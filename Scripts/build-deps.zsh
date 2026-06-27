@@ -258,6 +258,15 @@ remove_dependency_path() {
     esac
 }
 
+is_exact_git_checkout() {
+    local path="$1"
+    local top_level
+
+    [[ -d "$path" ]] || return 1
+    top_level="$(git -C "$path" rev-parse --show-toplevel 2>/dev/null)" || return 1
+    [[ "${top_level:A}" == "${path:A}" ]]
+}
+
 verify_sha256() {
     local file="$1"
     local expected="$2"
@@ -749,7 +758,7 @@ ensure_git_mirror() {
 
     if [[ ! -d "$mirror_dir" ]]; then
         mkdir -p "$(dirname "$mirror_dir")"
-        if [[ -n "$seed_checkout" ]] && git -C "$seed_checkout" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        if [[ -n "$seed_checkout" ]] && is_exact_git_checkout "$seed_checkout"; then
             git clone --mirror "$seed_checkout" "$mirror_dir"
         else
             git clone --mirror "$repo_url" "$mirror_dir"
