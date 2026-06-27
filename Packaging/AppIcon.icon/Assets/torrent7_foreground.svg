@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="torrent7-purple" x1="190" y1="170" x2="780" y2="880" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6E2BFF"/>
+      <stop offset="0.52" stop-color="#B05CFF"/>
+      <stop offset="1" stop-color="#7426F5"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#torrent7-purple)" d="M742 345 L742 424 L900 286 L742 148 L742 225 L310 225 L310 148 L154 286 L310 424 L310 345 L618 345 L405 764 L338 764 L470 900 L650 764 L542 764 L710 345 Z"/>
+</svg>

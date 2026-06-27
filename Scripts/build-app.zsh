@@ -1,0 +1,100 @@
+#!/bin/zsh
+emulate -L zsh
+setopt err_exit no_unset pipe_fail
+
+typeset -r root_dir=${0:A:h:h}
+typeset -r enable_diagnostics=${SANITIZER_DIAGNOSTICS:-0}
+typeset configuration
+if [[ $enable_diagnostics == "1" && ${+CONFIGURATION} == 0 ]]; then
+    configuration="debug"
+else
+    configuration=${CONFIGURATION:-release}
+fi
+typeset -r build_dir="$root_dir/.build"
+typeset app_output_dir="$build_dir/App"
+typeset app_bundle_name="Torrent 7"
+if [[ $enable_diagnostics == "1" ]]; then
+    app_output_dir="$build_dir/App-Diagnostics"
+    app_bundle_name="Torrent 7 (debug)"
+fi
+typeset -r app_dir="$app_output_dir/$app_bundle_name.app"
+typeset -r contents_dir="$app_dir/Contents"
+typeset -r macos_dir="$contents_dir/MacOS"
+typeset -r resources_dir="$contents_dir/Resources"
+typeset -r executable="$macos_dir/Torrent 7"
+typeset -r app_icon="$root_dir/Packaging/AppIcon.icon"
+typeset -r document_icon="$root_dir/Packaging/Torrent7Document.icns"
+typeset -r app_icon_info_plist="$app_output_dir/AppIconInfo.plist"
+typeset -r sign_identity=${SIGN_IDENTITY:--}
+typeset -r sign_options="runtime,restrict,library"
+typeset app_entitlements="$root_dir/Packaging/Torrent7.entitlements"
+typeset -a timestamp_flag=(--timestamp=none)
+
+if [[ $sign_identity != "-" ]]; then
+    timestamp_flag=(--timestamp)
+else
+    app_entitlements="$root_dir/Packaging/Torrent7.dev.entitlements"
+fi
+
+cd -- "$root_dir"
+
+export CC="$(xcrun --find clang)"
+export CXX="$(xcrun --find clang++)"
+
+if [[ $enable_diagnostics == "1" ]]; then
+    export SANITIZER_DIAGNOSTICS=1
+    export DEPS_DIR="${DEPS_DIR:-$build_dir/deps/arm64e-diagnostics}"
+    export DEPS_PREFIX="${DEPS_PREFIX:-$DEPS_DIR/prefix}"
+fi
+
+if [[ "${SKIP_BUILD_DEPS:-0}" != "1" ]]; then
+    "$root_dir/Scripts/build-deps.zsh"
+fi
+
+typeset -a swift_build_args=(
+    --configuration "$configuration"
+    --triple arm64e-apple-macosx26.0
+    --product Torrent7
+)
+if [[ $enable_diagnostics == "1" ]]; then
+    swift_build_args+=(--sanitize address --sanitize undefined)
+fi
+
+swift build "${swift_build_args[@]}"
+
+rm -rf -- "$app_output_dir"
+rm -rf -- "$app_dir"
+mkdir -p -- "$macos_dir" "$resources_dir"
+
+cp "$build_dir/arm64e-apple-macosx/$configuration/Torrent7" "$executable"
+cp "$root_dir/Packaging/Info.plist" "$contents_dir/Info.plist"
+if [[ $enable_diagnostics == "1" ]]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier app.torrent7.debug" "$contents_dir/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Torrent 7 (debug)" "$contents_dir/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleName Torrent 7 (debug)" "$contents_dir/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleURLTypes:0:CFBundleURLName app.torrent7.debug.magnet" "$contents_dir/Info.plist"
+fi
+cp "$document_icon" "$resources_dir/Torrent7Document.icns"
+
+rm -f -- "$app_icon_info_plist"
+xcrun actool \
+    --compile "$resources_dir" \
+    --platform macosx \
+    --minimum-deployment-target 26.0 \
+    --app-icon AppIcon \
+    --output-partial-info-plist "$app_icon_info_plist" \
+    "$app_icon"
+/usr/libexec/PlistBuddy -c "Merge $app_icon_info_plist" "$contents_dir/Info.plist"
+rm -f -- "$app_icon_info_plist"
+
+codesign \
+    --force \
+    --sign "$sign_identity" \
+    --options "$sign_options" \
+    --entitlements "$app_entitlements" \
+    "${timestamp_flag[@]}" \
+    "$app_dir"
+
+codesign --verify --deep --strict --verbose=2 "$app_dir"
+
+echo "$app_dir"

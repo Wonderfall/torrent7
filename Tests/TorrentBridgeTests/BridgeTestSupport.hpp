@@ -1,0 +1,157 @@
+#ifndef TORRENT_BRIDGE_TEST_SUPPORT_HPP
+#define TORRENT_BRIDGE_TEST_SUPPORT_HPP
+
+#include "TorrentBridgeInternal.hpp"
+
+#include <array>
+#include <cstddef>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <vector>
+
+namespace bridge_tests {
+
+class TemporaryDirectory {
+public:
+    TemporaryDirectory()
+    {
+        constexpr int kMaxAttempts = 32;
+        fs::path const parent = fs::temp_directory_path();
+        for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+            fs::path const candidate = parent / (
+                "TorrentBridgeTests-"
+                + std::to_string(random_u32())
+                + "-"
+                + std::to_string(attempt)
+            );
+
+            std::error_code error;
+            if (fs::create_directory(candidate, error)) {
+                path_ = candidate;
+                return;
+            }
+            if (error && error != std::errc::file_exists) {
+                throw std::system_error(error, "Could not create temporary test directory");
+            }
+        }
+
+        throw std::runtime_error("Could not create a unique temporary test directory.");
+    }
+
+    TemporaryDirectory(TemporaryDirectory const &) = delete;
+    TemporaryDirectory &operator=(TemporaryDirectory const &) = delete;
+    TemporaryDirectory(TemporaryDirectory &&) = delete;
+    TemporaryDirectory &operator=(TemporaryDirectory &&) = delete;
+
+    ~TemporaryDirectory()
+    {
+        std::error_code ignored;
+        fs::remove_all(path_, ignored);
+    }
+
+    [[nodiscard]] fs::path const &path() const noexcept
+    {
+        return path_;
+    }
+
+private:
+    fs::path path_;
+};
+
+[[nodiscard]] inline std::string string_from_c_buffer(std::span<char const> buffer)
+{
+    auto const terminator = std::ranges::find(buffer, '\0');
+    return {buffer.begin(), terminator};
+}
+
+[[nodiscard]] inline std::vector<char> byte_vector(std::string_view value)
+{
+    return {value.begin(), value.end()};
+}
+
+[[nodiscard]] inline std::string read_text_file(fs::path const &path)
+{
+    std::ifstream input(path, std::ios::binary);
+    return {
+        std::istreambuf_iterator<char>(input),
+        std::istreambuf_iterator<char>()
+    };
+}
+
+inline void write_text_file(fs::path const &path, std::string_view contents)
+{
+    std::ofstream output(path, std::ios::binary);
+    output << contents;
+    if (!output) {
+        throw std::runtime_error("Could not write test file: " + path.string());
+    }
+}
+
+[[nodiscard]] inline std::string canonical_id(char digit)
+{
+    return std::string(kCanonicalIDPrefix) + std::string(32U, digit);
+}
+
+[[nodiscard]] inline std::string v1_id(char digit)
+{
+    return "v1:" + std::string(40U, digit);
+}
+
+[[nodiscard]] inline std::string v2_id(char digit)
+{
+    return "v2:" + std::string(64U, digit);
+}
+
+template <std::size_t Count>
+[[nodiscard]] std::array<char, Count> sequential_bytes(unsigned char seed)
+{
+    std::array<char, Count> bytes{};
+    for (std::size_t index = 0; index < bytes.size(); ++index) {
+        bytes.at(index) = static_cast<char>(seed + static_cast<unsigned char>(index));
+    }
+    return bytes;
+}
+
+[[nodiscard]] inline std::string hex_for_sequential_bytes(std::size_t count, unsigned char seed)
+{
+    std::string bytes;
+    bytes.reserve(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        bytes.push_back(static_cast<char>(seed + static_cast<unsigned char>(index)));
+    }
+    return hex_string(bytes);
+}
+
+[[nodiscard]] inline lt::sha1_hash sha1_hash_from_seed(unsigned char seed)
+{
+    auto const bytes = sequential_bytes<20U>(seed);
+    return lt::sha1_hash(bytes.data());
+}
+
+[[nodiscard]] inline lt::sha256_hash sha256_hash_from_seed(unsigned char seed)
+{
+    auto const bytes = sequential_bytes<32U>(seed);
+    return lt::sha256_hash(bytes.data());
+}
+
+[[nodiscard]] inline lt::info_hash_t info_hashes_from_seed(unsigned char v1_seed, unsigned char v2_seed)
+{
+    return lt::info_hash_t(sha1_hash_from_seed(v1_seed), sha256_hash_from_seed(v2_seed));
+}
+
+[[nodiscard]] inline lt::add_torrent_params add_params_with_hashes()
+{
+    lt::add_torrent_params params;
+    params.info_hashes = info_hashes_from_seed(1U, 33U);
+    params.save_path = "/tmp";
+    return params;
+}
+
+} // namespace bridge_tests
+
+#endif

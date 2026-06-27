@@ -1,0 +1,8 @@
+#include "../../Sources/TorrentBridge/TorrentBridge.cpp"
+#include "../../Sources/TorrentBridge/TorrentBridgeClientAlerts.cpp"
+#include "../../Sources/TorrentBridge/TorrentBridgeClientCache.cpp"
+#include "../../Sources/TorrentBridge/TorrentBridgeClientIdentity.cpp"
+#include "../../Sources/TorrentBridge/TorrentBridgeClientLifecycle.cpp"
+#include "../../Sources/TorrentBridge/TorrentBridgeClientPersistence.cpp"
+#include "../../Sources/TorrentBridge/TorrentBridgeClientResume.cpp"
+#include "../../Sources/TorrentBridge/TorrentBridgeSupport.cpp"
