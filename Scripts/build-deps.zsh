@@ -801,7 +801,7 @@ setup_libtorrent_submodule_mirrors() {
         git -C "$LIBTORRENT_SOURCE_DIR" config "$key" "$mirror_dir"
     done < <(git -C "$LIBTORRENT_SOURCE_DIR" config -f .gitmodules --get-regexp '^submodule\..*\.url$' || true)
 
-    git -C "$LIBTORRENT_SOURCE_DIR" submodule update --init --recursive
+    git -C "$LIBTORRENT_SOURCE_DIR" -c protocol.file.allow=always submodule update --init --recursive
 }
 
 clone_libtorrent() {
