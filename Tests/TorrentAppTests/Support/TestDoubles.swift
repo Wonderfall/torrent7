@@ -154,7 +154,11 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
 final class RecordingTorrentFileLocationService: TorrentFileLocationServicing {
     var revealURLs = [TorrentItem.ID: URL]()
     var downloadedDataURLs = [TorrentItem.ID: URL]()
+    var deleteError: Error?
     var trashError: Error?
+    var onDeleteDownloadedData: ((URL) -> Void)?
+    var onMoveDownloadedDataToTrash: ((URL) -> Void)?
+    private(set) var deletedURLs = [URL]()
     private(set) var trashedURLs = [URL]()
 
     func revealURL(for torrent: TorrentItem) -> URL? {
@@ -169,10 +173,19 @@ final class RecordingTorrentFileLocationService: TorrentFileLocationServicing {
         downloadedDataURLs[torrent.id]
     }
 
+    func deleteDownloadedData(at url: URL) throws {
+        if let deleteError {
+            throw deleteError
+        }
+        onDeleteDownloadedData?(url)
+        deletedURLs.append(url)
+    }
+
     func moveDownloadedDataToTrash(at url: URL) throws {
         if let trashError {
             throw trashError
         }
+        onMoveDownloadedDataToTrash?(url)
         trashedURLs.append(url)
     }
 }

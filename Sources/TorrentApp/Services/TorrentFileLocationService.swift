@@ -4,6 +4,7 @@ protocol TorrentFileLocationServicing: AnyObject {
     func revealURL(for torrent: TorrentItem) -> URL?
     func revealURL(for torrent: TorrentItem, filePath: String) -> URL?
     func downloadedDataURL(for torrent: TorrentItem) -> URL?
+    func deleteDownloadedData(at url: URL) throws
     func moveDownloadedDataToTrash(at url: URL) throws
 }
 
@@ -92,6 +93,10 @@ final class TorrentFileLocationService: TorrentFileLocationServicing {
         }
 
         return itemURL
+    }
+
+    func deleteDownloadedData(at url: URL) throws {
+        try FileManager.default.removeItem(at: url)
     }
 
     func moveDownloadedDataToTrash(at url: URL) throws {

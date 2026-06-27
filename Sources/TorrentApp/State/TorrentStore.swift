@@ -793,20 +793,24 @@ final class TorrentStore {
         let engine = engine
         let errorGeneration = lastErrorGeneration
         let torrentsToRemove = idsToRemove.compactMap { torrentsByID[$0] }
-        let movesDataToTrash = deleteFiles && settings.moveRemovedDataToTrash
+        let movesDataToTrash = settings.moveRemovedDataToTrash
         scheduleUserOperation { store in
             var removedIDs = Set<TorrentItem.ID>()
             do {
                 for torrent in torrentsToRemove {
-                    if movesDataToTrash {
-                        let trashURL = store.fileLocationService.downloadedDataURL(for: torrent)
-                        try await engine.remove(id: torrent.id, deleteFiles: false, deletePartfile: true)
+                    if deleteFiles {
+                        let dataURL = store.fileLocationService.downloadedDataURL(for: torrent)
+                        try await engine.remove(id: torrent.id, deleteFiles: false, deletePartfile: false)
                         removedIDs.insert(torrent.id)
-                        if let trashURL {
-                            try store.fileLocationService.moveDownloadedDataToTrash(at: trashURL)
+                        if let dataURL {
+                            if movesDataToTrash {
+                                try store.fileLocationService.moveDownloadedDataToTrash(at: dataURL)
+                            } else {
+                                try store.fileLocationService.deleteDownloadedData(at: dataURL)
+                            }
                         }
                     } else {
-                        try await engine.remove(id: torrent.id, deleteFiles: deleteFiles, deletePartfile: deleteFiles)
+                        try await engine.remove(id: torrent.id, deleteFiles: false, deletePartfile: false)
                         removedIDs.insert(torrent.id)
                     }
                 }
