@@ -1,0 +1,76 @@
+name: Bridge fuzzing
+
+on:
+  schedule:
+    - cron: "31 3 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  BASE_BRANCH: ${{ github.event.repository.default_branch }}
+
+concurrency:
+  group: bridge-fuzz
+  cancel-in-progress: false
+
+jobs:
+  fuzz-bridge:
+    name: Run modest bridge fuzzing pass
+    runs-on: macos-26
+    permissions: {}
+    steps:
+      - name: Check out repository
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_EVENT_NAME" == "schedule" ]]; then
+            checkout_ref="refs/heads/${BASE_BRANCH}"
+          else
+            checkout_ref="$GITHUB_REF"
+          fi
+
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin "$checkout_ref"
+          git checkout --detach FETCH_HEAD
+
+      - name: Install fuzzing tools
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          brew install cmake ninja gnupg llvm
+
+      - name: Restore app dependency cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build/deps/source-cache
+            .build/deps/arm64e
+          key: deps-arm64e-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/keys/**') }}
+          restore-keys: |
+            deps-arm64e-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Build pinned app dependencies
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          Scripts/build-deps.zsh
+
+      - name: Restore fuzzing dependency cache
+        uses: actions/cache@v4
+        with:
+          path: Tools/Fuzzing/deps/arm64-libfuzzer
+          key: libfuzzer-deps-arm64-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Tools/Fuzzing/build-libfuzzer-deps.sh', 'Tools/Fuzzing/build-libfuzzer.sh', 'Scripts/build-deps.zsh') }}
+          restore-keys: |
+            libfuzzer-deps-arm64-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Run bridge fuzzing
+        shell: zsh {0}
+        env:
+          RUNS: "25000"
+          LIBFUZZER_ARGS: "-timeout=10"
+        run: |
+          set -euo pipefail
+          Tools/Fuzzing/run-libfuzzer.sh

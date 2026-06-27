@@ -1,0 +1,98 @@
+name: Bridge
+
+on:
+  push:
+    branches:
+      - "**"
+    paths:
+      - ".github/workflows/bridge.yml"
+      - "Package.swift"
+      - "Scripts/analyze-bridge.zsh"
+      - "Scripts/build-deps.zsh"
+      - "Scripts/keys/**"
+      - "Scripts/test-bridge.zsh"
+      - "Sources/TorrentBridge/**"
+      - "Tests/TorrentBridgeTests/**"
+      - "ThirdParty/doctest/**"
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    paths:
+      - ".github/workflows/bridge.yml"
+      - "Package.swift"
+      - "Scripts/analyze-bridge.zsh"
+      - "Scripts/build-deps.zsh"
+      - "Scripts/keys/**"
+      - "Scripts/test-bridge.zsh"
+      - "Sources/TorrentBridge/**"
+      - "Tests/TorrentBridgeTests/**"
+      - "ThirdParty/doctest/**"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: bridge-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-bridge:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    name: Analyze and test bridge
+    runs-on: macos-26
+    permissions: {}
+    steps:
+      - name: Check out repository
+        shell: zsh {0}
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            checkout_ref="refs/pull/${PR_NUMBER}/merge"
+          else
+            checkout_ref="$GITHUB_REF"
+          fi
+
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin "$checkout_ref"
+          git checkout --detach FETCH_HEAD
+
+      - name: Install build and analysis tools
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          brew install cmake ninja gnupg llvm
+
+      - name: Restore dependency cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build/deps/source-cache
+            .build/deps/arm64e
+          key: deps-arm64e-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/keys/**') }}
+          restore-keys: |
+            deps-arm64e-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Build pinned dependencies
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          Scripts/build-deps.zsh
+
+      - name: Analyze bridge
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          Scripts/analyze-bridge.zsh
+
+      - name: Run bridge tests
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          SKIP_BUILD_DEPS=1 Scripts/test-bridge.zsh

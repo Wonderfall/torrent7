@@ -1,0 +1,90 @@
+name: Swift
+
+on:
+  push:
+    branches:
+      - "**"
+    paths:
+      - ".github/workflows/swift.yml"
+      - "Package.swift"
+      - "Scripts/build-deps.zsh"
+      - "Scripts/keys/**"
+      - "Scripts/test-swift.zsh"
+      - "Sources/TorrentApp/**"
+      - "Sources/TorrentBridge/include/**"
+      - "Tests/TorrentAppTests/**"
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    paths:
+      - ".github/workflows/swift.yml"
+      - "Package.swift"
+      - "Scripts/build-deps.zsh"
+      - "Scripts/keys/**"
+      - "Scripts/test-swift.zsh"
+      - "Sources/TorrentApp/**"
+      - "Sources/TorrentBridge/include/**"
+      - "Tests/TorrentAppTests/**"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: swift-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-swift:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    name: Test Swift
+    runs-on: macos-26
+    permissions: {}
+    steps:
+      - name: Check out repository
+        shell: zsh {0}
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            checkout_ref="refs/pull/${PR_NUMBER}/merge"
+          else
+            checkout_ref="$GITHUB_REF"
+          fi
+
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin "$checkout_ref"
+          git checkout --detach FETCH_HEAD
+
+      - name: Install build tools
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          brew install cmake ninja gnupg
+
+      - name: Restore dependency cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build/deps/source-cache
+            .build/deps/arm64e
+          key: deps-arm64e-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/keys/**') }}
+          restore-keys: |
+            deps-arm64e-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Build pinned dependencies
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          Scripts/build-deps.zsh
+
+      - name: Run Swift tests
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          Scripts/test-swift.zsh
