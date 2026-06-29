@@ -43,7 +43,7 @@ jobs:
           brew install cmake ninja gnupg llvm
 
       - name: Restore app dependency cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             .build/deps/source-cache
@@ -59,7 +59,7 @@ jobs:
           Scripts/build-deps.zsh
 
       - name: Restore fuzzing dependency cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: Tools/Fuzzing/deps/arm64-libfuzzer
           key: libfuzzer-deps-arm64-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Tools/Fuzzing/build-libfuzzer-deps.sh', 'Tools/Fuzzing/build-libfuzzer.sh', 'Scripts/build-deps.zsh') }}
