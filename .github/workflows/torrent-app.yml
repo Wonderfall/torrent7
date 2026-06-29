@@ -7,11 +7,14 @@ on:
     paths:
       - ".github/workflows/torrent-app.yml"
       - "Package.swift"
+      - "Packaging/**"
+      - "Scripts/build-app.zsh"
       - "Scripts/build-deps.zsh"
       - "Scripts/keys/**"
       - "Scripts/test-swift.zsh"
+      - "Scripts/verify-app.zsh"
       - "Sources/TorrentApp/**"
-      - "Sources/TorrentBridge/include/**"
+      - "Sources/TorrentBridge/**"
       - "Tests/TorrentAppTests/**"
   pull_request:
     types:
@@ -22,11 +25,14 @@ on:
     paths:
       - ".github/workflows/torrent-app.yml"
       - "Package.swift"
+      - "Packaging/**"
+      - "Scripts/build-app.zsh"
       - "Scripts/build-deps.zsh"
       - "Scripts/keys/**"
       - "Scripts/test-swift.zsh"
+      - "Scripts/verify-app.zsh"
       - "Sources/TorrentApp/**"
-      - "Sources/TorrentBridge/include/**"
+      - "Sources/TorrentBridge/**"
       - "Tests/TorrentAppTests/**"
   workflow_dispatch:
 
@@ -37,9 +43,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  test-and-build:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    name: Test
+    name: Test, build, and verify
     runs-on: macos-26
     permissions: {}
     steps:
@@ -88,3 +94,15 @@ jobs:
         run: |
           set -euo pipefail
           Scripts/test-swift.zsh
+
+      - name: Build app
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          SKIP_BUILD_DEPS=1 Scripts/build-app.zsh
+
+      - name: Verify app bundle
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          Scripts/verify-app.zsh
