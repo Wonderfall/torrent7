@@ -1,11 +1,11 @@
-name: Bridge
+name: TorrentBridge
 
 on:
   push:
     branches:
       - main
     paths:
-      - ".github/workflows/bridge.yml"
+      - ".github/workflows/torrent-bridge.yml"
       - "Package.swift"
       - "Scripts/analyze-bridge.zsh"
       - "Scripts/build-deps.zsh"
@@ -21,7 +21,7 @@ on:
       - reopened
       - ready_for_review
     paths:
-      - ".github/workflows/bridge.yml"
+      - ".github/workflows/torrent-bridge.yml"
       - "Package.swift"
       - "Scripts/analyze-bridge.zsh"
       - "Scripts/build-deps.zsh"
@@ -35,13 +35,13 @@ on:
 permissions: {}
 
 concurrency:
-  group: bridge-${{ github.event.pull_request.number || github.ref }}
+  group: torrent-bridge-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  test-bridge:
+  analyze-and-test:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    name: Analyze and test bridge
+    name: Analyze and test
     runs-on: macos-26
     permissions: {}
     steps:

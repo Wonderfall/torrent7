@@ -1,11 +1,11 @@
-name: Swift
+name: TorrentApp
 
 on:
   push:
     branches:
       - main
     paths:
-      - ".github/workflows/swift.yml"
+      - ".github/workflows/torrent-app.yml"
       - "Package.swift"
       - "Scripts/build-deps.zsh"
       - "Scripts/keys/**"
@@ -20,7 +20,7 @@ on:
       - reopened
       - ready_for_review
     paths:
-      - ".github/workflows/swift.yml"
+      - ".github/workflows/torrent-app.yml"
       - "Package.swift"
       - "Scripts/build-deps.zsh"
       - "Scripts/keys/**"
@@ -33,13 +33,13 @@ on:
 permissions: {}
 
 concurrency:
-  group: swift-${{ github.event.pull_request.number || github.ref }}
+  group: torrent-app-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  test-swift:
+  test:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    name: Test Swift
+    name: Test
     runs-on: macos-26
     permissions: {}
     steps:

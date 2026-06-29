@@ -1,4 +1,4 @@
-name: Bridge fuzzing
+name: TorrentBridge Fuzzing
 
 on:
   schedule:
@@ -11,12 +11,12 @@ env:
   BASE_BRANCH: ${{ github.event.repository.default_branch }}
 
 concurrency:
-  group: bridge-fuzz
+  group: torrent-bridge-fuzzing
   cancel-in-progress: false
 
 jobs:
-  fuzz-bridge:
-    name: Run modest bridge fuzzing pass
+  fuzz:
+    name: Fuzz
     runs-on: macos-26
     permissions: {}
     steps:
