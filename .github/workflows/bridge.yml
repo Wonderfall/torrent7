@@ -3,7 +3,7 @@ name: Bridge
 on:
   push:
     branches:
-      - "**"
+      - main
     paths:
       - ".github/workflows/bridge.yml"
       - "Package.swift"
