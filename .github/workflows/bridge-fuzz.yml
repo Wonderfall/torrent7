@@ -74,3 +74,16 @@ jobs:
         run: |
           set -euo pipefail
           Tools/Fuzzing/run-libfuzzer.sh
+
+      - name: Upload fuzz failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bridge-fuzz-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            Tools/Fuzzing/libfuzzer-artifacts/**/crash-*
+            Tools/Fuzzing/libfuzzer-artifacts/**/timeout-*
+            Tools/Fuzzing/libfuzzer-artifacts/**/oom-*
+            Tools/Fuzzing/libfuzzer-artifacts/**/leak-*
+          if-no-files-found: ignore
+          retention-days: 14
