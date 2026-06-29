@@ -1,0 +1,84 @@
+name: Dependencies
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/dependencies.yml"
+      - "Scripts/build-deps.zsh"
+      - "Scripts/keys/**"
+      - "Tools/DependencyCheck/**"
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    paths:
+      - ".github/workflows/dependencies.yml"
+      - "Scripts/build-deps.zsh"
+      - "Scripts/keys/**"
+      - "Tools/DependencyCheck/**"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: dependencies-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-dependencies:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    name: Check pinned dependencies
+    runs-on: macos-26
+    permissions: {}
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        shell: zsh {0}
+        env:
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_EVENT_NAME" == "schedule" ]]; then
+            checkout_ref="refs/heads/${BASE_BRANCH}"
+          elif [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            checkout_ref="refs/pull/${PR_NUMBER}/merge"
+          else
+            checkout_ref="$GITHUB_REF"
+          fi
+
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin "$checkout_ref"
+          git checkout --detach FETCH_HEAD
+
+      - name: Install verification tools
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          brew install gnupg
+
+      - name: Check pinned dependencies
+        shell: zsh {0}
+        env:
+          DEPENDENCY_COOLDOWN_DAYS: "4"
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          Tools/DependencyCheck/check-dependencies.swift --summary artifacts/dependency-check.md
+
+      - name: Publish check summary
+        if: always()
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          if [[ -f artifacts/dependency-check.md ]]; then
+            cat artifacts/dependency-check.md >> "$GITHUB_STEP_SUMMARY"
+          fi
