@@ -61,8 +61,8 @@ jobs:
       - name: Restore fuzzing dependency cache
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
-          path: Tools/Fuzzing/deps/arm64-libfuzzer
-          key: libfuzzer-deps-arm64-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Tools/Fuzzing/build-libfuzzer-deps.sh', 'Tools/Fuzzing/build-libfuzzer.sh', 'Scripts/build-deps.zsh') }}
+          path: Tools/BridgeFuzzing/deps/arm64-libfuzzer
+          key: libfuzzer-deps-arm64-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Tools/BridgeFuzzing/build-libfuzzer-deps.sh', 'Tools/BridgeFuzzing/build-libfuzzer.sh', 'Scripts/build-deps.zsh') }}
           restore-keys: |
             libfuzzer-deps-arm64-${{ runner.os }}-${{ runner.arch }}-
 
@@ -73,7 +73,7 @@ jobs:
           LIBFUZZER_ARGS: "-timeout=10"
         run: |
           set -euo pipefail
-          Tools/Fuzzing/run-libfuzzer.sh
+          Tools/BridgeFuzzing/run-libfuzzer.sh
 
       - name: Upload fuzz failure artifacts
         if: failure()
@@ -81,9 +81,9 @@ jobs:
         with:
           name: bridge-fuzz-failure-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            Tools/Fuzzing/libfuzzer-artifacts/**/crash-*
-            Tools/Fuzzing/libfuzzer-artifacts/**/timeout-*
-            Tools/Fuzzing/libfuzzer-artifacts/**/oom-*
-            Tools/Fuzzing/libfuzzer-artifacts/**/leak-*
+            Tools/BridgeFuzzing/libfuzzer-artifacts/**/crash-*
+            Tools/BridgeFuzzing/libfuzzer-artifacts/**/timeout-*
+            Tools/BridgeFuzzing/libfuzzer-artifacts/**/oom-*
+            Tools/BridgeFuzzing/libfuzzer-artifacts/**/leak-*
           if-no-files-found: ignore
           retention-days: 14
