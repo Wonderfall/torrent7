@@ -1,6 +1,29 @@
 name: TorrentBridge Fuzzing
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/torrent-bridge-fuzzing.yml"
+      - "Package.swift"
+      - "Scripts/build-deps.zsh"
+      - "Scripts/keys/**"
+      - "Sources/TorrentBridge/**"
+      - "Tools/BridgeFuzzing/**"
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    paths:
+      - ".github/workflows/torrent-bridge-fuzzing.yml"
+      - "Package.swift"
+      - "Scripts/build-deps.zsh"
+      - "Scripts/keys/**"
+      - "Sources/TorrentBridge/**"
+      - "Tools/BridgeFuzzing/**"
   schedule:
     - cron: "31 3 * * 1"
   workflow_dispatch:
@@ -11,21 +34,26 @@ env:
   BASE_BRANCH: ${{ github.event.repository.default_branch }}
 
 concurrency:
-  group: torrent-bridge-fuzzing
-  cancel-in-progress: false
+  group: torrent-bridge-fuzzing-${{ github.event_name == 'schedule' && 'schedule' || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
   fuzz:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: Fuzz
     runs-on: macos-26
     permissions: {}
     steps:
       - name: Check out repository
         shell: zsh {0}
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
 
-          if [[ "$GITHUB_EVENT_NAME" == "schedule" ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            checkout_ref="refs/pull/${PR_NUMBER}/merge"
+          elif [[ "$GITHUB_EVENT_NAME" == "schedule" ]]; then
             checkout_ref="refs/heads/${BASE_BRANCH}"
           else
             checkout_ref="$GITHUB_REF"
@@ -69,10 +97,17 @@ jobs:
       - name: Run bridge fuzzing
         shell: zsh {0}
         env:
-          RUNS: "25000"
-          LIBFUZZER_ARGS: "-timeout=10"
+          DEEP_RUNS: "25000"
+          LIGHT_RUNS: "1000"
         run: |
           set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" || "$GITHUB_EVENT_NAME" == "push" ]]; then
+            export RUNS="$LIGHT_RUNS"
+            export LIBFUZZER_ARGS="-timeout=10 -max_total_time=120"
+          else
+            export RUNS="$DEEP_RUNS"
+            export LIBFUZZER_ARGS="-timeout=10"
+          fi
           Tools/BridgeFuzzing/run-libfuzzer.sh
 
       - name: Upload fuzz failure artifacts
