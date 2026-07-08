@@ -69,9 +69,11 @@ jobs:
         shell: zsh {0}
         env:
           DEPENDENCY_COOLDOWN_DAYS: "4"
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           mkdir -p artifacts
+          print -r -- "::add-mask::$GITHUB_TOKEN"
           Tools/DependencyCheck/check-dependencies.swift --summary artifacts/dependency-check.md
 
       - name: Publish check summary

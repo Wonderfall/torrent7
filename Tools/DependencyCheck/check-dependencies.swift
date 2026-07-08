@@ -46,6 +46,7 @@ final class DependencyChecker {
     private let now: Date
     private let cooldownDays: Int
     private let userAgent = "torrent7-dependency-check"
+    private let githubToken: String?
     private let secondsPerDay: TimeInterval = 86_400
     private var successes: [String] = []
     private var notes: [String] = []
@@ -74,6 +75,10 @@ final class DependencyChecker {
             throw CheckFailure.message("DEPENDENCY_COOLDOWN_DAYS must be a non-negative integer")
         }
         self.cooldownDays = parsedCooldown
+
+        let configuredGitHubToken = ProcessInfo.processInfo.environment["GITHUB_TOKEN"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        self.githubToken = configuredGitHubToken?.isEmpty == false ? configuredGitHubToken : nil
     }
 
     private static func summaryPath(from arguments: [String]) throws -> URL? {
@@ -280,6 +285,10 @@ final class DependencyChecker {
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         if url.host == "api.github.com" {
             request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+            request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+            if let githubToken {
+                request.setValue("Bearer \(githubToken)", forHTTPHeaderField: "Authorization")
+            }
         }
 
         let (data, response) = try await URLSession.shared.data(for: request)
