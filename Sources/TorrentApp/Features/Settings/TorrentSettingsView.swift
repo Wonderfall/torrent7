@@ -128,7 +128,6 @@ struct TorrentSettingsView: View {
     private var generalSettings: some View {
         Form {
             downloadsSection
-            deletionSection
             defaultsSection
             powerSection
         }
@@ -193,16 +192,6 @@ struct TorrentSettingsView: View {
             }
 
             Text("Choose a dedicated folder. \(AppIdentity.displayName) can access files inside this folder to download, verify, and resume torrents.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private var deletionSection: some View {
-        Section("Deletion") {
-            Toggle("Move removed data to Trash", isOn: setting(\.moveRemovedDataToTrash))
-
-            Text("When removing a torrent and its data, move the downloaded item to Trash instead of deleting it permanently.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }

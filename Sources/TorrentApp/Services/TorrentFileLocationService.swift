@@ -3,9 +3,6 @@ import Foundation
 protocol TorrentFileLocationServicing: AnyObject {
     func revealURL(for torrent: TorrentItem) -> URL?
     func revealURL(for torrent: TorrentItem, filePath: String) -> URL?
-    func downloadedDataURL(for torrent: TorrentItem) -> URL?
-    func deleteDownloadedData(at url: URL) throws
-    func moveDownloadedDataToTrash(at url: URL) throws
 }
 
 final class TorrentFileLocationService: TorrentFileLocationServicing {
@@ -77,30 +74,6 @@ final class TorrentFileLocationService: TorrentFileLocationServicing {
         }
 
         return saveURL
-    }
-
-    func downloadedDataURL(for torrent: TorrentItem) -> URL? {
-        let saveURL = URL(fileURLWithPath: torrent.savePath, isDirectory: true)
-            .standardizedFileURL
-            .resolvingSymlinksInPath()
-        let itemURL = saveURL
-            .appendingPathComponent(torrent.name)
-            .standardizedFileURL
-            .resolvingSymlinksInPath()
-        guard isURLStrictlyContained(itemURL, in: saveURL),
-              (try? itemURL.checkResourceIsReachable()) == true else {
-            return nil
-        }
-
-        return itemURL
-    }
-
-    func deleteDownloadedData(at url: URL) throws {
-        try FileManager.default.removeItem(at: url)
-    }
-
-    func moveDownloadedDataToTrash(at url: URL) throws {
-        try unsafe FileManager.default.trashItem(at: url, resultingItemURL: nil)
     }
 
     private func isURLStrictlyContained(_ url: URL, in directory: URL) -> Bool {

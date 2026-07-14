@@ -75,9 +75,10 @@ void TTorrentClient::pump_alerts()
 
         for (lt::alert const *alert : alerts) {
             try {
-                if (lt::alert_cast<lt::alerts_dropped_alert>(alert) != nullptr) {
+                if (auto const *dropped = lt::alert_cast<lt::alerts_dropped_alert>(alert)) {
                     rebuild_cache = true;
                     force_resume_save = true;
+                    changes |= fail_dropped_delete_request(*dropped);
                     changes |= queue_alert_error(
                         "Internal libtorrent alerts were dropped. Torrent details may be temporarily stale.");
                     continue;
@@ -156,12 +157,21 @@ void TTorrentClient::pump_alerts()
                 }
 
                 if (auto const *deleted = lt::alert_cast<lt::torrent_deleted_alert>(alert)) {
+                    complete_delete_request(deleted->info_hashes, TTORRENT_REMOVAL_SUCCEEDED);
                     changes |= complete_pending_delete(deleted->info_hashes, "");
                     continue;
                 }
 
                 if (auto const *delete_failed = lt::alert_cast<lt::torrent_delete_failed_alert>(alert)) {
-                    std::string failure_message;
+                    constexpr std::string_view generic_failure =
+                        "Downloaded data could not be deleted. Some files may remain on disk.";
+                    complete_delete_request(
+                        delete_failed->info_hashes,
+                        TTORRENT_REMOVAL_FAILED,
+                        generic_failure
+                    );
+
+                    std::string failure_message(generic_failure);
                     if (delete_failed->error) {
                         failure_message = "Downloaded data could not be deleted. Some files may remain on disk: " +
                             delete_failed->error.message() + ".";

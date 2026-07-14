@@ -793,40 +793,75 @@ final class TorrentStore {
         let engine = engine
         let errorGeneration = lastErrorGeneration
         let torrentsToRemove = idsToRemove.compactMap { torrentsByID[$0] }
-        let movesDataToTrash = settings.moveRemovedDataToTrash
         scheduleUserOperation { store in
             var removedIDs = Set<TorrentItem.ID>()
+            var removalWarnings = [String]()
             do {
                 for torrent in torrentsToRemove {
-                    if deleteFiles {
-                        let dataURL = store.fileLocationService.downloadedDataURL(for: torrent)
-                        try await engine.remove(id: torrent.id, deleteFiles: false, deletePartfile: false)
-                        removedIDs.insert(torrent.id)
-                        if let dataURL {
-                            if movesDataToTrash {
-                                try store.fileLocationService.moveDownloadedDataToTrash(at: dataURL)
-                            } else {
-                                try store.fileLocationService.deleteDownloadedData(at: dataURL)
-                            }
-                        }
-                    } else {
-                        try await engine.remove(id: torrent.id, deleteFiles: false, deletePartfile: false)
-                        removedIDs.insert(torrent.id)
+                    let outcome = try await store.removeFromEngine(
+                        torrent,
+                        deleteFiles: deleteFiles,
+                        using: engine
+                    )
+                    removedIDs.insert(torrent.id)
+                    if case .removedWithWarning(let message) = outcome {
+                        removalWarnings.append(message)
+                    }
+                    if !engine.isAvailable {
+                        break
                     }
                 }
                 store.completionNotifier.forget(removedIDs)
                 store.removeLabelAssignments(for: removedIDs)
                 store.selectionState.ids = store.selectionState.ids.subtracting(removedIDs)
-                await store.refreshFromEngine()
-                store.clearLastError(ifUnchangedSince: errorGeneration)
+                await store.reconcileAfterRemoval(removedIDs)
+                if removalWarnings.isEmpty {
+                    store.clearLastError(ifUnchangedSince: errorGeneration)
+                } else {
+                    store.setLastError(removalWarnings.joined(separator: "\n"), source: .userAction)
+                }
             } catch {
                 store.completionNotifier.forget(removedIDs)
                 store.removeLabelAssignments(for: removedIDs)
                 store.selectionState.ids = store.selectionState.ids.subtracting(removedIDs)
-                await store.refreshFromEngine()
-                store.setLastError(error.localizedDescription, source: .userAction)
+                await store.reconcileAfterRemoval(removedIDs)
+                removalWarnings.append(error.localizedDescription)
+                store.setLastError(removalWarnings.joined(separator: "\n"), source: .userAction)
             }
         }
+    }
+
+    private func removeFromEngine(
+        _ torrent: TorrentItem,
+        deleteFiles: Bool,
+        using engine: any TorrentEngineServicing
+    ) async throws -> TorrentRemovalOutcome {
+        guard deleteFiles else {
+            return try await engine.remove(id: torrent.id, deleteFiles: false)
+        }
+
+        let folderAccessLease = try downloadFolderAccessStore.lease(forSavePath: torrent.savePath)
+        defer {
+            withExtendedLifetime(folderAccessLease) {}
+        }
+        return try await engine.remove(id: torrent.id, deleteFiles: true)
+    }
+
+    private func reconcileAfterRemoval(_ removedIDs: Set<TorrentItem.ID>) async {
+        guard !engine.isAvailable else {
+            await refreshFromEngine()
+            return
+        }
+
+        lastSnapshotRevision = nil
+        guard !removedIDs.isEmpty else {
+            return
+        }
+        torrents.removeAll { removedIDs.contains($0.id) }
+        updateDockTransferRates(in: [])
+        updateSleepPrevention(in: [])
+        downloadFolderAccessStore.prune(activeTorrents: torrents)
+        pruneTrackerHosts(activeTorrentIDs: Set(torrents.map(\.id)))
     }
 
     func revealSelectedTorrentsInFinder() {
@@ -1041,6 +1076,9 @@ final class TorrentStore {
     }
 
     private func refreshFromEngine(notifiesCompletions: Bool = true) async {
+        guard engine.isAvailable else {
+            return
+        }
         refreshGeneration &+= 1
         let generation = refreshGeneration
         let sortOrder = sortOrder
@@ -1061,6 +1099,9 @@ final class TorrentStore {
             await refreshTrackerHostsFromEngine(generation: generation)
         }
         guard let snapshotBatch = await engine.snapshotsIfChanged(since: previousRevision, sortedBy: sortOrder, direction: sortDirection) else {
+            return
+        }
+        guard engine.isAvailable else {
             return
         }
         guard generation == refreshGeneration else {

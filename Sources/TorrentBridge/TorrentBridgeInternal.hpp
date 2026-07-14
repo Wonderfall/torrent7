@@ -119,7 +119,7 @@ static_assert(TTORRENT_MAX_TRACKER_COUNT > 0);
 static_assert(TTORRENT_MAX_WEB_SEED_COUNT > 0);
 static_assert(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT > 0);
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 27U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 28U);
 #if defined(TORRENT_USE_ASSERTS) && TORRENT_USE_ASSERTS
 static_assert(sizeof(lt::add_torrent_params) == 760U);
 #else
@@ -164,6 +164,8 @@ static_assert(std::is_standard_layout_v<TTorrentFileSnapshot>);
 static_assert(std::is_trivially_copyable_v<TTorrentFileSnapshot>);
 static_assert(std::is_standard_layout_v<TTorrentFilePriorityEntry>);
 static_assert(std::is_trivially_copyable_v<TTorrentFilePriorityEntry>);
+static_assert(std::is_standard_layout_v<TTorrentRemovalResult>);
+static_assert(std::is_trivially_copyable_v<TTorrentRemovalResult>);
 static_assert(std::is_standard_layout_v<TTorrentPieceMapSnapshot>);
 static_assert(std::is_trivially_copyable_v<TTorrentPieceMapSnapshot>);
 static_assert(std::is_standard_layout_v<TTorrentFilePreview>);
@@ -194,6 +196,8 @@ static_assert(sizeof(TTorrentFileSnapshot) == 1064U);
 static_assert(alignof(TTorrentFileSnapshot) == 8U);
 static_assert(sizeof(TTorrentFilePriorityEntry) == 8U);
 static_assert(alignof(TTorrentFilePriorityEntry) == 4U);
+static_assert(sizeof(TTorrentRemovalResult) == 516U);
+static_assert(alignof(TTorrentRemovalResult) == 4U);
 static_assert(sizeof(TTorrentPieceMapSnapshot) == 16U);
 static_assert(alignof(TTorrentPieceMapSnapshot) == 4U);
 static_assert(sizeof(TTorrentFilePreview) == 616U);
@@ -387,6 +391,13 @@ struct PieceMapCacheEntry {
     std::uint64_t revision = 0;
     TTorrentPieceMapSnapshot snapshot{};
     std::vector<std::uint8_t> pieces;
+};
+
+struct RemovalRequestEntry {
+    std::uint64_t request_token = 0;
+    lt::info_hash_t hashes;
+    int32_t state = TTORRENT_REMOVAL_PENDING;
+    std::array<char, 512> error{};
 };
 
 struct TorrentSourceCounts {
@@ -1027,6 +1038,8 @@ struct TTorrentClient {
     std::uint64_t file_revision = 0;
     std::unordered_map<std::string, PieceMapCacheEntry> piece_map_cache;
     std::uint64_t piece_map_revision = 0;
+    std::uint64_t next_removal_request_token = 1;
+    std::optional<RemovalRequestEntry> removal_request;
     std::uint64_t requested_network_revision = 0;
     std::uint64_t submitted_network_revision = 0;
     bool requested_network_blocked = true;
@@ -1428,6 +1441,23 @@ struct TTorrentClient {
     bool accepts_removed_alert(lt::info_hash_t const &hashes, TorrentIdentity *identity);
 
     void finalize_removed(lt::info_hash_t const &hashes, TorrentIdentity *identity);
+
+    std::uint64_t begin_delete_request(lt::info_hash_t const &hashes);
+
+    void abandon_removal_request(std::uint64_t request_token) noexcept;
+
+    void complete_delete_request(
+        lt::info_hash_t const &hashes,
+        int32_t terminal_state,
+        std::string_view error = {}
+    ) noexcept;
+
+    [[nodiscard]] DirtyMask fail_dropped_delete_request(lt::alerts_dropped_alert const &alert);
+
+    [[nodiscard]] BridgeResult take_removal_result(
+        std::uint64_t request_token,
+        TTorrentRemovalResult *result
+    );
 
     bool resume_write_is_current(lt::info_hash_t const &hashes, TorrentIdentity *identity);
 

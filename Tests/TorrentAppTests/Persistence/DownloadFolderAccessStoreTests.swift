@@ -4,6 +4,56 @@ import Testing
 
 @Suite("Download folder access store")
 struct DownloadFolderAccessStoreTests {
+    @Test("Removal leases require an exact active download root")
+    func removalLeasesRequireExactActiveRoot() throws {
+        try withIsolatedDefaults { defaults in
+            try withTemporaryDirectory { root in
+                let store = DownloadFolderAccessStore(
+                    defaults: defaults,
+                    accessProvider: FakeDownloadFolderAccessProvider()
+                )
+                let downloads = root.appending(path: "downloads", directoryHint: .isDirectory)
+                let other = root.appending(path: "other", directoryHint: .isDirectory)
+                _ = try store.setDefault(downloads, activeTorrents: [])
+
+                _ = try store.lease(forSavePath: downloads.path)
+                #expect(throws: TorrentStoreError.self) {
+                    try store.lease(forSavePath: downloads.appending(path: "child").path)
+                }
+                #expect(throws: TorrentStoreError.self) {
+                    try store.lease(forSavePath: other.path)
+                }
+                #expect(throws: TorrentStoreError.self) {
+                    try store.lease(forSavePath: "relative")
+                }
+            }
+        }
+    }
+
+    @Test("Pruning removes an additional bookmark while its lease retains live access")
+    func pruningRemovesAdditionalBookmarkWhileLeaseRetainsLiveAccess() throws {
+        try withIsolatedDefaults { defaults in
+            try withTemporaryDirectory { root in
+                let tracker = WeakDownloadFolderAccessTracker()
+                let store = DownloadFolderAccessStore(
+                    defaults: defaults,
+                    accessProvider: TrackingDownloadFolderAccessProvider(tracker: tracker)
+                )
+                let folder = root.appending(path: "folder", directoryHint: .isDirectory)
+                _ = try store.prepareForAdd(folder, setsDefault: false, activeTorrents: [])
+                var lease: DownloadFolderAccessLease? = try store.lease(forSavePath: folder.path)
+
+                store.prune(activeTorrents: [])
+
+                #expect(additionalBookmarks(in: defaults).isEmpty)
+                #expect(tracker.access != nil)
+                lease = nil
+                #expect(lease == nil)
+                #expect(tracker.access == nil)
+            }
+        }
+    }
+
     @Test("Preparing non-default folder saves and prunes additional bookmark")
     func preparingNonDefaultFolderSavesAndPrunesAdditionalBookmark() throws {
         try withIsolatedDefaults { defaults in
@@ -96,4 +146,41 @@ private func additionalBookmarks(in defaults: UserDefaults) -> [String: Data] {
 
 private func accessKey(_ url: URL) -> String {
     url.standardizedFileURL.resolvingSymlinksInPath().path
+}
+
+private final class WeakDownloadFolderAccessTracker {
+    weak var access: FakeDownloadFolderAccess?
+}
+
+private struct TrackingDownloadFolderAccessProvider: DownloadFolderAccessProviding {
+    let tracker: WeakDownloadFolderAccessTracker
+
+    func createAccess(url: URL, savesBookmark: Bool, defaults: UserDefaults) throws -> DownloadFolderAccessing {
+        let access = FakeDownloadFolderAccess(url: url)
+        tracker.access = access
+        if savesBookmark {
+            defaults.set(try access.bookmarkData(), forKey: SecurityScopedFolder.defaultsKey)
+        }
+        return access
+    }
+
+    func restoreDefault(defaults: UserDefaults) throws -> DownloadFolderAccessing? {
+        guard let bookmark = defaults.data(forKey: SecurityScopedFolder.defaultsKey) else {
+            return nil
+        }
+        return try restore(from: bookmark)
+    }
+
+    func restore(from bookmark: Data) throws -> DownloadFolderAccessing {
+        guard let path = String(data: bookmark, encoding: .utf8), !path.isEmpty else {
+            throw FakeBookmarkError()
+        }
+        let access = FakeDownloadFolderAccess(url: URL(fileURLWithPath: path, isDirectory: true))
+        tracker.access = access
+        return access
+    }
+
+    func clearDefaultBookmark(defaults: UserDefaults) {
+        defaults.removeObject(forKey: SecurityScopedFolder.defaultsKey)
+    }
 }

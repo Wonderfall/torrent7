@@ -24,6 +24,39 @@ char const *maybe_null(bridge_fuzz::ByteReader &reader, std::string const &value
     return reader.read_bool() ? nullptr : value.c_str();
 }
 
+void poll_tracked_removal(bridge_fuzz::BridgeClientHarness &harness)
+{
+    std::optional<std::uint64_t> &request_token = harness.tracked_removal_token();
+    if (!request_token.has_value()) {
+        return;
+    }
+
+    TTorrentRemovalResult result{};
+    bridge_fuzz::ErrorBuffer error;
+    int32_t const status = TorrentClientTakeRemovalResult(
+        harness.client(),
+        *request_token,
+        &result,
+        error.data(),
+        error.capacity()
+    );
+    if (status == 0 && result.state != TTORRENT_REMOVAL_PENDING) {
+        request_token.reset();
+    }
+}
+
+std::uint64_t malformed_removal_token(
+    bridge_fuzz::ByteReader &reader,
+    std::optional<std::uint64_t> const &tracked_token
+)
+{
+    std::uint64_t token = static_cast<std::uint64_t>(static_cast<std::uint32_t>(reader.read_i32()));
+    if (tracked_token == token) {
+        ++token;
+    }
+    return token;
+}
+
 } // namespace
 
 extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
@@ -32,6 +65,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
 )
 {
     auto &harness = bridge_fuzz::shared_harness("bridge-session-api");
+    poll_tracked_removal(harness);
     bridge_fuzz::ByteReader reader(data, size);
     std::uint8_t const operation_count = static_cast<std::uint8_t>(1U + (reader.read_u8() % 28U));
 
@@ -168,15 +202,30 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             break;
         }
         case 8: {
+            poll_tracked_removal(harness);
             std::string id = selected_id(reader, harness.client());
+            std::uint64_t request_token = 0;
             static_cast<void>(TorrentClientRemove(
                 harness.client(),
                 maybe_null(reader, id),
                 reader.read_u8(),
                 reader.read_u8(),
+                reader.read_bool() ? nullptr : &request_token,
                 error.data(),
                 error.capacity()
             ));
+            if (request_token != 0) {
+                harness.tracked_removal_token() = request_token;
+            }
+            TTorrentRemovalResult result{};
+            static_cast<void>(TorrentClientTakeRemovalResult(
+                harness.client(),
+                malformed_removal_token(reader, harness.tracked_removal_token()),
+                reader.read_bool() ? nullptr : &result,
+                error.data(),
+                error.capacity()
+            ));
+            poll_tracked_removal(harness);
             break;
         }
         case 9: {
@@ -320,5 +369,6 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
     bridge_fuzz::exercise_snapshot_copy(harness.client());
     bridge_fuzz::exercise_detail_copies(harness.client());
     bridge_fuzz::drain_alert_error(harness.client());
+    poll_tracked_removal(harness);
     return 0;
 }

@@ -52,6 +52,18 @@ private func torrentWakeCallback(_ context: UnsafeMutableRawPointer?) {
 
 typealias TorrentClientCreationPreflight = @Sendable (_ stateDirectory: URL, _ enablePeerExchangePlugin: Bool) throws -> Void
 
+private struct TorrentRemovalResultStatus: Sendable {
+    var state: Int32
+    var error: String
+}
+
+enum TorrentRemovalResultReadOverride: Sendable {
+    case pending
+    case unknownState
+}
+
+typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResultReadOverride?
+
 enum TorrentEngineError: LocalizedError, Sendable {
     case failedToCreateClient
     case startupFailed(String)
@@ -67,6 +79,11 @@ enum TorrentEngineError: LocalizedError, Sendable {
             return message.isEmpty ? "The torrent operation failed." : message
         }
     }
+}
+
+enum TorrentRemovalOutcome: Equatable, Sendable {
+    case removed
+    case removedWithWarning(String)
 }
 
 protocol TorrentEngineServicing: Sendable {
@@ -100,7 +117,7 @@ protocol TorrentEngineServicing: Sendable {
     func resume(id: String) async throws
     func reannounce(id: String) async throws
     func forceRecheck(id: String) async throws
-    func remove(id: String, deleteFiles: Bool, deletePartfile: Bool) async throws
+    func remove(id: String, deleteFiles: Bool) async throws -> TorrentRemovalOutcome
     func applySettings(_ settings: TorrentSettings, networkBlocked: Bool) async throws
     func blockNetworkNow() async throws
     func saveAll() async
@@ -135,14 +152,21 @@ protocol TorrentEngineServicing: Sendable {
     static let clientCreationPreflight = Mutex<TorrentClientCreationPreflight?>(nil)
 
     private let stateDirectory: URL?
+    private let removalResultReader: TorrentRemovalResultReader?
     nonisolated let startupFailureMessage: String?
     private let runtimeFailureMessage = Mutex<String?>(nil)
     private let wakeRelay = TorrentWakeRelay()
     private var client: TorrentClientHandle?
+    private var hasPendingRemovalRequest = false
     nonisolated let libtorrentVersion: String
 
-    init(stateDirectory: URL, enablePeerExchangePlugin: Bool) throws {
+    init(
+        stateDirectory: URL,
+        enablePeerExchangePlugin: Bool,
+        removalResultReader: TorrentRemovalResultReader? = nil
+    ) throws {
         self.stateDirectory = stateDirectory
+        self.removalResultReader = removalResultReader
         startupFailureMessage = nil
         unsafe libtorrentVersion = String(cString: TorrentBridgeLibtorrentVersion())
         client = try Self.createClient(
@@ -154,6 +178,7 @@ protocol TorrentEngineServicing: Sendable {
 
     init(startupFailureMessage: String) {
         stateDirectory = nil
+        removalResultReader = nil
         self.startupFailureMessage = startupFailureMessage
         unsafe libtorrentVersion = String(cString: TorrentBridgeLibtorrentVersion())
         client = nil
@@ -164,6 +189,9 @@ protocol TorrentEngineServicing: Sendable {
     }
 
     func restart(enablePeerExchangePlugin: Bool) throws {
+        guard !hasPendingRemovalRequest else {
+            throw TorrentEngineError.bridgeError("The torrent engine cannot restart while removal is pending.")
+        }
         guard let stateDirectory else {
             throw TorrentEngineError.startupFailed(startupFailureMessage ?? "")
         }
@@ -381,20 +409,142 @@ protocol TorrentEngineServicing: Sendable {
         }
     }
 
-    func remove(id: String, deleteFiles: Bool, deletePartfile: Bool = false) throws {
+    func remove(
+        id: String,
+        deleteFiles: Bool
+    ) async throws -> TorrentRemovalOutcome {
         let client = try unsafe requireClient()
-        try throwingBridgeCall { errorBuffer, errorCapacity in
-            unsafe id.withCString {
-                unsafe TorrentClientRemove(
-                    client,
-                    $0,
-                    deleteFiles.bridgeFlag,
-                    deletePartfile.bridgeFlag,
-                    &errorBuffer,
-                    errorCapacity
+        if deleteFiles {
+            guard !hasPendingRemovalRequest else {
+                throw TorrentEngineError.bridgeError("Another torrent data deletion is already pending.")
+            }
+            hasPendingRemovalRequest = true
+        }
+        defer {
+            if deleteFiles {
+                hasPendingRemovalRequest = false
+            }
+        }
+
+        var requestToken: UInt64 = 0
+        do {
+            try throwingBridgeCall { errorBuffer, errorCapacity in
+                unsafe id.withCString {
+                    unsafe TorrentClientRemove(
+                        client,
+                        $0,
+                        deleteFiles.bridgeFlag,
+                        false.bridgeFlag,
+                        &requestToken,
+                        &errorBuffer,
+                        errorCapacity
+                    )
+                }
+            }
+        } catch {
+            guard requestToken != 0 else {
+                throw error
+            }
+            return quiesceAfterUntrackableRemoval(detail: error.localizedDescription)
+        }
+
+        guard deleteFiles else {
+            guard requestToken == 0 else {
+                return quiesceAfterUntrackableRemoval(
+                    detail: "The bridge returned a deletion token when data deletion was not requested.",
+                    downloadedFilesMayRemain: false
+                )
+            }
+            return .removed
+        }
+        guard requestToken != 0 else {
+            return quiesceAfterUntrackableRemoval(
+                detail: "The bridge did not return a deletion request token."
+            )
+        }
+
+        while true {
+            let result: TorrentRemovalResultStatus
+            do {
+                result = try unsafe removalResult(client: client, requestToken: requestToken)
+            } catch {
+                return quiesceAfterUntrackableRemoval(detail: error.localizedDescription)
+            }
+
+            switch result.state {
+            case Int32(TTORRENT_REMOVAL_PENDING):
+                await Self.waitForRemovalPollInterval()
+            case Int32(TTORRENT_REMOVAL_SUCCEEDED):
+                return .removed
+            case Int32(TTORRENT_REMOVAL_FAILED):
+                let message = result.error
+                return .removedWithWarning(
+                    message.isEmpty
+                        ? "The torrent was removed, but some downloaded files may remain on disk."
+                        : message
+                )
+            default:
+                return quiesceAfterUntrackableRemoval(
+                    detail: "The bridge returned an unknown deletion state."
                 )
             }
         }
+    }
+
+    private func removalResult(
+        client: OpaquePointer,
+        requestToken: UInt64
+    ) throws -> TorrentRemovalResultStatus {
+        if let removalResultReader,
+           let override = try removalResultReader() {
+            switch override {
+            case .pending:
+                return TorrentRemovalResultStatus(
+                    state: Int32(TTORRENT_REMOVAL_PENDING),
+                    error: ""
+                )
+            case .unknownState:
+                return TorrentRemovalResultStatus(
+                    state: .max,
+                    error: ""
+                )
+            }
+        }
+
+        var result = TTorrentRemovalResult()
+        try throwingBridgeCall { errorBuffer, errorCapacity in
+            unsafe TorrentClientTakeRemovalResult(
+                client,
+                requestToken,
+                &result,
+                &errorBuffer,
+                errorCapacity
+            )
+        }
+        return TorrentRemovalResultStatus(
+            state: result.state,
+            error: String(cStringTuple: result.error)
+        )
+    }
+
+    private func quiesceAfterUntrackableRemoval(
+        detail: String,
+        downloadedFilesMayRemain: Bool = true
+    ) -> TorrentRemovalOutcome {
+        let fileWarning = downloadedFilesMayRemain ? " Some downloaded files may remain on disk." : ""
+        let message = "The torrent was removed, but the bridge could not reliably track the operation. "
+            + "The torrent engine was stopped safely before folder access was released."
+            + fileWarning
+            + " \(detail)"
+        runtimeFailureMessage.withLock { $0 = message }
+        destroyClient(waitForShutdown: true)
+        return .removedWithWarning(message)
+    }
+
+    private nonisolated static func waitForRemovalPollInterval() async {
+        await Task.detached {
+            try? await Task.sleep(for: .milliseconds(25))
+        }.value
     }
 
     func applySettings(_ settings: TorrentSettings, networkBlocked: Bool) throws {
@@ -506,6 +656,9 @@ protocol TorrentEngineServicing: Sendable {
         direction: TorrentSortDirection
     ) -> TorrentSnapshotBatch? {
         guard let client else {
+            if runtimeFailureMessage.withLock({ $0 != nil }) {
+                return nil
+            }
             return revision == 0 ? nil : TorrentSnapshotBatch(revision: 0, torrents: [])
         }
 

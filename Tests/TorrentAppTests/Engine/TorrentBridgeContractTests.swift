@@ -6,7 +6,7 @@ import TorrentBridge
 struct TorrentBridgeContractTests {
     @Test("Pins bridge ABI version, limits, states, and dirty masks")
     func pinsBridgeConstants() {
-        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 27)
+        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 28)
         #expect(Int32(TTORRENT_BRIDGE_STATE_UNKNOWN) == -1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_CHECKING_FILES) == 1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_DOWNLOADING_METADATA) == 2)
@@ -39,6 +39,9 @@ struct TorrentBridgeContractTests {
         #expect(Int32(TTORRENT_FILE_PRIORITY_LOW) == 1)
         #expect(Int32(TTORRENT_FILE_PRIORITY_NORMAL) == 4)
         #expect(Int32(TTORRENT_FILE_PRIORITY_HIGH) == 7)
+        #expect(Int32(TTORRENT_REMOVAL_PENDING) == 0)
+        #expect(Int32(TTORRENT_REMOVAL_SUCCEEDED) == 1)
+        #expect(Int32(TTORRENT_REMOVAL_FAILED) == 2)
     }
 
     @Test("Pins Swift-imported C struct layout")
@@ -59,6 +62,8 @@ struct TorrentBridgeContractTests {
         #expect(MemoryLayout<TTorrentFileSnapshot>.alignment == 8)
         #expect(MemoryLayout<TTorrentFilePriorityEntry>.size == 8)
         #expect(MemoryLayout<TTorrentFilePriorityEntry>.alignment == 4)
+        #expect(MemoryLayout<TTorrentRemovalResult>.size == 516)
+        #expect(MemoryLayout<TTorrentRemovalResult>.alignment == 4)
         #expect(MemoryLayout<TTorrentPieceMapSnapshot>.size == 16)
         #expect(MemoryLayout<TTorrentPieceMapSnapshot>.alignment == 4)
         #expect(MemoryLayout<TTorrentFilePreview>.size == 616)
@@ -84,6 +89,7 @@ struct TorrentBridgeContractTests {
         let trackerHost = TTorrentTrackerHostSnapshot()
         let webSeed = TTorrentWebSeedSnapshot()
         let file = TTorrentFileSnapshot()
+        let removal = TTorrentRemovalResult()
         let preview = TTorrentFilePreview()
         let network = TTorrentNetworkStatus()
 
@@ -100,6 +106,7 @@ struct TorrentBridgeContractTests {
         #expect(MemoryLayout.size(ofValue: trackerHost.host) == Int(TTORRENT_TRACKER_HOST_CAPACITY))
         #expect(MemoryLayout.size(ofValue: webSeed.url) == 1_024)
         #expect(MemoryLayout.size(ofValue: file.path) == 1_024)
+        #expect(MemoryLayout.size(ofValue: removal.error) == 512)
         #expect(MemoryLayout.size(ofValue: preview.name) == 512)
         #expect(MemoryLayout.size(ofValue: preview.id) == 68)
         #expect(MemoryLayout.size(ofValue: network.endpoint) == 128)

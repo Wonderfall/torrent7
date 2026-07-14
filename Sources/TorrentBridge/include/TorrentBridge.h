@@ -40,7 +40,10 @@ inline constexpr int32_t TTORRENT_QUEUE_MOVE_TOP = 0;
 inline constexpr int32_t TTORRENT_QUEUE_MOVE_UP = 1;
 inline constexpr int32_t TTORRENT_QUEUE_MOVE_DOWN = 2;
 inline constexpr int32_t TTORRENT_QUEUE_MOVE_BOTTOM = 3;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 27;
+inline constexpr int32_t TTORRENT_REMOVAL_PENDING = 0;
+inline constexpr int32_t TTORRENT_REMOVAL_SUCCEEDED = 1;
+inline constexpr int32_t TTORRENT_REMOVAL_FAILED = 2;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 28;
 extern "C" {
 #else
 #define TORRENT_BRIDGE_NOEXCEPT
@@ -79,7 +82,10 @@ enum {
     TTORRENT_QUEUE_MOVE_UP = 1,
     TTORRENT_QUEUE_MOVE_DOWN = 2,
     TTORRENT_QUEUE_MOVE_BOTTOM = 3,
-    TTORRENT_BRIDGE_ABI_VERSION = 27
+    TTORRENT_REMOVAL_PENDING = 0,
+    TTORRENT_REMOVAL_SUCCEEDED = 1,
+    TTORRENT_REMOVAL_FAILED = 2,
+    TTORRENT_BRIDGE_ABI_VERSION = 28
 };
 #endif
 
@@ -179,6 +185,11 @@ typedef struct TTorrentFilePriorityEntry {
     int32_t index;
     int32_t priority;
 } TTorrentFilePriorityEntry;
+
+typedef struct TTorrentRemovalResult {
+    int32_t state;
+    char error[512];
+} TTorrentRemovalResult;
 
 typedef struct TTorrentPieceMapSnapshot {
     int32_t total_pieces;
@@ -482,11 +493,28 @@ int32_t TorrentClientPause(TTorrentClient *client, const char *torrent_id, char 
 int32_t TorrentClientResume(TTorrentClient *client, const char *torrent_id, char *error_out, int32_t error_capacity) TORRENT_BRIDGE_NOEXCEPT;
 int32_t TorrentClientReannounce(TTorrentClient *client, const char *torrent_id, char *error_out, int32_t error_capacity) TORRENT_BRIDGE_NOEXCEPT;
 int32_t TorrentClientForceRecheck(TTorrentClient *client, const char *torrent_id, char *error_out, int32_t error_capacity) TORRENT_BRIDGE_NOEXCEPT;
+
+// Once libtorrent accepts an asynchronous deletion, a nonzero output token is
+// authoritative even if this call reports a later bookkeeping error. The
+// caller must either consume that token's terminal result before releasing
+// access to the save path, or blocking-destroy the client before releasing it.
 int32_t TorrentClientRemove(
     TTorrentClient *client,
     const char *torrent_id,
     uint8_t delete_files,
     uint8_t delete_partfile,
+    uint64_t *request_token_out,
+    char *error_out,
+    int32_t error_capacity
+) TORRENT_BRIDGE_NOEXCEPT;
+
+// A nonzero token is returned only when payload deletion needs an asynchronous
+// terminal result. Pending results remain available; a terminal result is
+// consumed when read. An accepted removal cannot be cancelled.
+int32_t TorrentClientTakeRemovalResult(
+    TTorrentClient *client,
+    uint64_t request_token,
+    TTorrentRemovalResult *result,
     char *error_out,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;

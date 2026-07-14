@@ -5,6 +5,14 @@ struct PreparedDownloadFolder {
     let defaultURL: URL?
 }
 
+final class DownloadFolderAccessLease {
+    private let access: DownloadFolderAccessing
+
+    init(access: DownloadFolderAccessing) {
+        self.access = access
+    }
+}
+
 protocol DownloadFolderAccessStoring: AnyObject {
     var defaultURL: URL? { get }
     func restoreDefault() throws -> URL?
@@ -15,6 +23,7 @@ protocol DownloadFolderAccessStoring: AnyObject {
     func setDefault(_ url: URL, activeTorrents: [TorrentItem]) throws -> URL
     func clearDefault(activeTorrents: [TorrentItem])
     func prepareForAdd(_ url: URL, setsDefault: Bool, activeTorrents: [TorrentItem]) throws -> PreparedDownloadFolder
+    func lease(forSavePath path: String) throws -> DownloadFolderAccessLease
     func prune(activeTorrents: [TorrentItem])
 }
 
@@ -97,6 +106,25 @@ final class DownloadFolderAccessStore: DownloadFolderAccessStoring {
         try saveAdditionalDownloadFolderBookmark(for: access)
         additionalAccesses[Self.accessKey(access.url)] = access
         return PreparedDownloadFolder(path: access.url.path, defaultURL: nil)
+    }
+
+    func lease(forSavePath path: String) throws -> DownloadFolderAccessLease {
+        guard !path.isEmpty, (path as NSString).isAbsolutePath else {
+            throw TorrentStoreError.downloadFolderAccessDenied
+        }
+
+        let key = Self.accessKey(URL(fileURLWithPath: path, isDirectory: true))
+        let access: DownloadFolderAccessing?
+        if let defaultAccess, Self.accessKey(defaultAccess.url) == key {
+            access = defaultAccess
+        } else {
+            access = additionalAccesses[key]
+        }
+
+        guard let access else {
+            throw TorrentStoreError.downloadFolderAccessDenied
+        }
+        return DownloadFolderAccessLease(access: access)
     }
 
     func prune(activeTorrents: [TorrentItem]) {

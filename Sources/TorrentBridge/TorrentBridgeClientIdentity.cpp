@@ -1,5 +1,15 @@
 #include "TorrentBridgeInternal.hpp"
 
+namespace {
+
+bool hashes_overlap_without_allocation(lt::info_hash_t const &left, lt::info_hash_t const &right) noexcept
+{
+    return (left.has_v1() && right.has_v1() && left.v1 == right.v1)
+        || (left.has_v2() && right.has_v2() && left.v2 == right.v2);
+}
+
+} // namespace
+
 bool TTorrentClient::identity_is_referenced_locked(TorrentIdentity const *identity) const
 {
     if (identity == nullptr) {
@@ -355,6 +365,96 @@ void TTorrentClient::finalize_removed(lt::info_hash_t const &hashes, TorrentIden
     handle_by_id.erase(identity->canonical_id);
     removing_identity_by_id.erase(identity->canonical_id);
     retire_identity_if_unreferenced_locked(identity);
+}
+
+std::uint64_t TTorrentClient::begin_delete_request(lt::info_hash_t const &hashes)
+{
+    if (removal_request.has_value()) {
+        throw std::runtime_error("Another torrent data deletion is already pending or awaiting result collection.");
+    }
+
+    std::uint64_t request_token = next_removal_request_token++;
+    while (request_token == 0) {
+        request_token = next_removal_request_token++;
+    }
+    removal_request.emplace(
+        RemovalRequestEntry{
+            .request_token = request_token,
+            .hashes = hashes,
+            .state = TTORRENT_REMOVAL_PENDING,
+            .error = {}
+        }
+    );
+    return request_token;
+}
+
+void TTorrentClient::abandon_removal_request(std::uint64_t request_token) noexcept
+{
+    if (removal_request.has_value()
+        && removal_request->request_token == request_token
+        && removal_request->state == TTORRENT_REMOVAL_PENDING) {
+        removal_request.reset();
+    }
+}
+
+void TTorrentClient::complete_delete_request(
+    lt::info_hash_t const &hashes,
+    int32_t terminal_state,
+    std::string_view error
+) noexcept
+{
+    if (terminal_state != TTORRENT_REMOVAL_SUCCEEDED && terminal_state != TTORRENT_REMOVAL_FAILED) {
+        return;
+    }
+    if (!removal_request.has_value() || removal_request->state != TTORRENT_REMOVAL_PENDING) {
+        return;
+    }
+    if (!hashes_overlap_without_allocation(removal_request->hashes, hashes)) {
+        return;
+    }
+
+    removal_request->state = terminal_state;
+    copy_string(std::span{removal_request->error}, error);
+}
+
+DirtyMask TTorrentClient::fail_dropped_delete_request(lt::alerts_dropped_alert const &alert)
+{
+    bool const terminal_alert_dropped = alert.dropped_alerts.test(lt::torrent_deleted_alert::alert_type)
+        || alert.dropped_alerts.test(lt::torrent_delete_failed_alert::alert_type);
+    if (!terminal_alert_dropped
+        || !removal_request.has_value()
+        || removal_request->state != TTORRENT_REMOVAL_PENDING) {
+        return 0;
+    }
+
+    constexpr std::string_view message =
+        "Torrent data deletion completed, but its terminal libtorrent alert was dropped. Some downloaded files may remain on disk.";
+    lt::info_hash_t const hashes = removal_request->hashes;
+    complete_delete_request(hashes, TTORRENT_REMOVAL_FAILED, message);
+    return complete_pending_delete(hashes, std::string(message));
+}
+
+BridgeResult TTorrentClient::take_removal_result(
+    std::uint64_t request_token,
+    TTorrentRemovalResult *result
+)
+{
+    if (request_token == 0 || result == nullptr) {
+        return bridge_error(1, "Missing removal request token or result output.");
+    }
+
+    if (!removal_request.has_value() || removal_request->request_token != request_token) {
+        return bridge_error(2, "Removal request not found.");
+    }
+
+    TTorrentRemovalResult copied{};
+    copied.state = removal_request->state;
+    copy_string(std::span{copied.error}, std::string_view(removal_request->error.data()));
+    *result = copied;
+    if (removal_request->state != TTORRENT_REMOVAL_PENDING) {
+        removal_request.reset();
+    }
+    return {};
 }
 
 bool TTorrentClient::resume_write_is_current(lt::info_hash_t const &hashes, TorrentIdentity *identity)

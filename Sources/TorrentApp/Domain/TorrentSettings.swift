@@ -62,7 +62,6 @@ struct TorrentSettings: Codable, Equatable, Sendable {
     var completionNotificationNamesEnabled = false
     var dockTransferRatesEnabled = true
     var preventSleepDuringTransfers = false
-    var moveRemovedDataToTrash = false
 
     init() {}
 
@@ -94,7 +93,6 @@ struct TorrentSettings: Codable, Equatable, Sendable {
         case completionNotificationNamesEnabled
         case dockTransferRatesEnabled
         case preventSleepDuringTransfers
-        case moveRemovedDataToTrash
     }
 
     init(from decoder: Decoder) throws {
@@ -127,7 +125,6 @@ struct TorrentSettings: Codable, Equatable, Sendable {
         settings.completionNotificationNamesEnabled = try values.decodeIfPresent(Bool.self, forKey: .completionNotificationNamesEnabled) ?? settings.completionNotificationNamesEnabled
         settings.dockTransferRatesEnabled = try values.decodeIfPresent(Bool.self, forKey: .dockTransferRatesEnabled) ?? settings.dockTransferRatesEnabled
         settings.preventSleepDuringTransfers = try values.decodeIfPresent(Bool.self, forKey: .preventSleepDuringTransfers) ?? settings.preventSleepDuringTransfers
-        settings.moveRemovedDataToTrash = try values.decodeIfPresent(Bool.self, forKey: .moveRemovedDataToTrash) ?? settings.moveRemovedDataToTrash
         self = settings.clamped()
     }
 

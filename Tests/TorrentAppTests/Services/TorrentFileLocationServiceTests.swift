@@ -16,7 +16,6 @@ struct TorrentFileLocationServiceTests {
             let torrent = makeTorrent(name: "Ubuntu.iso", savePath: saveURL.path)
 
             #expect(service.revealURL(for: torrent)?.path == itemURL.path)
-            #expect(service.downloadedDataURL(for: torrent)?.path == itemURL.path)
         }
     }
 
@@ -30,7 +29,6 @@ struct TorrentFileLocationServiceTests {
             let torrent = makeTorrent(name: "Missing.iso", savePath: saveURL.path)
 
             #expect(service.revealURL(for: torrent)?.path == saveURL.path)
-            #expect(service.downloadedDataURL(for: torrent) == nil)
         }
     }
 
@@ -58,7 +56,6 @@ struct TorrentFileLocationServiceTests {
             let torrent = makeTorrent(name: "../outside.iso", savePath: saveURL.path)
 
             #expect(service.revealURL(for: torrent)?.path == saveURL.path)
-            #expect(service.downloadedDataURL(for: torrent) == nil)
             #expect(service.revealURL(for: torrent, filePath: "../outside.iso") == nil)
         }
     }
@@ -79,7 +76,6 @@ struct TorrentFileLocationServiceTests {
             let torrent = makeTorrent(name: "escape/secret.txt", savePath: saveURL.path)
 
             #expect(service.revealURL(for: torrent)?.path == saveURL.path)
-            #expect(service.downloadedDataURL(for: torrent) == nil)
             #expect(service.revealURL(for: torrent, filePath: "escape/secret.txt") == nil)
         }
     }

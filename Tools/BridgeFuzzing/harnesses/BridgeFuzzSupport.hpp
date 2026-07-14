@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -23,7 +24,7 @@ namespace bridge_fuzz {
 
 namespace fs = std::filesystem;
 
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 27, "Update the fuzz harnesses for the current TorrentBridge ABI.");
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 28, "Update the fuzz harnesses for the current TorrentBridge ABI.");
 #if !defined(TORRENT_USE_ASSERTS) || !TORRENT_USE_ASSERTS
 #error "Fuzz consumers must match the assertion-enabled Debug libtorrent archive."
 #endif
@@ -244,6 +245,11 @@ public:
         return save_path_.c_str();
     }
 
+    [[nodiscard]] std::optional<std::uint64_t> &tracked_removal_token() noexcept
+    {
+        return tracked_removal_token_;
+    }
+
 private:
     fs::path root_;
     fs::path state_dir_;
@@ -252,6 +258,7 @@ private:
     std::string save_path_;
     TTorrentClient *client_ = nullptr;
     std::atomic_uint64_t wake_count_ = 0;
+    std::optional<std::uint64_t> tracked_removal_token_;
 };
 
 inline BridgeClientHarness &shared_harness(std::string_view label)
@@ -450,7 +457,16 @@ inline void remove_all_torrents(TTorrentClient *client)
 
         for (std::string const &id : ids) {
             ErrorBuffer error;
-            static_cast<void>(TorrentClientRemove(client, id.c_str(), 0, 1, error.data(), error.capacity()));
+            std::uint64_t request_token = 0;
+            static_cast<void>(TorrentClientRemove(
+                client,
+                id.c_str(),
+                0,
+                0,
+                &request_token,
+                error.data(),
+                error.capacity()
+            ));
         }
     }
 }

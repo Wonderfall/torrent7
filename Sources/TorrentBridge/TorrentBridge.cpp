@@ -2367,12 +2367,16 @@ extern "C" int32_t TorrentClientForceRecheck(TTorrentClient *client, const char 
 }
 
 extern "C" int32_t TorrentClientRemove(TTorrentClient *client, const char *torrent_id, uint8_t delete_files,
-                                       uint8_t delete_partfile, char *error_out, int32_t error_capacity) noexcept
+                                       uint8_t delete_partfile, std::uint64_t *request_token_out, char *error_out,
+                                       int32_t error_capacity) noexcept
 {
+    if (request_token_out != nullptr) {
+        *request_token_out = 0;
+    }
     WakeCallbackInvocation wake;
     int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 3, [&]() -> BridgeResult {
-        if (client == nullptr || torrent_id == nullptr) {
-            return bridge_error(1, "Missing torrent client or torrent id.");
+        if (client == nullptr || torrent_id == nullptr || request_token_out == nullptr) {
+            return bridge_error(1, "Missing torrent client, torrent id, or removal request output.");
         }
 
         std::string const id(c_string_view(torrent_id));
@@ -2398,21 +2402,32 @@ extern "C" int32_t TorrentClientRemove(TTorrentClient *client, const char *torre
         lt::info_hash_t const hashes = handle->info_hashes();
         TorrentIdentity *identity = identity_from_handle(*handle);
         std::vector<std::string> const removal_ids = client->removal_ids_for_identity(hashes, id, identity);
-        BridgeResult tombstoned = client->persist_removal_tombstones(
-            removal_ids,
-            waits_for_delete ? RemovalTombstoneState::awaiting_payload_delete : RemovalTombstoneState::resume_cleanup,
-            bridge_bool(delete_files), bridge_bool(delete_partfile));
+        std::uint64_t const request_token = waits_for_delete ? client->begin_delete_request(hashes) : 0;
+        BridgeResult tombstoned;
+        try {
+            tombstoned = client->persist_removal_tombstones(
+                removal_ids,
+                waits_for_delete ? RemovalTombstoneState::awaiting_payload_delete : RemovalTombstoneState::resume_cleanup,
+                bridge_bool(delete_files), bridge_bool(delete_partfile));
+        } catch (...) {
+            client->abandon_removal_request(request_token);
+            throw;
+        }
         if (!tombstoned) {
+            client->abandon_removal_request(request_token);
             return tombstoned;
         }
 
         try {
             client->session.remove_torrent(*handle, flags);
         } catch (std::exception const &exception) {
+            client->abandon_removal_request(request_token);
             return client->cancel_tombstoned_operation_or_fault(removal_ids, 3, exception.what());
         } catch (...) {
+            client->abandon_removal_request(request_token);
             return client->cancel_tombstoned_operation_or_fault(removal_ids, 3, "Torrent could not be removed.");
         }
+        *request_token_out = request_token;
         client->mark_remove_requested(hashes, id, identity);
         if (waits_for_delete) {
             client->remember_pending_delete(hashes, removal_ids);
@@ -2440,6 +2455,23 @@ extern "C" int32_t TorrentClientRemove(TTorrentClient *client, const char *torre
         client->invoke_wake_callback(wake);
     }
     return result;
+}
+
+extern "C" int32_t TorrentClientTakeRemovalResult(TTorrentClient *client, std::uint64_t request_token,
+                                                   TTorrentRemovalResult *result, char *error_out,
+                                                   int32_t error_capacity) noexcept
+{
+    if (result != nullptr) {
+        *result = {};
+    }
+    return run_bridge_operation(output_buffer(error_out, error_capacity), 3, [&]() -> BridgeResult {
+        if (client == nullptr || result == nullptr) {
+            return bridge_error(1, "Missing torrent client or removal result output.");
+        }
+
+        std::scoped_lock guard(client->lock);
+        return client->take_removal_result(request_token, result);
+    });
 }
 
 extern "C" int32_t TorrentClientApplySettings(TTorrentClient *client, TTorrentSessionSettings const *requested,

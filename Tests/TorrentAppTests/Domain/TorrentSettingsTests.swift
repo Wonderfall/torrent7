@@ -72,13 +72,6 @@ struct TorrentSettingsTests {
         #expect(settings.effectiveAnonymousMode == true)
     }
 
-    @Test("Removing downloaded data does not use Trash by default")
-    func removingDownloadedDataDoesNotUseTrashByDefault() {
-        let settings = TorrentSettings()
-
-        #expect(settings.moveRemovedDataToTrash == false)
-    }
-
     @Test("Local Service Discovery is fully off by default")
     func localServiceDiscoveryIsFullyOffByDefault() {
         let settings = TorrentSettings()

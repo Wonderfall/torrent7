@@ -435,142 +435,131 @@ struct TorrentStoreIntegrationTests {
         #expect(await harness.engine.resumedIDs == ["paused"])
     }
 
-    @Test("Removing with trash moves downloaded data and forgets completion ownership")
-    func removingWithTrashMovesDownloadedDataAndForgetsCompletionOwnership() async {
-        var settings = TorrentSettings()
-        settings.moveRemovedDataToTrash = true
-        let harness = makeStoreHarness(settings: settings)
+    @Test("Removing data delegates deletion to libtorrent under a folder access lease")
+    func removingDataDelegatesDeletionToLibtorrentUnderFolderAccessLease() async {
+        let harness = makeStoreHarness()
         let torrent = makeTorrent(id: "alpha", name: "Alpha", savePath: "/Downloads", finished: true)
-        let downloadedURL = URL(filePath: "/Downloads/Alpha")
-        harness.fileLocationService.downloadedDataURLs["alpha"] = downloadedURL
         await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 1, torrents: [torrent]))
         await harness.store.refreshNow()
+        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 2, torrents: []))
         harness.store.selectionState.ids = ["alpha"]
 
         harness.store.removeTorrents(ids: ["alpha"], deleteFiles: true)
         await harness.store.saveAll()
 
-        #expect(harness.fileLocationService.trashedURLs == [downloadedURL])
+        #expect(harness.accessStore.leaseCalls == ["/Downloads"])
         #expect(await harness.engine.removed.count == 1)
         #expect(await harness.engine.removed.first?.id == "alpha")
-        #expect(await harness.engine.removed.first?.deleteFiles == false)
-        #expect(await harness.engine.removed.first?.deletePartfile == false)
+        #expect(await harness.engine.removed.first?.deleteFiles == true)
         #expect(harness.history.forgottenIDs == [["alpha"]])
         #expect(harness.store.selectionState.ids.isEmpty)
     }
 
-    @Test("Removing with delete deletes downloaded data from the app side")
-    func removingWithDeleteDeletesDownloadedDataFromTheAppSide() async {
+    @Test("Removing a torrent without data does not acquire a folder access lease")
+    func removingTorrentWithoutDataDoesNotAcquireFolderAccessLease() async {
         let harness = makeStoreHarness()
-        let torrent = makeTorrent(id: "alpha", name: "Alpha", savePath: "/Downloads", finished: false)
-        let downloadedURL = URL(filePath: "/Downloads/Alpha")
-        harness.fileLocationService.downloadedDataURLs["alpha"] = downloadedURL
+        let torrent = makeTorrent(id: "alpha", savePath: "/Downloads")
         await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 1, torrents: [torrent]))
         await harness.store.refreshNow()
-        harness.store.selectionState.ids = ["alpha"]
 
-        harness.store.removeTorrents(ids: ["alpha"], deleteFiles: true)
+        harness.store.removeTorrents(ids: ["alpha"], deleteFiles: false)
         await harness.store.saveAll()
 
-        #expect(harness.fileLocationService.deletedURLs == [downloadedURL])
-        #expect(harness.fileLocationService.trashedURLs.isEmpty)
+        #expect(harness.accessStore.leaseCalls.isEmpty)
         #expect(await harness.engine.removed.count == 1)
-        #expect(await harness.engine.removed.first?.id == "alpha")
         #expect(await harness.engine.removed.first?.deleteFiles == false)
-        #expect(await harness.engine.removed.first?.deletePartfile == false)
-        #expect(harness.history.forgottenIDs == [["alpha"]])
-        #expect(harness.store.selectionState.ids.isEmpty)
     }
 
-    @Test("Removing with delete prunes folder access only after deleting data")
-    func removingWithDeletePrunesFolderAccessOnlyAfterDeletingData() async {
+    @Test("A missing folder access lease prevents data deletion")
+    func missingFolderAccessLeasePreventsDataDeletion() async {
         let harness = makeStoreHarness()
-        let torrent = makeTorrent(id: "alpha", name: "Alpha", savePath: "/Downloads", finished: false)
-        let downloadedURL = URL(filePath: "/Downloads/Alpha")
-        harness.fileLocationService.downloadedDataURLs["alpha"] = downloadedURL
+        let torrent = makeTorrent(id: "alpha", savePath: "/Downloads")
+        harness.accessStore.leaseResult = .failure(FakeBookmarkError())
         await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 1, torrents: [torrent]))
-        await harness.store.refreshNow()
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 2, torrents: []))
-
-        var pruneCallsDuringDelete = [[TorrentItem]]()
-        harness.fileLocationService.onDeleteDownloadedData = { _ in
-            pruneCallsDuringDelete = harness.accessStore.pruneCalls
-        }
-
-        harness.store.removeTorrents(ids: ["alpha"], deleteFiles: true)
-        await harness.store.saveAll()
-
-        #expect(pruneCallsDuringDelete.map { $0.map(\.id) } == [["alpha"]])
-        #expect(harness.accessStore.pruneCalls.map { $0.map(\.id) } == [["alpha"], []])
-    }
-
-    @Test("Removing with trash prunes folder access only after moving data")
-    func removingWithTrashPrunesFolderAccessOnlyAfterMovingData() async {
-        var settings = TorrentSettings()
-        settings.moveRemovedDataToTrash = true
-        let harness = makeStoreHarness(settings: settings)
-        let torrent = makeTorrent(id: "alpha", name: "Alpha", savePath: "/Downloads", finished: false)
-        let downloadedURL = URL(filePath: "/Downloads/Alpha")
-        harness.fileLocationService.downloadedDataURLs["alpha"] = downloadedURL
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 1, torrents: [torrent]))
-        await harness.store.refreshNow()
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 2, torrents: []))
-
-        var pruneCallsDuringTrash = [[TorrentItem]]()
-        harness.fileLocationService.onMoveDownloadedDataToTrash = { _ in
-            pruneCallsDuringTrash = harness.accessStore.pruneCalls
-        }
-
-        harness.store.removeTorrents(ids: ["alpha"], deleteFiles: true)
-        await harness.store.saveAll()
-
-        #expect(pruneCallsDuringTrash.map { $0.map(\.id) } == [["alpha"]])
-        #expect(harness.accessStore.pruneCalls.map { $0.map(\.id) } == [["alpha"], []])
-    }
-
-    @Test("Removing with trash does not move data before engine removal succeeds")
-    func removingWithTrashDoesNotMoveDataBeforeEngineRemovalSucceeds() async {
-        var settings = TorrentSettings()
-        settings.moveRemovedDataToTrash = true
-        let harness = makeStoreHarness(settings: settings)
-        let torrent = makeTorrent(id: "alpha", name: "Alpha", savePath: "/Downloads", finished: true)
-        let downloadedURL = URL(filePath: "/Downloads/Alpha")
-        harness.fileLocationService.downloadedDataURLs["alpha"] = downloadedURL
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 1, torrents: [torrent]))
-        await harness.engine.setRemoveError(FakeBookmarkError())
         await harness.store.refreshNow()
 
         harness.store.removeTorrents(ids: ["alpha"], deleteFiles: true)
         await harness.store.saveAll()
 
-        #expect(harness.fileLocationService.trashedURLs.isEmpty)
+        #expect(harness.accessStore.leaseCalls == ["/Downloads"])
         #expect(await harness.engine.removed.isEmpty)
+        #expect(harness.store.lastError != nil)
     }
 
-    @Test("Removing with trash keeps engine removal when trash fails")
-    func removingWithTrashKeepsEngineRemovalWhenTrashFails() async {
-        var settings = TorrentSettings()
-        settings.moveRemovedDataToTrash = true
-        let harness = makeStoreHarness(settings: settings)
-        let torrent = makeTorrent(id: "alpha", name: "Alpha", savePath: "/Downloads", finished: true)
-        let downloadedURL = URL(filePath: "/Downloads/Alpha")
-        harness.fileLocationService.downloadedDataURLs["alpha"] = downloadedURL
-        harness.fileLocationService.trashError = FakeBookmarkError()
+    @Test("Folder access lease survives snapshot pruning until terminal deletion")
+    func folderAccessLeaseSurvivesSnapshotPruningUntilTerminalDeletion() async throws {
+        let harness = makeStoreHarness()
+        let torrent = makeTorrent(id: "alpha", savePath: "/Downloads")
+        var access: FakeDownloadFolderAccess? = FakeDownloadFolderAccess(
+            url: URL(fileURLWithPath: torrent.savePath, isDirectory: true)
+        )
+        weak let weakAccess = access
+        harness.accessStore.leaseResult = .success(DownloadFolderAccessLease(access: try #require(access)))
+        access = nil
         await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 1, torrents: [torrent]))
         await harness.store.refreshNow()
+        await harness.engine.suspendNextRemove()
+
+        harness.store.removeTorrents(ids: ["alpha"], deleteFiles: true)
+        await harness.engine.waitForSuspendedRemove()
+        #expect(weakAccess != nil)
+
+        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 2, torrents: []))
+        await harness.store.refreshNow()
+        #expect(harness.accessStore.pruneCalls.map { $0.map(\.id) } == [["alpha"], []])
+        #expect(weakAccess != nil)
+
+        await harness.engine.resumeSuspendedRemoves()
+        await harness.store.saveAll()
+        #expect(weakAccess == nil)
+    }
+
+    @Test("Terminal deletion warning releases access and forgets removed torrent ownership")
+    func terminalDeletionWarningReleasesAccessAndForgetsRemovedTorrentOwnership() async throws {
+        let harness = makeStoreHarness()
+        let torrent = makeTorrent(id: "alpha", savePath: "/Downloads", finished: true)
+        var access: FakeDownloadFolderAccess? = FakeDownloadFolderAccess(
+            url: URL(fileURLWithPath: torrent.savePath, isDirectory: true)
+        )
+        weak let weakAccess = access
+        harness.accessStore.leaseResult = .success(DownloadFolderAccessLease(access: try #require(access)))
+        access = nil
+        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 1, torrents: [torrent]))
+        await harness.store.refreshNow()
+        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 2, torrents: []))
+        await harness.engine.setRemoveOutcome(.removedWithWarning("Some downloaded files may remain on disk."))
         harness.store.selectionState.ids = ["alpha"]
 
         harness.store.removeTorrents(ids: ["alpha"], deleteFiles: true)
         await harness.store.saveAll()
 
-        #expect(await harness.engine.removed.count == 1)
-        #expect(await harness.engine.removed.first?.id == "alpha")
-        #expect(await harness.engine.removed.first?.deleteFiles == false)
-        #expect(await harness.engine.removed.first?.deletePartfile == false)
-        #expect(harness.fileLocationService.trashedURLs.isEmpty)
         #expect(harness.history.forgottenIDs == [["alpha"]])
         #expect(harness.store.selectionState.ids.isEmpty)
-        #expect(harness.store.lastError != nil)
+        #expect(harness.store.lastError == "Some downloaded files may remain on disk.")
+        #expect(weakAccess == nil)
+    }
+
+    @Test("Deletion tracking fault preserves unrelated torrents and folder access")
+    func deletionTrackingFaultPreservesUnrelatedTorrentsAndFolderAccess() async throws {
+        let harness = makeStoreHarness()
+        let removed = makeTorrent(id: "alpha", savePath: "/Downloads/Alpha")
+        let retained = makeTorrent(id: "beta", savePath: "/Downloads/Beta")
+        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 1, torrents: [removed, retained]))
+        await harness.store.refreshNow()
+        await harness.engine.setRemoveOutcome(.removedWithWarning("The torrent engine was stopped safely."))
+        await harness.engine.setBecomesUnavailableOnRemove(true)
+
+        harness.store.removeTorrents(ids: [removed.id, retained.id], deleteFiles: true)
+        await harness.store.saveAll()
+        await harness.store.refreshNow()
+
+        let acceptedID = try #require(await harness.engine.removed.first?.id)
+        let retainedID = acceptedID == removed.id ? retained.id : removed.id
+        #expect(await harness.engine.removed.count == 1)
+        #expect(Set(harness.store.torrents.map(\.id)) == [retainedID])
+        #expect(harness.accessStore.pruneCalls.last?.map(\.id) == [retainedID])
+        #expect(harness.history.forgottenIDs == [[acceptedID]])
+        #expect(harness.store.lastError == "The torrent engine was stopped safely.")
     }
 
     @Test("Updating settings clears disabled completion badge and applies blocked network policy")

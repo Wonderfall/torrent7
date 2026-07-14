@@ -2,8 +2,10 @@
 
 #include <doctest.h>
 
+#include <libtorrent/aux_/stack_allocator.hpp>
 #include <libtorrent/create_torrent.hpp>
 
+#include <bitset>
 #include <chrono>
 #include <cstdint>
 #include <ctime>
@@ -184,6 +186,25 @@ void self_clearing_wake_callback(void *context)
     lt::add_torrent_params params;
     params.ti = std::make_shared<lt::torrent_info>(info);
     return add_metadata_torrent(client, std::move(params), save_path, identity);
+}
+
+[[nodiscard]] bool eventually_take_removal_result(
+    TTorrentClient &client,
+    std::uint64_t request_token,
+    TTorrentRemovalResult &result,
+    std::span<char> error
+)
+{
+    return eventually([&] {
+        client.pump_alerts();
+        return TorrentClientTakeRemovalResult(
+            &client,
+            request_token,
+            &result,
+            error.data(),
+            static_cast<int32_t>(error.size())
+        ) == 0 && result.state != TTORRENT_REMOVAL_PENDING;
+    });
 }
 
 } // namespace
@@ -1901,7 +1922,212 @@ TEST_CASE("magnet torrents disable peer exchange until metadata arrives")
     CHECK_FALSE(client.peer_exchange_disabled_by_app.contains(identity));
 }
 
-TEST_CASE("metadata-less magnet removal treats zero-error delete alert as success")
+TEST_CASE("payload deletion waits for libtorrent and removes an exact torrent file")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+    client.stop_alert_worker();
+
+    fs::path const payload = temporary_directory.path() / "public.bin";
+    bridge_tests::write_text_file(payload, "data");
+    std::shared_ptr<lt::torrent_info const> const info = make_torrent_info(false);
+    TorrentIdentity *identity = nullptr;
+    static_cast<void>(add_metadata_torrent(client, *info, temporary_directory.path(), identity));
+    REQUIRE(identity != nullptr);
+
+    std::uint64_t request_token = 0;
+    std::array<char, 512> error{};
+    REQUIRE(TorrentClientRemove(
+        &client,
+        identity->canonical_id.c_str(),
+        bridge_bool(true),
+        bridge_bool(false),
+        &request_token,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == 0);
+    REQUIRE(request_token != 0);
+
+    TTorrentRemovalResult result{};
+    REQUIRE(TorrentClientTakeRemovalResult(
+        &client,
+        request_token,
+        &result,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == 0);
+    CHECK(result.state == TTORRENT_REMOVAL_PENDING);
+
+    REQUIRE(eventually_take_removal_result(client, request_token, result, error));
+    CHECK(result.state == TTORRENT_REMOVAL_SUCCEEDED);
+    CHECK_FALSE(file_exists(payload));
+}
+
+TEST_CASE("payload deletion does not recursively remove a colliding directory")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+    client.stop_alert_worker();
+
+    fs::path const colliding_directory = temporary_directory.path() / "public.bin";
+    fs::path const unrelated_file = colliding_directory / "unrelated.txt";
+    REQUIRE(fs::create_directory(colliding_directory));
+    bridge_tests::write_text_file(unrelated_file, "unrelated data");
+    std::shared_ptr<lt::torrent_info const> const info = make_torrent_info(false);
+    TorrentIdentity *identity = nullptr;
+    static_cast<void>(add_metadata_torrent(client, *info, temporary_directory.path(), identity));
+    REQUIRE(identity != nullptr);
+
+    std::uint64_t request_token = 0;
+    std::array<char, 512> error{};
+    REQUIRE(TorrentClientRemove(
+        &client,
+        identity->canonical_id.c_str(),
+        bridge_bool(true),
+        bridge_bool(false),
+        &request_token,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == 0);
+
+    TTorrentRemovalResult result{};
+    REQUIRE(eventually_take_removal_result(client, request_token, result, error));
+    CHECK(result.state == TTORRENT_REMOVAL_FAILED);
+    CHECK(bridge_tests::string_from_c_buffer(std::span{result.error}).contains("Some files may remain on disk"));
+    CHECK(fs::is_directory(colliding_directory));
+    CHECK(file_exists(unrelated_file));
+}
+
+TEST_CASE("a second payload deletion is rejected while the first is pending")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+    client.stop_alert_worker();
+
+    std::shared_ptr<lt::torrent_info const> const first_info = make_queue_torrent_info(41U);
+    std::shared_ptr<lt::torrent_info const> const second_info = make_queue_torrent_info(42U);
+    TorrentIdentity *first_identity = nullptr;
+    TorrentIdentity *second_identity = nullptr;
+    static_cast<void>(add_metadata_torrent(client, *first_info, temporary_directory.path(), first_identity));
+    static_cast<void>(add_metadata_torrent(client, *second_info, temporary_directory.path(), second_identity));
+    REQUIRE(first_identity != nullptr);
+    REQUIRE(second_identity != nullptr);
+
+    std::uint64_t first_token = 0;
+    std::array<char, 512> error{};
+    REQUIRE(TorrentClientRemove(
+        &client,
+        first_identity->canonical_id.c_str(),
+        bridge_bool(true),
+        bridge_bool(false),
+        &first_token,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == 0);
+
+    std::uint64_t second_token = 1;
+    CHECK(TorrentClientRemove(
+        &client,
+        second_identity->canonical_id.c_str(),
+        bridge_bool(true),
+        bridge_bool(false),
+        &second_token,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) != 0);
+    CHECK(second_token == 0);
+    CHECK(bridge_tests::string_from_c_buffer(std::span{error}).contains("already pending"));
+    CHECK(client.find(second_identity->canonical_id).has_value());
+
+    TTorrentRemovalResult result{};
+    CHECK(eventually_take_removal_result(client, first_token, result, error));
+}
+
+TEST_CASE("a completed payload deletion remains tracked until its result is collected")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+    client.stop_alert_worker();
+
+    std::shared_ptr<lt::torrent_info const> const first_info = make_queue_torrent_info(43U);
+    std::shared_ptr<lt::torrent_info const> const second_info = make_queue_torrent_info(44U);
+    std::uint64_t const first_token = client.begin_delete_request(first_info->info_hashes());
+    client.complete_delete_request(first_info->info_hashes(), TTORRENT_REMOVAL_SUCCEEDED);
+
+    std::bitset<lt::abi_alert_count> dropped_alerts;
+    dropped_alerts.set(lt::torrent_deleted_alert::alert_type);
+    lt::aux::stack_allocator allocator;
+    lt::alerts_dropped_alert const dropped_alert(allocator, dropped_alerts);
+    CHECK(client.fail_dropped_delete_request(dropped_alert) == 0U);
+
+    CHECK_THROWS(client.begin_delete_request(second_info->info_hashes()));
+
+    TTorrentRemovalResult result{};
+    std::array<char, 512> error{};
+    CHECK(TorrentClientTakeRemovalResult(
+        &client,
+        first_token + 1U,
+        &result,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) != 0);
+    CHECK_THROWS(client.begin_delete_request(second_info->info_hashes()));
+
+    REQUIRE(TorrentClientTakeRemovalResult(
+        &client,
+        first_token,
+        &result,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == 0);
+    CHECK(result.state == TTORRENT_REMOVAL_SUCCEEDED);
+
+    std::uint64_t const second_token = client.begin_delete_request(second_info->info_hashes());
+    CHECK(second_token != 0);
+    client.abandon_removal_request(second_token);
+    std::uint64_t const third_token = client.begin_delete_request(first_info->info_hashes());
+    CHECK(third_token != 0);
+    client.abandon_removal_request(third_token);
+    CHECK_FALSE(client.removal_request.has_value());
+}
+
+TEST_CASE("a dropped terminal deletion alert fails the request and completes cleanup")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+    client.stop_alert_worker();
+
+    std::shared_ptr<lt::torrent_info const> const info = make_torrent_info(false);
+    std::string const resume_id = primary_hash_key(info->info_hashes());
+    std::uint64_t const request_token = client.begin_delete_request(info->info_hashes());
+    client.remember_pending_delete(info->info_hashes(), {resume_id});
+
+    std::bitset<lt::abi_alert_count> dropped_alerts;
+    dropped_alerts.set(lt::torrent_deleted_alert::alert_type);
+    lt::aux::stack_allocator allocator;
+    lt::alerts_dropped_alert const alert(allocator, dropped_alerts);
+    CHECK((client.fail_dropped_delete_request(alert) & TTORRENT_DIRTY_ERRORS) != 0U);
+    CHECK(client.awaiting_delete_resume_ids_by_id.empty());
+
+    TTorrentRemovalResult result{};
+    std::array<char, 512> error{};
+    REQUIRE(TorrentClientTakeRemovalResult(
+        &client,
+        request_token,
+        &result,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == 0);
+    CHECK(result.state == TTORRENT_REMOVAL_FAILED);
+    CHECK(bridge_tests::string_from_c_buffer(std::span{result.error}).contains("terminal libtorrent alert was dropped"));
+}
+
+TEST_CASE("metadata-less magnet removal treats a zero-error failed alert conservatively")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
     TTorrentClient client((temporary_directory.path() / "State").string());
@@ -1926,22 +2152,33 @@ TEST_CASE("metadata-less magnet removal treats zero-error delete alert as succes
         static_cast<int32_t>(sizeof(error))
     ) == 0);
 
+    std::uint64_t request_token = 0;
     REQUIRE(TorrentClientRemove(
         &client,
         id.c_str(),
         bridge_bool(true),
         bridge_bool(true),
+        &request_token,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
+    REQUIRE(request_token != 0);
 
+    TTorrentRemovalResult removal_result{};
     CHECK(eventually([&] {
         client.pump_alerts();
-        std::scoped_lock guard(client.lock);
-        return client.awaiting_delete_resume_ids_by_id.empty();
+        return TorrentClientTakeRemovalResult(
+            &client,
+            request_token,
+            &removal_result,
+            error,
+            static_cast<int32_t>(sizeof(error))
+        ) == 0 && removal_result.state != TTORRENT_REMOVAL_PENDING;
     }));
 
-    CHECK_FALSE(client.take_alert_error(std::span{error}));
+    CHECK(removal_result.state == TTORRENT_REMOVAL_FAILED);
+    CHECK(bridge_tests::string_from_c_buffer(std::span{removal_result.error}).contains("Some files may remain on disk"));
+    CHECK(client.take_alert_error(std::span{error}));
 }
 
 TEST_CASE("metadata-pending peer exchange policy survives resume reload")

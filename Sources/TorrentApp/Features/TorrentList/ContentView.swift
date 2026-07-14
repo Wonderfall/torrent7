@@ -227,13 +227,9 @@ struct ContentView: View {
     }
 
     private var removeTorrentAndDataButtonTitle: String {
-        guard let removalConfirmationRequest else {
-            return "Remove Torrent and Move Data to Trash"
-        }
-        if removalConfirmationRequest.movesDataToTrash {
-            return removalConfirmationRequest.count == 1 ? "Remove Torrent and Move Data to Trash" : "Remove Torrents and Move Data to Trash"
-        }
-        return removalConfirmationRequest.count == 1 ? "Remove Torrent and Delete Data Permanently" : "Remove Torrents and Delete Data Permanently"
+        removalConfirmationRequest?.count == 1
+            ? "Remove Torrent and Delete Data Permanently"
+            : "Remove Torrents and Delete Data Permanently"
     }
 
     private var removalConfirmationMessage: String {
@@ -241,10 +237,10 @@ struct ContentView: View {
             return ""
         }
         if removalConfirmationRequest.count == 1, let savePath = removalConfirmationRequest.singleTorrentSavePath {
-            return "Choose whether to keep the downloaded data in \(savePath). If removed, it will be \(removalConfirmationRequest.dataActionText)."
+            return "Choose whether to keep the downloaded data in \(savePath). If removed, it will be deleted permanently."
         }
 
-        return "Choose whether to keep the downloaded data for \(removalConfirmationRequest.count) torrents. If removed, it will be \(removalConfirmationRequest.dataActionText)."
+        return "Choose whether to keep the downloaded data for \(removalConfirmationRequest.count) torrents. If removed, it will be deleted permanently."
     }
 
     private func configureCommandActions() {
@@ -424,8 +420,7 @@ struct ContentView: View {
         removalConfirmationRequest = TorrentRemovalConfirmationRequest(
             ids: Set(torrents.map(\.id)),
             count: torrents.count,
-            singleTorrentSavePath: torrents.count == 1 ? torrents[0].savePath : nil,
-            movesDataToTrash: store.settings.moveRemovedDataToTrash
+            singleTorrentSavePath: torrents.count == 1 ? torrents[0].savePath : nil
         )
     }
 
@@ -444,9 +439,4 @@ private struct TorrentRemovalConfirmationRequest {
     let ids: Set<TorrentItem.ID>
     let count: Int
     let singleTorrentSavePath: String?
-    let movesDataToTrash: Bool
-
-    var dataActionText: String {
-        movesDataToTrash ? "moved to Trash" : "deleted permanently"
-    }
 }

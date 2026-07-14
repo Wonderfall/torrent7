@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 @testable import TorrentApp
 
 final class RecordingCompletionHistoryStore: TorrentCompletionHistoryStoring {
@@ -98,10 +99,12 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
     var validateSelectionResult: Result<Void, Error> = .success(())
     var setDefaultResult: Result<URL, Error>?
     var prepareForAddResult: Result<PreparedDownloadFolder, Error>?
+    var leaseResult: Result<DownloadFolderAccessLease, Error>?
     private(set) var clearedDefaultCount = 0
     private(set) var clearDefaultCalls = [[TorrentItem]]()
     private(set) var setDefaultCalls = [(url: URL, activeTorrents: [TorrentItem])]()
     private(set) var prepareForAddCalls = [(url: URL, setsDefault: Bool, activeTorrents: [TorrentItem])]()
+    private(set) var leaseCalls = [String]()
     private(set) var pruneCalls = [[TorrentItem]]()
 
     func restoreDefault() throws -> URL? {
@@ -146,6 +149,15 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
         return result
     }
 
+    func lease(forSavePath path: String) throws -> DownloadFolderAccessLease {
+        leaseCalls.append(path)
+        let result = leaseResult ?? .success(DownloadFolderAccessLease(
+            access: FakeDownloadFolderAccess(url: URL(fileURLWithPath: path, isDirectory: true))
+        ))
+        leaseResult = nil
+        return try result.get()
+    }
+
     func prune(activeTorrents: [TorrentItem]) {
         pruneCalls.append(activeTorrents)
     }
@@ -153,13 +165,6 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
 
 final class RecordingTorrentFileLocationService: TorrentFileLocationServicing {
     var revealURLs = [TorrentItem.ID: URL]()
-    var downloadedDataURLs = [TorrentItem.ID: URL]()
-    var deleteError: Error?
-    var trashError: Error?
-    var onDeleteDownloadedData: ((URL) -> Void)?
-    var onMoveDownloadedDataToTrash: ((URL) -> Void)?
-    private(set) var deletedURLs = [URL]()
-    private(set) var trashedURLs = [URL]()
 
     func revealURL(for torrent: TorrentItem) -> URL? {
         revealURLs[torrent.id]
@@ -168,32 +173,16 @@ final class RecordingTorrentFileLocationService: TorrentFileLocationServicing {
     func revealURL(for torrent: TorrentItem, filePath: String) -> URL? {
         revealURLs[torrent.id]
     }
-
-    func downloadedDataURL(for torrent: TorrentItem) -> URL? {
-        downloadedDataURLs[torrent.id]
-    }
-
-    func deleteDownloadedData(at url: URL) throws {
-        if let deleteError {
-            throw deleteError
-        }
-        onDeleteDownloadedData?(url)
-        deletedURLs.append(url)
-    }
-
-    func moveDownloadedDataToTrash(at url: URL) throws {
-        if let trashError {
-            throw trashError
-        }
-        onMoveDownloadedDataToTrash?(url)
-        trashedURLs.append(url)
-    }
 }
 
 actor FakeTorrentEngine: TorrentEngineServicing {
     nonisolated let startupFailureMessage: String? = nil
     nonisolated let libtorrentVersion = "fake-libtorrent"
-    nonisolated let isAvailable = true
+    private nonisolated let availability = Mutex(true)
+
+    nonisolated var isAvailable: Bool {
+        availability.withLock { $0 }
+    }
 
     var snapshotBatch: TorrentSnapshotBatch?
     var trackerHostBatchValue = TorrentTrackerHostBatch(revision: 0, hosts: [])
@@ -232,8 +221,12 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     )]()
     private(set) var pausedIDs = [String]()
     private(set) var resumedIDs = [String]()
-    private(set) var removed = [(id: String, deleteFiles: Bool, deletePartfile: Bool)]()
+    private(set) var removed = [(id: String, deleteFiles: Bool)]()
     var removeError: Error?
+    var removeOutcome = TorrentRemovalOutcome.removed
+    var becomesUnavailableOnRemove = false
+    private var removeSuspensionCount = 0
+    private var removeContinuations = [CheckedContinuation<Void, Never>]()
     private(set) var snapshotRequests = [(revision: UInt64?, sortOrder: TorrentSortOrder, direction: TorrentSortDirection)]()
     private(set) var sourcePolicyUpdates = [(id: String, policy: TorrentSourcePolicy)]()
     private(set) var torrentOptionsUpdates = [(id: String, options: TorrentOptions)]()
@@ -290,6 +283,32 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         removeError = error
     }
 
+    func setRemoveOutcome(_ outcome: TorrentRemovalOutcome) {
+        removeOutcome = outcome
+    }
+
+    func setBecomesUnavailableOnRemove(_ value: Bool) {
+        becomesUnavailableOnRemove = value
+    }
+
+    func suspendNextRemove() {
+        removeSuspensionCount += 1
+    }
+
+    func waitForSuspendedRemove() async {
+        while removeContinuations.isEmpty {
+            await Task.yield()
+        }
+    }
+
+    func resumeSuspendedRemoves() {
+        let continuations = removeContinuations
+        removeContinuations.removeAll()
+        for continuation in continuations {
+            continuation.resume()
+        }
+    }
+
     func setNextAddedMagnetID(_ id: String) {
         nextAddedMagnetID = id
     }
@@ -301,6 +320,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     func restart(enablePeerExchangePlugin: Bool) async throws {
         restartCount += 1
         restartPeerExchangePluginValues.append(enablePeerExchangePlugin)
+        availability.withLock { $0 = true }
     }
 
     func wakeEvents() async -> AsyncStream<Void> {
@@ -353,11 +373,24 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func forceRecheck(id: String) async throws {}
 
-    func remove(id: String, deleteFiles: Bool, deletePartfile: Bool) async throws {
+    func remove(
+        id: String,
+        deleteFiles: Bool
+    ) async throws -> TorrentRemovalOutcome {
         if let removeError {
             throw removeError
         }
-        removed.append((id, deleteFiles, deletePartfile))
+        removed.append((id, deleteFiles))
+        if removeSuspensionCount > 0 {
+            removeSuspensionCount -= 1
+            await withCheckedContinuation { continuation in
+                removeContinuations.append(continuation)
+            }
+        }
+        if becomesUnavailableOnRemove {
+            availability.withLock { $0 = false }
+        }
+        return removeOutcome
     }
 
     func applySettings(_ settings: TorrentSettings, networkBlocked: Bool) async throws {
