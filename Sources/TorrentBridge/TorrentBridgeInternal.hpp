@@ -396,8 +396,6 @@ struct TorrentSourceCounts {
     int32_t https_web_seed_count = 0;
 };
 
-using ResumeDataResult = std::expected<std::vector<PendingResumeWrite>, std::string>;
-using ResumeHandleResult = std::expected<std::vector<PendingResumeHandle>, std::string>;
 using TombstoneEntriesResult = std::expected<std::vector<RemovalTombstoneEntry>, std::string>;
 using TombstoneCommitResult = std::expected<TombstoneCommitStatus, std::string>;
 using TombstonePayloadResult = std::expected<RemovalTombstonePayload, std::string>;
@@ -948,10 +946,6 @@ void restrict_permissions(int descriptor, std::string_view description, FileSyst
 
 UniqueFileDescriptor acquire_state_directory_lock(int state_directory_descriptor);
 
-BridgeResult torrent_file_read_error(FileReadFailure failure);
-
-TorrentLoadResult load_torrent_file(fs::path const &path);
-
 TorrentLoadResult load_torrent_data(std::span<char const> torrent_data);
 
 BridgeResult validate_torrent_info(lt::torrent_info const &info);
@@ -965,7 +959,7 @@ BridgeResult validate_torrent_info(lt::add_torrent_params const &params);
 
 void copy_torrent_preview(lt::add_torrent_params const &params, TTorrentFilePreview *preview) noexcept;
 
-int32_t copy_torrent_preview_files(
+void copy_torrent_preview_files(
     lt::add_torrent_params const &params,
     std::span<TTorrentFileSnapshot> output
 );
@@ -1171,15 +1165,11 @@ struct TTorrentClient {
 
     std::vector<std::string> retry_pending_delete_cleanups(bool reports_errors);
 
-    bool remove_resume_temp_files_for_id_locked(std::string const &id);
-
     bool remove_resume_file_locked(fs::path const &path);
 
     ResumeRemoveResult remove_resume_file_checked_locked(fs::path const &path);
 
     void sync_resume_directory_quietly();
-
-    bool remove_resume_files_for_id_locked(std::string const &id);
 
     ResumeRemoveResult remove_resume_temp_files_for_id_checked_locked(std::string const &id);
 
@@ -1481,8 +1471,6 @@ struct TTorrentClient {
 
     std::vector<PendingResumeHandle> collect_resume_handles();
 
-    ResumeHandleResult collect_resume_handles_checked();
-
     ResumeHandleReport collect_resume_handles_report();
 
     std::vector<PendingResumeWrite> collect_resume_data(
@@ -1494,9 +1482,6 @@ struct TTorrentClient {
         std::span<PendingResumeHandle const> handles,
         lt::resume_data_flags_t flags
     );
-
-    ResumeDataResult collect_resume_data_checked(std::span<PendingResumeHandle const> handles,
-                                                 lt::resume_data_flags_t flags);
 
     void save_all();
 

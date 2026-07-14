@@ -497,34 +497,6 @@ std::vector<std::string> TTorrentClient::retry_pending_delete_cleanups(bool repo
     return errors;
 }
 
-bool TTorrentClient::remove_resume_temp_files_for_id_locked(std::string const &id)
-{
-    bool removed = false;
-    try {
-        std::string const prefix = id + std::string(kResumeExtension) + std::string(kTempExtension) + ".";
-        std::error_code ec;
-        for (auto const &entry : fs::directory_iterator(resume_directory, ec)) {
-            if (ec) {
-                return removed;
-            }
-
-            std::error_code entry_error;
-            if (!entry.is_regular_file(entry_error)) {
-                continue;
-            }
-
-            std::string const name = entry.path().filename().string();
-            if (name.starts_with(prefix)) {
-                std::error_code ignored;
-                removed = fs::remove(entry.path(), ignored) || removed;
-            }
-        }
-    } catch (...) {
-        ignore_shutdown_failure();
-    }
-    return removed;
-}
-
 bool TTorrentClient::remove_resume_file_locked(fs::path const &path)
 {
     std::error_code ignored;
@@ -547,18 +519,6 @@ void TTorrentClient::sync_resume_directory_quietly()
     if (!result) {
         ignore_shutdown_failure();
     }
-}
-
-bool TTorrentClient::remove_resume_files_for_id_locked(std::string const &id)
-{
-    fs::path const final_path = resume_directory / (id + std::string(kResumeExtension));
-    fs::path temp_path = final_path;
-    temp_path += std::string(kTempExtension);
-
-    bool removed = remove_resume_file_locked(final_path);
-    removed = remove_resume_file_locked(temp_path) || removed;
-    removed = remove_resume_temp_files_for_id_locked(id) || removed;
-    return removed;
 }
 
 ResumeRemoveResult TTorrentClient::remove_resume_temp_files_for_id_checked_locked(std::string const &id)

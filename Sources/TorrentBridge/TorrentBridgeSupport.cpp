@@ -2192,40 +2192,13 @@ UniqueFileDescriptor acquire_state_directory_lock(int state_directory_descriptor
     return descriptor;
 }
 
-BridgeResult torrent_file_read_error(FileReadFailure failure)
-{
-    switch (failure) {
-    case FileReadFailure::unreadable:
-        return bridge_error(2, "The torrent file could not be read.");
-    case FileReadFailure::empty:
-        return bridge_error(2, "The torrent file is empty.");
-    case FileReadFailure::too_large:
-        return bridge_error(2, "The torrent file is too large.");
-    }
-
-    return bridge_error(2, "The torrent file could not be read.");
-}
-
-TorrentLoadResult load_torrent_file(fs::path const &path)
-{
-    FileReadResult const torrent_data = read_file(path, kMaxTorrentFileBytes);
-    if (!torrent_data) {
-        BridgeResult const read_error = torrent_file_read_error(torrent_data.error());
-        return std::unexpected(read_error.error());
-    }
-
-    return load_torrent_data(std::span<char const>{*torrent_data});
-}
-
 TorrentLoadResult load_torrent_data(std::span<char const> torrent_data)
 {
     if (torrent_data.empty()) {
-        BridgeResult const read_error = torrent_file_read_error(FileReadFailure::empty);
-        return std::unexpected(read_error.error());
+        return std::unexpected(BridgeError{.code = 2, .message = "The torrent file is empty."});
     }
     if (torrent_data.size() > kMaxTorrentFileBytes) {
-        BridgeResult const read_error = torrent_file_read_error(FileReadFailure::too_large);
-        return std::unexpected(read_error.error());
+        return std::unexpected(BridgeError{.code = 2, .message = "The torrent file is too large."});
     }
 
     try {
@@ -2378,15 +2351,11 @@ void copy_torrent_preview(lt::add_torrent_params const &params, TTorrentFilePrev
     preview->https_web_seed_count = counts.https_web_seed_count;
 }
 
-int32_t copy_torrent_preview_files(
+void copy_torrent_preview_files(
     lt::add_torrent_params const &params,
     std::span<TTorrentFileSnapshot> output
 )
 {
-    if (!validate_torrent_info(params)) {
-        return 0;
-    }
-
     lt::file_storage const &layout = params.ti->layout();
     lt::renamed_files renamed_files;
     renamed_files.import_filenames(layout, params.renamed_files);
@@ -2401,7 +2370,6 @@ int32_t copy_torrent_preview_files(
             static_cast<int32_t>(static_cast<std::uint8_t>(lt::default_priority))
         );
     }
-    return static_cast<int32_t>(count);
 }
 
 bool is_valid_file_priority(int32_t priority) noexcept

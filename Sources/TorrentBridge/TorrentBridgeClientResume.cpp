@@ -454,29 +454,6 @@ std::vector<PendingResumeHandle> TTorrentClient::collect_resume_handles()
     return handles;
 }
 
-ResumeHandleResult TTorrentClient::collect_resume_handles_checked()
-{
-    std::vector<PendingResumeHandle> handles;
-    for (auto const &handle : session.get_torrents()) {
-        if (!handle.is_valid()) {
-            return std::unexpected("A torrent handle became invalid while saving resume data.");
-        }
-
-        TorrentIdentity *identity = identity_from_handle(handle);
-        if (identity == nullptr) {
-            return std::unexpected("Resume data is missing torrent identity.");
-        }
-
-        handles.push_back(PendingResumeHandle{
-            .handle = handle,
-            .identity = identity,
-            .policy = resume_policy_snapshot_locked(identity),
-            .cleanups = {}
-        });
-    }
-    return handles;
-}
-
 ResumeHandleReport TTorrentClient::collect_resume_handles_report()
 {
     ResumeHandleReport report;
@@ -574,40 +551,6 @@ ResumeDataReport TTorrentClient::collect_resume_data_report(
         }
     }
     return report;
-}
-
-ResumeDataResult TTorrentClient::collect_resume_data_checked(std::span<PendingResumeHandle const> handles,
-                                             lt::resume_data_flags_t flags)
-{
-    std::vector<PendingResumeWrite> resume_data;
-    std::scoped_lock capture_guard(resume_capture_lock);
-    for (PendingResumeHandle const &pending : handles) {
-        if (!pending.handle.is_valid()) {
-            return std::unexpected("A torrent handle became invalid while saving resume data.");
-        }
-
-        if (pending.identity == nullptr) {
-            return std::unexpected("Resume data is missing torrent identity.");
-        }
-
-        std::uint64_t const generation = allocate_resume_generation(pending.identity);
-        try {
-            lt::add_torrent_params params = pending.handle.get_resume_data(flags);
-            resume_data.push_back(
-                PendingResumeWrite{.params = std::move(params),
-                                   .handle = pending.handle,
-                                   .identity = pending.identity,
-                                   .policy = pending.policy,
-                                   .generation = generation,
-                                   .async = false,
-                                   .cleanups = cleanups_for_write(pending.identity, generation, pending.cleanups)});
-        } catch (std::exception const &exception) {
-            return std::unexpected(std::string("Resume data could not be collected: ") + exception.what());
-        } catch (...) {
-            return std::unexpected("Resume data could not be collected.");
-        }
-    }
-    return resume_data;
 }
 
 void TTorrentClient::save_all()
