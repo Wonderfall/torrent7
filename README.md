@@ -112,14 +112,16 @@ The production app builds pinned dependencies into local static artifacts:
 
 | Dependency | Version | Use |
 | --- | --- | --- |
-| libtorrent-rasterbar | 2.0.13 | Torrent engine |
+| libtorrent-rasterbar | 2.1.0 | Torrent engine |
 | OpenSSL | 3.5.7 LTS | TLS support for libtorrent |
 | Boost | 1.91.0 headers | Header-only Boost pieces used by libtorrent |
 
 Homebrew supplies build tools only; it is not a runtime dependency source for the
 app bundle. OpenSSL archives are verified with SHA-256 and a pinned upstream PGP
 signing fingerprint. Boost is verified by SHA-256. Libtorrent is fetched from a
-pinned tag and commit through a local source cache.
+pinned tag and commit through a local source cache, then receives a hashed
+Xcode 26 compatibility and strict-bounds patch. WebTorrent support stays
+disabled to avoid adding its unused protocol and dependency surface.
 
 ## Build
 

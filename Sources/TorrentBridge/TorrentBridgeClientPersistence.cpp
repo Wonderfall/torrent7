@@ -920,7 +920,7 @@ void TTorrentClient::load_resume_data()
             continue;
         }
         if (params.ti) {
-            BridgeResult const valid_info = validate_torrent_info(*params.ti);
+            BridgeResult const valid_info = validate_torrent_info(params);
             if (!valid_info) {
                 remove_resume_file_locked(entry.path());
                 sync_resume_directory_quietly();

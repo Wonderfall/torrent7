@@ -9,9 +9,9 @@
 #include <libtorrent/bencode.hpp>
 #include <libtorrent/client_data.hpp>
 #include <libtorrent/error_code.hpp>
+#include <libtorrent/file_storage.hpp>
 #include <libtorrent/load_torrent.hpp>
 #include <libtorrent/magnet_uri.hpp>
-#include <libtorrent/parse_url.hpp>
 #include <libtorrent/read_resume_data.hpp>
 #include <libtorrent/session.hpp>
 #include <libtorrent/session_handle.hpp>
@@ -32,12 +32,14 @@
 #include <cstdint>
 #include <cstddef>
 #include <condition_variable>
+#include <ctime>
 #include <exception>
 #include <expected>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -87,7 +89,7 @@ constexpr std::string_view kAppDisabledLSDResumeKey = "torrent-app-policy-disabl
 constexpr std::string_view kQueuePriorityResumeKey = "torrent-app-queue-priority";
 constexpr std::string_view kQueueRankResumeKey = "torrent-app-queue-rank";
 constexpr std::string_view kCanonicalIDPrefix = "t:";
-constexpr std::string_view kNetworkClientIdentity = "libtorrent/2.0";
+constexpr std::string_view kNetworkClientIdentity = "libtorrent/2.1";
 constexpr int32_t kUnsetQueueRank = -1;
 constexpr std::size_t kOneKilobyte = 1024U;
 constexpr std::uintmax_t kOneMegabyte = static_cast<std::uintmax_t>(1024U) * 1024U;
@@ -117,7 +119,12 @@ static_assert(TTORRENT_MAX_TRACKER_COUNT > 0);
 static_assert(TTORRENT_MAX_WEB_SEED_COUNT > 0);
 static_assert(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT > 0);
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 26U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 27U);
+#if defined(TORRENT_USE_ASSERTS) && TORRENT_USE_ASSERTS
+static_assert(sizeof(lt::add_torrent_params) == 760U);
+#else
+static_assert(sizeof(lt::add_torrent_params) == 744U);
+#endif
 static_assert(TTORRENT_FILE_PRIORITY_SKIP == static_cast<int32_t>(static_cast<std::uint8_t>(lt::dont_download)));
 static_assert(TTORRENT_FILE_PRIORITY_LOW == static_cast<int32_t>(static_cast<std::uint8_t>(lt::low_priority)));
 static_assert(TTORRENT_FILE_PRIORITY_NORMAL == static_cast<int32_t>(static_cast<std::uint8_t>(lt::default_priority)));
@@ -177,8 +184,8 @@ static_assert(sizeof(TTorrentTrackerSnapshot) == 1560U);
 static_assert(alignof(TTorrentTrackerSnapshot) == 4U);
 static_assert(sizeof(TTorrentTrackerHostSnapshot) == 324U);
 static_assert(alignof(TTorrentTrackerHostSnapshot) == 1U);
-static_assert(sizeof(TTorrentWebSeedSnapshot) == 1028U);
-static_assert(alignof(TTorrentWebSeedSnapshot) == 4U);
+static_assert(sizeof(TTorrentWebSeedSnapshot) == 1024U);
+static_assert(alignof(TTorrentWebSeedSnapshot) == 1U);
 static_assert(sizeof(TTorrentWebSeedActivitySnapshot) == 16U);
 static_assert(alignof(TTorrentWebSeedActivitySnapshot) == 8U);
 static_assert(sizeof(TTorrentPeerSourceSnapshot) == 36U);
@@ -212,11 +219,6 @@ enum class NetworkBindingKind : std::uint8_t {
     name,
     ipv4,
     ipv6
-};
-
-enum class WebSeedKind : std::uint8_t {
-    url = 0,
-    http = 1
 };
 
 enum class FileReadFailure : std::uint8_t {
@@ -282,6 +284,8 @@ struct PendingResumeRequest {
 struct TorrentIdentity {
     std::uint64_t generation = 0;
     std::string canonical_id;
+    std::string comment;
+    std::time_t creation_date = 0;
     ResumeSaveState resume_save;
     bool allows_non_https_trackers = false;
     bool allows_non_https_web_seeds = false;
@@ -299,7 +303,7 @@ struct TorrentIdentity {
     int32_t queue_priority = TTORRENT_QUEUE_PRIORITY_NORMAL;
     int32_t queue_rank = kUnsetQueueRank;
     std::vector<lt::announce_entry> source_trackers;
-    std::vector<lt::web_seed_entry> source_web_seeds;
+    std::vector<std::string> source_web_seeds;
 };
 
 struct ResumePolicySnapshot {
@@ -323,7 +327,7 @@ struct ResumePolicySnapshot {
     int32_t queue_priority = TTORRENT_QUEUE_PRIORITY_NORMAL;
     int32_t queue_rank = kUnsetQueueRank;
     std::vector<lt::announce_entry> source_trackers;
-    std::vector<lt::web_seed_entry> source_web_seeds;
+    std::vector<std::string> source_web_seeds;
 };
 
 struct PendingResumeWrite {
@@ -822,7 +826,10 @@ bool hash_matches(lt::info_hash_t const &hashes, std::string_view id);
 
 double download_progress(lt::torrent_status const &status);
 
-TTorrentSnapshot snapshot_from_status(lt::torrent_status const &status);
+TTorrentSnapshot snapshot_from_status(
+    lt::torrent_status const &status,
+    TorrentIdentity const *identity = nullptr
+);
 
 struct TrackerEndpointAggregate {
     int32_t relevant_count = 0;
@@ -844,17 +851,16 @@ TTorrentTrackerSnapshot tracker_snapshot_from_entry(lt::announce_entry const &en
 
 std::optional<std::string> normalized_tracker_host(std::string const &url);
 
-TTorrentWebSeedSnapshot web_seed_snapshot(std::string const &url, WebSeedKind kind);
+TTorrentWebSeedSnapshot web_seed_snapshot(std::string const &url);
 
 void append_web_seed_snapshots(
     std::vector<TTorrentWebSeedSnapshot> &snapshots,
     std::set<std::string> const &urls,
-    WebSeedKind kind,
     std::size_t limit
 );
 
-TTorrentFileSnapshot file_snapshot_from_storage(
-    lt::file_storage const &files,
+TTorrentFileSnapshot file_snapshot_from_files(
+    lt::filenames const &files,
     lt::file_index_t file,
     int32_t priority
 );
@@ -876,8 +882,6 @@ void prepare_add_params(
 
 bool is_https_url(std::string_view url) noexcept;
 
-TorrentSourceCounts torrent_source_counts(lt::torrent_info const &info);
-
 TorrentSourceCounts torrent_source_counts(lt::add_torrent_params const &params);
 
 BridgeResult validate_torrent_sources(lt::add_torrent_params const &params);
@@ -887,8 +891,6 @@ bool filter_non_https_sources(
     bool require_https_trackers = true,
     bool require_https_web_seeds = true
 );
-
-void remember_source_policy_sources(TorrentIdentity &identity, lt::torrent_info const &info);
 
 void remember_source_policy_sources(TorrentIdentity &identity, lt::add_torrent_params const &params);
 
@@ -954,11 +956,19 @@ TorrentLoadResult load_torrent_data(std::span<char const> torrent_data);
 
 BridgeResult validate_torrent_info(lt::torrent_info const &info);
 
+BridgeResult validate_torrent_info(
+    lt::torrent_info const &info,
+    std::map<lt::file_index_t, std::string> const &renamed_files
+);
+
 BridgeResult validate_torrent_info(lt::add_torrent_params const &params);
 
 void copy_torrent_preview(lt::add_torrent_params const &params, TTorrentFilePreview *preview) noexcept;
 
-int32_t copy_torrent_preview_files(lt::torrent_info const &info, std::span<TTorrentFileSnapshot> output);
+int32_t copy_torrent_preview_files(
+    lt::add_torrent_params const &params,
+    std::span<TTorrentFileSnapshot> output
+);
 
 bool is_valid_file_priority(int32_t priority) noexcept;
 
@@ -1205,6 +1215,11 @@ struct TTorrentClient {
 
     [[nodiscard]] DirtyMask cache_snapshot(lt::torrent_handle const &handle);
 
+    [[nodiscard]] DirtyMask cache_resume_metadata(
+        TorrentIdentity *identity,
+        lt::add_torrent_params const &params
+    );
+
     std::vector<lt::torrent_handle> apply_queue_priority_order_locked();
 
     [[nodiscard]] DirtyMask update_snapshot_cache(std::vector<lt::torrent_status> const &statuses);
@@ -1247,8 +1262,7 @@ struct TTorrentClient {
 
     [[nodiscard]] DirtyMask cache_web_seeds(
         std::string_view id,
-        std::set<std::string> const &url_seeds,
-        std::set<std::string> const &http_seeds
+        std::set<std::string> const &url_seeds
     );
 
     [[nodiscard]] BridgeResult cache_file_metadata(lt::torrent_handle const &handle, DirtyMask &changes);

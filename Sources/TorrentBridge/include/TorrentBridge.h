@@ -40,7 +40,7 @@ inline constexpr int32_t TTORRENT_QUEUE_MOVE_TOP = 0;
 inline constexpr int32_t TTORRENT_QUEUE_MOVE_UP = 1;
 inline constexpr int32_t TTORRENT_QUEUE_MOVE_DOWN = 2;
 inline constexpr int32_t TTORRENT_QUEUE_MOVE_BOTTOM = 3;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 26;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 27;
 extern "C" {
 #else
 #define TORRENT_BRIDGE_NOEXCEPT
@@ -79,7 +79,7 @@ enum {
     TTORRENT_QUEUE_MOVE_UP = 1,
     TTORRENT_QUEUE_MOVE_DOWN = 2,
     TTORRENT_QUEUE_MOVE_BOTTOM = 3,
-    TTORRENT_BRIDGE_ABI_VERSION = 26
+    TTORRENT_BRIDGE_ABI_VERSION = 27
 };
 #endif
 
@@ -145,7 +145,6 @@ typedef struct TTorrentTrackerHostSnapshot {
 
 typedef struct TTorrentWebSeedSnapshot {
     char url[1024];
-    int32_t kind;
 } TTorrentWebSeedSnapshot;
 
 typedef struct TTorrentWebSeedActivitySnapshot {

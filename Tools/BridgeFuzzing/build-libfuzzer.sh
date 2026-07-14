@@ -31,9 +31,7 @@ deps_ready() {
         && -f "$DEPS_PREFIX/lib/libcrypto.a" ]]
 }
 
-if ! deps_ready; then
-    "$TOOLS_DIR/build-libfuzzer-deps.sh"
-fi
+"$TOOLS_DIR/build-libfuzzer-deps.sh"
 
 if ! deps_ready; then
     echo "libFuzzer dependencies are still missing under $DEPS_PREFIX" >&2
@@ -74,8 +72,13 @@ cxx_flags=(
     -D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_DEBUG
     -DBOOST_ASIO_ENABLE_CANCELIO
     -DBOOST_ASIO_NO_DEPRECATED
-    -DTORRENT_NO_DEPRECATE
+    -DBOOST_SYSTEM_USE_UTF8
+    -DTORRENT_ABI_VERSION=100
+    # The sanitized libtorrent archive uses CMake's Debug configuration, whose
+    # public interface enables assertions and changes internal object layouts.
+    -DTORRENT_USE_ASSERTS=1
     -DTORRENT_USE_I2P=0
+    -DTORRENT_USE_RTC=0
     -DTORRENT_DISABLE_LOGGING
     -DTORRENT_DISABLE_MUTABLE_TORRENTS
     -DTORRENT_DISABLE_STREAMING

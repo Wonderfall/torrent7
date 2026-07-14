@@ -41,16 +41,9 @@ default_max_len() {
     esac
 }
 
-missing=()
-for target in "${targets[@]}"; do
-    if [[ ! -x "$BUILD_DIR/$target" ]]; then
-        missing+=("$target")
-    fi
-done
-
-if [[ "${#missing[@]}" -gt 0 ]]; then
-    "$TOOLS_DIR/build-libfuzzer.sh" "${missing[@]}"
-fi
+# Rebuild every requested target so source, ABI, compiler, and dependency
+# changes can never leave the runner exercising a stale executable.
+"$TOOLS_DIR/build-libfuzzer.sh" "${targets[@]}"
 
 mkdir -p "$ARTIFACTS_DIR" "$WORK_CORPUS_DIR"
 

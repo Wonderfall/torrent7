@@ -143,6 +143,7 @@ void TTorrentClient::pump_alerts()
                         continue;
                     }
 
+                    changes |= cache_resume_metadata(identity, resume->params);
                     resume_data.push_back(
                         PendingResumeWrite{.params = resume->params,
                                            .handle = resume->handle,

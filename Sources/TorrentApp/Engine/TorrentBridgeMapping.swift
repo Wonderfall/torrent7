@@ -87,8 +87,7 @@ extension TorrentTrackerHostItem {
 extension TorrentWebSeedItem {
     init(snapshot: TTorrentWebSeedSnapshot) {
         self.init(
-            url: String(cStringTuple: snapshot.url),
-            kind: TorrentWebSeedKind(rawBridgeValue: snapshot.kind)
+            url: String(cStringTuple: snapshot.url)
         )
     }
 }

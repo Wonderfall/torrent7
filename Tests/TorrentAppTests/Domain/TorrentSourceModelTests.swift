@@ -53,15 +53,6 @@ struct TorrentSourceModelTests {
         #expect(tracker(scrapeSeeders: 1, scrapeLeechers: 1, scrapeDownloaded: 2).scrapeSummaryText == "1 seeder · 1 leecher · 2 completed")
     }
 
-    @Test("Web seed kind falls back to URL seed")
-    func webSeedKindFallsBackToURLSeed() {
-        #expect(TorrentWebSeedKind(rawBridgeValue: 0) == .urlSeed)
-        #expect(TorrentWebSeedKind(rawBridgeValue: 1) == .httpSeed)
-        #expect(TorrentWebSeedKind(rawBridgeValue: 999) == .urlSeed)
-        #expect(TorrentWebSeedKind.urlSeed.title == "Web Seed")
-        #expect(TorrentWebSeedKind.httpSeed.title == "HTTP Seed")
-    }
-
     @Test("Web seed activity summarizes active connections")
     func webSeedActivitySummarizesActiveConnections() {
         #expect(TorrentWebSeedActivity.empty.summaryText == nil)

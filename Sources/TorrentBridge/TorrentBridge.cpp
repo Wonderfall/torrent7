@@ -555,12 +555,6 @@ DirtyMask TTorrentClient::enforce_https_source_policy(lt::torrent_handle const &
                 changed = true;
             }
         }
-        for (std::string const &url : handle.http_seeds()) {
-            if (!is_https_url(url)) {
-                handle.remove_http_seed(url);
-                changed = true;
-            }
-        }
     }
 
     if (changed && require_web_seeds) {
@@ -591,10 +585,8 @@ DirtyMask TTorrentClient::restore_metadata_source_policy(lt::torrent_handle cons
         return {};
     }
 
-    std::shared_ptr<lt::torrent_info const> const torrent_file = handle.torrent_file();
-    if (!torrent_file
-        && (identity == nullptr
-            || (identity->source_trackers.empty() && identity->source_web_seeds.empty()))) {
+    if (identity == nullptr
+        || (identity->source_trackers.empty() && identity->source_web_seeds.empty())) {
         return {};
     }
 
@@ -607,8 +599,8 @@ DirtyMask TTorrentClient::restore_metadata_source_policy(lt::torrent_handle cons
     auto tracker_allowed = [require_trackers](lt::announce_entry const &tracker) noexcept {
         return !require_trackers || is_https_url(tracker.url);
     };
-    auto web_seed_allowed = [require_web_seeds](lt::web_seed_entry const &web_seed) noexcept {
-        return !require_web_seeds || is_https_url(web_seed.url);
+    auto web_seed_allowed = [require_web_seeds](std::string const &web_seed) noexcept {
+        return !require_web_seeds || is_https_url(web_seed);
     };
 
     std::vector<lt::announce_entry> const current_trackers = handle.trackers();
@@ -620,22 +612,11 @@ DirtyMask TTorrentClient::restore_metadata_source_policy(lt::torrent_handle cons
             restored_trackers.push_back(tracker);
         }
     }
-    if (identity != nullptr) {
-        for (lt::announce_entry const &tracker : identity->source_trackers) {
-            if (restored_trackers.size() < static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT)
-                && tracker_allowed(tracker)
-                && tracker_urls.insert(tracker.url).second) {
-                restored_trackers.push_back(tracker);
-            }
-        }
-    }
-    if (torrent_file) {
-        for (lt::announce_entry const &tracker : torrent_file->trackers()) {
-            if (restored_trackers.size() < static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT)
-                && tracker_allowed(tracker)
-                && tracker_urls.insert(tracker.url).second) {
-                restored_trackers.push_back(tracker);
-            }
+    for (lt::announce_entry const &tracker : identity->source_trackers) {
+        if (restored_trackers.size() < static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT)
+            && tracker_allowed(tracker)
+            && tracker_urls.insert(tracker.url).second) {
+            restored_trackers.push_back(tracker);
         }
     }
     bool const trackers_changed = restored_trackers.size() != current_trackers.size()
@@ -644,42 +625,14 @@ DirtyMask TTorrentClient::restore_metadata_source_policy(lt::torrent_handle cons
         });
 
     std::set<std::string> current_url_seeds = handle.url_seeds();
-    std::set<std::string> current_http_seeds = handle.http_seeds();
     bool web_seeds_changed = false;
-    if (identity != nullptr) {
-        for (lt::web_seed_entry const &web_seed : identity->source_web_seeds) {
-            if (current_url_seeds.size() + current_http_seeds.size() >= static_cast<std::size_t>(TTORRENT_MAX_WEB_SEED_COUNT)) {
-                break;
-            }
-            if (static_cast<lt::web_seed_entry::type_t>(web_seed.type) == lt::web_seed_entry::url_seed) {
-                if (web_seed_allowed(web_seed) && current_url_seeds.insert(web_seed.url).second) {
-                    web_seeds_changed = true;
-                    changed = true;
-                }
-            } else if (static_cast<lt::web_seed_entry::type_t>(web_seed.type) == lt::web_seed_entry::http_seed) {
-                if (web_seed_allowed(web_seed) && current_http_seeds.insert(web_seed.url).second) {
-                    web_seeds_changed = true;
-                    changed = true;
-                }
-            }
+    for (std::string const &web_seed : identity->source_web_seeds) {
+        if (current_url_seeds.size() >= static_cast<std::size_t>(TTORRENT_MAX_WEB_SEED_COUNT)) {
+            break;
         }
-    }
-    if (torrent_file) {
-        for (lt::web_seed_entry const &web_seed : torrent_file->web_seeds()) {
-            if (current_url_seeds.size() + current_http_seeds.size() >= static_cast<std::size_t>(TTORRENT_MAX_WEB_SEED_COUNT)) {
-                break;
-            }
-            if (static_cast<lt::web_seed_entry::type_t>(web_seed.type) == lt::web_seed_entry::url_seed) {
-                if (web_seed_allowed(web_seed) && current_url_seeds.insert(web_seed.url).second) {
-                    web_seeds_changed = true;
-                    changed = true;
-                }
-            } else if (static_cast<lt::web_seed_entry::type_t>(web_seed.type) == lt::web_seed_entry::http_seed) {
-                if (web_seed_allowed(web_seed) && current_http_seeds.insert(web_seed.url).second) {
-                    web_seeds_changed = true;
-                    changed = true;
-                }
-            }
+        if (web_seed_allowed(web_seed) && current_url_seeds.insert(web_seed).second) {
+            web_seeds_changed = true;
+            changed = true;
         }
     }
 
@@ -689,7 +642,6 @@ DirtyMask TTorrentClient::restore_metadata_source_policy(lt::torrent_handle cons
         restored_sources.tracker_tiers.push_back(tracker.tier);
     }
     restored_sources.url_seeds.assign(current_url_seeds.begin(), current_url_seeds.end());
-    restored_sources.http_seeds.assign(current_http_seeds.begin(), current_http_seeds.end());
     BridgeResult const valid_sources = validate_torrent_sources(restored_sources);
     if (!valid_sources) {
         changes |= remove_torrent_with_invalid_metadata(handle, valid_sources.error().message);
@@ -704,19 +656,13 @@ DirtyMask TTorrentClient::restore_metadata_source_policy(lt::torrent_handle cons
 
     if (web_seeds_changed) {
         std::set<std::string> const existing_url_seeds = handle.url_seeds();
-        std::set<std::string> const existing_http_seeds = handle.http_seeds();
         for (std::string const &url : current_url_seeds) {
             if (!existing_url_seeds.contains(url)) {
                 handle.add_url_seed(url);
             }
         }
-        for (std::string const &url : current_http_seeds) {
-            if (!existing_http_seeds.contains(url)) {
-                handle.add_http_seed(url);
-            }
-        }
         if (std::optional<std::string> const cache_id = cache_id_for_handle(handle)) {
-            changes |= cache_web_seeds(*cache_id, current_url_seeds, current_http_seeds);
+            changes |= cache_web_seeds(*cache_id, current_url_seeds);
         } else {
             changes |= queue_alert_error("Torrent not found.");
         }
@@ -778,7 +724,7 @@ TTorrentSourcePolicy TTorrentClient::source_policy(lt::torrent_handle const &han
     TTorrentSourcePolicy policy{};
     lt::torrent_flags_t const flags = handle.flags();
     std::shared_ptr<lt::torrent_info const> const torrent_file = handle.torrent_file();
-    bool const private_torrent = torrent_file && torrent_file->priv();
+    bool const private_torrent = torrent_file && torrent_file->is_valid() && torrent_file->priv();
     bool const dht_locked =
         private_torrent || (identity != nullptr && identity->dht_locked_by_source);
     bool const peer_exchange_locked =
@@ -848,7 +794,7 @@ DirtyMask TTorrentClient::set_source_policy(
     }
 
     std::shared_ptr<lt::torrent_info const> const torrent_file = handle.torrent_file();
-    bool const private_torrent = torrent_file && torrent_file->priv();
+    bool const private_torrent = torrent_file && torrent_file->is_valid() && torrent_file->priv();
     bool const dht_locked = private_torrent || identity->dht_locked_by_source;
     bool const peer_exchange_locked = private_torrent || identity->peer_exchange_locked_by_source;
     bool const lsd_locked = private_torrent || identity->lsd_locked_by_source;
@@ -1439,7 +1385,7 @@ int32_t add_torrent_file_data_with_priorities(
             return valid_info;
         }
         lt::add_torrent_params const source_params = params;
-        if (file_priority_count > params.ti->files().num_files()) {
+        if (file_priority_count > params.ti->layout().num_files()) {
             return bridge_error(2, "The file priorities are invalid.");
         }
 
@@ -1728,10 +1674,10 @@ int32_t preview_torrent_file_with_loader(
 
         lt::torrent_info const &info = *params.ti;
         if (required_count_out != nullptr) {
-            *required_count_out = info.files().num_files();
+            *required_count_out = info.layout().num_files();
         }
         copy_torrent_preview(params, preview);
-        copy_torrent_preview_files(info, output_span_from_c_buffer(files, capacity));
+        copy_torrent_preview_files(params, output_span_from_c_buffer(files, capacity));
         return {};
     });
 }
@@ -2270,15 +2216,19 @@ extern "C" int32_t TorrentClientSetFilePriority(
         }
 
         std::shared_ptr<lt::torrent_info const> const torrent_file = handle->torrent_file();
-        if (!torrent_file) {
+        if (!torrent_file || !torrent_file->is_valid()) {
             return bridge_error(2, "Torrent metadata is not available.");
         }
 
-        BridgeResult const valid_info = validate_torrent_info(*torrent_file);
+        lt::renamed_files const renamed_files = handle->get_renamed_files();
+        BridgeResult const valid_info = validate_torrent_info(
+            *torrent_file,
+            renamed_files.export_filenames(torrent_file->layout())
+        );
         if (!valid_info) {
             return valid_info;
         }
-        if (file_index >= torrent_file->files().num_files()) {
+        if (file_index >= torrent_file->layout().num_files()) {
             return bridge_error(2, "File not found.");
         }
 

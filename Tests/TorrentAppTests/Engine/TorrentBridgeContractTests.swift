@@ -6,7 +6,7 @@ import TorrentBridge
 struct TorrentBridgeContractTests {
     @Test("Pins bridge ABI version, limits, states, and dirty masks")
     func pinsBridgeConstants() {
-        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 26)
+        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 27)
         #expect(Int32(TTORRENT_BRIDGE_STATE_UNKNOWN) == -1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_CHECKING_FILES) == 1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_DOWNLOADING_METADATA) == 2)
@@ -49,8 +49,8 @@ struct TorrentBridgeContractTests {
         #expect(MemoryLayout<TTorrentTrackerSnapshot>.alignment == 4)
         #expect(MemoryLayout<TTorrentTrackerHostSnapshot>.size == 324)
         #expect(MemoryLayout<TTorrentTrackerHostSnapshot>.alignment == 1)
-        #expect(MemoryLayout<TTorrentWebSeedSnapshot>.size == 1_028)
-        #expect(MemoryLayout<TTorrentWebSeedSnapshot>.alignment == 4)
+        #expect(MemoryLayout<TTorrentWebSeedSnapshot>.size == 1_024)
+        #expect(MemoryLayout<TTorrentWebSeedSnapshot>.alignment == 1)
         #expect(MemoryLayout<TTorrentWebSeedActivitySnapshot>.size == 16)
         #expect(MemoryLayout<TTorrentWebSeedActivitySnapshot>.alignment == 8)
         #expect(MemoryLayout<TTorrentPeerSourceSnapshot>.size == 36)
@@ -106,16 +106,11 @@ struct TorrentBridgeContractTests {
         #expect(MemoryLayout.size(ofValue: network.last_error) == 512)
     }
 
-    @Test("Libtorrent version is exposed as a non-empty C string")
-    func libtorrentVersionIsExposedAsNonEmptyCString() {
+    @Test("Libtorrent version is pinned to 2.1.0")
+    func libtorrentVersionIsPinned() {
         let version = unsafe String(cString: TorrentBridgeLibtorrentVersion())
-        let components = version.split(separator: ".")
 
-        #expect(!version.isEmpty)
-        #expect(components.count >= 2)
-        #expect(components.allSatisfy { component in
-            !component.isEmpty && component.allSatisfy(\.isNumber)
-        })
+        #expect(version == "2.1.0.0")
     }
 
     @Test("Create reports invalid state paths through the error buffer")

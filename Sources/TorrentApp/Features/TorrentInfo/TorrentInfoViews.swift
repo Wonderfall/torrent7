@@ -1355,7 +1355,7 @@ private struct TorrentWebSeedRow: View {
 
             Spacer(minLength: 12)
 
-            Label(webSeed.kind.title, systemImage: "globe")
+            Label("Web Seed", systemImage: "globe")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .labelStyle(.titleAndIcon)

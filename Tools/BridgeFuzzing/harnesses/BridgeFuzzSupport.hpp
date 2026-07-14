@@ -23,7 +23,10 @@ namespace bridge_fuzz {
 
 namespace fs = std::filesystem;
 
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 26, "Update the fuzz harnesses for the current TorrentBridge ABI.");
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 27, "Update the fuzz harnesses for the current TorrentBridge ABI.");
+#if !defined(TORRENT_USE_ASSERTS) || !TORRENT_USE_ASSERTS
+#error "Fuzz consumers must match the assertion-enabled Debug libtorrent archive."
+#endif
 
 inline constexpr int32_t kErrorCapacity = 1024;
 

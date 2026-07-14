@@ -242,12 +242,10 @@ struct TorrentBridgeMappingTests {
 
         var webSeedSnapshot = TTorrentWebSeedSnapshot()
         writeCString("https://example.com/file", to: &webSeedSnapshot.url)
-        webSeedSnapshot.kind = TorrentWebSeedKind.httpSeed.rawValue
 
         let webSeed = TorrentWebSeedItem(snapshot: webSeedSnapshot)
 
         #expect(webSeed.url == "https://example.com/file")
-        #expect(webSeed.kind == .httpSeed)
     }
 
     @Test("Maps web seed activity snapshots")

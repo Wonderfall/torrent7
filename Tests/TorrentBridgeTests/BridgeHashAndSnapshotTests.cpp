@@ -8,6 +8,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 TEST_CASE("hex and bridge ID helpers use lowercase canonical forms")
@@ -112,11 +113,30 @@ TEST_CASE("bridge booleans and torrent states are stable ABI values")
 
 TEST_CASE("tracker host normalization extracts bounded lowercase hosts")
 {
+    std::string const maximum_bounded_host =
+        std::string(63U, 'a') + "."
+        + std::string(63U, 'b') + "."
+        + std::string(63U, 'c') + "."
+        + std::string(63U, 'd');
+    REQUIRE(maximum_bounded_host.size() == static_cast<std::size_t>(TTORRENT_TRACKER_HOST_CAPACITY - 1));
+
     CHECK(normalized_tracker_host("https://Tracker.Example.Org:443/announce").value_or("") == "tracker.example.org");
     CHECK(normalized_tracker_host("udp://torrent.FEDORAPROJECT.org:6969/announce").value_or("") == "torrent.fedoraproject.org");
     CHECK(normalized_tracker_host("http://tracker.example.org./announce").value_or("") == "tracker.example.org");
+    CHECK(normalized_tracker_host("https://user:secret@Tracker.Example.Org:443/announce").value_or("") == "tracker.example.org");
+    CHECK(normalized_tracker_host("udp://[2001:db8::1]:6969/announce").value_or("") == "2001:db8::1");
+    CHECK(normalized_tracker_host("http://[fe80::1%25en0]:8080/announce").value_or("") == "fe80::1%25en0");
     CHECK_FALSE(normalized_tracker_host("not a tracker url").has_value());
     CHECK_FALSE(normalized_tracker_host("https:///announce").has_value());
+    CHECK_FALSE(normalized_tracker_host("https://[2001:db8::1/announce").has_value());
+    CHECK_FALSE(normalized_tracker_host("https://[2001:db8::1]suffix/announce").has_value());
+    CHECK_FALSE(normalized_tracker_host("https://tracker.example:/announce").has_value());
+    CHECK_FALSE(normalized_tracker_host("https://tracker.example:0/announce").has_value());
+    CHECK_FALSE(normalized_tracker_host("https://tracker.example:65536/announce").has_value());
+    CHECK_FALSE(normalized_tracker_host("https://tracker.example:invalid/announce").has_value());
+    CHECK_FALSE(normalized_tracker_host("https://tracker.example\r\n.evil/announce").has_value());
+    CHECK(normalized_tracker_host("https://" + maximum_bounded_host + "/announce").value_or("") == maximum_bounded_host);
+    CHECK_FALSE(normalized_tracker_host("https://" + maximum_bounded_host + "x/announce").has_value());
 }
 
 TEST_CASE("download progress handles terminal, empty, and clamped states")
@@ -197,23 +217,23 @@ TEST_CASE("snapshot_from_status copies sanitized ABI fields")
 
 TEST_CASE("snapshot_from_status maps torrent metadata facts when available")
 {
-    lt::file_storage storage;
-    storage.add_file("metadata.bin", 1024);
+    std::vector<lt::create_file_entry> files;
+    files.emplace_back("metadata.bin", 1024);
 
-    lt::create_torrent creator(storage, 16 * 1024, lt::create_torrent::v1_only);
+    lt::create_torrent creator(std::move(files), 16 * 1024, lt::create_torrent::v1_only);
     creator.set_priv(true);
     creator.set_comment("Created for tests");
     creator.set_creation_date(12'345);
     creator.set_hash(lt::piece_index_t(0), bridge_tests::sha1_hash_from_seed(17U));
 
     std::vector<char> const buffer = creator.generate_buf();
-    lt::error_code error;
-    auto info = std::make_shared<lt::torrent_info>(
-        lt::span<char const>(buffer.data(), static_cast<int>(buffer.size())),
-        error,
-        lt::from_span
-    );
-    REQUIRE_FALSE(error);
+    lt::add_torrent_params const params =
+        bridge_tests::load_torrent_params(buffer, "snapshot metadata torrent info");
+    std::shared_ptr<lt::torrent_info const> const info = params.ti;
+
+    TorrentIdentity identity;
+    identity.comment = params.comment;
+    identity.creation_date = params.creation_date;
 
     lt::torrent_status status;
     status.info_hashes = info->info_hashes();
@@ -223,7 +243,7 @@ TEST_CASE("snapshot_from_status maps torrent metadata facts when available")
     status.completed_time = 67'890;
     status.has_metadata = true;
 
-    TTorrentSnapshot const snapshot = snapshot_from_status(status);
+    TTorrentSnapshot const snapshot = snapshot_from_status(status, &identity);
 
     CHECK(std::string(snapshot.comment) == "Created for tests");
     CHECK(snapshot.total_size == 1024);

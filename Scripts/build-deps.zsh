@@ -158,10 +158,17 @@ typeset -r LIBTORRENT_SOURCE_DIR="$SOURCE_ROOT/libtorrent"
 typeset -r LIBTORRENT_BUILD_DIR="$BUILD_ROOT/libtorrent"
 typeset -r LIBTORRENT_BUILD_STAMP="$DEPS_PREFIX/.torrent-app-libtorrent-build"
 typeset -r LIBTORRENT_REPO=${LIBTORRENT_REPO:-https://github.com/arvidn/libtorrent.git}
-typeset -r LIBTORRENT_TAG=${LIBTORRENT_TAG:-v2.0.13}
-typeset -r LIBTORRENT_COMMIT=${LIBTORRENT_COMMIT:-7d7fc38fac61177fa5e02148f791b2f65250b09d}
+typeset -r LIBTORRENT_TAG=${LIBTORRENT_TAG:-v2.1.0}
+typeset -r LIBTORRENT_COMMIT=${LIBTORRENT_COMMIT:-578e06824c3546f3371ab43967ab288a7e253eca}
+typeset -r LIBTORRENT_PATCH="$ROOT_DIR/Scripts/patches/libtorrent-2.1.0-xcode-26.patch"
+typeset -r LIBTORRENT_PATCHED_IO_BLOB=406c7c7aa7d4e34657d203517cd749aa71cb29f4
+typeset -r LIBTORRENT_PATCHED_PACKET_POOL_BLOB=799e3765cffa4cbb140d5a4e860629f07538eb2f
+typeset -r LIBTORRENT_PATCHED_FLAGS_BLOB=60224b1151d6fa714e0db38c1595ddd1532619bf
 typeset -r LIBTORRENT_MIRROR_DIR="$GIT_CACHE_DIR/libtorrent.git"
 typeset -r LIBTORRENT_SUBMODULE_MIRROR_ROOT="$GIT_CACHE_DIR/libtorrent-submodules"
+typeset -ar LIBTORRENT_REQUIRED_SUBMODULES=(
+    deps/try_signal
+)
 typeset -a LIBTORRENT_CMAKE_OPTIONS=(
     -DBUILD_SHARED_LIBS=OFF
     -Dstatic_runtime=OFF
@@ -181,8 +188,15 @@ typeset -a LIBTORRENT_CMAKE_OPTIONS=(
     -Dlogging=OFF
     -Dmutable-torrents=OFF
     -Dstreaming=OFF
+    -Dwebtorrent=OFF
 )
 typeset -r LIBTORRENT_EXTRA_DEFINES="-DTORRENT_DISABLE_SUPERSEEDING -DTORRENT_DISABLE_SHARE_MODE -DTORRENT_DISABLE_PREDICTIVE_PIECES"
+# These AppleClang diagnostics are audited upstream implementation patterns:
+# Boost.Pool's matching new[]/delete[] raw allocator, explicit RAII mutex
+# acquisition, a non-elided endpoint return, and two private statistics fields
+# left unused when streaming is disabled. Keep the suppressions scoped to the
+# pinned libtorrent build rather than weakening bridge warnings.
+typeset -r LIBTORRENT_UPSTREAM_WARNING_FLAGS="-Wno-allocator-wrappers -Wno-thread-safety-negative -Wno-nrvo -Wno-unused-private-field"
 typeset -r ALLOW_EXTERNAL_DEPS_CLEAN=${ALLOW_EXTERNAL_DEPS_CLEAN:-0}
 # Keep global PAC options compatible with system C/C++ runtime contracts.
 # Type-discriminated C function pointers and RTTI typeinfo vtable pointers
@@ -199,14 +213,10 @@ typeset -r BRANCH_TARGET_IDENTIFICATION_FLAG="-fbranch-target-identification"
 typeset -r SLS_HARDENING_FLAG="-mharden-sls=all"
 typeset LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE
 typeset -r DIAGNOSTIC_SANITIZER_FLAGS="-g -fno-omit-frame-pointer -fsanitize=address,undefined,local-bounds -fsanitize-address-use-after-scope -fno-sanitize-recover=undefined,local-bounds"
-# Libtorrent's uTP packet pool uses a historical trailing buf[1] member with
-# extra bytes allocated behind it. ASan can validate the actual allocation, but
-# UBSan bounds instrumentation treats accesses past buf[0] as out-of-bounds.
-typeset -r LIBTORRENT_DIAGNOSTIC_SANITIZER_FLAGS="-g -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize=array-bounds,local-bounds -fsanitize-address-use-after-scope -fno-sanitize-recover=undefined"
 if [[ "$ENABLE_DIAGNOSTICS" == "1" ]]; then
     LIBCPP_HARDENING_MODE="_LIBCPP_HARDENING_MODE_DEBUG"
 fi
-typeset -r HARDENED_COMMON_FLAGS="-Wno-poison-system-directories -Wformat -Wformat-security -Werror=format-security -fstack-protector-strong -D_FORTIFY_SOURCE=3 -fPIE -ftrivial-auto-var-init=zero -fvisibility=hidden -faarch64-jump-table-hardening $STRICT_FLEX_ARRAYS_FLAG $BRANCH_TARGET_IDENTIFICATION_FLAG $SLS_HARDENING_FLAG $PTRAUTH_C_FLAGS"
+typeset -r HARDENED_COMMON_FLAGS="-Wno-poison-system-directories -Wformat -Wformat-security -Werror=format-security -fstack-protector-strong -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -fPIE -ftrivial-auto-var-init=zero -fvisibility=hidden -faarch64-jump-table-hardening $STRICT_FLEX_ARRAYS_FLAG $BRANCH_TARGET_IDENTIFICATION_FLAG $SLS_HARDENING_FLAG $PTRAUTH_C_FLAGS"
 typeset -r HARDENED_C_FLAGS="$HARDENED_COMMON_FLAGS $TYPED_ALLOCATOR_C_FLAGS"
 typeset -r OPENSSL_HARDENED_CXX_FLAGS="$HARDENED_COMMON_FLAGS $PTRAUTH_CXX_FLAGS $TYPED_ALLOCATOR_CXX_FLAGS -D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE -fvisibility-inlines-hidden"
 typeset -r HARDENED_CXX_FLAGS="$HARDENED_COMMON_FLAGS $PTRAUTH_CXX_FLAGS $TYPED_ALLOCATOR_CXX_FLAGS -D_LIBCPP_HARDENING_MODE=$LIBCPP_HARDENING_MODE -fvisibility-inlines-hidden"
@@ -215,11 +225,11 @@ typeset -r OPENSSL_CXXFLAGS="$OPENSSL_HARDENED_CXX_FLAGS -isysroot $SDK_PATH -mm
 typeset LIBTORRENT_C_FLAGS=$HARDENED_C_FLAGS
 typeset LIBTORRENT_CXX_FLAGS=$HARDENED_CXX_FLAGS
 if [[ "$ENABLE_DIAGNOSTICS" == "1" ]]; then
-    LIBTORRENT_C_FLAGS="$LIBTORRENT_C_FLAGS $LIBTORRENT_DIAGNOSTIC_SANITIZER_FLAGS"
-    LIBTORRENT_CXX_FLAGS="$LIBTORRENT_CXX_FLAGS $LIBTORRENT_DIAGNOSTIC_SANITIZER_FLAGS"
+    LIBTORRENT_C_FLAGS="$LIBTORRENT_C_FLAGS $DIAGNOSTIC_SANITIZER_FLAGS"
+    LIBTORRENT_CXX_FLAGS="$LIBTORRENT_CXX_FLAGS $DIAGNOSTIC_SANITIZER_FLAGS"
 fi
 LIBTORRENT_C_FLAGS="$LIBTORRENT_C_FLAGS $LIBTORRENT_EXTRA_DEFINES"
-LIBTORRENT_CXX_FLAGS="$LIBTORRENT_CXX_FLAGS $LIBTORRENT_EXTRA_DEFINES"
+LIBTORRENT_CXX_FLAGS="$LIBTORRENT_CXX_FLAGS $LIBTORRENT_EXTRA_DEFINES $LIBTORRENT_UPSTREAM_WARNING_FLAGS"
 
 require_tool() {
     local -r tool=$1
@@ -388,9 +398,13 @@ sdk=$SDK_PATH
 configure-target=$OPENSSL_CONFIGURE_TARGET
 configure-options=$(openssl_configure_options_text)
 compiler-c=$OPENSSL_CC
+compiler-c-sha256=$(file_sha256 "$OPENSSL_CC")
 compiler-cxx=$OPENSSL_CXX
+compiler-cxx-sha256=$(file_sha256 "$OPENSSL_CXX")
 ar=$OPENSSL_AR
+ar-sha256=$(file_sha256 "$OPENSSL_AR")
 ranlib=$OPENSSL_RANLIB
+ranlib-sha256=$(file_sha256 "$OPENSSL_RANLIB")
 cflags=$OPENSSL_CFLAGS
 cxxflags=$OPENSSL_CXXFLAGS
 EOF
@@ -414,6 +428,7 @@ libtorrent_build_manifest() {
     cat <<EOF
 libtorrent-tag=$LIBTORRENT_TAG
 libtorrent-commit=$LIBTORRENT_COMMIT
+libtorrent-patch-sha256=$(file_sha256 "$LIBTORRENT_PATCH")
 target-arch=$TARGET_ARCH
 target-triple=$TARGET_TRIPLE
 deployment-target=$MACOSX_DEPLOYMENT_TARGET
@@ -421,13 +436,18 @@ diagnostics=$ENABLE_DIAGNOSTICS
 cmake-build-type=$LIBTORRENT_CMAKE_BUILD_TYPE
 sdk=$SDK_PATH
 compiler-c=$LIBTORRENT_CC
+compiler-c-sha256=$(file_sha256 "$LIBTORRENT_CC")
 compiler-cxx=$LIBTORRENT_CXX
+compiler-cxx-sha256=$(file_sha256 "$LIBTORRENT_CXX")
 ar=$LIBTORRENT_AR
+ar-sha256=$(file_sha256 "$LIBTORRENT_AR")
 ranlib=$LIBTORRENT_RANLIB
+ranlib-sha256=$(file_sha256 "$LIBTORRENT_RANLIB")
 c-flags=$LIBTORRENT_C_FLAGS
 cxx-flags=$LIBTORRENT_CXX_FLAGS
 cmake-options=$(libtorrent_cmake_options_text)
 openssl-prefix=$DEPS_PREFIX
+openssl-build-stamp-sha256=$(file_sha256 "$OPENSSL_BUILD_STAMP")
 openssl-configure-options=$(openssl_configure_options_text)
 boost-version=$BOOST_VERSION
 boost-sha256=$BOOST_SHA256
@@ -784,24 +804,65 @@ setup_libtorrent_submodule_mirrors() {
     local mirror_dir
     local expected_commit
 
-    if [[ ! -f "$LIBTORRENT_SOURCE_DIR/.gitmodules" ]]; then
+    if [[ ! -f "$LIBTORRENT_SOURCE_DIR/.gitmodules" || ${#LIBTORRENT_REQUIRED_SUBMODULES[@]} -eq 0 ]]; then
         return
     fi
 
-    git -C "$LIBTORRENT_SOURCE_DIR" submodule sync --recursive
-
-    while read -r key url; do
-        name="${key#submodule.}"
-        name="${name%.url}"
+    for name in "${LIBTORRENT_REQUIRED_SUBMODULES[@]}"; do
+        key="submodule.$name.url"
+        url="$(git -C "$LIBTORRENT_SOURCE_DIR" config -f .gitmodules --get "$key")"
         submodule_path="$(git -C "$LIBTORRENT_SOURCE_DIR" config -f .gitmodules --get "submodule.$name.path")"
+        [[ -n "$url" && -n "$submodule_path" ]] \
+            || fail "Missing required libtorrent submodule: $name"
+
+        git -C "$LIBTORRENT_SOURCE_DIR" submodule sync --recursive -- "$submodule_path"
         mirror_dir="$LIBTORRENT_SUBMODULE_MIRROR_ROOT/${submodule_path//\//__}.git"
         expected_commit="$(git -C "$LIBTORRENT_SOURCE_DIR" ls-tree HEAD "$submodule_path" | awk '{print $3}')"
 
         ensure_git_mirror "$url" "$mirror_dir" "libtorrent submodule $submodule_path" "$LIBTORRENT_SOURCE_DIR/$submodule_path" "$expected_commit"
         git -C "$LIBTORRENT_SOURCE_DIR" config "$key" "$mirror_dir"
-    done < <(git -C "$LIBTORRENT_SOURCE_DIR" config -f .gitmodules --get-regexp '^submodule\..*\.url$' || true)
+        git -C "$LIBTORRENT_SOURCE_DIR" -c protocol.file.allow=always submodule update --init --recursive -- "$submodule_path"
 
-    git -C "$LIBTORRENT_SOURCE_DIR" -c protocol.file.allow=always submodule update --init --recursive
+        [[ "$(git -C "$LIBTORRENT_SOURCE_DIR/$submodule_path" rev-parse HEAD)" == "$expected_commit" ]] \
+            || fail "libtorrent submodule checkout mismatch: $submodule_path"
+        [[ -z "$(git -C "$LIBTORRENT_SOURCE_DIR/$submodule_path" status --porcelain=v1 --untracked-files=all)" ]] \
+            || fail "libtorrent submodule checkout is dirty: $submodule_path"
+    done
+}
+
+libtorrent_checkout_status() {
+    git -C "$LIBTORRENT_SOURCE_DIR" status \
+        --porcelain=v1 \
+        --untracked-files=all \
+        --ignore-submodules=none
+}
+
+libtorrent_checkout_has_expected_patch() {
+    local -r expected_status=$' M include/libtorrent/aux_/io.hpp\n M include/libtorrent/aux_/packet_pool.hpp\n M include/libtorrent/flags.hpp'
+
+    [[ "$(libtorrent_checkout_status)" == "$expected_status" ]] || return 1
+    [[ "$(git hash-object --no-filters "$LIBTORRENT_SOURCE_DIR/include/libtorrent/aux_/io.hpp")" \
+        == "$LIBTORRENT_PATCHED_IO_BLOB" ]] || return 1
+    [[ "$(git hash-object --no-filters "$LIBTORRENT_SOURCE_DIR/include/libtorrent/aux_/packet_pool.hpp")" \
+        == "$LIBTORRENT_PATCHED_PACKET_POOL_BLOB" ]] || return 1
+    [[ "$(git hash-object --no-filters "$LIBTORRENT_SOURCE_DIR/include/libtorrent/flags.hpp")" \
+        == "$LIBTORRENT_PATCHED_FLAGS_BLOB" ]]
+}
+
+apply_libtorrent_patch() {
+    require_path "$LIBTORRENT_PATCH" "libtorrent compatibility patch"
+
+    if libtorrent_checkout_has_expected_patch; then
+        return
+    fi
+    if [[ -n "$(libtorrent_checkout_status)" ]] \
+        || ! git -C "$LIBTORRENT_SOURCE_DIR" apply --check "$LIBTORRENT_PATCH" 2>/dev/null
+    then
+        fail "Could not apply libtorrent compatibility patch: $LIBTORRENT_PATCH"
+    fi
+    git -C "$LIBTORRENT_SOURCE_DIR" apply "$LIBTORRENT_PATCH"
+    libtorrent_checkout_has_expected_patch \
+        || fail "libtorrent compatibility patch produced an unexpected source tree"
 }
 
 clone_libtorrent() {
@@ -812,7 +873,9 @@ clone_libtorrent() {
     if [[ -d "$LIBTORRENT_SOURCE_DIR/.git" ]]; then
         local current
         current="$(git -C "$LIBTORRENT_SOURCE_DIR" rev-parse HEAD 2>/dev/null || true)"
-        if [[ "$current" != "$LIBTORRENT_COMMIT" ]]; then
+        if [[ "$current" != "$LIBTORRENT_COMMIT" ]] \
+            || { [[ -n "$(libtorrent_checkout_status)" ]] && ! libtorrent_checkout_has_expected_patch; }
+        then
             remove_dependency_path "$LIBTORRENT_SOURCE_DIR"
         fi
     elif [[ -e "$LIBTORRENT_SOURCE_DIR" ]]; then
@@ -830,6 +893,7 @@ clone_libtorrent() {
         git -C "$LIBTORRENT_SOURCE_DIR" remote set-url origin "$LIBTORRENT_REPO"
     fi
 
+    apply_libtorrent_patch
     setup_libtorrent_submodule_mirrors
 
     local current
@@ -847,7 +911,13 @@ build_libtorrent() {
     fi
 
     remove_dependency_path "$LIBTORRENT_BUILD_DIR"
-    rm -f "$DEPS_PREFIX/lib/libtorrent-rasterbar.a" "$LIBTORRENT_BUILD_STAMP"
+    remove_dependency_path "$DEPS_PREFIX/include/libtorrent"
+    remove_dependency_path "$DEPS_PREFIX/lib/cmake/LibtorrentRasterbar"
+    rm -f \
+        "$DEPS_PREFIX/lib/libtorrent-rasterbar.a" \
+        "$DEPS_PREFIX/lib/pkgconfig/libtorrent-rasterbar.pc" \
+        "$DEPS_PREFIX/share/cmake/Modules/FindLibtorrentRasterbar.cmake" \
+        "$LIBTORRENT_BUILD_STAMP"
 
     if [[ -n ${CMAKE_GENERATOR:-} ]]; then
         cmake_generator_args=(-G "$CMAKE_GENERATOR")

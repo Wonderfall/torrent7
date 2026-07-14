@@ -74,6 +74,24 @@ private:
     return {value.begin(), value.end()};
 }
 
+[[nodiscard]] inline lt::add_torrent_params load_torrent_params(
+    std::vector<char> const &buffer,
+    std::string_view description
+)
+{
+    lt::error_code error;
+    lt::add_torrent_params params = lt::load_torrent_buffer(
+        lt::span<char const>(buffer),
+        error,
+        lt::load_torrent_limits{}
+    );
+    if (error || !params.ti) {
+        std::string const reason = error ? error.message() : "missing torrent metadata";
+        throw std::runtime_error("Could not load " + std::string(description) + ": " + reason);
+    }
+    return params;
+}
+
 [[nodiscard]] inline std::string read_text_file(fs::path const &path)
 {
     std::ifstream input(path, std::ios::binary);

@@ -5,6 +5,41 @@
 #include <libtorrent/extensions/ut_metadata.hpp>
 #include <libtorrent/extensions/ut_pex.hpp>
 
+namespace {
+
+constexpr bool is_ascii_alpha(unsigned char const character) noexcept
+{
+    return (character >= 'A' && character <= 'Z')
+        || (character >= 'a' && character <= 'z');
+}
+
+constexpr bool is_ascii_digit(unsigned char const character) noexcept
+{
+    return character >= '0' && character <= '9';
+}
+
+constexpr bool is_ascii_hex_digit(unsigned char const character) noexcept
+{
+    return is_ascii_digit(character)
+        || (character >= 'A' && character <= 'F')
+        || (character >= 'a' && character <= 'f');
+}
+
+constexpr bool is_ascii_unreserved(unsigned char const character) noexcept
+{
+    return is_ascii_alpha(character) || is_ascii_digit(character)
+        || character == '-' || character == '.' || character == '_' || character == '~';
+}
+
+constexpr char ascii_lower(unsigned char const character) noexcept
+{
+    return character >= 'A' && character <= 'Z'
+        ? static_cast<char>(character + ('a' - 'A'))
+        : static_cast<char>(character);
+}
+
+}
+
 #ifndef TORRENT_DISABLE_EXTENSIONS
 class TorrentPluginFactory final : public lt::plugin {
 public:
@@ -1198,7 +1233,10 @@ double download_progress(lt::torrent_status const &status)
     );
 }
 
-TTorrentSnapshot snapshot_from_status(lt::torrent_status const &status)
+TTorrentSnapshot snapshot_from_status(
+    lt::torrent_status const &status,
+    TorrentIdentity const *identity
+)
 {
     TTorrentSnapshot snapshot{};
     copy_string(std::span{snapshot.id}, primary_hash_key(status.info_hashes));
@@ -1207,13 +1245,15 @@ TTorrentSnapshot snapshot_from_status(lt::torrent_status const &status)
     copy_string(std::span{snapshot.save_path}, status.save_path);
     copy_string(std::span{snapshot.error}, status.errc ? status.errc.message() : std::string());
     std::shared_ptr<lt::torrent_info const> const torrent_file = status.torrent_file.lock();
-    if (torrent_file) {
-        copy_string(std::span{snapshot.comment}, torrent_file->comment());
+    if (torrent_file && torrent_file->is_valid()) {
         snapshot.total_size = torrent_file->total_size();
-        snapshot.created_time = static_cast<int64_t>(torrent_file->creation_date());
         snapshot.private_torrent = bridge_bool(torrent_file->priv());
     } else {
         snapshot.total_size = status.total;
+    }
+    if (identity != nullptr) {
+        copy_string(std::span{snapshot.comment}, identity->comment);
+        snapshot.created_time = static_cast<int64_t>(identity->creation_date);
     }
     snapshot.progress = download_progress(status);
     snapshot.total_done = status.total_wanted_done;
@@ -1335,19 +1375,150 @@ TTorrentTrackerSnapshot tracker_snapshot_from_entry(lt::announce_entry const &en
 
 std::optional<std::string> normalized_tracker_host(std::string const &url)
 {
-    lt::error_code error;
-    std::string host = std::get<2>(lt::parse_url_components(url, error));
-    if (error || host.empty() || host.size() >= static_cast<std::size_t>(TTORRENT_TRACKER_HOST_CAPACITY)) {
+    if (std::ranges::any_of(url, [](unsigned char const character) {
+            return character <= 0x20U || character == 0x7fU;
+        })) {
         return std::nullopt;
     }
 
+    std::size_t const scheme_separator = url.find("://");
+    if (scheme_separator == std::string::npos || scheme_separator == 0U) {
+        return std::nullopt;
+    }
+
+    auto const valid_scheme_character = [](unsigned char const character) noexcept {
+        return is_ascii_alpha(character) || is_ascii_digit(character)
+            || character == '+' || character == '-' || character == '.';
+    };
+    if (!is_ascii_alpha(static_cast<unsigned char>(url.front()))
+        || !std::ranges::all_of(
+            std::string_view(url).substr(1U, scheme_separator - 1U),
+            valid_scheme_character
+        )) {
+        return std::nullopt;
+    }
+
+    std::size_t const authority_start = scheme_separator + 3U;
+    std::size_t const authority_end = url.find_first_of("/?#", authority_start);
+    std::string_view authority = std::string_view(url).substr(
+        authority_start,
+        (authority_end == std::string::npos ? url.size() : authority_end) - authority_start
+    );
+    if (authority.empty()) {
+        return std::nullopt;
+    }
+
+    if (std::size_t const userinfo_end = authority.rfind('@'); userinfo_end != std::string_view::npos) {
+        authority.remove_prefix(userinfo_end + 1U);
+    }
+    if (authority.empty()) {
+        return std::nullopt;
+    }
+
+    std::string_view host;
+    std::string_view port;
+    bool const bracketed_ipv6 = authority.front() == '[';
+    if (bracketed_ipv6) {
+        std::size_t const bracket_end = authority.find(']');
+        if (bracket_end == std::string_view::npos || bracket_end == 1U) {
+            return std::nullopt;
+        }
+        host = authority.substr(1U, bracket_end - 1U);
+        std::string_view const suffix = authority.substr(bracket_end + 1U);
+        if (!suffix.empty()) {
+            if (suffix.front() != ':') {
+                return std::nullopt;
+            }
+            port = suffix.substr(1U);
+        }
+    } else {
+        std::size_t const colon = authority.rfind(':');
+        if (colon == std::string_view::npos) {
+            host = authority;
+        } else {
+            if (authority.find(':') != colon) {
+                return std::nullopt;
+            }
+            host = authority.substr(0U, colon);
+            port = authority.substr(colon + 1U);
+        }
+    }
+
+    if (!port.empty()) {
+        unsigned int value = 0U;
+        for (unsigned char const character : port) {
+            if (!is_ascii_digit(character)) {
+                return std::nullopt;
+            }
+            value = (value * 10U) + static_cast<unsigned int>(character - '0');
+            if (value > 65'535U) {
+                return std::nullopt;
+            }
+        }
+        if (value == 0U) {
+            return std::nullopt;
+        }
+    } else if (authority.ends_with(':')) {
+        return std::nullopt;
+    }
+
+    if (host.empty() || host.size() >= static_cast<std::size_t>(TTORRENT_TRACKER_HOST_CAPACITY)
+        || std::ranges::any_of(host, [](unsigned char character) {
+            return character <= 0x20U || character == 0x7fU
+                || character == '/' || character == '?' || character == '#'
+                || character == '[' || character == ']' || character == '@'
+                || character == '\\' || character == '\'' || character == '"';
+        })) {
+        return std::nullopt;
+    }
+    if (!bracketed_ipv6 && !std::ranges::all_of(host, [](unsigned char const character) {
+            return is_ascii_alpha(character) || is_ascii_digit(character)
+                || character == '-' || character == '.';
+        })) {
+        return std::nullopt;
+    }
     std::string normalized;
     normalized.reserve(host.size());
-    std::ranges::transform(host, std::back_inserter(normalized), [](unsigned char character) {
-        return static_cast<char>(std::tolower(character));
-    });
-    if (normalized.ends_with('.')) {
-        normalized.pop_back();
+    if (bracketed_ipv6) {
+        std::string_view address_host = host;
+        std::string_view zone;
+        if (std::size_t const zone_separator = host.find("%25"); zone_separator != std::string_view::npos) {
+            address_host = host.substr(0U, zone_separator);
+            zone = host.substr(zone_separator + 3U);
+            if (address_host.empty() || zone.empty()) {
+                return std::nullopt;
+            }
+
+            for (std::size_t index = 0U; index < zone.size();) {
+                auto const character = static_cast<unsigned char>(zone.at(index));
+                if (is_ascii_unreserved(character)) {
+                    ++index;
+                    continue;
+                }
+                if (character != '%' || index + 2U >= zone.size()
+                    || !is_ascii_hex_digit(static_cast<unsigned char>(zone.at(index + 1U)))
+                    || !is_ascii_hex_digit(static_cast<unsigned char>(zone.at(index + 2U)))) {
+                    return std::nullopt;
+                }
+                index += 3U;
+            }
+        }
+
+        in6_addr address{};
+        std::string const host_string(address_host);
+        if (::inet_pton(AF_INET6, host_string.c_str(), &address) != 1) {
+            return std::nullopt;
+        }
+        std::ranges::transform(address_host, std::back_inserter(normalized), ascii_lower);
+        if (!zone.empty()) {
+            normalized.append("%25");
+            normalized.append(zone);
+        }
+    } else {
+        std::ranges::transform(host, std::back_inserter(normalized), ascii_lower);
+        if (normalized.ends_with('.')) {
+            normalized.pop_back();
+        }
     }
     if (normalized.empty()) {
         return std::nullopt;
@@ -1355,18 +1526,16 @@ std::optional<std::string> normalized_tracker_host(std::string const &url)
     return normalized;
 }
 
-TTorrentWebSeedSnapshot web_seed_snapshot(std::string const &url, WebSeedKind kind)
+TTorrentWebSeedSnapshot web_seed_snapshot(std::string const &url)
 {
     TTorrentWebSeedSnapshot snapshot{};
     copy_string(std::span{snapshot.url}, url);
-    snapshot.kind = static_cast<std::int32_t>(kind);
     return snapshot;
 }
 
 void append_web_seed_snapshots(
     std::vector<TTorrentWebSeedSnapshot> &snapshots,
     std::set<std::string> const &urls,
-    WebSeedKind kind,
     std::size_t limit
 )
 {
@@ -1374,12 +1543,12 @@ void append_web_seed_snapshots(
         if (snapshots.size() >= limit) {
             return;
         }
-        snapshots.push_back(web_seed_snapshot(url, kind));
+        snapshots.push_back(web_seed_snapshot(url));
     }
 }
 
-TTorrentFileSnapshot file_snapshot_from_storage(
-    lt::file_storage const &files,
+TTorrentFileSnapshot file_snapshot_from_files(
+    lt::filenames const &files,
     lt::file_index_t file,
     int32_t priority
 )
@@ -1398,8 +1567,7 @@ TTorrentFileSnapshot file_snapshot_from_storage(
 
 bool is_web_seed_peer(lt::peer_info const &peer) noexcept
 {
-    return peer.connection_type == lt::peer_info::web_seed
-        || peer.connection_type == lt::peer_info::http_seed;
+    return peer.connection_type == lt::peer_info::web_seed;
 }
 
 TTorrentPeerSourceSnapshot peer_source_snapshot(std::vector<lt::peer_info> const &peers) noexcept
@@ -1461,55 +1629,25 @@ bool is_https_url(std::string_view url) noexcept
     }
 
     return std::ranges::equal(scheme, std::string_view("https"), [](char left, char right) {
-        return std::tolower(static_cast<unsigned char>(left)) == std::tolower(static_cast<unsigned char>(right));
+        return ascii_lower(static_cast<unsigned char>(left)) == ascii_lower(static_cast<unsigned char>(right));
     });
-}
-
-TorrentSourceCounts torrent_source_counts(lt::torrent_info const &info)
-{
-    TorrentSourceCounts counts;
-    std::vector<lt::announce_entry> const &trackers = info.trackers();
-    std::vector<lt::web_seed_entry> const &web_seeds = info.web_seeds();
-    counts.tracker_count = static_cast<int32_t>(std::min(
-        trackers.size(),
-        static_cast<std::size_t>(std::numeric_limits<int32_t>::max())
-    ));
-    counts.https_tracker_count = static_cast<int32_t>(std::ranges::count_if(trackers, [](lt::announce_entry const &entry) {
-        return is_https_url(entry.url);
-    }));
-    counts.web_seed_count = static_cast<int32_t>(std::min(
-        web_seeds.size(),
-        static_cast<std::size_t>(std::numeric_limits<int32_t>::max())
-    ));
-    counts.https_web_seed_count = static_cast<int32_t>(std::ranges::count_if(web_seeds, [](lt::web_seed_entry const &entry) {
-        return is_https_url(entry.url);
-    }));
-    return counts;
 }
 
 TorrentSourceCounts torrent_source_counts(lt::add_torrent_params const &params)
 {
     TorrentSourceCounts counts;
-    if (params.ti) {
-        counts = torrent_source_counts(*params.ti);
-    }
-
-    counts.tracker_count += static_cast<int32_t>(std::min(
+    counts.tracker_count = static_cast<int32_t>(std::min(
         params.trackers.size(),
-        static_cast<std::size_t>(std::numeric_limits<int32_t>::max() - counts.tracker_count)
+        static_cast<std::size_t>(std::numeric_limits<int32_t>::max())
     ));
-    counts.https_tracker_count += static_cast<int32_t>(std::ranges::count_if(params.trackers, [](std::string const &url) {
+    counts.https_tracker_count = static_cast<int32_t>(std::ranges::count_if(params.trackers, [](std::string const &url) {
         return is_https_url(url);
     }));
-    std::size_t const param_web_seed_count = params.url_seeds.size() + params.http_seeds.size();
-    counts.web_seed_count += static_cast<int32_t>(std::min(
-        param_web_seed_count,
-        static_cast<std::size_t>(std::numeric_limits<int32_t>::max() - counts.web_seed_count)
+    counts.web_seed_count = static_cast<int32_t>(std::min(
+        params.url_seeds.size(),
+        static_cast<std::size_t>(std::numeric_limits<int32_t>::max())
     ));
-    counts.https_web_seed_count += static_cast<int32_t>(std::ranges::count_if(params.url_seeds, [](std::string const &url) {
-        return is_https_url(url);
-    }));
-    counts.https_web_seed_count += static_cast<int32_t>(std::ranges::count_if(params.http_seeds, [](std::string const &url) {
+    counts.https_web_seed_count = static_cast<int32_t>(std::ranges::count_if(params.url_seeds, [](std::string const &url) {
         return is_https_url(url);
     }));
     return counts;
@@ -1538,46 +1676,6 @@ BridgeResult validate_torrent_sources(lt::add_torrent_params const &params)
     return {};
 }
 
-bool filter_torrent_info_non_https_sources(
-    lt::torrent_info &info,
-    bool const require_https_trackers,
-    bool const require_https_web_seeds
-)
-{
-    bool changed = false;
-
-    if (require_https_trackers) {
-        std::vector<lt::announce_entry> const trackers = info.trackers();
-        std::vector<lt::announce_entry> https_trackers;
-        https_trackers.reserve(trackers.size());
-        std::ranges::copy_if(trackers, std::back_inserter(https_trackers), [](lt::announce_entry const &entry) {
-            return is_https_url(entry.url);
-        });
-        if (https_trackers.size() != trackers.size()) {
-            info.clear_trackers();
-            for (lt::announce_entry const &tracker : https_trackers) {
-                info.add_tracker(tracker.url, tracker.tier);
-            }
-            changed = true;
-        }
-    }
-
-    if (require_https_web_seeds) {
-        std::vector<lt::web_seed_entry> const web_seeds = info.web_seeds();
-        std::vector<lt::web_seed_entry> https_web_seeds;
-        https_web_seeds.reserve(web_seeds.size());
-        std::ranges::copy_if(web_seeds, std::back_inserter(https_web_seeds), [](lt::web_seed_entry const &entry) {
-            return is_https_url(entry.url);
-        });
-        if (https_web_seeds.size() != web_seeds.size()) {
-            info.set_web_seeds(std::move(https_web_seeds));
-            changed = true;
-        }
-    }
-
-    return changed;
-}
-
 template <typename Strings>
 bool filter_non_https_strings(Strings &strings)
 {
@@ -1598,14 +1696,6 @@ bool filter_non_https_sources(
 )
 {
     bool changed = false;
-
-    if (params.ti) {
-        auto filtered_info = std::make_shared<lt::torrent_info>(*params.ti);
-        if (filter_torrent_info_non_https_sources(*filtered_info, require_https_trackers, require_https_web_seeds)) {
-            params.ti = std::move(filtered_info);
-            changed = true;
-        }
-    }
 
     if (require_https_trackers && !params.trackers.empty()) {
         std::vector<std::string> filtered_trackers;
@@ -1635,7 +1725,6 @@ bool filter_non_https_sources(
 
     if (require_https_web_seeds) {
         changed = filter_non_https_strings(params.url_seeds) || changed;
-        changed = filter_non_https_strings(params.http_seeds) || changed;
     }
     return changed;
 }
@@ -1653,35 +1742,19 @@ void remember_source_policy_tracker(TorrentIdentity &identity, lt::announce_entr
     identity.source_trackers.push_back(tracker);
 }
 
-void remember_source_policy_web_seed(TorrentIdentity &identity, lt::web_seed_entry const &web_seed)
+void remember_source_policy_web_seed(TorrentIdentity &identity, std::string const &web_seed)
 {
     if (identity.source_web_seeds.size() >= static_cast<std::size_t>(TTORRENT_MAX_WEB_SEED_COUNT)) {
         return;
     }
-    if (std::ranges::any_of(identity.source_web_seeds, [&](lt::web_seed_entry const &stored) {
-            return stored.type == web_seed.type && stored.url == web_seed.url;
-        })) {
+    if (std::ranges::find(identity.source_web_seeds, web_seed) != identity.source_web_seeds.end()) {
         return;
     }
     identity.source_web_seeds.push_back(web_seed);
 }
 
-void remember_source_policy_sources(TorrentIdentity &identity, lt::torrent_info const &info)
-{
-    for (lt::announce_entry const &tracker : info.trackers()) {
-        remember_source_policy_tracker(identity, tracker);
-    }
-    for (lt::web_seed_entry const &web_seed : info.web_seeds()) {
-        remember_source_policy_web_seed(identity, web_seed);
-    }
-}
-
 void remember_source_policy_sources(TorrentIdentity &identity, lt::add_torrent_params const &params)
 {
-    if (params.ti) {
-        remember_source_policy_sources(identity, *params.ti);
-    }
-
     auto tier = params.tracker_tiers.begin();
     for (std::string const &tracker_url : params.trackers) {
         lt::announce_entry tracker(tracker_url);
@@ -1693,10 +1766,7 @@ void remember_source_policy_sources(TorrentIdentity &identity, lt::add_torrent_p
     }
 
     for (std::string const &url_seed : params.url_seeds) {
-        remember_source_policy_web_seed(identity, lt::web_seed_entry(url_seed, lt::web_seed_entry::url_seed));
-    }
-    for (std::string const &http_seed : params.http_seeds) {
-        remember_source_policy_web_seed(identity, lt::web_seed_entry(http_seed, lt::web_seed_entry::http_seed));
+        remember_source_policy_web_seed(identity, url_seed);
     }
 }
 
@@ -1710,47 +1780,6 @@ void restore_source_policy_sources(lt::add_torrent_params &params, ResumePolicyS
     if (!policy.has_identity
         || (policy.source_trackers.empty() && policy.source_web_seeds.empty())) {
         return;
-    }
-
-    if (params.ti) {
-        auto restored_info = std::make_shared<lt::torrent_info>(*params.ti);
-        bool changed = false;
-
-        std::vector<lt::announce_entry> restored_trackers = restored_info->trackers();
-        std::set<std::string> tracker_urls;
-        for (lt::announce_entry const &tracker : restored_trackers) {
-            tracker_urls.insert(tracker.url);
-        }
-        for (lt::announce_entry const &tracker : policy.source_trackers) {
-            if (restored_trackers.size() < static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT)
-                && tracker_urls.insert(tracker.url).second) {
-                restored_trackers.push_back(tracker);
-                changed = true;
-            }
-        }
-        if (changed) {
-            restored_info->clear_trackers();
-            for (lt::announce_entry const &tracker : restored_trackers) {
-                restored_info->add_tracker(tracker.url, tracker.tier, lt::announce_entry::source_torrent);
-            }
-        }
-
-        std::vector<lt::web_seed_entry> restored_web_seeds = restored_info->web_seeds();
-        std::set<std::pair<lt::web_seed_entry::type_t, std::string>> web_seed_keys;
-        for (lt::web_seed_entry const &web_seed : restored_web_seeds) {
-            web_seed_keys.emplace(static_cast<lt::web_seed_entry::type_t>(web_seed.type), web_seed.url);
-        }
-        for (lt::web_seed_entry const &web_seed : policy.source_web_seeds) {
-            if (restored_web_seeds.size() < static_cast<std::size_t>(TTORRENT_MAX_WEB_SEED_COUNT)
-                && web_seed_keys.emplace(static_cast<lt::web_seed_entry::type_t>(web_seed.type), web_seed.url).second) {
-                restored_web_seeds.push_back(web_seed);
-                changed = true;
-            }
-        }
-        if (changed) {
-            restored_info->set_web_seeds(std::move(restored_web_seeds));
-            params.ti = std::move(restored_info);
-        }
     }
 
     std::set<std::string> tracker_urls(params.trackers.begin(), params.trackers.end());
@@ -1767,22 +1796,14 @@ void restore_source_policy_sources(lt::add_torrent_params &params, ResumePolicyS
     }
 
     std::set<std::string> url_seed_urls(params.url_seeds.begin(), params.url_seeds.end());
-    std::set<std::string> http_seed_urls(params.http_seeds.begin(), params.http_seeds.end());
     std::size_t web_seed_count = static_cast<std::size_t>(torrent_source_counts(params).web_seed_count);
-    for (lt::web_seed_entry const &web_seed : policy.source_web_seeds) {
+    for (std::string const &web_seed : policy.source_web_seeds) {
         if (web_seed_count >= static_cast<std::size_t>(TTORRENT_MAX_WEB_SEED_COUNT)) {
             break;
         }
-        if (static_cast<lt::web_seed_entry::type_t>(web_seed.type) == lt::web_seed_entry::url_seed) {
-            if (url_seed_urls.insert(web_seed.url).second) {
-                params.url_seeds.push_back(web_seed.url);
-                ++web_seed_count;
-            }
-        } else if (static_cast<lt::web_seed_entry::type_t>(web_seed.type) == lt::web_seed_entry::http_seed) {
-            if (http_seed_urls.insert(web_seed.url).second) {
-                params.http_seeds.push_back(web_seed.url);
-                ++web_seed_count;
-            }
+        if (url_seed_urls.insert(web_seed).second) {
+            params.url_seeds.push_back(web_seed);
+            ++web_seed_count;
         }
     }
 }
@@ -1801,10 +1822,7 @@ bool should_strip_resume_peer_cache(
         return false;
     }
 
-    if (!params.trackers.empty()) {
-        return false;
-    }
-    return params.ti == nullptr || params.ti->trackers().empty();
+    return params.trackers.empty();
 }
 
 bool should_strip_resume_peer_cache(
@@ -1820,10 +1838,7 @@ bool should_strip_resume_peer_cache(
         return false;
     }
 
-    if (!params.trackers.empty()) {
-        return false;
-    }
-    return params.ti == nullptr || params.ti->trackers().empty();
+    return params.trackers.empty();
 }
 
 void strip_resume_peer_cache(lt::add_torrent_params &params) noexcept
@@ -2224,10 +2239,99 @@ TorrentLoadResult load_torrent_data(std::span<char const> torrent_data)
     }
 }
 
+namespace {
+
+BridgeResult validate_relative_torrent_path(std::string_view path)
+{
+    if (path.empty() || std::ranges::any_of(path, [](unsigned char const character) {
+            return is_c_string_control_byte(character);
+        })) {
+        return bridge_error(2, "The torrent contains an invalid file path.");
+    }
+    if (path.starts_with('/')) {
+        return bridge_error(2, "The torrent contains a file path outside its download folder.");
+    }
+
+    std::size_t component_start = 0U;
+    while (component_start < path.size()) {
+        std::size_t const separator = path.find('/', component_start);
+        std::string_view const component = path.substr(
+            component_start,
+            separator == std::string_view::npos ? std::string_view::npos : separator - component_start
+        );
+        if (component.empty() || component == "." || component == "..") {
+            return bridge_error(2, "The torrent contains a file path outside its download folder.");
+        }
+        if (separator == std::string_view::npos) {
+            break;
+        }
+        component_start = separator + 1U;
+        if (component_start == path.size()) {
+            return bridge_error(2, "The torrent contains an invalid file path.");
+        }
+    }
+
+    return {};
+}
+
+BridgeResult validate_rename_map(
+    lt::file_storage const &layout,
+    std::map<lt::file_index_t, std::string> const &renamed_files
+)
+{
+    for (auto const &[file, path] : renamed_files) {
+        if (file < lt::file_index_t(0) || file >= layout.end_file()) {
+            return bridge_error(2, "The torrent contains an invalid file rename.");
+        }
+        BridgeResult const valid_path = validate_relative_torrent_path(path);
+        if (!valid_path) {
+            return valid_path;
+        }
+    }
+    return {};
+}
+
+BridgeResult validate_effective_files(lt::filenames const &files)
+{
+    for (lt::file_index_t const file : files.file_range()) {
+        if (static_cast<bool>(files.file_flags(file) & lt::file_storage::flag_symlink)) {
+            return bridge_error(2, "The torrent contains symbolic links, which are not supported.");
+        }
+        if (files.file_absolute_path(file)) {
+            return bridge_error(2, "The torrent contains a file path outside its download folder.");
+        }
+
+        std::string const effective_path = files.file_path(file);
+        BridgeResult const valid_path = validate_relative_torrent_path(effective_path);
+        if (!valid_path) {
+            return valid_path;
+        }
+        if (effective_path.size() >= sizeof(TTorrentFileSnapshot::path)) {
+            return bridge_error(2, "The torrent contains a file path that is too long.");
+        }
+    }
+    return {};
+}
+
+}
+
 BridgeResult validate_torrent_info(lt::torrent_info const &info)
 {
-    lt::file_storage const &files = info.files();
-    int const file_count = files.num_files();
+    static std::map<lt::file_index_t, std::string> const no_renames;
+    return validate_torrent_info(info, no_renames);
+}
+
+BridgeResult validate_torrent_info(
+    lt::torrent_info const &info,
+    std::map<lt::file_index_t, std::string> const &renamed_files
+)
+{
+    if (!info.is_valid()) {
+        return bridge_error(2, "The torrent file is invalid.");
+    }
+
+    lt::file_storage const &layout = info.layout();
+    int const file_count = layout.num_files();
     if (file_count > TTORRENT_MAX_FILE_COUNT) {
         return bridge_error(
             2,
@@ -2237,17 +2341,14 @@ BridgeResult validate_torrent_info(lt::torrent_info const &info)
         );
     }
 
-    for (lt::file_index_t const file : files.file_range()) {
-        if (static_cast<bool>(files.file_flags(file) & lt::file_storage::flag_symlink)) {
-            return bridge_error(2, "The torrent contains symbolic links, which are not supported.");
-        }
-
-        if (files.file_path(file).size() >= sizeof(TTorrentFileSnapshot::path)) {
-            return bridge_error(2, "The torrent contains a file path that is too long.");
-        }
+    BridgeResult const valid_renames = validate_rename_map(layout, renamed_files);
+    if (!valid_renames) {
+        return valid_renames;
     }
 
-    return {};
+    lt::renamed_files effective_renames;
+    effective_renames.import_filenames(layout, renamed_files);
+    return validate_effective_files(lt::filenames(layout, effective_renames));
 }
 
 BridgeResult validate_torrent_info(lt::add_torrent_params const &params)
@@ -2256,7 +2357,7 @@ BridgeResult validate_torrent_info(lt::add_torrent_params const &params)
         return bridge_error(2, "The torrent file is invalid.");
     }
 
-    return validate_torrent_info(*params.ti);
+    return validate_torrent_info(*params.ti, params.renamed_files);
 }
 
 void copy_torrent_preview(lt::add_torrent_params const &params, TTorrentFilePreview *preview) noexcept
@@ -2269,7 +2370,7 @@ void copy_torrent_preview(lt::add_torrent_params const &params, TTorrentFilePrev
     copy_string(std::span{preview->name}, info.name());
     copy_primary_hash_key(std::span{preview->id}, info.info_hashes());
     preview->total_size = info.total_size();
-    preview->file_count = info.files().num_files();
+    preview->file_count = info.layout().num_files();
     TorrentSourceCounts const counts = torrent_source_counts(params);
     preview->tracker_count = counts.tracker_count;
     preview->https_tracker_count = counts.https_tracker_count;
@@ -2277,14 +2378,24 @@ void copy_torrent_preview(lt::add_torrent_params const &params, TTorrentFilePrev
     preview->https_web_seed_count = counts.https_web_seed_count;
 }
 
-int32_t copy_torrent_preview_files(lt::torrent_info const &info, std::span<TTorrentFileSnapshot> output)
+int32_t copy_torrent_preview_files(
+    lt::add_torrent_params const &params,
+    std::span<TTorrentFileSnapshot> output
+)
 {
-    lt::file_storage const &files = info.files();
+    if (!validate_torrent_info(params)) {
+        return 0;
+    }
+
+    lt::file_storage const &layout = params.ti->layout();
+    lt::renamed_files renamed_files;
+    renamed_files.import_filenames(layout, params.renamed_files);
+    lt::filenames const files(layout, renamed_files);
     std::size_t const count = std::min(output.size(), static_cast<std::size_t>(files.num_files()));
     for (std::size_t index = 0; index < count; ++index) {
         auto const file = lt::file_index_t(static_cast<int>(index));
         auto destination = std::next(output.begin(), static_cast<std::ptrdiff_t>(index));
-        *destination = file_snapshot_from_storage(
+        *destination = file_snapshot_from_files(
             files,
             file,
             static_cast<int32_t>(static_cast<std::uint8_t>(lt::default_priority))
@@ -2320,7 +2431,7 @@ BridgeResult apply_file_priorities(
         return valid_info;
     }
 
-    lt::file_storage const &files = params.ti->files();
+    lt::file_storage const &files = params.ti->layout();
     if (file_priorities->empty()) {
         return bridge_error(2, "Choose at least one file.");
     }

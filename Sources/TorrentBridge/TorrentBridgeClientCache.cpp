@@ -70,7 +70,7 @@ template <std::size_t Count>
     TTorrentWebSeedSnapshot const &rhs
 ) noexcept
 {
-    return char_arrays_equal(lhs.url, rhs.url) && lhs.kind == rhs.kind;
+    return char_arrays_equal(lhs.url, rhs.url);
 }
 
 [[nodiscard]] bool file_snapshots_equal(TTorrentFileSnapshot const &lhs, TTorrentFileSnapshot const &rhs) noexcept
@@ -198,7 +198,7 @@ DirtyMask TTorrentClient::cache_snapshot(lt::torrent_status const &status)
         }
     }
 
-    TTorrentSnapshot snapshot = snapshot_from_status(status);
+    TTorrentSnapshot snapshot = snapshot_from_status(status, identity);
     copy_string(std::span{snapshot.id}, id);
     snapshot.queue_priority = identity == nullptr ? TTORRENT_QUEUE_PRIORITY_NORMAL : identity->queue_priority;
     auto const existing = snapshot_indices.find(id);
@@ -232,6 +232,45 @@ DirtyMask TTorrentClient::cache_snapshot(lt::torrent_handle const &handle)
     } catch (...) {
         return 0;
     }
+}
+
+DirtyMask TTorrentClient::cache_resume_metadata(
+    TorrentIdentity *identity,
+    lt::add_torrent_params const &params
+)
+{
+    if (identity == nullptr) {
+        return 0;
+    }
+
+    bool changed = false;
+    if (!params.comment.empty()) {
+        std::array<char, sizeof(TTorrentSnapshot::comment)> comment{};
+        copy_string(std::span{comment}, params.comment);
+        std::string const bounded_comment(comment.data());
+        if (identity->comment != bounded_comment) {
+            identity->comment = bounded_comment;
+            changed = true;
+        }
+    }
+    if (params.creation_date > 0 && identity->creation_date != params.creation_date) {
+        identity->creation_date = params.creation_date;
+        changed = true;
+    }
+    if (!changed) {
+        return 0;
+    }
+
+    auto const snapshot = snapshot_indices.find(identity->canonical_id);
+    if (snapshot == snapshot_indices.end()) {
+        request_snapshot_update_locked();
+        return 0;
+    }
+
+    TTorrentSnapshot &cached = snapshot_cache.at(snapshot->second);
+    copy_string(std::span{cached.comment}, identity->comment);
+    cached.created_time = static_cast<int64_t>(identity->creation_date);
+    return mark_snapshot_cache_changed();
 }
 
 DirtyMask TTorrentClient::update_snapshot_cache(std::vector<lt::torrent_status> const &statuses)
@@ -522,16 +561,14 @@ BridgeResult TTorrentClient::cache_web_seeds(lt::torrent_handle const &handle, D
     }
 
     std::set<std::string> const url_seeds = handle.url_seeds();
-    std::set<std::string> const http_seeds = handle.http_seeds();
 
     std::vector<TTorrentWebSeedSnapshot> snapshots;
     std::size_t const count = std::min(
-        url_seeds.size() + http_seeds.size(),
+        url_seeds.size(),
         static_cast<std::size_t>(TTORRENT_MAX_WEB_SEED_COUNT)
     );
     snapshots.reserve(count);
-    append_web_seed_snapshots(snapshots, url_seeds, WebSeedKind::url, count);
-    append_web_seed_snapshots(snapshots, http_seeds, WebSeedKind::http, count);
+    append_web_seed_snapshots(snapshots, url_seeds, count);
 
     for (std::string const &alias : hash_keys(handle.info_hashes())) {
         if (alias != *cache_id) {
@@ -551,8 +588,7 @@ BridgeResult TTorrentClient::cache_web_seeds(lt::torrent_handle const &handle, D
 
 DirtyMask TTorrentClient::cache_web_seeds(
     std::string_view id,
-    std::set<std::string> const &url_seeds,
-    std::set<std::string> const &http_seeds
+    std::set<std::string> const &url_seeds
 )
 {
     if (id.empty()) {
@@ -561,12 +597,11 @@ DirtyMask TTorrentClient::cache_web_seeds(
 
     std::vector<TTorrentWebSeedSnapshot> snapshots;
     std::size_t const count = std::min(
-        url_seeds.size() + http_seeds.size(),
+        url_seeds.size(),
         static_cast<std::size_t>(TTORRENT_MAX_WEB_SEED_COUNT)
     );
     snapshots.reserve(count);
-    append_web_seed_snapshots(snapshots, url_seeds, WebSeedKind::url, count);
-    append_web_seed_snapshots(snapshots, http_seeds, WebSeedKind::http, count);
+    append_web_seed_snapshots(snapshots, url_seeds, count);
 
     auto &entry = web_seed_cache[std::string(id)];
     if (vectors_equal(entry.web_seeds, snapshots, web_seed_snapshots_equal)) {
@@ -585,7 +620,7 @@ BridgeResult TTorrentClient::cache_file_metadata(lt::torrent_handle const &handl
     }
 
     std::shared_ptr<lt::torrent_info const> const torrent_file = handle.torrent_file();
-    if (!torrent_file) {
+    if (!torrent_file || !torrent_file->is_valid()) {
         auto existing = file_cache.find(*cache_id);
         if (existing != file_cache.end() && !existing->second.files.empty()) {
             existing->second.files.clear();
@@ -595,8 +630,12 @@ BridgeResult TTorrentClient::cache_file_metadata(lt::torrent_handle const &handl
         return {};
     }
 
-    lt::file_storage const &files = torrent_file->files();
-    BridgeResult const valid_info = validate_torrent_info(*torrent_file);
+    lt::file_storage const &layout = torrent_file->layout();
+    lt::renamed_files const renamed_files = handle.get_renamed_files();
+    BridgeResult const valid_info = validate_torrent_info(
+        *torrent_file,
+        renamed_files.export_filenames(layout)
+    );
     if (!valid_info) {
         if (auto existing = file_cache.find(*cache_id); existing != file_cache.end() && !existing->second.files.empty()) {
             existing->second.files.clear();
@@ -605,6 +644,7 @@ BridgeResult TTorrentClient::cache_file_metadata(lt::torrent_handle const &handl
         }
         return valid_info;
     }
+    lt::filenames const files(layout, renamed_files);
 
     std::vector<lt::download_priority_t> priorities = handle.get_file_priorities();
     std::unordered_map<int32_t, TTorrentFileSnapshot> previous_files;
@@ -624,7 +664,7 @@ BridgeResult TTorrentClient::cache_file_metadata(lt::torrent_handle const &handl
             priority = static_cast<int32_t>(static_cast<std::uint8_t>(priorities.at(priority_index)));
         }
 
-        TTorrentFileSnapshot snapshot = file_snapshot_from_storage(files, file, priority);
+        TTorrentFileSnapshot snapshot = file_snapshot_from_files(files, file, priority);
         if (auto const previous = previous_files.find(snapshot.index); previous != previous_files.end()) {
             snapshot.downloaded = std::clamp<std::int64_t>(previous->second.downloaded, 0, snapshot.size);
             snapshot.progress = snapshot.size <= 0
@@ -732,7 +772,9 @@ DirtyMask TTorrentClient::cache_piece_map(lt::torrent_status const &status)
     }
 
     std::shared_ptr<lt::torrent_info const> const torrent_file = status.torrent_file.lock();
-    int const total_pieces = torrent_file == nullptr ? status.pieces.size() : torrent_file->num_pieces();
+    int const total_pieces = torrent_file == nullptr || !torrent_file->is_valid()
+        ? status.pieces.size()
+        : torrent_file->num_pieces();
 
     TTorrentPieceMapSnapshot snapshot{};
     snapshot.total_pieces = std::max(0, total_pieces);
@@ -1011,17 +1053,28 @@ BridgeResult TTorrentClient::validate_or_remove_loaded_metadata(lt::torrent_hand
     }
 
     std::shared_ptr<lt::torrent_info const> const torrent_file = handle.torrent_file();
-    if (!torrent_file) {
+    if (!torrent_file || !torrent_file->is_valid()) {
         return {};
     }
 
-    BridgeResult const valid_info = validate_torrent_info(*torrent_file);
+    lt::file_storage const &layout = torrent_file->layout();
+    lt::renamed_files const renamed_files = handle.get_renamed_files();
+    BridgeResult const valid_info = validate_torrent_info(
+        *torrent_file,
+        renamed_files.export_filenames(layout)
+    );
     if (!valid_info) {
         changes |= remove_torrent_with_invalid_metadata(handle, valid_info.error().message);
         return valid_info;
     }
+
     lt::add_torrent_params metadata_sources;
-    metadata_sources.ti = std::make_shared<lt::torrent_info>(*torrent_file);
+    for (lt::announce_entry const &tracker : handle.trackers()) {
+        metadata_sources.trackers.push_back(tracker.url);
+        metadata_sources.tracker_tiers.push_back(tracker.tier);
+    }
+    std::set<std::string> const url_seeds = handle.url_seeds();
+    metadata_sources.url_seeds.assign(url_seeds.begin(), url_seeds.end());
     BridgeResult const valid_sources = validate_torrent_sources(metadata_sources);
     if (!valid_sources) {
         changes |= remove_torrent_with_invalid_metadata(handle, valid_sources.error().message);
@@ -1029,7 +1082,7 @@ BridgeResult TTorrentClient::validate_or_remove_loaded_metadata(lt::torrent_hand
     }
 
     if (TorrentIdentity *identity = identity_from_handle(handle); identity != nullptr) {
-        remember_source_policy_sources(*identity, *torrent_file);
+        remember_source_policy_sources(*identity, metadata_sources);
         if (torrent_file->priv()) {
             bool const policy_changed = identity->dht_enabled_by_user
                 || identity->dht_disabled_by_user

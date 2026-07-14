@@ -6,12 +6,14 @@
 
 #include <chrono>
 #include <cstdint>
+#include <ctime>
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <system_error>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -55,106 +57,63 @@ template <typename Predicate>
     };
 }
 
-[[nodiscard]] std::shared_ptr<lt::torrent_info> make_torrent_info(bool is_private)
+[[nodiscard]] std::shared_ptr<lt::torrent_info const> make_torrent_info(bool is_private)
 {
-    lt::file_storage storage;
-    storage.add_file(is_private ? "private.bin" : "public.bin", 4);
+    std::vector<lt::create_file_entry> files;
+    files.emplace_back(is_private ? "private.bin" : "public.bin", 4);
 
-    lt::create_torrent creator(storage, 16 * 1024, lt::create_torrent::v1_only);
+    lt::create_torrent creator(std::move(files), 16 * 1024, lt::create_torrent::v1_only);
     creator.set_priv(is_private);
     creator.set_hash(lt::piece_index_t(0), bridge_tests::sha1_hash_from_seed(9U));
 
     std::vector<char> const buffer = creator.generate_buf();
-    lt::error_code error;
-    auto info = std::make_shared<lt::torrent_info>(
-        lt::span<char const>(buffer.data(), static_cast<int>(buffer.size())),
-        error,
-        lt::from_span
-    );
-    if (error) {
-        throw std::runtime_error("Could not create torrent info: " + error.message());
-    }
-    return info;
+    return bridge_tests::load_torrent_params(buffer, "torrent info").ti;
 }
 
-[[nodiscard]] std::shared_ptr<lt::torrent_info> make_piece_map_torrent_info()
+[[nodiscard]] std::shared_ptr<lt::torrent_info const> make_piece_map_torrent_info()
 {
     constexpr int piece_size = 16 * 1024;
     constexpr int piece_count = 5;
 
-    lt::file_storage storage;
-    storage.add_file("piece-map.bin", static_cast<std::int64_t>(piece_size * piece_count));
+    std::vector<lt::create_file_entry> files;
+    files.emplace_back("piece-map.bin", static_cast<std::int64_t>(piece_size * piece_count));
 
-    lt::create_torrent creator(storage, piece_size, lt::create_torrent::v1_only);
+    lt::create_torrent creator(std::move(files), piece_size, lt::create_torrent::v1_only);
     for (int piece = 0; piece < piece_count; ++piece) {
         creator.set_hash(lt::piece_index_t(piece), bridge_tests::sha1_hash_from_seed(static_cast<unsigned char>(20 + piece)));
     }
 
     std::vector<char> const buffer = creator.generate_buf();
-    lt::error_code error;
-    auto info = std::make_shared<lt::torrent_info>(
-        lt::span<char const>(buffer.data(), static_cast<int>(buffer.size())),
-        error,
-        lt::from_span
-    );
-    if (error) {
-        throw std::runtime_error("Could not create piece map torrent info: " + error.message());
-    }
-    return info;
+    return bridge_tests::load_torrent_params(buffer, "piece map torrent info").ti;
 }
 
-[[nodiscard]] std::shared_ptr<lt::torrent_info> make_source_torrent_info()
+[[nodiscard]] lt::add_torrent_params make_source_torrent_params()
 {
-    lt::file_storage storage;
-    storage.add_file("source-policy.bin", 4);
+    std::vector<lt::create_file_entry> files;
+    files.emplace_back("source-policy.bin", 4);
 
-    lt::create_torrent creator(storage, 16 * 1024, lt::create_torrent::v1_only);
+    lt::create_torrent creator(std::move(files), 16 * 1024, lt::create_torrent::v1_only);
     creator.set_hash(lt::piece_index_t(0), bridge_tests::sha1_hash_from_seed(10U));
     creator.add_tracker("http://tracker.example/announce", 0);
     creator.add_tracker("https://secure-tracker.example/announce", 1);
     creator.add_url_seed("http://seed.example/file");
     creator.add_url_seed("https://secure-seed.example/file");
-    creator.add_http_seed("http://http-seed.example/file");
-    creator.add_http_seed("https://secure-http-seed.example/file");
 
     std::vector<char> const buffer = creator.generate_buf();
-    lt::error_code error;
-    auto info = std::make_shared<lt::torrent_info>(
-        lt::span<char const>(buffer.data(), static_cast<int>(buffer.size())),
-        error,
-        lt::from_span
-    );
-    if (error) {
-        throw std::runtime_error("Could not create source policy torrent info: " + error.message());
-    }
-    return info;
+    return bridge_tests::load_torrent_params(buffer, "source policy torrent info");
 }
 
-[[nodiscard]] std::shared_ptr<lt::torrent_info> make_queue_torrent_info(unsigned char seed)
+[[nodiscard]] std::shared_ptr<lt::torrent_info const> make_queue_torrent_info(unsigned char seed)
 {
-    lt::file_storage storage;
-    storage.add_file("queue-" + std::to_string(seed) + ".bin", 4);
+    std::vector<lt::create_file_entry> files;
+    files.emplace_back("queue-" + std::to_string(seed) + ".bin", 4);
 
-    lt::create_torrent creator(storage, 16 * 1024, lt::create_torrent::v1_only);
+    lt::create_torrent creator(std::move(files), 16 * 1024, lt::create_torrent::v1_only);
     creator.set_hash(lt::piece_index_t(0), bridge_tests::sha1_hash_from_seed(seed));
 
     std::vector<char> const buffer = creator.generate_buf();
-    lt::error_code error;
-    auto info = std::make_shared<lt::torrent_info>(
-        lt::span<char const>(buffer.data(), static_cast<int>(buffer.size())),
-        error,
-        lt::from_span
-    );
-    if (error) {
-        throw std::runtime_error("Could not create queue torrent info: " + error.message());
-    }
-    return info;
+    return bridge_tests::load_torrent_params(buffer, "queue torrent info").ti;
 }
-
-struct WebSeedCounts {
-    int32_t url = 0;
-    int32_t http = 0;
-};
 
 struct SelfClearingWakeContext {
     TTorrentClient *client = nullptr;
@@ -168,7 +127,7 @@ void self_clearing_wake_callback(void *context)
     TorrentClientClearWakeCallback(wake_context->client);
 }
 
-[[nodiscard]] WebSeedCounts cached_web_seed_counts(TTorrentClient &client, std::string const &id)
+[[nodiscard]] int32_t cached_url_seed_count(TTorrentClient &client, std::string const &id)
 {
     std::uint64_t revision = 0;
     int32_t required_count = 0;
@@ -177,15 +136,7 @@ void self_clearing_wake_callback(void *context)
     std::vector<TTorrentWebSeedSnapshot> web_seeds(static_cast<std::size_t>(required_count));
     REQUIRE(client.copy_web_seeds(id, web_seeds, &revision, &required_count) == required_count);
 
-    WebSeedCounts counts;
-    for (TTorrentWebSeedSnapshot const &web_seed : web_seeds) {
-        if (web_seed.kind == static_cast<int32_t>(WebSeedKind::http)) {
-            ++counts.http;
-        } else {
-            ++counts.url;
-        }
-    }
-    return counts;
+    return required_count;
 }
 
 [[nodiscard]] int32_t persisted_queue_rank(TTorrentClient const &client, lt::torrent_info const &info)
@@ -201,18 +152,19 @@ void self_clearing_wake_callback(void *context)
 
 [[nodiscard]] lt::torrent_handle add_metadata_torrent(
     TTorrentClient &client,
-    lt::torrent_info const &info,
+    lt::add_torrent_params params,
     fs::path const &save_path,
     TorrentIdentity *&identity
 )
 {
-    lt::add_torrent_params params;
-    params.ti = std::make_shared<lt::torrent_info>(info);
-    params.info_hashes = info.info_hashes();
+    if (!params.ti) {
+        throw std::runtime_error("Could not add metadata torrent without torrent info.");
+    }
+    params.info_hashes = params.ti->info_hashes();
     prepare_add_params(params, save_path.string(), false, true);
 
     identity = client.attach_identity(params);
-    remember_source_policy_sources(*identity, info);
+    remember_source_policy_sources(*identity, params);
     lt::error_code add_error;
     lt::torrent_handle handle = client.session.add_torrent(std::move(params), add_error);
     if (add_error) {
@@ -220,6 +172,18 @@ void self_clearing_wake_callback(void *context)
     }
     client.mark_active(handle, identity);
     return handle;
+}
+
+[[nodiscard]] lt::torrent_handle add_metadata_torrent(
+    TTorrentClient &client,
+    lt::torrent_info const &info,
+    fs::path const &save_path,
+    TorrentIdentity *&identity
+)
+{
+    lt::add_torrent_params params;
+    params.ti = std::make_shared<lt::torrent_info>(info);
+    return add_metadata_torrent(client, std::move(params), save_path, identity);
 }
 
 } // namespace
@@ -352,6 +316,226 @@ TEST_CASE("coalesced async resume saves preserve policy save flags")
     REQUIRE(repeat_flags.has_value());
     CHECK(static_cast<bool>(*repeat_flags & lt::torrent_handle::save_info_dict));
     CHECK_FALSE(static_cast<bool>(*repeat_flags & lt::torrent_handle::only_if_modified));
+}
+
+TEST_CASE("resume metadata refreshes identity and cached snapshot")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+
+    std::string const id = bridge_tests::v1_id('4');
+    TorrentIdentity *identity = client.make_identity(id);
+    REQUIRE(identity != nullptr);
+    std::string const cache_id = identity->canonical_id;
+
+    TTorrentSnapshot snapshot{};
+    copy_string(std::span{snapshot.id}, cache_id);
+    client.snapshot_indices.emplace(cache_id, 0U);
+    client.snapshot_cache.push_back(snapshot);
+
+    lt::add_torrent_params params;
+    params.comment = "Metadata from resume data";
+    params.creation_date = 12'345;
+
+    CHECK(client.cache_resume_metadata(identity, params) == TTORRENT_DIRTY_TORRENTS);
+    CHECK(identity->comment == "Metadata from resume data");
+    CHECK(identity->creation_date == 12'345);
+    REQUIRE(client.snapshot_cache.size() == 1U);
+    CHECK(std::string(client.snapshot_cache.front().comment) == "Metadata from resume data");
+    CHECK(client.snapshot_cache.front().created_time == 12'345);
+    CHECK(client.cache_resume_metadata(identity, params) == 0U);
+}
+
+TEST_CASE("resume persistence rejects unsafe serialized file renames")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    std::shared_ptr<lt::torrent_info const> const info = make_torrent_info(false);
+    REQUIRE(info != nullptr);
+
+    std::array<std::string, 2> const unsafe_paths{
+        "/tmp/outside-download.bin",
+        "../outside-download.bin",
+    };
+    for (std::size_t index = 0; index < unsafe_paths.size(); ++index) {
+        fs::path const state_directory = temporary_directory.path() / ("UnsafeResume-" + std::to_string(index));
+        fs::path const resume_directory = state_directory / "ResumeData";
+        REQUIRE(fs::create_directories(resume_directory));
+
+        lt::add_torrent_params params;
+        params.ti = info;
+        params.info_hashes = info->info_hashes();
+        params.save_path = temporary_directory.path().string();
+        params.renamed_files.emplace(lt::file_index_t(0), unsafe_paths.at(index));
+
+        TorrentIdentity identity;
+        identity.canonical_id = bridge_tests::canonical_id(static_cast<char>('a' + index));
+        std::vector<char> const encoded = encoded_resume_data(params, &identity);
+
+        lt::error_code read_error;
+        lt::add_torrent_params const decoded = lt::read_resume_data(
+            lt::span<char const>(encoded),
+            read_error
+        );
+        REQUIRE_FALSE(read_error);
+        REQUIRE(decoded.renamed_files.contains(lt::file_index_t(0)));
+        CHECK(decoded.renamed_files.at(lt::file_index_t(0)) == unsafe_paths.at(index));
+
+        std::string const resume_id = primary_hash_key(info->info_hashes());
+        fs::path const resume_path = resume_directory / (resume_id + std::string(kResumeExtension));
+        ResumeSaveResult const written = write_owner_only_file_checked(
+            resume_path,
+            std::string_view(encoded.data(), encoded.size())
+        );
+        REQUIRE(written.has_value());
+
+        TTorrentClient client(state_directory.string());
+        client.set_session_shutdown_asynchronous(false);
+
+        CHECK(client.session.get_torrents().empty());
+        CHECK_FALSE(file_exists(resume_path));
+
+        ResumeSaveResult const rejected = client.write_resume_data_checked(
+            params,
+            nullptr,
+            ResumePolicySnapshot{},
+            0,
+            {}
+        );
+        REQUIRE_FALSE(rejected);
+        CHECK(rejected.error() == "The torrent contains a file path outside its download folder.");
+    }
+}
+
+TEST_CASE("resume metadata flows through add, async save alerts, and reload")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    fs::path const state_directory = temporary_directory.path() / "State";
+    std::string const expected_comment = "Metadata lifecycle comment";
+    constexpr std::time_t expected_creation_date = 23'456;
+
+    std::vector<lt::create_file_entry> files;
+    files.emplace_back("metadata-lifecycle.bin", 4);
+    lt::create_torrent creator(std::move(files), 16 * 1024, lt::create_torrent::v1_only);
+    creator.set_comment(expected_comment.c_str());
+    creator.set_creation_date(expected_creation_date);
+    creator.set_hash(lt::piece_index_t(0), bridge_tests::sha1_hash_from_seed(31U));
+    std::vector<char> const torrent_data = creator.generate_buf();
+
+    std::string canonical_id;
+    {
+        TTorrentClient client(state_directory.string());
+        client.set_session_shutdown_asynchronous(false);
+
+        TTorrentAddOptions add_options = default_add_options();
+        char added_id[TTORRENT_ID_CAPACITY]{};
+        char error[512]{};
+        REQUIRE(TorrentClientAddTorrentFileData(
+            &client,
+            torrent_data.data(),
+            static_cast<int32_t>(torrent_data.size()),
+            temporary_directory.path().c_str(),
+            &add_options,
+            added_id,
+            static_cast<int32_t>(sizeof(added_id)),
+            error,
+            static_cast<int32_t>(sizeof(error))
+        ) == 0);
+
+        canonical_id = added_id;
+        std::optional<lt::torrent_handle> const handle = client.find(canonical_id);
+        REQUIRE(handle.has_value());
+        TorrentIdentity *identity = identity_from_handle(*handle);
+        REQUIRE(identity != nullptr);
+        CHECK(identity->comment == expected_comment);
+        CHECK(identity->creation_date == expected_creation_date);
+
+        {
+            std::scoped_lock guard(client.lock);
+            auto const cached = client.snapshot_indices.find(canonical_id);
+            REQUIRE(cached != client.snapshot_indices.end());
+            TTorrentSnapshot &snapshot = client.snapshot_cache.at(cached->second);
+            CHECK(std::string(snapshot.comment) == expected_comment);
+            CHECK(snapshot.created_time == expected_creation_date);
+
+            identity->comment.clear();
+            identity->creation_date = 0;
+            copy_string(std::span{snapshot.comment}, "");
+            snapshot.created_time = 0;
+        }
+
+        client.request_save(*handle, kPolicyResumeSaveFlags);
+        REQUIRE(eventually([&] {
+            client.pump_alerts();
+            std::scoped_lock guard(client.lock);
+            auto const cached = client.snapshot_indices.find(canonical_id);
+            if (cached == client.snapshot_indices.end()) {
+                return false;
+            }
+            TTorrentSnapshot const &snapshot = client.snapshot_cache.at(cached->second);
+            return identity->comment == expected_comment
+                && identity->creation_date == expected_creation_date
+                && std::string(snapshot.comment) == expected_comment
+                && snapshot.created_time == expected_creation_date;
+        }));
+    }
+
+    TTorrentClient reloaded(state_directory.string());
+    reloaded.set_session_shutdown_asynchronous(false);
+    std::scoped_lock guard(reloaded.lock);
+    auto const cached = reloaded.snapshot_indices.find(canonical_id);
+    REQUIRE(cached != reloaded.snapshot_indices.end());
+    TTorrentSnapshot const &snapshot = reloaded.snapshot_cache.at(cached->second);
+    CHECK(std::string(snapshot.comment) == expected_comment);
+    CHECK(snapshot.created_time == expected_creation_date);
+}
+
+TEST_CASE("active file cache applies filenames renamed before add")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+
+    std::shared_ptr<lt::torrent_info const> const info = make_torrent_info(false);
+    CHECK(info->layout().file_path(lt::file_index_t(0)) == "public.bin");
+    lt::add_torrent_params params;
+    params.ti = info;
+    params.renamed_files.emplace(lt::file_index_t(0), "renamed-public.bin");
+
+    TorrentIdentity *identity = nullptr;
+    lt::torrent_handle handle = add_metadata_torrent(
+        client,
+        std::move(params),
+        temporary_directory.path(),
+        identity
+    );
+    REQUIRE(identity != nullptr);
+    REQUIRE(handle.is_valid());
+    REQUIRE(eventually([&] {
+        try {
+            return handle.get_renamed_files().file_path(
+                info->layout(),
+                lt::file_index_t(0)
+            ) == "renamed-public.bin";
+        } catch (...) {
+            return false;
+        }
+    }));
+
+    DirtyMask changes = 0;
+    {
+        std::scoped_lock guard(client.lock);
+        REQUIRE(client.request_files(identity->canonical_id, changes).has_value());
+    }
+
+    std::uint64_t revision = 0;
+    int32_t required_count = 0;
+    REQUIRE(client.copy_files(identity->canonical_id, {}, &revision, &required_count) == 0);
+    REQUIRE(required_count == 1);
+
+    std::array<TTorrentFileSnapshot, 1> files{};
+    REQUIRE(client.copy_files(identity->canonical_id, files, &revision, &required_count) == 1);
+    CHECK(std::string(files.front().path) == "renamed-public.bin");
 }
 
 TEST_CASE("settings apply toggles peer exchange for loaded torrents")
@@ -1157,13 +1341,12 @@ TEST_CASE("settings apply enforces HTTPS-only source policy on loaded torrents")
     TTorrentClient client((temporary_directory.path() / "State").string());
     client.set_session_shutdown_asynchronous(false);
 
-    auto info = make_source_torrent_info();
+    lt::add_torrent_params source_params = make_source_torrent_params();
     TorrentIdentity *identity = nullptr;
-    lt::torrent_handle handle = add_metadata_torrent(client, *info, temporary_directory.path(), identity);
+    lt::torrent_handle handle = add_metadata_torrent(client, std::move(source_params), temporary_directory.path(), identity);
     REQUIRE(identity != nullptr);
     REQUIRE(handle.trackers().size() == 2U);
     REQUIRE(handle.url_seeds().size() == 2U);
-    REQUIRE(handle.http_seeds().size() == 2U);
 
     TTorrentSessionSettings settings{};
     settings.required_network_interface = "";
@@ -1183,7 +1366,6 @@ TEST_CASE("settings apply enforces HTTPS-only source policy on loaded torrents")
     REQUIRE(trackers.size() == 1U);
     CHECK(trackers.front().url == "https://secure-tracker.example/announce");
     CHECK(handle.url_seeds().size() == 2U);
-    CHECK(handle.http_seeds().size() == 2U);
 
     settings.require_https_web_seeds = bridge_bool(true);
     REQUIRE(TorrentClientApplySettings(
@@ -1196,8 +1378,6 @@ TEST_CASE("settings apply enforces HTTPS-only source policy on loaded torrents")
     REQUIRE(handle.trackers().size() == 1U);
     CHECK(handle.url_seeds().size() == 1U);
     CHECK(handle.url_seeds().contains("https://secure-seed.example/file"));
-    CHECK(handle.http_seeds().size() == 1U);
-    CHECK(handle.http_seeds().contains("https://secure-http-seed.example/file"));
 
     settings.require_https_trackers = bridge_bool(false);
     settings.require_https_web_seeds = bridge_bool(false);
@@ -1208,9 +1388,7 @@ TEST_CASE("settings apply enforces HTTPS-only source policy on loaded torrents")
         static_cast<int32_t>(sizeof(error))
     ) == 0);
     REQUIRE(handle.trackers().size() == 2U);
-    WebSeedCounts const restored_web_seeds = cached_web_seed_counts(client, identity->canonical_id);
-    CHECK(restored_web_seeds.url == 2);
-    CHECK(restored_web_seeds.http == 2);
+    CHECK(cached_url_seed_count(client, identity->canonical_id) == 2);
 }
 
 TEST_CASE("per-torrent HTTPS source exception preserves loaded torrent sources")
@@ -1219,9 +1397,9 @@ TEST_CASE("per-torrent HTTPS source exception preserves loaded torrent sources")
     TTorrentClient client((temporary_directory.path() / "State").string());
     client.set_session_shutdown_asynchronous(false);
 
-    auto info = make_source_torrent_info();
+    lt::add_torrent_params source_params = make_source_torrent_params();
     TorrentIdentity *identity = nullptr;
-    lt::torrent_handle handle = add_metadata_torrent(client, *info, temporary_directory.path(), identity);
+    lt::torrent_handle handle = add_metadata_torrent(client, std::move(source_params), temporary_directory.path(), identity);
     REQUIRE(identity != nullptr);
     identity->allows_non_https_trackers = true;
     identity->allows_non_https_web_seeds = true;
@@ -1242,7 +1420,6 @@ TEST_CASE("per-torrent HTTPS source exception preserves loaded torrent sources")
 
     CHECK(handle.trackers().size() == 2U);
     CHECK(handle.url_seeds().size() == 2U);
-    CHECK(handle.http_seeds().size() == 2U);
 }
 
 TEST_CASE("source policy toggles DHT PEX LSD and HTTPS sources for a loaded torrent")
@@ -1251,9 +1428,9 @@ TEST_CASE("source policy toggles DHT PEX LSD and HTTPS sources for a loaded torr
     TTorrentClient client((temporary_directory.path() / "State").string());
     client.set_session_shutdown_asynchronous(false);
 
-    auto info = make_source_torrent_info();
+    lt::add_torrent_params source_params = make_source_torrent_params();
     TorrentIdentity *identity = nullptr;
-    lt::torrent_handle handle = add_metadata_torrent(client, *info, temporary_directory.path(), identity);
+    lt::torrent_handle handle = add_metadata_torrent(client, std::move(source_params), temporary_directory.path(), identity);
     REQUIRE(identity != nullptr);
 
     char error[512]{};
@@ -1306,7 +1483,6 @@ TEST_CASE("source policy toggles DHT PEX LSD and HTTPS sources for a loaded torr
     REQUIRE(handle.trackers().size() == 1U);
     CHECK(handle.trackers().front().url == "https://secure-tracker.example/announce");
     CHECK(handle.url_seeds().size() == 1U);
-    CHECK(handle.http_seeds().size() == 1U);
     CHECK(identity->dht_disabled_by_user);
     CHECK(identity->peer_exchange_disabled_by_user);
     CHECK(identity->lsd_disabled_by_user);
@@ -1325,9 +1501,7 @@ TEST_CASE("source policy toggles DHT PEX LSD and HTTPS sources for a loaded torr
         static_cast<int32_t>(sizeof(error))
     ) == 0);
     REQUIRE(handle.trackers().size() == 2U);
-    WebSeedCounts const restored_web_seeds = cached_web_seed_counts(client, identity->canonical_id);
-    CHECK(restored_web_seeds.url == 2);
-    CHECK(restored_web_seeds.http == 2);
+    CHECK(cached_url_seed_count(client, identity->canonical_id) == 2);
     CHECK_FALSE(identity->requires_https_trackers);
     CHECK_FALSE(identity->requires_https_web_seeds);
 }
@@ -1338,9 +1512,9 @@ TEST_CASE("source policy reports explicit user policy over transient libtorrent 
     TTorrentClient client((temporary_directory.path() / "State").string());
     client.set_session_shutdown_asynchronous(false);
 
-    auto info = make_source_torrent_info();
+    lt::add_torrent_params source_params = make_source_torrent_params();
     TorrentIdentity *identity = nullptr;
-    lt::torrent_handle handle = add_metadata_torrent(client, *info, temporary_directory.path(), identity);
+    lt::torrent_handle handle = add_metadata_torrent(client, std::move(source_params), temporary_directory.path(), identity);
     REQUIRE(identity != nullptr);
 
     identity->dht_enabled_by_user = true;
@@ -1423,15 +1597,137 @@ TEST_CASE("piece map reports metadata piece count before any piece is downloaded
     }
 }
 
+TEST_CASE("hash-only torrent info is rejected as invalid metadata")
+{
+    lt::torrent_info const info{
+        lt::info_hash_t{bridge_tests::sha1_hash_from_seed(26U)}
+    };
+    REQUIRE_FALSE(info.is_valid());
+
+    BridgeResult const result = validate_torrent_info(info);
+    REQUIRE_FALSE(result);
+    CHECK(result.error().code == 2);
+    CHECK(result.error().message == "The torrent file is invalid.");
+}
+
+TEST_CASE("piece map remains unavailable for a metadata-less magnet")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+
+    std::string const magnet = "magnet:?xt=urn:btih:0123456A89abcdef32056417897768acf0261b73";
+    std::string const save_path = temporary_directory.path().string();
+    TTorrentAddOptions add_options = default_add_options(false);
+    add_options.starts_paused = bridge_bool(true);
+    char added_id[TTORRENT_ID_CAPACITY]{};
+    char error[512]{};
+
+    REQUIRE(TorrentClientAddMagnet(
+        &client,
+        magnet.c_str(),
+        save_path.c_str(),
+        &add_options,
+        added_id,
+        static_cast<int32_t>(sizeof(added_id)),
+        error,
+        static_cast<int32_t>(sizeof(error))
+    ) == 0);
+    REQUIRE(is_canonical_torrent_id(added_id));
+
+    std::optional<lt::torrent_handle> const handle = client.find(added_id);
+    REQUIRE(handle.has_value());
+    lt::torrent_status const status = handle->status(lt::torrent_handle::query_torrent_file);
+    REQUIRE_FALSE(status.has_metadata);
+    std::shared_ptr<lt::torrent_info const> const torrent_file = status.torrent_file.lock();
+    REQUIRE(torrent_file != nullptr);
+    REQUIRE_FALSE(torrent_file->is_valid());
+
+    REQUIRE(TorrentClientRequestFiles(
+        &client,
+        added_id,
+        error,
+        static_cast<int32_t>(sizeof(error))
+    ) == 0);
+    CHECK(error[0] == '\0');
+
+    std::uint64_t revision = 0;
+    int32_t required_count = -1;
+    CHECK(TorrentClientCopyFileBatch(
+        &client,
+        added_id,
+        nullptr,
+        0,
+        &revision,
+        &required_count
+    ) == 0);
+    CHECK(required_count == 0);
+
+    lt::torrent_status synthetic_status = status;
+    synthetic_status.pieces.resize(3);
+    DirtyMask synthetic_changes = 0;
+    {
+        std::scoped_lock guard(client.lock);
+        synthetic_changes |= client.cache_piece_map(synthetic_status);
+    }
+    CHECK((synthetic_changes & TTORRENT_DIRTY_PIECES) != 0U);
+
+    TTorrentPieceMapSnapshot synthetic_snapshot{};
+    revision = 0;
+    required_count = -1;
+    CHECK(TorrentClientCopyPieceMap(
+        &client,
+        added_id,
+        &synthetic_snapshot,
+        nullptr,
+        0,
+        &revision,
+        &required_count
+    ) == 0);
+    CHECK(synthetic_snapshot.total_pieces == 3);
+    CHECK(synthetic_snapshot.completed_pieces == 0);
+    CHECK(synthetic_snapshot.available_pieces == 3);
+    CHECK(bridge_bool(synthetic_snapshot.map_available));
+    CHECK_FALSE(bridge_bool(synthetic_snapshot.map_truncated));
+    CHECK(required_count == 3);
+
+    REQUIRE(TorrentClientRequestPieceMap(
+        &client,
+        added_id,
+        error,
+        static_cast<int32_t>(sizeof(error))
+    ) == 0);
+    CHECK(error[0] == '\0');
+
+    TTorrentPieceMapSnapshot snapshot{};
+    revision = 0;
+    required_count = -1;
+    CHECK(TorrentClientCopyPieceMap(
+        &client,
+        added_id,
+        &snapshot,
+        nullptr,
+        0,
+        &revision,
+        &required_count
+    ) == 0);
+    CHECK(snapshot.total_pieces == 0);
+    CHECK(snapshot.completed_pieces == 0);
+    CHECK(snapshot.available_pieces == 0);
+    CHECK_FALSE(bridge_bool(snapshot.map_available));
+    CHECK_FALSE(bridge_bool(snapshot.map_truncated));
+    CHECK(required_count == 0);
+}
+
 TEST_CASE("source policy cannot override DHT PEX or LSD source locks")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
     TTorrentClient client((temporary_directory.path() / "State").string());
     client.set_session_shutdown_asynchronous(false);
 
-    auto info = make_source_torrent_info();
+    lt::add_torrent_params source_params = make_source_torrent_params();
     TorrentIdentity *identity = nullptr;
-    lt::torrent_handle handle = add_metadata_torrent(client, *info, temporary_directory.path(), identity);
+    lt::torrent_handle handle = add_metadata_torrent(client, std::move(source_params), temporary_directory.path(), identity);
     REQUIRE(identity != nullptr);
 
     identity->dht_locked_by_source = true;
@@ -1501,10 +1797,7 @@ TEST_CASE("source policy restores sources preserved before HTTPS-only filtering"
     TTorrentClient client((temporary_directory.path() / "State").string());
     client.set_session_shutdown_asynchronous(false);
 
-    auto info = make_source_torrent_info();
-    lt::add_torrent_params params;
-    params.ti = info;
-    params.info_hashes = info->info_hashes();
+    lt::add_torrent_params params = make_source_torrent_params();
     lt::add_torrent_params const source_params = params;
     REQUIRE(filter_non_https_sources(params));
     prepare_add_params(params, temporary_directory.path().string(), false, true);
@@ -1520,7 +1813,6 @@ TEST_CASE("source policy restores sources preserved before HTTPS-only filtering"
 
     REQUIRE(handle.trackers().size() == 1U);
     CHECK(handle.url_seeds().size() == 1U);
-    CHECK(handle.http_seeds().size() == 1U);
 
     char error[512]{};
     TTorrentSourcePolicy requested{};
@@ -1537,9 +1829,7 @@ TEST_CASE("source policy restores sources preserved before HTTPS-only filtering"
     ) == 0);
 
     REQUIRE(handle.trackers().size() == 2U);
-    WebSeedCounts const restored_web_seeds = cached_web_seed_counts(client, identity->canonical_id);
-    CHECK(restored_web_seeds.url == 2);
-    CHECK(restored_web_seeds.http == 2);
+    CHECK(cached_url_seed_count(client, identity->canonical_id) == 2);
 }
 
 TEST_CASE("source policy restore does not reinsert blocked HTTPS-only sources")
@@ -1548,10 +1838,7 @@ TEST_CASE("source policy restore does not reinsert blocked HTTPS-only sources")
     TTorrentClient client((temporary_directory.path() / "State").string());
     client.set_session_shutdown_asynchronous(false);
 
-    auto info = make_source_torrent_info();
-    lt::add_torrent_params params;
-    params.ti = info;
-    params.info_hashes = info->info_hashes();
+    lt::add_torrent_params params = make_source_torrent_params();
     lt::add_torrent_params const source_params = params;
     REQUIRE(filter_non_https_sources(params, true, true));
     prepare_add_params(params, temporary_directory.path().string(), false, true);
@@ -1570,7 +1857,6 @@ TEST_CASE("source policy restore does not reinsert blocked HTTPS-only sources")
 
     REQUIRE(handle.trackers().size() == 1U);
     CHECK(handle.url_seeds().size() == 1U);
-    CHECK(handle.http_seeds().size() == 1U);
 
     static_cast<void>(client.restore_metadata_source_policy(handle, identity));
 
@@ -1578,10 +1864,8 @@ TEST_CASE("source policy restore does not reinsert blocked HTTPS-only sources")
     CHECK(handle.trackers().front().url == "https://secure-tracker.example/announce");
     CHECK(handle.url_seeds().size() == 1U);
     CHECK(handle.url_seeds().contains("https://secure-seed.example/file"));
-    CHECK(handle.http_seeds().size() == 1U);
-    CHECK(handle.http_seeds().contains("https://secure-http-seed.example/file"));
     CHECK(identity->source_trackers.size() == 2U);
-    CHECK(identity->source_web_seeds.size() == 4U);
+    CHECK(identity->source_web_seeds.size() == 2U);
 }
 
 TEST_CASE("magnet torrents disable peer exchange until metadata arrives")

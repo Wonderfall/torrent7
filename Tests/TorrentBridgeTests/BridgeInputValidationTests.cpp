@@ -6,20 +6,22 @@
 
 #include <array>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
 
-[[nodiscard]] std::shared_ptr<lt::torrent_info> make_source_torrent_info()
+[[nodiscard]] lt::add_torrent_params make_source_torrent_params()
 {
-    lt::file_storage storage;
-    storage.add_file("source-test.bin", 4);
+    std::vector<lt::create_file_entry> files;
+    files.emplace_back("source-test.bin", 4);
 
     lt::create_torrent creator(
-        storage,
+        std::move(files),
         16 * 1024,
         lt::create_torrent::v1_only | lt::create_torrent::symlinks
     );
@@ -28,51 +30,31 @@ namespace {
     creator.add_tracker("https://secure-tracker.example/announce", 1);
     creator.add_url_seed("http://seed.example/file");
     creator.add_url_seed("https://secure-seed.example/file");
-    creator.add_http_seed("http://http-seed.example/file");
-    creator.add_http_seed("https://secure-http-seed.example/file");
 
     std::vector<char> const buffer = creator.generate_buf();
-    lt::error_code error;
-    auto info = std::make_shared<lt::torrent_info>(
-        lt::span<char const>(buffer.data(), static_cast<int>(buffer.size())),
-        error,
-        lt::from_span
-    );
-    if (error) {
-        throw std::runtime_error("Could not create source test torrent info: " + error.message());
-    }
-    return info;
+    return bridge_tests::load_torrent_params(buffer, "source test torrent info");
 }
 
-[[nodiscard]] std::shared_ptr<lt::torrent_info> make_file_priority_torrent_info()
+[[nodiscard]] std::shared_ptr<lt::torrent_info const> make_file_priority_torrent_info()
 {
-    lt::file_storage storage;
-    storage.add_file("files/high.bin", 4);
-    storage.add_file("files/skip.bin", 4);
-    storage.add_file("files/low.bin", 4);
+    std::vector<lt::create_file_entry> files;
+    files.emplace_back("files/high.bin", 4);
+    files.emplace_back("files/skip.bin", 4);
+    files.emplace_back("files/low.bin", 4);
 
-    lt::create_torrent creator(storage, 16 * 1024, lt::create_torrent::v1_only);
+    lt::create_torrent creator(std::move(files), 16 * 1024, lt::create_torrent::v1_only);
     creator.set_hash(lt::piece_index_t(0), bridge_tests::sha1_hash_from_seed(14U));
 
     std::vector<char> const buffer = creator.generate_buf();
-    lt::error_code error;
-    auto info = std::make_shared<lt::torrent_info>(
-        lt::span<char const>(buffer.data(), static_cast<int>(buffer.size())),
-        error,
-        lt::from_span
-    );
-    if (error) {
-        throw std::runtime_error("Could not create file priority test torrent info: " + error.message());
-    }
-    return info;
+    return bridge_tests::load_torrent_params(buffer, "file priority test torrent info").ti;
 }
 
 [[nodiscard]] std::vector<char> make_http_tracker_torrent_buffer()
 {
-    lt::file_storage storage;
-    storage.add_file("http-tracker-test.bin", 4);
+    std::vector<lt::create_file_entry> files;
+    files.emplace_back("http-tracker-test.bin", 4);
 
-    lt::create_torrent creator(storage, 16 * 1024, lt::create_torrent::v1_only);
+    lt::create_torrent creator(std::move(files), 16 * 1024, lt::create_torrent::v1_only);
     creator.set_hash(lt::piece_index_t(0), bridge_tests::sha1_hash_from_seed(13U));
     creator.add_tracker("http://tracker.example/announce", 0);
     return creator.generate_buf();
@@ -93,7 +75,24 @@ void append_bencoded_string(std::string &buffer, std::string_view value)
     buffer.append(value);
 }
 
-[[nodiscard]] std::shared_ptr<lt::torrent_info> make_raw_v1_torrent_info(std::string_view files_payload)
+[[nodiscard]] std::vector<char> make_duplicate_file_torrent_buffer()
+{
+    std::vector<char> buffer;
+    auto append = [&buffer](std::string_view value) {
+        buffer.insert(buffer.end(), value.begin(), value.end());
+    };
+
+    append("d4:infod5:filesl");
+    for (int index = 0; index < 2; ++index) {
+        append("d6:lengthi4e4:pathl8:same.binee");
+    }
+    append("e4:name9:duplicate12:piece lengthi16384e6:pieces");
+    append_bencoded_string(buffer, std::string(20U, '\0'));
+    append("ee");
+    return buffer;
+}
+
+[[nodiscard]] std::shared_ptr<lt::torrent_info const> make_raw_v1_torrent_info(std::string_view files_payload)
 {
     std::vector<char> buffer;
     auto append = [&buffer](std::string_view value) {
@@ -108,16 +107,7 @@ void append_bencoded_string(std::string &buffer, std::string_view value)
     append_bencoded_string(buffer, std::string(20U, '\0'));
     append("ee");
 
-    lt::error_code error;
-    auto info = std::make_shared<lt::torrent_info>(
-        lt::span<char const>(buffer.data(), static_cast<int>(buffer.size())),
-        error,
-        lt::from_span
-    );
-    if (error) {
-        throw std::runtime_error("Could not create raw validation test torrent info: " + error.message());
-    }
-    return info;
+    return bridge_tests::load_torrent_params(buffer, "raw validation test torrent info").ti;
 }
 
 } // namespace
@@ -156,6 +146,49 @@ TEST_CASE("torrent metadata rejects symbolic links and paths that cannot fit the
     REQUIRE_FALSE(long_path);
     CHECK(long_path.error().code == 2);
     CHECK(long_path.error().message == "The torrent contains a file path that is too long.");
+}
+
+TEST_CASE("torrent metadata rejects unsafe renamed file layouts")
+{
+    std::shared_ptr<lt::torrent_info const> const info = make_file_priority_torrent_info();
+    REQUIRE(info != nullptr);
+
+    using RenameMap = std::map<lt::file_index_t, std::string>;
+    auto expect_rejected = [&info](RenameMap const &renames) {
+        BridgeResult const result = validate_torrent_info(*info, renames);
+        CHECK_FALSE(result.has_value());
+        if (!result) {
+            CHECK(result.error().code == 2);
+        }
+    };
+
+    CHECK(validate_torrent_info(
+        *info,
+        RenameMap{{lt::file_index_t(0), "renamed-high.bin"}}
+    ).has_value());
+
+    expect_rejected(RenameMap{{lt::file_index_t(0), ""}});
+    expect_rejected(RenameMap{{lt::file_index_t(-1), "negative-index.bin"}});
+    expect_rejected(RenameMap{{lt::file_index_t(info->layout().num_files()), "past-end.bin"}});
+    expect_rejected(RenameMap{{lt::file_index_t(0), "/tmp/escaped.bin"}});
+    expect_rejected(RenameMap{{lt::file_index_t(0), "../escaped.bin"}});
+    expect_rejected(RenameMap{{lt::file_index_t(0), "files/./renamed.bin"}});
+    expect_rejected(RenameMap{{lt::file_index_t(0), "files//renamed.bin"}});
+    expect_rejected(RenameMap{{lt::file_index_t(0), "files/control\nname.bin"}});
+
+    std::string nul_path = "files/nul";
+    nul_path.push_back('\0');
+    nul_path += "name.bin";
+    expect_rejected(RenameMap{{lt::file_index_t(0), std::move(nul_path)}});
+
+    std::string delete_path = "files/delete";
+    delete_path.push_back(static_cast<char>(0x7f));
+    delete_path += "name.bin";
+    expect_rejected(RenameMap{{lt::file_index_t(0), std::move(delete_path)}});
+
+    std::string overlong_path = "files/";
+    overlong_path.append(sizeof(TTorrentFileSnapshot::path), 'x');
+    expect_rejected(RenameMap{{lt::file_index_t(0), std::move(overlong_path)}});
 }
 
 TEST_CASE("peer source snapshots count overlapping libtorrent source flags")
@@ -325,14 +358,13 @@ TEST_CASE("source counts include trackers and web seeds")
     };
     params.url_seeds.push_back("http://seed.example/file");
     params.url_seeds.push_back("https://secure-seed.example/file");
-    params.http_seeds.push_back("https://secure-http-seed.example/file");
 
     TorrentSourceCounts const counts = torrent_source_counts(params);
 
     CHECK(counts.tracker_count == 2);
     CHECK(counts.https_tracker_count == 1);
-    CHECK(counts.web_seed_count == 3);
-    CHECK(counts.https_web_seed_count == 2);
+    CHECK(counts.web_seed_count == 2);
+    CHECK(counts.https_web_seed_count == 1);
 }
 
 TEST_CASE("source validation rejects source lists above bridge limits")
@@ -373,7 +405,7 @@ TEST_CASE("source restoration preserves bridge source count caps")
 {
     TorrentIdentity identity;
     identity.source_trackers.emplace_back("http://extra-tracker.example/announce");
-    identity.source_web_seeds.emplace_back("http://extra-seed.example/file", lt::web_seed_entry::url_seed);
+    identity.source_web_seeds.emplace_back("http://extra-seed.example/file");
 
     lt::add_torrent_params params = bridge_tests::add_params_with_hashes();
     params.trackers.reserve(static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT));
@@ -422,6 +454,46 @@ TEST_CASE("torrent file data preview counts sources drained into add params")
     CHECK(preview.https_web_seed_count == 0);
 }
 
+TEST_CASE("torrent file data preview applies duplicate filename renames from add params")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    std::vector<char> const torrent_data = make_duplicate_file_torrent_buffer();
+    lt::add_torrent_params const params =
+        bridge_tests::load_torrent_params(torrent_data, "duplicate filename torrent info");
+    REQUIRE(params.ti != nullptr);
+    REQUIRE(params.ti->layout().num_files() == 2);
+    CHECK(params.ti->layout().file_path(lt::file_index_t(0)) == "duplicate/same.bin");
+    CHECK(params.ti->layout().file_path(lt::file_index_t(1)) == "duplicate/same.bin");
+
+    auto const renamed = params.renamed_files.find(lt::file_index_t(1));
+    REQUIRE(renamed != params.renamed_files.end());
+    REQUIRE(renamed->second == "duplicate/same.1.bin");
+
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+
+    TTorrentFilePreview preview{};
+    std::array<TTorrentFileSnapshot, 2> files{};
+    int32_t required_count = 0;
+    char error[512]{};
+    REQUIRE(TorrentClientPreviewTorrentFileData(
+        &client,
+        torrent_data.data(),
+        static_cast<int32_t>(torrent_data.size()),
+        &preview,
+        files.data(),
+        static_cast<int32_t>(files.size()),
+        &required_count,
+        error,
+        static_cast<int32_t>(sizeof(error))
+    ) == 0);
+
+    CHECK(required_count == 2);
+    CHECK(preview.file_count == 2);
+    CHECK(std::string(files.at(0).path) == "duplicate/same.bin");
+    CHECK(std::string(files.at(1).path) == renamed->second);
+}
+
 TEST_CASE("filtering non-HTTPS sources keeps tracker tiers aligned")
 {
     lt::add_torrent_params params = bridge_tests::add_params_with_hashes();
@@ -434,8 +506,6 @@ TEST_CASE("filtering non-HTTPS sources keeps tracker tiers aligned")
     params.tracker_tiers = {0, 1, 2, 3};
     params.url_seeds.push_back("http://seed.example/file");
     params.url_seeds.push_back("https://secure-seed.example/file");
-    params.http_seeds.push_back("http://http-seed.example/file");
-    params.http_seeds.push_back("https://secure-http-seed.example/file");
 
     CHECK(filter_non_https_sources(params));
 
@@ -447,14 +517,10 @@ TEST_CASE("filtering non-HTTPS sources keeps tracker tiers aligned")
     std::vector<std::string> const expected_url_seeds{
         "https://secure-seed.example/file"
     };
-    std::vector<std::string> const expected_http_seeds{
-        "https://secure-http-seed.example/file"
-    };
 
     CHECK(params.trackers == expected_trackers);
     CHECK(params.tracker_tiers == expected_tiers);
     CHECK(std::vector<std::string>(params.url_seeds.begin(), params.url_seeds.end()) == expected_url_seeds);
-    CHECK(std::vector<std::string>(params.http_seeds.begin(), params.http_seeds.end()) == expected_http_seeds);
 }
 
 TEST_CASE("filtering non-HTTPS sources can target trackers only")
@@ -501,19 +567,17 @@ TEST_CASE("filtering non-HTTPS sources can target web seeds only")
     CHECK(std::vector<std::string>(params.url_seeds.begin(), params.url_seeds.end()) == expected_url_seeds);
 }
 
-TEST_CASE("filtering non-HTTPS sources filters torrent metadata too")
+TEST_CASE("filtering non-HTTPS sources filters loaded torrent sources")
 {
-    lt::add_torrent_params params = bridge_tests::add_params_with_hashes();
-    params.ti = make_source_torrent_info();
-    params.info_hashes = params.ti->info_hashes();
+    lt::add_torrent_params params = make_source_torrent_params();
 
     CHECK(filter_non_https_sources(params));
 
-    TorrentSourceCounts const counts = torrent_source_counts(*params.ti);
+    TorrentSourceCounts const counts = torrent_source_counts(params);
     CHECK(counts.tracker_count == 1);
     CHECK(counts.https_tracker_count == 1);
-    CHECK(counts.web_seed_count == 2);
-    CHECK(counts.https_web_seed_count == 2);
+    CHECK(counts.web_seed_count == 1);
+    CHECK(counts.https_web_seed_count == 1);
 }
 
 TEST_CASE("restricted DHT policy strips trackerless resume peer cache")
@@ -591,9 +655,7 @@ TEST_CASE("resume encoding uses captured source policy snapshot")
 
 TEST_CASE("restored source policy trackers are persisted in resume params with metadata")
 {
-    lt::add_torrent_params params = bridge_tests::add_params_with_hashes();
-    params.ti = make_source_torrent_info();
-    params.info_hashes = params.ti->info_hashes();
+    lt::add_torrent_params params = make_source_torrent_params();
     params.trackers.clear();
     params.tracker_tiers.clear();
 

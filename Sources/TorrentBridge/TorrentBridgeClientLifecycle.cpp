@@ -316,6 +316,10 @@ TorrentIdentity *TTorrentClient::make_identity(std::string canonical_id)
 TorrentIdentity *TTorrentClient::attach_identity(lt::add_torrent_params &params, std::string canonical_id)
 {
     TorrentIdentity *identity = make_identity(std::move(canonical_id));
+    std::array<char, sizeof(TTorrentSnapshot::comment)> comment{};
+    copy_string(std::span{comment}, params.comment);
+    identity->comment = comment.data();
+    identity->creation_date = std::max<std::time_t>(params.creation_date, 0);
     params.userdata = identity;
     return identity;
 }

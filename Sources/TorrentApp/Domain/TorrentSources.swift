@@ -70,30 +70,11 @@ struct TorrentTrackerHostItem: Hashable, Sendable {
     let host: String
 }
 
-enum TorrentWebSeedKind: Int32, Hashable, Sendable {
-    case urlSeed = 0
-    case httpSeed = 1
-
-    init(rawBridgeValue: Int32) {
-        self = TorrentWebSeedKind(rawValue: rawBridgeValue) ?? .urlSeed
-    }
-
-    var title: String {
-        switch self {
-        case .urlSeed:
-            return "Web Seed"
-        case .httpSeed:
-            return "HTTP Seed"
-        }
-    }
-}
-
 struct TorrentWebSeedItem: Identifiable, Hashable, Sendable {
     let url: String
-    let kind: TorrentWebSeedKind
 
     var id: String {
-        "\(kind.rawValue):\(url)"
+        url
     }
 }
 

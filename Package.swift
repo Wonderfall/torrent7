@@ -109,8 +109,10 @@ let bridgeDefines: [CXXSetting] = [
     .define("_LIBCPP_HARDENING_MODE", to: libcppHardeningMode),
     .define("BOOST_ASIO_ENABLE_CANCELIO"),
     .define("BOOST_ASIO_NO_DEPRECATED"),
-    .define("TORRENT_NO_DEPRECATE"),
+    .define("BOOST_SYSTEM_USE_UTF8"),
+    .define("TORRENT_ABI_VERSION", to: "100"),
     .define("TORRENT_USE_I2P", to: "0"),
+    .define("TORRENT_USE_RTC", to: "0"),
     .define("TORRENT_DISABLE_LOGGING"),
     .define("TORRENT_DISABLE_MUTABLE_TORRENTS"),
     .define("TORRENT_DISABLE_STREAMING"),
@@ -125,7 +127,11 @@ let bridgeDefines: [CXXSetting] = [
     .define("OPENSSL_NO_TLS1"),
     .define("OPENSSL_NO_TLS1_1"),
     .define("OPENSSL_NO_DTLS1")
-]
+] + (enableDiagnostics ? [
+    // The diagnostics dependency uses libtorrent's CMake Debug configuration,
+    // whose public assertion mode changes internal C++ object layouts.
+    .define("TORRENT_USE_ASSERTS", to: "1")
+] : [])
 let bridgeStaticLibraryFlags = [
     "\(depsPrefix)/lib/libtorrent-rasterbar.a",
     "\(opensslPrefix)/lib/libssl.a",
@@ -133,8 +139,7 @@ let bridgeStaticLibraryFlags = [
 ]
 let bridgeLinkerHardeningFlags = [
     "-Xlinker", "-dead_strip",
-    "-Xlinker", "-dead_strip_dylibs",
-    "-Xlinker", "-pie"
+    "-Xlinker", "-dead_strip_dylibs"
 ]
 let appSwiftStrictnessFlags = [
     "-strict-concurrency=complete"

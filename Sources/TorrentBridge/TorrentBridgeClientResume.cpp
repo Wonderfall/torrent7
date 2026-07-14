@@ -220,7 +220,7 @@ ResumeSaveResult TTorrentClient::write_resume_data_checked(
     }
 
     if (params.ti) {
-        BridgeResult const valid_info = validate_torrent_info(*params.ti);
+        BridgeResult const valid_info = validate_torrent_info(params);
         if (!valid_info) {
             return std::unexpected(valid_info.error().message);
         }

@@ -1,0 +1,46 @@
+diff --git a/include/libtorrent/aux_/io.hpp b/include/libtorrent/aux_/io.hpp
+index d847182cd873b5cc9723c85cac22bd57eaa2a4aa..406c7c7aa7d4e34657d203517cd749aa71cb29f4 100644
+--- a/include/libtorrent/aux_/io.hpp
++++ b/include/libtorrent/aux_/io.hpp
+@@ -11,6 +11,7 @@ see LICENSE file.
+ #ifndef TORRENT_AUX_IO_HPP_INCLUDED
+ #define TORRENT_AUX_IO_HPP_INCLUDED
+ 
++#include <algorithm>
+ #include <cstdint>
+ #include <string>
+ #include <type_traits>
+diff --git a/include/libtorrent/aux_/packet_pool.hpp b/include/libtorrent/aux_/packet_pool.hpp
+index 00899fd78b4e1ed73bf1e2dd82f54ffdd67c5aae..799e3765cffa4cbb140d5a4e860629f07538eb2f 100644
+--- a/include/libtorrent/aux_/packet_pool.hpp
++++ b/include/libtorrent/aux_/packet_pool.hpp
+@@ -75,7 +75,14 @@ namespace libtorrent {
+ 		bool mtu_probe:1;
+ 
+ 		// the actual packet buffer
+-		std::uint8_t buf[1];
++#if defined(__clang__)
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wc99-extensions"
++#endif
++		std::uint8_t buf[];
++#if defined(__clang__)
++#pragma clang diagnostic pop
++#endif
+ 	};
+ 
+ 	static_assert((sizeof(packet) & 0x7) == 0, "packet structure size should be divisible by 8");
+diff --git a/include/libtorrent/flags.hpp b/include/libtorrent/flags.hpp
+index c19fcd72aaa64ea802f7f1d73192ac4aa36ae7df..60224b1151d6fa714e0db38c1595ddd1532619bf 100644
+--- a/include/libtorrent/flags.hpp
++++ b/include/libtorrent/flags.hpp
+@@ -13,8 +13,8 @@ see LICENSE file.
+ #include <type_traits> // for enable_if
+ 
+ #if TORRENT_USE_IOSTREAM
+-#include <iosfwd>
+ #include <iomanip>
++#include <ostream>
+ #endif
+ 
+ namespace libtorrent {
