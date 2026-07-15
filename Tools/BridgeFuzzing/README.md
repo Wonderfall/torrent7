@@ -43,7 +43,14 @@ Useful overrides:
 ```sh
 Tools/BridgeFuzzing/build-libfuzzer.sh bridge_torrent_file
 JOBS=4 Tools/BridgeFuzzing/build-libfuzzer-deps.sh
+ALLOW_EXTERNAL_LIBFUZZER_DEPS=1 \
+  LIBFUZZER_DEPS_ROOT=/absolute/path/to/an/empty/cache \
+  Tools/BridgeFuzzing/build-libfuzzer-deps.sh
 ```
+
+An external dependency root must be empty on first use. The builder marks it as
+owned, and only removes its fixed `prefix` and `build` children on later
+rebuilds.
 
 ## Run
 

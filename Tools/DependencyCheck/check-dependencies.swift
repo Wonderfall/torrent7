@@ -41,6 +41,7 @@ struct ProcessResult {
 
 final class DependencyChecker {
     private let buildDepsPath: URL
+    private let libtorrentPatchSeriesPath: URL
     private let opensslReleaseKeysPath: URL
     private let summaryPath: URL?
     private let now: Date
@@ -58,6 +59,7 @@ final class DependencyChecker {
         let root = try Self.findRoot(startingAt: scriptDirectory)
 
         self.buildDepsPath = root.appendingPathComponent("Scripts/build-deps.zsh")
+        self.libtorrentPatchSeriesPath = root.appendingPathComponent("Scripts/libtorrent-patch-series.sh")
         self.opensslReleaseKeysPath = root.appendingPathComponent("Scripts/keys/openssl-release-pubkeys.asc")
         self.summaryPath = try Self.summaryPath(from: Array(CommandLine.arguments.dropFirst()))
 
@@ -222,7 +224,7 @@ final class DependencyChecker {
             "# Dependency Check",
             "",
             "- Cooldown: \(cooldownDays) day\(cooldownDays == 1 ? "" : "s")",
-            "- Pins source: `Scripts/build-deps.zsh`",
+            "- Pins source: `Scripts/build-deps.zsh` and `Scripts/libtorrent-patch-series.sh`",
             ""
         ]
 
@@ -590,7 +592,16 @@ final class DependencyChecker {
 
     private func checkLibtorrent() async throws {
         let pinnedTag = try buildDepDefault("LIBTORRENT_TAG")
-        let pinnedCommit = try buildDepDefault("LIBTORRENT_COMMIT")
+        let commitResult = try runProcess(libtorrentPatchSeriesPath.path, ["commit"])
+        let pinnedCommit = commitResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard commitResult.status == 0,
+              pinnedCommit.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil
+        else {
+            throw CheckFailure.message(
+                "Could not read the pinned libtorrent commit from \(libtorrentPatchSeriesPath.path): "
+                    + commitResult.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        }
         let releases = try await fetchJSON([GitHubRelease].self, from: "https://api.github.com/repos/arvidn/libtorrent/releases?per_page=100")
 
         let stable2x = try releases.compactMap { release -> Release? in

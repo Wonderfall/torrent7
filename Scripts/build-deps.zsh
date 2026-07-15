@@ -157,13 +157,11 @@ typeset -a OPENSSL_CONFIGURE_OPTIONS=(
 typeset -r LIBTORRENT_SOURCE_DIR="$SOURCE_ROOT/libtorrent"
 typeset -r LIBTORRENT_BUILD_DIR="$BUILD_ROOT/libtorrent"
 typeset -r LIBTORRENT_BUILD_STAMP="$DEPS_PREFIX/.torrent-app-libtorrent-build"
+typeset -r LIBTORRENT_PROVENANCE="$DEPS_PREFIX/share/torrent7/libtorrent-provenance.txt"
+typeset -r LIBTORRENT_PATCH_HELPER="$ROOT_DIR/Scripts/libtorrent-patch-series.sh"
 typeset -r LIBTORRENT_REPO=${LIBTORRENT_REPO:-https://github.com/arvidn/libtorrent.git}
 typeset -r LIBTORRENT_TAG=${LIBTORRENT_TAG:-v2.1.0}
-typeset -r LIBTORRENT_COMMIT=${LIBTORRENT_COMMIT:-578e06824c3546f3371ab43967ab288a7e253eca}
-typeset -r LIBTORRENT_PATCH="$ROOT_DIR/Scripts/patches/libtorrent-2.1.0-xcode-26.patch"
-typeset -r LIBTORRENT_PATCHED_IO_BLOB=406c7c7aa7d4e34657d203517cd749aa71cb29f4
-typeset -r LIBTORRENT_PATCHED_PACKET_POOL_BLOB=799e3765cffa4cbb140d5a4e860629f07538eb2f
-typeset -r LIBTORRENT_PATCHED_FLAGS_BLOB=60224b1151d6fa714e0db38c1595ddd1532619bf
+typeset -r LIBTORRENT_COMMIT=$("$LIBTORRENT_PATCH_HELPER" commit)
 typeset -r LIBTORRENT_MIRROR_DIR="$GIT_CACHE_DIR/libtorrent.git"
 typeset -r LIBTORRENT_SUBMODULE_MIRROR_ROOT="$GIT_CACHE_DIR/libtorrent-submodules"
 typeset -ar LIBTORRENT_REQUIRED_SUBMODULES=(
@@ -244,28 +242,36 @@ require_path() {
 
 remove_dependency_path() {
     local target="$1"
-    local default_root
+    local default_root=""
     local target_parent
+    local within_default=0
 
-    mkdir -p "$DEFAULT_DEPS_DIR"
-    default_root="$(cd "$DEFAULT_DEPS_DIR" && pwd -P)"
-    mkdir -p "$(dirname "$target")"
+    # Only the literal in-project cache is trusted implicitly. If either fixed
+    # parent is a symlink, its physical destination is external and requires
+    # the same explicit opt-in as any other external dependency location.
+    if [[ ! -L "$ROOT_DIR/.build" && ! -L "$DEFAULT_DEPS_DIR" ]]; then
+        mkdir -p -- "$DEFAULT_DEPS_DIR"
+        default_root="$(cd "$DEFAULT_DEPS_DIR" && pwd -P)"
+        [[ "$default_root" == "$DEFAULT_DEPS_DIR" ]] || default_root=""
+    fi
+
+    mkdir -p -- "$(dirname "$target")"
     target_parent="$(cd "$(dirname "$target")" && pwd -P)"
 
-    case "$target_parent/" in
-        "$default_root"/*)
-            rm -rf "$target"
-            ;;
-        *)
-            if [[ "$ALLOW_EXTERNAL_DEPS_CLEAN" == "1" ]]; then
-                rm -rf "$target"
-            else
-                print -ru2 -- "Refusing to remove external dependency path: $target"
-                print -ru2 -- "Set ALLOW_EXTERNAL_DEPS_CLEAN=1 to allow cleanup outside $DEFAULT_DEPS_DIR."
-                exit 1
-            fi
-            ;;
-    esac
+    if [[ -n "$default_root" ]]; then
+        case "$target_parent/" in
+            "$default_root"/*) within_default=1 ;;
+        esac
+    fi
+    if [[ "$within_default" == "1" ]]; then
+        rm -rf -- "$target"
+    elif [[ "$ALLOW_EXTERNAL_DEPS_CLEAN" == "1" ]]; then
+        rm -rf -- "$target"
+    else
+        print -ru2 -- "Refusing to remove external dependency path: $target"
+        print -ru2 -- "Set ALLOW_EXTERNAL_DEPS_CLEAN=1 to allow cleanup outside $DEFAULT_DEPS_DIR."
+        exit 1
+    fi
 }
 
 is_exact_git_checkout() {
@@ -351,19 +357,70 @@ seed_openssl_signature_from_existing_profiles() {
 stamp_matches() {
     local stamp="$1"
     local generator="$2"
+    local base="$3"
     local expected
 
-    [[ -f "$stamp" ]] || return 1
+    [[ -f "$stamp" && ! -L "$stamp" ]] || return 1
+    prepare_stamp_directory "$base" "${stamp:h}"
     expected="$("$generator")"
     [[ "$(cat "$stamp")" == "$expected" ]]
+}
+
+prepare_stamp_directory() {
+    local base="${1:a}"
+    local directory="${2:a}"
+    local relative
+    local current
+    local component
+    local next
+    local -a components
+
+    [[ -d "$base" && ! -L "$base" ]] \
+        || fail "Refusing stamp access through a symlinked dependency prefix: $base"
+    case "$directory/" in
+        "$base/"*) ;;
+        *) fail "Refusing stamp path outside dependency prefix: $directory" ;;
+    esac
+
+    relative=${directory#"$base"}
+    relative=${relative#/}
+    if [[ -z "$relative" ]]; then
+        return 0
+    fi
+    components=("${(@s:/:)relative}")
+    current="$base"
+    for component in "${components[@]}"; do
+        [[ -n "$component" && "$component" != "." && "$component" != ".." ]] \
+            || fail "Invalid dependency stamp path: $directory"
+        next="$current/$component"
+        [[ ! -L "$next" ]] \
+            || fail "Refusing stamp access through a symlinked cache directory: $next"
+        if [[ ! -e "$next" ]]; then
+            mkdir -- "$next"
+        fi
+        [[ -d "$next" ]] || fail "Dependency stamp parent is not a directory: $next"
+        current="$next"
+    done
 }
 
 write_stamp() {
     local stamp="$1"
     local generator="$2"
+    local base="$3"
+    local directory="${stamp:h}"
+    local temporary
 
-    mkdir -p "$(dirname "$stamp")"
-    "$generator" >"$stamp"
+    prepare_stamp_directory "$base" "$directory"
+    temporary="$(mktemp "$directory/.${stamp:t}.tmp.XXXXXXXX")" \
+        || fail "Could not create temporary dependency stamp"
+    if ! "$generator" >"$temporary"; then
+        rm -f -- "$temporary"
+        fail "Could not generate dependency stamp: $stamp"
+    fi
+    if ! /bin/mv -fh "$temporary" "$stamp"; then
+        rm -f -- "$temporary"
+        fail "Could not publish dependency stamp: $stamp"
+    fi
 }
 
 openssl_configure_options_text() {
@@ -427,8 +484,8 @@ EOF
 libtorrent_build_manifest() {
     cat <<EOF
 libtorrent-tag=$LIBTORRENT_TAG
-libtorrent-commit=$LIBTORRENT_COMMIT
-libtorrent-patch-sha256=$(file_sha256 "$LIBTORRENT_PATCH")
+libtorrent-patch-helper-sha256=$(file_sha256 "$LIBTORRENT_PATCH_HELPER")
+$("$LIBTORRENT_PATCH_HELPER" manifest "$LIBTORRENT_SOURCE_DIR")
 target-arch=$TARGET_ARCH
 target-triple=$TARGET_TRIPLE
 deployment-target=$MACOSX_DEPLOYMENT_TARGET
@@ -700,7 +757,7 @@ extract_boost() {
 }
 
 install_boost_headers() {
-    if [[ -f "$BOOST_PREFIX/include/boost/version.hpp" ]] && stamp_matches "$BOOST_HEADERS_STAMP" boost_headers_manifest; then
+    if [[ -f "$BOOST_PREFIX/include/boost/version.hpp" ]] && stamp_matches "$BOOST_HEADERS_STAMP" boost_headers_manifest "$BOOST_PREFIX"; then
         return
     fi
 
@@ -708,7 +765,7 @@ install_boost_headers() {
     mkdir -p "$BOOST_PREFIX/include" "$BOOST_PREFIX/share/licenses/boost"
     cp -R "$BOOST_SOURCE_DIR/boost" "$BOOST_PREFIX/include/"
     cp "$BOOST_SOURCE_DIR/LICENSE_1_0.txt" "$BOOST_PREFIX/share/licenses/boost/LICENSE_1_0.txt"
-    write_stamp "$BOOST_HEADERS_STAMP" boost_headers_manifest
+    write_stamp "$BOOST_HEADERS_STAMP" boost_headers_manifest "$BOOST_PREFIX"
 }
 
 extract_openssl() {
@@ -726,7 +783,7 @@ extract_openssl() {
 }
 
 build_openssl() {
-    if [[ -f "$DEPS_PREFIX/lib/libssl.a" && -f "$DEPS_PREFIX/lib/libcrypto.a" ]] && stamp_matches "$OPENSSL_BUILD_STAMP" openssl_build_manifest; then
+    if [[ -f "$DEPS_PREFIX/lib/libssl.a" && -f "$DEPS_PREFIX/lib/libcrypto.a" ]] && stamp_matches "$OPENSSL_BUILD_STAMP" openssl_build_manifest "$DEPS_PREFIX"; then
         thin_archive_arch "$DEPS_PREFIX/lib/libssl.a" "$TARGET_ARCH"
         thin_archive_arch "$DEPS_PREFIX/lib/libcrypto.a" "$TARGET_ARCH"
         verify_archive_arch "$DEPS_PREFIX/lib/libssl.a" "$TARGET_ARCH"
@@ -762,7 +819,7 @@ build_openssl() {
     thin_archive_arch "$DEPS_PREFIX/lib/libcrypto.a" "$TARGET_ARCH"
     verify_archive_arch "$DEPS_PREFIX/lib/libssl.a" "$TARGET_ARCH"
     verify_archive_arch "$DEPS_PREFIX/lib/libcrypto.a" "$TARGET_ARCH"
-    write_stamp "$OPENSSL_BUILD_STAMP" openssl_build_manifest
+    write_stamp "$OPENSSL_BUILD_STAMP" openssl_build_manifest "$DEPS_PREFIX"
 }
 
 ensure_git_mirror() {
@@ -837,32 +894,9 @@ libtorrent_checkout_status() {
         --ignore-submodules=none
 }
 
-libtorrent_checkout_has_expected_patch() {
-    local -r expected_status=$' M include/libtorrent/aux_/io.hpp\n M include/libtorrent/aux_/packet_pool.hpp\n M include/libtorrent/flags.hpp'
-
-    [[ "$(libtorrent_checkout_status)" == "$expected_status" ]] || return 1
-    [[ "$(git hash-object --no-filters "$LIBTORRENT_SOURCE_DIR/include/libtorrent/aux_/io.hpp")" \
-        == "$LIBTORRENT_PATCHED_IO_BLOB" ]] || return 1
-    [[ "$(git hash-object --no-filters "$LIBTORRENT_SOURCE_DIR/include/libtorrent/aux_/packet_pool.hpp")" \
-        == "$LIBTORRENT_PATCHED_PACKET_POOL_BLOB" ]] || return 1
-    [[ "$(git hash-object --no-filters "$LIBTORRENT_SOURCE_DIR/include/libtorrent/flags.hpp")" \
-        == "$LIBTORRENT_PATCHED_FLAGS_BLOB" ]]
-}
-
-apply_libtorrent_patch() {
-    require_path "$LIBTORRENT_PATCH" "libtorrent compatibility patch"
-
-    if libtorrent_checkout_has_expected_patch; then
-        return
-    fi
-    if [[ -n "$(libtorrent_checkout_status)" ]] \
-        || ! git -C "$LIBTORRENT_SOURCE_DIR" apply --check "$LIBTORRENT_PATCH" 2>/dev/null
-    then
-        fail "Could not apply libtorrent compatibility patch: $LIBTORRENT_PATCH"
-    fi
-    git -C "$LIBTORRENT_SOURCE_DIR" apply "$LIBTORRENT_PATCH"
-    libtorrent_checkout_has_expected_patch \
-        || fail "libtorrent compatibility patch produced an unexpected source tree"
+apply_libtorrent_patches() {
+    require_path "$LIBTORRENT_PATCH_HELPER" "libtorrent patch-series helper"
+    "$LIBTORRENT_PATCH_HELPER" apply "$LIBTORRENT_SOURCE_DIR"
 }
 
 clone_libtorrent() {
@@ -873,9 +907,12 @@ clone_libtorrent() {
     if [[ -d "$LIBTORRENT_SOURCE_DIR/.git" ]]; then
         local current
         current="$(git -C "$LIBTORRENT_SOURCE_DIR" rev-parse HEAD 2>/dev/null || true)"
-        if [[ "$current" != "$LIBTORRENT_COMMIT" ]] \
-            || { [[ -n "$(libtorrent_checkout_status)" ]] && ! libtorrent_checkout_has_expected_patch; }
-        then
+        local checkout_status
+        checkout_status="$(libtorrent_checkout_status)"
+        if [[ "$current" != "$LIBTORRENT_COMMIT" ]]; then
+            if [[ -n "$checkout_status" ]]; then
+                fail "Refusing to replace a libtorrent checkout with unexpected local changes: $LIBTORRENT_SOURCE_DIR"
+            fi
             remove_dependency_path "$LIBTORRENT_SOURCE_DIR"
         fi
     elif [[ -e "$LIBTORRENT_SOURCE_DIR" ]]; then
@@ -893,7 +930,7 @@ clone_libtorrent() {
         git -C "$LIBTORRENT_SOURCE_DIR" remote set-url origin "$LIBTORRENT_REPO"
     fi
 
-    apply_libtorrent_patch
+    apply_libtorrent_patches
     setup_libtorrent_submodule_mirrors
 
     local current
@@ -905,8 +942,9 @@ clone_libtorrent() {
 
 build_libtorrent() {
     local -a cmake_generator_args=()
-    if [[ -f "$DEPS_PREFIX/lib/libtorrent-rasterbar.a" ]] && stamp_matches "$LIBTORRENT_BUILD_STAMP" libtorrent_build_manifest; then
+    if [[ -f "$DEPS_PREFIX/lib/libtorrent-rasterbar.a" ]] && stamp_matches "$LIBTORRENT_BUILD_STAMP" libtorrent_build_manifest "$DEPS_PREFIX"; then
         verify_archive_arch "$DEPS_PREFIX/lib/libtorrent-rasterbar.a" "$TARGET_ARCH"
+        write_stamp "$LIBTORRENT_PROVENANCE" libtorrent_build_manifest "$DEPS_PREFIX"
         return
     fi
 
@@ -917,7 +955,8 @@ build_libtorrent() {
         "$DEPS_PREFIX/lib/libtorrent-rasterbar.a" \
         "$DEPS_PREFIX/lib/pkgconfig/libtorrent-rasterbar.pc" \
         "$DEPS_PREFIX/share/cmake/Modules/FindLibtorrentRasterbar.cmake" \
-        "$LIBTORRENT_BUILD_STAMP"
+        "$LIBTORRENT_BUILD_STAMP" \
+        "$LIBTORRENT_PROVENANCE"
 
     if [[ -n ${CMAKE_GENERATOR:-} ]]; then
         cmake_generator_args=(-G "$CMAKE_GENERATOR")
@@ -961,7 +1000,8 @@ build_libtorrent() {
     cmake --build "$LIBTORRENT_BUILD_DIR" --target install --parallel "${JOBS:-$(sysctl -n hw.ncpu)}"
 
     verify_archive_arch "$DEPS_PREFIX/lib/libtorrent-rasterbar.a" "$TARGET_ARCH"
-    write_stamp "$LIBTORRENT_BUILD_STAMP" libtorrent_build_manifest
+    write_stamp "$LIBTORRENT_BUILD_STAMP" libtorrent_build_manifest "$DEPS_PREFIX"
+    write_stamp "$LIBTORRENT_PROVENANCE" libtorrent_build_manifest "$DEPS_PREFIX"
 }
 
 require_tool cmake

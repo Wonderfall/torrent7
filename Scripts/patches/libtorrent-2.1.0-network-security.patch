@@ -1,0 +1,596 @@
+diff --git a/include/libtorrent/aux_/parse_url.hpp b/include/libtorrent/aux_/parse_url.hpp
+index 1827ddc87..bec9f3a6f 100644
+--- a/include/libtorrent/aux_/parse_url.hpp
++++ b/include/libtorrent/aux_/parse_url.hpp
+@@ -51,6 +51,12 @@ namespace libtorrent::aux {
+ 	// false if either URL fails to parse. Used to decide whether credentials
+ 	// may be forwarded across an HTTP redirect.
+ 	TORRENT_EXTRA_EXPORT bool same_origin(std::string const& a, std::string const& b);
++
++	// Returns true when an HTTPS referrer would redirect to a URL that is not
++	// HTTPS. The target is expected to have already been resolved against the
++	// referrer. An invalid target is treated as insecure.
++	TORRENT_EXTRA_EXPORT bool is_https_redirect_downgrade(
++		std::string const& referrer, std::string const& target);
+ }
+ 
+ #endif
+diff --git a/include/libtorrent/aux_/web_peer_connection.hpp b/include/libtorrent/aux_/web_peer_connection.hpp
+index cb604ff4d..b7cd24cb6 100644
+--- a/include/libtorrent/aux_/web_peer_connection.hpp
++++ b/include/libtorrent/aux_/web_peer_connection.hpp
+@@ -26,6 +26,11 @@ see LICENSE file.
+ 
+ namespace libtorrent::aux {
+ 
++	// Builds an HTTP proxy absolute-form request target from an endpoint that
++	// has already passed the web-seed address policy.
++	TORRENT_EXTRA_EXPORT std::string make_web_seed_proxy_request_target(
++		tcp::endpoint const& target, std::string const& path);
++
+ 	class TORRENT_EXTRA_EXPORT web_peer_connection
+ 		: public web_connection_base
+ 	{
+diff --git a/include/libtorrent/settings_pack.hpp b/include/libtorrent/settings_pack.hpp
+index 05cde75b5..d26c6b2d8 100644
+--- a/include/libtorrent/settings_pack.hpp
++++ b/include/libtorrent/settings_pack.hpp
+@@ -992,13 +992,10 @@ namespace aux {
+ 			// tracker request to loopback will be rejected. This applies to
+ 			// trackers that redirect to loopback as well.
+ 			//
+-			// Web seeds that end up on the client's local network (i.e. in a
+-			// private IP address range) may not include query string arguments.
+-			// This applies to web seeds redirecting to the local network as
+-			// well.
+-			//
+-			// Web seeds on global IPs (i.e. not local network) may not redirect
+-			// to a local network address
++			// Web seeds must resolve to globally routable addresses. Loopback,
++			// private, link-local, multicast and unspecified endpoints are
++			// rejected, including redirect targets. Well-known NAT64 addresses
++			// are accepted only when they embed a globally routable IPv4 address.
+ 			ssrf_mitigation,
+ 
+ 			// when disabled, any tracker or web seed with an IDNA hostname
+diff --git a/src/http_connection.cpp b/src/http_connection.cpp
+index eaf4876fe..be73073cd 100644
+--- a/src/http_connection.cpp
++++ b/src/http_connection.cpp
+@@ -761,6 +761,11 @@ void http_connection::on_read(error_code const& e
+ 			m_sock->close(ec);
+ 
+ 			std::string url = aux::resolve_redirect_location(m_url, location);
++			if (is_https_redirect_downgrade(m_url, url))
++			{
++				callback(error_code(errors::unsupported_url_protocol));
++				return;
++			}
+ 
+ 			// Don't forward Authorization credentials to a different
+ 			// origin. The redirect target may be a third party server
+diff --git a/src/ip_helpers.cpp b/src/ip_helpers.cpp
+index 5d8dfe0ee..ae51f84bf 100644
+--- a/src/ip_helpers.cpp
++++ b/src/ip_helpers.cpp
+@@ -8,6 +8,10 @@ see LICENSE file.
+ */
+ 
+ #include "libtorrent/config.hpp"
++
++#include <algorithm>
++#include <cstdint>
++
+ #include "libtorrent/address.hpp"
+ #include "libtorrent/error_code.hpp"
+ #include "libtorrent/io_context.hpp"
+@@ -30,7 +34,25 @@ namespace aux {
+ 		{
+ 			// https://www.iana.org/assignments/ipv6-address-space/ipv6-address-space.xhtml
+ 			address_v6 const a6 = a.to_v6();
+-			return (a6.to_bytes()[0] & 0xe0) == 0x20;
++			auto const bytes = a6.to_bytes();
++			if ((bytes[0] & 0xe0) == 0x20) return true;
++
++			// The well-known NAT64 prefix represents an IPv4 destination. Treat
++			// it as global only when the embedded IPv4 address is global too, so
++			// DNS64 remains usable without opening a path to private IPv4 space.
++			bool const well_known_nat64 = bytes[0] == 0x00
++				&& bytes[1] == 0x64
++				&& bytes[2] == 0xff
++				&& bytes[3] == 0x9b
++				&& std::all_of(bytes.begin() + 4, bytes.begin() + 12
++					, [](std::uint8_t const b) { return b == 0; });
++			if (!well_known_nat64) return false;
++
++			std::uint32_t const embedded_v4 = (std::uint32_t(bytes[12]) << 24)
++				| (std::uint32_t(bytes[13]) << 16)
++				| (std::uint32_t(bytes[14]) << 8)
++				| std::uint32_t(bytes[15]);
++			return is_global(address_v4(embedded_v4));
+ 		}
+ 		else
+ 		{
+@@ -104,4 +126,3 @@ namespace aux {
+ 
+ }
+ }
+-
+diff --git a/src/parse_url.cpp b/src/parse_url.cpp
+index e3a55d9b8..6f911ea1e 100644
+--- a/src/parse_url.cpp
++++ b/src/parse_url.cpp
+@@ -233,6 +233,21 @@ exit:
+ 			&& std::get<2>(oa) == std::get<2>(ob);
+ 	}
+ 
++	bool is_https_redirect_downgrade(std::string const& referrer
++		, std::string const& target)
++	{
++		error_code referrer_ec;
++		auto const referrer_components = parse_url_components(referrer, referrer_ec);
++		if (referrer_ec
++			|| !string_equal_no_case(std::get<0>(referrer_components), "https"))
++			return false;
++
++		error_code target_ec;
++		auto const target_components = parse_url_components(target, target_ec);
++		return target_ec
++			|| !string_equal_no_case(std::get<0>(target_components), "https");
++	}
++
+ 	bool is_valid_tracker_url(string_view const url)
+ 	{
+ 		if (url.empty())
+diff --git a/src/torrent.cpp b/src/torrent.cpp
+index fecec2704..8d9fc5cb0 100644
+--- a/src/torrent.cpp
++++ b/src/torrent.cpp
+@@ -6768,6 +6768,8 @@ namespace {
+ 		}
+ 
+ 		aux::proxy_settings const& ps = m_ses.proxy();
++		bool const enforce_endpoint_policy = web->no_local_ips
++			|| settings().get_bool(settings_pack::ssrf_mitigation);
+ 		if ((ps.type == settings_pack::http
+ 			|| ps.type == settings_pack::http_pw)
+ 			&& ps.proxy_peer_connections)
+@@ -6784,7 +6786,8 @@ namespace {
+ 				, [self = shared_from_this(), web, proxy_port](error_code const& e, std::vector<address> const& addrs)
+ 				{ self->wrap(&torrent::on_proxy_name_lookup, e, addrs, web, proxy_port); });
+ 		}
+-		else if (ps.proxy_hostnames
++		else if (!enforce_endpoint_policy
++			&& ps.proxy_hostnames
+ 			&& (ps.type == settings_pack::socks5
+ 				|| ps.type == settings_pack::socks5_pw)
+ 			&& ps.proxy_peer_connections)
+@@ -6935,11 +6938,23 @@ namespace {
+ 			return;
+ 		}
+ 
++		bool const block_non_global = web->no_local_ips
++			|| settings().get_bool(settings_pack::ssrf_mitigation);
++		bool blocked_non_global = false;
+ 		for (auto const& addr : addrs)
+ 		{
+-			// if this is set, we don't allow this web seed to have resolved to a
+-			// local IP
+-			if (web->no_local_ips && !aux::is_global(addr)) continue;
++			// Untrusted web-seed metadata must never turn the client into an HTTP
++			// transport to a non-global address. Apply this after resolution so
++			// hostnames and literals receive the same policy.
++			if (block_non_global && !aux::is_global(addr))
++			{
++				blocked_non_global = true;
++				if (m_ses.alerts().should_post<peer_blocked_alert>())
++					m_ses.alerts().emplace_alert<peer_blocked_alert>(get_handle()
++						, tcp::endpoint(addr, std::uint16_t(port))
++						, peer_blocked_alert::ssrf_mitigation);
++				continue;
++			}
+ 
+ 			// fill in the peer struct's address field
+ 			web->endpoints.emplace_back(addr, std::uint16_t(port));
+@@ -6954,8 +6969,9 @@ namespace {
+ 		{
+ 			if (m_ses.alerts().should_post<url_seed_alert>())
+ 			{
+-				m_ses.alerts().emplace_alert<url_seed_alert>(get_handle()
+-					, web->url, errors::banned_by_ip_filter);
++				m_ses.alerts().emplace_alert<url_seed_alert>(get_handle(), web->url
++					, blocked_non_global ? errors::ssrf_mitigation
++						: errors::banned_by_ip_filter);
+ 			}
+ 
+ 			// the name lookup failed for the http host. Don't try
+@@ -6979,23 +6995,9 @@ namespace {
+ 		TORRENT_ASSERT(is_single_thread());
+ 		if (m_abort) return;
+ 
+-		if (m_ip_filter && m_ip_filter->access(a.address()) & ip_filter::blocked)
+-		{
+-			if (m_ses.alerts().should_post<peer_blocked_alert>())
+-				m_ses.alerts().emplace_alert<peer_blocked_alert>(get_handle()
+-					, a, peer_blocked_alert::ip_filter);
+-			return;
+-		}
+-
+ 		TORRENT_ASSERT(!web->resolving);
+ 		TORRENT_ASSERT(web->peer_info.connection == nullptr);
+ 
+-		if (aux::is_v4(a))
+-		{
+-			web->peer_info.addr = a.address().to_v4();
+-			web->peer_info.port = a.port();
+-		}
+-
+ 		if (is_paused()) return;
+ 		if (m_ses.is_aborted()) return;
+ 		if (is_upload_only()) return;
+@@ -7028,10 +7030,9 @@ namespace {
+ 		}
+ 
+ 		std::string hostname;
+-		std::string path;
+ 		error_code ec;
+ 		using std::ignore;
+-		std::tie(ignore, ignore, hostname, ignore, path)
++		std::tie(ignore, ignore, hostname, ignore, ignore)
+ 			= parse_url_components(web->url, ec);
+ 		if (ec)
+ 		{
+@@ -7056,18 +7057,22 @@ namespace {
+ 			return;
+ 		}
+ 
+-		// The SSRF mitigation for web seeds is that any HTTP server on the
+-		// local network may not use any query string parameters
+-		if (settings().get_bool(settings_pack::ssrf_mitigation)
+-			&& aux::is_local(web->peer_info.addr)
+-			&& path.find('?') != std::string::npos)
++		bool const is_ip = aux::is_ip_address(hostname);
++		if (is_ip) a.address(make_address(hostname, ec));
++
++		// Check again at the connection boundary. This covers cached endpoints,
++		// numeric hosts, and any future call path that bypasses on_name_lookup().
++		// When this policy is active, proxy connections are pinned to the locally
++		// resolved and filtered endpoint instead of asking the proxy to resolve it.
++		bool const enforce_endpoint_policy = web->no_local_ips
++			|| settings().get_bool(settings_pack::ssrf_mitigation);
++		if (enforce_endpoint_policy
++			&& !aux::is_global(a.address()))
+ 		{
+ #ifndef TORRENT_DISABLE_LOGGING
+ 			if (should_log())
+-			{
+ 				debug_log("*** SSRF MITIGATION BLOCKED WEB SEED: %s"
+ 					, web->url.c_str());
+-			}
+ #endif
+ 			if (m_ses.alerts().should_post<url_seed_alert>())
+ 				m_ses.alerts().emplace_alert<url_seed_alert>(get_handle()
+@@ -7075,17 +7080,34 @@ namespace {
+ 			if (m_ses.alerts().should_post<peer_blocked_alert>())
+ 				m_ses.alerts().emplace_alert<peer_blocked_alert>(get_handle()
+ 					, a, peer_blocked_alert::ssrf_mitigation);
+-			// never try it again
+ 			web->disabled = true;
+ 			return;
+ 		}
+ 
+-		bool const is_ip = aux::is_ip_address(hostname);
+-		if (is_ip) a.address(make_address(hostname, ec));
++		// Apply the user IP filter after replacing a proxy placeholder with a
++		// numeric URL host. Otherwise a SOCKS remote-DNS connection could bypass
++		// the filter by entering this function with an unspecified endpoint.
++		if (m_ip_filter && m_ip_filter->access(a.address()) & ip_filter::blocked)
++		{
++			if (m_ses.alerts().should_post<peer_blocked_alert>())
++				m_ses.alerts().emplace_alert<peer_blocked_alert>(get_handle()
++					, a, peer_blocked_alert::ip_filter);
++			return;
++		}
++
++		if (aux::is_v4(a))
++		{
++			web->peer_info.addr = a.address().to_v4();
++			web->peer_info.port = a.port();
++		}
++
++		auto const& ps = m_ses.proxy();
+ 		bool const proxy_hostnames = settings().get_bool(settings_pack::proxy_hostnames)
++			&& !enforce_endpoint_policy
+ 			&& !is_ip;
+ 
+-		if (!is_ip
++		if (!enforce_endpoint_policy
++			&& !is_ip
+ 			&& settings().get_bool(settings_pack::proxy_send_host_in_connect))
+ 		{
+ 			if (auto* inner1 = std::get_if<http_stream>(&s))
+diff --git a/src/web_peer_connection.cpp b/src/web_peer_connection.cpp
+index d75eeac03..9ca118b12 100644
+--- a/src/web_peer_connection.cpp
++++ b/src/web_peer_connection.cpp
+@@ -36,6 +36,7 @@ see LICENSE file.
+ #include "libtorrent/aux_/random.hpp"
+ #include "libtorrent/aux_/torrent.hpp"
+ #include "libtorrent/aux_/http_parser.hpp"
++#include "libtorrent/aux_/socket_io.hpp"
+ 
+ namespace libtorrent::aux {
+ 
+@@ -43,6 +44,12 @@ constexpr int request_size_overhead = 5000;
+ 
+ std::string escape_file_path(file_storage const& storage, file_index_t index);
+ 
++std::string make_web_seed_proxy_request_target(tcp::endpoint const& target
++	, std::string const& path)
++{
++	return "http://" + print_endpoint(target) + path;
++}
++
+ web_peer_connection::web_peer_connection(peer_connection_args& pack
+ 	, aux::web_seed_t& web)
+ 	: web_connection_base(pack, web)
+@@ -387,6 +394,23 @@ void web_peer_connection::write_request(peer_request const& r)
+ 	int const proxy_type = m_settings.get_int(settings_pack::proxy_type);
+ 	bool const using_proxy = (proxy_type == settings_pack::http
+ 		|| proxy_type == settings_pack::http_pw) && !m_ssl;
++	std::string proxy_url;
++	if (using_proxy)
++	{
++		if (m_settings.get_bool(settings_pack::ssrf_mitigation)
++			|| m_web->no_local_ips)
++		{
++			// Keep the original Host header, but pin the absolute-form request
++			// target to the endpoint already resolved and filtered by torrent.
++			// This prevents an HTTP proxy from independently re-resolving an
++			// untrusted web-seed hostname to a private address.
++			proxy_url = make_web_seed_proxy_request_target(remote(), m_path);
++		}
++		else
++		{
++			proxy_url = m_url;
++		}
++	}
+ 
+ 	// the number of pad files that have been "requested". In case we _only_
+ 	// request padfiles, we can't rely on handling them in the on_receive()
+@@ -407,7 +431,7 @@ void web_peer_connection::write_request(peer_request const& r)
+ 		request += "GET ";
+ 		// do not encode single file paths, they are
+ 		// assumed to be encoded in the torrent file
+-		request += using_proxy ? m_url : m_path;
++		request += using_proxy ? proxy_url : m_path;
+ 		request += " HTTP/1.1\r\n";
+ 		add_headers(request, m_settings, using_proxy);
+ 		request += "\r\nRange: bytes=";
+@@ -450,9 +474,9 @@ void web_peer_connection::write_request(peer_request const& r)
+ 			request += "GET ";
+ 			if (using_proxy)
+ 			{
+-				// m_url is already a properly escaped URL
++				// proxy_url is already a properly escaped URL
+ 				// with the correct slashes. Don't encode it again
+-				request += m_url;
++				request += proxy_url;
+ 			}
+ 
+ 			auto redirection = m_web->redirects.find(f.file_index);
+@@ -682,6 +706,11 @@ void web_peer_connection::handle_redirect(int const bytes_left)
+ 		file_index_t const file_index = m_file_requests.front().file_index;
+ 
+ 		location = aux::resolve_redirect_location(m_url, location);
++		if (is_https_redirect_downgrade(m_url, location))
++		{
++			disable(errors::unsupported_url_protocol);
++			return;
++		}
+ 
+ 		// work-around for buggy HTTP servers, that fail to encode the redirect URL
+ 		location = maybe_url_encode(location);
+@@ -759,6 +788,11 @@ void web_peer_connection::handle_redirect(int const bytes_left)
+ 	else
+ 	{
+ 		location = aux::resolve_redirect_location(m_url, location);
++		if (is_https_redirect_downgrade(m_url, location))
++		{
++			disable(errors::unsupported_url_protocol);
++			return;
++		}
+ 
+ 		// work-around for buggy HTTP servers, that fail to encode the redirect URL
+ 		location = maybe_url_encode(location);
+diff --git a/test/test_enum_net.cpp b/test/test_enum_net.cpp
+index b44281596..994b3a136 100644
+--- a/test/test_enum_net.cpp
++++ b/test/test_enum_net.cpp
+@@ -34,6 +34,13 @@ TORRENT_TEST(is_local)
+ 	TEST_CHECK(!ec);
+ }
+ 
++TORRENT_TEST(is_global_nat64)
++{
++	TEST_CHECK(is_global(make_address("64:ff9b::808:808")));
++	TEST_CHECK(!is_global(make_address("64:ff9b::7f00:1")));
++	TEST_CHECK(!is_global(make_address("64:ff9b::a00:1")));
++}
++
+ TORRENT_TEST(match_addr_mask)
+ {
+ 	TEST_CHECK(match_addr_mask(
+diff --git a/test/test_http_parser.cpp b/test/test_http_parser.cpp
+index 70fbf0a80..94972b9de 100644
+--- a/test/test_http_parser.cpp
++++ b/test/test_http_parser.cpp
+@@ -589,6 +589,18 @@ TORRENT_TEST(http_parser)
+ 	// unparseable URLs are never same-origin
+ 	TEST_CHECK(!same_origin("not a url", "not a url"));
+ 
++	// HTTPS redirects may retain transport security, but may not downgrade it.
++	TEST_CHECK(!is_https_redirect_downgrade(
++		"http://example.com/a", "http://example.com/b"));
++	TEST_CHECK(!is_https_redirect_downgrade(
++		"https://example.com/a", "HTTPS://example.com/b"));
++	TEST_CHECK(is_https_redirect_downgrade(
++		"https://example.com/a", "http://example.com/b"));
++	TEST_CHECK(is_https_redirect_downgrade(
++		"https://example.com/a", "ftp://example.com/b"));
++	TEST_CHECK(is_https_redirect_downgrade(
++		"https://example.com/a", "not a url"));
++
+ 	// is_ok_status
+ 
+ 	TEST_EQUAL(aux::is_ok_status(200), true);
+diff --git a/test/test_web_seed_redirect.cpp b/test/test_web_seed_redirect.cpp
+index f7fd21c65..4c48dccea 100644
+--- a/test/test_web_seed_redirect.cpp
++++ b/test/test_web_seed_redirect.cpp
+@@ -16,13 +16,123 @@ see LICENSE file.
+ #include "web_seed_suite.hpp"
+ #include "settings.hpp"
+ #include "libtorrent/aux_/random.hpp"
++#include "libtorrent/aux_/web_peer_connection.hpp"
++#include "libtorrent/alert_types.hpp"
+ #include "libtorrent/create_torrent.hpp"
++#include "libtorrent/disabled_disk_io.hpp"
++#include "libtorrent/ip_filter.hpp"
+ #include "libtorrent/load_torrent.hpp"
+ #include "libtorrent/session_params.hpp"
+ #include "libtorrent/aux_/open_mode.hpp"
+ 
+ using namespace lt;
+ 
++TORRENT_TEST(web_seed_proxy_request_target_uses_vetted_endpoint)
++{
++	TEST_EQUAL(aux::make_web_seed_proxy_request_target(
++		tcp::endpoint(make_address("8.8.8.8"), 8080), "/test_file")
++		, "http://8.8.8.8:8080/test_file");
++	TEST_EQUAL(aux::make_web_seed_proxy_request_target(
++		tcp::endpoint(make_address("2001:4860:4860::8888"), 8080), "/test_file")
++		, "http://[2001:4860:4860::8888]:8080/test_file");
++}
++
++TORRENT_TEST(web_seed_ssrf_blocks_non_global_endpoint)
++{
++	settings_pack p = settings();
++	p.set_bool(settings_pack::ssrf_mitigation, true);
++	session_params sp(p);
++	sp.disk_io_constructor = disabled_disk_io_constructor;
++	lt::session ses(std::move(sp));
++
++	std::vector<lt::create_file_entry> fs;
++	fs.emplace_back("test_file", 16000);
++	lt::add_torrent_params atp = make_torrent(std::move(fs), 0x4000);
++	atp.url_seeds.emplace_back("http://127.0.0.1/test_file");
++	atp.flags &= ~torrent_flags::paused;
++	atp.flags &= ~torrent_flags::auto_managed;
++	atp.save_path = ".";
++
++	error_code ec;
++	ses.add_torrent(atp, ec);
++	TEST_CHECK(!ec);
++
++	alert const* const a = wait_for_alert(ses, url_seed_alert::alert_type
++		, "web-seed SSRF mitigation");
++	auto const* const blocked = alert_cast<url_seed_alert>(a);
++	TEST_CHECK(blocked != nullptr);
++	if (blocked != nullptr)
++		TEST_EQUAL(blocked->error, error_code(errors::ssrf_mitigation));
++}
++
++TORRENT_TEST(web_seed_ssrf_resolves_socks_hostname_locally)
++{
++	settings_pack p = settings();
++	p.set_bool(settings_pack::ssrf_mitigation, true);
++	p.set_int(settings_pack::proxy_type, settings_pack::socks5);
++	p.set_str(settings_pack::proxy_hostname, "127.0.0.1");
++	p.set_int(settings_pack::proxy_port, 1);
++	p.set_bool(settings_pack::proxy_peer_connections, true);
++	p.set_bool(settings_pack::proxy_hostnames, true);
++	session_params sp(p);
++	sp.disk_io_constructor = disabled_disk_io_constructor;
++	lt::session ses(std::move(sp));
++
++	std::vector<lt::create_file_entry> fs;
++	fs.emplace_back("test_file", 16000);
++	lt::add_torrent_params atp = make_torrent(std::move(fs), 0x4000);
++	atp.url_seeds.emplace_back("http://localhost/test_file");
++	atp.flags &= ~torrent_flags::paused;
++	atp.flags &= ~torrent_flags::auto_managed;
++	atp.save_path = ".";
++
++	error_code ec;
++	ses.add_torrent(atp, ec);
++	TEST_CHECK(!ec);
++
++	alert const* const a = wait_for_alert(ses, url_seed_alert::alert_type
++		, "SOCKS web-seed SSRF mitigation");
++	auto const* const blocked = alert_cast<url_seed_alert>(a);
++	TEST_CHECK(blocked != nullptr);
++	if (blocked != nullptr)
++		TEST_EQUAL(blocked->error, error_code(errors::ssrf_mitigation));
++}
++
++TORRENT_TEST(web_seed_numeric_host_honors_ip_filter_with_socks_dns)
++{
++	settings_pack p = settings();
++	p.set_bool(settings_pack::ssrf_mitigation, false);
++	p.set_int(settings_pack::proxy_type, settings_pack::socks5);
++	p.set_str(settings_pack::proxy_hostname, "127.0.0.1");
++	p.set_int(settings_pack::proxy_port, 1);
++	p.set_bool(settings_pack::proxy_peer_connections, true);
++	p.set_bool(settings_pack::proxy_hostnames, true);
++	session_params sp(p);
++	sp.disk_io_constructor = disabled_disk_io_constructor;
++	sp.ip_filter.add_rule(make_address("8.8.8.8"), make_address("8.8.8.8")
++		, ip_filter::blocked);
++	lt::session ses(std::move(sp));
++
++	std::vector<lt::create_file_entry> fs;
++	fs.emplace_back("test_file", 16000);
++	lt::add_torrent_params atp = make_torrent(std::move(fs), 0x4000);
++	atp.url_seeds.emplace_back("http://8.8.8.8/test_file");
++	atp.flags &= ~torrent_flags::paused;
++	atp.flags &= ~torrent_flags::auto_managed;
++	atp.save_path = ".";
++
++	error_code ec;
++	ses.add_torrent(atp, ec);
++	TEST_CHECK(!ec);
++
++	alert const* const a = wait_for_alert(ses, peer_blocked_alert::alert_type
++		, "SOCKS web-seed IP filter");
++	auto const* const blocked = alert_cast<peer_blocked_alert>(a);
++	TEST_CHECK(blocked != nullptr);
++	if (blocked != nullptr)
++		TEST_EQUAL(blocked->reason, peer_blocked_alert::ip_filter);
++}
++
+ TORRENT_TEST_DISK_IO(web_seed_redirect)
+ {
+ 	using namespace lt;
+@@ -64,6 +174,7 @@ TORRENT_TEST_DISK_IO(web_seed_redirect)
+ 
+ 	{
+ 		settings_pack p = settings();
++		p.set_bool(settings_pack::ssrf_mitigation, false);
+ 		p.set_int(settings_pack::max_queued_disk_bytes, 256 * 1024);
+ 		session_params sp(p);
+ 		sp.disk_io_constructor = disk_io;
+diff --git a/test/web_seed_suite.cpp b/test/web_seed_suite.cpp
+index de81c714d..39b2c0c92 100644
+--- a/test/web_seed_suite.cpp
++++ b/test/web_seed_suite.cpp
+@@ -381,6 +381,9 @@ int EXPORT run_http_suite(int proxy,
+ 			pack.set_bool(settings_pack::enable_natpmp, false);
+ 			pack.set_bool(settings_pack::enable_upnp, false);
+ 			pack.set_bool(settings_pack::enable_dht, false);
++			// The local web server is an explicitly trusted test fixture. Tests
++			// for SSRF mitigation enable it in their own focused session.
++			pack.set_bool(settings_pack::ssrf_mitigation, false);
+ 			session_params sp(pack, {});
+ 			sp.disk_io_constructor = disk_io;
+ 			lt::session ses(std::move(sp));

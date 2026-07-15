@@ -5,7 +5,13 @@ TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$TOOLS_DIR/../.." && pwd)"
 
 BUILD_DIR="${BUILD_DIR:-$TOOLS_DIR/libfuzzer-build}"
-DEPS_PREFIX="${LIBFUZZER_DEPS_PREFIX:-$TOOLS_DIR/deps/arm64-libfuzzer/prefix}"
+DEPS_ROOT="${LIBFUZZER_DEPS_ROOT:-$TOOLS_DIR/deps/arm64-libfuzzer}"
+if [[ -n "${LIBFUZZER_DEPS_PREFIX:-}" \
+    && "${LIBFUZZER_DEPS_PREFIX:-}" != "$DEPS_ROOT/prefix" ]]; then
+    echo "LIBFUZZER_DEPS_PREFIX must be the prefix child of LIBFUZZER_DEPS_ROOT" >&2
+    exit 1
+fi
+DEPS_PREFIX="$DEPS_ROOT/prefix"
 BOOST_PREFIX="${BOOST_PREFIX:-$ROOT_DIR/.build/deps/source-cache/boost/boost_1_91_0}"
 LLVM_PREFIX="${LLVM_PREFIX:-$(brew --prefix llvm 2>/dev/null || true)}"
 CXX="${CXX:-$LLVM_PREFIX/bin/clang++}"
