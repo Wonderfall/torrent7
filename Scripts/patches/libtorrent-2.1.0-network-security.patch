@@ -34,9 +34,18 @@ index 3f05415a6..682141eac 100644
  	TORRENT_EXTRA_EXPORT bool is_link_local(address const& addr);
  	TORRENT_EXTRA_EXPORT bool is_teredo(address const& addr);
 diff --git a/include/libtorrent/aux_/parse_url.hpp b/include/libtorrent/aux_/parse_url.hpp
-index 1827ddc87..bec9f3a6f 100644
+index 1827ddc87..fb20b5b4e 100644
 --- a/include/libtorrent/aux_/parse_url.hpp
 +++ b/include/libtorrent/aux_/parse_url.hpp
+@@ -22,7 +22,7 @@ see LICENSE file.
+ 
+ namespace libtorrent::aux {
+ 
+-	// returns protocol, auth, hostname, port, path
++	// returns the ASCII-lowercase protocol, auth, hostname, port and path
+ 	TORRENT_EXTRA_EXPORT std::tuple<std::string, std::string
+ 		, std::string, int, std::string>
+ 		parse_url_components(string_view url, error_code& ec);
 @@ -51,6 +51,12 @@ namespace libtorrent::aux {
  	// false if either URL fails to parse. Used to decide whether credentials
  	// may be forwarded across an HTTP redirect.
@@ -462,10 +471,26 @@ index 5d8dfe0ee..7a136540d 100644
  }
 -
 diff --git a/src/parse_url.cpp b/src/parse_url.cpp
-index e3a55d9b8..6f911ea1e 100644
+index e3a55d9b8..62480fd38 100644
 --- a/src/parse_url.cpp
 +++ b/src/parse_url.cpp
-@@ -233,6 +233,21 @@ exit:
+@@ -16,5 +16,5 @@ namespace libtorrent::aux {
+ 
+-	// returns protocol, auth, hostname, port, path
++	// returns the ASCII-lowercase protocol, auth, hostname, port and path
+ 	std::tuple<std::string, std::string, std::string, int, std::string>
+ 		parse_url_components(string_view url, error_code& ec)
+ 	{
+@@ -37,6 +37,8 @@ namespace libtorrent::aux {
+ 			++start;
+ 		auto end = std::find(url.begin(), url.end(), ':');
+ 		protocol.assign(start, end);
++		std::transform(protocol.begin(), protocol.end(), protocol.begin()
++			, [](char const c) { return aux::to_lower(c); });
+ 
+ 		if (end == url.end())
+ 		{
+@@ -233,6 +235,21 @@ exit:
  			&& std::get<2>(oa) == std::get<2>(ob);
  	}
  
@@ -487,8 +512,82 @@ index e3a55d9b8..6f911ea1e 100644
  	bool is_valid_tracker_url(string_view const url)
  	{
  		if (url.empty())
+diff --git a/src/tracker_list.cpp b/src/tracker_list.cpp
+index 87d1a5fb1..303c1a257 100644
+--- a/src/tracker_list.cpp
++++ b/src/tracker_list.cpp
+@@ -14,6 +14,7 @@ see LICENSE file.
+ #include "libtorrent/announce_entry.hpp"
+ #include "libtorrent/aux_/parse_url.hpp"
+ #include "libtorrent/aux_/invariant_check.hpp"
++#include "libtorrent/aux_/string_util.hpp"
+ 
+ namespace libtorrent::aux {
+ 
+@@ -104,7 +105,7 @@ void tracker_list::prioritize_udp_trackers()
+ 	// look for udp-trackers
+ 	for (auto i = m_trackers.begin(), end(m_trackers.end()); i != end; ++i)
+ 	{
+-		if (i->url.substr(0, 6) != "udp://") continue;
++		if (!string_begins_no_case("udp://", i->url)) continue;
+ 		// now, look for trackers with the same hostname
+ 		// that is has higher priority than this one
+ 		// if we find one, swap with the udp-tracker
+@@ -115,7 +116,7 @@ void tracker_list::prioritize_udp_trackers()
+ 			= parse_url_components(i->url, ec);
+ 		for (auto j = m_trackers.begin(); j != i; ++j)
+ 		{
+-			if (j->url.substr(0, 6) == "udp://") continue;
++			if (string_begins_no_case("udp://", j->url)) continue;
+ 			std::string hostname;
+ 			std::tie(ignore, ignore, hostname, ignore, ignore)
+ 				= parse_url_components(j->url, ec);
+diff --git a/src/tracker_manager.cpp b/src/tracker_manager.cpp
+index 15f545905..d3de1af11 100644
+--- a/src/tracker_manager.cpp
++++ b/src/tracker_manager.cpp
+@@ -19,6 +19,7 @@ see LICENSE file.
+ #include "libtorrent/performance_counters.hpp"
+ #include "libtorrent/aux_/socket_io.hpp"
+ #include "libtorrent/aux_/ssl.hpp"
++#include "libtorrent/aux_/string_util.hpp"
+ #include "libtorrent/aux_/tracker_manager.hpp"
+ #include "libtorrent/aux_/udp_tracker_connection.hpp"
+ 
+@@ -275,9 +276,10 @@ namespace libtorrent::aux {
+ 		std::string const protocol = req.url.substr(0, req.url.find(':'));
+ 
+ #if TORRENT_USE_SSL
+-		if (protocol == "http" || protocol == "https")
++		if (string_equal_no_case(protocol, "http")
++			|| string_equal_no_case(protocol, "https"))
+ #else
+-		if (protocol == "http")
++		if (string_equal_no_case(protocol, "http"))
+ #endif
+ 		{
+ 			auto con = std::make_shared<aux::http_tracker_connection>(ios, *this, std::move(req), c);
+@@ -300,7 +302,7 @@ namespace libtorrent::aux {
+ 			}
+ 			return;
+ 		}
+-		else if (protocol == "udp")
++		else if (string_equal_no_case(protocol, "udp"))
+ 		{
+ 			auto con = std::make_shared<aux::udp_tracker_connection>(ios, *this, std::move(req), c);
+ 			m_udp_conns[con->transaction_id()] = con;
+@@ -308,7 +310,8 @@ namespace libtorrent::aux {
+ 			return;
+         }
+ #if TORRENT_USE_RTC
+-        else if (protocol == "ws" || protocol == "wss")
++        else if (string_equal_no_case(protocol, "ws")
++            || string_equal_no_case(protocol, "wss"))
+         {
+ 			std::shared_ptr<request_callback> cb = c.lock();
+ 			if (!cb) return;
 diff --git a/src/torrent.cpp b/src/torrent.cpp
-index fecec2704..d2a890ee0 100644
+index fecec2704..8252edbdc 100644
 --- a/src/torrent.cpp
 +++ b/src/torrent.cpp
 @@ -136,6 +136,14 @@ bool is_downloading_state(int const st)
@@ -532,6 +631,16 @@ index fecec2704..d2a890ee0 100644
  	}
  
  #ifndef TORRENT_DISABLE_SHARE_MODE
+@@ -3092,7 +3105,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 		if(auto pos = ae.url.find(':'); pos != string_view::npos)
+ 		{
+ 			string_view const protocol = string_view(ae.url).substr(0, pos);
+-			if (protocol == "ws" || protocol == "wss")
++			if (string_equal_no_case(protocol, "ws")
++				|| string_equal_no_case(protocol, "wss"))
+ 			{
+ 				// WebSocket trackers will ignore the endpoint anyway
+ 				valid_endpoints = std::min(valid_endpoints, std::size_t(1));
 @@ -6768,6 +6781,8 @@ namespace {
  		}
  
@@ -1099,10 +1208,19 @@ index 282a33bff..396d604f7 100644
  	// redirects is a bit unpredictable. under SSL for instance,
  	// it will be an ungraceful shutdown
 diff --git a/test/test_http_parser.cpp b/test/test_http_parser.cpp
-index 70fbf0a80..94972b9de 100644
+index 70fbf0a80..38ba31229 100644
 --- a/test/test_http_parser.cpp
 +++ b/test/test_http_parser.cpp
-@@ -589,6 +589,18 @@ TORRENT_TEST(http_parser)
+@@ -360,6 +360,8 @@ TORRENT_TEST(http_parser)
+ 	error_code ec;
+ 	TEST_CHECK(parse_url_components("http://foo:bar@host.com:80/path/to/file", ec)
+ 		== std::make_tuple("http", "foo:bar", "host.com", 80, "/path/to/file"));
++	TEST_CHECK(parse_url_components("HtTpS://host.com/path", ec)
++		== std::make_tuple("https", "", "host.com", -1, "/path"));
+ 
+ 	TEST_CHECK(parse_url_components("http://host.com/path/to/file", ec)
+ 		== std::make_tuple("http", "", "host.com", -1, "/path/to/file"));
+@@ -589,6 +591,18 @@ TORRENT_TEST(http_parser)
  	// unparseable URLs are never same-origin
  	TEST_CHECK(!same_origin("not a url", "not a url"));
  
@@ -1121,6 +1239,98 @@ index 70fbf0a80..94972b9de 100644
  	// is_ok_status
  
  	TEST_EQUAL(aux::is_ok_status(200), true);
+diff --git a/test/test_tracker_list.cpp b/test/test_tracker_list.cpp
+index c21f6b18c..77d8a9e19 100644
+--- a/test/test_tracker_list.cpp
++++ b/test/test_tracker_list.cpp
+@@ -196,7 +196,7 @@ TORRENT_TEST(test_prioritize_udp)
+ 	trackers.emplace_back("http://example1.com/announce");
+ 	trackers.emplace_back("http://example2.com/announce");
+ 	trackers.emplace_back("http://example3.com/announce");
+-	trackers.emplace_back("udp://example1.com/announce");
++	trackers.emplace_back("UDP://example1.com/announce");
+ 
+ 	tl.replace(trackers);
+ 
+@@ -211,14 +211,14 @@ TORRENT_TEST(test_prioritize_udp)
+ 	++i;
+ 	TEST_EQUAL(i->url, "http://example3.com/announce");
+ 	++i;
+-	TEST_EQUAL(i->url, "udp://example1.com/announce");
++	TEST_EQUAL(i->url, "UDP://example1.com/announce");
+ 	++i;
+ 	TEST_CHECK(i == tl.end());
+ 
+ 	tl.prioritize_udp_trackers();
+ 
+ 	i = tl.begin();
+-	TEST_EQUAL(i->url, "udp://example1.com/announce");
++	TEST_EQUAL(i->url, "UDP://example1.com/announce");
+ 	++i;
+ 	TEST_EQUAL(i->url, "http://example2.com/announce");
+ 	++i;
+diff --git a/test/test_tracker_manager.cpp b/test/test_tracker_manager.cpp
+index 08a62decc..9ead66df7 100644
+--- a/test/test_tracker_manager.cpp
++++ b/test/test_tracker_manager.cpp
+@@ -18,7 +18,11 @@ using namespace lt;
+ using namespace lt::aux;
+ using namespace std::placeholders;
+ 
+-struct tracker_manager_handler : aux::session_logger {
++struct tracker_manager_handler
++#if !defined TORRENT_DISABLE_LOGGING || TORRENT_USE_ASSERTS
++	: aux::session_logger
++#endif
++{
+ 
+ 	tracker_manager_handler(io_context& ios, aux::session_settings& sett)
+ 		: m_host_resolver(ios)
+@@ -176,3 +180,44 @@ TORRENT_TEST(empty_and_num_requests)
+ #endif
+ 	}
+ }
++
++TORRENT_TEST(protocol_dispatch_is_case_insensitive)
++{
++	io_context ios;
++	aux::session_settings sett;
++	tracker_manager_handler h{ios, sett};
++
++	tracker_request http;
++	http.url = "HTTP://127.0.0.1:1/announce";
++	h.m_tracker_manager.queue_request(ios, std::move(http), sett);
++	TEST_EQUAL(h.m_tracker_manager.num_requests(), 1);
++
++#if TORRENT_USE_SSL
++	tracker_request https;
++	https.url = "HTTPS://127.0.0.1:1/announce";
++	h.m_tracker_manager.queue_request(ios, std::move(https), sett);
++	TEST_EQUAL(h.m_tracker_manager.num_requests(), 2);
++#endif
++
++	tracker_request udp;
++	udp.url = "UDP://127.0.0.1:1/announce";
++	h.m_tracker_manager.queue_request(ios, std::move(udp), sett);
++#if TORRENT_USE_SSL
++	TEST_EQUAL(h.m_tracker_manager.num_requests(), 3);
++#else
++	TEST_EQUAL(h.m_tracker_manager.num_requests(), 2);
++#endif
++
++#if TORRENT_USE_RTC
++	auto callback = std::make_shared<ws_request_callback>();
++	tracker_request websocket;
++	websocket.url = "WSS://127.0.0.1:1/announce";
++	websocket.num_want = 1;
++	h.m_tracker_manager.queue_request(ios, std::move(websocket), sett, callback);
++#if TORRENT_USE_SSL
++	TEST_EQUAL(h.m_tracker_manager.num_requests(), 4);
++#else
++	TEST_EQUAL(h.m_tracker_manager.num_requests(), 3);
++#endif
++#endif
++}
 diff --git a/test/test_torrent.cpp b/test/test_torrent.cpp
 index a2ce92974..a8f9ceb2f 100644
 --- a/test/test_torrent.cpp

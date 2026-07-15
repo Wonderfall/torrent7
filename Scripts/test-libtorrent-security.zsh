@@ -24,6 +24,8 @@ typeset -ra test_targets=(
     test_http_parser
     test_storage
     test_torrent
+    test_tracker_list
+    test_tracker_manager
     test_web_seed_redirect
 )
 typeset restore_configuration=0
@@ -63,6 +65,10 @@ restore_configuration=0
         "$source_dir/test/test_enum_net.cpp.nat64_discovery_fails_closed_on_malformed_answers"
     ./test_torrent --no-redirect \
         "$source_dir/test/test_torrent.cpp.non_global_discovery_peers_are_temporarily_blocked"
+    ./test_tracker_list --no-redirect \
+        "$source_dir/test/test_tracker_list.cpp.test_prioritize_udp"
+    ./test_tracker_manager --no-redirect \
+        "$source_dir/test/test_tracker_manager.cpp.protocol_dispatch_is_case_insensitive"
     ./test_http_connection --no-redirect \
         "$source_dir/test/test_http_connection.cpp.no_proxy_ssl"
     ./test_http_parser --no-redirect \
