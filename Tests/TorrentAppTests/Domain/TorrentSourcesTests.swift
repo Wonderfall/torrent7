@@ -6,9 +6,15 @@ import Testing
 struct TorrentSourcesTests {
     @Test("Parses magnet sources case-insensitively")
     func parsesMagnetSourcesCaseInsensitively() throws {
-        let draft = try #require(TorrentAddSourceParser.magnetDraft(from: " \nMAGNET:?xt=urn:btih:abc "))
+        let draft = try #require(TorrentAddSourceParser.magnetDraft(
+            from: " \nMAGNET:?xt=urn:btih:abc&tr=HTTPS%3A%2F%2Ftracker.example%2Fannounce "
+        ))
+        let magnetURI = try #require(draft.magnetURI)
+        let securitySummary = TorrentSourceSecurityParser.summary(magnetURI: magnetURI)
 
-        #expect(draft.magnetURI == "MAGNET:?xt=urn:btih:abc")
+        #expect(magnetURI == "magnet:?xt=urn:btih:abc&tr=HTTPS%3A%2F%2Ftracker.example%2Fannounce")
+        #expect(securitySummary.trackerCount == 1)
+        #expect(securitySummary.httpsTrackerCount == 1)
         #expect(draft.fileURL == nil)
         #expect(draft.title == "Magnet Link")
     }

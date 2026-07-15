@@ -64,7 +64,8 @@ enum TorrentAddSourceParser {
             return nil
         }
 
-        return TorrentAddDraft(source: .magnet(magnet))
+        let canonicalMagnet = "magnet:" + String(magnet.dropFirst("magnet:".count))
+        return TorrentAddDraft(source: .magnet(canonicalMagnet))
     }
 
     static func torrentFileDrafts(from urls: [URL]) -> [TorrentAddDraft] {
