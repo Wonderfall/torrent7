@@ -51,7 +51,7 @@ index 1827ddc87..bec9f3a6f 100644
  
  #endif
 diff --git a/include/libtorrent/aux_/torrent.hpp b/include/libtorrent/aux_/torrent.hpp
-index 748ad15d2..d25787ee6 100644
+index 748ad15d2..2f6670879 100644
 --- a/include/libtorrent/aux_/torrent.hpp
 +++ b/include/libtorrent/aux_/torrent.hpp
 @@ -71,6 +71,7 @@ see LICENSE file.
@@ -100,6 +100,17 @@ index 748ad15d2..d25787ee6 100644
  		void connect_web_seed(std::list<web_seed_t>::iterator web, tcp::endpoint a);
  
  		// this is the asio callback that is called when a name
+@@ -1721,6 +1739,10 @@ namespace libtorrent::aux {
+ 		// doesn't cause a mismatch between the storage (which was set up as
+ 		// v2-only) and the engine's block-sizing logic.
+ 		bool m_disable_v1_hashes:1;
++
++		// reject non-global tracker, DHT and PEX peer endpoints while an
++		// application validates metadata obtained from an untrusted source
++		bool m_block_non_global_peers:1;
+ // ----
+ 
+ 		// total time we've been available as a seed on this torrent.
 diff --git a/include/libtorrent/aux_/web_peer_connection.hpp b/include/libtorrent/aux_/web_peer_connection.hpp
 index cb604ff4d..b7cd24cb6 100644
 --- a/include/libtorrent/aux_/web_peer_connection.hpp
@@ -138,6 +149,28 @@ index 05cde75b5..d26c6b2d8 100644
  			ssrf_mitigation,
  
  			// when disabled, any tracker or web seed with an IDNA hostname
+diff --git a/include/libtorrent/torrent_flags.hpp b/include/libtorrent/torrent_flags.hpp
+index 97f654f34..daec19f0f 100644
+--- a/include/libtorrent/torrent_flags.hpp
++++ b/include/libtorrent/torrent_flags.hpp
+@@ -301,6 +301,12 @@ namespace torrent_flags {
+ 	// torrents. Cannot be changed after the torrent is added.
+ 	constexpr torrent_flags_t disable_v1_hashes = 25_bit;
+ 
++	// Reject non-globally-routable peer endpoints learned from trackers, the DHT
++	// or peer exchange. This is a temporary guard while an application validates
++	// metadata from an untrusted magnet. The standard resume-data encoder does
++	// not serialize this application-owned state.
++	constexpr torrent_flags_t block_non_global_peers = 26_bit;
++
+ 	// all torrent flags combined. Can conveniently be used when creating masks
+ 	// for flags
+ 	constexpr torrent_flags_t all = torrent_flags_t::all();
+@@ -327,4 +333,3 @@ namespace torrent_flags {
+ } // libtorrent
+ 
+ #endif
+-
 diff --git a/src/http_connection.cpp b/src/http_connection.cpp
 index eaf4876fe..be73073cd 100644
 --- a/src/http_connection.cpp
@@ -455,7 +488,7 @@ index e3a55d9b8..6f911ea1e 100644
  	{
  		if (url.empty())
 diff --git a/src/torrent.cpp b/src/torrent.cpp
-index fecec2704..9d1a065a4 100644
+index fecec2704..d2a890ee0 100644
 --- a/src/torrent.cpp
 +++ b/src/torrent.cpp
 @@ -136,6 +136,14 @@ bool is_downloading_state(int const st)
@@ -473,7 +506,33 @@ index fecec2704..9d1a065a4 100644
  // convert file priorities into piece priorities
  aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  	file_storage const& fs
-@@ -6768,6 +6776,8 @@ namespace {
+@@ -249,6 +257,7 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 		, m_enable_lsd(!bool(p.flags & torrent_flags::disable_lsd))
+ 		, m_i2p(bool(p.flags & torrent_flags::i2p_torrent))
+ 		, m_disable_v1_hashes(false)
++		, m_block_non_global_peers(bool(p.flags & torrent_flags::block_non_global_peers))
+ 		, m_max_uploads((1 << 24) - 1)
+ 		, m_num_uploads(0)
+ 		, m_enable_pex(!bool(p.flags & torrent_flags::disable_pex))
+@@ -950,6 +959,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 			ret |= torrent_flags::i2p_torrent;
+ 		if (m_disable_v1_hashes)
+ 			ret |= torrent_flags::disable_v1_hashes;
++		if (m_block_non_global_peers)
++			ret |= torrent_flags::block_non_global_peers;
+ 		return ret;
+ 	}
+ 
+@@ -1009,6 +1020,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 				set_need_save_resume(torrent_handle::if_config_changed);
+ 			m_enable_pex = new_value;
+ 		}
++		if (mask & torrent_flags::block_non_global_peers)
++			m_block_non_global_peers = bool(flags & torrent_flags::block_non_global_peers);
+ 	}
+ 
+ #ifndef TORRENT_DISABLE_SHARE_MODE
+@@ -6768,6 +6781,8 @@ namespace {
  		}
  
  		aux::proxy_settings const& ps = m_ses.proxy();
@@ -482,7 +541,7 @@ index fecec2704..9d1a065a4 100644
  		if ((ps.type == settings_pack::http
  			|| ps.type == settings_pack::http_pw)
  			&& ps.proxy_peer_connections)
-@@ -6784,7 +6794,8 @@ namespace {
+@@ -6784,7 +6799,8 @@ namespace {
  				, [self = shared_from_this(), web, proxy_port](error_code const& e, std::vector<address> const& addrs)
  				{ self->wrap(&torrent::on_proxy_name_lookup, e, addrs, web, proxy_port); });
  		}
@@ -492,7 +551,7 @@ index fecec2704..9d1a065a4 100644
  			&& (ps.type == settings_pack::socks5
  				|| ps.type == settings_pack::socks5_pw)
  			&& ps.proxy_peer_connections)
-@@ -6799,6 +6810,9 @@ namespace {
+@@ -6799,6 +6815,9 @@ namespace {
  
  			auto self = shared_from_this();
  			web->resolving = true;
@@ -502,7 +561,7 @@ index fecec2704..9d1a065a4 100644
  
  			m_ses.get_resolver().async_resolve(hostname, aux::resolver_interface::abort_on_shutdown
  				, [self, web, port](error_code const& e, std::vector<address> const& addrs)
-@@ -6884,6 +6898,9 @@ namespace {
+@@ -6884,6 +6903,9 @@ namespace {
  
  		auto self = shared_from_this();
  		web->resolving = true;
@@ -512,7 +571,7 @@ index fecec2704..9d1a065a4 100644
  		m_ses.get_resolver().async_resolve(hostname, aux::resolver_interface::abort_on_shutdown
  			, [self, web, port](error_code const& err, std::vector<address> const& addr)
  			{
-@@ -6905,9 +6922,9 @@ namespace {
+@@ -6905,9 +6927,9 @@ namespace {
  #ifndef TORRENT_DISABLE_LOGGING
  		debug_log("completed resolve: %s", web->url.c_str());
  #endif
@@ -523,7 +582,7 @@ index fecec2704..9d1a065a4 100644
  #ifndef TORRENT_DISABLE_LOGGING
  			debug_log("removed web seed");
  #endif
-@@ -6915,7 +6932,36 @@ namespace {
+@@ -6915,7 +6937,36 @@ namespace {
  			return;
  		}
  
@@ -561,7 +620,7 @@ index fecec2704..9d1a065a4 100644
  
  		if (e || addrs.empty())
  		{
-@@ -6935,11 +6981,21 @@ namespace {
+@@ -6935,11 +6986,21 @@ namespace {
  			return;
  		}
  
@@ -586,7 +645,7 @@ index fecec2704..9d1a065a4 100644
  
  			// fill in the peer struct's address field
  			web->endpoints.emplace_back(addr, std::uint16_t(port));
-@@ -6954,8 +7010,9 @@ namespace {
+@@ -6954,8 +7015,9 @@ namespace {
  		{
  			if (m_ses.alerts().should_post<url_seed_alert>())
  			{
@@ -598,7 +657,7 @@ index fecec2704..9d1a065a4 100644
  			}
  
  			// the name lookup failed for the http host. Don't try
-@@ -6972,30 +7029,54 @@ namespace {
+@@ -6972,30 +7034,54 @@ namespace {
  	}
  	catch (...) { handle_exception(); }
  
@@ -624,14 +683,14 @@ index fecec2704..9d1a065a4 100644
 -					, a, peer_blocked_alert::ip_filter);
 +			web->resolving = false;
 +			remove_web_seed_iter(web);
- 			return;
- 		}
++			return;
++		}
 +		if (m_abort || m_ses.is_aborted())
 +		{
 +			web->resolving = false;
-+			return;
-+		}
-+
+ 			return;
+ 		}
+ 
 +		nat64_discovery_result discovery;
 +		if (!e) discovery = discover_nat64_prefixes(addrs);
 +		web->nat64_prefixes = std::move(discovery.prefixes);
@@ -654,7 +713,7 @@ index fecec2704..9d1a065a4 100644
 +
 +		TORRENT_ASSERT(is_single_thread());
 +		if (m_abort) return;
- 
++
  		TORRENT_ASSERT(!web->resolving);
  		TORRENT_ASSERT(web->peer_info.connection == nullptr);
  
@@ -667,7 +726,7 @@ index fecec2704..9d1a065a4 100644
  		if (is_paused()) return;
  		if (m_ses.is_aborted()) return;
  		if (is_upload_only()) return;
-@@ -7028,10 +7109,9 @@ namespace {
+@@ -7028,10 +7114,9 @@ namespace {
  		}
  
  		std::string hostname;
@@ -679,7 +738,7 @@ index fecec2704..9d1a065a4 100644
  			= parse_url_components(web->url, ec);
  		if (ec)
  		{
-@@ -7056,18 +7136,22 @@ namespace {
+@@ -7056,18 +7141,22 @@ namespace {
  			return;
  		}
  
@@ -709,7 +768,7 @@ index fecec2704..9d1a065a4 100644
  #endif
  			if (m_ses.alerts().should_post<url_seed_alert>())
  				m_ses.alerts().emplace_alert<url_seed_alert>(get_handle()
-@@ -7075,17 +7159,34 @@ namespace {
+@@ -7075,17 +7164,34 @@ namespace {
  			if (m_ses.alerts().should_post<peer_blocked_alert>())
  				m_ses.alerts().emplace_alert<peer_blocked_alert>(get_handle()
  					, a, peer_blocked_alert::ssrf_mitigation);
@@ -748,6 +807,30 @@ index fecec2704..9d1a065a4 100644
  			&& settings().get_bool(settings_pack::proxy_send_host_in_connect))
  		{
  			if (auto* inner1 = std::get_if<http_stream>(&s))
+@@ -11645,6 +11751,23 @@ namespace {
+ 
+ 		TORRENT_ASSERT(info_hash().has_v2() || !(flags & pex_lt_v2));
+ 
++		bool const untrusted_discovery_source = bool(source & peer_info::tracker)
++			|| bool(source & peer_info::dht)
++			|| bool(source & peer_info::pex);
++		if (m_block_non_global_peers
++			&& untrusted_discovery_source
++			&& !is_global(adr.address()))
++		{
++			if (alerts().should_post<peer_blocked_alert>())
++				alerts().emplace_alert<peer_blocked_alert>(get_handle()
++					, adr, peer_blocked_alert::ssrf_mitigation);
++
++#ifndef TORRENT_DISABLE_EXTENSIONS
++			notify_extension_add_peer(adr, source, torrent_plugin::filtered);
++#endif
++			return nullptr;
++		}
++
+ 		if (m_apply_ip_filter
+ 			&& m_ip_filter
+ 			&& m_ip_filter->access(adr.address()) & ip_filter::blocked)
 diff --git a/src/web_peer_connection.cpp b/src/web_peer_connection.cpp
 index d75eeac03..9ca118b12 100644
 --- a/src/web_peer_connection.cpp
@@ -1038,6 +1121,108 @@ index 70fbf0a80..94972b9de 100644
  	// is_ok_status
  
  	TEST_EQUAL(aux::is_ok_status(200), true);
+diff --git a/test/test_torrent.cpp b/test/test_torrent.cpp
+index a2ce92974..a8f9ceb2f 100644
+--- a/test/test_torrent.cpp
++++ b/test/test_torrent.cpp
+@@ -25,7 +25,9 @@ see LICENSE file.
+ #include "libtorrent/aux_/path.hpp" // for combine_path, current_working_directory
+ #include "libtorrent/magnet_uri.hpp"
+ #include "libtorrent/span.hpp"
+ #include "libtorrent/session_params.hpp"
++#include "libtorrent/read_resume_data.hpp"
++#include "libtorrent/write_resume_data.hpp"
+ #include "libtorrent/aux_/random.hpp"
+ #include "settings.hpp"
+ #include <tuple>
+@@ -290,6 +292,87 @@ TORRENT_TEST(added_peers)
+ 	if (ra) TEST_EQUAL(ra->params.peers.size(), 2);
+ }
+ 
++TORRENT_TEST(non_global_discovery_peers_are_temporarily_blocked)
++{
++	std::vector<lt::create_file_entry> fs;
++	fs.emplace_back("test_torrent_dir4/tmp1", 1024);
++
++	lt::create_torrent t(std::move(fs), 1024);
++	t.set_hash(0_piece, sha1_hash::max());
++	std::vector<char> const tmp = bencode(t.generate());
++	auto info = load_torrent_buffer(tmp).ti;
++
++	settings_pack pack = settings();
++	pack.set_str(settings_pack::listen_interfaces, test_listen_interface());
++	pack.set_int(settings_pack::max_retry_port_bind, 10);
++	lt::session ses(pack);
++
++	add_torrent_params p;
++	p.ti = info;
++	p.save_path = ".";
++	p.flags |= torrent_flags::block_non_global_peers;
++	p.flags |= torrent_flags::paused;
++	p.flags &= ~torrent_flags::auto_managed;
++	torrent_handle h = ses.add_torrent(std::move(p));
++
++	tcp::endpoint const private_tracker{make_address("10.0.0.1"), 48081};
++	tcp::endpoint const private_dht{make_address("fd00::1"), 48082};
++	tcp::endpoint const private_pex{make_address("192.168.1.1"), 48083};
++	tcp::endpoint const private_mixed{make_address("172.16.0.1"), 48087};
++	tcp::endpoint const private_nat64{make_address("64:ff9b::a00:1"), 48088};
++	tcp::endpoint const public_tracker{make_address("8.8.8.8"), 48084};
++	tcp::endpoint const public_dht{make_address("2606:4700:4700::1111"), 48085};
++	tcp::endpoint const accepted_private_tracker{make_address("10.0.0.2"), 48086};
++
++	h.connect_peer(private_tracker, peer_info::tracker);
++	h.connect_peer(private_dht, peer_info::dht);
++	h.connect_peer(private_pex, peer_info::pex);
++	h.connect_peer(private_mixed, peer_info::tracker | peer_info::pex);
++	h.connect_peer(private_nat64, peer_info::tracker);
++	h.connect_peer(public_tracker, peer_info::tracker);
++	h.connect_peer(public_dht, peer_info::dht);
++	h.save_resume_data();
++
++	auto const *saved = alert_cast<save_resume_data_alert>(
++		wait_for_alert(ses, save_resume_data_alert::alert_type));
++	TEST_CHECK(saved);
++	if (saved)
++	{
++		auto const contains = [&saved](tcp::endpoint const& endpoint)
++		{
++			return std::find(saved->params.peers.begin(), saved->params.peers.end(), endpoint)
++				!= saved->params.peers.end();
++		};
++		TEST_CHECK(!contains(private_tracker));
++		TEST_CHECK(!contains(private_dht));
++		TEST_CHECK(!contains(private_pex));
++		TEST_CHECK(!contains(private_mixed));
++		TEST_CHECK(!contains(private_nat64));
++		TEST_CHECK(contains(public_tracker));
++		TEST_CHECK(contains(public_dht));
++		TEST_CHECK(bool(saved->params.flags & torrent_flags::block_non_global_peers));
++		auto const restored = read_resume_data(write_resume_data_buf(saved->params));
++		TEST_CHECK(!bool(restored.flags & torrent_flags::block_non_global_peers));
++	}
++
++	h.unset_flags(torrent_flags::block_non_global_peers);
++	h.connect_peer(accepted_private_tracker, peer_info::tracker);
++	h.connect_peer(private_pex, peer_info::pex);
++	h.save_resume_data();
++
++	saved = alert_cast<save_resume_data_alert>(
++		wait_for_alert(ses, save_resume_data_alert::alert_type));
++	TEST_CHECK(saved);
++	if (saved)
++	{
++		TEST_CHECK(std::find(saved->params.peers.begin(), saved->params.peers.end()
++			, accepted_private_tracker) != saved->params.peers.end());
++		TEST_CHECK(std::find(saved->params.peers.begin(), saved->params.peers.end()
++			, private_pex) != saved->params.peers.end());
++		TEST_CHECK(!bool(saved->params.flags & torrent_flags::block_non_global_peers));
++	}
++}
++
+ TORRENT_TEST(mismatching_info_hash)
+ {
+ 	std::vector<lt::create_file_entry> fs;
 diff --git a/test/test_web_seed_redirect.cpp b/test/test_web_seed_redirect.cpp
 index f7fd21c65..337c3666d 100644
 --- a/test/test_web_seed_redirect.cpp

@@ -23,6 +23,7 @@ typeset -ra test_targets=(
     test_http_connection
     test_http_parser
     test_storage
+    test_torrent
     test_web_seed_redirect
 )
 typeset restore_configuration=0
@@ -60,6 +61,8 @@ restore_configuration=0
         "$source_dir/test/test_enum_net.cpp.nat64_prefix_discovery"
     ./test_enum_net --no-redirect \
         "$source_dir/test/test_enum_net.cpp.nat64_discovery_fails_closed_on_malformed_answers"
+    ./test_torrent --no-redirect \
+        "$source_dir/test/test_torrent.cpp.non_global_discovery_peers_are_temporarily_blocked"
     ./test_http_connection --no-redirect \
         "$source_dir/test/test_http_connection.cpp.no_proxy_ssl"
     ./test_http_parser --no-redirect \

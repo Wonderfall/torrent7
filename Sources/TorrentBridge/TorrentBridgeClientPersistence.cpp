@@ -933,16 +933,24 @@ void TTorrentClient::load_resume_data()
         bool const app_disabled_lsd =
             app_disabled_lsd_from_resume_data(*buffer) && !lsd_enabled_by_user && !lsd_disabled_by_user;
         bool const has_private_metadata = params.ti && params.ti->priv();
+        // A metadata-less app resume can only contain temporary discovery
+        // guards or explicit app policy. Source locks are established only
+        // after the torrent metadata itself has been validated.
         bool const dht_locked_by_source = has_private_metadata
-            || (static_cast<bool>(params.flags & lt::torrent_flags::disable_dht)
-                && (metadata_pending || (!dht_enabled_by_user && !dht_disabled_by_user)));
+            || (!metadata_pending
+                && static_cast<bool>(params.flags & lt::torrent_flags::disable_dht)
+                && !dht_enabled_by_user
+                && !dht_disabled_by_user);
         bool const peer_exchange_locked_by_source = has_private_metadata
-            || (static_cast<bool>(params.flags & lt::torrent_flags::disable_pex)
-                && (metadata_pending
-                    || (!peer_exchange_enabled_by_user && !peer_exchange_disabled_by_user)));
+            || (!metadata_pending
+                && static_cast<bool>(params.flags & lt::torrent_flags::disable_pex)
+                && !peer_exchange_enabled_by_user
+                && !peer_exchange_disabled_by_user);
         bool const lsd_locked_by_source = has_private_metadata
-            || (static_cast<bool>(params.flags & lt::torrent_flags::disable_lsd)
-                && (metadata_pending || (!lsd_enabled_by_user && !lsd_disabled_by_user)));
+            || (!metadata_pending
+                && static_cast<bool>(params.flags & lt::torrent_flags::disable_lsd)
+                && !lsd_enabled_by_user
+                && !lsd_disabled_by_user);
         if (requires_https_trackers || requires_https_web_seeds) {
             static_cast<void>(filter_non_https_sources(params, requires_https_trackers, requires_https_web_seeds));
         }
@@ -972,6 +980,7 @@ void TTorrentClient::load_resume_data()
         if (metadata_pending) {
             params.file_priorities.clear();
             params.flags |= lt::torrent_flags::default_dont_download;
+            params.flags |= lt::torrent_flags::block_non_global_peers;
         }
         if (!metadata_pending && should_strip_resume_peer_cache(params, nullptr, app_disabled_dht)) {
             strip_resume_peer_cache(params);
