@@ -4,6 +4,7 @@ setopt err_exit no_unset pipe_fail
 
 typeset -r root_dir=${0:A:h:h}
 typeset -r enable_diagnostics=${SANITIZER_DIAGNOSTICS:-0}
+typeset -r signing_mode=${APP_SIGNING_MODE:-development}
 typeset configuration
 if [[ $enable_diagnostics == "1" && ${+CONFIGURATION} == 0 ]]; then
     configuration="debug"
@@ -27,14 +28,38 @@ typeset -r document_icon="$root_dir/Packaging/Torrent7Document.icns"
 typeset -r app_icon_info_plist="$app_output_dir/AppIconInfo.plist"
 typeset -r sign_identity=${SIGN_IDENTITY:--}
 typeset -r sign_options="runtime,restrict,library"
-typeset app_entitlements="$root_dir/Packaging/Torrent7.entitlements"
+typeset -r app_entitlements="$root_dir/Packaging/Torrent7.entitlements"
+typeset -r expected_team_id=${EXPECTED_TEAM_ID:-}
 typeset -a timestamp_flag=(--timestamp=none)
 
-if [[ $sign_identity != "-" ]]; then
-    timestamp_flag=(--timestamp)
-else
-    app_entitlements="$root_dir/Packaging/Torrent7.dev.entitlements"
-fi
+fail() {
+    print -ru2 -- "$1"
+    exit 1
+}
+
+case "$signing_mode" in
+    development)
+        if [[ $sign_identity != "-" ]]; then
+            timestamp_flag=(--timestamp)
+        fi
+        ;;
+    distribution)
+        [[ $enable_diagnostics == "0" ]] \
+            || fail "Distribution builds cannot enable sanitizer diagnostics"
+        [[ $configuration == "release" ]] \
+            || fail "Distribution builds require CONFIGURATION=release"
+        [[ $sign_identity != "-" ]] \
+            || fail "Distribution builds require SIGN_IDENTITY"
+        [[ $sign_identity == "Developer ID Application: "* ]] \
+            || fail "SIGN_IDENTITY must name a Developer ID Application certificate"
+        [[ ${#expected_team_id} == 10 && $expected_team_id != *[^A-Z0-9]* ]] \
+            || fail "Distribution builds require a 10-character EXPECTED_TEAM_ID"
+        timestamp_flag=(--timestamp)
+        ;;
+    *)
+        fail "APP_SIGNING_MODE must be development or distribution"
+        ;;
+esac
 
 cd -- "$root_dir"
 
@@ -96,5 +121,13 @@ codesign \
     "$app_dir"
 
 codesign --verify --deep --strict --verbose=2 "$app_dir"
+
+if [[ $signing_mode == "distribution" ]]; then
+    "$root_dir/Scripts/verify-app.zsh" \
+        --mode distribution \
+        --notarization pending \
+        --team-id "$expected_team_id" \
+        "$app_dir"
+fi
 
 echo "$app_dir"
