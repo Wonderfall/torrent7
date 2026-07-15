@@ -1,3 +1,38 @@
+diff --git a/include/libtorrent/aux_/ip_helpers.hpp b/include/libtorrent/aux_/ip_helpers.hpp
+index 3f05415a6..682141eac 100644
+--- a/include/libtorrent/aux_/ip_helpers.hpp
++++ b/include/libtorrent/aux_/ip_helpers.hpp
+@@ -15,11 +15,30 @@ see LICENSE file.
+ #include "libtorrent/config.hpp"
+ #include "libtorrent/address.hpp"
+ #include "libtorrent/aux_/export.hpp"
++#include "libtorrent/span.hpp"
++
++#include <cstdint>
++#include <vector>
+ 
+ namespace libtorrent {
+ namespace aux {
++	struct nat64_prefix
++	{
++		address_v6::bytes_type bytes{};
++		std::uint8_t length = 0;
++	};
++
++	struct nat64_discovery_result
++	{
++		std::vector<nat64_prefix> prefixes;
++		bool valid = false;
++	};
+ 
+ 	TORRENT_EXTRA_EXPORT bool is_global(address const& a);
++	TORRENT_EXTRA_EXPORT bool is_global(address const& a
++		, span<nat64_prefix const> prefixes);
++	TORRENT_EXTRA_EXPORT nat64_discovery_result discover_nat64_prefixes(
++		span<address const> addresses);
+ 	TORRENT_EXTRA_EXPORT bool is_local(address const& a);
+ 	TORRENT_EXTRA_EXPORT bool is_link_local(address const& addr);
+ 	TORRENT_EXTRA_EXPORT bool is_teredo(address const& addr);
 diff --git a/include/libtorrent/aux_/parse_url.hpp b/include/libtorrent/aux_/parse_url.hpp
 index 1827ddc87..bec9f3a6f 100644
 --- a/include/libtorrent/aux_/parse_url.hpp
@@ -15,6 +50,56 @@ index 1827ddc87..bec9f3a6f 100644
  }
  
  #endif
+diff --git a/include/libtorrent/aux_/torrent.hpp b/include/libtorrent/aux_/torrent.hpp
+index 748ad15d2..d25787ee6 100644
+--- a/include/libtorrent/aux_/torrent.hpp
++++ b/include/libtorrent/aux_/torrent.hpp
+@@ -71,6 +71,7 @@ see LICENSE file.
+ #include "libtorrent/aux_/deferred_handler.hpp"
+ #include "libtorrent/aux_/allocating_handler.hpp"
+ #include "libtorrent/aux_/announce_entry.hpp"
++#include "libtorrent/aux_/ip_helpers.hpp"
+ #include "libtorrent/extensions.hpp" // for add_peer_flags_t
+ #include "libtorrent/aux_/ssl.hpp"
+ #include "libtorrent/aux_/tracker_list.hpp"
+@@ -144,6 +145,13 @@ namespace libtorrent::aux {
+ 		// these are its IP addresses
+ 		std::vector<tcp::endpoint> endpoints;
+ 
++		// RFC 7050 prefixes learned before accepting an untrusted IPv6
++		// endpoint. Completion and validity are distinct so a failed or
++		// malformed discovery can fail closed without affecting IPv4.
++		std::vector<nat64_prefix> nat64_prefixes;
++		bool nat64_discovery_complete = false;
++		bool nat64_discovery_valid = false;
++
+ 		// this is the peer_info field used for the
+ 		// connection, just to count hash failures
+ 		// it's also used to hold the peer_connection
+@@ -213,6 +221,9 @@ namespace libtorrent::aux {
+ 			web_seed_entry::operator=(std::move(rhs));
+ 			retry = std::move(rhs.retry);
+ 			endpoints = std::move(rhs.endpoints);
++			nat64_prefixes = std::move(rhs.nat64_prefixes);
++			nat64_discovery_complete = rhs.nat64_discovery_complete;
++			nat64_discovery_valid = rhs.nat64_discovery_valid;
+ 			peer_info = std::move(rhs.peer_info);
+ 			supports_keepalive = std::move(rhs.supports_keepalive);
+ 			resolving = std::move(rhs.resolving);
+@@ -1011,6 +1022,13 @@ namespace libtorrent::aux {
+ 			, int port
+ 			, std::list<web_seed_t>::iterator);
+ 
++		void on_nat64_name_lookup(error_code const&
++			, std::vector<address> const&
++			, error_code target_error
++			, std::vector<address> target_addresses
++			, int port
++			, std::list<web_seed_t>::iterator);
++
+ 		void connect_web_seed(std::list<web_seed_t>::iterator web, tcp::endpoint a);
+ 
+ 		// this is the asio callback that is called when a name
 diff --git a/include/libtorrent/aux_/web_peer_connection.hpp b/include/libtorrent/aux_/web_peer_connection.hpp
 index cb604ff4d..b7cd24cb6 100644
 --- a/include/libtorrent/aux_/web_peer_connection.hpp
@@ -70,48 +155,275 @@ index eaf4876fe..be73073cd 100644
  			// Don't forward Authorization credentials to a different
  			// origin. The redirect target may be a third party server
 diff --git a/src/ip_helpers.cpp b/src/ip_helpers.cpp
-index 5d8dfe0ee..ae51f84bf 100644
+index 5d8dfe0ee..7a136540d 100644
 --- a/src/ip_helpers.cpp
 +++ b/src/ip_helpers.cpp
-@@ -8,6 +8,10 @@ see LICENSE file.
+@@ -8,6 +8,11 @@ see LICENSE file.
  */
  
  #include "libtorrent/config.hpp"
 +
 +#include <algorithm>
++#include <array>
 +#include <cstdint>
 +
  #include "libtorrent/address.hpp"
  #include "libtorrent/error_code.hpp"
  #include "libtorrent/io_context.hpp"
-@@ -30,7 +34,25 @@ namespace aux {
- 		{
- 			// https://www.iana.org/assignments/ipv6-address-space/ipv6-address-space.xhtml
- 			address_v6 const a6 = a.to_v6();
--			return (a6.to_bytes()[0] & 0xe0) == 0x20;
-+			auto const bytes = a6.to_bytes();
-+			if ((bytes[0] & 0xe0) == 0x20) return true;
+@@ -16,6 +21,167 @@ see LICENSE file.
+ 
+ namespace libtorrent {
+ namespace aux {
++	namespace {
 +
-+			// The well-known NAT64 prefix represents an IPv4 destination. Treat
-+			// it as global only when the embedded IPv4 address is global too, so
-+			// DNS64 remains usable without opening a path to private IPv4 space.
++		bool is_global_v4(address_v4 const& address)
++		{
++			std::uint32_t const ip = address.to_uint();
++
++			// Match the IANA IPv4 Special-Purpose Address Registry's
++			// "Globally Reachable" column. The two anycast addresses are
++			// globally reachable exceptions within 192.0.0.0/24.
++			if ((ip & 0xff000000) == 0x00000000) return false; // 0.0.0.0/8
++			if ((ip & 0xff000000) == 0x0a000000) return false; // 10.0.0.0/8
++			if ((ip & 0xffc00000) == 0x64400000) return false; // 100.64.0.0/10
++			if ((ip & 0xff000000) == 0x7f000000) return false; // 127.0.0.0/8
++			if ((ip & 0xffff0000) == 0xa9fe0000) return false; // 169.254.0.0/16
++			if ((ip & 0xfff00000) == 0xac100000) return false; // 172.16.0.0/12
++			if ((ip & 0xffffff00) == 0xc0000000)
++				return ip == 0xc0000009 || ip == 0xc000000a;
++			if ((ip & 0xffffff00) == 0xc0000200) return false; // 192.0.2.0/24
++			if ((ip & 0xffffff00) == 0xc0586300) return false; // 192.88.99.0/24
++			if ((ip & 0xffff0000) == 0xc0a80000) return false; // 192.168.0.0/16
++			if ((ip & 0xfffe0000) == 0xc6120000) return false; // 198.18.0.0/15
++			if ((ip & 0xffffff00) == 0xc6336400) return false; // 198.51.100.0/24
++			if ((ip & 0xffffff00) == 0xcb007100) return false; // 203.0.113.0/24
++			if ((ip & 0xf0000000) == 0xe0000000) return false; // 224.0.0.0/4
++			if ((ip & 0xf0000000) == 0xf0000000) return false; // 240.0.0.0/4
++			return true;
++		}
++
++		std::uint32_t first_v6_word(address_v6::bytes_type const& bytes)
++		{
++			return (std::uint32_t(bytes[0]) << 24)
++				| (std::uint32_t(bytes[1]) << 16)
++				| (std::uint32_t(bytes[2]) << 8)
++				| std::uint32_t(bytes[3]);
++		}
++
++		constexpr std::uint8_t nat64_prefix_lengths[] = {32, 40, 48, 56, 64, 96};
++
++		std::uint32_t embedded_v4(address_v6::bytes_type const& bytes
++			, std::uint8_t const prefix_length)
++		{
++			std::array<std::uint8_t, 4> indexes{};
++			switch (prefix_length)
++			{
++				case 32: indexes = {4, 5, 6, 7}; break;
++				case 40: indexes = {5, 6, 7, 9}; break;
++				case 48: indexes = {6, 7, 9, 10}; break;
++				case 56: indexes = {7, 9, 10, 11}; break;
++				case 64: indexes = {9, 10, 11, 12}; break;
++				case 96: indexes = {12, 13, 14, 15}; break;
++				default: TORRENT_ASSERT_FAIL(); return 0;
++			}
++
++			return (std::uint32_t(bytes[indexes[0]]) << 24)
++				| (std::uint32_t(bytes[indexes[1]]) << 16)
++				| (std::uint32_t(bytes[indexes[2]]) << 8)
++				| std::uint32_t(bytes[indexes[3]]);
++		}
++
++		nat64_prefix make_nat64_prefix(address_v6::bytes_type const& bytes
++			, std::uint8_t const prefix_length)
++		{
++			nat64_prefix prefix;
++			prefix.length = prefix_length;
++			std::copy_n(bytes.begin(), prefix_length / 8, prefix.bytes.begin());
++			return prefix;
++		}
++
++		bool same_prefix(nat64_prefix const& lhs, nat64_prefix const& rhs)
++		{
++			return lhs.length == rhs.length
++				&& std::equal(lhs.bytes.begin(), lhs.bytes.begin() + lhs.length / 8
++					, rhs.bytes.begin());
++		}
++
++		bool matches_prefix(address_v6::bytes_type const& bytes
++			, nat64_prefix const& prefix)
++		{
++			return std::equal(prefix.bytes.begin()
++				, prefix.bytes.begin() + prefix.length / 8, bytes.begin());
++		}
++
++		bool is_well_known_nat64_prefix(nat64_prefix const& prefix)
++		{
++			return prefix.length == 96
++				&& prefix.bytes[0] == 0x00
++				&& prefix.bytes[1] == 0x64
++				&& prefix.bytes[2] == 0xff
++				&& prefix.bytes[3] == 0x9b
++				&& std::all_of(prefix.bytes.begin() + 4
++					, prefix.bytes.begin() + 12
++					, [](std::uint8_t const byte) { return byte == 0; });
++		}
++
++		bool discover_prefix(address_v6::bytes_type const& bytes
++			, std::uint32_t const well_known_v4, nat64_prefix& result)
++		{
++			int matches = 0;
++			for (std::uint8_t const length : nat64_prefix_lengths)
++			{
++				// RFC 6052 requires address bits 64-71 to be zero for every
++				// supported prefix length, including a /96 NSP.
++				if (bytes[8] != 0) continue;
++				if (embedded_v4(bytes, length) != well_known_v4) continue;
++				result = make_nat64_prefix(bytes, length);
++				++matches;
++			}
++			return matches == 1;
++		}
++
++		bool is_iana_ipv6_exception(address_v6::bytes_type const& bytes)
++		{
++			std::uint32_t const first = first_v6_word(bytes);
++			if (first == 0x20010003) return true; // 2001:3::/32, AMT
++			if ((first & 0xfffffff0) == 0x20010020) return true; // ORCHIDv2
++			if ((first & 0xfffffff0) == 0x20010030) return true; // DRIP DETs
++			if (first == 0x20010004 && bytes[4] == 0x01 && bytes[5] == 0x12)
++				return true; // 2001:4:112::/48, AS112-v6
++
++			// IETF protocol-assignment anycast exceptions 2001:1::1-3.
++			return first == 0x20010001
++				&& std::all_of(bytes.begin() + 4, bytes.end() - 1
++					, [](std::uint8_t const byte) { return byte == 0; })
++				&& bytes.back() >= 1
++				&& bytes.back() <= 3;
++		}
++
++		bool is_global_v6(address_v6 const& address)
++		{
++			auto const bytes = address.to_bytes();
++
++			// The well-known NAT64 prefix is globally reachable, but the
++			// translated destination must independently pass the IPv4 policy.
 +			bool const well_known_nat64 = bytes[0] == 0x00
 +				&& bytes[1] == 0x64
 +				&& bytes[2] == 0xff
 +				&& bytes[3] == 0x9b
 +				&& std::all_of(bytes.begin() + 4, bytes.begin() + 12
-+					, [](std::uint8_t const b) { return b == 0; });
-+			if (!well_known_nat64) return false;
++					, [](std::uint8_t const byte) { return byte == 0; });
++			if (well_known_nat64)
++			{
++				std::uint32_t const embedded = (std::uint32_t(bytes[12]) << 24)
++					| (std::uint32_t(bytes[13]) << 16)
++					| (std::uint32_t(bytes[14]) << 8)
++					| std::uint32_t(bytes[15]);
++				return is_global_v4(address_v4(embedded));
++			}
 +
-+			std::uint32_t const embedded_v4 = (std::uint32_t(bytes[12]) << 24)
-+				| (std::uint32_t(bytes[13]) << 16)
-+				| (std::uint32_t(bytes[14]) << 8)
-+				| std::uint32_t(bytes[15]);
-+			return is_global(address_v4(embedded_v4));
- 		}
- 		else
++			// Ordinary globally routable IPv6 addresses are in 2000::/3. The
++			// registry carves out non-global ranges within that allocation.
++			if ((bytes[0] & 0xe0) != 0x20) return false;
++			std::uint32_t const first = first_v6_word(bytes);
++			if ((first & 0xfffffe00) == 0x20010000)
++				return is_iana_ipv6_exception(bytes); // 2001::/23
++			if (first == 0x20010db8) return false; // documentation
++			if ((first & 0xffff0000) == 0x20020000) return false; // 6to4
++			if ((first & 0xfffff000) == 0x3fff0000) return false; // documentation
++			return true;
++		}
++
++	}
+ 
+ 	bool is_ip_address(std::string const& host)
+ 	{
+@@ -26,17 +192,77 @@ namespace aux {
+ 
+ 	bool is_global(address const& a)
+ 	{
+-		if (a.is_v6())
++		return a.is_v6() ? is_global_v6(a.to_v6()) : is_global_v4(a.to_v4());
++	}
++
++	bool is_global(address const& a, span<nat64_prefix const> const prefixes)
++	{
++		if (a.is_v4()) return is_global_v4(a.to_v4());
++
++		auto const bytes = a.to_v6().to_bytes();
++		bool translated = false;
++		for (nat64_prefix const& prefix : prefixes)
  		{
-@@ -104,4 +126,3 @@ namespace aux {
+-			// https://www.iana.org/assignments/ipv6-address-space/ipv6-address-space.xhtml
+-			address_v6 const a6 = a.to_v6();
+-			return (a6.to_bytes()[0] & 0xe0) == 0x20;
++			if (!matches_prefix(bytes, prefix)) continue;
++			translated = true;
++			if (!is_global_v4(address_v4(embedded_v4(bytes, prefix.length))))
++				return false;
+ 		}
+-		else
++		return translated || is_global_v6(a.to_v6());
++	}
++
++	nat64_discovery_result discover_nat64_prefixes(
++		span<address const> const addresses)
++	{
++		constexpr std::uint32_t wka170 = 0xc00000aa;
++		constexpr std::uint32_t wka171 = 0xc00000ab;
++		nat64_discovery_result result;
++		bool has_well_known_v4 = false;
++		bool has_unrecognized_v4 = false;
++		bool has_v6 = false;
++		bool has_unrecognized_v6 = false;
++
++		for (address const& candidate : addresses)
+ 		{
+-			address_v4 const a4 = a.to_v4();
+-			return !(a4.is_multicast() || a4.is_unspecified() || is_local(a));
++			if (candidate.is_v4())
++			{
++				std::uint32_t const v4 = candidate.to_v4().to_uint();
++				bool const well_known = v4 == wka170 || v4 == wka171;
++				has_well_known_v4 = has_well_known_v4 || well_known;
++				has_unrecognized_v4 = has_unrecognized_v4 || !well_known;
++				continue;
++			}
++
++			has_v6 = true;
++			auto const bytes = candidate.to_v6().to_bytes();
++			nat64_prefix prefix170;
++			nat64_prefix prefix171;
++			bool const found170 = discover_prefix(bytes, wka170, prefix170);
++			bool const found171 = discover_prefix(bytes, wka171, prefix171);
++			if (found170 == found171)
++			{
++				has_unrecognized_v6 = true;
++				continue;
++			}
++			nat64_prefix const& prefix = found170 ? prefix170 : prefix171;
++			if (!is_well_known_nat64_prefix(prefix)
++				&& !is_global_v6(address_v6(prefix.bytes)))
++			{
++				has_unrecognized_v6 = true;
++				continue;
++			}
++
++			if (std::none_of(result.prefixes.begin(), result.prefixes.end()
++				, [&prefix](nat64_prefix const& existing)
++				{ return same_prefix(existing, prefix); }))
++				result.prefixes.push_back(prefix);
+ 		}
++
++		// A direct WKA response confirms a native resolver only when no
++		// unrecognized AAAA answer makes the DNS64 state ambiguous.
++		result.valid = !has_unrecognized_v4 && !has_unrecognized_v6
++			&& (!result.prefixes.empty() || (has_well_known_v4 && !has_v6));
++		return result;
+ 	}
+ 
+ 	bool is_link_local(address const& a)
+@@ -104,4 +330,3 @@ namespace aux {
  
  }
  }
@@ -143,10 +455,25 @@ index e3a55d9b8..6f911ea1e 100644
  	{
  		if (url.empty())
 diff --git a/src/torrent.cpp b/src/torrent.cpp
-index fecec2704..8d9fc5cb0 100644
+index fecec2704..9d1a065a4 100644
 --- a/src/torrent.cpp
 +++ b/src/torrent.cpp
-@@ -6768,6 +6768,8 @@ namespace {
+@@ -136,6 +136,14 @@ bool is_downloading_state(int const st)
+ 	}
+ }
+ 
++bool is_global_web_seed_endpoint(address const& endpoint, web_seed_t const& web)
++{
++	if (endpoint.is_v6()
++		&& (!web.nat64_discovery_complete || !web.nat64_discovery_valid))
++		return false;
++	return is_global(endpoint, web.nat64_prefixes);
++}
++
+ // convert file priorities into piece priorities
+ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 	file_storage const& fs
+@@ -6768,6 +6776,8 @@ namespace {
  		}
  
  		aux::proxy_settings const& ps = m_ses.proxy();
@@ -155,7 +482,7 @@ index fecec2704..8d9fc5cb0 100644
  		if ((ps.type == settings_pack::http
  			|| ps.type == settings_pack::http_pw)
  			&& ps.proxy_peer_connections)
-@@ -6784,7 +6786,8 @@ namespace {
+@@ -6784,7 +6794,8 @@ namespace {
  				, [self = shared_from_this(), web, proxy_port](error_code const& e, std::vector<address> const& addrs)
  				{ self->wrap(&torrent::on_proxy_name_lookup, e, addrs, web, proxy_port); });
  		}
@@ -165,12 +492,79 @@ index fecec2704..8d9fc5cb0 100644
  			&& (ps.type == settings_pack::socks5
  				|| ps.type == settings_pack::socks5_pw)
  			&& ps.proxy_peer_connections)
-@@ -6935,11 +6938,23 @@ namespace {
+@@ -6799,6 +6810,9 @@ namespace {
+ 
+ 			auto self = shared_from_this();
+ 			web->resolving = true;
++			web->nat64_prefixes.clear();
++			web->nat64_discovery_complete = false;
++			web->nat64_discovery_valid = false;
+ 
+ 			m_ses.get_resolver().async_resolve(hostname, aux::resolver_interface::abort_on_shutdown
+ 				, [self, web, port](error_code const& e, std::vector<address> const& addrs)
+@@ -6884,6 +6898,9 @@ namespace {
+ 
+ 		auto self = shared_from_this();
+ 		web->resolving = true;
++		web->nat64_prefixes.clear();
++		web->nat64_discovery_complete = false;
++		web->nat64_discovery_valid = false;
+ 		m_ses.get_resolver().async_resolve(hostname, aux::resolver_interface::abort_on_shutdown
+ 			, [self, web, port](error_code const& err, std::vector<address> const& addr)
+ 			{
+@@ -6905,9 +6922,9 @@ namespace {
+ #ifndef TORRENT_DISABLE_LOGGING
+ 		debug_log("completed resolve: %s", web->url.c_str());
+ #endif
+-		web->resolving = false;
+ 		if (web->removed)
+ 		{
++			web->resolving = false;
+ #ifndef TORRENT_DISABLE_LOGGING
+ 			debug_log("removed web seed");
+ #endif
+@@ -6915,7 +6932,36 @@ namespace {
  			return;
  		}
  
+-		if (m_abort) return;
++		if (m_abort)
++		{
++			web->resolving = false;
++			return;
++		}
++
 +		bool const block_non_global = web->no_local_ips
 +			|| settings().get_bool(settings_pack::ssrf_mitigation);
++		bool const has_ipv6 = std::any_of(addrs.begin(), addrs.end()
++			, [](address const& addr) { return addr.is_v6(); });
++		if (!e && block_non_global && has_ipv6
++			&& !web->nat64_discovery_complete)
++		{
++			// Hold every target address until the shared, cached RFC 7050
++			// discovery completes. IPv4-only results avoid this DNS lookup.
++			auto self = shared_from_this();
++			m_ses.get_resolver().async_resolve("ipv4only.arpa"
++				, aux::resolver_interface::abort_on_shutdown
++				, [self, web, target_error = e, target_addresses = addrs, port]
++					(error_code const& discovery_error
++						, std::vector<address> const& discovery_addresses)
++				{
++					self->wrap(&torrent::on_nat64_name_lookup, discovery_error
++						, discovery_addresses, target_error, target_addresses
++						, port, web);
++				});
++			return;
++		}
++
++		web->resolving = false;
+ 
+ 		if (e || addrs.empty())
+ 		{
+@@ -6935,11 +6981,21 @@ namespace {
+ 			return;
+ 		}
+ 
 +		bool blocked_non_global = false;
  		for (auto const& addr : addrs)
  		{
@@ -180,7 +574,7 @@ index fecec2704..8d9fc5cb0 100644
 +			// Untrusted web-seed metadata must never turn the client into an HTTP
 +			// transport to a non-global address. Apply this after resolution so
 +			// hostnames and literals receive the same policy.
-+			if (block_non_global && !aux::is_global(addr))
++			if (block_non_global && !is_global_web_seed_endpoint(addr, *web))
 +			{
 +				blocked_non_global = true;
 +				if (m_ses.alerts().should_post<peer_blocked_alert>())
@@ -192,7 +586,7 @@ index fecec2704..8d9fc5cb0 100644
  
  			// fill in the peer struct's address field
  			web->endpoints.emplace_back(addr, std::uint16_t(port));
-@@ -6954,8 +6969,9 @@ namespace {
+@@ -6954,8 +7010,9 @@ namespace {
  		{
  			if (m_ses.alerts().should_post<url_seed_alert>())
  			{
@@ -204,18 +598,63 @@ index fecec2704..8d9fc5cb0 100644
  			}
  
  			// the name lookup failed for the http host. Don't try
-@@ -6979,23 +6995,9 @@ namespace {
+@@ -6972,30 +7029,54 @@ namespace {
+ 	}
+ 	catch (...) { handle_exception(); }
+ 
+-	void torrent::connect_web_seed(std::list<web_seed_t>::iterator web, tcp::endpoint a)
++	void torrent::on_nat64_name_lookup(error_code const& e
++		, std::vector<address> const& addrs
++		, error_code target_error
++		, std::vector<address> target_addresses
++		, int const port
++		, std::list<web_seed_t>::iterator web) try
+ 	{
+-		INVARIANT_CHECK;
+-
  		TORRENT_ASSERT(is_single_thread());
- 		if (m_abort) return;
+-		if (m_abort) return;
++		TORRENT_ASSERT(web->resolving);
  
 -		if (m_ip_filter && m_ip_filter->access(a.address()) & ip_filter::blocked)
--		{
++		if (web->removed)
+ 		{
 -			if (m_ses.alerts().should_post<peer_blocked_alert>())
 -				m_ses.alerts().emplace_alert<peer_blocked_alert>(get_handle()
 -					, a, peer_blocked_alert::ip_filter);
--			return;
--		}
--
++			web->resolving = false;
++			remove_web_seed_iter(web);
+ 			return;
+ 		}
++		if (m_abort || m_ses.is_aborted())
++		{
++			web->resolving = false;
++			return;
++		}
++
++		nat64_discovery_result discovery;
++		if (!e) discovery = discover_nat64_prefixes(addrs);
++		web->nat64_prefixes = std::move(discovery.prefixes);
++		web->nat64_discovery_complete = true;
++		web->nat64_discovery_valid = !e && discovery.valid;
++
++#ifndef TORRENT_DISABLE_LOGGING
++		if (!web->nat64_discovery_valid && should_log())
++			debug_log("NAT64 prefix discovery failed closed for IPv6 web seed: %s"
++				, web->url.c_str());
++#endif
++
++		on_name_lookup(target_error, target_addresses, port, web);
++	}
++	catch (...) { handle_exception(); }
++
++	void torrent::connect_web_seed(std::list<web_seed_t>::iterator web, tcp::endpoint a)
++	{
++		INVARIANT_CHECK;
++
++		TORRENT_ASSERT(is_single_thread());
++		if (m_abort) return;
+ 
  		TORRENT_ASSERT(!web->resolving);
  		TORRENT_ASSERT(web->peer_info.connection == nullptr);
  
@@ -228,7 +667,7 @@ index fecec2704..8d9fc5cb0 100644
  		if (is_paused()) return;
  		if (m_ses.is_aborted()) return;
  		if (is_upload_only()) return;
-@@ -7028,10 +7030,9 @@ namespace {
+@@ -7028,10 +7109,9 @@ namespace {
  		}
  
  		std::string hostname;
@@ -240,7 +679,7 @@ index fecec2704..8d9fc5cb0 100644
  			= parse_url_components(web->url, ec);
  		if (ec)
  		{
-@@ -7056,18 +7057,22 @@ namespace {
+@@ -7056,18 +7136,22 @@ namespace {
  			return;
  		}
  
@@ -259,7 +698,7 @@ index fecec2704..8d9fc5cb0 100644
 +		bool const enforce_endpoint_policy = web->no_local_ips
 +			|| settings().get_bool(settings_pack::ssrf_mitigation);
 +		if (enforce_endpoint_policy
-+			&& !aux::is_global(a.address()))
++			&& !is_global_web_seed_endpoint(a.address(), *web))
  		{
  #ifndef TORRENT_DISABLE_LOGGING
  			if (should_log())
@@ -270,7 +709,7 @@ index fecec2704..8d9fc5cb0 100644
  #endif
  			if (m_ses.alerts().should_post<url_seed_alert>())
  				m_ses.alerts().emplace_alert<url_seed_alert>(get_handle()
-@@ -7075,17 +7080,34 @@ namespace {
+@@ -7075,17 +7159,34 @@ namespace {
  			if (m_ses.alerts().should_post<peer_blocked_alert>())
  				m_ses.alerts().emplace_alert<peer_blocked_alert>(get_handle()
  					, a, peer_blocked_alert::ssrf_mitigation);
@@ -403,24 +842,179 @@ index d75eeac03..9ca118b12 100644
  
  		// work-around for buggy HTTP servers, that fail to encode the redirect URL
  		location = maybe_url_encode(location);
+diff --git a/test/http_proxy.py b/test/http_proxy.py
+index 70d049538..a81b572ef 100755
+--- a/test/http_proxy.py
++++ b/test/http_proxy.py
+@@ -486,6 +486,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
+     # pylint:disable=invalid-name
+     def do_GET(self):
+         """Handles a proxy GET request."""
++        url = urllib.parse.urlsplit(self.path)
++        if url.path == "/vetted-proxy-request-test" and url.port == 8080:
++            # The matching libtorrent test uses a legacy numeric hostname that
++            # resolves locally to 8.8.8.8. Serve data only when the request
++            # target contains that vetted endpoint instead of the hostname.
++            if url.hostname != "8.8.8.8":
++                self.send_error(421, message="unvetted proxy request target")
++                return
++            payload = b"x" * 16000
++            if self.headers.get("Range") != "bytes=0-15999":
++                self.send_error(416, message="unexpected byte range")
++                return
++            self.send_response(206)
++            self.send_header("Content-Range", "bytes 0-15999/16000")
++            self.send_header("Content-Length", str(len(payload)))
++            self.send_header("Connection", "close")
++            self.end_headers()
++            self.wfile.write(payload)
++            return
+         self.do_proxy()
+ 
+     # pylint:disable=invalid-name
 diff --git a/test/test_enum_net.cpp b/test/test_enum_net.cpp
-index b44281596..994b3a136 100644
+index b44281596..0315c8a55 100644
 --- a/test/test_enum_net.cpp
 +++ b/test/test_enum_net.cpp
-@@ -34,6 +34,13 @@ TORRENT_TEST(is_local)
+@@ -14,6 +14,7 @@ see LICENSE file.
+ #include "libtorrent/address.hpp"
+ #include "libtorrent/aux_/ip_helpers.hpp"
+ #include "libtorrent/error_code.hpp"
++#include <array>
+ #include <cstring>
+ 
+ using namespace lt;
+@@ -34,6 +35,114 @@ TORRENT_TEST(is_local)
  	TEST_CHECK(!ec);
  }
  
-+TORRENT_TEST(is_global_nat64)
++TORRENT_TEST(is_global_addresses)
 +{
++	TEST_CHECK(is_global(make_address("8.8.8.8")));
++	TEST_CHECK(is_global(make_address("192.0.0.9")));
++	TEST_CHECK(is_global(make_address("192.31.196.1")));
++	TEST_CHECK(!is_global(make_address("0.0.0.1")));
++	TEST_CHECK(!is_global(make_address("192.0.0.1")));
++	TEST_CHECK(!is_global(make_address("192.0.2.1")));
++	TEST_CHECK(!is_global(make_address("192.88.99.2")));
++	TEST_CHECK(!is_global(make_address("198.18.0.1")));
++	TEST_CHECK(!is_global(make_address("198.51.100.1")));
++	TEST_CHECK(!is_global(make_address("203.0.113.1")));
++	TEST_CHECK(!is_global(make_address("240.0.0.1")));
++
++	TEST_CHECK(is_global(make_address("2606:4700:4700::1111")));
++	TEST_CHECK(is_global(make_address("2001:1::1")));
++	TEST_CHECK(!is_global(make_address("2001:1::4")));
++	TEST_CHECK(is_global(make_address("2001:3::1")));
++	TEST_CHECK(is_global(make_address("2001:4:112::1")));
++	TEST_CHECK(is_global(make_address("2001:20::1")));
++	TEST_CHECK(is_global(make_address("2001:30::1")));
++	TEST_CHECK(!is_global(make_address("2001::1")));
++	TEST_CHECK(!is_global(make_address("2001:2::1")));
++	TEST_CHECK(!is_global(make_address("2001:db8::1")));
++	TEST_CHECK(!is_global(make_address("2002:808:808::1")));
++	TEST_CHECK(!is_global(make_address("3fff::1")));
++
 +	TEST_CHECK(is_global(make_address("64:ff9b::808:808")));
 +	TEST_CHECK(!is_global(make_address("64:ff9b::7f00:1")));
 +	TEST_CHECK(!is_global(make_address("64:ff9b::a00:1")));
++	TEST_CHECK(!is_global(make_address("64:ff9b::c000:201")));
++	TEST_CHECK(!is_global(make_address("64:ff9b:1::808:808")));
++}
++
++TORRENT_TEST(nat64_prefix_discovery)
++{
++	struct test_case
++	{
++		int length;
++		char const* discovery;
++		char const* private_target;
++		char const* global_target;
++	};
++
++	std::array<test_case, 6> const cases = {{
++		{32, "2001:4860:c000:aa::", "2001:4860:a00:1::1234", "2001:4860:808:808::"},
++		{40, "2001:4860:abc0:0:aa::", "2001:4860:ab0a:0:1::1234", "2001:4860:ab08:808:8::"},
++		{48, "2001:4860:abcd:c000:0:aa00::", "2001:4860:abcd:a00:0:100:0:1234", "2001:4860:abcd:808:8:800::"},
++		{56, "2001:4860:abcd:efc0:0:aa::", "2001:4860:abcd:ef0a:0:1:0:1234", "2001:4860:abcd:ef08:8:808::"},
++		{64, "2001:4860:abcd:ef01:c0:0:aa00:0", "2001:4860:abcd:ef01:a:0:100:1234", "2001:4860:abcd:ef01:8:808:800:0"},
++		{96, "2001:4860:abcd:ef01::c000:aa", "2001:4860:abcd:ef01::a00:1", "2001:4860:abcd:ef01::808:808"},
++	}};
++
++	for (test_case const& test : cases)
++	{
++		std::array<address, 1> const answers = {{make_address(test.discovery)}};
++		nat64_discovery_result const discovery = discover_nat64_prefixes(answers);
++		TEST_CHECK(discovery.valid);
++		TEST_EQUAL(discovery.prefixes.size(), 1);
++		if (discovery.prefixes.empty()) continue;
++		TEST_EQUAL(int(discovery.prefixes.front().length), test.length);
++		TEST_CHECK(!is_global(make_address(test.private_target), discovery.prefixes));
++		TEST_CHECK(is_global(make_address(test.global_target), discovery.prefixes));
++		TEST_CHECK(is_global(make_address("2606:4700:4700::1111"), discovery.prefixes));
++	}
++}
++
++TORRENT_TEST(nat64_discovery_fails_closed_on_malformed_answers)
++{
++	std::array<address, 2> const direct = {{
++		make_address("192.0.0.170"), make_address("192.0.0.171")}};
++	auto discovery = discover_nat64_prefixes(direct);
++	TEST_CHECK(discovery.valid);
++	TEST_CHECK(discovery.prefixes.empty());
++
++	std::array<address, 1> const well_known_prefix = {{
++		make_address("64:ff9b::c000:aa")}};
++	discovery = discover_nat64_prefixes(well_known_prefix);
++	TEST_CHECK(discovery.valid);
++	TEST_EQUAL(discovery.prefixes.size(), 1);
++
++	std::array<address, 2> const unexpected_v4 = {{
++		make_address("192.0.0.170"), make_address("8.8.8.8")}};
++	discovery = discover_nat64_prefixes(unexpected_v4);
++	TEST_CHECK(!discovery.valid);
++
++	std::array<address, 2> const mixed_v6 = {{
++		make_address("2001:4860:c000:aa::"),
++		make_address("2606:4700:4700::1111")}};
++	discovery = discover_nat64_prefixes(mixed_v6);
++	TEST_CHECK(!discovery.valid);
++
++	// Bits 64-71 are part of this /96 NSP and violate RFC 6052 when nonzero.
++	std::array<address, 1> const malformed_96 = {{
++		make_address("2001:4860:abcd:ef01:100:0:c000:aa")}};
++	discovery = discover_nat64_prefixes(malformed_96);
++	TEST_CHECK(!discovery.valid);
++
++	std::array<address, 1> const non_global_prefix = {{
++		make_address("fd00:1234:5678:9abc::c000:aa")}};
++	discovery = discover_nat64_prefixes(non_global_prefix);
++	TEST_CHECK(!discovery.valid);
++
++	std::array<address, 0> const empty{};
++	discovery = discover_nat64_prefixes(empty);
++	TEST_CHECK(!discovery.valid);
 +}
 +
  TORRENT_TEST(match_addr_mask)
  {
  	TEST_CHECK(match_addr_mask(
+diff --git a/test/test_http_connection.cpp b/test/test_http_connection.cpp
+index 282a33bff..396d604f7 100644
+--- a/test/test_http_connection.cpp
++++ b/test/test_http_connection.cpp
+@@ -171,6 +171,11 @@ void run_suite(std::string const& protocol
+ 
+ 	run_test(url_base + "relative/redirect", 3216, 200, 2, error_code(), ps);
+ 	run_test(url_base + "redirect", 3216, 200, 2, error_code(), ps);
++	if (protocol == "https" && ps.type == settings_pack::none)
++	{
++		run_test(url_base + "redirect_downgrade", 0, 301, 1
++			, error_code(errors::unsupported_url_protocol), ps);
++	}
+ 	// the actual error code for an abort caused by too many
+ 	// redirects is a bit unpredictable. under SSL for instance,
+ 	// it will be an ungraceful shutdown
 diff --git a/test/test_http_parser.cpp b/test/test_http_parser.cpp
 index 70fbf0a80..94972b9de 100644
 --- a/test/test_http_parser.cpp
@@ -445,10 +1039,10 @@ index 70fbf0a80..94972b9de 100644
  
  	TEST_EQUAL(aux::is_ok_status(200), true);
 diff --git a/test/test_web_seed_redirect.cpp b/test/test_web_seed_redirect.cpp
-index f7fd21c65..4c48dccea 100644
+index f7fd21c65..337c3666d 100644
 --- a/test/test_web_seed_redirect.cpp
 +++ b/test/test_web_seed_redirect.cpp
-@@ -16,13 +16,123 @@ see LICENSE file.
+@@ -16,13 +16,207 @@ see LICENSE file.
  #include "web_seed_suite.hpp"
  #include "settings.hpp"
  #include "libtorrent/aux_/random.hpp"
@@ -456,6 +1050,7 @@ index f7fd21c65..4c48dccea 100644
 +#include "libtorrent/alert_types.hpp"
  #include "libtorrent/create_torrent.hpp"
 +#include "libtorrent/disabled_disk_io.hpp"
++#include "libtorrent/hasher.hpp"
 +#include "libtorrent/ip_filter.hpp"
  #include "libtorrent/load_torrent.hpp"
  #include "libtorrent/session_params.hpp"
@@ -471,6 +1066,89 @@ index f7fd21c65..4c48dccea 100644
 +	TEST_EQUAL(aux::make_web_seed_proxy_request_target(
 +		tcp::endpoint(make_address("2001:4860:4860::8888"), 8080), "/test_file")
 +		, "http://[2001:4860:4860::8888]:8080/test_file");
++}
++
++TORRENT_TEST(web_seed_proxy_request_uses_vetted_endpoint)
++{
++	int const proxy_port = start_proxy(settings_pack::http);
++	TEST_CHECK(proxy_port > 0);
++
++	settings_pack p = settings();
++	p.set_bool(settings_pack::ssrf_mitigation, true);
++	p.set_int(settings_pack::proxy_type, settings_pack::http);
++	p.set_str(settings_pack::proxy_hostname, "127.0.0.1");
++	p.set_int(settings_pack::proxy_port, proxy_port);
++	p.set_bool(settings_pack::proxy_peer_connections, true);
++
++	std::vector<char> const payload(16000, 'x');
++	std::vector<lt::create_file_entry> fs;
++	fs.emplace_back("test_file", std::int64_t(payload.size()));
++	lt::create_torrent torrent(std::move(fs), 0x4000, create_torrent::v1_only);
++	torrent.set_hash(0_piece, hasher(payload).final());
++	lt::add_torrent_params atp = load_torrent_buffer(bencode(torrent.generate()));
++	// getaddrinfo resolves this legacy numeric form to 8.8.8.8 without DNS.
++	// The original hostname and the locally vetted endpoint therefore differ.
++	atp.url_seeds.emplace_back("http://134744072:8080/vetted-proxy-request-test");
++	atp.flags &= ~torrent_flags::paused;
++	atp.flags &= ~torrent_flags::auto_managed;
++	atp.save_path = complete("vetted-proxy-request");
++
++	error_code ec;
++	remove_all(atp.save_path, ec);
++	ec.clear();
++	{
++		lt::session ses(p);
++		ses.add_torrent(atp, ec);
++		TEST_CHECK(!ec);
++		TEST_CHECK(wait_for_alert(ses, torrent_finished_alert::alert_type
++			, "vetted proxy target") != nullptr);
++	}
++
++	stop_proxy(proxy_port);
++	remove_all(atp.save_path, ec);
++	TEST_CHECK(!ec);
++}
++
++TORRENT_TEST(web_seed_https_redirect_downgrade)
++{
++	std::vector<char> const payload(16000, 'x');
++	ofstream("test_file").write(payload.data(), payload.size());
++	int const port = start_web_server(true);
++
++	std::vector<lt::create_file_entry> fs;
++	fs.emplace_back("test_file", std::int64_t(payload.size()));
++	lt::create_torrent torrent(std::move(fs), 0x4000, create_torrent::v1_only);
++	torrent.set_hash(0_piece, hasher(payload).final());
++	lt::add_torrent_params atp = load_torrent_buffer(bencode(torrent.generate()));
++	atp.url_seeds.emplace_back("https://127.0.0.1:" + std::to_string(port)
++		+ "/redirect_downgrade");
++	atp.flags &= ~torrent_flags::paused;
++	atp.flags &= ~torrent_flags::auto_managed;
++	atp.save_path = complete("web-seed-downgrade");
++
++	error_code ec;
++	remove_all(atp.save_path, ec);
++	ec.clear();
++	{
++		settings_pack p = settings();
++		p.set_bool(settings_pack::ssrf_mitigation, false);
++		p.set_bool(settings_pack::validate_https_trackers, false);
++		lt::session ses(p);
++		ses.add_torrent(atp, ec);
++		TEST_CHECK(!ec);
++		TEST_CHECK(wait_for_alert(ses, "web-seed HTTPS downgrade"
++			, [](alert const* const alert)
++			{
++				auto const* const peer_error = alert_cast<peer_error_alert>(alert);
++				return peer_error != nullptr
++					&& peer_error->error == errors::unsupported_url_protocol;
++			}, seconds(10)));
++	}
++
++	stop_web_server();
++	remove_all(atp.save_path, ec);
++	if (ec == boost::system::errc::no_such_file_or_directory) ec.clear();
++	TEST_CHECK(!ec);
 +}
 +
 +TORRENT_TEST(web_seed_ssrf_blocks_non_global_endpoint)
@@ -572,7 +1250,7 @@ index f7fd21c65..4c48dccea 100644
  TORRENT_TEST_DISK_IO(web_seed_redirect)
  {
  	using namespace lt;
-@@ -64,6 +174,7 @@ TORRENT_TEST_DISK_IO(web_seed_redirect)
+@@ -64,6 +258,7 @@ TORRENT_TEST_DISK_IO(web_seed_redirect)
  
  	{
  		settings_pack p = settings();
@@ -594,3 +1272,20 @@ index de81c714d..39b2c0c92 100644
  			session_params sp(pack, {});
  			sp.disk_io_constructor = disk_io;
  			lt::session ses(std::move(sp));
+diff --git a/test/web_server.py b/test/web_server.py
+index 3bea3a62e..4927456a8 100644
+--- a/test/web_server.py
++++ b/test/web_server.py
+@@ -93,6 +93,12 @@ class http_handler(BaseHTTPRequestHandler):
+             self.send_header("Location", "/test_file")
+             self.send_header("Connection", "close")
+             self.end_headers()
++        elif self.path == '/redirect_downgrade':
++            self.send_response(301)
++            self.send_header("Location",
++                "http://127.0.0.1:%d/test_file" % port)
++            self.send_header("Connection", "close")
++            self.end_headers()
+         elif self.path == '/infinite_redirect':
+             self.send_response(301)
+             self.send_header("Location", "/infinite_redirect")

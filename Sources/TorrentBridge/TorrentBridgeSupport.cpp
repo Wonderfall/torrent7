@@ -4,7 +4,6 @@
 #include <libtorrent/extensions/smart_ban.hpp>
 #include <libtorrent/extensions/ut_metadata.hpp>
 #include <libtorrent/extensions/ut_pex.hpp>
-#include <libtorrent/aux_/ip_helpers.hpp>
 
 namespace {
 
@@ -1867,9 +1866,7 @@ void strip_resume_peer_cache(lt::add_torrent_params &params) noexcept
 void sanitize_magnet_endpoint_hints(lt::add_torrent_params &params)
 {
     sanitize_resume_endpoint_hints(params);
-    std::erase_if(params.peers, [](lt::tcp::endpoint const &endpoint) {
-        return endpoint.port() < 1024 || !lt::aux::is_global(endpoint.address());
-    });
+    params.peers.clear();
 }
 
 void sanitize_resume_endpoint_hints(lt::add_torrent_params &params) noexcept

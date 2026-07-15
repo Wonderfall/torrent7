@@ -700,18 +700,17 @@ TEST_CASE("network client identity is generic and coarse")
     CHECK(settings.get_bool(lt::settings_pack::no_connect_privileged_ports));
 }
 
-TEST_CASE("untrusted magnet endpoint hints cannot target local or privileged services")
+TEST_CASE("untrusted magnet endpoint hints are discarded")
 {
     lt::add_torrent_params params = bridge_tests::add_params_with_hashes();
     params.dht_nodes.emplace_back("127.0.0.1", 6881);
     params.peers.emplace_back(lt::make_address_v4("127.0.0.1"), 6881);
     params.peers.emplace_back(lt::make_address_v4("8.8.8.8"), 80);
     params.peers.emplace_back(lt::make_address_v4("8.8.8.8"), 6881);
+    params.peers.emplace_back(lt::make_address("2001:4860:4860::8888"), 6881);
 
     sanitize_magnet_endpoint_hints(params);
 
     CHECK(params.dht_nodes.empty());
-    REQUIRE(params.peers.size() == 1U);
-    CHECK(params.peers.front().address() == lt::make_address_v4("8.8.8.8"));
-    CHECK(params.peers.front().port() == 6881);
+    CHECK(params.peers.empty());
 }

@@ -20,7 +20,9 @@ typeset -r patch_helper="$root_dir/Scripts/libtorrent-patch-series.sh"
 typeset -ra test_targets=(
     test_enum_net
     test_file
+    test_http_connection
     test_http_parser
+    test_storage
     test_web_seed_redirect
 )
 typeset restore_configuration=0
@@ -53,11 +55,21 @@ restore_configuration=0
 (
     cd -- "$build_dir/test"
     ./test_enum_net --no-redirect \
-        "$source_dir/test/test_enum_net.cpp.is_global_nat64"
+        "$source_dir/test/test_enum_net.cpp.is_global_addresses"
+    ./test_enum_net --no-redirect \
+        "$source_dir/test/test_enum_net.cpp.nat64_prefix_discovery"
+    ./test_enum_net --no-redirect \
+        "$source_dir/test/test_enum_net.cpp.nat64_discovery_fails_closed_on_malformed_answers"
+    ./test_http_connection --no-redirect \
+        "$source_dir/test/test_http_connection.cpp.no_proxy_ssl"
     ./test_http_parser --no-redirect \
         "$source_dir/test/test_http_parser.cpp.http_parser"
     ./test_web_seed_redirect --no-redirect \
         "$source_dir/test/test_web_seed_redirect.cpp.web_seed_proxy_request_target_uses_vetted_endpoint"
+    ./test_web_seed_redirect --no-redirect \
+        "$source_dir/test/test_web_seed_redirect.cpp.web_seed_proxy_request_uses_vetted_endpoint"
+    ./test_web_seed_redirect --no-redirect \
+        "$source_dir/test/test_web_seed_redirect.cpp.web_seed_https_redirect_downgrade"
     ./test_web_seed_redirect --no-redirect \
         "$source_dir/test/test_web_seed_redirect.cpp.web_seed_ssrf_blocks_non_global_endpoint"
     ./test_web_seed_redirect --no-redirect \
@@ -66,4 +78,8 @@ restore_configuration=0
         "$source_dir/test/test_web_seed_redirect.cpp.web_seed_numeric_host_honors_ip_filter_with_socks_dns"
     ./test_file --no-redirect \
         "$source_dir/test/test_file.cpp.confined_filesystem_operations"
+    ./test_storage --no-redirect \
+        "$source_dir/test/test_storage.cpp.confined_hard_link_write_pread"
+    ./test_storage --no-redirect \
+        "$source_dir/test/test_storage.cpp.confined_hard_link_write_mmap"
 )

@@ -768,7 +768,7 @@ index c6e5fe5d11b53f9a1edcfa457e7d716288ad1830..962f454a27c36d9609223a82af911202
  			if (ec == boost::system::errc::no_such_file_or_directory)
  				ec.clear();
 diff --git a/src/path.cpp b/src/path.cpp
-index 59b829db20f26901f930df918c9ca991679d4285..41f5efcf4df87b6f22368cf634e1ac62b260f03b 100644
+index 59b829db20f26901f930df918c9ca991679d4285..01c86ed0d4fb6669ca3198ea2661dd2a5544e8ed 100644
 --- a/src/path.cpp
 +++ b/src/path.cpp
 @@ -46,6 +46,9 @@ see LICENSE file.
@@ -848,7 +848,7 @@ index 59b829db20f26901f930df918c9ca991679d4285..41f5efcf4df87b6f22368cf634e1ac62
  #ifdef TORRENT_WINDOWS
  	time_t file_time_to_posix(FILETIME f)
  	{
-@@ -330,6 +386,309 @@ namespace {
+@@ -330,6 +386,311 @@ namespace {
  #undef RenameFunction_
  	}
  
@@ -1142,8 +1142,10 @@ index 59b829db20f26901f930df918c9ca991679d4285..41f5efcf4df87b6f22368cf634e1ac62
 +		}
 +		auto root_fd = open_confined_root(root, ec);
 +		if (ec) return -1;
++		int open_flags = flags | O_NOFOLLOW_ANY | O_RESOLVE_BENEATH;
++		if ((flags & O_ACCMODE) != O_RDONLY) open_flags |= O_UNIQUE;
 +		int const fd = ::openat(root_fd.fd(), relative.c_str()
-+			, flags | O_NOFOLLOW_ANY | O_RESOLVE_BENEATH, mode);
++			, open_flags, mode);
 +		if (fd < 0) ec.assign(errno, system_category());
 +		return fd;
 +#else
@@ -1513,10 +1515,10 @@ index 70f353acc0716e0cb1a91f9f34749c7667f58c08..2ba9d7765a1f96a1bbeeea8baa03c50b
 +
  }}
 diff --git a/test/test_file.cpp b/test/test_file.cpp
-index 71a20be7fc7acdaf707148aa23bdcbbcc355333e..186e3e5a9c25181f8b741fe7f2d380a671378e68 100644
+index 71a20be7fc7acdaf707148aa23bdcbbcc355333e..3732a764960c0108812f3bbdc4021c7b45123e0a 100644
 --- a/test/test_file.cpp
 +++ b/test/test_file.cpp
-@@ -535,6 +535,132 @@ TORRENT_TEST(lexically_relative_normal)
+@@ -535,6 +535,161 @@ TORRENT_TEST(lexically_relative_normal)
  #undef S
  }
  
@@ -1539,6 +1541,8 @@ index 71a20be7fc7acdaf707148aa23bdcbbcc355333e..186e3e5a9c25181f8b741fe7f2d380a6
 +	TEST_EQUAL(::symlink(outside.c_str(), combine_path(root, "escape").c_str()), 0);
 +	TEST_EQUAL(::symlink(combine_path(outside, "victim").c_str()
 +		, combine_path(root, "final-link").c_str()), 0);
++	TEST_EQUAL(::link(combine_path(outside, "victim").c_str()
++		, combine_path(root, "hard-link").c_str()), 0);
 +
 +	file_status status;
 +	confined_stat_file(root, "escape/victim", &status, ec);
@@ -1563,6 +1567,31 @@ index 71a20be7fc7acdaf707148aa23bdcbbcc355333e..186e3e5a9c25181f8b741fe7f2d380a6
 +	try
 +	{
 +		aux::file_handle file(root, "final-link", 0, aux::open_mode::read_only);
++	}
++	catch (storage_error const&)
++	{
++		open_failed = true;
++	}
++	TEST_CHECK(open_failed);
++
++	// A read-only open does not mutate the inode and remains valid. Writable
++	// opens must reject a multiply-linked inode so writes cannot escape root.
++	open_failed = false;
++	try
++	{
++		aux::file_handle file(root, "hard-link", 0, aux::open_mode::read_only);
++	}
++	catch (storage_error const&)
++	{
++		open_failed = true;
++	}
++	TEST_CHECK(!open_failed);
++
++	open_failed = false;
++	try
++	{
++		aux::file_handle file(root, "hard-link", 0
++			, aux::open_mode::write | aux::open_mode::truncate);
 +	}
 +	catch (storage_error const&)
 +	{
@@ -1636,6 +1665,8 @@ index 71a20be7fc7acdaf707148aa23bdcbbcc355333e..186e3e5a9c25181f8b741fe7f2d380a6
 +	TEST_CHECK(!ec);
 +	confined_remove(root, "final-link", false, ec);
 +	TEST_CHECK(!ec);
++	confined_remove(root, "hard-link", false, ec);
++	TEST_CHECK(!ec);
 +	stat_file(combine_path(outside, "victim"), &status, ec);
 +	TEST_CHECK(!ec);
 +	TEST_EQUAL(status.file_size, 32);
@@ -1649,8 +1680,113 @@ index 71a20be7fc7acdaf707148aa23bdcbbcc355333e..186e3e5a9c25181f8b741fe7f2d380a6
  // UNC tests
  #if TORRENT_USE_UNC_PATHS
  
-@@ -700,4 +826,3 @@ TORRENT_TEST(to_file_open_mode)
+@@ -700,4 +855,3 @@ TORRENT_TEST(to_file_open_mode)
  	TEST_CHECK(aux::to_file_open_mode(aux::open_mode::write | aux::open_mode::no_atime, false) == (file_open_mode::read_write | file_open_mode::no_atime));
  	TEST_CHECK(aux::to_file_open_mode(aux::open_mode::write, true) == (file_open_mode::read_write | file_open_mode::mmapped));
  }
 -
+diff --git a/test/test_storage.cpp b/test/test_storage.cpp
+index fac4bfff65e4339f12bb732ea19feac9ca983ca4..d976702b9a1dd6a6de4cd6bae6e251a117a5f69f 100644
+--- a/test/test_storage.cpp
++++ b/test/test_storage.cpp
+@@ -332,6 +332,79 @@ std::vector<char> new_piece(std::size_t const size)
+ 	return ret;
+ }
+ 
++#if defined __APPLE__ && defined __MACH__
++template <typename StorageType>
++void test_confined_hard_link_write(char const* const name)
++{
++	std::string const root = complete(std::string("hard-link-") + name + "-root");
++	std::string const victim = complete(std::string("hard-link-") + name + "-victim");
++	error_code ec;
++	remove_all(root, ec);
++	ec.clear();
++	remove(victim, ec);
++	ec.clear();
++	create_directories(root, ec);
++	TEST_CHECK(!ec);
++	std::vector<char> metadata;
++	auto const info = setup_torrent_info(metadata);
++	std::string const linked = combine_path(root, info->layout().file_path(0_file));
++	create_directories(parent_path(linked), ec);
++	TEST_CHECK(!ec);
++
++	std::vector<char> const expected(0x8000, 'v');
++	{
++		std::ofstream output(victim, std::ios::binary);
++		output.write(expected.data(), std::streamsize(expected.size()));
++		TEST_CHECK(output.good());
++	}
++	TEST_EQUAL(::link(victim.c_str(), linked.c_str()), 0);
++
++	aux::vector<download_priority_t, file_index_t> priorities;
++	renamed_files renamed;
++	storage_params params{
++		info->layout(),
++		renamed,
++		root,
++		{},
++		storage_mode_sparse,
++		priorities,
++		sha1_hash{},
++		info->v1(),
++		info->v2()
++	};
++	typename file_pool_type<StorageType>::type pool;
++	auto storage = make_storage<StorageType>(params, pool);
++	aux::session_settings settings;
++	storage_error error;
++	storage->initialize(settings, error);
++	TEST_CHECK(!error);
++
++	std::vector<char> payload(0x4000, 'x');
++	int const written = write(storage, settings, span<char>(payload), 0_piece, 0
++		, aux::open_mode::write, error);
++	TEST_CHECK(error);
++	TEST_CHECK(written < int(payload.size()));
++
++	storage_error release_error;
++	release_files(storage, release_error);
++	TEST_CHECK(!release_error);
++	storage.reset();
++
++	std::vector<char> actual(expected.size());
++	{
++		std::ifstream input(victim, std::ios::binary);
++		input.read(actual.data(), std::streamsize(actual.size()));
++		TEST_EQUAL(input.gcount(), std::streamsize(actual.size()));
++	}
++	TEST_CHECK(actual == expected);
++
++	remove_all(root, ec);
++	TEST_CHECK(!ec);
++	remove(victim, ec);
++	TEST_CHECK(!ec);
++}
++#endif
++
+ template <typename StorageType>
+ void run_storage_tests(std::shared_ptr<torrent_info const> info
+ 	, lt::storage_mode_t storage_mode)
+@@ -910,6 +983,20 @@ TORRENT_TEST_DISK_IO(check_files_allocate) { test_check_files_all_threads(zero_p
+ TORRENT_TEST(test_pre_allocate_mmap) { test_pre_allocate<mmap_storage>(); }
+ #endif
+ 
++#if defined __APPLE__ && defined __MACH__
++TORRENT_TEST(confined_hard_link_write_pread)
++{
++	test_confined_hard_link_write<pread_storage>("pread");
++}
++
++#if TORRENT_HAVE_MMAP || TORRENT_HAVE_MAP_VIEW_OF_FILE
++TORRENT_TEST(confined_hard_link_write_mmap)
++{
++	test_confined_hard_link_write<mmap_storage>("mmap");
++}
++#endif
++#endif
++
+ // posix_storage is meant to only use the most portable API for disk I/O, and so
+ // doesn't support pre-allocating files
+ /*
