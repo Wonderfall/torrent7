@@ -175,6 +175,11 @@ final class RecordingTorrentFileLocationService: TorrentFileLocationServicing {
     }
 }
 
+enum FakeTorrentEngineOperation: Equatable, Sendable {
+    case applySettings(dhtEnabled: Bool, networkBlocked: Bool)
+    case addMagnet(appliedDHTEnabled: Bool?, networkBlocked: Bool)
+}
+
 actor FakeTorrentEngine: TorrentEngineServicing {
     nonisolated let startupFailureMessage: String? = nil
     nonisolated let libtorrentVersion = "fake-libtorrent"
@@ -198,9 +203,11 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private(set) var restartCount = 0
     private(set) var restartPeerExchangePluginValues = [Bool]()
     private(set) var blockNetworkCount = 0
+    private(set) var currentNetworkBlocked = false
     private(set) var saveAllCount = 0
     private(set) var saveAllCheckedCount = 0
     private(set) var appliedSettings = [(settings: TorrentSettings, networkBlocked: Bool)]()
+    private(set) var operations = [FakeTorrentEngineOperation]()
     private(set) var previewedTorrentFiles = [Data]()
     private(set) var addedMagnets = [(
         magnet: String,
@@ -223,6 +230,8 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         allowNonHTTPSWebSeeds: Bool
     )]()
     private(set) var pausedIDs = [String]()
+    private(set) var pauseAppliedDHTValues = [Bool?]()
+    private(set) var pauseNetworkBlockedValues = [Bool]()
     private(set) var resumedIDs = [String]()
     private(set) var removed = [(id: String, deleteFiles: Bool)]()
     var removeError: Error?
@@ -318,6 +327,12 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         }
     }
 
+    func waitForNetworkBlock() async {
+        while blockNetworkCount == 0 {
+            await Task.yield()
+        }
+    }
+
     func setNextAddedMagnetID(_ id: String) {
         nextAddedMagnetID = id
     }
@@ -365,6 +380,10 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         allowNonHTTPSWebSeeds: Bool,
         allowPreMetadataDHT: Bool
     ) async throws -> String {
+        operations.append(.addMagnet(
+            appliedDHTEnabled: appliedSettings.last?.settings.enableDHTNetwork,
+            networkBlocked: currentNetworkBlocked
+        ))
         addedMagnets.append((
             magnet,
             savePath,
@@ -399,6 +418,8 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func pause(id: String) async throws {
         pausedIDs.append(id)
+        pauseAppliedDHTValues.append(appliedSettings.last?.settings.enableDHTNetwork)
+        pauseNetworkBlockedValues.append(currentNetworkBlocked)
     }
 
     func resume(id: String) async throws {
@@ -431,10 +452,16 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func applySettings(_ settings: TorrentSettings, networkBlocked: Bool) async throws {
         appliedSettings.append((settings, networkBlocked))
+        currentNetworkBlocked = networkBlocked
+        operations.append(.applySettings(
+            dhtEnabled: settings.enableDHTNetwork,
+            networkBlocked: networkBlocked
+        ))
     }
 
     func blockNetworkNow() async throws {
         blockNetworkCount += 1
+        currentNetworkBlocked = true
     }
 
     func saveAll() async {

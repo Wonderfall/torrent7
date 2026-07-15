@@ -694,6 +694,57 @@ struct TorrentStoreIntegrationTests {
         #expect(await harness.engine.appliedSettings.first?.settings.downloadRateLimitKBps == 20)
     }
 
+    @Test("Settings retain FIFO order at pending user-operation capacity")
+    func settingsRetainFIFOOrderAtPendingUserOperationCapacity() async throws {
+        let suiteName = "app.torrent7.operation-queue-order.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let harness = makeStoreHarness(defaults: defaults)
+        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+            revision: 1,
+            torrents: [makeTorrent(id: "alpha")]
+        ))
+        await harness.store.refreshNow()
+
+        await harness.engine.suspendNextRemove()
+        harness.store.removeTorrent(id: "alpha", deleteFiles: false)
+        await harness.engine.waitForSuspendedRemove()
+
+        var restrictedSettings = harness.store.settings
+        restrictedSettings.enableDHTNetwork = false
+        harness.store.updateSettings(restrictedSettings)
+        harness.store.addMagnet(
+            "magnet:?xt=urn:btih:abc",
+            savePath: "/Downloads",
+            allowPreMetadataDHT: true
+        )
+        for _ in 0..<63 {
+            harness.store.pauseTorrent(id: "alpha")
+        }
+
+        var relaxedSettings = harness.store.settings
+        relaxedSettings.enableDHTNetwork = true
+        relaxedSettings.requireNetworkInterface = true
+        relaxedSettings.requiredNetworkInterfaceName = "utun-missing"
+        harness.store.updateSettings(relaxedSettings)
+        await harness.engine.waitForNetworkBlock()
+
+        await harness.engine.resumeSuspendedRemoves()
+        await harness.store.saveAll()
+
+        #expect(await harness.engine.operations == [
+            .applySettings(dhtEnabled: false, networkBlocked: true),
+            .addMagnet(appliedDHTEnabled: false, networkBlocked: true),
+            .applySettings(dhtEnabled: true, networkBlocked: true)
+        ])
+        #expect(await harness.engine.pauseAppliedDHTValues.count == 63)
+        #expect(await harness.engine.pauseAppliedDHTValues.allSatisfy { $0 == false })
+        #expect(await harness.engine.pauseNetworkBlockedValues.allSatisfy { $0 })
+    }
+
     @Test("Open wake stream does not retain store")
     func openWakeStreamDoesNotRetainStore() async throws {
         var harness: StoreHarness? = makeStoreHarness(

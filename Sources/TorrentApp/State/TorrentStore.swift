@@ -19,8 +19,15 @@ private enum TorrentStoreErrorSource {
 
 private typealias TorrentStoreUserOperation = @MainActor @Sendable (TorrentStore) async -> Void
 
+private struct TorrentStorePendingSettingsApplication {
+    var settings: TorrentSettings
+    var networkBinding: AppliedNetworkBinding
+    var refreshes: Bool
+    var notifiesCompletions: Bool
+}
+
 private enum TorrentStorePendingOperation {
-    case applySettings(refreshes: Bool, notifiesCompletions: Bool)
+    case applySettings(TorrentStorePendingSettingsApplication)
     case user(TorrentStoreUserOperation)
 }
 
@@ -28,7 +35,7 @@ private enum TorrentStorePendingOperation {
 @Observable
 final class TorrentStore {
     private static let maximumPendingUserOperationCount = 64
-    private static let maximumPendingOperationCount = maximumPendingUserOperationCount + 1
+    private static let maximumPendingOperationCount = maximumPendingUserOperationCount * 2 + 1
 
     let commandState = TorrentCommandState()
     let selectionState = TorrentSelectionState()
@@ -1354,37 +1361,27 @@ final class TorrentStore {
             return
         }
 
-        applyImmediateNetworkBlockIfNeeded(for: currentNetworkBinding)
+        let networkBinding = currentNetworkBinding
+        applyImmediateNetworkBlockIfNeeded(for: networkBinding)
 
-        let coalescingIndex = pendingOperations.indices.last.flatMap { lastIndex in
-            if case .applySettings = pendingOperations[lastIndex] {
-                return lastIndex
-            }
-            guard pendingOperations.count >= Self.maximumPendingOperationCount else {
-                return nil
-            }
-            return pendingOperations.indices.last { index in
-                if case .applySettings = pendingOperations[index] {
-                    return true
-                }
-                return false
-            }
-        }
-        if let coalescingIndex,
-           case let .applySettings(existingRefreshes, existingNotifiesCompletions) = pendingOperations[coalescingIndex] {
-            pendingOperations[coalescingIndex] = .applySettings(
-                refreshes: existingRefreshes || refreshes,
-                notifiesCompletions: existingNotifiesCompletions && notifiesCompletions
-            )
+        if let lastIndex = pendingOperations.indices.last,
+           case .applySettings(var application) = pendingOperations[lastIndex] {
+            application.settings = settings
+            application.networkBinding = networkBinding
+            application.refreshes = application.refreshes || refreshes
+            application.notifiesCompletions = application.notifiesCompletions && notifiesCompletions
+            pendingOperations[lastIndex] = .applySettings(application)
         } else {
             guard pendingOperations.count < Self.maximumPendingOperationCount else {
-                assertionFailure("A full operation queue must contain a settings operation to coalesce")
+                assertionFailure("The bounded operation queue invariant was violated")
                 return
             }
-            pendingOperations.append(.applySettings(
+            pendingOperations.append(.applySettings(TorrentStorePendingSettingsApplication(
+                settings: settings,
+                networkBinding: networkBinding,
                 refreshes: refreshes,
                 notifiesCompletions: notifiesCompletions
-            ))
+            )))
         }
         startOperationDrainIfNeeded()
     }
@@ -1435,27 +1432,32 @@ final class TorrentStore {
 
     private func execute(_ operation: TorrentStorePendingOperation) async {
         switch operation {
-        case let .applySettings(refreshes, notifiesCompletions):
-            await applySettingsToEngine()
-            if refreshes {
-                await refreshFromEngine(notifiesCompletions: notifiesCompletions)
+        case .applySettings(let application):
+            await applySettingsToEngine(
+                application.settings,
+                networkBinding: application.networkBinding
+            )
+            if application.refreshes {
+                await refreshFromEngine(notifiesCompletions: application.notifiesCompletions)
             }
         case .user(let operation):
             await operation(self)
         }
     }
 
-    private func applySettingsToEngine() async {
-        let networkBinding = currentNetworkBinding
+    private func applySettingsToEngine(
+        _ settings: TorrentSettings,
+        networkBinding: AppliedNetworkBinding
+    ) async {
         let previousNetworkBinding = appliedNetworkBinding
         let bindingChanged = previousNetworkBinding.map { $0 != networkBinding } ?? false
-        let settings = settings
+        let networkMustRemainBlocked = networkBinding.networkBlocked || networkBinding != currentNetworkBinding
         let peerExchangePluginChanged = appliedPeerExchangePluginEnabled.map {
             $0 != settings.enablePeerExchangePlugin
         } ?? false
 
         do {
-            if networkBinding.networkBlocked || bindingChanged || peerExchangePluginChanged {
+            if networkMustRemainBlocked || bindingChanged || peerExchangePluginChanged {
                 try await engine.blockNetworkNow()
             }
 
@@ -1469,7 +1471,7 @@ final class TorrentStore {
 
             try await engine.applySettings(
                 settings,
-                networkBlocked: networkBinding.networkBlocked
+                networkBlocked: networkBinding.networkBlocked || networkBinding != currentNetworkBinding
             )
             appliedNetworkBinding = networkBinding
             appliedPeerExchangePluginEnabled = settings.enablePeerExchangePlugin
