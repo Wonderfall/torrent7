@@ -12,10 +12,13 @@ else
     configuration=${CONFIGURATION:-release}
 fi
 typeset -r build_dir="$root_dir/.build"
-typeset app_output_dir="$build_dir/App"
+typeset -r swift_build_dir=${SWIFT_BUILD_DIR:-$build_dir}
+typeset app_output_dir=${APP_OUTPUT_DIR:-$build_dir/App}
 typeset app_bundle_name="Torrent 7"
 if [[ $enable_diagnostics == "1" ]]; then
-    app_output_dir="$build_dir/App-Diagnostics"
+    if [[ -z ${APP_OUTPUT_DIR:-} ]]; then
+        app_output_dir="$build_dir/App-Diagnostics"
+    fi
     app_bundle_name="Torrent 7 (debug)"
 fi
 typeset -r app_dir="$app_output_dir/$app_bundle_name.app"
@@ -36,6 +39,8 @@ fail() {
     print -ru2 -- "$1"
     exit 1
 }
+
+[[ $app_output_dir == /* ]] || fail "APP_OUTPUT_DIR must be an absolute path"
 
 case "$signing_mode" in
     development)
@@ -63,8 +68,8 @@ esac
 
 cd -- "$root_dir"
 
-export CC="$(xcrun --find clang)"
-export CXX="$(xcrun --find clang++)"
+export CC="$(/usr/bin/xcrun --find clang)"
+export CXX="$(/usr/bin/xcrun --find clang++)"
 
 if [[ $enable_diagnostics == "1" ]]; then
     export SANITIZER_DIAGNOSTICS=1
@@ -85,13 +90,12 @@ if [[ $enable_diagnostics == "1" ]]; then
     swift_build_args+=(--sanitize address --sanitize undefined)
 fi
 
-swift build "${swift_build_args[@]}"
+/usr/bin/swift build --scratch-path "$swift_build_dir" "${swift_build_args[@]}"
 
-rm -rf -- "$app_output_dir"
 rm -rf -- "$app_dir"
 mkdir -p -- "$macos_dir" "$resources_dir"
 
-cp "$build_dir/arm64e-apple-macosx/$configuration/Torrent7" "$executable"
+cp "$swift_build_dir/arm64e-apple-macosx/$configuration/Torrent7" "$executable"
 cp "$root_dir/Packaging/Info.plist" "$contents_dir/Info.plist"
 if [[ $enable_diagnostics == "1" ]]; then
     /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier app.torrent7.debug" "$contents_dir/Info.plist"
@@ -102,7 +106,7 @@ fi
 cp "$document_icon" "$resources_dir/Torrent7Document.icns"
 
 rm -f -- "$app_icon_info_plist"
-xcrun actool \
+/usr/bin/xcrun actool \
     --compile "$resources_dir" \
     --platform macosx \
     --minimum-deployment-target 26.0 \
@@ -112,7 +116,7 @@ xcrun actool \
 /usr/libexec/PlistBuddy -c "Merge $app_icon_info_plist" "$contents_dir/Info.plist"
 rm -f -- "$app_icon_info_plist"
 
-codesign \
+/usr/bin/codesign \
     --force \
     --sign "$sign_identity" \
     --options "$sign_options" \
@@ -120,7 +124,7 @@ codesign \
     "${timestamp_flag[@]}" \
     "$app_dir"
 
-codesign --verify --deep --strict --verbose=2 "$app_dir"
+/usr/bin/codesign --verify --deep --strict --verbose=2 "$app_dir"
 
 if [[ $signing_mode == "distribution" ]]; then
     "$root_dir/Scripts/verify-app.zsh" \

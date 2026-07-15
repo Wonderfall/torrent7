@@ -73,19 +73,19 @@ typeset -r executable="$app_dir/Contents/MacOS/Torrent 7"
 typeset -r resources_dir="$app_dir/Contents/Resources"
 typeset -r expected_entitlements="$root_dir/Packaging/Torrent7.entitlements"
 typeset -r homebrew_prefix=/opt/homebrew
-typeset -r entitlements_output=$(mktemp)
-typeset -r signature_output=$(mktemp)
-typeset -r arch_output=$(mktemp)
-typeset -r text_output=$(mktemp)
-typeset -r symbol_output=$(mktemp)
-trap 'rm -f -- "$entitlements_output" "$signature_output" "$arch_output" "$text_output" "$symbol_output"' EXIT
+typeset -r entitlements_output=$(/usr/bin/mktemp)
+typeset -r signature_output=$(/usr/bin/mktemp)
+typeset -r arch_output=$(/usr/bin/mktemp)
+typeset -r text_output=$(/usr/bin/mktemp)
+typeset -r symbol_output=$(/usr/bin/mktemp)
+trap '/bin/rm -f -- "$entitlements_output" "$signature_output" "$arch_output" "$text_output" "$symbol_output"' EXIT
 
 require_match() {
     local -r pattern=$1
     local -r file=$2
     local -r message=$3
 
-    grep -Eq -- "$pattern" "$file" || fail "$message"
+    /usr/bin/grep -Eq -- "$pattern" "$file" || fail "$message"
 }
 
 reject_match() {
@@ -93,7 +93,7 @@ reject_match() {
     local -r file=$2
     local -r message=$3
 
-    if grep -Eq -- "$pattern" "$file"; then
+    if /usr/bin/grep -Eq -- "$pattern" "$file"; then
         fail "$message"
     fi
 }
@@ -103,20 +103,20 @@ info_plist_value() {
     /usr/libexec/PlistBuddy -c "Print :$key" "$info_plist"
 }
 
-codesign --verify --deep --strict --verbose=2 "$app_dir"
-codesign --display --verbose=4 "$app_dir" >"$signature_output" 2>&1
-cat "$signature_output"
-codesign --display --xml --entitlements - "$app_dir" >"$entitlements_output" 2>/dev/null
-cat "$entitlements_output"
-plutil -lint "$entitlements_output" >/dev/null
-xcrun swift "$root_dir/Scripts/compare-entitlements.swift" \
+/usr/bin/codesign --verify --deep --strict --verbose=2 "$app_dir"
+/usr/bin/codesign --display --verbose=4 "$app_dir" >"$signature_output" 2>&1
+/bin/cat "$signature_output"
+/usr/bin/codesign --display --xml --entitlements - "$app_dir" >"$entitlements_output" 2>/dev/null
+/bin/cat "$entitlements_output"
+/usr/bin/plutil -lint "$entitlements_output" >/dev/null
+/usr/bin/xcrun swift "$root_dir/Scripts/compare-entitlements.swift" \
     "$expected_entitlements" \
     "$entitlements_output" \
     || fail "Signed entitlements do not exactly match Packaging/Torrent7.entitlements"
-xcrun lipo -info "$executable" >"$arch_output"
-cat "$arch_output"
-xcrun otool -tvV "$executable" >"$text_output"
-xcrun nm -m "$executable" >"$symbol_output"
+/usr/bin/xcrun lipo -info "$executable" >"$arch_output"
+/bin/cat "$arch_output"
+/usr/bin/xcrun otool -tvV "$executable" >"$text_output"
+/usr/bin/xcrun nm -m "$executable" >"$symbol_output"
 
 require_match "architecture: arm64e" "$arch_output" "Executable is not arm64e"
 require_match "pacibsp|retab|autd|braa|blraa" "$text_output" "Could not find expected PAC instructions in executable"
@@ -140,8 +140,8 @@ if [[ $mode == "distribution" ]]; then
     reject_match "^Timestamp=none$" "$signature_output" "Distribution signature has no trusted timestamp"
 
     if [[ $notarization == "required" ]]; then
-        xcrun stapler validate "$app_dir"
-        spctl --assess --type execute --verbose=4 "$app_dir"
+        /usr/bin/xcrun stapler validate "$app_dir"
+        /usr/sbin/spctl --assess --type execute --verbose=4 "$app_dir"
     fi
 fi
 
@@ -159,7 +159,7 @@ fi
 typeset -a bundled_dylibs=()
 while IFS= read -r dylib; do
     bundled_dylibs+=("$dylib")
-done < <(find "$app_dir" -type f -name "*.dylib")
+done < <(/usr/bin/find "$app_dir" -type f -name "*.dylib")
 if (( ${#bundled_dylibs} > 0 )); then
     print -ru2 -- "Found bundled dylibs; third-party libraries should be statically linked"
     printf '%s\n' "${bundled_dylibs[@]}" >&2
@@ -167,11 +167,11 @@ if (( ${#bundled_dylibs} > 0 )); then
 fi
 
 while IFS= read -r binary; do
-    otool -L "$binary"
-    if otool -L "$binary" | grep -q -- "$homebrew_prefix"; then
+    /usr/bin/otool -L "$binary"
+    if /usr/bin/otool -L "$binary" | /usr/bin/grep -q -- "$homebrew_prefix"; then
         fail "Found non-contained Homebrew load path in $binary"
     fi
-    if otool -L "$binary" | grep -E "libtorrent-rasterbar|libssl\\.3|libcrypto\\.3" >/dev/null; then
+    if /usr/bin/otool -L "$binary" | /usr/bin/grep -E "libtorrent-rasterbar|libssl\\.3|libcrypto\\.3" >/dev/null; then
         fail "Found dynamically linked third-party dependency in $binary"
     fi
-done < <(find "$app_dir" -type f -perm -111)
+done < <(/usr/bin/find "$app_dir" -type f -perm -111)

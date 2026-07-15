@@ -11,14 +11,14 @@ typeset -r ROOT_DIR=${0:A:h:h}
 typeset -r TARGET_ARCH=${TARGET_ARCH:-arm64e}
 typeset -r MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-26.0}
 typeset -r TARGET_TRIPLE="${TARGET_ARCH}-apple-macosx${MACOSX_DEPLOYMENT_TARGET}"
-typeset -r SDK_PATH=$(xcrun --sdk macosx --show-sdk-path)
+typeset -r SDK_PATH=$(/usr/bin/xcrun --sdk macosx --show-sdk-path)
 typeset -r HOMEBREW_PREFIX=${HOMEBREW_PREFIX:-/opt/homebrew}
 typeset -r GPG=${GPG:-$HOMEBREW_PREFIX/bin/gpg}
-typeset -r APPLE_CC=$(xcrun --find clang)
-typeset -r APPLE_CXX=$(xcrun --find clang++)
-typeset -r APPLE_AR=$(xcrun --find ar)
-typeset -r APPLE_RANLIB=$(xcrun --find ranlib)
-typeset -r APPLE_LIPO=$(xcrun --find lipo)
+typeset -r APPLE_CC=$(/usr/bin/xcrun --find clang)
+typeset -r APPLE_CXX=$(/usr/bin/xcrun --find clang++)
+typeset -r APPLE_AR=$(/usr/bin/xcrun --find ar)
+typeset -r APPLE_RANLIB=$(/usr/bin/xcrun --find ranlib)
+typeset -r APPLE_LIPO=$(/usr/bin/xcrun --find lipo)
 typeset -r OPENSSL_CC=$APPLE_CC
 typeset -r OPENSSL_CXX=$APPLE_CXX
 typeset -r OPENSSL_AR=$APPLE_AR
@@ -31,6 +31,7 @@ typeset -r ARCH_LIPO=$APPLE_LIPO
 typeset -r DEFAULT_DEPS_DIR="$ROOT_DIR/.build/deps"
 typeset -r DEFAULT_SOURCE_CACHE_DIR="$DEFAULT_DEPS_DIR/source-cache"
 typeset -r SOURCE_CACHE_DIR=${SOURCE_CACHE_DIR:-$DEFAULT_SOURCE_CACHE_DIR}
+typeset -r SOURCE_CACHE_SEED_DIR=${SOURCE_CACHE_SEED_DIR:-}
 typeset -r ARCHIVE_CACHE_DIR="$SOURCE_CACHE_DIR/archives"
 typeset -r GIT_CACHE_DIR="$SOURCE_CACHE_DIR/git"
 typeset -r ENABLE_DIAGNOSTICS=${SANITIZER_DIAGNOSTICS:-0}
@@ -51,7 +52,7 @@ typeset -r BOOST_ARCHIVE_BASENAME="boost_$BOOST_VERSION_UNDERSCORE"
 typeset -r BOOST_SHA256=${BOOST_SHA256:-5734305f40a76c30f951c9abd409a45a2a19fb546efe4162119250bbe4d3a463}
 typeset -r BOOST_TARBALL_URL=${BOOST_TARBALL_URL:-https://archives.boost.io/release/$BOOST_VERSION/source/$BOOST_ARCHIVE_BASENAME.tar.gz}
 typeset -r BOOST_TARBALL="$ARCHIVE_CACHE_DIR/$BOOST_ARCHIVE_BASENAME.tar.gz"
-typeset -r BOOST_SOURCE_ROOT="$SOURCE_CACHE_DIR/boost"
+typeset -r BOOST_SOURCE_ROOT=${BOOST_SOURCE_ROOT:-$SOURCE_CACHE_DIR/boost}
 typeset -r BOOST_SOURCE_DIR="$BOOST_SOURCE_ROOT/$BOOST_ARCHIVE_BASENAME"
 typeset -r BOOST_HEADERS_STAMP="$BOOST_PREFIX/.torrent-app-boost-headers"
 typeset -r OPENSSL_VERSION=${OPENSSL_VERSION:-3.5.7}
@@ -196,6 +197,7 @@ typeset -r LIBTORRENT_EXTRA_DEFINES="-DTORRENT_DISABLE_SUPERSEEDING -DTORRENT_DI
 # pinned libtorrent build rather than weakening bridge warnings.
 typeset -r LIBTORRENT_UPSTREAM_WARNING_FLAGS="-Wno-allocator-wrappers -Wno-thread-safety-negative -Wno-nrvo -Wno-unused-private-field"
 typeset -r ALLOW_EXTERNAL_DEPS_CLEAN=${ALLOW_EXTERNAL_DEPS_CLEAN:-0}
+typeset -a TEMPORARY_FILES=()
 # Keep global PAC options compatible with system C/C++ runtime contracts.
 # Type-discriminated C function pointers and RTTI typeinfo vtable pointers
 # need targeted use; enabling them globally breaks APIs such as pthread_once
@@ -238,6 +240,21 @@ require_path() {
     local -r required_path=$1
     local -r label=$2
     [[ -e $required_path ]] || fail "Missing $label: $required_path"
+}
+
+cleanup_temporary_files() {
+    /bin/rm -f -- "${TEMPORARY_FILES[@]}"
+}
+trap cleanup_temporary_files EXIT
+
+make_temporary_file() {
+    local -r destination=$1
+    local -r directory=${destination:h}
+
+    mkdir -p -- "$directory"
+    REPLY=$(/usr/bin/mktemp "$directory/.${destination:t}.tmp.XXXXXXXX") \
+        || fail "Could not create temporary file for $destination"
+    TEMPORARY_FILES+=("$REPLY")
 }
 
 remove_dependency_path() {
@@ -283,6 +300,19 @@ is_exact_git_checkout() {
     [[ "${top_level:A}" == "${path:A}" ]]
 }
 
+is_usable_git_mirror() {
+    local path="$1"
+    local expected_commit="${2:-}"
+    local is_bare
+
+    [[ -d "$path" ]] || return 1
+    is_bare="$(git -C "$path" rev-parse --is-bare-repository 2>/dev/null)" \
+        || return 1
+    [[ "$is_bare" == "true" ]] || return 1
+    [[ -z "$expected_commit" ]] \
+        || git -C "$path" rev-parse --verify "$expected_commit^{commit}" >/dev/null 2>&1
+}
+
 verify_sha256() {
     local file="$1"
     local expected="$2"
@@ -307,22 +337,27 @@ seed_archive_from_existing_profiles() {
     local expected_sha256="$3"
     local candidate
     local tmp
+    local -a candidates=()
 
-    for candidate in \
-        "$DEPS_DIR/src/$basename" \
-        "$DEFAULT_DEPS_DIR/$TARGET_ARCH/src/$basename" \
+    if [[ -n $SOURCE_CACHE_SEED_DIR ]]; then
+        candidates+=("$SOURCE_CACHE_SEED_DIR/archives/$basename")
+    fi
+    candidates+=(
+        "$DEPS_DIR/src/$basename"
+        "$DEFAULT_DEPS_DIR/$TARGET_ARCH/src/$basename"
         "$DEFAULT_DEPS_DIR/$TARGET_ARCH-diagnostics/src/$basename"
-    do
+    )
+
+    for candidate in "${candidates[@]}"; do
         if [[ "$candidate" == "$output" || ! -f "$candidate" ]]; then
             continue
         fi
 
-        verify_sha256 "$candidate" "$expected_sha256"
-        mkdir -p "$(dirname "$output")"
-        tmp="$output.tmp.$$"
-        cp "$candidate" "$tmp"
+        make_temporary_file "$output"
+        tmp=$REPLY
+        /bin/cp "$candidate" "$tmp"
         verify_sha256 "$tmp" "$expected_sha256"
-        mv "$tmp" "$output"
+        /bin/mv -fh "$tmp" "$output"
         return 0
     done
 
@@ -334,20 +369,26 @@ seed_openssl_signature_from_existing_profiles() {
     local basename="$2"
     local candidate
     local tmp
+    local -a candidates=()
 
-    for candidate in \
-        "$DEPS_DIR/src/$basename" \
-        "$DEFAULT_DEPS_DIR/$TARGET_ARCH/src/$basename" \
+    if [[ -n $SOURCE_CACHE_SEED_DIR ]]; then
+        candidates+=("$SOURCE_CACHE_SEED_DIR/archives/$basename")
+    fi
+    candidates+=(
+        "$DEPS_DIR/src/$basename"
+        "$DEFAULT_DEPS_DIR/$TARGET_ARCH/src/$basename"
         "$DEFAULT_DEPS_DIR/$TARGET_ARCH-diagnostics/src/$basename"
-    do
+    )
+
+    for candidate in "${candidates[@]}"; do
         if [[ "$candidate" == "$output" || ! -f "$candidate" ]]; then
             continue
         fi
 
-        mkdir -p "$(dirname "$output")"
-        tmp="$output.tmp.$$"
-        cp "$candidate" "$tmp"
-        mv "$tmp" "$output"
+        make_temporary_file "$output"
+        tmp=$REPLY
+        /bin/cp "$candidate" "$tmp"
+        /bin/mv -fh "$tmp" "$output"
         return 0
     done
 
@@ -411,7 +452,7 @@ write_stamp() {
     local temporary
 
     prepare_stamp_directory "$base" "$directory"
-    temporary="$(mktemp "$directory/.${stamp:t}.tmp.XXXXXXXX")" \
+    temporary="$(/usr/bin/mktemp "$directory/.${stamp:t}.tmp.XXXXXXXX")" \
         || fail "Could not create temporary dependency stamp"
     if ! "$generator" >"$temporary"; then
         rm -f -- "$temporary"
@@ -539,8 +580,8 @@ verify_archive_arch() {
         exit 1
     fi
 
-    tmpdir="$(mktemp -d)"
-    (cd "$tmpdir" && xcrun ar -x "$archive")
+    tmpdir="$(/usr/bin/mktemp -d)"
+    (cd "$tmpdir" && /usr/bin/xcrun ar -x "$archive")
     while IFS= read -r member; do
         local header
         local file_info
@@ -556,7 +597,7 @@ verify_archive_arch() {
             continue
         fi
 
-        if ! header="$(xcrun otool -hv "$member" 2>/dev/null | tail -n 1)"; then
+        if ! header="$(/usr/bin/xcrun otool -hv "$member" 2>/dev/null | tail -n 1)"; then
             continue
         fi
 
@@ -597,10 +638,11 @@ thin_archive_arch() {
         exit 1
     fi
 
-    tmp="$archive.thin.$$"
+    make_temporary_file "$archive"
+    tmp=$REPLY
     "$ARCH_LIPO" "$archive" -thin "$arch" -output "$tmp"
-    mv "$tmp" "$archive"
-    xcrun ranlib "$archive"
+    /bin/mv -fh "$tmp" "$archive"
+    /usr/bin/xcrun ranlib "$archive"
 }
 
 download_openssl_signature() {
@@ -612,9 +654,9 @@ download_openssl_signature() {
         return
     fi
 
-    local tmp="$OPENSSL_SIGNATURE.tmp.$$"
-    mkdir -p "$(dirname "$OPENSSL_SIGNATURE")"
-    rm -f "$tmp"
+    local tmp
+    make_temporary_file "$OPENSSL_SIGNATURE"
+    tmp=$REPLY
     curl \
         --fail \
         --location \
@@ -625,7 +667,7 @@ download_openssl_signature() {
         --output "$tmp" \
         "$OPENSSL_SIGNATURE_URL"
 
-    mv "$tmp" "$OPENSSL_SIGNATURE"
+    /bin/mv -fh "$tmp" "$OPENSSL_SIGNATURE"
 }
 
 verify_openssl_signature() {
@@ -642,7 +684,7 @@ verify_openssl_signature() {
     require_path "$signature" "OpenSSL detached signature"
     require_path "$archive" "OpenSSL source archive"
 
-    tmpdir="$(mktemp -d)"
+    tmpdir="$(/usr/bin/mktemp -d)"
     gnupg_home="$tmpdir/gnupg"
     status_file="$tmpdir/status"
     verify_log="$tmpdir/verify.log"
@@ -695,8 +737,9 @@ download_openssl() {
         return
     fi
 
-    local tmp="$OPENSSL_TARBALL.tmp.$$"
-    rm -f "$tmp"
+    local tmp
+    make_temporary_file "$OPENSSL_TARBALL"
+    tmp=$REPLY
     curl \
         --fail \
         --location \
@@ -710,7 +753,7 @@ download_openssl() {
     verify_sha256 "$tmp" "$OPENSSL_SHA256"
     download_openssl_signature
     verify_openssl_signature "$tmp" "$OPENSSL_SIGNATURE"
-    mv "$tmp" "$OPENSSL_TARBALL"
+    /bin/mv -fh "$tmp" "$OPENSSL_TARBALL"
 }
 
 download_boost() {
@@ -725,8 +768,9 @@ download_boost() {
         return
     fi
 
-    local tmp="$BOOST_TARBALL.tmp.$$"
-    rm -f "$tmp"
+    local tmp
+    make_temporary_file "$BOOST_TARBALL"
+    tmp=$REPLY
     curl \
         --fail \
         --location \
@@ -738,7 +782,7 @@ download_boost() {
         "$BOOST_TARBALL_URL"
 
     verify_sha256 "$tmp" "$BOOST_SHA256"
-    mv "$tmp" "$BOOST_TARBALL"
+    /bin/mv -fh "$tmp" "$BOOST_TARBALL"
 }
 
 extract_boost() {
@@ -828,6 +872,7 @@ ensure_git_mirror() {
     local label="$3"
     local seed_checkout="${4:-}"
     local expected_commit="${5:-}"
+    local seed_mirror="${6:-}"
 
     if [[ -e "$mirror_dir" ]] && ! git -C "$mirror_dir" rev-parse --is-bare-repository >/dev/null 2>&1; then
         remove_dependency_path "$mirror_dir"
@@ -835,7 +880,10 @@ ensure_git_mirror() {
 
     if [[ ! -d "$mirror_dir" ]]; then
         mkdir -p "$(dirname "$mirror_dir")"
-        if [[ -n "$seed_checkout" ]] && is_exact_git_checkout "$seed_checkout"; then
+        if [[ -n "$seed_mirror" ]] && is_usable_git_mirror "$seed_mirror" "$expected_commit"; then
+            git clone --mirror --no-hardlinks "$seed_mirror" "$mirror_dir"
+            git -C "$mirror_dir" fsck --full --strict
+        elif [[ -n "$seed_checkout" ]] && is_exact_git_checkout "$seed_checkout"; then
             git clone --mirror "$seed_checkout" "$mirror_dir"
         else
             git clone --mirror "$repo_url" "$mirror_dir"
@@ -859,6 +907,7 @@ setup_libtorrent_submodule_mirrors() {
     local name
     local submodule_path
     local mirror_dir
+    local seed_mirror
     local expected_commit
 
     if [[ ! -f "$LIBTORRENT_SOURCE_DIR/.gitmodules" || ${#LIBTORRENT_REQUIRED_SUBMODULES[@]} -eq 0 ]]; then
@@ -874,9 +923,13 @@ setup_libtorrent_submodule_mirrors() {
 
         git -C "$LIBTORRENT_SOURCE_DIR" submodule sync --recursive -- "$submodule_path"
         mirror_dir="$LIBTORRENT_SUBMODULE_MIRROR_ROOT/${submodule_path//\//__}.git"
+        seed_mirror=""
+        if [[ -n "$SOURCE_CACHE_SEED_DIR" ]]; then
+            seed_mirror="$SOURCE_CACHE_SEED_DIR/git/libtorrent-submodules/${submodule_path//\//__}.git"
+        fi
         expected_commit="$(git -C "$LIBTORRENT_SOURCE_DIR" ls-tree HEAD "$submodule_path" | awk '{print $3}')"
 
-        ensure_git_mirror "$url" "$mirror_dir" "libtorrent submodule $submodule_path" "$LIBTORRENT_SOURCE_DIR/$submodule_path" "$expected_commit"
+        ensure_git_mirror "$url" "$mirror_dir" "libtorrent submodule $submodule_path" "$LIBTORRENT_SOURCE_DIR/$submodule_path" "$expected_commit" "$seed_mirror"
         git -C "$LIBTORRENT_SOURCE_DIR" config "$key" "$mirror_dir"
         git -C "$LIBTORRENT_SOURCE_DIR" -c protocol.file.allow=always submodule update --init --recursive -- "$submodule_path"
 
@@ -900,7 +953,11 @@ apply_libtorrent_patches() {
 }
 
 clone_libtorrent() {
-    ensure_git_mirror "$LIBTORRENT_REPO" "$LIBTORRENT_MIRROR_DIR" "libtorrent" "$LIBTORRENT_SOURCE_DIR" "$LIBTORRENT_COMMIT"
+    local seed_mirror=""
+    if [[ -n "$SOURCE_CACHE_SEED_DIR" ]]; then
+        seed_mirror="$SOURCE_CACHE_SEED_DIR/git/libtorrent.git"
+    fi
+    ensure_git_mirror "$LIBTORRENT_REPO" "$LIBTORRENT_MIRROR_DIR" "libtorrent" "$LIBTORRENT_SOURCE_DIR" "$LIBTORRENT_COMMIT" "$seed_mirror"
 
     mkdir -p "$SOURCE_ROOT"
 
@@ -1011,7 +1068,6 @@ require_tool make
 require_tool perl
 require_tool shasum
 require_tool tar
-require_tool xcrun
 require_path "$GPG" "GnuPG verifier"
 require_path "$OPENSSL_CC" "OpenSSL C compiler"
 require_path "$OPENSSL_CXX" "OpenSSL C++ compiler"
