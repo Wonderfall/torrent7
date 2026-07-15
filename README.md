@@ -81,8 +81,9 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
   mode is enabled by default, DHT privacy lookups are enabled, and local discovery
   is disabled by default.
 
-Torrent 7 can restrict traffic to a selected interface and can use VPN interfaces
-only, but this is app-level policy. It is not a system-wide VPN kill switch.
+Torrent 7 can bind libtorrent connections to a selected interface and can use VPN
+interfaces only, but hostname lookup still uses macOS system DNS. This is app-level
+policy, not a system-wide VPN kill switch.
 
 ## Sandbox Model
 
@@ -119,9 +120,10 @@ The production app builds pinned dependencies into local static artifacts:
 Homebrew supplies build tools only; it is not a runtime dependency source for the
 app bundle. OpenSSL archives are verified with SHA-256 and a pinned upstream PGP
 signing fingerprint. Boost is verified by SHA-256. Libtorrent is fetched from a
-pinned tag and commit through a local source cache, then receives a hashed
-Xcode 26 compatibility and strict-bounds patch. WebTorrent support stays
-disabled to avoid adding its unused protocol and dependency surface.
+pinned tag and commit through a local source cache, then receives an ordered,
+hashed patch series for Xcode compatibility, network boundaries, and storage
+confinement. WebTorrent support stays disabled to avoid adding its unused
+protocol and dependency surface.
 
 ## Build
 
@@ -149,11 +151,8 @@ The output is:
 .build/App/Torrent 7.app
 ```
 
-By default the app is ad-hoc signed. For Developer ID signing:
-
-```sh
-SIGN_IDENTITY="Developer ID Application: Example, Inc. (TEAMID)" Scripts/build-app.zsh
-```
+By default the app is ad-hoc signed for local development. This default does not
+require a signing identity or Apple Developer credentials.
 
 Verify the built app:
 
@@ -161,10 +160,49 @@ Verify the built app:
 Scripts/verify-app.zsh
 ```
 
+The verifier requires the signed entitlements to exactly match the canonical
+allowlist in `Packaging/Torrent7.entitlements`; missing, changed, or unexpected
+entitlements fail verification.
+
 Use a shared dependency source cache if desired:
 
 ```sh
 SOURCE_CACHE_DIR=/path/to/source-cache Scripts/build-app.zsh
+```
+
+### Distribution release
+
+Store notarization credentials in the login keychain once, rather than placing
+credentials in the repository or command history:
+
+```sh
+xcrun notarytool store-credentials torrent7-notary
+```
+
+Build, Developer ID sign, notarize, staple, verify with Gatekeeper, and archive
+a distribution release with:
+
+```sh
+SIGN_IDENTITY="Developer ID Application: Example, Inc. (ABCDE12345)" \
+EXPECTED_TEAM_ID="ABCDE12345" \
+NOTARYTOOL_PROFILE="torrent7-notary" \
+Scripts/release-app.zsh
+```
+
+The release script requires a release build, a Developer ID Application
+identity with the expected Team ID, a trusted signing timestamp, an accepted
+notarization result, a valid stapled ticket, and successful `spctl` assessment.
+Its final output is:
+
+```text
+.build/Release/Torrent 7.zip
+```
+
+To re-verify an already notarized app:
+
+```sh
+EXPECTED_TEAM_ID="ABCDE12345" \
+Scripts/verify-app.zsh --mode distribution
 ```
 
 ## Diagnostics and Tests
@@ -179,6 +217,12 @@ Run the C++ bridge test suite:
 
 ```sh
 Scripts/test-bridge.zsh
+```
+
+Run the focused libtorrent network and storage security regressions:
+
+```sh
+Scripts/test-libtorrent-security.zsh
 ```
 
 Run the bridge static-analysis pass:
