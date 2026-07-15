@@ -6,7 +6,7 @@ import TorrentBridge
 struct TorrentBridgeContractTests {
     @Test("Pins bridge ABI version, limits, states, and dirty masks")
     func pinsBridgeConstants() {
-        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 28)
+        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 29)
         #expect(Int32(TTORRENT_BRIDGE_STATE_UNKNOWN) == -1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_CHECKING_FILES) == 1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_DOWNLOADING_METADATA) == 2)
@@ -74,9 +74,9 @@ struct TorrentBridgeContractTests {
         #expect(sessionSettingsAlignment == 8)
         #expect(MemoryLayout<TTorrentNetworkStatus>.size == 664)
         #expect(MemoryLayout<TTorrentNetworkStatus>.alignment == 8)
-        #expect(MemoryLayout<TTorrentSourcePolicy>.size == 8)
+        #expect(MemoryLayout<TTorrentSourcePolicy>.size == 10)
         #expect(MemoryLayout<TTorrentSourcePolicy>.alignment == 1)
-        #expect(MemoryLayout<TTorrentAddOptions>.size == 5)
+        #expect(MemoryLayout<TTorrentAddOptions>.size == 6)
         #expect(MemoryLayout<TTorrentAddOptions>.alignment == 1)
         #expect(MemoryLayout<TTorrentOptions>.size == 20)
         #expect(MemoryLayout<TTorrentOptions>.alignment == 4)
@@ -161,7 +161,9 @@ struct TorrentBridgeContractTests {
             require_https_web_seeds: 1,
             dht_locked: 1,
             peer_exchange_locked: 1,
-            lsd_locked: 1
+            lsd_locked: 1,
+            metadata_validation_pending: 1,
+            allow_pre_metadata_dht: 1
         )
         var errorBuffer = BridgeErrorBuffer()
         errorBuffer.writeSentinel()
@@ -177,6 +179,8 @@ struct TorrentBridgeContractTests {
         #expect(sourcePolicy.dht_locked == 0)
         #expect(sourcePolicy.peer_exchange_locked == 0)
         #expect(sourcePolicy.lsd_locked == 0)
+        #expect(sourcePolicy.metadata_validation_pending == 0)
+        #expect(sourcePolicy.allow_pre_metadata_dht == 0)
         #expect(errorBuffer.string == "Missing torrent client, torrent id, or source policy.")
 
         var activity = TTorrentWebSeedActivitySnapshot(active_count: 3, download_rate: 4, total_download: 5)

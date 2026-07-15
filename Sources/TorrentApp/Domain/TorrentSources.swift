@@ -229,6 +229,8 @@ struct TorrentSourcePolicy: Equatable, Sendable {
     var isDHTLocked: Bool
     var isPeerExchangeLocked: Bool
     var isLocalServiceDiscoveryLocked: Bool
+    var isMetadataValidationPending: Bool
+    var allowsPreMetadataDHT: Bool
 
     static let unavailable = TorrentSourcePolicy(
         isDHTEnabled: false,
@@ -238,7 +240,9 @@ struct TorrentSourcePolicy: Equatable, Sendable {
         usesHTTPSWebSeedsOnly: false,
         isDHTLocked: false,
         isPeerExchangeLocked: false,
-        isLocalServiceDiscoveryLocked: false
+        isLocalServiceDiscoveryLocked: false,
+        isMetadataValidationPending: false,
+        allowsPreMetadataDHT: false
     )
 }
 

@@ -42,7 +42,7 @@ void TTorrentClient::retire_identity_if_unreferenced_locked(TorrentIdentity *ide
     dht_disabled_by_app.erase(identity);
     lsd_disabled_by_app.erase(identity);
     peer_exchange_disabled_by_app.erase(identity);
-    peer_exchange_disabled_until_metadata.erase(identity);
+    metadata_validation_pending.erase(identity);
     retired_torrent_identities.push_back(std::move(*existing));
     torrent_identities.erase(existing);
 }
@@ -54,7 +54,7 @@ ResumePolicySnapshot TTorrentClient::resume_policy_snapshot_locked(TorrentIdenti
         return policy;
     }
 
-    policy.peer_exchange_pending_metadata = peer_exchange_disabled_until_metadata.contains(identity);
+    policy.metadata_validation_pending = metadata_validation_pending.contains(identity);
     policy.app_disabled_dht = dht_disabled_by_app.contains(identity);
     policy.app_disabled_lsd = lsd_disabled_by_app.contains(identity);
     policy.app_disabled_peer_exchange = peer_exchange_disabled_by_app.contains(identity);

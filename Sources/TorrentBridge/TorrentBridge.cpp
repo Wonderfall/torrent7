@@ -251,7 +251,7 @@ void add_policy_result(SourcePolicyApplicationResult &result, SourcePolicyApplic
     );
 }
 
-bool set_torrent_flag_if_needed(lt::torrent_handle &handle, lt::torrent_flags_t flag)
+bool set_torrent_flag_if_needed(lt::torrent_handle const &handle, lt::torrent_flags_t flag)
 {
     if (static_cast<bool>(handle.flags() & flag)) {
         return false;
@@ -260,7 +260,7 @@ bool set_torrent_flag_if_needed(lt::torrent_handle &handle, lt::torrent_flags_t 
     return true;
 }
 
-bool unset_torrent_flag_if_needed(lt::torrent_handle &handle, lt::torrent_flags_t flag)
+bool unset_torrent_flag_if_needed(lt::torrent_handle const &handle, lt::torrent_flags_t flag)
 {
     if (!static_cast<bool>(handle.flags() & flag)) {
         return false;
@@ -304,6 +304,24 @@ SourcePolicyApplicationResult apply_dht_policy_locked(TTorrentClient &client, bo
             changed = client.dht_disabled_by_app.erase(identity) > 0U || changed;
             changed = set_torrent_flag_if_needed(handle, lt::torrent_flags::disable_dht) || changed;
             result.changes |= client.clear_peer_cache_if_restricted(handle, identity);
+            if (changed) {
+                add_policy_save(result, handle);
+            }
+            continue;
+        }
+
+        if (client.metadata_validation_pending.contains(identity)) {
+            if (use_dht_by_default) {
+                changed = client.dht_disabled_by_app.erase(identity) > 0U;
+            } else {
+                changed = client.dht_disabled_by_app.insert(identity).second;
+            }
+            if (identity->allow_pre_metadata_dht) {
+                changed = unset_torrent_flag_if_needed(handle, lt::torrent_flags::disable_dht) || changed;
+            } else {
+                changed = set_torrent_flag_if_needed(handle, lt::torrent_flags::disable_dht) || changed;
+                result.changes |= client.clear_peer_cache_if_restricted(handle, identity);
+            }
             if (changed) {
                 add_policy_save(result, handle);
             }
@@ -383,6 +401,19 @@ SourcePolicyApplicationResult apply_lsd_policy_locked(TTorrentClient &client, bo
             continue;
         }
 
+        if (client.metadata_validation_pending.contains(identity)) {
+            if (use_lsd_by_default) {
+                changed = client.lsd_disabled_by_app.erase(identity) > 0U;
+            } else {
+                changed = client.lsd_disabled_by_app.insert(identity).second;
+            }
+            changed = set_torrent_flag_if_needed(handle, lt::torrent_flags::disable_lsd) || changed;
+            if (changed) {
+                add_policy_save(result, handle);
+            }
+            continue;
+        }
+
         if (identity->lsd_enabled_by_user) {
             changed = client.lsd_disabled_by_app.erase(identity) > 0U;
             changed = unset_torrent_flag_if_needed(handle, lt::torrent_flags::disable_lsd) || changed;
@@ -447,7 +478,6 @@ SourcePolicyApplicationResult apply_peer_exchange_policy_locked(TTorrentClient &
             identity->peer_exchange_enabled_by_user = false;
             identity->peer_exchange_disabled_by_user = false;
             changed = client.peer_exchange_disabled_by_app.erase(identity) > 0U || changed;
-            changed = client.peer_exchange_disabled_until_metadata.erase(identity) > 0U || changed;
             changed = set_torrent_flag_if_needed(handle, lt::torrent_flags::disable_pex) || changed;
             if (changed) {
                 add_policy_save(result, handle);
@@ -464,9 +494,24 @@ SourcePolicyApplicationResult apply_peer_exchange_policy_locked(TTorrentClient &
             continue;
         }
 
+        if (client.metadata_validation_pending.contains(identity)) {
+            bool const intended_enabled = identity->peer_exchange_enabled_by_user
+                || (!identity->peer_exchange_disabled_by_user && use_peer_exchange_by_default);
+            if (intended_enabled) {
+                changed = client.peer_exchange_disabled_by_app.erase(identity) > 0U;
+            } else {
+                changed = client.peer_exchange_disabled_by_app.insert(identity).second;
+            }
+            changed = set_torrent_flag_if_needed(handle, lt::torrent_flags::disable_pex) || changed;
+            if (changed) {
+                add_policy_save(result, handle);
+            }
+            continue;
+        }
+
         if (identity->peer_exchange_enabled_by_user) {
             changed = client.peer_exchange_disabled_by_app.erase(identity) > 0U;
-            if (!client.peer_exchange_disabled_until_metadata.contains(identity)) {
+            if (!client.metadata_validation_pending.contains(identity)) {
                 changed = unset_torrent_flag_if_needed(handle, lt::torrent_flags::disable_pex) || changed;
             }
             if (changed) {
@@ -487,18 +532,9 @@ SourcePolicyApplicationResult apply_peer_exchange_policy_locked(TTorrentClient &
         if (use_peer_exchange_by_default) {
             bool const was_disabled_by_app = client.peer_exchange_disabled_by_app.erase(identity) > 0U;
             changed = was_disabled_by_app;
-            if (was_disabled_by_app && !client.peer_exchange_disabled_until_metadata.contains(identity)) {
+            if (was_disabled_by_app && !client.metadata_validation_pending.contains(identity)) {
                 changed = unset_torrent_flag_if_needed(handle, lt::torrent_flags::disable_pex) || changed;
             }
-            if (changed) {
-                add_policy_save(result, handle);
-            }
-            continue;
-        }
-
-        if (client.peer_exchange_disabled_until_metadata.contains(identity)) {
-            changed = set_torrent_flag_if_needed(handle, lt::torrent_flags::disable_pex);
-            changed = client.peer_exchange_disabled_by_app.insert(identity).second || changed;
             if (changed) {
                 add_policy_save(result, handle);
             }
@@ -731,6 +767,8 @@ TTorrentSourcePolicy TTorrentClient::source_policy(lt::torrent_handle const &han
         private_torrent || (identity != nullptr && identity->peer_exchange_locked_by_source);
     bool const lsd_locked =
         private_torrent || (identity != nullptr && identity->lsd_locked_by_source);
+    bool const metadata_pending =
+        identity != nullptr && metadata_validation_pending.contains(identity);
 
     bool dht_enabled = !dht_locked && !static_cast<bool>(flags & lt::torrent_flags::disable_dht);
     if (identity != nullptr && !dht_locked) {
@@ -741,6 +779,9 @@ TTorrentSourcePolicy TTorrentClient::source_policy(lt::torrent_handle const &han
             dht_enabled = true;
         } else if (identity->dht_disabled_by_user || disabled_by_app) {
             dht_enabled = false;
+        }
+        if (metadata_validation_pending.contains(identity)) {
+            dht_enabled = identity->allow_pre_metadata_dht;
         }
     }
 
@@ -780,6 +821,10 @@ TTorrentSourcePolicy TTorrentClient::source_policy(lt::torrent_handle const &han
     policy.dht_locked = bridge_bool(dht_locked);
     policy.peer_exchange_locked = bridge_bool(peer_exchange_locked);
     policy.lsd_locked = bridge_bool(lsd_locked);
+    policy.metadata_validation_pending = bridge_bool(metadata_pending);
+    policy.allow_pre_metadata_dht = bridge_bool(
+        metadata_pending && identity != nullptr && identity->allow_pre_metadata_dht
+    );
     return policy;
 }
 
@@ -798,17 +843,22 @@ DirtyMask TTorrentClient::set_source_policy(
     bool const dht_locked = private_torrent || identity->dht_locked_by_source;
     bool const peer_exchange_locked = private_torrent || identity->peer_exchange_locked_by_source;
     bool const lsd_locked = private_torrent || identity->lsd_locked_by_source;
+    bool const metadata_pending = metadata_validation_pending.contains(identity);
     TTorrentSourcePolicy const current_policy = source_policy(handle, identity);
     lt::torrent_flags_t const original_flags = handle.flags();
     bool const should_force_dht_announce =
         !dht_locked
-        && !bridge_bool(current_policy.enable_dht)
-        && bridge_bool(policy.enable_dht)
+        && (metadata_pending
+            ? (!bridge_bool(current_policy.allow_pre_metadata_dht)
+                && bridge_bool(policy.allow_pre_metadata_dht))
+            : (!bridge_bool(current_policy.enable_dht)
+                && bridge_bool(policy.enable_dht)))
         && dht_node_enabled
         && !requested_network_blocked
         && !static_cast<bool>(original_flags & lt::torrent_flags::paused);
     bool const should_force_lsd_announce =
         !lsd_locked
+        && !metadata_validation_pending.contains(identity)
         && !bridge_bool(current_policy.enable_lsd)
         && bridge_bool(policy.enable_lsd)
         && lsd_service_enabled
@@ -816,7 +866,23 @@ DirtyMask TTorrentClient::set_source_policy(
         && !static_cast<bool>(original_flags & lt::torrent_flags::paused);
 
     bool changed = false;
-    if (dht_locked) {
+    if (metadata_pending) {
+        bool const allow_pre_metadata_dht =
+            !dht_locked && bridge_bool(policy.allow_pre_metadata_dht);
+        if (identity->allow_pre_metadata_dht != allow_pre_metadata_dht) {
+            identity->allow_pre_metadata_dht = allow_pre_metadata_dht;
+            changed = true;
+        }
+        if (allow_pre_metadata_dht) {
+            if (static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht)) {
+                handle.unset_flags(lt::torrent_flags::disable_dht);
+                changed = true;
+            }
+        } else if (!static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht)) {
+            handle.set_flags(lt::torrent_flags::disable_dht);
+            changed = true;
+        }
+    } else if (dht_locked) {
         if (identity->dht_enabled_by_user || identity->dht_disabled_by_user) {
             changed = true;
         }
@@ -851,14 +917,15 @@ DirtyMask TTorrentClient::set_source_policy(
         }
     }
 
-    if (peer_exchange_locked) {
+    if (metadata_pending) {
+        changed = set_torrent_flag_if_needed(handle, lt::torrent_flags::disable_pex) || changed;
+    } else if (peer_exchange_locked) {
         if (identity->peer_exchange_enabled_by_user || identity->peer_exchange_disabled_by_user) {
             changed = true;
         }
         identity->peer_exchange_enabled_by_user = false;
         identity->peer_exchange_disabled_by_user = false;
         peer_exchange_disabled_by_app.erase(identity);
-        peer_exchange_disabled_until_metadata.erase(identity);
         if (!static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex)) {
             handle.set_flags(lt::torrent_flags::disable_pex);
             changed = true;
@@ -875,8 +942,7 @@ DirtyMask TTorrentClient::set_source_policy(
         identity->peer_exchange_enabled_by_user = true;
         identity->peer_exchange_disabled_by_user = false;
         peer_exchange_disabled_by_app.erase(identity);
-        if (!peer_exchange_disabled_until_metadata.contains(identity)
-            && static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex)) {
+        if (static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex)) {
             handle.unset_flags(lt::torrent_flags::disable_pex);
             changed = true;
         }
@@ -893,7 +959,12 @@ DirtyMask TTorrentClient::set_source_policy(
         }
     }
 
-    if (lsd_locked) {
+    if (metadata_pending) {
+        if (!static_cast<bool>(handle.flags() & lt::torrent_flags::disable_lsd)) {
+            handle.set_flags(lt::torrent_flags::disable_lsd);
+            changed = true;
+        }
+    } else if (lsd_locked) {
         if (identity->lsd_enabled_by_user || identity->lsd_disabled_by_user) {
             changed = true;
         }
@@ -1070,15 +1141,6 @@ extern "C" void TorrentClientSetWakeCallback(
     }
 }
 
-extern "C" void TorrentClientClearWakeCallback(TTorrentClient *client) noexcept
-{
-    if (client == nullptr) {
-        return;
-    }
-
-    client->clear_wake_callback();
-}
-
 extern "C" uint64_t TorrentClientTakeChanges(TTorrentClient *client, uint32_t *dirty_mask_out) noexcept
 {
     if (dirty_mask_out != nullptr) {
@@ -1128,6 +1190,7 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         if (parse_error) {
             return bridge_error(2, parse_error.message());
         }
+        sanitize_magnet_endpoint_hints(params);
         lt::add_torrent_params const source_params = params;
 
         bool const allows_non_https_trackers = bridge_bool(add_options.allow_non_https_trackers);
@@ -1142,6 +1205,12 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
             return valid_sources;
         }
         bool const enable_peer_exchange_value = bridge_bool(add_options.enable_peer_exchange);
+        bool const metadata_pending = !params.ti;
+        bool const allow_pre_metadata_dht =
+            metadata_pending && bridge_bool(add_options.allow_pre_metadata_dht);
+        bool const intended_default_dont_download =
+            static_cast<bool>(params.flags & lt::torrent_flags::default_dont_download);
+        std::vector<lt::download_priority_t> intended_file_priorities = params.file_priorities;
         bool const private_torrent = params.ti && params.ti->priv();
         bool const dht_locked_by_source =
             private_torrent || static_cast<bool>(params.flags & lt::torrent_flags::disable_dht);
@@ -1152,25 +1221,30 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         bool const peer_exchange_was_disabled =
             static_cast<bool>(params.flags & lt::torrent_flags::disable_pex);
         bool const peer_exchange_locked_by_source = private_torrent || peer_exchange_was_disabled;
-        bool const peer_exchange_pending_metadata =
-            enable_peer_exchange_value && !peer_exchange_was_disabled && !params.ti;
         if (dht_locked_by_source) {
             params.flags |= lt::torrent_flags::disable_dht;
         }
-        if (dht_disabled_by_app) {
+        if ((dht_disabled_by_app || metadata_pending) && !allow_pre_metadata_dht) {
             params.flags |= lt::torrent_flags::disable_dht;
         }
-        if (lsd_locked_by_source || lsd_disabled_by_app) {
+        if (allow_pre_metadata_dht && !dht_locked_by_source) {
+            params.flags &= ~lt::torrent_flags::disable_dht;
+        }
+        if (lsd_locked_by_source || lsd_disabled_by_app || metadata_pending) {
             params.flags |= lt::torrent_flags::disable_lsd;
         }
-        if (peer_exchange_locked_by_source) {
+        if (peer_exchange_locked_by_source || metadata_pending) {
             params.flags |= lt::torrent_flags::disable_pex;
+        }
+        if (metadata_pending) {
+            params.file_priorities.clear();
+            params.flags |= lt::torrent_flags::default_dont_download;
         }
         prepare_add_params(
             params,
             requested_save_path,
             bridge_bool(add_options.starts_paused),
-            enable_peer_exchange_value && !peer_exchange_pending_metadata
+            enable_peer_exchange_value && !metadata_pending
         );
         bool const peer_exchange_disabled_by_app =
             !enable_peer_exchange_value && !peer_exchange_was_disabled && !peer_exchange_locked_by_source;
@@ -1184,6 +1258,9 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         identity->dht_locked_by_source = dht_locked_by_source;
         identity->lsd_locked_by_source = lsd_locked_by_source;
         identity->peer_exchange_locked_by_source = peer_exchange_locked_by_source;
+        identity->allow_pre_metadata_dht = allow_pre_metadata_dht;
+        identity->intended_default_dont_download = intended_default_dont_download;
+        identity->intended_file_priorities = std::move(intended_file_priorities);
         remember_source_policy_sources(*identity, source_params);
         lt::add_torrent_params resume_params = params;
         lt::error_code add_error;
@@ -1213,8 +1290,8 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         if (peer_exchange_disabled_by_app) {
             client->peer_exchange_disabled_by_app.insert(identity);
         }
-        if (peer_exchange_pending_metadata) {
-            client->peer_exchange_disabled_until_metadata.insert(identity);
+        if (metadata_pending) {
+            client->metadata_validation_pending.insert(identity);
         }
         client->apply_queue_priority_order_locked();
         ResumeSaveResult saved_resume = client->save_added_torrent_resume_data(
@@ -1233,8 +1310,8 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
             if (rolled_back && peer_exchange_disabled_by_app) {
                 client->peer_exchange_disabled_by_app.erase(identity);
             }
-            if (rolled_back && peer_exchange_pending_metadata) {
-                client->peer_exchange_disabled_until_metadata.erase(identity);
+            if (rolled_back && metadata_pending) {
+                client->metadata_validation_pending.erase(identity);
             }
             if (!rolled_back) {
                 return bridge_error(3,
@@ -1255,8 +1332,8 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
             if (rolled_back && peer_exchange_disabled_by_app) {
                 client->peer_exchange_disabled_by_app.erase(identity);
             }
-            if (rolled_back && peer_exchange_pending_metadata) {
-                client->peer_exchange_disabled_until_metadata.erase(identity);
+            if (rolled_back && metadata_pending) {
+                client->metadata_validation_pending.erase(identity);
             }
             if (!rolled_back) {
                 return bridge_error(3, "Torrent was added, but obsolete resume "
@@ -1278,8 +1355,8 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
             if (rolled_back && peer_exchange_disabled_by_app) {
                 client->peer_exchange_disabled_by_app.erase(identity);
             }
-            if (rolled_back && peer_exchange_pending_metadata) {
-                client->peer_exchange_disabled_until_metadata.erase(identity);
+            if (rolled_back && metadata_pending) {
+                client->metadata_validation_pending.erase(identity);
             }
             if (!rolled_back) {
                 return bridge_error(3, "Torrent was added, but removal markers "
@@ -1301,8 +1378,8 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
                 if (rolled_back && lsd_disabled_by_app) {
                     client->lsd_disabled_by_app.erase(identity);
                 }
-                if (rolled_back && peer_exchange_pending_metadata) {
-                    client->peer_exchange_disabled_until_metadata.erase(identity);
+                if (rolled_back && metadata_pending) {
+                    client->metadata_validation_pending.erase(identity);
                 }
                 if (!rolled_back) {
                     return bridge_error(3, "Torrent was added, but removal marker "
@@ -1384,6 +1461,7 @@ int32_t add_torrent_file_data_with_priorities(
         if (!valid_info) {
             return valid_info;
         }
+        sanitize_resume_endpoint_hints(params);
         lt::add_torrent_params const source_params = params;
         if (file_priority_count > params.ti->layout().num_files()) {
             return bridge_error(2, "The file priorities are invalid.");
@@ -1804,6 +1882,11 @@ extern "C" int32_t TorrentClientSetSourcePolicy(
         TorrentIdentity *identity = identity_from_handle(*handle);
         if (identity == nullptr) {
             return bridge_error(2, "Torrent identity not found.");
+        }
+
+        bool const metadata_pending = client->metadata_validation_pending.contains(identity);
+        if (bridge_bool(policy->metadata_validation_pending) != metadata_pending) {
+            return bridge_error(2, "Torrent metadata state changed. Refresh the source policy and try again.");
         }
 
         BridgeResult const persistence = client->ensure_persistence_available(2);

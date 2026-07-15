@@ -100,7 +100,8 @@ protocol TorrentEngineServicing: Sendable {
         queuePriority: TorrentQueuePriority,
         enablePeerExchange: Bool,
         allowNonHTTPSTrackers: Bool,
-        allowNonHTTPSWebSeeds: Bool
+        allowNonHTTPSWebSeeds: Bool,
+        allowPreMetadataDHT: Bool
     ) async throws -> String
     func addTorrentFile(
         data: Data,
@@ -224,7 +225,8 @@ protocol TorrentEngineServicing: Sendable {
         queuePriority: TorrentQueuePriority = .normal,
         enablePeerExchange: Bool = true,
         allowNonHTTPSTrackers: Bool = false,
-        allowNonHTTPSWebSeeds: Bool = false
+        allowNonHTTPSWebSeeds: Bool = false,
+        allowPreMetadataDHT: Bool = false
     ) throws -> String {
         let client = try unsafe requireClient()
         var options = TTorrentAddOptions(
@@ -232,7 +234,8 @@ protocol TorrentEngineServicing: Sendable {
             queue_priority: queuePriority.bridgeByteValue,
             enable_peer_exchange: enablePeerExchange.bridgeFlag,
             allow_non_https_trackers: allowNonHTTPSTrackers.bridgeFlag,
-            allow_non_https_web_seeds: allowNonHTTPSWebSeeds.bridgeFlag
+            allow_non_https_web_seeds: allowNonHTTPSWebSeeds.bridgeFlag,
+            allow_pre_metadata_dht: allowPreMetadataDHT.bridgeFlag
         )
         return try unsafe throwingBridgeCallReturningString(capacity: Int(TTORRENT_ID_CAPACITY)) { outputBuffer, outputCapacity, errorBuffer, errorCapacity in
             unsafe magnet.withCString { magnetPointer in
@@ -274,7 +277,8 @@ protocol TorrentEngineServicing: Sendable {
             queue_priority: queuePriority.bridgeByteValue,
             enable_peer_exchange: enablePeerExchange.bridgeFlag,
             allow_non_https_trackers: allowNonHTTPSTrackers.bridgeFlag,
-            allow_non_https_web_seeds: allowNonHTTPSWebSeeds.bridgeFlag
+            allow_non_https_web_seeds: allowNonHTTPSWebSeeds.bridgeFlag,
+            allow_pre_metadata_dht: false.bridgeFlag
         )
         if let priorityEntries {
             return try unsafe throwingBridgeCallReturningString(capacity: Int(TTORRENT_ID_CAPACITY)) { outputBuffer, outputCapacity, errorBuffer, errorCapacity in
@@ -1294,14 +1298,12 @@ struct TorrentPieceMapBatch: Sendable {
             return
         }
 
-        unsafe TorrentClientClearWakeCallback(pointer)
         unsafe rawPointer = nil
         unsafe TorrentClientDestroyBlocking(pointer)
     }
 
     deinit {
         if let rawPointer = unsafe rawPointer {
-            unsafe TorrentClientClearWakeCallback(rawPointer)
             unsafe TorrentClientDestroy(rawPointer)
         }
     }

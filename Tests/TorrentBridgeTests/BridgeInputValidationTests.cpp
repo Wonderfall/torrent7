@@ -653,6 +653,22 @@ TEST_CASE("resume encoding uses captured source policy snapshot")
     CHECK(app_disabled_lsd_from_resume_data(encoded));
 }
 
+TEST_CASE("resume encoding records explicit pre-metadata DHT consent only for a pending validation")
+{
+    lt::add_torrent_params params = bridge_tests::add_params_with_hashes();
+    TorrentIdentity identity;
+    identity.canonical_id = "t:0123456789abcdef0123456789abcdef";
+    identity.allow_pre_metadata_dht = true;
+
+    std::vector<char> const pending = encoded_resume_data(params, &identity, true);
+    std::vector<char> const validated = encoded_resume_data(params, &identity, false);
+
+    CHECK(metadata_validation_pending_from_resume_data(pending));
+    CHECK(allow_pre_metadata_dht_from_resume_data(pending));
+    CHECK_FALSE(metadata_validation_pending_from_resume_data(validated));
+    CHECK_FALSE(allow_pre_metadata_dht_from_resume_data(validated));
+}
+
 TEST_CASE("restored source policy trackers are persisted in resume params with metadata")
 {
     lt::add_torrent_params params = make_source_torrent_params();
@@ -681,4 +697,21 @@ TEST_CASE("network client identity is generic and coarse")
     CHECK(settings.get_str(lt::settings_pack::handshake_client_version) == std::string(kNetworkClientIdentity));
     CHECK(settings.get_str(lt::settings_pack::user_agent).find("torrent-app") == std::string::npos);
     CHECK(settings.get_str(lt::settings_pack::handshake_client_version).find("torrent-app") == std::string::npos);
+    CHECK(settings.get_bool(lt::settings_pack::no_connect_privileged_ports));
+}
+
+TEST_CASE("untrusted magnet endpoint hints cannot target local or privileged services")
+{
+    lt::add_torrent_params params = bridge_tests::add_params_with_hashes();
+    params.dht_nodes.emplace_back("127.0.0.1", 6881);
+    params.peers.emplace_back(lt::make_address_v4("127.0.0.1"), 6881);
+    params.peers.emplace_back(lt::make_address_v4("8.8.8.8"), 80);
+    params.peers.emplace_back(lt::make_address_v4("8.8.8.8"), 6881);
+
+    sanitize_magnet_endpoint_hints(params);
+
+    CHECK(params.dht_nodes.empty());
+    REQUIRE(params.peers.size() == 1U);
+    CHECK(params.peers.front().address() == lt::make_address_v4("8.8.8.8"));
+    CHECK(params.peers.front().port() == 6881);
 }

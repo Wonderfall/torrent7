@@ -32,6 +32,10 @@ enum TorrentProtocolEncryption: Int, Codable, CaseIterable, Identifiable, Sendab
 
 struct TorrentSettings: Codable, Equatable, Sendable {
     private static let defaultsKey = "TorrentSettings"
+    private static let maximumRateLimitKBps = 1_000_000
+    private static let maximumActiveTorrentCount = 1_000
+    private static let maximumStopSeedingRatioPercent = 10_000
+    private static let maximumStopSeedingHours = 100_000
     static let minimumManualIncomingPort = 1024
     static let maximumIncomingPort = 65_535
 
@@ -145,22 +149,24 @@ struct TorrentSettings: Codable, Equatable, Sendable {
     }
 
     var libtorrentActiveLimit: Int32 {
-        if maximumActiveDownloads == 0 || maximumActiveSeeds == 0 {
+        let activeDownloads = Self.clampedActiveTorrentCount(maximumActiveDownloads)
+        let activeSeeds = Self.clampedActiveTorrentCount(maximumActiveSeeds)
+        if activeDownloads == 0 || activeSeeds == 0 {
             return Int32.max
         }
-        return Int32(maximumActiveDownloads + maximumActiveSeeds)
+        return Int32(activeDownloads + activeSeeds)
     }
 
     var libtorrentSeedTimeLimit: Int32 {
-        Int32(stopSeedingAfterHours * 60 * 60)
+        Int32(Self.clampedStopSeedingHours(stopSeedingAfterHours) * 60 * 60)
     }
 
     var libtorrentShareRatioLimit: Int32 {
-        Int32(stopSeedingRatioPercent)
+        Int32(Self.clampedStopSeedingRatioPercent(stopSeedingRatioPercent))
     }
 
     var libtorrentIncomingPort: Int32 {
-        Int32(incomingPort)
+        Int32(Self.clampedIncomingPort(incomingPort))
     }
 
     var libtorrentEncryptionPolicy: Int32 {
@@ -212,20 +218,13 @@ struct TorrentSettings: Codable, Equatable, Sendable {
 
     func clamped() -> TorrentSettings {
         var settings = self
-        settings.downloadRateLimitKBps = min(max(settings.downloadRateLimitKBps, 0), 1_000_000)
-        settings.uploadRateLimitKBps = min(max(settings.uploadRateLimitKBps, 0), 1_000_000)
-        settings.maximumActiveDownloads = min(max(settings.maximumActiveDownloads, 0), 1000)
-        settings.maximumActiveSeeds = min(max(settings.maximumActiveSeeds, 0), 1000)
-        settings.stopSeedingRatioPercent = min(max(settings.stopSeedingRatioPercent, 1), 10_000)
-        settings.stopSeedingAfterHours = min(max(settings.stopSeedingAfterHours, 1), 100_000)
-        if settings.incomingPort <= 0 {
-            settings.incomingPort = 0
-        } else {
-            settings.incomingPort = min(
-                max(settings.incomingPort, Self.minimumManualIncomingPort),
-                Self.maximumIncomingPort
-            )
-        }
+        settings.downloadRateLimitKBps = Self.clampedRateLimitKBps(settings.downloadRateLimitKBps)
+        settings.uploadRateLimitKBps = Self.clampedRateLimitKBps(settings.uploadRateLimitKBps)
+        settings.maximumActiveDownloads = Self.clampedActiveTorrentCount(settings.maximumActiveDownloads)
+        settings.maximumActiveSeeds = Self.clampedActiveTorrentCount(settings.maximumActiveSeeds)
+        settings.stopSeedingRatioPercent = Self.clampedStopSeedingRatioPercent(settings.stopSeedingRatioPercent)
+        settings.stopSeedingAfterHours = Self.clampedStopSeedingHours(settings.stopSeedingAfterHours)
+        settings.incomingPort = Self.clampedIncomingPort(settings.incomingPort)
         if !settings.requireNetworkInterface {
             settings.showOnlyVPNInterfaces = false
         }
@@ -234,10 +233,34 @@ struct TorrentSettings: Codable, Equatable, Sendable {
     }
 
     private func rateLimitBytesPerSecond(_ kilobytesPerSecond: Int) -> Int32 {
-        Int32(kilobytesPerSecond * 1024)
+        Int32(Self.clampedRateLimitKBps(kilobytesPerSecond) * 1024)
     }
 
     private func activeLimit(_ value: Int) -> Int32 {
-        value == 0 ? -1 : Int32(value)
+        let clampedValue = Self.clampedActiveTorrentCount(value)
+        return clampedValue == 0 ? -1 : Int32(clampedValue)
+    }
+
+    private static func clampedRateLimitKBps(_ value: Int) -> Int {
+        min(max(value, 0), maximumRateLimitKBps)
+    }
+
+    private static func clampedActiveTorrentCount(_ value: Int) -> Int {
+        min(max(value, 0), maximumActiveTorrentCount)
+    }
+
+    private static func clampedStopSeedingRatioPercent(_ value: Int) -> Int {
+        min(max(value, 1), maximumStopSeedingRatioPercent)
+    }
+
+    private static func clampedStopSeedingHours(_ value: Int) -> Int {
+        min(max(value, 1), maximumStopSeedingHours)
+    }
+
+    private static func clampedIncomingPort(_ value: Int) -> Int {
+        guard value > 0 else {
+            return 0
+        }
+        return min(max(value, minimumManualIncomingPort), maximumIncomingPort)
     }
 }

@@ -609,8 +609,8 @@ struct TorrentSettingsView: View {
 
     private var networkInterfaceSection: some View {
         Section("Network Interface") {
-            Toggle("Restrict traffic to selected interface", isOn: requireNetworkInterface)
-                .help("Pause transfers unless the selected interface is available.")
+            Toggle("Bind torrent connections to selected interface", isOn: requireNetworkInterface)
+                .help("Bind libtorrent sockets to the selected interface. Hostname lookup still uses macOS system DNS.")
 
             vpnOnlyModeRow
 
@@ -882,16 +882,16 @@ struct TorrentSettingsView: View {
     }
 
     private var requireNetworkInterfaceConfirmationTitle: String {
-        pendingRequireNetworkInterface == true ? "Restrict traffic to selected interface?" : "Stop restricting traffic to selected interface?"
+        pendingRequireNetworkInterface == true ? "Bind torrent connections to selected interface?" : "Stop binding torrent connections?"
     }
 
     private var requireNetworkInterfaceConfirmationAction: String {
-        pendingRequireNetworkInterface == true ? "Restrict" : "Stop Restricting"
+        pendingRequireNetworkInterface == true ? "Bind" : "Stop Binding"
     }
 
     private var requireNetworkInterfaceConfirmationMessage: String {
         if pendingRequireNetworkInterface == true {
-            return "Transfers will pause unless the selected interface is available. Applying this restarts the libtorrent session."
+            return "Torrent sockets will bind to the selected interface and transfers will pause while it is unavailable. Hostname lookup still uses macOS system DNS. Applying this restarts the libtorrent session."
         }
         return "Transfers will use the system network route again. Applying this restarts the libtorrent session."
     }

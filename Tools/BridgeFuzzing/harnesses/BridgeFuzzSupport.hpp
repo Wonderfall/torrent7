@@ -24,7 +24,7 @@ namespace bridge_fuzz {
 
 namespace fs = std::filesystem;
 
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 28, "Update the fuzz harnesses for the current TorrentBridge ABI.");
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 29, "Update the fuzz harnesses for the current TorrentBridge ABI.");
 #if !defined(TORRENT_USE_ASSERTS) || !TORRENT_USE_ASSERTS
 #error "Fuzz consumers must match the assertion-enabled Debug libtorrent archive."
 #endif
@@ -228,7 +228,6 @@ public:
     ~BridgeClientHarness()
     {
         if (client_ != nullptr) {
-            TorrentClientClearWakeCallback(client_);
             TorrentClientDestroyBlocking(client_);
             client_ = nullptr;
         }
@@ -508,6 +507,7 @@ inline TTorrentAddOptions add_options_from_reader(ByteReader &reader)
     options.enable_peer_exchange = reader.read_u8();
     options.allow_non_https_trackers = reader.read_u8();
     options.allow_non_https_web_seeds = reader.read_u8();
+    options.allow_pre_metadata_dht = reader.read_u8();
     return options;
 }
 
@@ -547,6 +547,8 @@ inline TTorrentSourcePolicy source_policy_from_reader(ByteReader &reader)
     policy.dht_locked = reader.read_u8();
     policy.peer_exchange_locked = reader.read_u8();
     policy.lsd_locked = reader.read_u8();
+    policy.metadata_validation_pending = reader.read_u8();
+    policy.allow_pre_metadata_dht = reader.read_u8();
     return policy;
 }
 

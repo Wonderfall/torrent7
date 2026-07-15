@@ -73,7 +73,8 @@ constexpr std::string_view kTempExtension = ".tmp";
 constexpr std::string_view kRemovalTombstoneExtension = ".remove";
 constexpr std::string_view kRemovalTombstonePrefix = "removal-";
 constexpr std::string_view kCanonicalIDResumeKey = "torrent-app-id";
-constexpr std::string_view kPeerExchangePendingMetadataResumeKey = "torrent-app-pex-pending-metadata";
+constexpr std::string_view kMetadataValidationPendingResumeKey = "torrent-app-metadata-validation-pending";
+constexpr std::string_view kAllowPreMetadataDHTResumeKey = "torrent-app-allow-pre-metadata-dht";
 constexpr std::string_view kAllowNonHTTPSTrackersResumeKey = "torrent-app-allow-non-https-trackers";
 constexpr std::string_view kAllowNonHTTPSWebSeedsResumeKey = "torrent-app-allow-non-https-web-seeds";
 constexpr std::string_view kRequireHTTPSTrackersResumeKey = "torrent-app-require-https-trackers";
@@ -119,7 +120,7 @@ static_assert(TTORRENT_MAX_TRACKER_COUNT > 0);
 static_assert(TTORRENT_MAX_WEB_SEED_COUNT > 0);
 static_assert(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT > 0);
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 28U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 29U);
 #if defined(TORRENT_USE_ASSERTS) && TORRENT_USE_ASSERTS
 static_assert(sizeof(lt::add_torrent_params) == 760U);
 #else
@@ -206,9 +207,9 @@ static_assert(sizeof(TTorrentSessionSettings) == 72U);
 static_assert(alignof(TTorrentSessionSettings) == 8U);
 static_assert(sizeof(TTorrentNetworkStatus) == 664U);
 static_assert(alignof(TTorrentNetworkStatus) == 8U);
-static_assert(sizeof(TTorrentSourcePolicy) == 8U);
+static_assert(sizeof(TTorrentSourcePolicy) == 10U);
 static_assert(alignof(TTorrentSourcePolicy) == 1U);
-static_assert(sizeof(TTorrentAddOptions) == 5U);
+static_assert(sizeof(TTorrentAddOptions) == 6U);
 static_assert(alignof(TTorrentAddOptions) == 1U);
 static_assert(sizeof(TTorrentOptions) == 20U);
 static_assert(alignof(TTorrentOptions) == 4U);
@@ -304,10 +305,14 @@ struct TorrentIdentity {
     bool dht_locked_by_source = false;
     bool peer_exchange_locked_by_source = false;
     bool lsd_locked_by_source = false;
+    bool allow_pre_metadata_dht = false;
+    bool intended_default_dont_download = false;
     int32_t queue_priority = TTORRENT_QUEUE_PRIORITY_NORMAL;
     int32_t queue_rank = kUnsetQueueRank;
     std::vector<lt::announce_entry> source_trackers;
     std::vector<std::string> source_web_seeds;
+    std::vector<lt::download_priority_t> intended_file_priorities;
+    std::chrono::steady_clock::time_point metadata_validation_retry_after{};
 };
 
 struct ResumePolicySnapshot {
@@ -324,7 +329,11 @@ struct ResumePolicySnapshot {
     bool lsd_enabled_by_user = false;
     bool lsd_disabled_by_user = false;
     bool dht_locked_by_source = false;
-    bool peer_exchange_pending_metadata = false;
+    bool peer_exchange_locked_by_source = false;
+    bool lsd_locked_by_source = false;
+    bool metadata_validation_pending = false;
+    bool allow_pre_metadata_dht = false;
+    bool intended_default_dont_download = false;
     bool app_disabled_dht = false;
     bool app_disabled_lsd = false;
     bool app_disabled_peer_exchange = false;
@@ -332,6 +341,7 @@ struct ResumePolicySnapshot {
     int32_t queue_rank = kUnsetQueueRank;
     std::vector<lt::announce_entry> source_trackers;
     std::vector<std::string> source_web_seeds;
+    std::vector<lt::download_priority_t> intended_file_priorities;
 };
 
 struct PendingResumeWrite {
@@ -739,7 +749,7 @@ std::string torrent_context(lt::torrent_alert const &alert);
 
 ResumePolicySnapshot resume_policy_snapshot(
     TorrentIdentity const *identity,
-    bool peer_exchange_pending_metadata,
+    bool metadata_validation_pending,
     bool app_disabled_dht,
     bool app_disabled_lsd,
     bool app_disabled_peer_exchange
@@ -748,7 +758,7 @@ ResumePolicySnapshot resume_policy_snapshot(
 std::vector<char> encoded_resume_data(
     lt::add_torrent_params const &params,
     TorrentIdentity const *identity,
-    bool peer_exchange_pending_metadata = false,
+    bool metadata_validation_pending = false,
     bool app_disabled_dht = false,
     bool app_disabled_lsd = false
 );
@@ -760,7 +770,13 @@ std::vector<char> encoded_resume_data(
 
 std::string canonical_id_from_resume_data(std::vector<char> const &buffer);
 
-bool peer_exchange_pending_metadata_from_resume_data(std::vector<char> const &buffer);
+bool metadata_validation_pending_from_resume_data(std::vector<char> const &buffer);
+
+bool allow_pre_metadata_dht_from_resume_data(std::vector<char> const &buffer);
+
+void sanitize_magnet_endpoint_hints(lt::add_torrent_params &params);
+
+void sanitize_resume_endpoint_hints(lt::add_torrent_params &params) noexcept;
 
 bool allow_non_https_trackers_from_resume_data(std::vector<char> const &buffer);
 
@@ -1011,7 +1027,7 @@ struct TTorrentClient {
     std::unordered_map<std::string, lt::torrent_handle> handle_by_id;
     std::set<TorrentIdentity *> dht_disabled_by_app;
     std::set<TorrentIdentity *> peer_exchange_disabled_by_app;
-    std::set<TorrentIdentity *> peer_exchange_disabled_until_metadata;
+    std::set<TorrentIdentity const *> metadata_validation_pending;
     std::set<TorrentIdentity *> lsd_disabled_by_app;
     std::unordered_map<std::string, std::vector<std::string>> awaiting_delete_resume_ids_by_id;
     std::unordered_map<std::string, std::vector<std::string>> pending_resume_cleanup_ids_by_id;
@@ -1062,7 +1078,6 @@ struct TTorrentClient {
     TTorrentWakeCallback wake_callback = nullptr;
     void *wake_callback_context = nullptr;
     int32_t wake_callbacks_in_flight = 0;
-    std::thread::id wake_callback_thread;
     std::condition_variable wake_callback_quiesced;
 
     void start_alert_worker();
@@ -1309,6 +1324,8 @@ struct TTorrentClient {
     );
 
     [[nodiscard]] BridgeResult validate_or_remove_loaded_metadata(lt::torrent_handle const &handle, DirtyMask &changes);
+
+    void validate_pending_metadata(DirtyMask &changes);
 
     [[nodiscard]] BridgeResult request_files(std::string const &id, DirtyMask &changes);
 

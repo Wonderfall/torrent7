@@ -128,7 +128,9 @@ extension TorrentSourcePolicy {
             usesHTTPSWebSeedsOnly: snapshot.require_https_web_seeds.bridgeBool,
             isDHTLocked: snapshot.dht_locked.bridgeBool,
             isPeerExchangeLocked: snapshot.peer_exchange_locked.bridgeBool,
-            isLocalServiceDiscoveryLocked: snapshot.lsd_locked.bridgeBool
+            isLocalServiceDiscoveryLocked: snapshot.lsd_locked.bridgeBool,
+            isMetadataValidationPending: snapshot.metadata_validation_pending.bridgeBool,
+            allowsPreMetadataDHT: snapshot.allow_pre_metadata_dht.bridgeBool
         )
     }
 
@@ -141,7 +143,9 @@ extension TorrentSourcePolicy {
             require_https_web_seeds: usesHTTPSWebSeedsOnly.bridgeFlag,
             dht_locked: isDHTLocked.bridgeFlag,
             peer_exchange_locked: isPeerExchangeLocked.bridgeFlag,
-            lsd_locked: isLocalServiceDiscoveryLocked.bridgeFlag
+            lsd_locked: isLocalServiceDiscoveryLocked.bridgeFlag,
+            metadata_validation_pending: isMetadataValidationPending.bridgeFlag,
+            allow_pre_metadata_dht: allowsPreMetadataDHT.bridgeFlag
         )
     }
 }

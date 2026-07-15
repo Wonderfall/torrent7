@@ -18,6 +18,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
         .enable_peer_exchange = 0,
         .allow_non_https_trackers = 0,
         .allow_non_https_web_seeds = 0,
+        .allow_pre_metadata_dht = 0,
     };
     bridge_fuzz::AddedIdBuffer added_id;
     bridge_fuzz::ErrorBuffer error;

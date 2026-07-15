@@ -88,6 +88,7 @@ private struct TorrentInfoView: View {
     @State private var webSeedActivity = TorrentWebSeedActivity.empty
     @State private var peerSources = TorrentPeerSources.empty
     @State private var sourcePolicy: TorrentSourcePolicy?
+    @State private var sourcePolicyMutationGeneration: UInt64 = 0
     @State private var torrentOptions: TorrentOptions?
     @State private var files = [TorrentFileItem]()
     @State private var pieceMap = TorrentPieceMap.empty
@@ -502,20 +503,31 @@ private struct TorrentInfoView: View {
     private var discoveryOptionsSection: some View {
         Section {
             if let sourcePolicy {
-                Toggle("Use Distributed Hash Table (DHT)", isOn: dhtPolicyBinding)
-                    .disabled(isDHTPolicyDisabled(for: sourcePolicy))
-                    .foregroundStyle(isDHTPolicyDisabled(for: sourcePolicy) ? Color.secondary : Color.primary)
-                    .help(dhtPolicyHelp(for: sourcePolicy))
+                if sourcePolicy.isMetadataValidationPending {
+                    Toggle("Use DHT to fetch metadata", isOn: preMetadataDHTBinding)
+                        .disabled(isDHTPolicyDisabled(for: sourcePolicy))
+                        .foregroundStyle(isDHTPolicyDisabled(for: sourcePolicy) ? Color.secondary : Color.primary)
+                        .help("Share this magnet's info hash with the public DHT before its metadata is checked.")
 
-                Toggle("Use Peer Exchange (PEX)", isOn: peerExchangePolicyBinding)
-                    .disabled(isPeerExchangePolicyDisabled(for: sourcePolicy))
-                    .foregroundStyle(isPeerExchangePolicyDisabled(for: sourcePolicy) ? Color.secondary : Color.primary)
-                    .help(peerExchangePolicyHelp(for: sourcePolicy))
+                    Text("PEX and local discovery stay off until the torrent metadata is checked.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Toggle("Use Distributed Hash Table (DHT)", isOn: dhtPolicyBinding)
+                        .disabled(isDHTPolicyDisabled(for: sourcePolicy))
+                        .foregroundStyle(isDHTPolicyDisabled(for: sourcePolicy) ? Color.secondary : Color.primary)
+                        .help(dhtPolicyHelp(for: sourcePolicy))
 
-                Toggle("Use Local Service Discovery (LSD)", isOn: localServiceDiscoveryPolicyBinding)
-                    .disabled(isLocalServiceDiscoveryPolicyDisabled(for: sourcePolicy))
-                    .foregroundStyle(isLocalServiceDiscoveryPolicyDisabled(for: sourcePolicy) ? Color.secondary : Color.primary)
-                    .help(localServiceDiscoveryPolicyHelp(for: sourcePolicy))
+                    Toggle("Use Peer Exchange (PEX)", isOn: peerExchangePolicyBinding)
+                        .disabled(isPeerExchangePolicyDisabled(for: sourcePolicy))
+                        .foregroundStyle(isPeerExchangePolicyDisabled(for: sourcePolicy) ? Color.secondary : Color.primary)
+                        .help(peerExchangePolicyHelp(for: sourcePolicy))
+
+                    Toggle("Use Local Service Discovery (LSD)", isOn: localServiceDiscoveryPolicyBinding)
+                        .disabled(isLocalServiceDiscoveryPolicyDisabled(for: sourcePolicy))
+                        .foregroundStyle(isLocalServiceDiscoveryPolicyDisabled(for: sourcePolicy) ? Color.secondary : Color.primary)
+                        .help(localServiceDiscoveryPolicyHelp(for: sourcePolicy))
+                }
 
                 Toggle("Use HTTPS trackers only", isOn: sourcePolicyBinding(\.usesHTTPSTrackersOnly))
                     .help("Ignore non-HTTPS trackers for this torrent.")
@@ -743,7 +755,7 @@ private struct TorrentInfoView: View {
     }
 
     private var optionsRefreshID: String {
-        "\(torrent.id):\(selectedTab == .options)"
+        "\(torrent.id):\(torrent.hasMetadata):\(selectedTab == .options)"
     }
 
     private var trackerSummaryText: String? {
@@ -883,13 +895,7 @@ private struct TorrentInfoView: View {
             }
             return sourcePolicy[keyPath: keyPath]
         } set: { newValue in
-            guard var updatedPolicy = sourcePolicy else {
-                return
-            }
-            updatedPolicy[keyPath: keyPath] = newValue
-            Task {
-                await setSourcePolicy(updatedPolicy)
-            }
+            updateSourcePolicy(keyPath, to: newValue)
         }
     }
 
@@ -900,13 +906,15 @@ private struct TorrentInfoView: View {
             }
             return sourcePolicy.isDHTEnabled
         } set: { newValue in
-            guard var updatedPolicy = sourcePolicy else {
-                return
-            }
-            updatedPolicy.isDHTEnabled = newValue
-            Task {
-                await setSourcePolicy(updatedPolicy)
-            }
+            updateSourcePolicy(\.isDHTEnabled, to: newValue)
+        }
+    }
+
+    private var preMetadataDHTBinding: Binding<Bool> {
+        Binding {
+            sourcePolicy?.allowsPreMetadataDHT ?? false
+        } set: { newValue in
+            updateSourcePolicy(\.allowsPreMetadataDHT, to: newValue)
         }
     }
 
@@ -917,13 +925,7 @@ private struct TorrentInfoView: View {
             }
             return sourcePolicy.isPeerExchangeEnabled
         } set: { newValue in
-            guard var updatedPolicy = sourcePolicy else {
-                return
-            }
-            updatedPolicy.isPeerExchangeEnabled = newValue
-            Task {
-                await setSourcePolicy(updatedPolicy)
-            }
+            updateSourcePolicy(\.isPeerExchangeEnabled, to: newValue)
         }
     }
 
@@ -934,13 +936,24 @@ private struct TorrentInfoView: View {
             }
             return sourcePolicy.isLocalServiceDiscoveryEnabled
         } set: { newValue in
-            guard var updatedPolicy = sourcePolicy else {
-                return
-            }
-            updatedPolicy.isLocalServiceDiscoveryEnabled = newValue
-            Task {
-                await setSourcePolicy(updatedPolicy)
-            }
+            updateSourcePolicy(\.isLocalServiceDiscoveryEnabled, to: newValue)
+        }
+    }
+
+    @MainActor
+    private func updateSourcePolicy(
+        _ keyPath: WritableKeyPath<TorrentSourcePolicy, Bool>,
+        to newValue: Bool
+    ) {
+        guard var updatedPolicy = sourcePolicy else {
+            return
+        }
+        updatedPolicy[keyPath: keyPath] = newValue
+        sourcePolicy = updatedPolicy
+        sourcePolicyMutationGeneration &+= 1
+        let mutationGeneration = sourcePolicyMutationGeneration
+        Task {
+            await setSourcePolicy(updatedPolicy, mutationGeneration: mutationGeneration)
         }
     }
 
@@ -996,10 +1009,23 @@ private struct TorrentInfoView: View {
     }
 
     @MainActor
-    private func setSourcePolicy(_ policy: TorrentSourcePolicy) async {
+    private func setSourcePolicy(
+        _ policy: TorrentSourcePolicy,
+        mutationGeneration: UInt64
+    ) async {
+        guard mutationGeneration == sourcePolicyMutationGeneration else {
+            return
+        }
         do {
             try await store.setSourcePolicy(for: torrent.id, policy: policy)
-            sourcePolicy = try await store.sourcePolicy(for: torrent.id)
+            guard mutationGeneration == sourcePolicyMutationGeneration else {
+                return
+            }
+            let confirmedPolicy = try await store.sourcePolicy(for: torrent.id)
+            guard mutationGeneration == sourcePolicyMutationGeneration else {
+                return
+            }
+            sourcePolicy = confirmedPolicy
             try? await store.requestSources(for: torrent.id)
             let trackerBatch = await store.trackerBatch(for: torrent.id)
             let webSeedBatch = await store.webSeedBatch(for: torrent.id)
@@ -1014,9 +1040,16 @@ private struct TorrentInfoView: View {
             sourceError = nil
             optionsError = nil
         } catch {
+            guard mutationGeneration == sourcePolicyMutationGeneration else {
+                return
+            }
+            let confirmedPolicy = try? await store.sourcePolicy(for: torrent.id)
+            guard mutationGeneration == sourcePolicyMutationGeneration else {
+                return
+            }
             sourceError = error.localizedDescription
             optionsError = error.localizedDescription
-            sourcePolicy = try? await store.sourcePolicy(for: torrent.id)
+            sourcePolicy = confirmedPolicy
         }
     }
 

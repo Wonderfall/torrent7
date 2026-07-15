@@ -346,7 +346,8 @@ struct ContentView: View {
                 setsDownloadFolderAsDefault: options.setsDownloadFolderAsDefault,
                 startsPaused: options.startsPaused,
                 queuePriority: options.queuePriority,
-                labelIDs: options.labelIDs
+                labelIDs: options.labelIDs,
+                allowPreMetadataDHT: options.allowsPreMetadataDHT
             )
         }
 

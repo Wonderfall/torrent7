@@ -152,6 +152,7 @@ struct TorrentStoreIntegrationTests {
         #expect(await harness.engine.addedMagnets.first?.enablePeerExchange == false)
         #expect(await harness.engine.addedMagnets.first?.allowNonHTTPSTrackers == false)
         #expect(await harness.engine.addedMagnets.first?.allowNonHTTPSWebSeeds == false)
+        #expect(await harness.engine.addedMagnets.first?.allowPreMetadataDHT == false)
         #expect(harness.store.torrents.map(\.id) == ["alpha"])
     }
 
@@ -271,13 +272,15 @@ struct TorrentStoreIntegrationTests {
             savePath: "/Downloads",
             queuePriority: .high,
             allowNonHTTPSTrackers: true,
-            allowNonHTTPSWebSeeds: true
+            allowNonHTTPSWebSeeds: true,
+            allowPreMetadataDHT: true
         )
         await harness.store.saveAll()
 
         #expect(await harness.engine.addedMagnets.first?.queuePriority == .high)
         #expect(await harness.engine.addedMagnets.first?.allowNonHTTPSTrackers == true)
         #expect(await harness.engine.addedMagnets.first?.allowNonHTTPSWebSeeds == true)
+        #expect(await harness.engine.addedMagnets.first?.allowPreMetadataDHT == true)
     }
 
     @Test("Set queue priority updates torrent options")
@@ -646,6 +649,70 @@ struct TorrentStoreIntegrationTests {
         #expect(harness.store.settings.effectiveEnableLocalServiceDiscovery == true)
         #expect(harness.store.settings.effectiveAnonymousMode == false)
     }
+
+    @Test("User operation queue applies bounded backpressure")
+    func userOperationQueueAppliesBoundedBackpressure() async {
+        let harness = makeStoreHarness()
+        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+            revision: 1,
+            torrents: [makeTorrent(id: "alpha")]
+        ))
+        await harness.store.refreshNow()
+
+        for _ in 0..<80 {
+            harness.store.pauseTorrent(id: "alpha")
+        }
+
+        #expect(harness.store.lastError == TorrentStoreError.tooManyPendingOperations.localizedDescription)
+        await harness.store.saveAll()
+        #expect(await harness.engine.pausedIDs.count == 64)
+
+        harness.store.pauseTorrent(id: "alpha")
+        await harness.store.saveAll()
+        #expect(await harness.engine.pausedIDs.count == 65)
+        #expect(harness.store.lastError == nil)
+    }
+
+    @Test("Pending settings applications coalesce to latest values")
+    func pendingSettingsApplicationsCoalesceToLatestValues() async throws {
+        let suiteName = "app.torrent7.operation-queue.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let harness = makeStoreHarness(defaults: defaults)
+
+        for rateLimit in 1...20 {
+            var settings = harness.store.settings
+            settings.downloadRateLimitKBps = rateLimit
+            harness.store.updateSettings(settings)
+        }
+        await harness.store.saveAll()
+
+        #expect(await harness.engine.appliedSettings.count == 1)
+        #expect(await harness.engine.appliedSettings.first?.settings.downloadRateLimitKBps == 20)
+    }
+
+    @Test("Open wake stream does not retain store")
+    func openWakeStreamDoesNotRetainStore() async throws {
+        var harness: StoreHarness? = makeStoreHarness(
+            startsTasks: true,
+            keepsWakeStreamOpen: true
+        )
+        let engine = try #require(harness?.engine)
+        await engine.waitForOpenWakeStream()
+        await harness?.store.saveAll()
+
+        weak let weakStore = harness?.store
+        harness = nil
+        for _ in 0..<20 where weakStore != nil {
+            await Task.yield()
+        }
+
+        #expect(weakStore == nil)
+        await engine.finishWakeStream()
+    }
 }
 
 @MainActor
@@ -665,9 +732,11 @@ private func makeStoreHarness(
     sortOrder: TorrentSortOrder = .name,
     sortDirection: TorrentSortDirection = .ascending,
     defaults: UserDefaults = .standard,
-    networkInterfaces: [NetworkInterfaceOption] = []
+    networkInterfaces: [NetworkInterfaceOption] = [],
+    startsTasks: Bool = false,
+    keepsWakeStreamOpen: Bool = false
 ) -> StoreHarness {
-    let engine = FakeTorrentEngine()
+    let engine = FakeTorrentEngine(keepsWakeStreamOpen: keepsWakeStreamOpen)
     let dock = RecordingDockTileService()
     let notifications = RecordingNotificationService()
     let history = RecordingCompletionHistoryStore()
@@ -692,7 +761,8 @@ private func makeStoreHarness(
         downloadFolderAccessStore: accessStore,
         fileLocationService: fileLocationService,
         defaults: defaults,
-        networkInterfaces: networkInterfaces
+        networkInterfaces: networkInterfaces,
+        startsTasks: startsTasks
     )
     return StoreHarness(
         store: store,

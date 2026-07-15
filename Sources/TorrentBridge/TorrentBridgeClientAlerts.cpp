@@ -292,6 +292,16 @@ void TTorrentClient::pump_alerts()
             }
         }
 
+        try {
+            validate_pending_metadata(changes);
+        } catch (std::exception const &exception) {
+            changes |= queue_alert_error(
+                "Pending torrent metadata could not be validated: " + std::string(exception.what()) + "."
+            );
+        } catch (...) {
+            changes |= queue_alert_error("Pending torrent metadata could not be validated.");
+        }
+
         if (rebuild_cache) {
             changes |= invalidate_detail_caches_locked();
             changes |= rebuild_snapshot_cache();

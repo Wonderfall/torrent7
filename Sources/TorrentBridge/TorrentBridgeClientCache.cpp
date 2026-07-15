@@ -882,6 +882,18 @@ DirtyMask TTorrentClient::remove_torrent_with_invalid_metadata(lt::torrent_handl
     std::vector<std::string> const removal_ids = removal_ids_for_identity(hashes, "", identity);
     BridgeResult tombstoned = persist_removal_tombstones(removal_ids);
     if (!tombstoned) {
+        if (identity != nullptr) {
+            identity->metadata_validation_retry_after =
+                std::chrono::steady_clock::now() + kResumeRetryInterval;
+        }
+        try {
+            handle.pause();
+            handle.set_flags(lt::torrent_flags::disable_dht);
+            handle.set_flags(lt::torrent_flags::disable_pex);
+            handle.set_flags(lt::torrent_flags::disable_lsd);
+        } catch (...) {
+            ignore_shutdown_failure();
+        }
         return queue_alert_error("Invalid torrent metadata could not be removed durably: " + tombstoned.error().message + ".");
     }
     try {
@@ -1052,6 +1064,13 @@ BridgeResult TTorrentClient::validate_or_remove_loaded_metadata(lt::torrent_hand
         return {};
     }
 
+    TorrentIdentity *identity = identity_from_handle(handle);
+    if (identity != nullptr
+        && metadata_validation_pending.contains(identity)
+        && identity->metadata_validation_retry_after > std::chrono::steady_clock::now()) {
+        return bridge_error(3, "Invalid torrent metadata removal is waiting to retry.");
+    }
+
     std::shared_ptr<lt::torrent_info const> const torrent_file = handle.torrent_file();
     if (!torrent_file || !torrent_file->is_valid()) {
         return {};
@@ -1081,8 +1100,31 @@ BridgeResult TTorrentClient::validate_or_remove_loaded_metadata(lt::torrent_hand
         return valid_sources;
     }
 
-    if (TorrentIdentity *identity = identity_from_handle(handle); identity != nullptr) {
+    if (identity != nullptr) {
+        identity->metadata_validation_retry_after = {};
         remember_source_policy_sources(*identity, metadata_sources);
+        bool const was_pending = metadata_validation_pending.contains(identity);
+        if (was_pending) {
+            std::vector<lt::download_priority_t> priorities(
+                static_cast<std::size_t>(layout.num_files()),
+                identity->intended_default_dont_download ? lt::dont_download : lt::default_priority
+            );
+            std::size_t const explicit_priority_count = std::min(
+                priorities.size(),
+                identity->intended_file_priorities.size()
+            );
+            std::copy_n(
+                identity->intended_file_priorities.begin(),
+                explicit_priority_count,
+                priorities.begin()
+            );
+            handle.prioritize_files(priorities);
+            if (identity->intended_default_dont_download) {
+                handle.set_flags(lt::torrent_flags::default_dont_download);
+            } else {
+                handle.unset_flags(lt::torrent_flags::default_dont_download);
+            }
+        }
         if (torrent_file->priv()) {
             bool const policy_changed = identity->dht_enabled_by_user
                 || identity->dht_disabled_by_user
@@ -1107,7 +1149,6 @@ BridgeResult TTorrentClient::validate_or_remove_loaded_metadata(lt::torrent_hand
             identity->lsd_locked_by_source = true;
             dht_disabled_by_app.erase(identity);
             lsd_disabled_by_app.erase(identity);
-            peer_exchange_disabled_until_metadata.erase(identity);
             peer_exchange_disabled_by_app.erase(identity);
             handle.set_flags(lt::torrent_flags::disable_dht);
             handle.set_flags(lt::torrent_flags::disable_pex);
@@ -1115,17 +1156,72 @@ BridgeResult TTorrentClient::validate_or_remove_loaded_metadata(lt::torrent_hand
             if (policy_changed) {
                 request_save(handle);
             }
-        } else if (peer_exchange_disabled_until_metadata.erase(identity) > 0U
-                   && !peer_exchange_disabled_by_app.contains(identity)
-                   && !identity->peer_exchange_disabled_by_user
-                   && !identity->peer_exchange_locked_by_source
-                   && peer_exchange_plugin_enabled
-                   && (peer_exchange_enabled_by_default || identity->peer_exchange_enabled_by_user)) {
-            handle.unset_flags(lt::torrent_flags::disable_pex);
+        } else if (was_pending) {
+            bool const enable_dht = !identity->dht_locked_by_source
+                && (identity->dht_enabled_by_user
+                    || (!identity->dht_disabled_by_user && !dht_disabled_by_app.contains(identity)));
+            bool const enable_peer_exchange = !identity->peer_exchange_locked_by_source
+                && peer_exchange_plugin_enabled
+                && (identity->peer_exchange_enabled_by_user
+                    || (!identity->peer_exchange_disabled_by_user
+                        && !peer_exchange_disabled_by_app.contains(identity)));
+            bool const enable_lsd = !identity->lsd_locked_by_source
+                && (identity->lsd_enabled_by_user
+                    || (!identity->lsd_disabled_by_user && !lsd_disabled_by_app.contains(identity)));
+            if (enable_dht) {
+                handle.unset_flags(lt::torrent_flags::disable_dht);
+            } else {
+                handle.set_flags(lt::torrent_flags::disable_dht);
+            }
+            if (enable_peer_exchange) {
+                handle.unset_flags(lt::torrent_flags::disable_pex);
+            } else {
+                handle.set_flags(lt::torrent_flags::disable_pex);
+            }
+            if (enable_lsd) {
+                handle.unset_flags(lt::torrent_flags::disable_lsd);
+            } else {
+                handle.set_flags(lt::torrent_flags::disable_lsd);
+            }
+        }
+        if (was_pending) {
+            metadata_validation_pending.erase(identity);
+            identity->allow_pre_metadata_dht = false;
+            identity->intended_default_dont_download = false;
+            identity->intended_file_priorities.clear();
+            request_save(handle);
         }
         changes |= enforce_https_source_policy(handle, identity);
     }
     return valid_info;
+}
+
+void TTorrentClient::validate_pending_metadata(DirtyMask &changes)
+{
+    std::vector<lt::torrent_handle> candidates;
+    std::set<TorrentIdentity const *> visited;
+    for (auto const &[id, identity] : active_identity_by_id) {
+        if (identity == nullptr
+            || !metadata_validation_pending.contains(identity)
+            || !visited.insert(identity).second) {
+            continue;
+        }
+        auto const handle = handle_by_id.find(id);
+        if (handle != handle_by_id.end()) {
+            candidates.push_back(handle->second);
+        }
+    }
+
+    for (lt::torrent_handle const &handle : candidates) {
+        std::shared_ptr<lt::torrent_info const> const torrent_file = handle.torrent_file();
+        if (!torrent_file || !torrent_file->is_valid()) {
+            continue;
+        }
+        BridgeResult const validated = validate_or_remove_loaded_metadata(handle, changes);
+        if (!validated) {
+            continue;
+        }
+    }
 }
 
 BridgeResult TTorrentClient::request_files(std::string const &id, DirtyMask &changes)

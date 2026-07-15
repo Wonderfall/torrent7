@@ -1,7 +1,6 @@
 #include "BridgeFuzzSupport.hpp"
 
 #include <array>
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -72,7 +71,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
     for (std::uint8_t operation = 0; operation < operation_count; ++operation) {
         bridge_fuzz::ErrorBuffer error;
 
-        switch (reader.read_u8() % 20U) {
+        switch (reader.read_u8() % 19U) {
         case 0: {
             std::string magnet = reader.read_string(2048);
             std::string save_path = reader.read_bool() ? std::string(harness.save_path()) : reader.read_string(256);
@@ -324,15 +323,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             }
             bridge_fuzz::drain_alert_error(harness.client());
             break;
-        case 16:
-            if (reader.read_bool()) {
-                TorrentClientClearWakeCallback(harness.client());
-            } else {
-                static std::atomic_uint64_t wake_count = 0;
-                TorrentClientSetWakeCallback(harness.client(), bridge_fuzz::wake_callback, &wake_count);
-            }
-            break;
-        case 17: {
+        case 16: {
             std::string id = selected_id(reader, harness.client());
             if (reader.read_bool()) {
                 static_cast<void>(TorrentClientRequestSources(
@@ -351,7 +342,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             }
             break;
         }
-        case 18:
+        case 17:
             TorrentClientSaveAll(harness.client());
             static_cast<void>(TorrentBridgeLibtorrentVersion());
             break;

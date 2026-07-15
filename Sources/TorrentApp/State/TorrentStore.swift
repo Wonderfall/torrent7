@@ -17,9 +17,19 @@ private enum TorrentStoreErrorSource {
     case userAction
 }
 
+private typealias TorrentStoreUserOperation = @MainActor @Sendable (TorrentStore) async -> Void
+
+private enum TorrentStorePendingOperation {
+    case applySettings(refreshes: Bool, notifiesCompletions: Bool)
+    case user(TorrentStoreUserOperation)
+}
+
 @MainActor
 @Observable
 final class TorrentStore {
+    private static let maximumPendingUserOperationCount = 64
+    private static let maximumPendingOperationCount = maximumPendingUserOperationCount + 1
+
     let commandState = TorrentCommandState()
     let selectionState = TorrentSelectionState()
     let torrentState = TorrentListState()
@@ -61,8 +71,10 @@ final class TorrentStore {
     private var refreshTask: Task<Void, Never>?
     private var wakeRefreshTask: Task<Void, Never>?
     private var networkInterfaceTask: Task<Void, Never>?
-    private var userOperationTask: Task<Void, Never>?
-    private var settingsApplyTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var operationDrainTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var pendingOperations = [TorrentStorePendingOperation]()
     private var appliedNetworkBinding: AppliedNetworkBinding?
     private var appliedPeerExchangePluginEnabled: Bool?
     private var immediateNetworkBlockBinding: AppliedNetworkBinding?
@@ -205,8 +217,7 @@ final class TorrentStore {
         refreshTask?.cancel()
         wakeRefreshTask?.cancel()
         networkInterfaceTask?.cancel()
-        userOperationTask?.cancel()
-        settingsApplyTask?.cancel()
+        operationDrainTask?.cancel()
         networkInterfaceMonitor.cancel()
     }
 
@@ -511,7 +522,9 @@ final class TorrentStore {
             }
         }
 
-        let torrentData = try Self.readTorrentFile(url)
+        let torrentData = try await Task.detached(priority: .userInitiated) {
+            try Self.readTorrentFile(url)
+        }.value
         return try await engine.previewTorrentFile(data: torrentData)
     }
 
@@ -522,7 +535,8 @@ final class TorrentStore {
         queuePriority: TorrentQueuePriority = .normal,
         labelIDs: Set<TorrentLabel.ID> = [],
         allowNonHTTPSTrackers: Bool = false,
-        allowNonHTTPSWebSeeds: Bool = false
+        allowNonHTTPSWebSeeds: Bool = false,
+        allowPreMetadataDHT: Bool = false
     ) {
         guard let savePath = explicitSavePath ?? downloadFolder?.path else {
             setLastError("Choose a download folder first.", source: .userAction)
@@ -546,7 +560,8 @@ final class TorrentStore {
                     queuePriority: queuePriority,
                     enablePeerExchange: enablePeerExchange,
                     allowNonHTTPSTrackers: allowNonHTTPSTrackers,
-                    allowNonHTTPSWebSeeds: allowNonHTTPSWebSeeds
+                    allowNonHTTPSWebSeeds: allowNonHTTPSWebSeeds,
+                    allowPreMetadataDHT: allowPreMetadataDHT
                 )
                 store.setSanitizedLabels(sanitizedLabelIDs, forTorrent: addedTorrentID)
                 await store.refreshFromEngine()
@@ -566,7 +581,8 @@ final class TorrentStore {
         queuePriority: TorrentQueuePriority = .normal,
         labelIDs: Set<TorrentLabel.ID> = [],
         allowNonHTTPSTrackers: Bool = false,
-        allowNonHTTPSWebSeeds: Bool = false
+        allowNonHTTPSWebSeeds: Bool = false,
+        allowPreMetadataDHT: Bool = false
     ) {
         guard magnet.utf8.count <= TorrentInputLimits.maxMagnetURIBytes else {
             setLastError(TorrentStoreError.magnetTooLarge.localizedDescription, source: .userAction)
@@ -582,7 +598,8 @@ final class TorrentStore {
                 queuePriority: queuePriority,
                 labelIDs: labelIDs,
                 allowNonHTTPSTrackers: allowNonHTTPSTrackers,
-                allowNonHTTPSWebSeeds: allowNonHTTPSWebSeeds
+                allowNonHTTPSWebSeeds: allowNonHTTPSWebSeeds,
+                allowPreMetadataDHT: allowPreMetadataDHT
             )
         } catch {
             setLastError(error.localizedDescription, source: .userAction)
@@ -923,19 +940,15 @@ final class TorrentStore {
     }
 
     func saveAll() async {
-        let pendingUserOperation = userOperationTask
-        let pendingSettingsApply = settingsApplyTask
-        await pendingUserOperation?.value
-        await pendingSettingsApply?.value
+        let pendingOperations = operationDrainTask
+        await pendingOperations?.value
         await engine.saveAll()
     }
 
     @discardableResult
     func saveAllChecked() async -> Bool {
-        let pendingUserOperation = userOperationTask
-        let pendingSettingsApply = settingsApplyTask
-        await pendingUserOperation?.value
-        await pendingSettingsApply?.value
+        let pendingOperations = operationDrainTask
+        await pendingOperations?.value
 
         do {
             try await engine.saveAllChecked()
@@ -1200,17 +1213,17 @@ final class TorrentStore {
     }
 
     private func startRefreshing() {
+        let engine = engine
         wakeRefreshTask = Task { @MainActor [weak self] in
-            guard let self else {
-                return
-            }
-
             let wakeEvents = await engine.wakeEvents()
             for await _ in wakeEvents {
                 guard !Task.isCancelled else {
                     return
                 }
-                await refreshFromEngine()
+                guard let self else {
+                    return
+                }
+                await self.refreshFromEngine()
             }
         }
 
@@ -1339,30 +1352,91 @@ final class TorrentStore {
 
         applyImmediateNetworkBlockIfNeeded(for: currentNetworkBinding)
 
-        let previousSettingsTask = settingsApplyTask
-        let previousUserOperationTask = userOperationTask
-        settingsApplyTask = Task { @MainActor [weak self] in
-            await previousSettingsTask?.value
-            await previousUserOperationTask?.value
-            guard let self else {
-                return
+        let coalescingIndex = pendingOperations.indices.last.flatMap { lastIndex in
+            if case .applySettings = pendingOperations[lastIndex] {
+                return lastIndex
             }
-            await self.applySettingsToEngine()
-            if refreshes {
-                await self.refreshFromEngine(notifiesCompletions: notifiesCompletions)
+            guard pendingOperations.count >= Self.maximumPendingOperationCount else {
+                return nil
+            }
+            return pendingOperations.indices.last { index in
+                if case .applySettings = pendingOperations[index] {
+                    return true
+                }
+                return false
             }
         }
+        if let coalescingIndex,
+           case let .applySettings(existingRefreshes, existingNotifiesCompletions) = pendingOperations[coalescingIndex] {
+            pendingOperations[coalescingIndex] = .applySettings(
+                refreshes: existingRefreshes || refreshes,
+                notifiesCompletions: existingNotifiesCompletions && notifiesCompletions
+            )
+        } else {
+            guard pendingOperations.count < Self.maximumPendingOperationCount else {
+                assertionFailure("A full operation queue must contain a settings operation to coalesce")
+                return
+            }
+            pendingOperations.append(.applySettings(
+                refreshes: refreshes,
+                notifiesCompletions: notifiesCompletions
+            ))
+        }
+        startOperationDrainIfNeeded()
     }
 
     private func scheduleUserOperation(_ operation: @escaping @MainActor @Sendable (TorrentStore) async -> Void) {
-        let previousUserOperationTask = userOperationTask
-        let previousSettingsTask = settingsApplyTask
-        userOperationTask = Task { @MainActor [weak self] in
-            await previousUserOperationTask?.value
-            await previousSettingsTask?.value
-            guard let self else {
-                return
+        let pendingUserOperationCount = pendingOperations.reduce(into: 0) { count, operation in
+            if case .user = operation {
+                count += 1
             }
+        }
+        guard pendingUserOperationCount < Self.maximumPendingUserOperationCount,
+              pendingOperations.count < Self.maximumPendingOperationCount else {
+            setLastError(TorrentStoreError.tooManyPendingOperations.localizedDescription, source: .userAction)
+            return
+        }
+
+        pendingOperations.append(.user(operation))
+        startOperationDrainIfNeeded()
+    }
+
+    private func startOperationDrainIfNeeded() {
+        guard operationDrainTask == nil else {
+            return
+        }
+
+        operationDrainTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let operation = self?.takeNextPendingOperation() else {
+                    self?.operationDrainTask = nil
+                    return
+                }
+                guard let store = self else {
+                    return
+                }
+                await store.execute(operation)
+            }
+            self?.operationDrainTask = nil
+        }
+    }
+
+    private func takeNextPendingOperation() -> TorrentStorePendingOperation? {
+        guard !pendingOperations.isEmpty else {
+            return nil
+        }
+
+        return pendingOperations.removeFirst()
+    }
+
+    private func execute(_ operation: TorrentStorePendingOperation) async {
+        switch operation {
+        case let .applySettings(refreshes, notifiesCompletions):
+            await applySettingsToEngine()
+            if refreshes {
+                await refreshFromEngine(notifiesCompletions: notifiesCompletions)
+            }
+        case .user(let operation):
             await operation(self)
         }
     }
@@ -1491,7 +1565,7 @@ final class TorrentStore {
         return message.isEmpty ? "Unknown startup error." : message
     }
 
-    private static func readTorrentFile(_ url: URL) throws -> Data {
+    private nonisolated static func readTorrentFile(_ url: URL) throws -> Data {
         let descriptor = try openTorrentFileDescriptor(url)
         defer {
             try? descriptor.close()
@@ -1508,7 +1582,7 @@ final class TorrentStore {
         return data
     }
 
-    private static func openTorrentFileDescriptor(_ url: URL) throws -> FileDescriptor {
+    private nonisolated static func openTorrentFileDescriptor(_ url: URL) throws -> FileDescriptor {
         do {
             return try FileDescriptor.open(
                 FilePath(url.path(percentEncoded: false)),
@@ -1520,7 +1594,7 @@ final class TorrentStore {
         }
     }
 
-    private static func validatedTorrentFileSize(descriptor: FileDescriptor) throws -> Int {
+    private nonisolated static func validatedTorrentFileSize(descriptor: FileDescriptor) throws -> Int {
         var metadata = stat()
         guard unsafe Darwin.fstat(descriptor.rawValue, &metadata) == 0 else {
             throw TorrentStoreError.unreadableTorrentFile

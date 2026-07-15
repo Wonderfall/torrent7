@@ -31,18 +31,32 @@ struct FileItemIcon: View, Equatable {
 }
 
 @MainActor
-private enum TorrentFileIconProvider {
-    private static var cache = [CacheKey: NSImage]()
+private enum FileIconCache {
+    private static let storage: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 256
+        return cache
+    }()
 
-    static func icon(for row: TorrentRowSnapshot) -> NSImage {
-        let key = cacheKey(for: row)
-        if let cached = cache[key] {
+    static func icon(for key: String, makeIcon: () -> NSImage) -> NSImage {
+        let cacheKey = key as NSString
+        if let cached = storage.object(forKey: cacheKey) {
             return cached
         }
 
-        let icon = makeIcon(for: key)
-        cache[key] = icon
+        let icon = makeIcon()
+        storage.setObject(icon, forKey: cacheKey)
         return icon
+    }
+}
+
+@MainActor
+private enum TorrentFileIconProvider {
+    static func icon(for row: TorrentRowSnapshot) -> NSImage {
+        let key = cacheKey(for: row)
+        return FileIconCache.icon(for: key.identifier) {
+            makeIcon(for: key)
+        }
     }
 
     private static func makeIcon(for key: CacheKey) -> NSImage {
@@ -81,22 +95,27 @@ private enum TorrentFileIconProvider {
         case existingItem(String)
         case fileExtension(String)
         case folder
+
+        var identifier: String {
+            switch self {
+            case .existingItem(let path):
+                "item:\(path)"
+            case .fileExtension(let pathExtension):
+                "extension:\(pathExtension)"
+            case .folder:
+                "folder"
+            }
+        }
     }
 }
 
 @MainActor
 private enum FileItemIconProvider {
-    private static var cache = [CacheKey: NSImage]()
-
     static func icon(for path: String) -> NSImage {
         let key = cacheKey(for: path)
-        if let cached = cache[key] {
-            return cached
+        return FileIconCache.icon(for: key.identifier) {
+            makeIcon(for: key)
         }
-
-        let icon = makeIcon(for: key)
-        cache[key] = icon
-        return icon
     }
 
     private static func makeIcon(for key: CacheKey) -> NSImage {
@@ -129,5 +148,16 @@ private enum FileItemIconProvider {
         case existingItem(String)
         case fileExtension(String)
         case folder
+
+        var identifier: String {
+            switch self {
+            case .existingItem(let path):
+                "item:\(path)"
+            case .fileExtension(let pathExtension):
+                "extension:\(pathExtension)"
+            case .folder:
+                "folder"
+            }
+        }
     }
 }

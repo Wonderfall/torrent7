@@ -5,6 +5,7 @@
 #include <libtorrent/aux_/stack_allocator.hpp>
 #include <libtorrent/create_torrent.hpp>
 
+#include <atomic>
 #include <bitset>
 #include <chrono>
 #include <cstdint>
@@ -19,6 +20,24 @@
 #include <vector>
 
 namespace {
+
+struct BlockingWakeContext {
+    std::mutex lock;
+    std::condition_variable changed;
+    bool entered = false;
+    bool released = false;
+};
+
+void blocking_wake_callback(void *context)
+{
+    auto *wake_context = static_cast<BlockingWakeContext *>(context);
+    std::unique_lock guard(wake_context->lock);
+    wake_context->entered = true;
+    wake_context->changed.notify_all();
+    wake_context->changed.wait(guard, [wake_context] {
+        return wake_context->released;
+    });
+}
 
 [[nodiscard]] bool has_owner_directory_permissions(fs::path const &path)
 {
@@ -56,6 +75,7 @@ template <typename Predicate>
         .enable_peer_exchange = bridge_bool(enable_peer_exchange),
         .allow_non_https_trackers = bridge_bool(false),
         .allow_non_https_web_seeds = bridge_bool(false),
+        .allow_pre_metadata_dht = bridge_bool(false),
     };
 }
 
@@ -115,18 +135,6 @@ template <typename Predicate>
 
     std::vector<char> const buffer = creator.generate_buf();
     return bridge_tests::load_torrent_params(buffer, "queue torrent info").ti;
-}
-
-struct SelfClearingWakeContext {
-    TTorrentClient *client = nullptr;
-    bool called = false;
-};
-
-void self_clearing_wake_callback(void *context)
-{
-    auto *wake_context = static_cast<SelfClearingWakeContext *>(context);
-    wake_context->called = true;
-    TorrentClientClearWakeCallback(wake_context->client);
 }
 
 [[nodiscard]] int32_t cached_url_seed_count(TTorrentClient &client, std::string const &id)
@@ -226,27 +234,49 @@ TEST_CASE("TTorrentClient creates owner-only state directories and holds an excl
     CHECK_THROWS_AS(static_cast<void>(TTorrentClient(state_directory.string())), std::system_error);
 }
 
-TEST_CASE("wake callback can clear itself without waiting on itself")
+TEST_CASE("clearing a wake callback waits for every in-flight invocation")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
     TTorrentClient client((temporary_directory.path() / "State").string());
     client.set_session_shutdown_asynchronous(false);
 
-    SelfClearingWakeContext context{.client = &client};
-    TorrentClientSetWakeCallback(&client, self_clearing_wake_callback, &context);
-
+    BlockingWakeContext context;
+    client.set_wake_callback(blocking_wake_callback, &context);
     WakeCallbackInvocation wake;
     {
         std::scoped_lock guard(client.lock);
         wake = client.publish_changes_locked(TTORRENT_DIRTY_ERRORS);
     }
-    client.invoke_wake_callback(wake);
 
-    CHECK(context.called);
+    std::jthread invocation([&client, wake] {
+        client.invoke_wake_callback(wake);
+    });
     {
-        std::scoped_lock guard(client.lock);
-        CHECK(client.wake_callbacks_in_flight == 0);
+        std::unique_lock guard(context.lock);
+        context.changed.wait(guard, [&context] {
+            return context.entered;
+        });
     }
+
+    std::atomic_bool cleared = false;
+    std::jthread clearing([&client, &cleared] {
+        client.clear_wake_callback();
+        cleared.store(true);
+    });
+    REQUIRE(eventually([&client] {
+        std::scoped_lock guard(client.lock);
+        return client.wake_callback == nullptr;
+    }));
+    CHECK_FALSE(cleared.load());
+
+    {
+        std::scoped_lock guard(context.lock);
+        context.released = true;
+    }
+    context.changed.notify_all();
+    invocation.join();
+    clearing.join();
+    CHECK(cleared.load());
 }
 
 TEST_CASE("TTorrentClient startup completes durable tombstoned resume cleanup")
@@ -1527,6 +1557,38 @@ TEST_CASE("source policy toggles DHT PEX LSD and HTTPS sources for a loaded torr
     CHECK_FALSE(identity->requires_https_web_seeds);
 }
 
+TEST_CASE("source policy rejects a snapshot from an obsolete metadata state")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+
+    auto info = make_torrent_info(false);
+    REQUIRE(info != nullptr);
+    TorrentIdentity *identity = nullptr;
+    lt::torrent_handle handle = add_metadata_torrent(client, *info, temporary_directory.path(), identity);
+    REQUIRE(identity != nullptr);
+
+    client.metadata_validation_pending.insert(identity);
+    TTorrentSourcePolicy stale_policy = client.source_policy(handle, identity);
+    REQUIRE(bridge_bool(stale_policy.metadata_validation_pending));
+    client.metadata_validation_pending.erase(identity);
+
+    stale_policy.allow_pre_metadata_dht = bridge_bool(true);
+    char error[512]{};
+    CHECK(TorrentClientSetSourcePolicy(
+        &client,
+        identity->canonical_id.c_str(),
+        &stale_policy,
+        error,
+        static_cast<int32_t>(sizeof(error))
+    ) != 0);
+    CHECK(std::string(error) == "Torrent metadata state changed. Refresh the source policy and try again.");
+    CHECK_FALSE(identity->allow_pre_metadata_dht);
+    CHECK_FALSE(identity->dht_enabled_by_user);
+    CHECK_FALSE(identity->dht_disabled_by_user);
+}
+
 TEST_CASE("source policy reports explicit user policy over transient libtorrent flags")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
@@ -1889,7 +1951,7 @@ TEST_CASE("source policy restore does not reinsert blocked HTTPS-only sources")
     CHECK(identity->source_web_seeds.size() == 2U);
 }
 
-TEST_CASE("magnet torrents disable peer exchange until metadata arrives")
+TEST_CASE("magnet torrents gate payload files and untrusted discovery until metadata is validated")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
     TTorrentClient client((temporary_directory.path() / "State").string());
@@ -1917,9 +1979,60 @@ TEST_CASE("magnet torrents disable peer exchange until metadata arrives")
     lt::torrent_handle handle = client.handle_by_id.at(bridge_tests::v1_id('2'));
     TorrentIdentity *identity = identity_from_handle(handle);
     REQUIRE(identity != nullptr);
+    CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
     CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex));
-    CHECK(client.peer_exchange_disabled_until_metadata.contains(identity));
+    CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_lsd));
+    CHECK(client.metadata_validation_pending.contains(identity));
     CHECK_FALSE(client.peer_exchange_disabled_by_app.contains(identity));
+}
+
+TEST_CASE("trackerless magnet can explicitly allow DHT before metadata validation")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    fs::path const state_directory = temporary_directory.path() / "State";
+    std::string const hash(40U, '6');
+    std::string const magnet = "magnet:?xt=urn:btih:" + hash;
+    std::string const save_path = temporary_directory.path().string();
+    TTorrentAddOptions add_options = default_add_options();
+    add_options.allow_pre_metadata_dht = bridge_bool(true);
+    char added_id[TTORRENT_ID_CAPACITY]{};
+    char error[512]{};
+
+    {
+        TTorrentClient client(state_directory.string());
+        client.set_session_shutdown_asynchronous(false);
+        REQUIRE(TorrentClientAddMagnet(
+            &client,
+            magnet.c_str(),
+            save_path.c_str(),
+            &add_options,
+            added_id,
+            static_cast<int32_t>(sizeof(added_id)),
+            error,
+            static_cast<int32_t>(sizeof(error))
+        ) == 0);
+
+        lt::torrent_handle handle = client.handle_by_id.at(bridge_tests::v1_id('6'));
+        TorrentIdentity *identity = identity_from_handle(handle);
+        REQUIRE(identity != nullptr);
+        CHECK_FALSE(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
+        CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex));
+        CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_lsd));
+        CHECK(identity->allow_pre_metadata_dht);
+        CHECK(client.metadata_validation_pending.contains(identity));
+        TTorrentSourcePolicy const policy = client.source_policy(handle, identity);
+        CHECK(bridge_bool(policy.metadata_validation_pending));
+        CHECK(bridge_bool(policy.allow_pre_metadata_dht));
+    }
+
+    TTorrentClient reloaded(state_directory.string());
+    reloaded.set_session_shutdown_asynchronous(false);
+    lt::torrent_handle handle = reloaded.handle_by_id.at(bridge_tests::v1_id('6'));
+    TorrentIdentity *identity = identity_from_handle(handle);
+    REQUIRE(identity != nullptr);
+    CHECK_FALSE(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
+    CHECK(identity->allow_pre_metadata_dht);
+    CHECK(reloaded.metadata_validation_pending.contains(identity));
 }
 
 TEST_CASE("payload deletion waits for libtorrent and removes an exact torrent file")
@@ -2181,7 +2294,7 @@ TEST_CASE("metadata-less magnet removal treats a zero-error failed alert conserv
     CHECK(client.take_alert_error(std::span{error}));
 }
 
-TEST_CASE("metadata-pending peer exchange policy survives resume reload")
+TEST_CASE("metadata validation gate survives resume reload")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
     fs::path const state_directory = temporary_directory.path() / "State";
@@ -2212,12 +2325,14 @@ TEST_CASE("metadata-pending peer exchange policy survives resume reload")
     lt::torrent_handle handle = reloaded.handle_by_id.at(bridge_tests::v1_id('3'));
     TorrentIdentity *identity = identity_from_handle(handle);
     REQUIRE(identity != nullptr);
+    CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
     CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex));
-    CHECK(reloaded.peer_exchange_disabled_until_metadata.contains(identity));
+    CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_lsd));
+    CHECK(reloaded.metadata_validation_pending.contains(identity));
     CHECK_FALSE(reloaded.peer_exchange_disabled_by_app.contains(identity));
 }
 
-TEST_CASE("app-default DHT disabled policy survives resume reload")
+TEST_CASE("app-default DHT changes do not bypass pending metadata consent after reload")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
     fs::path const state_directory = temporary_directory.path() / "State";
@@ -2289,8 +2404,9 @@ TEST_CASE("app-default DHT disabled policy survives resume reload")
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
-    CHECK_FALSE(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
+    CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
     CHECK_FALSE(reloaded.dht_disabled_by_app.contains(identity));
+    CHECK_FALSE(identity->allow_pre_metadata_dht);
 }
 
 TEST_CASE("metadata resolution owns peer exchange pending policy")
@@ -2305,18 +2421,47 @@ TEST_CASE("metadata resolution owns peer exchange pending policy")
     REQUIRE(public_identity != nullptr);
 
     DirtyMask changes = 0;
+    public_identity->intended_default_dont_download = false;
+    public_identity->intended_file_priorities = {lt::low_priority};
+    public_handle.prioritize_files({lt::dont_download});
+    public_handle.set_flags(lt::torrent_flags::default_dont_download);
+    public_handle.set_flags(lt::torrent_flags::disable_dht);
     public_handle.set_flags(lt::torrent_flags::disable_pex);
-    client.peer_exchange_disabled_until_metadata.insert(public_identity);
+    public_handle.set_flags(lt::torrent_flags::disable_lsd);
+    client.metadata_validation_pending.insert(public_identity);
     REQUIRE(client.validate_or_remove_loaded_metadata(public_handle, changes));
+    REQUIRE(eventually([&public_handle] {
+        std::vector<lt::download_priority_t> const priorities = public_handle.get_file_priorities();
+        return priorities.size() == 1U && priorities.front() == lt::low_priority;
+    }));
+    CHECK_FALSE(static_cast<bool>(public_handle.flags() & lt::torrent_flags::default_dont_download));
+    CHECK_FALSE(static_cast<bool>(public_handle.flags() & lt::torrent_flags::disable_dht));
     CHECK_FALSE(static_cast<bool>(public_handle.flags() & lt::torrent_flags::disable_pex));
-    CHECK_FALSE(client.peer_exchange_disabled_until_metadata.contains(public_identity));
+    CHECK_FALSE(static_cast<bool>(public_handle.flags() & lt::torrent_flags::disable_lsd));
+    CHECK_FALSE(client.metadata_validation_pending.contains(public_identity));
 
+    public_identity->dht_locked_by_source = true;
+    public_identity->peer_exchange_locked_by_source = true;
+    public_identity->lsd_locked_by_source = true;
+    public_handle.set_flags(lt::torrent_flags::disable_dht);
     public_handle.set_flags(lt::torrent_flags::disable_pex);
-    client.peer_exchange_disabled_until_metadata.insert(public_identity);
+    public_handle.set_flags(lt::torrent_flags::disable_lsd);
+    client.metadata_validation_pending.insert(public_identity);
+    REQUIRE(client.validate_or_remove_loaded_metadata(public_handle, changes));
+    CHECK(static_cast<bool>(public_handle.flags() & lt::torrent_flags::disable_dht));
+    CHECK(static_cast<bool>(public_handle.flags() & lt::torrent_flags::disable_pex));
+    CHECK(static_cast<bool>(public_handle.flags() & lt::torrent_flags::disable_lsd));
+    CHECK_FALSE(client.metadata_validation_pending.contains(public_identity));
+
+    public_identity->dht_locked_by_source = false;
+    public_identity->peer_exchange_locked_by_source = false;
+    public_identity->lsd_locked_by_source = false;
+    public_handle.set_flags(lt::torrent_flags::disable_pex);
+    client.metadata_validation_pending.insert(public_identity);
     client.peer_exchange_disabled_by_app.insert(public_identity);
     REQUIRE(client.validate_or_remove_loaded_metadata(public_handle, changes));
     CHECK(static_cast<bool>(public_handle.flags() & lt::torrent_flags::disable_pex));
-    CHECK_FALSE(client.peer_exchange_disabled_until_metadata.contains(public_identity));
+    CHECK_FALSE(client.metadata_validation_pending.contains(public_identity));
     CHECK(client.peer_exchange_disabled_by_app.contains(public_identity));
 
     auto private_info = make_torrent_info(true);
@@ -2324,10 +2469,10 @@ TEST_CASE("metadata resolution owns peer exchange pending policy")
     lt::torrent_handle private_handle = add_metadata_torrent(client, *private_info, temporary_directory.path(), private_identity);
     REQUIRE(private_identity != nullptr);
 
-    client.peer_exchange_disabled_until_metadata.insert(private_identity);
+    client.metadata_validation_pending.insert(private_identity);
     REQUIRE(client.validate_or_remove_loaded_metadata(private_handle, changes));
     CHECK(static_cast<bool>(private_handle.flags() & lt::torrent_flags::disable_pex));
-    CHECK_FALSE(client.peer_exchange_disabled_until_metadata.contains(private_identity));
+    CHECK_FALSE(client.metadata_validation_pending.contains(private_identity));
     CHECK_FALSE(client.peer_exchange_disabled_by_app.contains(private_identity));
 
     TTorrentSessionSettings settings{};
@@ -2344,10 +2489,10 @@ TEST_CASE("metadata resolution owns peer exchange pending policy")
     CHECK(static_cast<bool>(private_handle.flags() & lt::torrent_flags::disable_pex));
 
     client.peer_exchange_disabled_by_app.insert(private_identity);
-    client.peer_exchange_disabled_until_metadata.insert(private_identity);
+    client.metadata_validation_pending.insert(private_identity);
     REQUIRE(client.validate_or_remove_loaded_metadata(private_handle, changes));
     CHECK_FALSE(client.peer_exchange_disabled_by_app.contains(private_identity));
-    CHECK_FALSE(client.peer_exchange_disabled_until_metadata.contains(private_identity));
+    CHECK_FALSE(client.metadata_validation_pending.contains(private_identity));
 }
 
 TEST_CASE("resume cleanups for a write merge pending and explicit IDs by generation")

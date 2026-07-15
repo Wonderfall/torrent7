@@ -43,7 +43,7 @@ inline constexpr int32_t TTORRENT_QUEUE_MOVE_BOTTOM = 3;
 inline constexpr int32_t TTORRENT_REMOVAL_PENDING = 0;
 inline constexpr int32_t TTORRENT_REMOVAL_SUCCEEDED = 1;
 inline constexpr int32_t TTORRENT_REMOVAL_FAILED = 2;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 28;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 29;
 extern "C" {
 #else
 #define TORRENT_BRIDGE_NOEXCEPT
@@ -85,7 +85,7 @@ enum {
     TTORRENT_REMOVAL_PENDING = 0,
     TTORRENT_REMOVAL_SUCCEEDED = 1,
     TTORRENT_REMOVAL_FAILED = 2,
-    TTORRENT_BRIDGE_ABI_VERSION = 28
+    TTORRENT_BRIDGE_ABI_VERSION = 29
 };
 #endif
 
@@ -253,6 +253,8 @@ typedef struct TTorrentSourcePolicy {
     uint8_t dht_locked;
     uint8_t peer_exchange_locked;
     uint8_t lsd_locked;
+    uint8_t metadata_validation_pending;
+    uint8_t allow_pre_metadata_dht;
 } TTorrentSourcePolicy;
 
 typedef struct TTorrentAddOptions {
@@ -261,6 +263,7 @@ typedef struct TTorrentAddOptions {
     uint8_t enable_peer_exchange;
     uint8_t allow_non_https_trackers;
     uint8_t allow_non_https_web_seeds;
+    uint8_t allow_pre_metadata_dht;
 } TTorrentAddOptions;
 
 typedef struct TTorrentOptions {
@@ -288,15 +291,13 @@ void TorrentClientDestroy(TTorrentClient *client) TORRENT_BRIDGE_NOEXCEPT;
 // Like TorrentClientDestroy, but waits for libtorrent's shutdown proxy before returning.
 void TorrentClientDestroyBlocking(TTorrentClient *client) TORRENT_BRIDGE_NOEXCEPT;
 
-// The wake callback is invoked outside the client lock. It may clear itself, but it must
-// not destroy the client from inside the callback.
+// The wake callback is invoked outside the client lock and remains installed until
+// client destruction. It must not destroy the client from inside the callback.
 void TorrentClientSetWakeCallback(
     TTorrentClient *client,
     TTorrentWakeCallback callback,
     void *context
 ) TORRENT_BRIDGE_NOEXCEPT;
-
-void TorrentClientClearWakeCallback(TTorrentClient *client) TORRENT_BRIDGE_NOEXCEPT;
 
 uint64_t TorrentClientTakeChanges(
     TTorrentClient *client,
@@ -375,6 +376,8 @@ int32_t TorrentClientCopySourcePolicy(
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
+// metadata_validation_pending is an optimistic state token copied by
+// TorrentClientCopySourcePolicy.
 int32_t TorrentClientSetSourcePolicy(
     TTorrentClient *client,
     const char *torrent_id,

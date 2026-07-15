@@ -179,6 +179,8 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     nonisolated let startupFailureMessage: String? = nil
     nonisolated let libtorrentVersion = "fake-libtorrent"
     private nonisolated let availability = Mutex(true)
+    private let keepsWakeStreamOpen: Bool
+    private var wakeContinuation: AsyncStream<Void>.Continuation?
 
     nonisolated var isAvailable: Bool {
         availability.withLock { $0 }
@@ -207,7 +209,8 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         queuePriority: TorrentQueuePriority,
         enablePeerExchange: Bool,
         allowNonHTTPSTrackers: Bool,
-        allowNonHTTPSWebSeeds: Bool
+        allowNonHTTPSWebSeeds: Bool,
+        allowPreMetadataDHT: Bool
     )]()
     private(set) var addedTorrentFiles = [(
         data: Data,
@@ -241,9 +244,15 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         usesHTTPSWebSeedsOnly: false,
         isDHTLocked: false,
         isPeerExchangeLocked: false,
-        isLocalServiceDiscoveryLocked: false
+        isLocalServiceDiscoveryLocked: false,
+        isMetadataValidationPending: false,
+        allowsPreMetadataDHT: false
     )
     var torrentOptionsValue = TorrentOptions.unlimited
+
+    init(keepsWakeStreamOpen: Bool = false) {
+        self.keepsWakeStreamOpen = keepsWakeStreamOpen
+    }
 
     func setSnapshotBatch(_ batch: TorrentSnapshotBatch?) {
         snapshotBatch = batch
@@ -324,9 +333,26 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     }
 
     func wakeEvents() async -> AsyncStream<Void> {
-        AsyncStream { continuation in
+        if keepsWakeStreamOpen {
+            let wakeEvents = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+            wakeContinuation = wakeEvents.continuation
+            return wakeEvents.stream
+        }
+
+        return AsyncStream<Void> { continuation in
             continuation.finish()
         }
+    }
+
+    func waitForOpenWakeStream() async {
+        while wakeContinuation == nil {
+            await Task.yield()
+        }
+    }
+
+    func finishWakeStream() {
+        wakeContinuation?.finish()
+        wakeContinuation = nil
     }
 
     func addMagnet(
@@ -336,9 +362,19 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         queuePriority: TorrentQueuePriority,
         enablePeerExchange: Bool,
         allowNonHTTPSTrackers: Bool,
-        allowNonHTTPSWebSeeds: Bool
+        allowNonHTTPSWebSeeds: Bool,
+        allowPreMetadataDHT: Bool
     ) async throws -> String {
-        addedMagnets.append((magnet, savePath, startsPaused, queuePriority, enablePeerExchange, allowNonHTTPSTrackers, allowNonHTTPSWebSeeds))
+        addedMagnets.append((
+            magnet,
+            savePath,
+            startsPaused,
+            queuePriority,
+            enablePeerExchange,
+            allowNonHTTPSTrackers,
+            allowNonHTTPSWebSeeds,
+            allowPreMetadataDHT
+        ))
         return nextAddedMagnetID
     }
 

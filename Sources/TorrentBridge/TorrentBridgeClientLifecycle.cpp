@@ -66,14 +66,19 @@ void TTorrentClient::set_session_shutdown_asynchronous(bool value) noexcept
 
 void TTorrentClient::set_wake_callback(TTorrentWakeCallback callback, void *context)
 {
-    clear_wake_callback();
+    if (callback == nullptr || context == nullptr) {
+        throw std::invalid_argument("Wake callback and context are required.");
+    }
 
     WakeCallbackInvocation wake;
     {
         std::unique_lock guard(lock);
+        if (wake_callback != nullptr) {
+            throw std::logic_error("Wake callback is already installed.");
+        }
         wake_callback = callback;
         wake_callback_context = context;
-        if (callback != nullptr && has_dirty_changes(pending_changes) && !wake_pending) {
+        if (has_dirty_changes(pending_changes) && !wake_pending) {
             wake_pending = true;
             ++wake_callbacks_in_flight;
             wake = WakeCallbackInvocation{.callback = callback, .context = context};
@@ -90,7 +95,7 @@ void TTorrentClient::clear_wake_callback() noexcept
         wake_callback_context = nullptr;
         wake_pending = false;
         wake_callback_quiesced.wait(guard, [this] {
-            return wake_callbacks_in_flight == 0 || wake_callback_thread == std::this_thread::get_id();
+            return wake_callbacks_in_flight == 0;
         });
     } catch (...) {
         ignore_shutdown_failure();
@@ -175,19 +180,9 @@ void TTorrentClient::invoke_wake_callback(WakeCallbackInvocation wake) noexcept
     }
 
     try {
-        {
-            std::scoped_lock guard(lock);
-            wake_callback_thread = std::this_thread::get_id();
-        }
         wake.callback(wake.context);
     } catch (...) {
         ignore_shutdown_failure();
-    }
-    {
-        std::scoped_lock guard(lock);
-        if (wake_callback_thread == std::this_thread::get_id()) {
-            wake_callback_thread = {};
-        }
     }
     complete_wake_callback();
 }

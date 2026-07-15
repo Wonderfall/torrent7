@@ -219,13 +219,42 @@ ResumeSaveResult TTorrentClient::write_resume_data_checked(
         return std::unexpected("Resume persistence is in an uncertain state.");
     }
 
-    if (params.ti) {
-        BridgeResult const valid_info = validate_torrent_info(params);
+    lt::add_torrent_params persisted_params = params;
+    if (policy.metadata_validation_pending) {
+        persisted_params.ti.reset();
+        persisted_params.file_priorities = policy.intended_file_priorities;
+        if (policy.intended_default_dont_download) {
+            persisted_params.flags |= lt::torrent_flags::default_dont_download;
+        } else {
+            persisted_params.flags &= ~lt::torrent_flags::default_dont_download;
+        }
+        if (policy.dht_locked_by_source) {
+            persisted_params.flags |= lt::torrent_flags::disable_dht;
+        } else {
+            persisted_params.flags &= ~lt::torrent_flags::disable_dht;
+        }
+        if (policy.peer_exchange_locked_by_source) {
+            persisted_params.flags |= lt::torrent_flags::disable_pex;
+        } else {
+            persisted_params.flags &= ~lt::torrent_flags::disable_pex;
+        }
+        if (policy.lsd_locked_by_source) {
+            persisted_params.flags |= lt::torrent_flags::disable_lsd;
+        } else {
+            persisted_params.flags &= ~lt::torrent_flags::disable_lsd;
+        }
+        sanitize_magnet_endpoint_hints(persisted_params);
+    } else {
+        sanitize_resume_endpoint_hints(persisted_params);
+    }
+
+    if (persisted_params.ti) {
+        BridgeResult const valid_info = validate_torrent_info(persisted_params);
         if (!valid_info) {
             return std::unexpected(valid_info.error().message);
         }
     }
-    BridgeResult const valid_sources = validate_torrent_sources(params);
+    BridgeResult const valid_sources = validate_torrent_sources(persisted_params);
     if (!valid_sources) {
         return std::unexpected(valid_sources.error().message);
     }
@@ -239,9 +268,8 @@ ResumeSaveResult TTorrentClient::write_resume_data_checked(
         return {};
     }
 
-    lt::add_torrent_params persisted_params = params;
-    bool const strip_peer_cache =
-        should_strip_resume_peer_cache(persisted_params, policy);
+    bool const strip_peer_cache = !policy.metadata_validation_pending
+        && should_strip_resume_peer_cache(persisted_params, policy);
     restore_source_policy_sources(persisted_params, policy);
     BridgeResult const valid_persisted_sources = validate_torrent_sources(persisted_params);
     if (!valid_persisted_sources) {
@@ -250,15 +278,15 @@ ResumeSaveResult TTorrentClient::write_resume_data_checked(
     if (strip_peer_cache) {
         strip_resume_peer_cache(persisted_params);
     }
-    if (policy.app_disabled_dht) {
+    if (policy.app_disabled_dht && !policy.dht_locked_by_source) {
         persisted_params.flags &= ~lt::torrent_flags::disable_dht;
     }
-    if (policy.app_disabled_lsd) {
+    if (policy.app_disabled_lsd && !policy.lsd_locked_by_source) {
         persisted_params.flags &= ~lt::torrent_flags::disable_lsd;
     }
     if (policy.has_identity
         && policy.app_disabled_peer_exchange
-        && !policy.peer_exchange_pending_metadata) {
+        && !policy.peer_exchange_locked_by_source) {
         persisted_params.flags &= ~lt::torrent_flags::disable_pex;
     }
 

@@ -171,6 +171,31 @@ struct TorrentSettingsTests {
         #expect(settings.effectiveUsePeerExchangeByDefault == false)
     }
 
+    @Test("Bridge numeric conversions clamp directly mutated settings")
+    func bridgeNumericConversionsClampDirectlyMutatedSettings() {
+        var settings = TorrentSettings()
+        settings.downloadRateLimitKBps = Int.max
+        settings.uploadRateLimitKBps = Int.min
+        settings.maximumActiveDownloads = Int.max
+        settings.maximumActiveSeeds = Int.max
+        settings.stopSeedingRatioPercent = Int.min
+        settings.stopSeedingAfterHours = Int.max
+        settings.incomingPort = Int.max
+
+        #expect(settings.libtorrentDownloadRateLimit == 1_000_000 * 1_024)
+        #expect(settings.libtorrentUploadRateLimit == 0)
+        #expect(settings.libtorrentActiveDownloads == 1_000)
+        #expect(settings.libtorrentActiveSeeds == 1_000)
+        #expect(settings.libtorrentActiveLimit == 2_000)
+        #expect(settings.libtorrentShareRatioLimit == 1)
+        #expect(settings.libtorrentSeedTimeLimit == 100_000 * 60 * 60)
+        #expect(settings.libtorrentIncomingPort == 65_535)
+
+        settings.maximumActiveSeeds = Int.min
+        #expect(settings.libtorrentActiveSeeds == -1)
+        #expect(settings.libtorrentActiveLimit == Int32.max)
+    }
+
     @Test("Anonymous mode uses its explicit persisted name")
     func anonymousModeUsesExplicitPersistedName() throws {
         var settings = TorrentSettings()

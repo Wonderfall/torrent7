@@ -4,6 +4,7 @@
 #include <libtorrent/extensions/smart_ban.hpp>
 #include <libtorrent/extensions/ut_metadata.hpp>
 #include <libtorrent/extensions/ut_pex.hpp>
+#include <libtorrent/aux_/ip_helpers.hpp>
 
 namespace {
 
@@ -861,7 +862,7 @@ std::string torrent_context(lt::torrent_alert const &alert)
 
 ResumePolicySnapshot resume_policy_snapshot(
     TorrentIdentity const *identity,
-    bool peer_exchange_pending_metadata,
+    bool metadata_validation_pending,
     bool app_disabled_dht,
     bool app_disabled_lsd,
     bool app_disabled_peer_exchange
@@ -885,7 +886,11 @@ ResumePolicySnapshot resume_policy_snapshot(
     policy.lsd_enabled_by_user = identity->lsd_enabled_by_user;
     policy.lsd_disabled_by_user = identity->lsd_disabled_by_user;
     policy.dht_locked_by_source = identity->dht_locked_by_source;
-    policy.peer_exchange_pending_metadata = peer_exchange_pending_metadata;
+    policy.peer_exchange_locked_by_source = identity->peer_exchange_locked_by_source;
+    policy.lsd_locked_by_source = identity->lsd_locked_by_source;
+    policy.metadata_validation_pending = metadata_validation_pending;
+    policy.allow_pre_metadata_dht = identity->allow_pre_metadata_dht;
+    policy.intended_default_dont_download = identity->intended_default_dont_download;
     policy.app_disabled_dht = app_disabled_dht;
     policy.app_disabled_lsd = app_disabled_lsd;
     policy.app_disabled_peer_exchange = app_disabled_peer_exchange;
@@ -893,6 +898,7 @@ ResumePolicySnapshot resume_policy_snapshot(
     policy.queue_rank = identity->queue_rank;
     policy.source_trackers = identity->source_trackers;
     policy.source_web_seeds = identity->source_web_seeds;
+    policy.intended_file_priorities = identity->intended_file_priorities;
     return policy;
 }
 
@@ -908,9 +914,15 @@ std::vector<char> encoded_resume_data(
             lt::entry(policy.canonical_id)
         );
     }
-    if (policy.peer_exchange_pending_metadata) {
+    if (policy.metadata_validation_pending) {
         resume_entry.dict().insert_or_assign(
-            std::string(kPeerExchangePendingMetadataResumeKey),
+            std::string(kMetadataValidationPendingResumeKey),
+            lt::entry(1)
+        );
+    }
+    if (policy.metadata_validation_pending && policy.allow_pre_metadata_dht) {
+        resume_entry.dict().insert_or_assign(
+            std::string(kAllowPreMetadataDHTResumeKey),
             lt::entry(1)
         );
     }
@@ -1008,14 +1020,14 @@ std::vector<char> encoded_resume_data(
 std::vector<char> encoded_resume_data(
     lt::add_torrent_params const &params,
     TorrentIdentity const *identity,
-    bool peer_exchange_pending_metadata,
+    bool metadata_validation_pending,
     bool app_disabled_dht,
     bool app_disabled_lsd
 )
 {
     return encoded_resume_data(
         params,
-        resume_policy_snapshot(identity, peer_exchange_pending_metadata, app_disabled_dht, app_disabled_lsd, false)
+        resume_policy_snapshot(identity, metadata_validation_pending, app_disabled_dht, app_disabled_lsd, false)
     );
 }
 
@@ -1069,9 +1081,14 @@ int32_t resume_data_int(std::vector<char> const &buffer, std::string_view key_na
     return static_cast<int32_t>(root.dict_find_int_value(key, default_value));
 }
 
-bool peer_exchange_pending_metadata_from_resume_data(std::vector<char> const &buffer)
+bool metadata_validation_pending_from_resume_data(std::vector<char> const &buffer)
 {
-    return resume_data_bool(buffer, kPeerExchangePendingMetadataResumeKey);
+    return resume_data_bool(buffer, kMetadataValidationPendingResumeKey);
+}
+
+bool allow_pre_metadata_dht_from_resume_data(std::vector<char> const &buffer)
+{
+    return resume_data_bool(buffer, kAllowPreMetadataDHTResumeKey);
 }
 
 bool allow_non_https_trackers_from_resume_data(std::vector<char> const &buffer)
@@ -1847,6 +1864,19 @@ void strip_resume_peer_cache(lt::add_torrent_params &params) noexcept
     params.banned_peers.clear();
 }
 
+void sanitize_magnet_endpoint_hints(lt::add_torrent_params &params)
+{
+    sanitize_resume_endpoint_hints(params);
+    std::erase_if(params.peers, [](lt::tcp::endpoint const &endpoint) {
+        return endpoint.port() < 1024 || !lt::aux::is_global(endpoint.address());
+    });
+}
+
+void sanitize_resume_endpoint_hints(lt::add_torrent_params &params) noexcept
+{
+    params.dht_nodes.clear();
+}
+
 lt::settings_pack make_settings()
 {
     lt::settings_pack settings;
@@ -1871,6 +1901,7 @@ lt::settings_pack make_settings()
     settings.set_bool(lt::settings_pack::ssrf_mitigation, true);
     settings.set_bool(lt::settings_pack::always_send_user_agent, false);
     settings.set_bool(lt::settings_pack::allow_idna, false);
+    settings.set_bool(lt::settings_pack::no_connect_privileged_ports, true);
 
     auto const categories = lt::alert_category::error
         | lt::alert_category::storage

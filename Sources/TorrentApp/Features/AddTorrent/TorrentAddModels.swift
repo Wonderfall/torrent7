@@ -83,6 +83,7 @@ struct TorrentAddOptions {
     let startsPaused: Bool
     let queuePriority: TorrentQueuePriority
     let labelIDs: Set<TorrentLabel.ID>
+    let allowsPreMetadataDHT: Bool
 }
 
 struct TorrentSourceSecuritySummary: Equatable, Sendable {

@@ -157,7 +157,9 @@ struct TorrentBridgeMappingTests {
                 require_https_web_seeds: false.bridgeFlag,
                 dht_locked: true.bridgeFlag,
                 peer_exchange_locked: true.bridgeFlag,
-                lsd_locked: false.bridgeFlag
+                lsd_locked: false.bridgeFlag,
+                metadata_validation_pending: true.bridgeFlag,
+                allow_pre_metadata_dht: true.bridgeFlag
             )
         )
 
@@ -169,6 +171,8 @@ struct TorrentBridgeMappingTests {
         #expect(policy.isDHTLocked)
         #expect(policy.isPeerExchangeLocked)
         #expect(!policy.isLocalServiceDiscoveryLocked)
+        #expect(policy.isMetadataValidationPending)
+        #expect(policy.allowsPreMetadataDHT)
 
         let bridgePolicy = policy.bridgeValue
         #expect(bridgePolicy.enable_dht == true.bridgeFlag)
@@ -179,6 +183,8 @@ struct TorrentBridgeMappingTests {
         #expect(bridgePolicy.dht_locked == true.bridgeFlag)
         #expect(bridgePolicy.peer_exchange_locked == true.bridgeFlag)
         #expect(bridgePolicy.lsd_locked == false.bridgeFlag)
+        #expect(bridgePolicy.metadata_validation_pending == true.bridgeFlag)
+        #expect(bridgePolicy.allow_pre_metadata_dht == true.bridgeFlag)
     }
 
     @Test("Maps torrent options")

@@ -83,7 +83,7 @@ void TTorrentClient::discard_unpublished_identity(TorrentIdentity *identity) noe
     dht_disabled_by_app.erase(identity);
     lsd_disabled_by_app.erase(identity);
     peer_exchange_disabled_by_app.erase(identity);
-    peer_exchange_disabled_until_metadata.erase(identity);
+    metadata_validation_pending.erase(identity);
     if (!torrent_identities.empty() && torrent_identities.back().get() == identity) {
         torrent_identities.pop_back();
     }
@@ -887,9 +887,23 @@ void TTorrentClient::load_resume_data()
                 continue;
             }
         }
+        bool const metadata_pending = !params.ti;
+        bool const persisted_metadata_pending =
+            metadata_validation_pending_from_resume_data(*buffer);
+        bool const allow_pre_metadata_dht = metadata_pending
+            && persisted_metadata_pending
+            && allow_pre_metadata_dht_from_resume_data(*buffer);
+        bool const intended_default_dont_download = metadata_pending
+            && static_cast<bool>(params.flags & lt::torrent_flags::default_dont_download);
+        std::vector<lt::download_priority_t> intended_file_priorities = metadata_pending
+            ? params.file_priorities
+            : std::vector<lt::download_priority_t>{};
+        if (metadata_pending) {
+            sanitize_magnet_endpoint_hints(params);
+        } else {
+            sanitize_resume_endpoint_hints(params);
+        }
         lt::add_torrent_params const source_params = params;
-        bool const peer_exchange_pending_metadata =
-            peer_exchange_pending_metadata_from_resume_data(*buffer);
         bool const allows_non_https_trackers =
             allow_non_https_trackers_from_resume_data(*buffer);
         bool const allows_non_https_web_seeds =
@@ -919,20 +933,16 @@ void TTorrentClient::load_resume_data()
         bool const app_disabled_lsd =
             app_disabled_lsd_from_resume_data(*buffer) && !lsd_enabled_by_user && !lsd_disabled_by_user;
         bool const has_private_metadata = params.ti && params.ti->priv();
-        bool const has_public_metadata = params.ti && !params.ti->priv();
         bool const dht_locked_by_source = has_private_metadata
             || (static_cast<bool>(params.flags & lt::torrent_flags::disable_dht)
-                && !dht_enabled_by_user
-                && !dht_disabled_by_user);
+                && (metadata_pending || (!dht_enabled_by_user && !dht_disabled_by_user)));
         bool const peer_exchange_locked_by_source = has_private_metadata
             || (static_cast<bool>(params.flags & lt::torrent_flags::disable_pex)
-                && !peer_exchange_enabled_by_user
-                && !peer_exchange_disabled_by_user
-                && !peer_exchange_pending_metadata);
+                && (metadata_pending
+                    || (!peer_exchange_enabled_by_user && !peer_exchange_disabled_by_user)));
         bool const lsd_locked_by_source = has_private_metadata
             || (static_cast<bool>(params.flags & lt::torrent_flags::disable_lsd)
-                && !lsd_enabled_by_user
-                && !lsd_disabled_by_user);
+                && (metadata_pending || (!lsd_enabled_by_user && !lsd_disabled_by_user)));
         if (requires_https_trackers || requires_https_web_seeds) {
             static_cast<void>(filter_non_https_sources(params, requires_https_trackers, requires_https_web_seeds));
         }
@@ -942,30 +952,28 @@ void TTorrentClient::load_resume_data()
             sync_resume_directory_quietly();
             continue;
         }
-        if (dht_locked_by_source || dht_disabled_by_user || app_disabled_dht) {
+        if (dht_locked_by_source || dht_disabled_by_user
+            || (app_disabled_dht && !(metadata_pending && allow_pre_metadata_dht))
+            || (metadata_pending && !allow_pre_metadata_dht)) {
             params.flags |= lt::torrent_flags::disable_dht;
-        } else if (dht_enabled_by_user) {
+        } else if (dht_enabled_by_user || allow_pre_metadata_dht) {
             params.flags &= ~lt::torrent_flags::disable_dht;
         }
-        if (peer_exchange_locked_by_source || peer_exchange_disabled_by_user) {
+        if (peer_exchange_locked_by_source || peer_exchange_disabled_by_user || metadata_pending) {
             params.flags |= lt::torrent_flags::disable_pex;
         } else if (peer_exchange_enabled_by_user) {
             params.flags &= ~lt::torrent_flags::disable_pex;
         }
-        if (lsd_locked_by_source || lsd_disabled_by_user || app_disabled_lsd) {
+        if (lsd_locked_by_source || lsd_disabled_by_user || app_disabled_lsd || metadata_pending) {
             params.flags |= lt::torrent_flags::disable_lsd;
         } else if (lsd_enabled_by_user) {
             params.flags &= ~lt::torrent_flags::disable_lsd;
         }
-        if (peer_exchange_pending_metadata
-            && has_public_metadata
-            && !peer_exchange_locked_by_source
-            && !peer_exchange_disabled_by_user) {
-            params.flags &= ~lt::torrent_flags::disable_pex;
-        } else if (peer_exchange_pending_metadata) {
-            params.flags |= lt::torrent_flags::disable_pex;
+        if (metadata_pending) {
+            params.file_priorities.clear();
+            params.flags |= lt::torrent_flags::default_dont_download;
         }
-        if (should_strip_resume_peer_cache(params, nullptr, app_disabled_dht)) {
+        if (!metadata_pending && should_strip_resume_peer_cache(params, nullptr, app_disabled_dht)) {
             strip_resume_peer_cache(params);
         }
 
@@ -990,6 +998,9 @@ void TTorrentClient::load_resume_data()
         identity->dht_locked_by_source = dht_locked_by_source;
         identity->peer_exchange_locked_by_source = peer_exchange_locked_by_source;
         identity->lsd_locked_by_source = lsd_locked_by_source;
+        identity->allow_pre_metadata_dht = allow_pre_metadata_dht;
+        identity->intended_default_dont_download = intended_default_dont_download;
+        identity->intended_file_priorities = std::move(intended_file_priorities);
         identity->dht_enabled_by_user = dht_enabled_by_user && !dht_disabled_by_user && !dht_locked_by_source;
         identity->dht_disabled_by_user = dht_disabled_by_user && !dht_locked_by_source;
         identity->peer_exchange_enabled_by_user =
@@ -1011,8 +1022,8 @@ void TTorrentClient::load_resume_data()
         if (app_disabled_lsd && !lsd_locked_by_source) {
             lsd_disabled_by_app.insert(identity);
         }
-        if (peer_exchange_pending_metadata && !has_private_metadata && !has_public_metadata) {
-            peer_exchange_disabled_until_metadata.insert(identity);
+        if (metadata_pending) {
+            metadata_validation_pending.insert(identity);
         }
     }
     static_cast<void>(apply_queue_priority_order_locked());

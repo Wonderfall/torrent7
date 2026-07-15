@@ -68,6 +68,7 @@ struct AddTorrentConfirmationView: View {
     @State private var setsDownloadFolderAsDefault = false
     @State private var queuePriority = TorrentQueuePriority.normal
     @State private var selectedLabelIDs = Set<TorrentLabel.ID>()
+    @State private var allowsPreMetadataDHT = false
     @State private var folderError: String?
 
     var body: some View {
@@ -203,6 +204,17 @@ struct AddTorrentConfirmationView: View {
                         needsPrompt: sourceSecuritySummary.needsWebSeedExceptionPrompt,
                         noHTTPSMessage: "This torrent has no HTTPS web seeds. Non-HTTPS web seeds will be ignored."
                     )
+                }
+
+                if needsPreMetadataDHTConsent(for: sourceSecuritySummary) {
+                    Toggle("Use DHT to fetch metadata", isOn: $allowsPreMetadataDHT)
+                        .disabled(!store.settings.enableDHTNetwork)
+
+                    Text(store.settings.enableDHTNetwork
+                         ? "This magnet has no usable tracker. Enabling DHT shares its info hash with the public DHT before its metadata can be checked."
+                         : "This magnet has no usable tracker and the DHT network is disabled in Settings.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Label(
@@ -502,13 +514,24 @@ struct AddTorrentConfirmationView: View {
             setsDownloadFolderAsDefault: setsDownloadFolderAsDefault,
             startsPaused: startsPaused,
             queuePriority: queuePriority,
-            labelIDs: selectedLabelIDs
+            labelIDs: selectedLabelIDs,
+            allowsPreMetadataDHT: allowsPreMetadataDHT
         ))
     }
 
     private func showsSourcePolicySection(for summary: TorrentSourceSecuritySummary) -> Bool {
         (store.settings.useHTTPSTrackersOnly && summary.hasNonHTTPSTrackers)
             || (store.settings.useHTTPSWebSeedsOnly && summary.hasNonHTTPSWebSeeds)
+            || needsPreMetadataDHTConsent(for: summary)
+    }
+
+    private func needsPreMetadataDHTConsent(for summary: TorrentSourceSecuritySummary) -> Bool {
+        guard draft.magnetURI != nil else {
+            return false
+        }
+        return store.settings.useHTTPSTrackersOnly
+            ? summary.httpsTrackerCount == 0
+            : summary.trackerCount == 0
     }
 
     private func pluralized(_ singular: String, count: Int) -> String {
