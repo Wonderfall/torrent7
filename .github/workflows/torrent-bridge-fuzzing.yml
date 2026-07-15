@@ -8,7 +8,9 @@ on:
       - ".github/workflows/torrent-bridge-fuzzing.yml"
       - "Package.swift"
       - "Scripts/build-deps.zsh"
+      - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/keys/**"
+      - "Scripts/patches/**"
       - "Sources/TorrentBridge/**"
       - "Tools/BridgeFuzzing/**"
   pull_request:
@@ -21,7 +23,9 @@ on:
       - ".github/workflows/torrent-bridge-fuzzing.yml"
       - "Package.swift"
       - "Scripts/build-deps.zsh"
+      - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/keys/**"
+      - "Scripts/patches/**"
       - "Sources/TorrentBridge/**"
       - "Tools/BridgeFuzzing/**"
   schedule:
@@ -43,6 +47,7 @@ jobs:
     name: Fuzz
     runs-on: macos-26
     permissions: {}
+    timeout-minutes: 120
     steps:
       - name: Check out repository
         shell: zsh {0}
@@ -76,10 +81,7 @@ jobs:
           path: |
             .build/deps/source-cache
             .build/deps/arm64e
-          key: deps-arm64e-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/keys/**') }}
-          restore-keys: |
-            deps-arm64e-${{ runner.os }}-${{ runner.arch }}-
-
+          key: deps-arm64e-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/keys/**', 'Scripts/patches/**') }}
       - name: Build pinned app dependencies
         shell: zsh {0}
         run: |
@@ -90,10 +92,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: Tools/BridgeFuzzing/deps/arm64-libfuzzer
-          key: libfuzzer-deps-arm64-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Tools/BridgeFuzzing/build-libfuzzer-deps.sh', 'Tools/BridgeFuzzing/build-libfuzzer.sh', 'Scripts/build-deps.zsh') }}
-          restore-keys: |
-            libfuzzer-deps-arm64-${{ runner.os }}-${{ runner.arch }}-
-
+          key: libfuzzer-deps-arm64-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Tools/BridgeFuzzing/build-libfuzzer-deps.sh', 'Tools/BridgeFuzzing/build-libfuzzer.sh', 'Scripts/build-deps.zsh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/patches/**') }}
       - name: Run bridge fuzzing
         shell: zsh {0}
         env:

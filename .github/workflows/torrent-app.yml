@@ -10,7 +10,11 @@ on:
       - "Packaging/**"
       - "Scripts/build-app.zsh"
       - "Scripts/build-deps.zsh"
+      - "Scripts/libtorrent-patch-series.sh"
+      - "Scripts/compare-entitlements.swift"
       - "Scripts/keys/**"
+      - "Scripts/patches/**"
+      - "Scripts/release-app.zsh"
       - "Scripts/test-swift.zsh"
       - "Scripts/verify-app.zsh"
       - "Sources/TorrentApp/**"
@@ -28,7 +32,11 @@ on:
       - "Packaging/**"
       - "Scripts/build-app.zsh"
       - "Scripts/build-deps.zsh"
+      - "Scripts/libtorrent-patch-series.sh"
+      - "Scripts/compare-entitlements.swift"
       - "Scripts/keys/**"
+      - "Scripts/patches/**"
+      - "Scripts/release-app.zsh"
       - "Scripts/test-swift.zsh"
       - "Scripts/verify-app.zsh"
       - "Sources/TorrentApp/**"
@@ -48,6 +56,7 @@ jobs:
     name: Test, build, and verify
     runs-on: macos-26
     permissions: {}
+    timeout-minutes: 45
     steps:
       - name: Check out repository
         shell: zsh {0}
@@ -79,15 +88,32 @@ jobs:
           path: |
             .build/deps/source-cache
             .build/deps/arm64e
-          key: deps-arm64e-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/keys/**') }}
-          restore-keys: |
-            deps-arm64e-${{ runner.os }}-${{ runner.arch }}-
-
+          key: deps-arm64e-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/keys/**', 'Scripts/patches/**') }}
       - name: Build pinned dependencies
         shell: zsh {0}
         run: |
           set -euo pipefail
           Scripts/build-deps.zsh
+
+      - name: Check release policy tools
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          zsh -n Scripts/build-app.zsh Scripts/release-app.zsh Scripts/verify-app.zsh
+          xcrun swiftc -typecheck Scripts/compare-entitlements.swift
+          xcrun swift Scripts/compare-entitlements.swift \
+            Packaging/Torrent7.entitlements \
+            Packaging/Torrent7.entitlements
+          unexpected_entitlements=$(mktemp)
+          trap 'rm -f -- "$unexpected_entitlements"' EXIT
+          cp Packaging/Torrent7.entitlements "$unexpected_entitlements"
+          /usr/libexec/PlistBuddy -c "Add :unexpected bool true" "$unexpected_entitlements"
+          if xcrun swift Scripts/compare-entitlements.swift \
+            Packaging/Torrent7.entitlements \
+            "$unexpected_entitlements"; then
+            print -ru2 -- "Entitlement allowlist accepted an unexpected key"
+            exit 1
+          fi
 
       - name: Run Swift tests
         shell: zsh {0}

@@ -9,8 +9,11 @@ on:
       - "Package.swift"
       - "Scripts/analyze-bridge.zsh"
       - "Scripts/build-deps.zsh"
+      - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/keys/**"
+      - "Scripts/patches/**"
       - "Scripts/test-bridge.zsh"
+      - "Scripts/test-libtorrent-security.zsh"
       - "Sources/TorrentBridge/**"
       - "Tests/TorrentBridgeTests/**"
       - "ThirdParty/doctest/**"
@@ -25,8 +28,11 @@ on:
       - "Package.swift"
       - "Scripts/analyze-bridge.zsh"
       - "Scripts/build-deps.zsh"
+      - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/keys/**"
+      - "Scripts/patches/**"
       - "Scripts/test-bridge.zsh"
+      - "Scripts/test-libtorrent-security.zsh"
       - "Sources/TorrentBridge/**"
       - "Tests/TorrentBridgeTests/**"
       - "ThirdParty/doctest/**"
@@ -44,6 +50,7 @@ jobs:
     name: Analyze and test
     runs-on: macos-26
     permissions: {}
+    timeout-minutes: 45
     steps:
       - name: Check out repository
         shell: zsh {0}
@@ -75,15 +82,18 @@ jobs:
           path: |
             .build/deps/source-cache
             .build/deps/arm64e
-          key: deps-arm64e-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/keys/**') }}
-          restore-keys: |
-            deps-arm64e-${{ runner.os }}-${{ runner.arch }}-
-
+          key: deps-arm64e-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/keys/**', 'Scripts/patches/**') }}
       - name: Build pinned dependencies
         shell: zsh {0}
         run: |
           set -euo pipefail
           Scripts/build-deps.zsh
+
+      - name: Run libtorrent security regressions
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          SKIP_BUILD_DEPS=1 Scripts/test-libtorrent-security.zsh
 
       - name: Analyze bridge
         shell: zsh {0}

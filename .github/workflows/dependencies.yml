@@ -9,7 +9,9 @@ on:
     paths:
       - ".github/workflows/dependencies.yml"
       - "Scripts/build-deps.zsh"
+      - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/keys/**"
+      - "Scripts/patches/**"
       - "Tools/DependencyCheck/**"
   pull_request:
     types:
@@ -20,7 +22,9 @@ on:
     paths:
       - ".github/workflows/dependencies.yml"
       - "Scripts/build-deps.zsh"
+      - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/keys/**"
+      - "Scripts/patches/**"
       - "Tools/DependencyCheck/**"
   workflow_dispatch:
 
