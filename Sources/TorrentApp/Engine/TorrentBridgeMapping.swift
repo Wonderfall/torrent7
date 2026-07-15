@@ -134,19 +134,24 @@ extension TorrentSourcePolicy {
         )
     }
 
-    var bridgeValue: TTorrentSourcePolicy {
-        TTorrentSourcePolicy(
-            enable_dht: isDHTEnabled.bridgeFlag,
-            enable_peer_exchange: isPeerExchangeEnabled.bridgeFlag,
-            enable_lsd: isLocalServiceDiscoveryEnabled.bridgeFlag,
-            require_https_trackers: usesHTTPSTrackersOnly.bridgeFlag,
-            require_https_web_seeds: usesHTTPSWebSeedsOnly.bridgeFlag,
-            dht_locked: isDHTLocked.bridgeFlag,
-            peer_exchange_locked: isPeerExchangeLocked.bridgeFlag,
-            lsd_locked: isLocalServiceDiscoveryLocked.bridgeFlag,
-            metadata_validation_pending: isMetadataValidationPending.bridgeFlag,
-            allow_pre_metadata_dht: allowsPreMetadataDHT.bridgeFlag
-        )
+}
+
+extension TorrentSourcePolicyField {
+    var bridgeValue: Int32 {
+        switch self {
+        case .dht:
+            Int32(TTORRENT_SOURCE_POLICY_ENABLE_DHT)
+        case .peerExchange:
+            Int32(TTORRENT_SOURCE_POLICY_ENABLE_PEER_EXCHANGE)
+        case .localServiceDiscovery:
+            Int32(TTORRENT_SOURCE_POLICY_ENABLE_LSD)
+        case .httpsTrackersOnly:
+            Int32(TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS)
+        case .httpsWebSeedsOnly:
+            Int32(TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS)
+        case .preMetadataDHT:
+            Int32(TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT)
+        }
     }
 }
 

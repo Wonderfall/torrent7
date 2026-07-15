@@ -244,6 +244,50 @@ struct TorrentSourcePolicy: Equatable, Sendable {
         isMetadataValidationPending: false,
         allowsPreMetadataDHT: false
     )
+
+    subscript(field: TorrentSourcePolicyField) -> Bool {
+        get {
+            switch field {
+            case .dht:
+                isDHTEnabled
+            case .peerExchange:
+                isPeerExchangeEnabled
+            case .localServiceDiscovery:
+                isLocalServiceDiscoveryEnabled
+            case .httpsTrackersOnly:
+                usesHTTPSTrackersOnly
+            case .httpsWebSeedsOnly:
+                usesHTTPSWebSeedsOnly
+            case .preMetadataDHT:
+                allowsPreMetadataDHT
+            }
+        }
+        set {
+            switch field {
+            case .dht:
+                isDHTEnabled = newValue
+            case .peerExchange:
+                isPeerExchangeEnabled = newValue
+            case .localServiceDiscovery:
+                isLocalServiceDiscoveryEnabled = newValue
+            case .httpsTrackersOnly:
+                usesHTTPSTrackersOnly = newValue
+            case .httpsWebSeedsOnly:
+                usesHTTPSWebSeedsOnly = newValue
+            case .preMetadataDHT:
+                allowsPreMetadataDHT = newValue
+            }
+        }
+    }
+}
+
+enum TorrentSourcePolicyField: Sendable {
+    case dht
+    case peerExchange
+    case localServiceDiscovery
+    case httpsTrackersOnly
+    case httpsWebSeedsOnly
+    case preMetadataDHT
 }
 
 enum TorrentFilePriority: Int32, CaseIterable, Identifiable, Sendable {

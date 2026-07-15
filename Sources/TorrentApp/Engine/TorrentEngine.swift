@@ -133,7 +133,7 @@ protocol TorrentEngineServicing: Sendable {
     ) async -> TorrentSnapshotBatch?
     func requestSources(id: String) async throws
     func sourcePolicy(id: String) async throws -> TorrentSourcePolicy
-    func setSourcePolicy(id: String, policy: TorrentSourcePolicy) async throws
+    func setSourcePolicy(id: String, field: TorrentSourcePolicyField, enabled: Bool) async throws
     func torrentOptions(id: String) async throws -> TorrentOptions
     func setTorrentOptions(id: String, options: TorrentOptions) async throws
     func moveTorrentInQueue(id: String, move: TorrentQueueMove) async throws
@@ -693,12 +693,18 @@ protocol TorrentEngineServicing: Sendable {
         return TorrentSourcePolicy(snapshot: policy)
     }
 
-    func setSourcePolicy(id: String, policy: TorrentSourcePolicy) throws {
+    func setSourcePolicy(id: String, field: TorrentSourcePolicyField, enabled: Bool) throws {
         let client = try unsafe requireClient()
-        var bridgePolicy = policy.bridgeValue
         try throwingBridgeCall { errorBuffer, errorCapacity in
             unsafe id.withCString {
-                unsafe TorrentClientSetSourcePolicy(client, $0, &bridgePolicy, &errorBuffer, errorCapacity)
+                unsafe TorrentClientSetSourcePolicyField(
+                    client,
+                    $0,
+                    field.bridgeValue,
+                    enabled.bridgeFlag,
+                    &errorBuffer,
+                    errorCapacity
+                )
             }
         }
     }

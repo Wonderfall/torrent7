@@ -43,7 +43,13 @@ inline constexpr int32_t TTORRENT_QUEUE_MOVE_BOTTOM = 3;
 inline constexpr int32_t TTORRENT_REMOVAL_PENDING = 0;
 inline constexpr int32_t TTORRENT_REMOVAL_SUCCEEDED = 1;
 inline constexpr int32_t TTORRENT_REMOVAL_FAILED = 2;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 29;
+inline constexpr int32_t TTORRENT_SOURCE_POLICY_ENABLE_DHT = 0;
+inline constexpr int32_t TTORRENT_SOURCE_POLICY_ENABLE_PEER_EXCHANGE = 1;
+inline constexpr int32_t TTORRENT_SOURCE_POLICY_ENABLE_LSD = 2;
+inline constexpr int32_t TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS = 3;
+inline constexpr int32_t TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS = 4;
+inline constexpr int32_t TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT = 5;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 30;
 extern "C" {
 #else
 #define TORRENT_BRIDGE_NOEXCEPT
@@ -85,7 +91,13 @@ enum {
     TTORRENT_REMOVAL_PENDING = 0,
     TTORRENT_REMOVAL_SUCCEEDED = 1,
     TTORRENT_REMOVAL_FAILED = 2,
-    TTORRENT_BRIDGE_ABI_VERSION = 29
+    TTORRENT_SOURCE_POLICY_ENABLE_DHT = 0,
+    TTORRENT_SOURCE_POLICY_ENABLE_PEER_EXCHANGE = 1,
+    TTORRENT_SOURCE_POLICY_ENABLE_LSD = 2,
+    TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS = 3,
+    TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS = 4,
+    TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT = 5,
+    TTORRENT_BRIDGE_ABI_VERSION = 30
 };
 #endif
 
@@ -376,12 +388,13 @@ int32_t TorrentClientCopySourcePolicy(
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
-// metadata_validation_pending is an optimistic state token copied by
-// TorrentClientCopySourcePolicy.
-int32_t TorrentClientSetSourcePolicy(
+// Mutates one policy field against the current torrent state and commits the
+// resulting policy to resume data before returning success.
+int32_t TorrentClientSetSourcePolicyField(
     TTorrentClient *client,
     const char *torrent_id,
-    const TTorrentSourcePolicy *policy,
+    int32_t field,
+    uint8_t enabled,
     char *error_out,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;

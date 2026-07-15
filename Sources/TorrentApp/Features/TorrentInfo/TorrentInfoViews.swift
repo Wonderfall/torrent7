@@ -89,6 +89,7 @@ private struct TorrentInfoView: View {
     @State private var peerSources = TorrentPeerSources.empty
     @State private var sourcePolicy: TorrentSourcePolicy?
     @State private var sourcePolicyMutationGeneration: UInt64 = 0
+    @State private var sourcePolicyMutationTask: Task<Void, Never>?
     @State private var torrentOptions: TorrentOptions?
     @State private var files = [TorrentFileItem]()
     @State private var pieceMap = TorrentPieceMap.empty
@@ -529,10 +530,10 @@ private struct TorrentInfoView: View {
                         .help(localServiceDiscoveryPolicyHelp(for: sourcePolicy))
                 }
 
-                Toggle("Use HTTPS trackers only", isOn: sourcePolicyBinding(\.usesHTTPSTrackersOnly))
+                Toggle("Use HTTPS trackers only", isOn: sourcePolicyBinding(.httpsTrackersOnly))
                     .help("Ignore non-HTTPS trackers for this torrent.")
 
-                Toggle("Use HTTPS web seeds only", isOn: sourcePolicyBinding(\.usesHTTPSWebSeedsOnly))
+                Toggle("Use HTTPS web seeds only", isOn: sourcePolicyBinding(.httpsWebSeedsOnly))
                     .help("Ignore non-HTTPS web seeds for this torrent.")
             } else {
                 HStack {
@@ -755,7 +756,20 @@ private struct TorrentInfoView: View {
     }
 
     private var optionsRefreshID: String {
-        "\(torrent.id):\(torrent.hasMetadata):\(selectedTab == .options)"
+        let settings = store.settings
+        return [
+            torrent.id,
+            String(torrent.hasMetadata),
+            String(selectedTab == .options),
+            String(settings.enableDHTNetwork),
+            String(settings.effectiveUseDHTByDefault),
+            String(settings.enablePeerExchangePlugin),
+            String(settings.effectiveUsePeerExchangeByDefault),
+            String(settings.effectiveEnableLocalServiceDiscovery),
+            String(settings.effectiveUseLocalServiceDiscoveryByDefault),
+            String(settings.useHTTPSTrackersOnly),
+            String(settings.useHTTPSWebSeedsOnly)
+        ].joined(separator: ":")
     }
 
     private var trackerSummaryText: String? {
@@ -888,14 +902,14 @@ private struct TorrentInfoView: View {
         }
     }
 
-    private func sourcePolicyBinding(_ keyPath: WritableKeyPath<TorrentSourcePolicy, Bool>) -> Binding<Bool> {
+    private func sourcePolicyBinding(_ field: TorrentSourcePolicyField) -> Binding<Bool> {
         Binding {
             guard let sourcePolicy else {
                 return false
             }
-            return sourcePolicy[keyPath: keyPath]
+            return sourcePolicy[field]
         } set: { newValue in
-            updateSourcePolicy(keyPath, to: newValue)
+            updateSourcePolicy(field, to: newValue)
         }
     }
 
@@ -906,7 +920,7 @@ private struct TorrentInfoView: View {
             }
             return sourcePolicy.isDHTEnabled
         } set: { newValue in
-            updateSourcePolicy(\.isDHTEnabled, to: newValue)
+            updateSourcePolicy(.dht, to: newValue)
         }
     }
 
@@ -914,7 +928,7 @@ private struct TorrentInfoView: View {
         Binding {
             sourcePolicy?.allowsPreMetadataDHT ?? false
         } set: { newValue in
-            updateSourcePolicy(\.allowsPreMetadataDHT, to: newValue)
+            updateSourcePolicy(.preMetadataDHT, to: newValue)
         }
     }
 
@@ -925,7 +939,7 @@ private struct TorrentInfoView: View {
             }
             return sourcePolicy.isPeerExchangeEnabled
         } set: { newValue in
-            updateSourcePolicy(\.isPeerExchangeEnabled, to: newValue)
+            updateSourcePolicy(.peerExchange, to: newValue)
         }
     }
 
@@ -936,24 +950,30 @@ private struct TorrentInfoView: View {
             }
             return sourcePolicy.isLocalServiceDiscoveryEnabled
         } set: { newValue in
-            updateSourcePolicy(\.isLocalServiceDiscoveryEnabled, to: newValue)
+            updateSourcePolicy(.localServiceDiscovery, to: newValue)
         }
     }
 
     @MainActor
     private func updateSourcePolicy(
-        _ keyPath: WritableKeyPath<TorrentSourcePolicy, Bool>,
+        _ field: TorrentSourcePolicyField,
         to newValue: Bool
     ) {
         guard var updatedPolicy = sourcePolicy else {
             return
         }
-        updatedPolicy[keyPath: keyPath] = newValue
+        updatedPolicy[field] = newValue
         sourcePolicy = updatedPolicy
         sourcePolicyMutationGeneration &+= 1
         let mutationGeneration = sourcePolicyMutationGeneration
-        Task {
-            await setSourcePolicy(updatedPolicy, mutationGeneration: mutationGeneration)
+        let previousMutation = sourcePolicyMutationTask
+        sourcePolicyMutationTask = Task {
+            await previousMutation?.value
+            await setSourcePolicy(
+                field: field,
+                enabled: newValue,
+                mutationGeneration: mutationGeneration
+            )
         }
     }
 
@@ -1010,14 +1030,12 @@ private struct TorrentInfoView: View {
 
     @MainActor
     private func setSourcePolicy(
-        _ policy: TorrentSourcePolicy,
+        field: TorrentSourcePolicyField,
+        enabled: Bool,
         mutationGeneration: UInt64
     ) async {
-        guard mutationGeneration == sourcePolicyMutationGeneration else {
-            return
-        }
         do {
-            try await store.setSourcePolicy(for: torrent.id, policy: policy)
+            try await store.setSourcePolicy(for: torrent.id, field: field, enabled: enabled)
             guard mutationGeneration == sourcePolicyMutationGeneration else {
                 return
             }

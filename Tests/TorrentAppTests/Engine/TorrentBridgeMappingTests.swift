@@ -174,17 +174,27 @@ struct TorrentBridgeMappingTests {
         #expect(policy.isMetadataValidationPending)
         #expect(policy.allowsPreMetadataDHT)
 
-        let bridgePolicy = policy.bridgeValue
-        #expect(bridgePolicy.enable_dht == true.bridgeFlag)
-        #expect(bridgePolicy.enable_peer_exchange == false.bridgeFlag)
-        #expect(bridgePolicy.enable_lsd == true.bridgeFlag)
-        #expect(bridgePolicy.require_https_trackers == true.bridgeFlag)
-        #expect(bridgePolicy.require_https_web_seeds == false.bridgeFlag)
-        #expect(bridgePolicy.dht_locked == true.bridgeFlag)
-        #expect(bridgePolicy.peer_exchange_locked == true.bridgeFlag)
-        #expect(bridgePolicy.lsd_locked == false.bridgeFlag)
-        #expect(bridgePolicy.metadata_validation_pending == true.bridgeFlag)
-        #expect(bridgePolicy.allow_pre_metadata_dht == true.bridgeFlag)
+        #expect(TorrentSourcePolicyField.dht.bridgeValue == Int32(TTORRENT_SOURCE_POLICY_ENABLE_DHT))
+        #expect(
+            TorrentSourcePolicyField.peerExchange.bridgeValue
+                == Int32(TTORRENT_SOURCE_POLICY_ENABLE_PEER_EXCHANGE)
+        )
+        #expect(
+            TorrentSourcePolicyField.localServiceDiscovery.bridgeValue
+                == Int32(TTORRENT_SOURCE_POLICY_ENABLE_LSD)
+        )
+        #expect(
+            TorrentSourcePolicyField.httpsTrackersOnly.bridgeValue
+                == Int32(TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS)
+        )
+        #expect(
+            TorrentSourcePolicyField.httpsWebSeedsOnly.bridgeValue
+                == Int32(TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS)
+        )
+        #expect(
+            TorrentSourcePolicyField.preMetadataDHT.bridgeValue
+                == Int32(TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT)
+        )
     }
 
     @Test("Maps torrent options")

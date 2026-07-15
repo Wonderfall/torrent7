@@ -328,6 +328,33 @@ ResumeSaveResult TTorrentClient::save_added_torrent_resume_data(lt::add_torrent_
     return write_resume_data_checked(params, identity, resume_policy_snapshot_locked(identity), generation, {});
 }
 
+ResumeSaveResult TTorrentClient::save_source_policy_resume_data(
+    lt::torrent_handle const &handle,
+    TorrentIdentity *identity
+)
+{
+    if (!handle.is_valid() || identity == nullptr) {
+        return std::unexpected("Source policy resume data is missing a torrent.");
+    }
+
+    try {
+        lt::add_torrent_params params;
+        ResumePolicySnapshot policy;
+        std::uint64_t generation = 0;
+        {
+            std::scoped_lock capture_guard(resume_capture_lock);
+            params = handle.get_resume_data(kPolicyResumeSaveFlags);
+            policy = resume_policy_snapshot_locked(identity);
+            generation = allocate_resume_generation(identity);
+        }
+        return write_resume_data_checked(params, identity, policy, generation, {});
+    } catch (std::exception const &exception) {
+        return std::unexpected(std::string("Source policy resume data could not be collected: ") + exception.what());
+    } catch (...) {
+        return std::unexpected("Source policy resume data could not be collected.");
+    }
+}
+
 ResumeSaveResult TTorrentClient::remove_obsolete_tombstoned_resume_data_for_readd(std::vector<std::string> const &resume_ids)
 {
     ResumeIDListResult matched_ids = tombstone_ids_overlapping(resume_ids);

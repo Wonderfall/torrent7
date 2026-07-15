@@ -63,6 +63,31 @@ struct TorrentSourceModelTests {
         )
     }
 
+    @Test("Source policy field mutation changes only the selected value")
+    func sourcePolicyFieldMutationIsScoped() {
+        var policy = TorrentSourcePolicy(
+            isDHTEnabled: true,
+            isPeerExchangeEnabled: true,
+            isLocalServiceDiscoveryEnabled: true,
+            usesHTTPSTrackersOnly: true,
+            usesHTTPSWebSeedsOnly: true,
+            isDHTLocked: false,
+            isPeerExchangeLocked: false,
+            isLocalServiceDiscoveryLocked: false,
+            isMetadataValidationPending: false,
+            allowsPreMetadataDHT: false
+        )
+        let original = policy
+
+        policy[.dht] = false
+
+        #expect(!policy.isDHTEnabled)
+        #expect(policy.isPeerExchangeEnabled == original.isPeerExchangeEnabled)
+        #expect(policy.isLocalServiceDiscoveryEnabled == original.isLocalServiceDiscoveryEnabled)
+        #expect(policy.usesHTTPSTrackersOnly == original.usesHTTPSTrackersOnly)
+        #expect(policy.usesHTTPSWebSeedsOnly == original.usesHTTPSWebSeedsOnly)
+    }
+
     @Test("File item display and status reflect path progress and priority")
     func fileItemDisplayAndStatusReflectPathProgressAndPriority() {
         let waiting = file(path: "folder/video.mkv")

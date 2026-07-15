@@ -231,7 +231,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private var removeSuspensionCount = 0
     private var removeContinuations = [CheckedContinuation<Void, Never>]()
     private(set) var snapshotRequests = [(revision: UInt64?, sortOrder: TorrentSortOrder, direction: TorrentSortDirection)]()
-    private(set) var sourcePolicyUpdates = [(id: String, policy: TorrentSourcePolicy)]()
+    private(set) var sourcePolicyUpdates = [(id: String, field: TorrentSourcePolicyField, enabled: Bool)]()
     private(set) var torrentOptionsUpdates = [(id: String, options: TorrentOptions)]()
     private(set) var filePriorityUpdates = [(id: String, fileIndex: Int32, priority: TorrentFilePriority)]()
     private(set) var queueMoves = [(id: String, move: TorrentQueueMove)]()
@@ -476,9 +476,9 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         sourcePolicyValue
     }
 
-    func setSourcePolicy(id: String, policy: TorrentSourcePolicy) async throws {
-        sourcePolicyUpdates.append((id, policy))
-        sourcePolicyValue = policy
+    func setSourcePolicy(id: String, field: TorrentSourcePolicyField, enabled: Bool) async throws {
+        sourcePolicyUpdates.append((id, field, enabled))
+        sourcePolicyValue[field] = enabled
     }
 
     func torrentOptions(id: String) async throws -> TorrentOptions {

@@ -24,7 +24,7 @@ namespace bridge_fuzz {
 
 namespace fs = std::filesystem;
 
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 29, "Update the fuzz harnesses for the current TorrentBridge ABI.");
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 30, "Update the fuzz harnesses for the current TorrentBridge ABI.");
 #if !defined(TORRENT_USE_ASSERTS) || !TORRENT_USE_ASSERTS
 #error "Fuzz consumers must match the assertion-enabled Debug libtorrent archive."
 #endif
@@ -385,7 +385,14 @@ inline void exercise_detail_copies(TTorrentClient *client)
 
         static_cast<void>(TorrentClientCopySourcePolicy(client, id.c_str(), nullptr, error.data(), error.capacity()));
         static_cast<void>(TorrentClientCopySourcePolicy(client, id.c_str(), &policy, error.data(), error.capacity()));
-        static_cast<void>(TorrentClientSetSourcePolicy(client, id.c_str(), &policy, error.data(), error.capacity()));
+        static_cast<void>(TorrentClientSetSourcePolicyField(
+            client,
+            id.c_str(),
+            TTORRENT_SOURCE_POLICY_ENABLE_DHT,
+            std::uint8_t{0},
+            error.data(),
+            error.capacity()
+        ));
         static_cast<void>(TorrentClientCopyTorrentOptions(client, id.c_str(), nullptr, error.data(), error.capacity()));
         static_cast<void>(TorrentClientCopyTorrentOptions(client, id.c_str(), &options, error.data(), error.capacity()));
         static_cast<void>(TorrentClientSetTorrentOptions(client, id.c_str(), &options, error.data(), error.capacity()));
@@ -534,22 +541,6 @@ inline TTorrentOptions torrent_options_from_reader(ByteReader &reader)
     options.max_connections = reader.read_i32();
     options.queue_priority = reader.read_i32();
     return options;
-}
-
-inline TTorrentSourcePolicy source_policy_from_reader(ByteReader &reader)
-{
-    TTorrentSourcePolicy policy{};
-    policy.enable_dht = reader.read_u8();
-    policy.enable_peer_exchange = reader.read_u8();
-    policy.enable_lsd = reader.read_u8();
-    policy.require_https_trackers = reader.read_u8();
-    policy.require_https_web_seeds = reader.read_u8();
-    policy.dht_locked = reader.read_u8();
-    policy.peer_exchange_locked = reader.read_u8();
-    policy.lsd_locked = reader.read_u8();
-    policy.metadata_validation_pending = reader.read_u8();
-    policy.allow_pre_metadata_dht = reader.read_u8();
-    return policy;
 }
 
 } // namespace bridge_fuzz

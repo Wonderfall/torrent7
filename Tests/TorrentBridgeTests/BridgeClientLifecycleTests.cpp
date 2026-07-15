@@ -149,6 +149,24 @@ template <typename Predicate>
     return required_count;
 }
 
+[[nodiscard]] int32_t set_source_policy_field(
+    TTorrentClient &client,
+    TorrentIdentity const &identity,
+    int32_t field,
+    bool enabled,
+    std::span<char> error
+)
+{
+    return TorrentClientSetSourcePolicyField(
+        &client,
+        identity.canonical_id.c_str(),
+        field,
+        bridge_bool(enabled),
+        error.data(),
+        static_cast<int32_t>(error.size())
+    );
+}
+
 [[nodiscard]] int32_t persisted_queue_rank(TTorrentClient const &client, lt::torrent_info const &info)
 {
     std::string const id = primary_hash_key(info.info_hashes());
@@ -669,13 +687,12 @@ TEST_CASE("disabled peer exchange plugin gates per-torrent PEX policy")
     CHECK_FALSE(bridge_bool(policy.peer_exchange_locked));
     CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex));
 
-    policy.enable_peer_exchange = bridge_bool(true);
-    REQUIRE(TorrentClientSetSourcePolicy(
-        &client,
-        identity->canonical_id.c_str(),
-        &policy,
-        error,
-        static_cast<int32_t>(sizeof(error))
+    REQUIRE(set_source_policy_field(
+        client,
+        *identity,
+        TTORRENT_SOURCE_POLICY_ENABLE_PEER_EXCHANGE,
+        true,
+        error
     ) == 0);
     REQUIRE(TorrentClientCopySourcePolicy(
         &client,
@@ -873,16 +890,15 @@ TEST_CASE("per-torrent source policy can override DHT PEX and LSD defaults")
     CHECK_FALSE(bridge_bool(policy.peer_exchange_locked));
     CHECK_FALSE(bridge_bool(policy.lsd_locked));
 
-    policy.enable_dht = bridge_bool(true);
-    policy.enable_peer_exchange = bridge_bool(true);
-    policy.enable_lsd = bridge_bool(true);
-    REQUIRE(TorrentClientSetSourcePolicy(
-        &client,
-        identity->canonical_id.c_str(),
-        &policy,
-        error,
-        static_cast<int32_t>(sizeof(error))
+    REQUIRE(set_source_policy_field(client, *identity, TTORRENT_SOURCE_POLICY_ENABLE_DHT, true, error) == 0);
+    REQUIRE(set_source_policy_field(
+        client,
+        *identity,
+        TTORRENT_SOURCE_POLICY_ENABLE_PEER_EXCHANGE,
+        true,
+        error
     ) == 0);
+    REQUIRE(set_source_policy_field(client, *identity, TTORRENT_SOURCE_POLICY_ENABLE_LSD, true, error) == 0);
 
     CHECK_FALSE(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
     CHECK_FALSE(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex));
@@ -923,18 +939,8 @@ TEST_CASE("per-torrent source policy fails closed when persistence is faulted")
     BridgeResult const fault = client.fault_persistence(2, "Synthetic persistence fault.");
     REQUIRE_FALSE(fault);
 
-    TTorrentSourcePolicy policy{};
-    policy.enable_dht = bridge_bool(false);
-    policy.enable_peer_exchange = bridge_bool(true);
-    policy.enable_lsd = bridge_bool(true);
     char error[512]{};
-    CHECK(TorrentClientSetSourcePolicy(
-        &client,
-        identity->canonical_id.c_str(),
-        &policy,
-        error,
-        static_cast<int32_t>(sizeof(error))
-    ) == 2);
+    CHECK(set_source_policy_field(client, *identity, TTORRENT_SOURCE_POLICY_ENABLE_DHT, false, error) == 2);
 
     CHECK(bridge_tests::string_from_c_buffer(error) == "Synthetic persistence fault.");
     CHECK_FALSE(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
@@ -1124,15 +1130,7 @@ TEST_CASE("per-torrent DHT policy does not override disabled DHT node")
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
-    policy.enable_dht = bridge_bool(true);
-    policy.enable_peer_exchange = bridge_bool(false);
-    REQUIRE(TorrentClientSetSourcePolicy(
-        &client,
-        identity->canonical_id.c_str(),
-        &policy,
-        error,
-        static_cast<int32_t>(sizeof(error))
-    ) == 0);
+    REQUIRE(set_source_policy_field(client, *identity, TTORRENT_SOURCE_POLICY_ENABLE_DHT, true, error) == 0);
 
     lt::torrent_flags_t const flags = handle.flags();
     CHECK(static_cast<bool>(flags & lt::torrent_flags::paused));
@@ -1185,14 +1183,7 @@ TEST_CASE("per-torrent DHT enable does not resume paused torrents")
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
-    policy.enable_dht = bridge_bool(true);
-    REQUIRE(TorrentClientSetSourcePolicy(
-        &client,
-        identity->canonical_id.c_str(),
-        &policy,
-        error,
-        static_cast<int32_t>(sizeof(error))
-    ) == 0);
+    REQUIRE(set_source_policy_field(client, *identity, TTORRENT_SOURCE_POLICY_ENABLE_DHT, true, error) == 0);
 
     lt::torrent_flags_t const flags = handle.flags();
     CHECK(static_cast<bool>(flags & lt::torrent_flags::paused));
@@ -1502,18 +1493,28 @@ TEST_CASE("source policy toggles DHT PEX LSD and HTTPS sources for a loaded torr
     CHECK_FALSE(bridge_bool(policy.peer_exchange_locked));
     CHECK_FALSE(bridge_bool(policy.lsd_locked));
 
-    TTorrentSourcePolicy updated{};
-    updated.enable_dht = bridge_bool(false);
-    updated.enable_peer_exchange = bridge_bool(false);
-    updated.enable_lsd = bridge_bool(false);
-    updated.require_https_trackers = bridge_bool(true);
-    updated.require_https_web_seeds = bridge_bool(true);
-    REQUIRE(TorrentClientSetSourcePolicy(
-        &client,
-        identity->canonical_id.c_str(),
-        &updated,
-        error,
-        static_cast<int32_t>(sizeof(error))
+    REQUIRE(set_source_policy_field(client, *identity, TTORRENT_SOURCE_POLICY_ENABLE_DHT, false, error) == 0);
+    REQUIRE(set_source_policy_field(
+        client,
+        *identity,
+        TTORRENT_SOURCE_POLICY_ENABLE_PEER_EXCHANGE,
+        false,
+        error
+    ) == 0);
+    REQUIRE(set_source_policy_field(client, *identity, TTORRENT_SOURCE_POLICY_ENABLE_LSD, false, error) == 0);
+    REQUIRE(set_source_policy_field(
+        client,
+        *identity,
+        TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS,
+        true,
+        error
+    ) == 0);
+    REQUIRE(set_source_policy_field(
+        client,
+        *identity,
+        TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS,
+        true,
+        error
     ) == 0);
 
     REQUIRE(TorrentClientCopySourcePolicy(
@@ -1542,14 +1543,19 @@ TEST_CASE("source policy toggles DHT PEX LSD and HTTPS sources for a loaded torr
     CHECK_FALSE(identity->allows_non_https_trackers);
     CHECK_FALSE(identity->allows_non_https_web_seeds);
 
-    updated.require_https_trackers = bridge_bool(false);
-    updated.require_https_web_seeds = bridge_bool(false);
-    REQUIRE(TorrentClientSetSourcePolicy(
-        &client,
-        identity->canonical_id.c_str(),
-        &updated,
-        error,
-        static_cast<int32_t>(sizeof(error))
+    REQUIRE(set_source_policy_field(
+        client,
+        *identity,
+        TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS,
+        false,
+        error
+    ) == 0);
+    REQUIRE(set_source_policy_field(
+        client,
+        *identity,
+        TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS,
+        false,
+        error
     ) == 0);
     REQUIRE(handle.trackers().size() == 2U);
     CHECK(cached_url_seed_count(client, identity->canonical_id) == 2);
@@ -1557,7 +1563,55 @@ TEST_CASE("source policy toggles DHT PEX LSD and HTTPS sources for a loaded torr
     CHECK_FALSE(identity->requires_https_web_seeds);
 }
 
-TEST_CASE("source policy rejects a snapshot from an obsolete metadata state")
+TEST_CASE("unrelated source policy mutations preserve global HTTPS enforcement")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+
+    lt::add_torrent_params source_params = make_source_torrent_params();
+    TorrentIdentity *identity = nullptr;
+    lt::torrent_handle handle = add_metadata_torrent(
+        client,
+        std::move(source_params),
+        temporary_directory.path(),
+        identity
+    );
+    REQUIRE(identity != nullptr);
+
+    TTorrentSessionSettings settings{};
+    settings.required_network_interface = "";
+    settings.network_blocked = bridge_bool(true);
+    settings.use_pex_by_default = bridge_bool(true);
+    settings.require_https_trackers = bridge_bool(true);
+    settings.require_https_web_seeds = bridge_bool(true);
+    char error[512]{};
+    REQUIRE(TorrentClientApplySettings(
+        &client,
+        &settings,
+        error,
+        static_cast<int32_t>(sizeof(error))
+    ) == 0);
+    REQUIRE(handle.trackers().size() == 1U);
+    REQUIRE(handle.url_seeds().size() == 1U);
+    REQUIRE_FALSE(identity->requires_https_trackers);
+    REQUIRE_FALSE(identity->requires_https_web_seeds);
+    REQUIRE_FALSE(identity->allows_non_https_trackers);
+    REQUIRE_FALSE(identity->allows_non_https_web_seeds);
+
+    REQUIRE(set_source_policy_field(client, *identity, TTORRENT_SOURCE_POLICY_ENABLE_DHT, false, error) == 0);
+
+    CHECK(handle.trackers().size() == 1U);
+    CHECK(handle.trackers().front().url == "https://secure-tracker.example/announce");
+    CHECK(handle.url_seeds().size() == 1U);
+    CHECK(handle.url_seeds().contains("https://secure-seed.example/file"));
+    CHECK_FALSE(identity->requires_https_trackers);
+    CHECK_FALSE(identity->requires_https_web_seeds);
+    CHECK_FALSE(identity->allows_non_https_trackers);
+    CHECK_FALSE(identity->allows_non_https_web_seeds);
+}
+
+TEST_CASE("source policy rejects metadata-only fields after metadata is available")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
     TTorrentClient client((temporary_directory.path() / "State").string());
@@ -1568,22 +1622,18 @@ TEST_CASE("source policy rejects a snapshot from an obsolete metadata state")
     TorrentIdentity *identity = nullptr;
     lt::torrent_handle handle = add_metadata_torrent(client, *info, temporary_directory.path(), identity);
     REQUIRE(identity != nullptr);
+    REQUIRE(handle.is_valid());
 
-    client.metadata_validation_pending.insert(identity);
-    TTorrentSourcePolicy stale_policy = client.source_policy(handle, identity);
-    REQUIRE(bridge_bool(stale_policy.metadata_validation_pending));
-    client.metadata_validation_pending.erase(identity);
-
-    stale_policy.allow_pre_metadata_dht = bridge_bool(true);
+    REQUIRE_FALSE(client.metadata_validation_pending.contains(identity));
     char error[512]{};
-    CHECK(TorrentClientSetSourcePolicy(
-        &client,
-        identity->canonical_id.c_str(),
-        &stale_policy,
-        error,
-        static_cast<int32_t>(sizeof(error))
+    CHECK(set_source_policy_field(
+        client,
+        *identity,
+        TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT,
+        true,
+        error
     ) != 0);
-    CHECK(std::string(error) == "Torrent metadata state changed. Refresh the source policy and try again.");
+    CHECK(std::string(error) == "This source policy field is unavailable for the current metadata state.");
     CHECK_FALSE(identity->allow_pre_metadata_dht);
     CHECK_FALSE(identity->dht_enabled_by_user);
     CHECK_FALSE(identity->dht_disabled_by_user);
@@ -1836,19 +1886,15 @@ TEST_CASE("source policy cannot override DHT PEX or LSD source locks")
     CHECK(bridge_bool(policy.peer_exchange_locked));
     CHECK(bridge_bool(policy.lsd_locked));
 
-    TTorrentSourcePolicy requested{};
-    requested.enable_dht = bridge_bool(true);
-    requested.enable_peer_exchange = bridge_bool(true);
-    requested.enable_lsd = bridge_bool(true);
-    requested.require_https_trackers = bridge_bool(false);
-    requested.require_https_web_seeds = bridge_bool(false);
-    REQUIRE(TorrentClientSetSourcePolicy(
-        &client,
-        identity->canonical_id.c_str(),
-        &requested,
-        error,
-        static_cast<int32_t>(sizeof(error))
+    REQUIRE(set_source_policy_field(client, *identity, TTORRENT_SOURCE_POLICY_ENABLE_DHT, true, error) == 0);
+    REQUIRE(set_source_policy_field(
+        client,
+        *identity,
+        TTORRENT_SOURCE_POLICY_ENABLE_PEER_EXCHANGE,
+        true,
+        error
     ) == 0);
+    REQUIRE(set_source_policy_field(client, *identity, TTORRENT_SOURCE_POLICY_ENABLE_LSD, true, error) == 0);
 
     REQUIRE(TorrentClientCopySourcePolicy(
         &client,
@@ -1898,17 +1944,19 @@ TEST_CASE("source policy restores sources preserved before HTTPS-only filtering"
     CHECK(handle.url_seeds().size() == 1U);
 
     char error[512]{};
-    TTorrentSourcePolicy requested{};
-    requested.enable_dht = bridge_bool(true);
-    requested.enable_peer_exchange = bridge_bool(true);
-    requested.require_https_trackers = bridge_bool(false);
-    requested.require_https_web_seeds = bridge_bool(false);
-    REQUIRE(TorrentClientSetSourcePolicy(
-        &client,
-        identity->canonical_id.c_str(),
-        &requested,
-        error,
-        static_cast<int32_t>(sizeof(error))
+    REQUIRE(set_source_policy_field(
+        client,
+        *identity,
+        TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS,
+        false,
+        error
+    ) == 0);
+    REQUIRE(set_source_policy_field(
+        client,
+        *identity,
+        TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS,
+        false,
+        error
     ) == 0);
 
     REQUIRE(handle.trackers().size() == 2U);
@@ -2033,6 +2081,73 @@ TEST_CASE("trackerless magnet can explicitly allow DHT before metadata validatio
     CHECK_FALSE(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
     CHECK(identity->allow_pre_metadata_dht);
     CHECK(reloaded.metadata_validation_pending.contains(identity));
+}
+
+TEST_CASE("pending magnet DHT revocation is durable before the setter returns")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    fs::path const state_directory = temporary_directory.path() / "State";
+    std::string const hash(40U, '7');
+    std::string const magnet = "magnet:?xt=urn:btih:" + hash;
+    std::string const save_path = temporary_directory.path().string();
+    TTorrentAddOptions add_options = default_add_options();
+    add_options.allow_pre_metadata_dht = bridge_bool(true);
+    char added_id[TTORRENT_ID_CAPACITY]{};
+    char error[512]{};
+
+    TTorrentClient client(state_directory.string());
+    client.set_session_shutdown_asynchronous(false);
+    REQUIRE(TorrentClientAddMagnet(
+        &client,
+        magnet.c_str(),
+        save_path.c_str(),
+        &add_options,
+        added_id,
+        static_cast<int32_t>(sizeof(added_id)),
+        error,
+        static_cast<int32_t>(sizeof(error))
+    ) == 0);
+
+    lt::torrent_handle handle = client.handle_by_id.at(bridge_tests::v1_id('7'));
+    TorrentIdentity *identity = identity_from_handle(handle);
+    REQUIRE(identity != nullptr);
+    REQUIRE(identity->allow_pre_metadata_dht);
+    client.stop_alert_worker();
+
+    REQUIRE(set_source_policy_field(
+        client,
+        *identity,
+        TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT,
+        false,
+        error
+    ) == 0);
+    CHECK_FALSE(identity->allow_pre_metadata_dht);
+    CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
+
+    std::string const resume_id = bridge_tests::v1_id('7');
+    fs::path const resume_path = client.resume_directory / (resume_id + std::string(kResumeExtension));
+    FileReadResult const persisted = read_file(resume_path, kMaxResumeFileBytes);
+    REQUIRE(persisted.has_value());
+    CHECK(metadata_validation_pending_from_resume_data(*persisted));
+    CHECK_FALSE(allow_pre_metadata_dht_from_resume_data(*persisted));
+
+    fs::path const restart_state = temporary_directory.path() / "RestartState";
+    fs::path const restart_resume_directory = restart_state / "ResumeData";
+    REQUIRE(fs::create_directories(restart_resume_directory));
+    REQUIRE(fs::copy_file(
+        resume_path,
+        restart_resume_directory / resume_path.filename(),
+        fs::copy_options::none
+    ));
+
+    TTorrentClient restarted(restart_state.string());
+    restarted.set_session_shutdown_asynchronous(false);
+    lt::torrent_handle restarted_handle = restarted.handle_by_id.at(resume_id);
+    TorrentIdentity *restarted_identity = identity_from_handle(restarted_handle);
+    REQUIRE(restarted_identity != nullptr);
+    CHECK(restarted.metadata_validation_pending.contains(restarted_identity));
+    CHECK_FALSE(restarted_identity->allow_pre_metadata_dht);
+    CHECK(static_cast<bool>(restarted_handle.flags() & lt::torrent_flags::disable_dht));
 }
 
 TEST_CASE("payload deletion waits for libtorrent and removes an exact torrent file")

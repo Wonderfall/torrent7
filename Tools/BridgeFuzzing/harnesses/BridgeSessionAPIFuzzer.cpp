@@ -229,7 +229,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
         }
         case 9: {
             std::string id = selected_id(reader, harness.client());
-            TTorrentSourcePolicy policy = bridge_fuzz::source_policy_from_reader(reader);
+            TTorrentSourcePolicy policy{};
             static_cast<void>(TorrentClientCopySourcePolicy(
                 harness.client(),
                 maybe_null(reader, id),
@@ -237,10 +237,11 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
                 error.data(),
                 error.capacity()
             ));
-            static_cast<void>(TorrentClientSetSourcePolicy(
+            static_cast<void>(TorrentClientSetSourcePolicyField(
                 harness.client(),
                 maybe_null(reader, id),
-                reader.read_bool() ? nullptr : &policy,
+                reader.read_i32(),
+                reader.read_u8(),
                 error.data(),
                 error.capacity()
             ));

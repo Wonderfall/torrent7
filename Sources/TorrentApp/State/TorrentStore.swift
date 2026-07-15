@@ -389,8 +389,12 @@ final class TorrentStore {
         try await engine.sourcePolicy(id: id)
     }
 
-    func setSourcePolicy(for id: TorrentItem.ID, policy: TorrentSourcePolicy) async throws {
-        try await engine.setSourcePolicy(id: id, policy: policy)
+    func setSourcePolicy(
+        for id: TorrentItem.ID,
+        field: TorrentSourcePolicyField,
+        enabled: Bool
+    ) async throws {
+        try await engine.setSourcePolicy(id: id, field: field, enabled: enabled)
     }
 
     func torrentOptions(for id: TorrentItem.ID) async throws -> TorrentOptions {

@@ -6,7 +6,7 @@ import TorrentBridge
 struct TorrentBridgeContractTests {
     @Test("Pins bridge ABI version, limits, states, and dirty masks")
     func pinsBridgeConstants() {
-        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 29)
+        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 30)
         #expect(Int32(TTORRENT_BRIDGE_STATE_UNKNOWN) == -1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_CHECKING_FILES) == 1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_DOWNLOADING_METADATA) == 2)
@@ -42,6 +42,12 @@ struct TorrentBridgeContractTests {
         #expect(Int32(TTORRENT_REMOVAL_PENDING) == 0)
         #expect(Int32(TTORRENT_REMOVAL_SUCCEEDED) == 1)
         #expect(Int32(TTORRENT_REMOVAL_FAILED) == 2)
+        #expect(Int32(TTORRENT_SOURCE_POLICY_ENABLE_DHT) == 0)
+        #expect(Int32(TTORRENT_SOURCE_POLICY_ENABLE_PEER_EXCHANGE) == 1)
+        #expect(Int32(TTORRENT_SOURCE_POLICY_ENABLE_LSD) == 2)
+        #expect(Int32(TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS) == 3)
+        #expect(Int32(TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS) == 4)
+        #expect(Int32(TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT) == 5)
     }
 
     @Test("Pins Swift-imported C struct layout")
@@ -182,6 +188,20 @@ struct TorrentBridgeContractTests {
         #expect(sourcePolicy.metadata_validation_pending == 0)
         #expect(sourcePolicy.allow_pre_metadata_dht == 0)
         #expect(errorBuffer.string == "Missing torrent client, torrent id, or source policy.")
+
+        errorBuffer.writeSentinel()
+        let setSourcePolicy = errorBuffer.withMutableBuffer { buffer in
+            unsafe TorrentClientSetSourcePolicyField(
+                nil,
+                nil,
+                Int32(TTORRENT_SOURCE_POLICY_ENABLE_DHT),
+                0,
+                &buffer,
+                Int32(buffer.count)
+            )
+        }
+        #expect(setSourcePolicy == 1)
+        #expect(errorBuffer.string == "Missing torrent client or torrent id.")
 
         var activity = TTorrentWebSeedActivitySnapshot(active_count: 3, download_rate: 4, total_download: 5)
         revision = UInt64.max

@@ -120,7 +120,7 @@ static_assert(TTORRENT_MAX_TRACKER_COUNT > 0);
 static_assert(TTORRENT_MAX_WEB_SEED_COUNT > 0);
 static_assert(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT > 0);
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 29U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 30U);
 #if defined(TORRENT_USE_ASSERTS) && TORRENT_USE_ASSERTS
 static_assert(sizeof(lt::add_torrent_params) == 760U);
 #else
@@ -1314,7 +1314,12 @@ struct TTorrentClient {
 
     [[nodiscard]] TTorrentSourcePolicy source_policy(lt::torrent_handle const &handle, TorrentIdentity const *identity) const;
 
-    [[nodiscard]] DirtyMask set_source_policy(lt::torrent_handle const &handle, TorrentIdentity *identity, TTorrentSourcePolicy const &policy);
+    [[nodiscard]] DirtyMask set_source_policy_field(
+        lt::torrent_handle const &handle,
+        TorrentIdentity *identity,
+        int32_t field,
+        bool enabled
+    );
 
     static bool conflict_participant_is_preferred(TorrentIdentity const *candidate, TorrentIdentity const *other) noexcept;
 
@@ -1502,6 +1507,11 @@ struct TTorrentClient {
 
     ResumeSaveResult save_added_torrent_resume_data(lt::add_torrent_params params, lt::info_hash_t const &hashes,
                                                     TorrentIdentity *identity);
+
+    ResumeSaveResult save_source_policy_resume_data(
+        lt::torrent_handle const &handle,
+        TorrentIdentity *identity
+    );
 
     ResumeSaveResult remove_obsolete_tombstoned_resume_data_for_readd(std::vector<std::string> const &resume_ids);
 
