@@ -263,6 +263,13 @@ remove_dependency_path() {
     local target_parent
     local within_default=0
 
+    # A caller may choose a fresh external cache or build root. There is
+    # nothing to authorize until an existing entry would actually be removed.
+    # Check -L separately so a dangling symlink remains protected.
+    if [[ ! -e "$target" && ! -L "$target" ]]; then
+        return
+    fi
+
     # Only the literal in-project cache is trusted implicitly. If either fixed
     # parent is a symlink, its physical destination is external and requires
     # the same explicit opt-in as any other external dependency location.
