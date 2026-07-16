@@ -84,8 +84,24 @@ void TTorrentClient::discard_unpublished_identity(TorrentIdentity *identity) noe
     lsd_disabled_by_app.erase(identity);
     peer_exchange_disabled_by_app.erase(identity);
     metadata_validation_pending.erase(identity);
-    if (!torrent_identities.empty() && torrent_identities.back().get() == identity) {
-        torrent_identities.pop_back();
+    auto const owned_identity = std::ranges::find_if(torrent_identities, [identity](auto const &owned) {
+        return owned.get() == identity;
+    });
+    if (owned_identity == torrent_identities.end()) {
+        return;
+    }
+
+    TorrentIdentityToken *const token = identity->token;
+    if (token != nullptr) {
+        token->active_identity.store(nullptr, std::memory_order_release);
+    }
+    torrent_identities.erase(owned_identity);
+
+    auto const owned_token = std::ranges::find_if(identity_tokens, [token](auto const &owned) {
+        return owned.get() == token;
+    });
+    if (owned_token != identity_tokens.end()) {
+        identity_tokens.erase(owned_token);
     }
 }
 
@@ -850,11 +866,21 @@ void TTorrentClient::load_resume_data()
             sync_resume_directory_quietly();
             continue;
         }
+        BridgeResult const admission = ensure_torrent_admission_available(3);
+        if (!admission) {
+            static_cast<void>(publish_changes_locked(queue_alert_error(
+                "Resume restore stopped: " + admission.error().message
+                + " Remaining resume data was preserved."
+            )));
+            break;
+        }
 
         FileReadResult const buffer = read_file(entry.path(), kMaxResumeFileBytes);
         if (!buffer) {
-            remove_resume_file_locked(entry.path());
-            sync_resume_directory_quietly();
+            if (resume_read_failure_is_definitively_invalid(buffer.error())) {
+                remove_resume_file_locked(entry.path());
+                sync_resume_directory_quietly();
+            }
             continue;
         }
 

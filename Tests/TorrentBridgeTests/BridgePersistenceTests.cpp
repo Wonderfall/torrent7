@@ -74,6 +74,30 @@ TEST_CASE("read_file refuses to follow symbolic links")
     CHECK(read.error() == FileReadFailure::unreadable);
 }
 
+TEST_CASE("resume read failures distinguish transient access from invalid payloads")
+{
+    CHECK_FALSE(resume_read_failure_is_definitively_invalid(FileReadFailure::unreadable));
+    CHECK(resume_read_failure_is_definitively_invalid(FileReadFailure::empty));
+    CHECK(resume_read_failure_is_definitively_invalid(FileReadFailure::too_large));
+}
+
+TEST_CASE("torrent admission uses the authoritative snapshot limit")
+{
+    constexpr std::size_t limit = static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT);
+    CHECK(torrent_count_allows_admission(0U));
+    CHECK(torrent_count_allows_admission(limit - 1U));
+    CHECK_FALSE(torrent_count_allows_admission(limit));
+    CHECK_FALSE(torrent_count_allows_admission(limit + 1U));
+}
+
+TEST_CASE("torrent identity tokens have a bounded session lifetime budget")
+{
+    CHECK(torrent_identity_token_count_allows_admission(0U));
+    CHECK(torrent_identity_token_count_allows_admission(kMaxTorrentIdentityTokenCount - 1U));
+    CHECK_FALSE(torrent_identity_token_count_allows_admission(kMaxTorrentIdentityTokenCount));
+    CHECK_FALSE(torrent_identity_token_count_allows_admission(kMaxTorrentIdentityTokenCount + 1U));
+}
+
 TEST_CASE("write_owner_only_file_checked commits data with owner-only permissions")
 {
     bridge_tests::TemporaryDirectory temporary_directory;

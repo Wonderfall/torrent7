@@ -275,8 +275,7 @@ void TTorrentClient::alert_loop(std::stop_token const &stop_token)
 
 [[nodiscard]] bool TTorrentClient::canonical_id_in_use_locked(std::string_view canonical_id) const
 {
-    return canonical_id_in_collection_locked(torrent_identities, canonical_id)
-        || canonical_id_in_collection_locked(retired_torrent_identities, canonical_id);
+    return canonical_id_in_collection_locked(torrent_identities, canonical_id);
 }
 
 [[nodiscard]] std::string TTorrentClient::make_unique_canonical_torrent_id_locked() const
@@ -295,16 +294,36 @@ void TTorrentClient::alert_loop(std::stop_token const &stop_token)
 TorrentIdentity *TTorrentClient::make_identity(std::string canonical_id)
 {
     std::scoped_lock io_guard(resume_io_lock);
+    if (!torrent_count_allows_admission(torrent_identities.size())) {
+        throw std::length_error("The torrent limit has been reached.");
+    }
+    if (!torrent_identity_token_count_allows_admission(identity_tokens.size())) {
+        throw std::length_error(
+            "The torrent identity safety limit for this app session has been reached. Restart the app before adding more torrents."
+        );
+    }
+
+    auto token = std::make_unique<TorrentIdentityToken>();
     auto identity = std::make_unique<TorrentIdentity>();
     identity->generation = next_identity_generation++;
+    token->generation = identity->generation;
     identity->canonical_id = canonical_id_in_use_locked(canonical_id)
         ? make_unique_canonical_torrent_id_locked()
         : std::move(canonical_id);
     if (!is_canonical_torrent_id(identity->canonical_id)) {
         identity->canonical_id = make_unique_canonical_torrent_id_locked();
     }
-    TorrentIdentity *raw = identity.get();
-    torrent_identities.push_back(std::move(identity));
+    TorrentIdentity *const raw = identity.get();
+    TorrentIdentityToken *const raw_token = token.get();
+    identity->token = raw_token;
+    raw_token->active_identity.store(raw, std::memory_order_release);
+    identity_tokens.push_back(std::move(token));
+    try {
+        torrent_identities.push_back(std::move(identity));
+    } catch (...) {
+        identity_tokens.pop_back();
+        throw;
+    }
     return raw;
 }
 
@@ -315,8 +334,30 @@ TorrentIdentity *TTorrentClient::attach_identity(lt::add_torrent_params &params,
     copy_string(std::span{comment}, params.comment);
     identity->comment = comment.data();
     identity->creation_date = std::max<std::time_t>(params.creation_date, 0);
-    params.userdata = identity;
+    params.userdata = identity->token;
     return identity;
+}
+
+BridgeResult TTorrentClient::ensure_torrent_admission_available(int32_t code) const
+{
+    std::size_t tracked_count = 0;
+    std::size_t identity_token_count = 0;
+    {
+        std::scoped_lock io_guard(resume_io_lock);
+        tracked_count = torrent_identities.size();
+        identity_token_count = identity_tokens.size();
+    }
+    std::size_t const session_count = session.get_torrents().size();
+    if (!torrent_count_allows_admission(std::max(tracked_count, session_count))) {
+        return bridge_error(code, "The torrent limit has been reached.");
+    }
+    if (!torrent_identity_token_count_allows_admission(identity_token_count)) {
+        return bridge_error(
+            code,
+            "The torrent identity safety limit for this app session has been reached. Restart the app before adding more torrents."
+        );
+    }
+    return {};
 }
 
 std::uint64_t TTorrentClient::allocate_resume_generation_locked(TorrentIdentity *identity)

@@ -43,8 +43,26 @@ void TTorrentClient::retire_identity_if_unreferenced_locked(TorrentIdentity *ide
     lsd_disabled_by_app.erase(identity);
     peer_exchange_disabled_by_app.erase(identity);
     metadata_validation_pending.erase(identity);
-    retired_torrent_identities.push_back(std::move(*existing));
+    retiring_torrent_identities.push_back(std::move(*existing));
+    if (identity->token != nullptr) {
+        identity->token->active_identity.store(nullptr, std::memory_order_release);
+    }
     torrent_identities.erase(existing);
+}
+
+void TTorrentClient::reclaim_retired_identities() noexcept
+{
+    try {
+        if (identity_reclamation_blockers.load(std::memory_order_acquire) != 0U) {
+            return;
+        }
+        std::scoped_lock io_guard(resume_io_lock);
+        if (identity_reclamation_blockers.load(std::memory_order_acquire) == 0U) {
+            retiring_torrent_identities.clear();
+        }
+    } catch (...) {
+        ignore_shutdown_failure();
+    }
 }
 
 ResumePolicySnapshot TTorrentClient::resume_policy_snapshot_locked(TorrentIdentity *identity) const

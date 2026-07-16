@@ -1123,6 +1123,10 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         if (!persistence) {
             return persistence;
         }
+        BridgeResult const admission = client->ensure_torrent_admission_available(3);
+        if (!admission) {
+            return admission;
+        }
         lt::error_code parse_error;
         lt::add_torrent_params params = lt::parse_magnet_uri(std::string(magnet), parse_error);
         if (parse_error) {
@@ -1421,6 +1425,10 @@ int32_t add_torrent_file_data_with_priorities(
             client->ensure_persistence_available(2);
         if (!persistence) {
             return persistence;
+        }
+        BridgeResult const admission = client->ensure_torrent_admission_available(2);
+        if (!admission) {
+            return admission;
         }
         bool const allows_non_https_trackers = bridge_bool(add_options.allow_non_https_trackers);
         bool const allows_non_https_web_seeds = bridge_bool(add_options.allow_non_https_web_seeds);

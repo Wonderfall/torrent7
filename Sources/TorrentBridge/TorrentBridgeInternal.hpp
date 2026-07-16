@@ -26,6 +26,7 @@
 #include <arpa/inet.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <cctype>
 #include <chrono>
@@ -103,6 +104,11 @@ constexpr std::array<unsigned char, 3> kUTF8ReplacementCharacter{0xefU, 0xbfU, 0
 constexpr auto kAlertWaitInterval = std::chrono::milliseconds(250);
 constexpr auto kSnapshotUpdateInterval = std::chrono::milliseconds(500);
 constexpr std::size_t kMaxPendingAlertErrors = 16U;
+// Userdata tokens cannot be reused safely because late libtorrent alerts may
+// still contain them. Bound their session-lifetime footprint while allowing
+// several complete replacements of the maximum live torrent set.
+constexpr std::size_t kMaxTorrentIdentityTokenCount =
+    4U * static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT);
 constexpr auto kPeriodicResumeSaveInterval = std::chrono::minutes(2);
 constexpr auto kResumeRetryInterval = std::chrono::seconds(30);
 constexpr auto kSnapshotStatusFlags = lt::torrent_handle::query_name
@@ -119,6 +125,7 @@ static_assert(TTORRENT_MAX_FILE_COUNT > 0);
 static_assert(TTORRENT_MAX_TRACKER_COUNT > 0);
 static_assert(TTORRENT_MAX_WEB_SEED_COUNT > 0);
 static_assert(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT > 0);
+static_assert(kMaxTorrentIdentityTokenCount > static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
 static_assert(TTORRENT_BRIDGE_ABI_VERSION == 30U);
 #if defined(TORRENT_USE_ASSERTS) && TORRENT_USE_ASSERTS
@@ -250,6 +257,21 @@ using ResumeIDListResult = std::expected<std::vector<std::string>, std::string>;
 using TombstoneIDResult = std::expected<std::set<std::string>, std::string>;
 using TorrentLoadResult = std::expected<lt::add_torrent_params, BridgeError>;
 
+[[nodiscard]] constexpr bool torrent_count_allows_admission(std::size_t count) noexcept
+{
+    return count < static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT);
+}
+
+[[nodiscard]] constexpr bool torrent_identity_token_count_allows_admission(std::size_t count) noexcept
+{
+    return count < kMaxTorrentIdentityTokenCount;
+}
+
+[[nodiscard]] constexpr bool resume_read_failure_is_definitively_invalid(FileReadFailure failure) noexcept
+{
+    return failure == FileReadFailure::empty || failure == FileReadFailure::too_large;
+}
+
 struct TombstoneCommitStatus {
     bool directory_synced = true;
 };
@@ -286,7 +308,20 @@ struct PendingResumeRequest {
     lt::resume_data_flags_t flags = kRoutineResumeSaveFlags;
 };
 
+struct TorrentIdentity;
+
+// Libtorrent may retain userdata after the app has stopped considering a
+// torrent active. Keep only this compact token alive for the session lifetime;
+// the heavyweight identity it resolves to can be reclaimed safely.
+struct TorrentIdentityToken {
+    std::uint64_t generation = 0;
+    std::atomic<TorrentIdentity *> active_identity = nullptr;
+};
+
+static_assert(sizeof(TorrentIdentityToken) <= 2U * sizeof(std::uintptr_t));
+
 struct TorrentIdentity {
+    TorrentIdentityToken *token = nullptr;
     std::uint64_t generation = 0;
     std::string canonical_id;
     std::string comment;
@@ -1020,8 +1055,10 @@ struct TTorrentClient {
     mutable std::mutex resume_io_lock;
     std::mutex resume_capture_lock;
     std::uint64_t next_identity_generation = 1;
+    std::vector<std::unique_ptr<TorrentIdentityToken>> identity_tokens;
     std::vector<std::unique_ptr<TorrentIdentity>> torrent_identities;
-    std::vector<std::unique_ptr<TorrentIdentity>> retired_torrent_identities;
+    std::vector<std::unique_ptr<TorrentIdentity>> retiring_torrent_identities;
+    std::atomic<std::size_t> identity_reclamation_blockers = 0;
     std::unordered_map<std::string, TorrentIdentity *> active_identity_by_id;
     std::unordered_map<std::string, TorrentIdentity *> removing_identity_by_id;
     std::unordered_map<std::string, lt::torrent_handle> handle_by_id;
@@ -1110,6 +1147,8 @@ struct TTorrentClient {
     TorrentIdentity *make_identity(std::string canonical_id = {});
 
     TorrentIdentity *attach_identity(lt::add_torrent_params &params, std::string canonical_id = {});
+
+    [[nodiscard]] BridgeResult ensure_torrent_admission_available(int32_t code) const;
 
     std::uint64_t allocate_resume_generation_locked(TorrentIdentity *identity);
 
@@ -1427,6 +1466,8 @@ struct TTorrentClient {
 
     void retire_identity_if_unreferenced_locked(TorrentIdentity *identity);
 
+    void reclaim_retired_identities() noexcept;
+
     TorrentIdentityState reconcile_identity_for_hashes_locked(std::vector<std::string> const &ids, TorrentIdentity *identity);
 
     TorrentIdentityState identity_state_for_status(std::vector<std::string> const &ids, TorrentIdentity *identity);
@@ -1569,6 +1610,30 @@ struct TTorrentClient {
     ResumeIDListResult tombstone_ids_overlapping(std::vector<std::string> const &ids);
 
     ResumeSaveResult clear_removal_tombstones(std::vector<std::string> const &ids);
+};
+
+class IdentityReclamationBlock final {
+public:
+    explicit IdentityReclamationBlock(TTorrentClient &client) noexcept
+        : client_(client)
+    {
+        client_.identity_reclamation_blockers.fetch_add(1U, std::memory_order_acq_rel);
+    }
+
+    ~IdentityReclamationBlock() noexcept
+    {
+        if (client_.identity_reclamation_blockers.fetch_sub(1U, std::memory_order_acq_rel) == 1U) {
+            client_.reclaim_retired_identities();
+        }
+    }
+
+    IdentityReclamationBlock(IdentityReclamationBlock const &) = delete;
+    IdentityReclamationBlock &operator=(IdentityReclamationBlock const &) = delete;
+    IdentityReclamationBlock(IdentityReclamationBlock &&) = delete;
+    IdentityReclamationBlock &operator=(IdentityReclamationBlock &&) = delete;
+
+private:
+    TTorrentClient &client_;
 };
 
 [[nodiscard]] DirtyMask block_network_locked(TTorrentClient &client);

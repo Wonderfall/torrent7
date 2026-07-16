@@ -610,6 +610,7 @@ ResumeDataReport TTorrentClient::collect_resume_data_report(
 
 void TTorrentClient::save_all()
 {
+    [[maybe_unused]] IdentityReclamationBlock identity_reclamation_block(*this);
     if (persistence_is_faulted()) {
         return;
     }
@@ -632,6 +633,9 @@ void TTorrentClient::save_all()
 
 BridgeResult TTorrentClient::save_all_checked()
 {
+    // The checked save intentionally releases the client lock around native and
+    // filesystem work. Pin any identity pointers captured during that window.
+    [[maybe_unused]] IdentityReclamationBlock identity_reclamation_block(*this);
     {
         std::scoped_lock guard(lock);
         BridgeResult const persistence = ensure_persistence_available(3);

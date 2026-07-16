@@ -1188,7 +1188,10 @@ void copy_primary_hash_key(std::span<char> destination, lt::info_hash_t const &h
 TorrentIdentity *identity_from_client_data(lt::client_data_t const &userdata) noexcept
 {
     try {
-        return userdata.get<TorrentIdentity>();
+        auto *const token = userdata.get<TorrentIdentityToken>();
+        return token == nullptr
+            ? nullptr
+            : token->active_identity.load(std::memory_order_acquire);
     } catch (...) {
         return nullptr;
     }

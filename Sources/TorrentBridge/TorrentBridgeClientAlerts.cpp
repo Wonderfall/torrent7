@@ -61,6 +61,8 @@ void TTorrentClient::complete_async_resume_write(
 
 void TTorrentClient::pump_alerts()
 {
+    // Alert batches carry direct identity pointers beyond the client lock.
+    [[maybe_unused]] IdentityReclamationBlock identity_reclamation_block(*this);
     std::vector<PendingResumeWrite> resume_data;
     std::vector<PendingResumeHandle> forced_resume_handles;
     std::vector<PendingResumeRequest> repeat_resume_requests;

@@ -328,6 +328,31 @@ TEST_CASE("TTorrentClient startup completes durable tombstoned resume cleanup")
     CHECK_FALSE(file_exists(tombstone_path));
 }
 
+TEST_CASE("TTorrentClient startup preserves unreadable resume entries but removes definitively invalid ones")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    fs::path const state_directory = temporary_directory.path() / "State";
+    fs::path const resume_directory = state_directory / "ResumeData";
+    REQUIRE(fs::create_directories(resume_directory));
+
+    fs::path const target = temporary_directory.path() / "resume-target";
+    bridge_tests::write_text_file(target, "not resume data");
+    fs::path const unreadable_resume =
+        resume_directory / (bridge_tests::v1_id('7') + std::string(kResumeExtension));
+    fs::path const empty_resume =
+        resume_directory / (bridge_tests::v1_id('8') + std::string(kResumeExtension));
+    std::error_code symlink_error;
+    fs::create_symlink(target, unreadable_resume, symlink_error);
+    REQUIRE_FALSE(symlink_error);
+    bridge_tests::write_text_file(empty_resume, "");
+
+    TTorrentClient client(state_directory.string());
+    client.set_session_shutdown_asynchronous(false);
+
+    CHECK(fs::is_symlink(fs::symlink_status(unreadable_resume)));
+    CHECK_FALSE(file_exists(empty_resume));
+}
+
 TEST_CASE("TTorrentClient startup reports abandoned payload deletion tombstones")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
@@ -366,6 +391,113 @@ TEST_CASE("pending resume cleanup groups are normalized and deduplicated")
     std::vector<std::vector<std::string>> const groups = client.pending_resume_cleanup_id_groups();
     REQUIRE(groups.size() == 1U);
     CHECK(groups.front() == std::vector<std::string>{first, second});
+}
+
+TEST_CASE("retired torrent identities release active state behind stable userdata tokens")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+    client.stop_alert_worker();
+
+    TorrentIdentity *identity = client.make_identity(bridge_tests::canonical_id('9'));
+    REQUIRE(identity != nullptr);
+    REQUIRE(identity->token != nullptr);
+    TorrentIdentityToken *const token = identity->token;
+    lt::client_data_t const userdata(token);
+    identity->source_trackers.emplace_back("https://tracker.example/announce");
+    identity->source_web_seeds.emplace_back("https://seed.example/file");
+    identity->intended_file_priorities.resize(1'000U, lt::default_priority);
+    CHECK(identity_from_client_data(userdata) == identity);
+
+    {
+        std::scoped_lock io_guard(client.resume_io_lock);
+        client.retire_identity_if_unreferenced_locked(identity);
+    }
+
+    CHECK(client.torrent_identities.empty());
+    CHECK(client.retiring_torrent_identities.size() == 1U);
+    CHECK(identity_from_client_data(userdata) == nullptr);
+    {
+        [[maybe_unused]] IdentityReclamationBlock reclamation_block(client);
+        client.reclaim_retired_identities();
+        CHECK(client.retiring_torrent_identities.size() == 1U);
+    }
+    CHECK(client.retiring_torrent_identities.empty());
+    CHECK(client.identity_tokens.size() == 1U);
+    CHECK(token->active_identity.load(std::memory_order_acquire) == nullptr);
+}
+
+TEST_CASE("torrent identity creation enforces the snapshot admission limit")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    fs::path const state_directory = temporary_directory.path() / "State";
+    TTorrentClient client(state_directory.string());
+    client.set_session_shutdown_asynchronous(false);
+    client.stop_alert_worker();
+
+    client.torrent_identities.reserve(static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
+    for (int32_t index = 0; index < TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT; ++index) {
+        client.torrent_identities.push_back(std::make_unique<TorrentIdentity>());
+    }
+
+    BridgeResult const admission = client.ensure_torrent_admission_available(7);
+    REQUIRE_FALSE(admission);
+    CHECK(admission.error().code == 7);
+    CHECK(admission.error().message == "The torrent limit has been reached.");
+    CHECK_THROWS_AS(static_cast<void>(client.make_identity()), std::length_error);
+
+    fs::path const preserved_resume =
+        client.resume_directory / (bridge_tests::v1_id('a') + std::string(kResumeExtension));
+    bridge_tests::write_text_file(preserved_resume, "preserve at capacity");
+    client.load_resume_data();
+    CHECK(file_exists(preserved_resume));
+    std::array<char, 512> error{};
+    REQUIRE(client.take_alert_error(std::span{error}));
+    CHECK(bridge_tests::string_from_c_buffer(std::span{error})
+          == "Resume restore stopped: The torrent limit has been reached. Remaining resume data was preserved.");
+    DirtyMask changes = 0;
+    static_cast<void>(client.take_changes(&changes));
+    CHECK((changes & TTORRENT_DIRTY_ERRORS) != 0U);
+    client.torrent_identities.clear();
+}
+
+TEST_CASE("session lifetime identity token budget bounds add and remove churn")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+    client.stop_alert_worker();
+
+    std::string const reusable_id = bridge_tests::canonical_id('b');
+    for (std::size_t index = 0; index < kMaxTorrentIdentityTokenCount; ++index) {
+        TorrentIdentity *identity = client.make_identity(reusable_id);
+        {
+            std::scoped_lock io_guard(client.resume_io_lock);
+            client.retire_identity_if_unreferenced_locked(identity);
+        }
+        client.reclaim_retired_identities();
+    }
+
+    CHECK(client.torrent_identities.empty());
+    CHECK(client.retiring_torrent_identities.empty());
+    CHECK(client.identity_tokens.size() == kMaxTorrentIdentityTokenCount);
+    BridgeResult const admission = client.ensure_torrent_admission_available(8);
+    REQUIRE_FALSE(admission);
+    CHECK(admission.error().code == 8);
+    CHECK(admission.error().message
+          == "The torrent identity safety limit for this app session has been reached. Restart the app before adding more torrents.");
+    CHECK_THROWS_AS(static_cast<void>(client.make_identity(reusable_id)), std::length_error);
+
+    fs::path const preserved_resume =
+        client.resume_directory / (bridge_tests::v1_id('b') + std::string(kResumeExtension));
+    bridge_tests::write_text_file(preserved_resume, "preserve after churn");
+    client.load_resume_data();
+    CHECK(file_exists(preserved_resume));
+    std::array<char, 512> error{};
+    REQUIRE(client.take_alert_error(std::span{error}));
+    CHECK(bridge_tests::string_from_c_buffer(std::span{error})
+          == "Resume restore stopped: The torrent identity safety limit for this app session has been reached. Restart the app before adding more torrents. Remaining resume data was preserved.");
 }
 
 TEST_CASE("coalesced async resume saves preserve policy save flags")
