@@ -26,6 +26,11 @@ typeset -r contents_dir="$app_dir/Contents"
 typeset -r macos_dir="$contents_dir/MacOS"
 typeset -r resources_dir="$contents_dir/Resources"
 typeset -r executable="$macos_dir/Torrent 7"
+typeset -r xpc_services_dir="$contents_dir/XPCServices"
+typeset -r engine_service_dir="$xpc_services_dir/app.torrent7.engine.xpc"
+typeset -r engine_service_contents_dir="$engine_service_dir/Contents"
+typeset -r engine_service_macos_dir="$engine_service_contents_dir/MacOS"
+typeset -r engine_service_executable="$engine_service_macos_dir/TorrentEngineService"
 typeset -r app_icon="$root_dir/Packaging/AppIcon.icon"
 typeset -r document_icon="$root_dir/Packaging/Torrent7Document.icns"
 typeset -r third_party_notices="$root_dir/Packaging/ThirdPartyNotices.txt"
@@ -33,12 +38,25 @@ typeset -r app_icon_info_plist="$app_output_dir/AppIconInfo.plist"
 typeset -r sign_identity=${SIGN_IDENTITY:--}
 typeset -r sign_options="runtime,restrict,library"
 typeset -r app_entitlements="$root_dir/Packaging/Torrent7.entitlements"
+typeset -r engine_service_entitlements="$root_dir/Packaging/Torrent7Engine.entitlements"
+typeset -r engine_service_info_plist="$root_dir/Packaging/TorrentEngineService-Info.plist"
 typeset -r expected_team_id=${EXPECTED_TEAM_ID:-}
 typeset -a timestamp_flag=(--timestamp=none)
 
 fail() {
     print -ru2 -- "$1"
     exit 1
+}
+
+valid_team_identifier() {
+    local -r value=$1
+    [[ ${#value} == 10 && $value != *[^A-Z0-9]* ]]
+}
+
+code_signing_team_identifier() {
+    local -r bundle=$1
+    /usr/bin/codesign --display --verbose=4 "$bundle" 2>&1 \
+        | /usr/bin/sed -n 's/^TeamIdentifier=//p'
 }
 
 [[ $app_output_dir == /* ]] || fail "APP_OUTPUT_DIR must be an absolute path"
@@ -85,24 +103,51 @@ fi
 typeset -a swift_build_args=(
     --configuration "$configuration"
     --triple arm64e-apple-macosx26.0
-    --product Torrent7
 )
 if [[ $enable_diagnostics == "1" ]]; then
     swift_build_args+=(--sanitize address --sanitize undefined)
 fi
 
-/usr/bin/swift build --scratch-path "$swift_build_dir" "${swift_build_args[@]}"
+/usr/bin/swift build \
+    --scratch-path "$swift_build_dir" \
+    "${swift_build_args[@]}" \
+    --product Torrent7
+/usr/bin/swift build \
+    --scratch-path "$swift_build_dir" \
+    "${swift_build_args[@]}" \
+    --product TorrentEngineService
 
 rm -rf -- "$app_dir"
-mkdir -p -- "$macos_dir" "$resources_dir"
+mkdir -p -- "$macos_dir" "$resources_dir" "$engine_service_macos_dir"
 
 cp "$swift_build_dir/arm64e-apple-macosx/$configuration/Torrent7" "$executable"
+cp \
+    "$swift_build_dir/arm64e-apple-macosx/$configuration/TorrentEngineService" \
+    "$engine_service_executable"
 cp "$root_dir/Packaging/Info.plist" "$contents_dir/Info.plist"
+cp "$engine_service_info_plist" "$engine_service_contents_dir/Info.plist"
+if [[ $sign_identity == "-" ]]; then
+    /usr/libexec/PlistBuddy \
+        -c "Add :Torrent7AllowAdHocXPCPeer bool true" \
+        "$contents_dir/Info.plist"
+    /usr/libexec/PlistBuddy \
+        -c "Add :Torrent7AllowAdHocXPCPeer bool true" \
+        "$engine_service_contents_dir/Info.plist"
+fi
 if [[ $enable_diagnostics == "1" ]]; then
     /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier app.torrent7.debug" "$contents_dir/Info.plist"
     /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Torrent 7 (debug)" "$contents_dir/Info.plist"
     /usr/libexec/PlistBuddy -c "Set :CFBundleName Torrent 7 (debug)" "$contents_dir/Info.plist"
     /usr/libexec/PlistBuddy -c "Set :CFBundleURLTypes:0:CFBundleURLName app.torrent7.debug.magnet" "$contents_dir/Info.plist"
+    /usr/libexec/PlistBuddy \
+        -c "Set :CFBundleIdentifier app.torrent7.debug.engine" \
+        "$engine_service_contents_dir/Info.plist"
+    /usr/libexec/PlistBuddy \
+        -c "Set :CFBundleDisplayName Torrent 7 Engine (debug)" \
+        "$engine_service_contents_dir/Info.plist"
+    /usr/libexec/PlistBuddy \
+        -c "Set :CFBundleName Torrent 7 Engine (debug)" \
+        "$engine_service_contents_dir/Info.plist"
 fi
 cp "$document_icon" "$resources_dir/Torrent7Document.icns"
 cp "$third_party_notices" "$resources_dir/ThirdPartyNotices.txt"
@@ -122,11 +167,33 @@ rm -f -- "$app_icon_info_plist"
     --force \
     --sign "$sign_identity" \
     --options "$sign_options" \
+    --entitlements "$engine_service_entitlements" \
+    "${timestamp_flag[@]}" \
+    "$engine_service_dir"
+
+/usr/bin/codesign \
+    --force \
+    --sign "$sign_identity" \
+    --options "$sign_options" \
     --entitlements "$app_entitlements" \
     "${timestamp_flag[@]}" \
     "$app_dir"
 
+/usr/bin/codesign --verify --strict --verbose=2 "$engine_service_dir"
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$app_dir"
+
+if [[ $sign_identity != "-" ]]; then
+    typeset -r signed_app_team_id=$(code_signing_team_identifier "$app_dir")
+    typeset -r signed_engine_team_id=$(
+        code_signing_team_identifier "$engine_service_dir"
+    )
+    valid_team_identifier "$signed_app_team_id" \
+        || fail "Identified app signature has a missing or invalid TeamIdentifier"
+    valid_team_identifier "$signed_engine_team_id" \
+        || fail "Identified engine signature has a missing or invalid TeamIdentifier"
+    [[ $signed_app_team_id == "$signed_engine_team_id" ]] \
+        || fail "App and engine service TeamIdentifiers do not match"
+fi
 
 if [[ $signing_mode == "distribution" ]]; then
     "$root_dir/Scripts/verify-app.zsh" \
