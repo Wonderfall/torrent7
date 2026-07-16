@@ -9,6 +9,7 @@ readonly -a LIBTORRENT_PATCHES=(
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.0-xcode-26.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.0-network-security.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.0-storage-confinement.patch"
+    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.0-tracker-endpoint-security.patch"
 )
 
 fail() {

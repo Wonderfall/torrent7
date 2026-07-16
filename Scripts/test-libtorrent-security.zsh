@@ -63,6 +63,24 @@ restore_configuration=0
         "$source_dir/test/test_enum_net.cpp.nat64_prefix_discovery"
     ./test_enum_net --no-redirect \
         "$source_dir/test/test_enum_net.cpp.nat64_discovery_fails_closed_on_malformed_answers"
+    ./test_tracker_manager --no-redirect \
+        "$source_dir/test/test_tracker_manager.cpp.http_tracker_blocks_non_global_resolved_endpoint"
+    ./test_tracker_manager --no-redirect \
+        "$source_dir/test/test_tracker_manager.cpp.http_tracker_mixed_dns_uses_only_global_endpoint"
+    ./test_tracker_manager --no-redirect \
+        "$source_dir/test/test_tracker_manager.cpp.plaintext_http_proxy_tracker_fails_closed"
+    ./test_tracker_manager --no-redirect \
+        "$source_dir/test/test_tracker_manager.cpp.udp_tracker_forces_local_dns_and_blocks_non_global_endpoint"
+    ./test_tracker_manager --no-redirect \
+        "$source_dir/test/test_tracker_manager.cpp.udp_tracker_mixed_dns_uses_only_global_endpoint"
+    ./test_tracker_manager --no-redirect \
+        "$source_dir/test/test_tracker_manager.cpp.http_tracker_blocks_private_network_specific_nat64_endpoint"
+    ./test_tracker_manager --no-redirect \
+        "$source_dir/test/test_tracker_manager.cpp.https_http_proxy_connect_uses_vetted_numeric_endpoint"
+    ./test_tracker_manager --no-redirect \
+        "$source_dir/test/test_tracker_manager.cpp.http_tracker_preflight_timer_stops_before_http_request"
+    ./test_tracker_manager --no-redirect \
+        "$source_dir/test/test_tracker_manager.cpp.nat64_preflight_is_bounded_by_tracker_operation_timeout"
     ./test_torrent --no-redirect \
         "$source_dir/test/test_torrent.cpp.non_global_discovery_peers_are_temporarily_blocked"
     ./test_tracker_list --no-redirect \
@@ -71,6 +89,8 @@ restore_configuration=0
         "$source_dir/test/test_tracker_manager.cpp.protocol_dispatch_is_case_insensitive"
     ./test_http_connection --no-redirect \
         "$source_dir/test/test_http_connection.cpp.no_proxy_ssl"
+    ./test_http_connection --no-redirect \
+        "$source_dir/test/test_http_connection.cpp.endpoint_filter_rechecks_redirect_target"
     ./test_http_parser --no-redirect \
         "$source_dir/test/test_http_parser.cpp.http_parser"
     ./test_web_seed_redirect --no-redirect \

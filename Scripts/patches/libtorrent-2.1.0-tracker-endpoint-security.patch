@@ -1,0 +1,1065 @@
+diff --git a/include/libtorrent/aux_/http_tracker_connection.hpp b/include/libtorrent/aux_/http_tracker_connection.hpp
+index a27b3fd6b064596871e124a97d7fea0987246b92..49672b3a21647b1bd1888a9e55b1c6663faeec3c 100644
+--- a/include/libtorrent/aux_/http_tracker_connection.hpp
++++ b/include/libtorrent/aux_/http_tracker_connection.hpp
+@@ -17,6 +17,7 @@ see LICENSE file.
+ #include "libtorrent/config.hpp"
+ #include "libtorrent/peer_id.hpp"
+ #include "libtorrent/error_code.hpp"
++#include "libtorrent/aux_/ip_helpers.hpp"
+ #include "libtorrent/aux_/tracker_manager.hpp" // for tracker_connection
+ 
+ namespace libtorrent {
+@@ -53,6 +54,11 @@ namespace libtorrent::aux {
+ 				tracker_connection::shared_from_this());
+ 		}
+ 
++		void start_request();
++		void on_nat64_name_lookup(error_code const& error
++			, std::vector<address> const& addresses);
++		void cancel_preflight_timeout();
++		void on_preflight_timeout(error_code const& error);
+ 		void on_filter(aux::http_connection& c, std::vector<tcp::endpoint>& endpoints);
+ 		bool on_filter_hostname(aux::http_connection& c, string_view hostname);
+ 		void on_connect(aux::http_connection& c);
+@@ -62,8 +68,11 @@ namespace libtorrent::aux {
+ 		void on_timeout(error_code const&) override {}
+ 
+ 		std::shared_ptr<aux::http_connection> m_tracker_connection;
++		nat64_discovery_result m_nat64_discovery;
+ 		address m_tracker_ip;
++		deadline_timer m_preflight_timer;
+ 		io_context& m_ioc;
++		bool m_preflight_pending = false;
+ 	};
+ 
+ 	TORRENT_EXTRA_EXPORT tracker_response parse_tracker_response(
+diff --git a/include/libtorrent/aux_/ip_helpers.hpp b/include/libtorrent/aux_/ip_helpers.hpp
+index 682141eaccf621012c00699dd13adea8ed19e4e9..9f061c7102a0f92d136b5104b7cb897d082e1ff5 100644
+--- a/include/libtorrent/aux_/ip_helpers.hpp
++++ b/include/libtorrent/aux_/ip_helpers.hpp
+@@ -37,6 +37,11 @@ namespace aux {
+ 	TORRENT_EXTRA_EXPORT bool is_global(address const& a);
+ 	TORRENT_EXTRA_EXPORT bool is_global(address const& a
+ 		, span<nat64_prefix const> prefixes);
++	// IPv4 endpoints do not depend on DNS64 discovery. IPv6 endpoints fail
++	// closed unless the RFC 7050 result is valid, so a network-specific NAT64
++	// prefix cannot disguise a non-global embedded IPv4 destination.
++	TORRENT_EXTRA_EXPORT bool is_global(address const& a
++		, nat64_discovery_result const& discovery);
+ 	TORRENT_EXTRA_EXPORT nat64_discovery_result discover_nat64_prefixes(
+ 		span<address const> addresses);
+ 	TORRENT_EXTRA_EXPORT bool is_local(address const& a);
+diff --git a/include/libtorrent/aux_/udp_tracker_connection.hpp b/include/libtorrent/aux_/udp_tracker_connection.hpp
+index 4b1476845dce440c71a9b0074f09060f0dcb31b8..639fc0665d16c6c50c334c080e8f8a9deabdcf23 100644
+--- a/include/libtorrent/aux_/udp_tracker_connection.hpp
++++ b/include/libtorrent/aux_/udp_tracker_connection.hpp
+@@ -20,6 +20,7 @@ see LICENSE file.
+ #include <map>
+ 
+ #include "libtorrent/aux_/udp_socket.hpp"
++#include "libtorrent/aux_/ip_helpers.hpp"
+ #include "libtorrent/aux_/tracker_manager.hpp"
+ #include "libtorrent/config.hpp"
+ #include "libtorrent/span.hpp"
+@@ -61,6 +62,9 @@ namespace libtorrent::aux {
+ 
+ 		void update_transaction_id();
+ 
++		void start_request();
++		void on_nat64_name_lookup(error_code const& error
++			, std::vector<address> const& addresses);
+ 		void name_lookup(error_code const& error
+ 			, std::vector<address> const& addresses, int port);
+ 		void start_announce();
+@@ -85,6 +89,7 @@ namespace libtorrent::aux {
+ 		void on_timeout(error_code const& ec) override;
+ 
+ 		std::string m_hostname;
++		nat64_discovery_result m_nat64_discovery;
+ 		std::vector<tcp::endpoint> m_endpoints;
+ 
+ 		struct connection_cache_entry
+@@ -103,6 +108,7 @@ namespace libtorrent::aux {
+ 
+ 		action_t m_state;
+ 
++		bool m_endpoint_policy_lookup = false;
+ 		bool m_abort;
+ 	};
+ 
+diff --git a/src/http_tracker_connection.cpp b/src/http_tracker_connection.cpp
+index 004bd4198aecb4751f5ca5157c8c0498a9743b40..4d83c0e01995fa248390cb4ea4cfb4615c17d67b 100644
+--- a/src/http_tracker_connection.cpp
++++ b/src/http_tracker_connection.cpp
+@@ -57,10 +57,118 @@ namespace libtorrent::aux {
+ 		, tracker_request req
+ 		, std::weak_ptr<request_callback> c)
+ 		: tracker_connection(man, std::move(req), ios, std::move(c))
++		, m_preflight_timer(ios)
+ 		, m_ioc(ios)
+ 	{}
+ 
+ 	void http_tracker_connection::start()
++	{
++		aux::session_settings const& settings = m_man.settings();
++		if (!settings.get_bool(settings_pack::ssrf_mitigation))
++		{
++			start_request();
++			return;
++		}
++
++		std::string protocol;
++		std::string hostname;
++		error_code ec;
++		std::tie(protocol, std::ignore, hostname, std::ignore, std::ignore)
++			= parse_url_components(tracker_req().url, ec);
++		if (ec)
++		{
++			fail(ec, operation_t::parse_address);
++			return;
++		}
++
++#if TORRENT_USE_I2P
++		if (is_i2p_url(tracker_req().url))
++		{
++			start_request();
++			return;
++		}
++#endif
++
++		aux::proxy_settings const ps(settings);
++		if (string_equal_no_case(protocol, "http") && ps.proxy_tracker_connections
++			&& (ps.type == settings_pack::http
++				|| ps.type == settings_pack::http_pw))
++		{
++			// A plaintext HTTP proxy resolves the absolute-form request target
++			// independently. The http_connection API cannot pin that target to a
++			// locally vetted address, so reject this configuration rather than
++			// allowing a proxy-side DNS rebinding or private-network request.
++			fail(errors::ssrf_mitigation, operation_t::bittorrent);
++			return;
++		}
++
++		address const literal = make_address(hostname, ec);
++		if (!ec && literal.is_v4())
++		{
++			start_request();
++			return;
++		}
++
++		int const timeout = tracker_req().event == event_t::stopped
++			? settings.get_int(settings_pack::stop_tracker_timeout)
++			: settings.get_int(settings_pack::tracker_completion_timeout);
++		m_preflight_pending = true;
++		m_preflight_timer.expires_after(seconds(timeout));
++		ADD_OUTSTANDING_ASYNC("http_tracker_connection::preflight_timeout");
++		m_preflight_timer.async_wait(std::bind(
++			&http_tracker_connection::on_preflight_timeout
++			, shared_from_this(), std::placeholders::_1));
++
++		ADD_OUTSTANDING_ASYNC("http_tracker_connection::nat64_name_lookup");
++		m_man.host_resolver().async_resolve("ipv4only.arpa"
++			, (tracker_req().event == event_t::stopped
++				? aux::resolver_interface::cache_only : aux::resolver_flags{})
++				| aux::resolver_interface::abort_on_shutdown
++			, std::bind(&http_tracker_connection::on_nat64_name_lookup
++				, shared_from_this(), std::placeholders::_1, std::placeholders::_2));
++	}
++
++	void http_tracker_connection::on_nat64_name_lookup(error_code const& error
++		, std::vector<address> const& addresses)
++	{
++		COMPLETE_ASYNC("http_tracker_connection::nat64_name_lookup");
++		if (cancelled()) return;
++		cancel_preflight_timeout();
++		if (error == boost::asio::error::operation_aborted)
++		{
++			fail(error, operation_t::hostname_lookup);
++			return;
++		}
++
++		m_nat64_discovery = error
++			? nat64_discovery_result{}
++			: discover_nat64_prefixes(addresses);
++		start_request();
++	}
++
++	void http_tracker_connection::cancel_preflight_timeout()
++	{
++		if (!m_preflight_pending) return;
++		m_preflight_pending = false;
++		m_preflight_timer.cancel();
++	}
++
++	void http_tracker_connection::on_preflight_timeout(error_code const& error)
++	{
++		COMPLETE_ASYNC("http_tracker_connection::preflight_timeout");
++		if (error == boost::asio::error::operation_aborted
++			|| !m_preflight_pending || cancelled())
++			return;
++
++		m_preflight_pending = false;
++		tracker_connection::fail(error
++			? error : error_code(errors::timed_out), operation_t::timer);
++		// Release the manager slot immediately. A stalled resolver still owns a
++		// callback reference, but its eventual completion observes cancelled().
++		close();
++	}
++
++	void http_tracker_connection::start_request()
+ 	{
+ 		std::string url = tracker_req().url;
+ 
+@@ -248,6 +356,14 @@ namespace libtorrent::aux {
+ 		// are that we're shutting down, and this should be a best-effort
+ 		// attempt. It's not worth stalling shutdown.
+ 		aux::proxy_settings ps(settings);
++		if (settings.get_bool(settings_pack::ssrf_mitigation))
++		{
++			// Remote DNS and a hostname-form HTTP CONNECT would bypass
++			// on_filter(). Give every proxy only the selected, vetted numeric
++			// endpoint while retaining the original hostname for TLS SNI.
++			ps.proxy_hostnames = false;
++			ps.send_host_in_connect = false;
++		}
+ 		m_tracker_connection->get(url, seconds(timeout)
+ 			, ps.proxy_tracker_connections ? &ps : nullptr
+ 			, 5, user_agent, bi
+@@ -279,6 +395,7 @@ namespace libtorrent::aux {
+ 
+ 	void http_tracker_connection::close()
+ 	{
++		cancel_preflight_timeout();
+ 		if (m_tracker_connection)
+ 		{
+ 			m_tracker_connection->close();
+@@ -292,9 +409,26 @@ namespace libtorrent::aux {
+ 	void http_tracker_connection::on_filter(aux::http_connection& c
+ 		, std::vector<tcp::endpoint>& endpoints)
+ 	{
+-		// filter all endpoints we cannot reach from this listen socket, which may
+-		// be all of them, in which case we should not announce this listen socket
+-		// to this tracker
++		aux::session_settings const& settings = m_man.settings();
++		bool const ssrf_mitigation = settings.get_bool(settings_pack::ssrf_mitigation);
++		if (ssrf_mitigation)
++		{
++			endpoints.erase(std::remove_if(endpoints.begin(), endpoints.end()
++				, [this](tcp::endpoint const& endpoint)
++				{
++					return !is_global(endpoint.address(), m_nat64_discovery);
++				}), endpoints.end());
++
++			if (endpoints.empty())
++			{
++				fail(errors::ssrf_mitigation, operation_t::bittorrent);
++				return;
++			}
++		}
++
++		// Apply reachability only after the security classification. Otherwise a
++		// private address from the other family is misreported as an unavailable
++		// interface instead of an SSRF attempt.
+ 		auto const ls = bind_socket();
+ 		if (ls.get() != nullptr)
+ 		{
+@@ -309,46 +443,6 @@ namespace libtorrent::aux {
+ 			return;
+ 		}
+ 
+-		aux::session_settings const& settings = m_man.settings();
+-		bool const ssrf_mitigation = settings.get_bool(settings_pack::ssrf_mitigation);
+-		if (ssrf_mitigation && std::find_if(endpoints.begin(), endpoints.end()
+-			, [](tcp::endpoint const& ep) { return ep.address().is_loopback(); }) != endpoints.end())
+-		{
+-			// there is at least one loopback address in here. If the request
+-			// path for this tracker is not /announce. filter all loopback
+-			// addresses.
+-			std::string path;
+-
+-			error_code ec;
+-			std::tie(std::ignore, std::ignore, std::ignore, std::ignore, path)
+-				= parse_url_components(c.url(), ec);
+-			if (ec)
+-			{
+-				fail(ec, operation_t::parse_address);
+-				return;
+-			}
+-
+-			// this is mitigation for Server Side request forgery. Any tracker
+-			// announce to localhost need to look like a standard BitTorrent
+-			// announce
+-			if (path.substr(0, 9) != "/announce")
+-			{
+-				for (auto i = endpoints.begin(); i != endpoints.end();)
+-				{
+-					if (i->address().is_loopback())
+-						i = endpoints.erase(i);
+-					else
+-						++i;
+-				}
+-			}
+-
+-			if (endpoints.empty())
+-			{
+-				fail(errors::ssrf_mitigation, operation_t::bittorrent);
+-				return;
+-			}
+-		}
+-
+ 		TORRENT_UNUSED(c);
+ 		if (!tracker_req().filter) return;
+ 
+diff --git a/src/ip_helpers.cpp b/src/ip_helpers.cpp
+index 7a136540d9af7c9aa3138d62f7811bb9e0ef7166..8673121bf4724d940669d4f54a6f5e485093edfb 100644
+--- a/src/ip_helpers.cpp
++++ b/src/ip_helpers.cpp
+@@ -211,6 +211,12 @@ namespace aux {
+ 		return translated || is_global_v6(a.to_v6());
+ 	}
+ 
++	bool is_global(address const& a, nat64_discovery_result const& discovery)
++	{
++		if (a.is_v6() && !discovery.valid) return false;
++		return is_global(a, discovery.prefixes);
++	}
++
+ 	nat64_discovery_result discover_nat64_prefixes(
+ 		span<address const> const addresses)
+ 	{
+diff --git a/src/udp_tracker_connection.cpp b/src/udp_tracker_connection.cpp
+index c43781fe00fa87096ff8169ed0187b6591304074..2fafcd31423018367d37ea81eb54a001a3b12bb4 100644
+--- a/src/udp_tracker_connection.cpp
++++ b/src/udp_tracker_connection.cpp
+@@ -55,6 +55,64 @@ namespace libtorrent::aux {
+ 	}
+ 
+ 	void udp_tracker_connection::start()
++	{
++		aux::session_settings const& settings = m_man.settings();
++		set_timeout(tracker_req().event == event_t::stopped
++			? settings.get_int(settings_pack::stop_tracker_timeout)
++			: settings.get_int(settings_pack::tracker_completion_timeout)
++			, settings.get_int(settings_pack::tracker_receive_timeout));
++		if (!settings.get_bool(settings_pack::ssrf_mitigation))
++		{
++			start_request();
++			return;
++		}
++
++		std::string hostname;
++		error_code ec;
++		std::tie(std::ignore, std::ignore, hostname, std::ignore, std::ignore)
++			= parse_url_components(tracker_req().url, ec);
++		if (ec)
++		{
++			tracker_connection::fail(ec, operation_t::parse_address);
++			return;
++		}
++
++		address const literal = make_address(hostname, ec);
++		if (!ec && literal.is_v4())
++		{
++			start_request();
++			return;
++		}
++
++		m_endpoint_policy_lookup = true;
++		ADD_OUTSTANDING_ASYNC("udp_tracker_connection::nat64_name_lookup");
++		m_man.host_resolver().async_resolve("ipv4only.arpa"
++			, (tracker_req().event == event_t::stopped
++				? aux::resolver_interface::cache_only : aux::resolver_flags{})
++				| aux::resolver_interface::abort_on_shutdown
++			, std::bind(&udp_tracker_connection::on_nat64_name_lookup
++				, shared_from_this(), std::placeholders::_1, std::placeholders::_2));
++	}
++
++	void udp_tracker_connection::on_nat64_name_lookup(error_code const& error
++		, std::vector<address> const& addresses)
++	{
++		COMPLETE_ASYNC("udp_tracker_connection::nat64_name_lookup");
++		m_endpoint_policy_lookup = false;
++		if (cancelled()) return;
++		if (error == boost::asio::error::operation_aborted)
++		{
++			tracker_connection::fail(error, operation_t::hostname_lookup);
++			return;
++		}
++
++		m_nat64_discovery = error
++			? nat64_discovery_result{}
++			: discover_nat64_prefixes(addresses);
++		start_request();
++	}
++
++	void udp_tracker_connection::start_request()
+ 	{
+ 		// TODO: 2 support authentication here. tracker_req().auth
+ 		std::string hostname;
+@@ -76,7 +134,8 @@ namespace libtorrent::aux {
+ 
+ 		int const proxy_type = settings.get_int(settings_pack::proxy_type);
+ 
+-		if (settings.get_bool(settings_pack::proxy_hostnames)
++		if (!settings.get_bool(settings_pack::ssrf_mitigation)
++			&& settings.get_bool(settings_pack::proxy_hostnames)
+ 			&& (proxy_type == settings_pack::socks5
+ 				|| proxy_type == settings_pack::socks5_pw))
+ 		{
+@@ -104,10 +163,6 @@ namespace libtorrent::aux {
+ #endif
+ 		}
+ 
+-		set_timeout(tracker_req().event == event_t::stopped
+-			? settings.get_int(settings_pack::stop_tracker_timeout)
+-			: settings.get_int(settings_pack::tracker_completion_timeout)
+-			, settings.get_int(settings_pack::tracker_receive_timeout));
+ 	}
+ 
+ 	void udp_tracker_connection::fail(error_code const& ec, operation_t const op
+@@ -191,15 +246,24 @@ namespace libtorrent::aux {
+ 		// filter all endpoints we cannot reach from this listen socket, which may
+ 		// be all of them, in which case we should not announce this listen socket
+ 		// to this tracker
++		bool blocked_non_global = false;
+ 		for (auto const& addr : addresses)
+ 		{
++			if (m_man.settings().get_bool(settings_pack::ssrf_mitigation)
++				&& !is_global(addr, m_nat64_discovery))
++			{
++				blocked_non_global = true;
++				continue;
++			}
+ 			if (!listen_socket.can_route(addr)) continue;
+ 			m_endpoints.emplace_back(addr, std::uint16_t(port));
+ 		}
+ 
+ 		if (m_endpoints.empty())
+ 		{
+-			fail(lt::errors::announce_skipped, operation_t::hostname_lookup);
++			fail(blocked_non_global ? error_code(errors::ssrf_mitigation)
++				: error_code(lt::errors::announce_skipped)
++				, operation_t::hostname_lookup);
+ 			return;
+ 		}
+ 
+@@ -238,6 +302,13 @@ namespace libtorrent::aux {
+ 
+ 	void udp_tracker_connection::start_announce()
+ 	{
++		if (m_man.settings().get_bool(settings_pack::ssrf_mitigation)
++			&& !is_global(m_target.address(), m_nat64_discovery))
++		{
++			fail(error_code(errors::ssrf_mitigation), operation_t::bittorrent);
++			return;
++		}
++
+ 		std::unique_lock<std::mutex> l(m_cache_mutex);
+ 		auto const cc = m_connection_cache.find(m_target.address());
+ 		if (cc != m_connection_cache.end())
+@@ -262,6 +333,17 @@ namespace libtorrent::aux {
+ 
+ 	void udp_tracker_connection::on_timeout(error_code const& ec)
+ 	{
++		if (m_endpoint_policy_lookup)
++		{
++			m_endpoint_policy_lookup = false;
++			tracker_connection::fail(ec
++				? ec : error_code(errors::timed_out), operation_t::timer);
++			// Do not leave the tracker-manager entry waiting for a resolver that
++			// may never invoke its callback.
++			close();
++			return;
++		}
++
+ 		if (ec)
+ 		{
+ 			fail(ec, operation_t::timer);
+diff --git a/test/test_enum_net.cpp b/test/test_enum_net.cpp
+index 0315c8a55cc7e21257816537f44310176f4bfaed..51b15730b54e320f5a904aca29cd0a0c3c780cff 100644
+--- a/test/test_enum_net.cpp
++++ b/test/test_enum_net.cpp
+@@ -96,9 +96,9 @@ TORRENT_TEST(nat64_prefix_discovery)
+ 		TEST_EQUAL(discovery.prefixes.size(), 1);
+ 		if (discovery.prefixes.empty()) continue;
+ 		TEST_EQUAL(int(discovery.prefixes.front().length), test.length);
+-		TEST_CHECK(!is_global(make_address(test.private_target), discovery.prefixes));
+-		TEST_CHECK(is_global(make_address(test.global_target), discovery.prefixes));
+-		TEST_CHECK(is_global(make_address("2606:4700:4700::1111"), discovery.prefixes));
++		TEST_CHECK(!is_global(make_address(test.private_target), discovery));
++		TEST_CHECK(is_global(make_address(test.global_target), discovery));
++		TEST_CHECK(is_global(make_address("2606:4700:4700::1111"), discovery));
+ 	}
+ }
+ 
+@@ -120,6 +120,9 @@ TORRENT_TEST(nat64_discovery_fails_closed_on_malformed_answers)
+ 		make_address("192.0.0.170"), make_address("8.8.8.8")}};
+ 	discovery = discover_nat64_prefixes(unexpected_v4);
+ 	TEST_CHECK(!discovery.valid);
++	TEST_CHECK(!is_global(make_address("2606:4700:4700::1111"), discovery));
++	TEST_CHECK(is_global(make_address("8.8.8.8"), discovery));
++	TEST_CHECK(!is_global(make_address("10.0.0.1"), discovery));
+ 
+ 	std::array<address, 2> const mixed_v6 = {{
+ 		make_address("2001:4860:c000:aa::"),
+diff --git a/test/test_http_connection.cpp b/test/test_http_connection.cpp
+index 396d604f7e5605e098ceb0cb5a5dd0b043c4b6fd..343389e9ffb3d663c7422db472fa64f42e9438ed 100644
+--- a/test/test_http_connection.cpp
++++ b/test/test_http_connection.cpp
+@@ -257,3 +257,43 @@ TORRENT_TEST(no_keepalive)
+ {
+ 	run_suite("http", settings_pack::none, 0);
+ }
++
++TORRENT_TEST(endpoint_filter_rechecks_redirect_target)
++{
++	reset_globals();
++	int const port = start_web_server(false, false, true);
++
++#if TORRENT_USE_SSL
++	aux::ssl::context ssl_ctx(aux::ssl::context::sslv23_client);
++#endif
++	int filter_calls = 0;
++	bool blocked_redirect = false;
++	auto filter = [&filter_calls, &blocked_redirect](aux::http_connection&
++		, std::vector<tcp::endpoint>& endpoints)
++	{
++		++filter_calls;
++		if (filter_calls > 1)
++		{
++			blocked_redirect = true;
++			endpoints.clear();
++		}
++	};
++
++	auto connection = std::make_shared<aux::http_connection>(ios, res
++		, &::http_handler_test, 1024 * 1024, &::http_connect_handler_test
++		, std::move(filter), aux::hostname_filter_handler()
++#if TORRENT_USE_SSL
++		, &ssl_ctx
++#endif
++		);
++	connection->get("http://127.0.0.1:" + std::to_string(port) + "/redirect"
++		, seconds(5));
++	ios.restart();
++	ios.run();
++
++	TEST_EQUAL(filter_calls, 2);
++	TEST_CHECK(blocked_redirect);
++	TEST_EQUAL(connect_handler_called, 1);
++	TEST_EQUAL(handler_called, 0);
++	stop_web_server();
++}
+diff --git a/test/test_tracker_manager.cpp b/test/test_tracker_manager.cpp
+index 9ead66df7b693ad5fe49941e1aa770d98ef1b3f9..c509d0cee242333d583c91ffcbe5241d04fb0108 100644
+--- a/test/test_tracker_manager.cpp
++++ b/test/test_tracker_manager.cpp
+@@ -11,8 +11,19 @@ see LICENSE file.
+ #include "test.hpp"
+ #include "libtorrent/aux_/tracker_manager.hpp"
+ #include "libtorrent/aux_/session_interface.hpp"
++#include "libtorrent/aux_/session_impl.hpp"
+ #include "libtorrent/performance_counters.hpp"
+ #include "libtorrent/aux_/resolver.hpp"
++#include "libtorrent/ip_filter.hpp"
++
++#include <boost/asio/read_until.hpp>
++#include <boost/asio/write.hpp>
++
++#include <algorithm>
++#include <atomic>
++#include <map>
++#include <set>
++#include <thread>
+ 
+ using namespace lt;
+ using namespace lt::aux;
+@@ -26,11 +37,28 @@ struct tracker_manager_handler
+ 
+ 	tracker_manager_handler(io_context& ios, aux::session_settings& sett)
+ 		: m_host_resolver(ios)
++		, m_resolver(m_host_resolver)
++		, m_tracker_manager(
++			std::bind(&tracker_manager_handler::send_fn, this, _1, _2, _3, _4, _5)
++			, std::bind(&tracker_manager_handler::send_fn_hostname, this, _1, _2, _3, _4, _5, _6)
++			, m_stats_counters
++			, m_resolver
++			, sett
++#if !defined TORRENT_DISABLE_LOGGING || TORRENT_USE_ASSERTS
++			, *this
++#endif
++			)
++	{}
++
++	tracker_manager_handler(io_context& ios, aux::session_settings& sett
++		, aux::resolver_interface& resolver)
++		: m_host_resolver(ios)
++		, m_resolver(resolver)
+ 		, m_tracker_manager(
+ 			std::bind(&tracker_manager_handler::send_fn, this, _1, _2, _3, _4, _5)
+ 			, std::bind(&tracker_manager_handler::send_fn_hostname, this, _1, _2, _3, _4, _5, _6)
+ 			, m_stats_counters
+-			, m_host_resolver
++			, m_resolver
+ 			, sett
+ #if !defined TORRENT_DISABLE_LOGGING || TORRENT_USE_ASSERTS
+ 			, *this
+@@ -53,7 +81,7 @@ struct tracker_manager_handler
+ 		, span<char const>
+ 		, error_code&
+ 		, aux::udp_send_flags_t const)
+-	{}
++	{ ++hostname_sends; }
+ 
+ #ifndef TORRENT_DISABLE_LOGGING
+ 	bool should_log() const override { return false; }
+@@ -70,7 +98,56 @@ struct tracker_manager_handler
+ 	io_context m_io_context;
+ 	counters m_stats_counters;
+ 	aux::resolver m_host_resolver;
++	aux::resolver_interface& m_resolver;
+ 	tracker_manager m_tracker_manager;
++	int hostname_sends = 0;
++};
++
++struct scripted_resolver : aux::resolver_interface
++{
++	explicit scripted_resolver(io_context& ios) : m_ios(ios) {}
++
++	void async_resolve(std::string const& host, aux::resolver_flags
++		, callback_t handler) override
++	{
++		lookups.push_back(host);
++		if (stalled.count(host) != 0)
++		{
++			pending.push_back(std::move(handler));
++			return;
++		}
++		auto const found = results.find(host);
++		if (found == results.end())
++		{
++			post(m_ios, [handler = std::move(handler)]
++			{
++				handler(error_code(boost::asio::error::host_not_found), {});
++			});
++			return;
++		}
++
++		std::vector<address> addresses = found->second;
++		post(m_ios, [handler = std::move(handler), addresses = std::move(addresses)]
++			{ handler(error_code{}, addresses); });
++	}
++
++	void abort() override {}
++	void set_cache_timeout(seconds) override {}
++	void complete_stalled()
++	{
++		auto callbacks = std::move(pending);
++		for (auto& callback : callbacks)
++		{
++			post(m_ios, [callback = std::move(callback)]
++				{ callback(error_code(boost::asio::error::operation_aborted), {}); });
++		}
++	}
++
++	io_context& m_ios;
++	std::map<std::string, std::vector<address>> results;
++	std::set<std::string> stalled;
++	std::vector<callback_t> pending;
++	std::vector<std::string> lookups;
+ };
+ 
+ struct ws_request_callback : request_callback
+@@ -89,10 +166,15 @@ struct ws_request_callback : request_callback
+ 		, struct tracker_response const&) override {}
+ 	void tracker_request_error(
+ 		tracker_request const&
+-		, error_code const&
+-		, operation_t
++		, error_code const& ec
++		, operation_t operation
+ 		, const std::string&
+-		, seconds32) override {}
++		, seconds32) override
++	{
++		last_error = ec;
++		last_operation = operation;
++		++error_count;
++	}
+ #if TORRENT_USE_RTC
+ 	void generate_rtc_offers(int
+ 		, std::function<void(error_code const&, std::vector<aux::rtc_offer>)> handler) override
+@@ -106,8 +188,27 @@ struct ws_request_callback : request_callback
+ 	bool should_log() const override { return false; }
+ 	void debug_log(const char*, ...) const noexcept override TORRENT_FORMAT(2,3) {}
+ #endif
++	error_code last_error;
++	operation_t last_operation = operation_t::unknown;
++	int error_count = 0;
+ };
+ 
++std::shared_ptr<aux::listen_socket_t> internet_socket_v4()
++{
++	auto socket = std::make_shared<aux::listen_socket_t>();
++	socket->local_endpoint = tcp::endpoint(address_v4::any(), 6881);
++	return socket;
++}
++
++tracker_request tracker_request_for(std::string url
++	, std::shared_ptr<aux::listen_socket_t> const& socket)
++{
++	tracker_request request;
++	request.url = std::move(url);
++	request.outgoing_socket = aux::listen_socket_handle(socket);
++	return request;
++}
++
+ TORRENT_TEST(empty_and_num_requests)
+ {
+ 	io_context ios;
+@@ -221,3 +322,344 @@ TORRENT_TEST(protocol_dispatch_is_case_insensitive)
+ #endif
+ #endif
+ }
++
++TORRENT_TEST(http_tracker_blocks_non_global_resolved_endpoint)
++{
++	io_context ios;
++	aux::session_settings sett;
++	sett.set_bool(settings_pack::ssrf_mitigation, true);
++	scripted_resolver resolver{ios};
++	resolver.results["ipv4only.arpa"] = {
++		make_address("192.0.0.170"), make_address("192.0.0.171")};
++	// The IPv6 endpoint cannot route through this IPv4 socket, but it must be
++	// classified as SSRF before the address-family reachability check.
++	resolver.results["private.test"] = {make_address("fd00::20")};
++	tracker_manager_handler h{ios, sett, resolver};
++	auto const socket = internet_socket_v4();
++	auto callback = std::make_shared<ws_request_callback>();
++
++	h.m_tracker_manager.queue_request(ios
++		, tracker_request_for("http://private.test:8080/announce", socket)
++		, sett, callback);
++	ios.run();
++
++	TEST_EQUAL(callback->error_count, 1);
++	TEST_EQUAL(callback->last_error, error_code(errors::ssrf_mitigation));
++	TEST_CHECK(callback->last_operation == operation_t::bittorrent);
++}
++
++TORRENT_TEST(http_tracker_mixed_dns_uses_only_global_endpoint)
++{
++	io_context ios;
++	aux::session_settings sett;
++	sett.set_bool(settings_pack::ssrf_mitigation, true);
++	scripted_resolver resolver{ios};
++	resolver.results["ipv4only.arpa"] = {
++		make_address("192.0.0.170"), make_address("192.0.0.171")};
++	resolver.results["mixed.test"] = {
++		make_address("10.0.0.20"), make_address("8.8.8.8")};
++	tracker_manager_handler h{ios, sett, resolver};
++	auto const socket = internet_socket_v4();
++	auto callback = std::make_shared<ws_request_callback>();
++	auto filter = std::make_shared<ip_filter>();
++	filter->add_rule(make_address("8.8.8.8"), make_address("8.8.8.8")
++		, ip_filter::blocked);
++	auto request = tracker_request_for("http://mixed.test:8080/announce", socket);
++	request.filter = std::move(filter);
++
++	h.m_tracker_manager.queue_request(ios, std::move(request), sett, callback);
++	ios.run();
++
++	// The private answer must be removed by the SSRF policy. The remaining
++	// global answer is then removed by the independent user IP filter.
++	TEST_EQUAL(callback->error_count, 1);
++	TEST_EQUAL(callback->last_error, error_code(errors::banned_by_ip_filter));
++}
++
++TORRENT_TEST(plaintext_http_proxy_tracker_fails_closed)
++{
++	io_context ios;
++	aux::session_settings sett;
++	sett.set_bool(settings_pack::ssrf_mitigation, true);
++	sett.set_int(settings_pack::proxy_type, settings_pack::http);
++	sett.set_bool(settings_pack::proxy_tracker_connections, true);
++	tracker_manager_handler h{ios, sett};
++	auto const socket = internet_socket_v4();
++	auto callback = std::make_shared<ws_request_callback>();
++
++	h.m_tracker_manager.queue_request(ios
++		, tracker_request_for("HTTP://8.8.8.8:8080/announce", socket)
++		, sett, callback);
++	ios.run();
++
++	TEST_EQUAL(callback->error_count, 1);
++	TEST_EQUAL(callback->last_error, error_code(errors::ssrf_mitigation));
++}
++
++TORRENT_TEST(udp_tracker_forces_local_dns_and_blocks_non_global_endpoint)
++{
++	io_context ios;
++	aux::session_settings sett;
++	sett.set_bool(settings_pack::ssrf_mitigation, true);
++	sett.set_int(settings_pack::proxy_type, settings_pack::socks5);
++	sett.set_bool(settings_pack::proxy_hostnames, true);
++	sett.set_bool(settings_pack::proxy_tracker_connections, true);
++	scripted_resolver resolver{ios};
++	resolver.results["ipv4only.arpa"] = {
++		make_address("192.0.0.170"), make_address("192.0.0.171")};
++	resolver.results["private.test"] = {make_address("fd00::20")};
++	tracker_manager_handler h{ios, sett, resolver};
++	auto const socket = internet_socket_v4();
++	auto callback = std::make_shared<ws_request_callback>();
++
++	h.m_tracker_manager.queue_request(ios
++		, tracker_request_for("udp://private.test:8080/announce", socket)
++		, sett, callback);
++	ios.run();
++
++	TEST_EQUAL(callback->error_count, 1);
++	TEST_EQUAL(callback->last_error, error_code(errors::ssrf_mitigation));
++	TEST_EQUAL(h.hostname_sends, 0);
++	TEST_CHECK(std::find(resolver.lookups.begin(), resolver.lookups.end()
++		, "private.test") != resolver.lookups.end());
++}
++
++TORRENT_TEST(udp_tracker_mixed_dns_uses_only_global_endpoint)
++{
++	io_context ios;
++	aux::session_settings sett;
++	sett.set_bool(settings_pack::ssrf_mitigation, true);
++	scripted_resolver resolver{ios};
++	resolver.results["ipv4only.arpa"] = {
++		make_address("192.0.0.170"), make_address("192.0.0.171")};
++	resolver.results["mixed.test"] = {
++		make_address("172.16.0.20"), make_address("8.8.4.4")};
++	tracker_manager_handler h{ios, sett, resolver};
++	auto const socket = internet_socket_v4();
++	auto callback = std::make_shared<ws_request_callback>();
++	auto filter = std::make_shared<ip_filter>();
++	filter->add_rule(make_address("8.8.4.4"), make_address("8.8.4.4")
++		, ip_filter::blocked);
++	auto request = tracker_request_for("udp://mixed.test:8080/announce", socket);
++	request.filter = std::move(filter);
++
++	h.m_tracker_manager.queue_request(ios, std::move(request), sett, callback);
++	ios.run();
++
++	TEST_EQUAL(callback->error_count, 1);
++	TEST_EQUAL(callback->last_error, error_code(errors::banned_by_ip_filter));
++}
++
++TORRENT_TEST(http_tracker_blocks_private_network_specific_nat64_endpoint)
++{
++	io_context ios;
++	aux::session_settings sett;
++	sett.set_bool(settings_pack::ssrf_mitigation, true);
++	scripted_resolver resolver{ios};
++	resolver.results["ipv4only.arpa"] = {
++		make_address("2001:4860:c000:aa::")};
++	resolver.results["private-nat64.test"] = {
++		make_address("2001:4860:a00:1::1234")};
++	tracker_manager_handler h{ios, sett, resolver};
++	auto socket = std::make_shared<aux::listen_socket_t>();
++	socket->local_endpoint = tcp::endpoint(address_v6::any(), 6881);
++	auto callback = std::make_shared<ws_request_callback>();
++
++	h.m_tracker_manager.queue_request(ios
++		, tracker_request_for("http://private-nat64.test:8080/announce", socket)
++		, sett, callback);
++	ios.run();
++
++	TEST_EQUAL(callback->error_count, 1);
++	TEST_EQUAL(callback->last_error, error_code(errors::ssrf_mitigation));
++}
++
++TORRENT_TEST(https_http_proxy_connect_uses_vetted_numeric_endpoint)
++{
++#if TORRENT_USE_SSL
++	io_context ios;
++	tcp::acceptor proxy_acceptor(ios
++		, tcp::endpoint(address_v4::loopback(), 0));
++	tcp::socket proxy_socket(ios);
++	std::string proxy_request;
++	bool received_connect = false;
++	aux::deadline_timer watchdog(ios);
++
++	proxy_acceptor.async_accept(proxy_socket
++		, [&](error_code const& accept_error)
++		{
++			if (accept_error) return;
++			boost::asio::async_read_until(proxy_socket
++				, boost::asio::dynamic_buffer(proxy_request, 4096), "\r\n\r\n"
++				, [&](error_code const& read_error, std::size_t)
++				{
++					if (read_error) return;
++					received_connect = true;
++					watchdog.cancel();
++					auto response = std::make_shared<std::string>(
++						"HTTP/1.1 502 Bad Gateway\r\n"
++						"Content-Length: 0\r\nConnection: close\r\n\r\n");
++					boost::asio::async_write(proxy_socket
++						, boost::asio::buffer(*response)
++						, [&, response](error_code const&, std::size_t)
++						{
++							error_code ignored;
++							proxy_socket.close(ignored);
++						});
++				});
++		});
++
++	watchdog.expires_after(seconds(5));
++	watchdog.async_wait([&](error_code const& error)
++	{
++		if (error) return;
++		error_code ignored;
++		proxy_acceptor.close(ignored);
++		proxy_socket.close(ignored);
++	});
++
++	aux::session_settings sett;
++	sett.set_bool(settings_pack::ssrf_mitigation, true);
++	sett.set_int(settings_pack::tracker_completion_timeout, 3);
++	sett.set_int(settings_pack::proxy_type, settings_pack::http);
++	sett.set_str(settings_pack::proxy_hostname, "127.0.0.1");
++	sett.set_int(settings_pack::proxy_port, proxy_acceptor.local_endpoint().port());
++	sett.set_bool(settings_pack::proxy_tracker_connections, true);
++	sett.set_bool(settings_pack::proxy_send_host_in_connect, true);
++	scripted_resolver resolver{ios};
++	resolver.results["ipv4only.arpa"] = {
++		make_address("192.0.0.170"), make_address("192.0.0.171")};
++	resolver.results["tracker.test"] = {make_address("8.8.8.8")};
++	tracker_manager_handler h{ios, sett, resolver};
++	auto const socket = internet_socket_v4();
++	auto callback = std::make_shared<ws_request_callback>();
++	aux::ssl::context ssl_context(aux::ssl::context::sslv23_client);
++	auto request = tracker_request_for("https://tracker.test:443/announce", socket);
++	request.ssl_ctx = &ssl_context;
++
++	h.m_tracker_manager.queue_request(ios, std::move(request), sett, callback);
++	ios.run();
++
++	TEST_CHECK(received_connect);
++	TEST_CHECK(proxy_request.rfind("CONNECT 8.8.8.8:443 HTTP/1.0\r\n", 0) == 0);
++	TEST_CHECK(proxy_request.find("tracker.test") == std::string::npos);
++	TEST_EQUAL(callback->error_count, 1);
++#else
++	TEST_CHECK(true);
++#endif
++}
++
++TORRENT_TEST(http_tracker_preflight_timer_stops_before_http_request)
++{
++#if TORRENT_USE_SSL
++	io_context ios;
++	tcp::acceptor proxy_acceptor(ios
++		, tcp::endpoint(address_v4::loopback(), 0));
++	tcp::socket proxy_socket(ios);
++	std::string proxy_request;
++	std::atomic<bool> client_blocked{false};
++	std::atomic<bool> terminal_response_sent{false};
++
++	aux::session_settings sett;
++	sett.set_bool(settings_pack::ssrf_mitigation, true);
++	sett.set_int(settings_pack::tracker_completion_timeout, 1);
++	sett.set_int(settings_pack::proxy_type, settings_pack::http);
++	sett.set_str(settings_pack::proxy_hostname, "127.0.0.1");
++	sett.set_int(settings_pack::proxy_port, proxy_acceptor.local_endpoint().port());
++	sett.set_bool(settings_pack::proxy_tracker_connections, true);
++	scripted_resolver resolver{ios};
++	resolver.results["ipv4only.arpa"] = {
++		make_address("192.0.0.170"), make_address("192.0.0.171")};
++	resolver.results["tracker.test"] = {make_address("8.8.8.8")};
++	tracker_manager_handler h{ios, sett, resolver};
++	auto const socket = internet_socket_v4();
++	auto callback = std::make_shared<ws_request_callback>();
++	aux::ssl::context ssl_context(aux::ssl::context::sslv23_client);
++	auto request = tracker_request_for("https://tracker.test:443/announce", socket);
++	request.ssl_ctx = &ssl_context;
++
++	// Hold the client event loop across the former preflight deadline after the
++	// proxy has a terminal response ready. With two independent request timers,
++	// the response and both deadlines become ready together and may enqueue two
++	// tracker failures. A preflight-only timer has already been cancelled, so the
++	// HTTP connection remains the sole owner of request completion.
++	auto const former_preflight_deadline = clock_type::now() + seconds(1);
++	std::thread proxy_thread([&]
++	{
++		error_code error;
++		proxy_acceptor.accept(proxy_socket, error);
++		if (error) return;
++		boost::asio::read_until(proxy_socket
++			, boost::asio::dynamic_buffer(proxy_request, 4096), "\r\n\r\n", error);
++		if (error) return;
++
++		post(ios, [&]
++		{
++			client_blocked.store(true, std::memory_order_release);
++			std::this_thread::sleep_until(
++				former_preflight_deadline + milliseconds(200));
++		});
++		while (!client_blocked.load(std::memory_order_acquire))
++			std::this_thread::yield();
++
++		std::string const response =
++			"HTTP/1.1 502 Bad Gateway\r\n"
++			"Content-Length: 0\r\nConnection: close\r\n\r\n";
++		boost::asio::write(proxy_socket, boost::asio::buffer(response), error);
++		terminal_response_sent.store(!error, std::memory_order_release);
++		proxy_socket.close(error);
++	});
++
++	h.m_tracker_manager.queue_request(ios, std::move(request), sett, callback);
++	ios.run();
++	proxy_thread.join();
++
++	TEST_CHECK(terminal_response_sent.load(std::memory_order_acquire));
++	TEST_CHECK(std::find(resolver.lookups.begin(), resolver.lookups.end()
++		, "ipv4only.arpa") != resolver.lookups.end());
++	TEST_EQUAL(callback->error_count, 1);
++	TEST_CHECK(h.m_tracker_manager.empty());
++#else
++	TEST_CHECK(true);
++#endif
++}
++
++TORRENT_TEST(nat64_preflight_is_bounded_by_tracker_operation_timeout)
++{
++	io_context ios;
++	aux::session_settings sett;
++	sett.set_bool(settings_pack::ssrf_mitigation, true);
++	sett.set_int(settings_pack::tracker_completion_timeout, 1);
++	sett.set_int(settings_pack::tracker_receive_timeout, 1);
++	scripted_resolver resolver{ios};
++	resolver.stalled.insert("ipv4only.arpa");
++	tracker_manager_handler h{ios, sett, resolver};
++	auto const socket = internet_socket_v4();
++	auto http_callback = std::make_shared<ws_request_callback>();
++	auto udp_callback = std::make_shared<ws_request_callback>();
++
++	h.m_tracker_manager.queue_request(ios
++		, tracker_request_for("http://stalled-http.test:8080/announce", socket)
++		, sett, http_callback);
++	h.m_tracker_manager.queue_request(ios
++		, tracker_request_for("udp://stalled-udp.test:8080/announce", socket)
++		, sett, udp_callback);
++
++	bool slots_released_before_resolver = false;
++	aux::deadline_timer resolver_watchdog(ios);
++	resolver_watchdog.expires_after(seconds(2));
++	resolver_watchdog.async_wait([&](error_code const& error)
++	{
++		if (error) return;
++		slots_released_before_resolver = h.m_tracker_manager.empty();
++		resolver.complete_stalled();
++	});
++	ios.run();
++
++	TEST_CHECK(slots_released_before_resolver);
++	TEST_CHECK(h.m_tracker_manager.empty());
++	TEST_EQUAL(http_callback->error_count, 1);
++	TEST_EQUAL(http_callback->last_error, error_code(errors::timed_out));
++	TEST_EQUAL(udp_callback->error_count, 1);
++	TEST_EQUAL(udp_callback->last_error, error_code(errors::timed_out));
++}
