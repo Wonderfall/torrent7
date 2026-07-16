@@ -3016,6 +3016,35 @@ TEST_CASE("pending magnet DHT revocation is durable before the setter returns")
     CHECK(static_cast<bool>(restarted_handle.flags() & lt::torrent_flags::disable_dht));
 }
 
+TEST_CASE("non-deleting removal reports its commit independently of a deletion token")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+    client.stop_alert_worker();
+
+    std::shared_ptr<lt::torrent_info const> const info = make_torrent_info(false);
+    TorrentIdentity *identity = nullptr;
+    static_cast<void>(add_metadata_torrent(client, *info, temporary_directory.path(), identity));
+    REQUIRE(identity != nullptr);
+
+    std::uint64_t request_token = 1;
+    std::uint8_t removal_committed = bridge_bool(false);
+    std::array<char, 512> error{};
+    REQUIRE(TorrentClientRemove(
+        &client,
+        identity->canonical_id.c_str(),
+        bridge_bool(false),
+        bridge_bool(false),
+        &request_token,
+        &removal_committed,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == 0);
+    CHECK(request_token == 0);
+    CHECK(bridge_bool(removal_committed));
+}
+
 TEST_CASE("payload deletion waits for libtorrent and removes an exact torrent file")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
@@ -3031,6 +3060,7 @@ TEST_CASE("payload deletion waits for libtorrent and removes an exact torrent fi
     REQUIRE(identity != nullptr);
 
     std::uint64_t request_token = 0;
+    std::uint8_t removal_committed = bridge_bool(false);
     std::array<char, 512> error{};
     REQUIRE(TorrentClientRemove(
         &client,
@@ -3038,10 +3068,12 @@ TEST_CASE("payload deletion waits for libtorrent and removes an exact torrent fi
         bridge_bool(true),
         bridge_bool(false),
         &request_token,
+        &removal_committed,
         error.data(),
         static_cast<int32_t>(error.size())
     ) == 0);
     REQUIRE(request_token != 0);
+    REQUIRE(bridge_bool(removal_committed));
 
     TTorrentRemovalResult result{};
     REQUIRE(TorrentClientTakeRemovalResult(
@@ -3075,6 +3107,7 @@ TEST_CASE("payload deletion does not recursively remove a colliding directory")
     REQUIRE(identity != nullptr);
 
     std::uint64_t request_token = 0;
+    std::uint8_t removal_committed = bridge_bool(false);
     std::array<char, 512> error{};
     REQUIRE(TorrentClientRemove(
         &client,
@@ -3082,9 +3115,11 @@ TEST_CASE("payload deletion does not recursively remove a colliding directory")
         bridge_bool(true),
         bridge_bool(false),
         &request_token,
+        &removal_committed,
         error.data(),
         static_cast<int32_t>(error.size())
     ) == 0);
+    REQUIRE(bridge_bool(removal_committed));
 
     TTorrentRemovalResult result{};
     REQUIRE(eventually_take_removal_result(client, request_token, result, error));
@@ -3111,6 +3146,7 @@ TEST_CASE("a second payload deletion is rejected while the first is pending")
     REQUIRE(second_identity != nullptr);
 
     std::uint64_t first_token = 0;
+    std::uint8_t first_removal_committed = bridge_bool(false);
     std::array<char, 512> error{};
     REQUIRE(TorrentClientRemove(
         &client,
@@ -3118,21 +3154,26 @@ TEST_CASE("a second payload deletion is rejected while the first is pending")
         bridge_bool(true),
         bridge_bool(false),
         &first_token,
+        &first_removal_committed,
         error.data(),
         static_cast<int32_t>(error.size())
     ) == 0);
+    REQUIRE(bridge_bool(first_removal_committed));
 
     std::uint64_t second_token = 1;
+    std::uint8_t second_removal_committed = bridge_bool(true);
     CHECK(TorrentClientRemove(
         &client,
         second_identity->canonical_id.c_str(),
         bridge_bool(true),
         bridge_bool(false),
         &second_token,
+        &second_removal_committed,
         error.data(),
         static_cast<int32_t>(error.size())
     ) != 0);
     CHECK(second_token == 0);
+    CHECK_FALSE(bridge_bool(second_removal_committed));
     CHECK(bridge_tests::string_from_c_buffer(std::span{error}).contains("already pending"));
     CHECK(client.find(second_identity->canonical_id).has_value());
 
@@ -3251,16 +3292,19 @@ TEST_CASE("metadata-less magnet removal treats a zero-error failed alert conserv
     ) == 0);
 
     std::uint64_t request_token = 0;
+    std::uint8_t removal_committed = bridge_bool(false);
     REQUIRE(TorrentClientRemove(
         &client,
         id.c_str(),
         bridge_bool(true),
         bridge_bool(true),
         &request_token,
+        &removal_committed,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
     REQUIRE(request_token != 0);
+    REQUIRE(bridge_bool(removal_committed));
 
     TTorrentRemovalResult removal_result{};
     CHECK(eventually([&] {

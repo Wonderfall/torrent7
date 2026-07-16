@@ -6,7 +6,7 @@ import TorrentBridge
 struct TorrentBridgeContractTests {
     @Test("Pins bridge ABI version, limits, states, and dirty masks")
     func pinsBridgeConstants() {
-        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 34)
+        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 35)
         #expect(Int32(TTORRENT_BRIDGE_STATE_UNKNOWN) == -1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_CHECKING_FILES) == 1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_DOWNLOADING_METADATA) == 2)

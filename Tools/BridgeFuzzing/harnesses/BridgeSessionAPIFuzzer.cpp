@@ -204,12 +204,14 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             poll_tracked_removal(harness);
             std::string id = selected_id(reader, harness.client());
             std::uint64_t request_token = 0;
+            std::uint8_t removal_committed = 0;
             static_cast<void>(TorrentClientRemove(
                 harness.client(),
                 maybe_null(reader, id),
                 reader.read_u8(),
                 reader.read_u8(),
                 reader.read_bool() ? nullptr : &request_token,
+                reader.read_bool() ? nullptr : &removal_committed,
                 error.data(),
                 error.capacity()
             ));

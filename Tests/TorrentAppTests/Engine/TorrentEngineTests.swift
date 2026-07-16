@@ -3,7 +3,7 @@ import Synchronization
 import Testing
 import TorrentBridge
 import TorrentEngineModel
-@testable import TorrentApp
+@testable import TorrentEngineCore
 
 @Suite("Torrent engine", .serialized)
 struct TorrentEngineTests {
@@ -81,6 +81,74 @@ struct TorrentEngineTests {
         #expect(await engine.networkStatus() == .empty)
         #expect(await engine.takeChanges() == 0)
         #expect(await engine.takeAlertError() == nil)
+    }
+
+    @Test("Coalesced polling drains alert errors in bounded batches")
+    func coalescedPollingDrainsAlertErrorsInBoundedBatches() async throws {
+        let stateDirectory = try temporaryStateDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: stateDirectory)
+        }
+        let expectedErrors = (0..<20).map { "alert-error-\($0)" }
+        let queuedErrors = Mutex(expectedErrors)
+        let engine = try TorrentEngine(
+            stateDirectory: stateDirectory,
+            enablePeerExchangePlugin: true,
+            alertErrorReader: {
+                queuedErrors.withLock { errors -> String? in
+                    guard !errors.isEmpty else {
+                        return nil
+                    }
+                    return errors.removeFirst()
+                }
+            }
+        )
+
+        let first = await engine.poll(
+            since: nil,
+            sortedBy: .name,
+            direction: .ascending,
+            includeTrackerHosts: false
+        )
+        let second = await engine.poll(
+            since: first.snapshotBatch?.revision,
+            sortedBy: .name,
+            direction: .ascending,
+            includeTrackerHosts: false
+        )
+
+        #expect(first.alertErrors == Array(expectedErrors.prefix(TorrentEngineLimits.maximumAlertErrorsPerPoll)))
+        #expect(second.alertErrors == Array(expectedErrors.dropFirst(TorrentEngineLimits.maximumAlertErrorsPerPoll)))
+        #expect(queuedErrors.withLock { $0.isEmpty })
+    }
+
+    @Test("Coalesced polling preserves revision and optional tracker host semantics")
+    func coalescedPollingPreservesRevisionAndOptionalTrackerHostSemantics() async throws {
+        let engine = TorrentEngine(startupFailureMessage: "boom")
+
+        let initial = await engine.poll(
+            since: 1,
+            sortedBy: .name,
+            direction: .ascending,
+            includeTrackerHosts: false
+        )
+        #expect(initial.bridgeHealth == .unavailable)
+        #expect(initial.networkStatus == .empty)
+        #expect(initial.dirtyMask == 0)
+        #expect(initial.alertErrors.isEmpty)
+        #expect(initial.snapshotBatch?.revision == 0)
+        #expect(initial.snapshotBatch?.torrents.isEmpty == true)
+        #expect(initial.trackerHostBatch == nil)
+
+        let unchanged = await engine.poll(
+            since: 0,
+            sortedBy: .name,
+            direction: .ascending,
+            includeTrackerHosts: true
+        )
+        #expect(unchanged.snapshotBatch == nil)
+        #expect(unchanged.trackerHostBatch?.revision == 0)
+        #expect(unchanged.trackerHostBatch?.hosts.isEmpty == true)
     }
 
     @Test("Nonresident torrent details are cache misses rather than authoritative empty batches")
@@ -268,6 +336,126 @@ struct TorrentEngineTests {
         #expect(completed.withLock { $0 })
         #expect(engine.isAvailable == true)
     }
+
+    @Test("Forced network containment invalidates a suspended removal before pointer reuse")
+    func forcedContainmentInvalidatesSuspendedRemovalPointer() async throws {
+        let stateDirectory = try temporaryStateDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: stateDirectory)
+        }
+        let downloadDirectory = stateDirectory.appending(path: "Downloads", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: downloadDirectory, withIntermediateDirectories: true)
+        let readCount = Mutex(0)
+        let engine = try TorrentEngine(
+            stateDirectory: stateDirectory,
+            enablePeerExchangePlugin: true,
+            authorizedSavePaths: [downloadDirectory.path],
+            removalResultReader: {
+                readCount.withLock { $0 += 1 }
+                return .pending
+            }
+        )
+        let id = try await engine.addMagnet(
+            "magnet:?xt=urn:btih:\(String(repeating: "9", count: 40))",
+            savePath: downloadDirectory.path
+        )
+        let removal = Task {
+            try await engine.remove(id: id, deleteFiles: true)
+        }
+
+        while readCount.withLock({ $0 == 0 }) {
+            await Task.yield()
+        }
+        await engine.forceContainmentAfterNetworkBlockFailure(detail: "test failure")
+
+        let outcome = try await removal.value
+        guard case .removedWithWarning(let warning) = outcome else {
+            Issue.record("Expected a conservative deletion warning")
+            return
+        }
+        #expect(warning.contains("security containment"))
+        #expect(engine.isAvailable == false)
+        #expect(readCount.withLock { $0 } == 1)
+    }
+
+    @Test("Runtime authorized save path replacement is immediate and fail-closed")
+    func runtimeAuthorizedSavePathReplacementIsImmediateAndFailClosed() async throws {
+        let stateDirectory = try temporaryStateDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: stateDirectory)
+        }
+        let firstDirectory = stateDirectory.appending(path: "First", directoryHint: .isDirectory)
+        let secondDirectory = stateDirectory.appending(path: "Second", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: firstDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: secondDirectory, withIntermediateDirectories: true)
+        let engine = try TorrentEngine(
+            stateDirectory: stateDirectory,
+            enablePeerExchangePlugin: true,
+            authorizedSavePaths: [firstDirectory.path]
+        )
+
+        try await engine.replaceAuthorizedSavePaths([secondDirectory.path])
+        await expectUnauthorizedSavePath(engine: engine, path: firstDirectory.path, hashCharacter: "a")
+        _ = try await engine.addMagnet(
+            "magnet:?xt=urn:btih:\(String(repeating: "b", count: 40))",
+            savePath: secondDirectory.path
+        )
+
+        do {
+            try await engine.replaceAuthorizedSavePaths(["relative"])
+            Issue.record("Expected an invalid replacement to fail")
+        } catch {
+            #expect(error.localizedDescription.contains("authorized download folder path is invalid"))
+        }
+        _ = try await engine.addMagnet(
+            "magnet:?xt=urn:btih:\(String(repeating: "c", count: 40))",
+            savePath: secondDirectory.path
+        )
+
+        try await engine.replaceAuthorizedSavePaths([])
+        await expectUnauthorizedSavePath(engine: engine, path: secondDirectory.path, hashCharacter: "d")
+    }
+
+    @Test("Safe shutdown blocks, saves, destroys, and permanently marks the engine unavailable")
+    func safeShutdownIsTerminalAndReleasesNativeState() async throws {
+        let stateDirectory = try temporaryStateDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: stateDirectory)
+        }
+        let engine = try TorrentEngine(stateDirectory: stateDirectory, enablePeerExchangePlugin: true)
+        let wakeEvents = await engine.wakeEvents()
+
+        try await engine.shutdownSafely()
+
+        #expect(engine.isAvailable == false)
+        var iterator = wakeEvents.makeAsyncIterator()
+        if await iterator.next() != nil {
+            #expect(await iterator.next() == nil)
+        }
+        await #expect(throws: TorrentEngineError.self) {
+            try await engine.saveAllChecked()
+        }
+        await #expect(throws: TorrentEngineError.self) {
+            try await engine.restart(enablePeerExchangePlugin: true, authorizedSavePaths: [])
+        }
+        try assertStateDirectoryCanBeReopened(stateDirectory)
+    }
+}
+
+private func expectUnauthorizedSavePath(
+    engine: TorrentEngine,
+    path: String,
+    hashCharacter: Character
+) async {
+    do {
+        _ = try await engine.addMagnet(
+            "magnet:?xt=urn:btih:\(String(repeating: hashCharacter, count: 40))",
+            savePath: path
+        )
+        Issue.record("Expected the save path to be rejected")
+    } catch {
+        #expect(error.localizedDescription.contains("save path is not authorized"))
+    }
 }
 
 private enum RemovalTrackingFault: Int, CaseIterable, Sendable {
@@ -291,6 +479,17 @@ private enum RemovalTrackingFault: Int, CaseIterable, Sendable {
             return .unknownState
         }
     }
+}
+
+@Test("Removal warnings share the client UTF-8 resource bound")
+func removalWarningsShareClientResourceBound() {
+    let warning = TorrentEngine.boundedRemovalWarning(
+        String(repeating: "🔒", count: TorrentEngineLimits.maximumRemovalWarningBytes)
+    )
+
+    #expect(!warning.isEmpty)
+    #expect(warning.utf8.count <= TorrentEngineLimits.maximumRemovalWarningBytes)
+    #expect(String(data: Data(warning.utf8), encoding: .utf8) == warning)
 }
 
 private func verifyRemovalTrackingFault(_ fault: RemovalTrackingFault) async throws {

@@ -81,8 +81,15 @@ private enum TorrentFileIconProvider {
         let itemURL = saveURL.appendingPathComponent(row.name)
             .standardizedFileURL
 
-        if FileManager.default.fileExists(atPath: itemURL.path) {
-            return .existingItem(itemURL.path)
+        let savePath = saveURL.path(percentEncoded: false)
+        let itemPath = itemURL.path(percentEncoded: false)
+        let containedPrefix = savePath == "/" ? "/" : "\(savePath)/"
+        guard itemPath.hasPrefix(containedPrefix), itemPath != savePath else {
+            return .folder
+        }
+
+        if FileManager.default.fileExists(atPath: itemPath) {
+            return .existingItem(itemPath)
         }
 
         let pathExtension = itemURL.pathExtension

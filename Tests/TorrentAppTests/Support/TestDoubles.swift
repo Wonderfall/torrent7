@@ -96,10 +96,13 @@ final class FakeNetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchecked 
 
 final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
     var defaultURL: URL?
+    private(set) var capabilityRevision: UInt64 = 0
     var capabilityDefaultAccess: DownloadFolderAccessing?
     var capabilityAdditionalAccesses = [DownloadFolderAccessing]()
+    var mirrorsCapabilityMutations = false
     var capabilitySnapshot: DownloadFolderCapabilitySnapshot {
         DownloadFolderCapabilitySnapshot(
+            revision: capabilityRevision,
             defaultAccess: capabilityDefaultAccess,
             additionalAccesses: capabilityAdditionalAccesses
         )
@@ -109,6 +112,7 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
     var setDefaultResult: Result<URL, Error>?
     var prepareForAddResult: Result<PreparedDownloadFolder, Error>?
     var leaseResult: Result<DownloadFolderAccessLease, Error>?
+    var nextCapabilityDelegationBookmarkError: (any Error)?
     private(set) var clearedDefaultCount = 0
     private(set) var clearDefaultCalls = [[TorrentItem]]()
     private(set) var setDefaultCalls = [(url: URL, activeTorrents: [TorrentItem])]()
@@ -122,6 +126,7 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
         capabilityAdditionalAccesses = paths.map { path in
             FakeDownloadFolderAccess(url: URL(filePath: path, directoryHint: .isDirectory))
         }
+        advanceCapabilityRevision()
     }
 
     func restoreDefault() throws -> URL? {
@@ -149,12 +154,38 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
         setDefaultCalls.append((url, activeTorrents))
         let result = try (setDefaultResult ?? .success(url)).get()
         defaultURL = result
+        if mirrorsCapabilityMutations {
+            let previousDefaultAccess = capabilityDefaultAccess
+            capabilityDefaultAccess = FakeDownloadFolderAccess(
+                url: result,
+                delegationBookmarkError: nextCapabilityDelegationBookmarkError
+            )
+            nextCapabilityDelegationBookmarkError = nil
+            preserveCapabilityIfNeeded(previousDefaultAccess, activeTorrents: activeTorrents)
+            capabilityAdditionalAccesses.removeAll {
+                Self.accessKey($0.url) == Self.accessKey(result)
+            }
+            pruneCapabilities(activeTorrents: activeTorrents)
+            advanceCapabilityRevision()
+        }
         return result
     }
 
     func clearDefault(activeTorrents: [TorrentItem]) {
         clearDefaultCalls.append(activeTorrents)
         defaultURL = nil
+        if mirrorsCapabilityMutations {
+            let hadDefaultCapability = capabilityDefaultAccess != nil
+            let previousPaths = Set(capabilitySnapshot.paths)
+            let previousDefaultAccess = capabilityDefaultAccess
+            capabilityDefaultAccess = nil
+            preserveCapabilityIfNeeded(previousDefaultAccess, activeTorrents: activeTorrents)
+            pruneCapabilities(activeTorrents: activeTorrents)
+            if hadDefaultCapability
+                || Set(capabilitySnapshot.paths) != previousPaths {
+                advanceCapabilityRevision()
+            }
+        }
     }
 
     func prepareForAdd(_ url: URL, setsDefault: Bool, activeTorrents: [TorrentItem]) throws -> PreparedDownloadFolder {
@@ -178,6 +209,24 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
         if let defaultURL = preparedFolder.defaultURL {
             self.defaultURL = defaultURL
         }
+        if mirrorsCapabilityMutations, preparedFolder.bookmarkData != nil {
+            let access = FakeDownloadFolderAccess(
+                url: URL(filePath: preparedFolder.path, directoryHint: .isDirectory)
+            )
+            if preparedFolder.defaultURL != nil {
+                capabilityDefaultAccess = access
+                capabilityAdditionalAccesses.removeAll {
+                    Self.accessKey($0.url) == Self.accessKey(access.url)
+                }
+                pruneCapabilities(activeTorrents: activeTorrents)
+            } else {
+                capabilityAdditionalAccesses.removeAll {
+                    Self.accessKey($0.url) == Self.accessKey(access.url)
+                }
+                capabilityAdditionalAccesses.append(access)
+            }
+            advanceCapabilityRevision()
+        }
         return preparedFolder.defaultURL
     }
 
@@ -192,6 +241,51 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
 
     func prune(activeTorrents: [TorrentItem]) {
         pruneCalls.append(activeTorrents)
+        if mirrorsCapabilityMutations {
+            let previousPaths = Set(capabilitySnapshot.paths)
+            pruneCapabilities(activeTorrents: activeTorrents)
+            if Set(capabilitySnapshot.paths) != previousPaths {
+                advanceCapabilityRevision()
+            }
+        }
+    }
+
+    private func advanceCapabilityRevision() {
+        precondition(capabilityRevision != UInt64.max)
+        capabilityRevision += 1
+    }
+
+    private func preserveCapabilityIfNeeded(
+        _ access: DownloadFolderAccessing?,
+        activeTorrents: [TorrentItem]
+    ) {
+        guard let access else {
+            return
+        }
+        let key = Self.accessKey(access.url)
+        guard activeTorrents.contains(where: {
+            Self.accessKey(URL(filePath: $0.savePath, directoryHint: .isDirectory)) == key
+        }), !capabilityAdditionalAccesses.contains(where: {
+            Self.accessKey($0.url) == key
+        }) else {
+            return
+        }
+        capabilityAdditionalAccesses.append(access)
+    }
+
+    private func pruneCapabilities(activeTorrents: [TorrentItem]) {
+        let activeKeys = Set(activeTorrents.map {
+            Self.accessKey(URL(filePath: $0.savePath, directoryHint: .isDirectory))
+        })
+        let defaultKey = capabilityDefaultAccess.map { Self.accessKey($0.url) }
+        capabilityAdditionalAccesses.removeAll { access in
+            let key = Self.accessKey(access.url)
+            return key == defaultKey || !activeKeys.contains(key)
+        }
+    }
+
+    private static func accessKey(_ url: URL) -> String {
+        url.standardizedFileURL.resolvingSymlinksInPath().path
     }
 }
 
@@ -218,6 +312,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private nonisolated let availability = Mutex(true)
     private let keepsWakeStreamOpen: Bool
     private var wakeContinuation: AsyncStream<Void>.Continuation?
+    private(set) var wakeStreamRequestCount = 0
 
     nonisolated var isAvailable: Bool {
         availability.withLock { $0 }
@@ -231,6 +326,8 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     var pieceMapBatchValue = TorrentPieceMapBatch(revision: 0, pieceMap: .empty)
     private var trackerHostBatchSuspensionCount = 0
     private var trackerHostBatchContinuations = [CheckedContinuation<Void, Never>]()
+    private var snapshotBatchSuspensionCount = 0
+    private var snapshotBatchContinuations = [CheckedContinuation<Void, Never>]()
     var dirtyMask: UInt32 = 0
     var networkStatusValue = TorrentNetworkStatus.empty
     var bridgeHealthValue = TorrentBridgeHealth.healthy
@@ -249,9 +346,14 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private(set) var currentNetworkBlocked = false
     private(set) var saveAllCount = 0
     private(set) var saveAllCheckedCount = 0
+    private(set) var shutdownCount = 0
     private(set) var appliedSettings = [(settings: TorrentSettings, networkBlocked: Bool)]()
     private(set) var operations = [FakeTorrentEngineOperation]()
     private(set) var previewedTorrentFiles = [Data]()
+    private(set) var delegatedFolderAuthorizations = [TorrentFolderAuthorization]()
+    private(set) var reconciledFolderAuthorizationSnapshots = [[TorrentFolderAuthorization]]()
+    private var folderReconciliationSuspensionCount = 0
+    private var folderReconciliationContinuations = [CheckedContinuation<Void, Never>]()
     private(set) var addedMagnets = [(
         magnet: String,
         savePath: String,
@@ -312,6 +414,17 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         self.keepsWakeStreamOpen = keepsWakeStreamOpen
     }
 
+    func shutdown() {
+        shutdownCount += 1
+        availability.withLock { $0 = false }
+        wakeContinuation?.finish()
+        wakeContinuation = nil
+    }
+
+    func terminateConnection() {
+        shutdown()
+    }
+
     func setSnapshotBatch(_ batch: TorrentSnapshotBatch?) {
         snapshotBatch = batch
     }
@@ -349,6 +462,24 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     func resumeSuspendedTrackerHostBatchCalls() {
         let continuations = trackerHostBatchContinuations
         trackerHostBatchContinuations.removeAll()
+        for continuation in continuations {
+            continuation.resume()
+        }
+    }
+
+    func suspendNextSnapshotBatchCall() {
+        snapshotBatchSuspensionCount += 1
+    }
+
+    func waitForSuspendedSnapshotBatchCall() async {
+        while snapshotBatchContinuations.isEmpty {
+            await Task.yield()
+        }
+    }
+
+    func resumeSuspendedSnapshotBatchCalls() {
+        let continuations = snapshotBatchContinuations
+        snapshotBatchContinuations.removeAll()
         for continuation in continuations {
             continuation.resume()
         }
@@ -468,6 +599,24 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         }
     }
 
+    func suspendNextFolderReconciliation() {
+        folderReconciliationSuspensionCount += 1
+    }
+
+    func waitForSuspendedFolderReconciliation() async {
+        while folderReconciliationContinuations.isEmpty {
+            await Task.yield()
+        }
+    }
+
+    func resumeSuspendedFolderReconciliations() {
+        let continuations = folderReconciliationContinuations
+        folderReconciliationContinuations.removeAll()
+        for continuation in continuations {
+            continuation.resume()
+        }
+    }
+
     func restart(enablePeerExchangePlugin: Bool, authorizedSavePaths: [String]) async throws {
         restartCount += 1
         restartPeerExchangePluginValues.append(enablePeerExchangePlugin)
@@ -481,7 +630,24 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         availability.withLock { $0 = true }
     }
 
+    func delegateFolderAuthorization(_ authorization: TorrentFolderAuthorization) {
+        delegatedFolderAuthorizations.append(authorization)
+    }
+
+    func reconcileFolderAuthorizations(
+        _ authorizations: [TorrentFolderAuthorization]
+    ) async {
+        reconciledFolderAuthorizationSnapshots.append(authorizations)
+        if folderReconciliationSuspensionCount > 0 {
+            folderReconciliationSuspensionCount -= 1
+            await withCheckedContinuation { continuation in
+                folderReconciliationContinuations.append(continuation)
+            }
+        }
+    }
+
     func wakeEvents() async -> AsyncStream<Void> {
+        wakeStreamRequestCount += 1
         if keepsWakeStreamOpen {
             let wakeEvents = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
             wakeContinuation = wakeEvents.continuation
@@ -495,6 +661,12 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func waitForOpenWakeStream() async {
         while wakeContinuation == nil {
+            await Task.yield()
+        }
+    }
+
+    func waitForWakeStreamRequestCount(_ expectedCount: Int) async {
+        while wakeStreamRequestCount < expectedCount {
             await Task.yield()
         }
     }
@@ -593,12 +765,15 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         return removeOutcome
     }
 
-    func applySettings(_ settings: TorrentSettings, networkBlocked: Bool) async throws {
-        appliedSettings.append((settings, networkBlocked))
-        currentNetworkBlocked = networkBlocked
+    func applySettings(
+        _ settings: TorrentSettings,
+        networkBinding: TorrentNetworkBinding
+    ) async throws {
+        appliedSettings.append((settings, networkBinding.networkBlocked))
+        currentNetworkBlocked = networkBinding.networkBlocked
         operations.append(.applySettings(
             dhtEnabled: settings.enableDHTNetwork,
-            networkBlocked: networkBlocked
+            networkBlocked: networkBinding.networkBlocked
         ))
     }
 
@@ -645,9 +820,16 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         direction: TorrentSortDirection
     ) async -> TorrentSnapshotBatch? {
         snapshotRequests.append((revision, sortOrder, direction))
-        return snapshotBatch.map { batch in
+        let response = snapshotBatch.map { batch in
             TorrentSnapshotBatch(revision: batch.revision, torrents: sortOrder.sorted(batch.torrents, direction: direction))
         }
+        if snapshotBatchSuspensionCount > 0 {
+            snapshotBatchSuspensionCount -= 1
+            await withCheckedContinuation { continuation in
+                snapshotBatchContinuations.append(continuation)
+            }
+        }
+        return response
     }
 
     func requestSources(id: String) async throws {}
@@ -728,13 +910,22 @@ struct FakeBookmarkError: Error {}
 
 final class FakeDownloadFolderAccess: DownloadFolderAccessing {
     let url: URL
+    private let delegationBookmarkError: (any Error)?
 
-    init(url: URL) {
+    init(url: URL, delegationBookmarkError: (any Error)? = nil) {
         self.url = url
+        self.delegationBookmarkError = delegationBookmarkError
     }
 
     func bookmarkData() throws -> Data {
         Data(url.path.utf8)
+    }
+
+    func delegationBookmarkData() throws -> Data {
+        if let delegationBookmarkError {
+            throw delegationBookmarkError
+        }
+        return Data("delegation:\(url.path)".utf8)
     }
 }
 

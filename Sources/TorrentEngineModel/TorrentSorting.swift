@@ -1,6 +1,6 @@
 import Foundation
 
-package enum TorrentSortOrder: String, CaseIterable, Identifiable, Sendable {
+package enum TorrentSortOrder: String, Codable, CaseIterable, Identifiable, Sendable {
     private static let defaultsKey = "TorrentSortOrder"
 
     case dateAdded
@@ -129,7 +129,7 @@ package enum TorrentSortOrder: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-package enum TorrentSortDirection: String, CaseIterable, Identifiable, Sendable {
+package enum TorrentSortDirection: String, Codable, CaseIterable, Identifiable, Sendable {
     case ascending
     case descending
 

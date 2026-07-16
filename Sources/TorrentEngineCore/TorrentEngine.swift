@@ -51,7 +51,7 @@ private func torrentWakeCallback(_ context: UnsafeMutableRawPointer?) {
     relay.signal()
 }
 
-typealias TorrentClientCreationPreflight = @Sendable (
+package typealias TorrentClientCreationPreflight = @Sendable (
     _ stateDirectory: URL,
     _ enablePeerExchangePlugin: Bool,
     _ authorizedSavePaths: [String]
@@ -62,33 +62,38 @@ private struct TorrentRemovalResultStatus: Sendable {
     var error: String
 }
 
-enum TorrentRemovalResultReadOverride: Sendable {
+package enum TorrentRemovalResultReadOverride: Sendable {
     case pending
     case unknownState
 }
 
-typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResultReadOverride?
+package typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResultReadOverride?
+package typealias TorrentAlertErrorReader = @Sendable () -> String?
 
-@safe actor TorrentEngine {
-    static let clientCreationPreflight = Mutex<TorrentClientCreationPreflight?>(nil)
+@safe package actor TorrentEngine {
+    package static let clientCreationPreflight = Mutex<TorrentClientCreationPreflight?>(nil)
 
     private let stateDirectory: URL?
     private let removalResultReader: TorrentRemovalResultReader?
-    nonisolated let startupFailureMessage: String?
+    private let alertErrorReader: TorrentAlertErrorReader?
+    package nonisolated let startupFailureMessage: String?
     private let runtimeFailureMessage = Mutex<String?>(nil)
     private let wakeRelay = TorrentWakeRelay()
     private var client: TorrentClientHandle?
     private var hasPendingRemovalRequest = false
-    nonisolated let libtorrentVersion: String
+    private var isShutdown = false
+    package nonisolated let libtorrentVersion: String
 
-    init(
+    package init(
         stateDirectory: URL,
         enablePeerExchangePlugin: Bool,
         authorizedSavePaths: [String] = [],
-        removalResultReader: TorrentRemovalResultReader? = nil
+        removalResultReader: TorrentRemovalResultReader? = nil,
+        alertErrorReader: TorrentAlertErrorReader? = nil
     ) throws {
         self.stateDirectory = stateDirectory
         self.removalResultReader = removalResultReader
+        self.alertErrorReader = alertErrorReader
         startupFailureMessage = nil
         unsafe libtorrentVersion = String(cString: TorrentBridgeLibtorrentVersion())
         client = try Self.createClient(
@@ -99,19 +104,23 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         )
     }
 
-    init(startupFailureMessage: String) {
+    package init(startupFailureMessage: String) {
         stateDirectory = nil
         removalResultReader = nil
+        alertErrorReader = nil
         self.startupFailureMessage = startupFailureMessage
         unsafe libtorrentVersion = String(cString: TorrentBridgeLibtorrentVersion())
         client = nil
     }
 
-    nonisolated var isAvailable: Bool {
+    package nonisolated var isAvailable: Bool {
         startupFailureMessage == nil && runtimeFailureMessage.withLock { $0 == nil }
     }
 
-    func restart(enablePeerExchangePlugin: Bool, authorizedSavePaths: [String]) throws {
+    package func restart(enablePeerExchangePlugin: Bool, authorizedSavePaths: [String]) throws {
+        guard !isShutdown else {
+            throw TorrentEngineError.bridgeError("The torrent engine has been shut down.")
+        }
         guard !hasPendingRemovalRequest else {
             throw TorrentEngineError.bridgeError("The torrent engine cannot restart while removal is pending.")
         }
@@ -137,11 +146,104 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         }
     }
 
-    func wakeEvents() -> AsyncStream<Void> {
+    package func replaceAuthorizedSavePaths(_ authorizedSavePaths: [String]) throws {
+        let client = try unsafe requireClient()
+        let blob = try Self.encodeAuthorizedSavePaths(authorizedSavePaths)
+        try throwingBridgeCall { errorBuffer, errorCapacity in
+            unsafe blob.withUnsafeBufferPointer { buffer in
+                unsafe TorrentClientReplaceAuthorizedSavePaths(
+                    client,
+                    buffer.isEmpty ? nil : buffer.baseAddress,
+                    Int32(buffer.count),
+                    &errorBuffer,
+                    errorCapacity
+                )
+            }
+        }
+    }
+
+    package func shutdownSafely() async throws {
+        guard let initialClient = unsafe client?.pointer else {
+            isShutdown = true
+            runtimeFailureMessage.withLock { message in
+                if message == nil {
+                    message = "The torrent engine was shut down safely."
+                }
+            }
+            wakeRelay.finish()
+            return
+        }
+
+        var errors = [String]()
+        do {
+            try unsafe blockNetwork(client: initialClient)
+        } catch {
+            let detail = error.localizedDescription
+            forceContainmentAfterNetworkBlockFailure(detail: detail)
+            throw TorrentEngineError.bridgeError(
+                "The torrent engine was force-stopped after network blocking failed. \(detail)"
+            )
+        }
+
+        isShutdown = true
+        let shuttingDownMessage = "The torrent engine is shutting down safely."
+        runtimeFailureMessage.withLock { message in
+            if message == nil {
+                message = shuttingDownMessage
+            }
+        }
+
+        while hasPendingRemovalRequest {
+            await Self.waitForRemovalPollInterval()
+        }
+
+        if let runtimeFailure = runtimeFailureMessage.withLock({ $0 }),
+           runtimeFailure != shuttingDownMessage {
+            errors.append(runtimeFailure)
+        }
+        if let currentClient = unsafe client?.pointer {
+            do {
+                try unsafe saveAllChecked(client: currentClient)
+            } catch {
+                errors.append(error.localizedDescription)
+            }
+        }
+
+        destroyClient(waitForShutdown: true)
+        wakeRelay.finish()
+
+        let failureMessage: String?
+        if errors.isEmpty {
+            failureMessage = nil
+            runtimeFailureMessage.withLock { $0 = "The torrent engine was shut down safely." }
+        } else {
+            let detail = errors.joined(separator: " ")
+            failureMessage = "The torrent engine was stopped, but safe shutdown reported an error. \(detail)"
+            runtimeFailureMessage.withLock { $0 = failureMessage }
+        }
+
+        if let failureMessage {
+            throw TorrentEngineError.bridgeError(failureMessage)
+        }
+    }
+
+    /// Final fail-closed boundary for a native network-block failure. This may
+    /// run while a removal poll is suspended; that poll validates shutdown
+    /// immediately after every suspension before touching its captured pointer.
+    package func forceContainmentAfterNetworkBlockFailure(detail: String = "") {
+        let suffix = detail.isEmpty ? "" : " \(detail)"
+        let message = "The torrent engine was force-stopped because network blocking failed.\(suffix)"
+        isShutdown = true
+        runtimeFailureMessage.withLock { $0 = message }
+        destroyClient(waitForShutdown: true)
+        wakeRelay.finish()
+    }
+
+    package func wakeEvents() -> AsyncStream<Void> {
         wakeRelay.stream
     }
 
-    func addMagnet(
+    package func addMagnet(
         _ magnet: String,
         savePath: String,
         startsPaused: Bool = false,
@@ -178,7 +280,7 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         }
     }
 
-    func addTorrentFile(
+    package func addTorrentFile(
         data: Data,
         savePath: String,
         filePriorities: [Int32: TorrentFilePriority]? = nil,
@@ -246,7 +348,7 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         }
     }
 
-    func previewTorrentFile(data: Data) throws -> TorrentFilePreview {
+    package func previewTorrentFile(data: Data) throws -> TorrentFilePreview {
         let client = try unsafe requireClient()
         let dataSize = try Self.torrentDataSize(data)
         var preview = TTorrentFilePreview()
@@ -308,35 +410,35 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         )
     }
 
-    func pause(id: String) throws {
+    package func pause(id: String) throws {
         let client = try unsafe requireClient()
         try throwingBridgeCall { errorBuffer, errorCapacity in
             unsafe id.withCString { unsafe TorrentClientPause(client, $0, &errorBuffer, errorCapacity) }
         }
     }
 
-    func resume(id: String) throws {
+    package func resume(id: String) throws {
         let client = try unsafe requireClient()
         try throwingBridgeCall { errorBuffer, errorCapacity in
             unsafe id.withCString { unsafe TorrentClientResume(client, $0, &errorBuffer, errorCapacity) }
         }
     }
 
-    func reannounce(id: String) throws {
+    package func reannounce(id: String) throws {
         let client = try unsafe requireClient()
         try throwingBridgeCall { errorBuffer, errorCapacity in
             unsafe id.withCString { unsafe TorrentClientReannounce(client, $0, &errorBuffer, errorCapacity) }
         }
     }
 
-    func forceRecheck(id: String) throws {
+    package func forceRecheck(id: String) throws {
         let client = try unsafe requireClient()
         try throwingBridgeCall { errorBuffer, errorCapacity in
             unsafe id.withCString { unsafe TorrentClientForceRecheck(client, $0, &errorBuffer, errorCapacity) }
         }
     }
 
-    func remove(
+    package func remove(
         id: String,
         deleteFiles: Bool
     ) async throws -> TorrentRemovalOutcome {
@@ -354,6 +456,7 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         }
 
         var requestToken: UInt64 = 0
+        var removalCommitted: UInt8 = 0
         do {
             try throwingBridgeCall { errorBuffer, errorCapacity in
                 unsafe id.withCString {
@@ -363,30 +466,34 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
                         deleteFiles.bridgeFlag,
                         false.bridgeFlag,
                         &requestToken,
+                        &removalCommitted,
                         &errorBuffer,
                         errorCapacity
                     )
                 }
             }
         } catch {
-            guard requestToken != 0 else {
+            guard removalCommitted != 0 else {
                 throw error
             }
-            return quiesceAfterUntrackableRemoval(detail: error.localizedDescription)
+            return quiesceAfterUntrackableRemoval(
+                detail: error.localizedDescription,
+                downloadedFilesMayRemain: deleteFiles
+            )
         }
 
         guard deleteFiles else {
-            guard requestToken == 0 else {
+            guard removalCommitted != 0, requestToken == 0 else {
                 return quiesceAfterUntrackableRemoval(
-                    detail: "The bridge returned a deletion token when data deletion was not requested.",
+                    detail: "The bridge returned inconsistent non-deleting removal state.",
                     downloadedFilesMayRemain: false
                 )
             }
             return .removed
         }
-        guard requestToken != 0 else {
+        guard removalCommitted != 0, requestToken != 0 else {
             return quiesceAfterUntrackableRemoval(
-                detail: "The bridge did not return a deletion request token."
+                detail: "The bridge returned inconsistent deleting removal state."
             )
         }
 
@@ -401,11 +508,17 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
             switch result.state {
             case Int32(TTORRENT_REMOVAL_PENDING):
                 await Self.waitForRemovalPollInterval()
+                guard !isShutdown,
+                      unsafe client == self.client?.pointer else {
+                    return Self.removedWithBoundedWarning(
+                        "The torrent engine was stopped for security containment while data deletion was pending. Some downloaded files may remain on disk."
+                    )
+                }
             case Int32(TTORRENT_REMOVAL_SUCCEEDED):
                 return .removed
             case Int32(TTORRENT_REMOVAL_FAILED):
                 let message = result.error
-                return .removedWithWarning(
+                return Self.removedWithBoundedWarning(
                     message.isEmpty
                         ? "The torrent was removed, but some downloaded files may remain on disk."
                         : message
@@ -463,9 +576,34 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
             + "The torrent engine was stopped safely before folder access was released."
             + fileWarning
             + " \(detail)"
-        runtimeFailureMessage.withLock { $0 = message }
+        let boundedMessage = Self.boundedRemovalWarning(message)
+        runtimeFailureMessage.withLock { $0 = boundedMessage }
         destroyClient(waitForShutdown: true)
-        return .removedWithWarning(message)
+        return .removedWithWarning(boundedMessage)
+    }
+
+    private nonisolated static func removedWithBoundedWarning(
+        _ message: String
+    ) -> TorrentRemovalOutcome {
+        .removedWithWarning(boundedRemovalWarning(message))
+    }
+
+    package nonisolated static func boundedRemovalWarning(_ message: String) -> String {
+        guard message.utf8.count > TorrentEngineLimits.maximumRemovalWarningBytes else {
+            return message
+        }
+        var result = ""
+        result.reserveCapacity(TorrentEngineLimits.maximumRemovalWarningBytes)
+        var byteCount = 0
+        for character in message {
+            let characterBytes = character.utf8.count
+            guard byteCount + characterBytes <= TorrentEngineLimits.maximumRemovalWarningBytes else {
+                break
+            }
+            result.append(character)
+            byteCount += characterBytes
+        }
+        return result
     }
 
     private nonisolated static func waitForRemovalPollInterval() async {
@@ -474,7 +612,10 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         }.value
     }
 
-    func applySettings(_ settings: TorrentSettings, networkBlocked: Bool) throws {
+    package func applySettings(
+        _ settings: TorrentSettings,
+        networkBinding: TorrentNetworkBinding
+    ) throws {
         let client = try unsafe requireClient()
         try throwingBridgeCall { errorBuffer, errorCapacity in
             unsafe settings.libtorrentRequiredNetworkInterfaceName.withCString { networkInterface in
@@ -499,7 +640,7 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
                 unsafe bridgeSettings.encryption_policy = settings.libtorrentEncryptionPolicy
                 unsafe bridgeSettings.anonymous_mode = settings.effectiveAnonymousMode.bridgeFlag
                 unsafe bridgeSettings.required_network_interface = networkInterface
-                unsafe bridgeSettings.network_blocked = networkBlocked.bridgeFlag
+                unsafe bridgeSettings.network_blocked = networkBinding.networkBlocked.bridgeFlag
                 return unsafe TorrentClientApplySettings(
                     client,
                     &bridgeSettings,
@@ -510,14 +651,18 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         }
     }
 
-    func blockNetworkNow() throws {
+    package func blockNetworkNow() throws {
         let client = try unsafe requireClient()
+        try unsafe blockNetwork(client: client)
+    }
+
+    private func blockNetwork(client: OpaquePointer) throws {
         try throwingBridgeCall { errorBuffer, errorCapacity in
             unsafe TorrentClientBlockNetwork(client, &errorBuffer, errorCapacity)
         }
     }
 
-    func saveAll() {
+    package func saveAll() {
         guard let pointer = unsafe client?.pointer else {
             return
         }
@@ -525,14 +670,21 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         unsafe TorrentClientSaveAll(pointer)
     }
 
-    func saveAllChecked() throws {
+    package func saveAllChecked() throws {
         let client = try unsafe requireClient()
+        try unsafe saveAllChecked(client: client)
+    }
+
+    private func saveAllChecked(client: OpaquePointer) throws {
         try throwingBridgeCall { errorBuffer, errorCapacity in
             unsafe TorrentClientSaveAllChecked(client, &errorBuffer, errorCapacity)
         }
     }
 
-    func takeAlertError() -> String? {
+    package func takeAlertError() -> String? {
+        if let alertErrorReader {
+            return alertErrorReader()
+        }
         guard let pointer = unsafe client?.pointer else {
             return nil
         }
@@ -550,7 +702,7 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         }
     }
 
-    func takeChanges() -> UInt32 {
+    package func takeChanges() -> UInt32 {
         guard let pointer = unsafe client?.pointer else {
             return 0
         }
@@ -560,7 +712,7 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         return dirtyMask
     }
 
-    func networkStatus() -> TorrentNetworkStatus {
+    package func networkStatus() -> TorrentNetworkStatus {
         guard let pointer = unsafe client?.pointer else {
             return .empty
         }
@@ -573,7 +725,7 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         return TorrentNetworkStatus(status: status)
     }
 
-    func bridgeHealth() -> TorrentBridgeHealth {
+    package func bridgeHealth() -> TorrentBridgeHealth {
         guard let pointer = unsafe client?.pointer else {
             return .unavailable
         }
@@ -586,11 +738,49 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         return TorrentBridgeHealth(snapshot: health)
     }
 
-    func snapshots() -> [TorrentItem] {
+    package func poll(
+        since revision: UInt64?,
+        sortedBy sortOrder: TorrentSortOrder,
+        direction: TorrentSortDirection,
+        includeTrackerHosts: Bool
+    ) -> TorrentEnginePollResult {
+        let health = bridgeHealth()
+        let dirtyMask = takeChanges()
+        var alertErrors = [String]()
+        alertErrors.reserveCapacity(TorrentEngineLimits.maximumAlertErrorsPerPoll)
+        for _ in 0..<TorrentEngineLimits.maximumAlertErrorsPerPoll {
+            guard let error = takeAlertError() else {
+                break
+            }
+            if !error.isEmpty {
+                alertErrors.append(error)
+            }
+        }
+        let status = networkStatus()
+        let trackerHostsChanged = TorrentEngineDirtySet(rawValue: dirtyMask).contains(.trackerHosts)
+        let trackerHosts = includeTrackerHosts || trackerHostsChanged
+            ? trackerHostBatch()
+            : nil
+        let snapshots = snapshotsIfChanged(
+            since: revision,
+            sortedBy: sortOrder,
+            direction: direction
+        )
+        return TorrentEnginePollResult(
+            dirtyMask: dirtyMask,
+            alertErrors: alertErrors,
+            networkStatus: status,
+            bridgeHealth: health,
+            snapshotBatch: snapshots,
+            trackerHostBatch: trackerHosts
+        )
+    }
+
+    package func snapshots() -> [TorrentItem] {
         snapshotBatch().torrents
     }
 
-    func snapshotsIfChanged(
+    package func snapshotsIfChanged(
         since revision: UInt64?,
         sortedBy sortOrder: TorrentSortOrder,
         direction: TorrentSortDirection
@@ -609,7 +799,7 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         return TorrentSnapshotBatch(revision: batch.revision, torrents: sortOrder.sorted(batch.torrents, direction: direction))
     }
 
-    func requestSources(id: String) throws {
+    package func requestSources(id: String) throws {
         let client = try unsafe requireClient()
         try throwingBridgeCall { errorBuffer, errorCapacity in
             unsafe id.withCString {
@@ -618,7 +808,7 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         }
     }
 
-    func sourcePolicy(id: String) throws -> TorrentSourcePolicy {
+    package func sourcePolicy(id: String) throws -> TorrentSourcePolicy {
         let client = try unsafe requireClient()
         var policy = TTorrentSourcePolicy()
         try throwingBridgeCall { errorBuffer, errorCapacity in
@@ -629,7 +819,7 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         return TorrentSourcePolicy(snapshot: policy)
     }
 
-    func setSourcePolicy(id: String, field: TorrentSourcePolicyField, enabled: Bool) throws {
+    package func setSourcePolicy(id: String, field: TorrentSourcePolicyField, enabled: Bool) throws {
         let client = try unsafe requireClient()
         try throwingBridgeCall { errorBuffer, errorCapacity in
             unsafe id.withCString {
@@ -645,7 +835,7 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         }
     }
 
-    func torrentOptions(id: String) throws -> TorrentOptions {
+    package func torrentOptions(id: String) throws -> TorrentOptions {
         let client = try unsafe requireClient()
         var options = TTorrentOptions()
         try throwingBridgeCall { errorBuffer, errorCapacity in
@@ -656,7 +846,7 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         return TorrentOptions(snapshot: options)
     }
 
-    func setTorrentOptions(id: String, options: TorrentOptions) throws {
+    package func setTorrentOptions(id: String, options: TorrentOptions) throws {
         let client = try unsafe requireClient()
         var bridgeOptions = options.bridgeValue
         try throwingBridgeCall { errorBuffer, errorCapacity in
@@ -666,7 +856,7 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         }
     }
 
-    func moveTorrentInQueue(id: String, move: TorrentQueueMove) throws {
+    package func moveTorrentInQueue(id: String, move: TorrentQueueMove) throws {
         let client = try unsafe requireClient()
         try throwingBridgeCall { errorBuffer, errorCapacity in
             unsafe id.withCString {
@@ -675,7 +865,7 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         }
     }
 
-    func requestFiles(id: String) throws {
+    package func requestFiles(id: String) throws {
         let client = try unsafe requireClient()
         try throwingBridgeCall { errorBuffer, errorCapacity in
             unsafe id.withCString {
@@ -684,7 +874,7 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         }
     }
 
-    func setFilePriority(id: String, fileIndex: Int32, priority: TorrentFilePriority) throws {
+    package func setFilePriority(id: String, fileIndex: Int32, priority: TorrentFilePriority) throws {
         let client = try unsafe requireClient()
         try throwingBridgeCall { errorBuffer, errorCapacity in
             unsafe id.withCString {
@@ -693,7 +883,7 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         }
     }
 
-    func requestPieceMap(id: String) throws {
+    package func requestPieceMap(id: String) throws {
         let client = try unsafe requireClient()
         try throwingBridgeCall { errorBuffer, errorCapacity in
             unsafe id.withCString {
@@ -702,7 +892,7 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         }
     }
 
-    func trackerBatch(id: String, since previousRevision: UInt64?) -> TorrentTrackerBatch? {
+    package func trackerBatch(id: String, since previousRevision: UInt64?) -> TorrentTrackerBatch? {
         guard let client, let pointer = unsafe client.pointer else {
             return nil
         }
@@ -782,7 +972,7 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         )
     }
 
-    func trackerHostBatch() -> TorrentTrackerHostBatch {
+    package func trackerHostBatch() -> TorrentTrackerHostBatch {
         guard let client, let pointer = unsafe client.pointer else {
             return TorrentTrackerHostBatch(revision: 0, hosts: [])
         }
@@ -835,7 +1025,7 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         )
     }
 
-    func webSeedBatch(id: String, since previousRevision: UInt64?) -> TorrentWebSeedBatch? {
+    package func webSeedBatch(id: String, since previousRevision: UInt64?) -> TorrentWebSeedBatch? {
         guard let client, let pointer = unsafe client.pointer else {
             return nil
         }
@@ -915,7 +1105,7 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         )
     }
 
-    func webSeedActivity(id: String) -> TorrentWebSeedActivity? {
+    package func webSeedActivity(id: String) -> TorrentWebSeedActivity? {
         guard let client, let pointer = unsafe client.pointer else {
             return nil
         }
@@ -930,7 +1120,7 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         return TorrentWebSeedActivity(snapshot: activity)
     }
 
-    func peerSources(id: String) -> TorrentPeerSources? {
+    package func peerSources(id: String) -> TorrentPeerSources? {
         guard let client, let pointer = unsafe client.pointer else {
             return nil
         }
@@ -945,7 +1135,7 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         return TorrentPeerSources(snapshot: sources)
     }
 
-    func fileBatch(id: String, since previousRevision: UInt64?) -> TorrentFileBatch? {
+    package func fileBatch(id: String, since previousRevision: UInt64?) -> TorrentFileBatch? {
         guard let client, let pointer = unsafe client.pointer else {
             return nil
         }
@@ -1025,7 +1215,7 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         )
     }
 
-    func pieceMapBatch(id: String, since previousRevision: UInt64?) -> TorrentPieceMapBatch? {
+    package func pieceMapBatch(id: String, since previousRevision: UInt64?) -> TorrentPieceMapBatch? {
         guard let client, let pointer = unsafe client.pointer else {
             return nil
         }
@@ -1216,7 +1406,7 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         return unsafe TorrentClientHandle(created, wakeRelay: wakeRelay)
     }
 
-    nonisolated static func encodeAuthorizedSavePaths(_ paths: [String]) throws -> [UInt8] {
+    package nonisolated static func encodeAuthorizedSavePaths(_ paths: [String]) throws -> [UInt8] {
         guard paths.count <= Int(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT) else {
             throw TorrentEngineError.bridgeError("Too many authorized download folders were provided.")
         }
@@ -1319,8 +1509,6 @@ typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResu
         min(max(current * 2, max(0, Int(requiredCount))), maximum)
     }
 }
-
-extension TorrentEngine: TorrentEngineServicing {}
 
 @safe private final class TorrentClientHandle: @unchecked Sendable {
     private var rawPointer: OpaquePointer?

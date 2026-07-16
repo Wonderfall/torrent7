@@ -1,0 +1,5 @@
+import TorrentNetworkSecurity
+
+typealias NetworkInterfaceOption = TorrentNetworkSecurity.NetworkInterfaceOption
+typealias NetworkInterfaceMonitoring = TorrentNetworkSecurity.NetworkInterfaceMonitoring
+typealias NetworkInterfaceMonitor = TorrentNetworkSecurity.NetworkInterfaceMonitor

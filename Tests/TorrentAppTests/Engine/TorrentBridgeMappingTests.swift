@@ -1,7 +1,7 @@
 import Testing
 import TorrentBridge
 import TorrentEngineModel
-@testable import TorrentApp
+@testable import TorrentEngineCore
 
 @Suite("Torrent bridge mapping")
 struct TorrentBridgeMappingTests {

@@ -4,6 +4,7 @@ package enum TorrentInputLimits {
 }
 
 package enum TorrentEngineLimits {
+    package static let maximumAlertErrorsPerPoll = 16
     package static let maximumFileCount = 20_000
     package static let maximumTrackerCount = 2_000
     package static let maximumWebSeedCount = 2_000
@@ -12,6 +13,7 @@ package enum TorrentEngineLimits {
     package static let maximumAuthorizedSavePathCount = 20_000
     package static let maximumAuthorizedSavePathBytes = 1_023
     package static let maximumAuthorizedSavePathBlobBytes = 20_480_000
+    package static let maximumRemovalWarningBytes = 511
     package static let maximumPieceMapCount = 0x20_0000
     package static let torrentIDCapacity = 68
     package static let trackerHostCapacity = 256

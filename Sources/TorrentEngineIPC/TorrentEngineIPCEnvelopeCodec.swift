@@ -11,9 +11,26 @@ package enum TorrentEngineIPCField {
     package static let expectedEpoch = "expectedEpoch"
     package static let engineEpoch = "engineEpoch"
     package static let status = "status"
+    package static let failureCode = "failureCode"
     package static let errorMessage = "error"
     package static let payload = "payload"
     package static let fileDescriptor = "fileDescriptor"
+}
+
+package struct TorrentEngineIPCRequestMetadata: Equatable, Sendable {
+    package let header: TorrentEngineIPCHeader
+    package let payloadByteCount: Int
+    package let hasFileDescriptor: Bool
+
+    package init(
+        header: TorrentEngineIPCHeader,
+        payloadByteCount: Int,
+        hasFileDescriptor: Bool
+    ) {
+        self.header = header
+        self.payloadByteCount = payloadByteCount
+        self.hasFileDescriptor = hasFileDescriptor
+    }
 }
 
 package enum TorrentEngineIPCEnvelopeCodec {
@@ -33,6 +50,7 @@ package enum TorrentEngineIPCEnvelopeCodec {
     private static let replyFields = commonFields.union([
         TorrentEngineIPCField.engineEpoch,
         TorrentEngineIPCField.status,
+        TorrentEngineIPCField.failureCode,
         TorrentEngineIPCField.errorMessage,
     ])
 
@@ -61,9 +79,56 @@ package enum TorrentEngineIPCEnvelopeCodec {
         maximumPayloadBytes: Int
     ) throws -> TorrentEngineIPCRequest {
         try TorrentEngineIPCPayloadBounds.validateMaximum(maximumPayloadBytes)
-        try validateAllowedFields(in: dictionary, allowed: requestFields)
+        let metadata = try inspectRequest(dictionary)
+        guard metadata.payloadByteCount <= maximumPayloadBytes else {
+            throw TorrentEngineIPCError.payloadTooLarge(
+                actual: metadata.payloadByteCount,
+                maximum: maximumPayloadBytes
+            )
+        }
+        return try decodeRequest(
+            dictionary,
+            metadata: metadata,
+            maximumPayloadBytes: maximumPayloadBytes
+        )
+    }
 
+    /// Validates the request envelope and reads only fixed-size header fields and
+    /// XPC object metadata. The payload is not copied and an FD is not duplicated.
+    package static func inspectRequest(
+        _ dictionary: XPCDictionary
+    ) throws -> TorrentEngineIPCRequestMetadata {
+        try validateAllowedFields(in: dictionary, allowed: requestFields)
         let header = try decodeHeader(dictionary)
+        let payloadByteCount = try TorrentEngineIPCXPCValues.payloadByteCount(
+            in: dictionary
+        )
+        let hasFileDescriptor = try TorrentEngineIPCXPCValues.hasFileDescriptor(
+            in: dictionary
+        )
+        return TorrentEngineIPCRequestMetadata(
+            header: header,
+            payloadByteCount: payloadByteCount,
+            hasFileDescriptor: hasFileDescriptor
+        )
+    }
+
+    /// Copies resources only after a caller has admitted the inspected request.
+    package static func decodeRequest(
+        _ dictionary: XPCDictionary,
+        metadata: TorrentEngineIPCRequestMetadata,
+        maximumPayloadBytes: Int
+    ) throws -> TorrentEngineIPCRequest {
+        try TorrentEngineIPCPayloadBounds.validateMaximum(maximumPayloadBytes)
+        guard try inspectRequest(dictionary) == metadata else {
+            throw TorrentEngineIPCError.requestMetadataMismatch
+        }
+        guard metadata.payloadByteCount <= maximumPayloadBytes else {
+            throw TorrentEngineIPCError.payloadTooLarge(
+                actual: metadata.payloadByteCount,
+                maximum: maximumPayloadBytes
+            )
+        }
         let payload = try TorrentEngineIPCXPCValues.copyPayload(
             from: dictionary,
             maximumBytes: maximumPayloadBytes
@@ -72,7 +137,7 @@ package enum TorrentEngineIPCEnvelopeCodec {
             from: dictionary
         )
         return TorrentEngineIPCRequest(
-            header: header,
+            header: metadata.header,
             payload: payload,
             fileDescriptor: fileDescriptor
         )
@@ -84,11 +149,18 @@ package enum TorrentEngineIPCEnvelopeCodec {
     ) throws -> XPCDictionary {
         try TorrentEngineIPCPayloadBounds.validateMaximum(maximumPayloadBytes)
         try validate(reply.header)
-        try validateReplyError(status: reply.status, message: reply.errorMessage)
+        try validateReplyError(
+            status: reply.status,
+            failureCode: reply.failureCode,
+            message: reply.errorMessage
+        )
 
         var dictionary = encodeHeader(reply.header)
         dictionary[TorrentEngineIPCField.engineEpoch] = reply.engineEpoch.uuidString
         dictionary[TorrentEngineIPCField.status] = reply.status.rawValue
+        if let failureCode = reply.failureCode {
+            dictionary[TorrentEngineIPCField.failureCode] = failureCode.rawValue
+        }
         if let errorMessage = reply.errorMessage {
             dictionary[TorrentEngineIPCField.errorMessage] = errorMessage
         }
@@ -123,11 +195,28 @@ package enum TorrentEngineIPCEnvelopeCodec {
         guard let status = TorrentEngineIPCReplyStatus(rawValue: statusValue) else {
             throw TorrentEngineIPCError.unknownReplyStatus(statusValue)
         }
+        let failureCodeValue = try optionalUInt64(
+            TorrentEngineIPCField.failureCode,
+            in: dictionary
+        )
+        let failureCode: TorrentEngineIPCFailureCode?
+        if let failureCodeValue {
+            guard let decoded = TorrentEngineIPCFailureCode(rawValue: failureCodeValue) else {
+                throw TorrentEngineIPCError.unknownFailureCode(failureCodeValue)
+            }
+            failureCode = decoded
+        } else {
+            failureCode = nil
+        }
         let errorMessage = try optionalString(
             TorrentEngineIPCField.errorMessage,
             in: dictionary
         )
-        try validateReplyError(status: status, message: errorMessage)
+        try validateReplyError(
+            status: status,
+            failureCode: failureCode,
+            message: errorMessage
+        )
 
         let payload = try TorrentEngineIPCXPCValues.copyPayload(
             from: dictionary,
@@ -140,6 +229,7 @@ package enum TorrentEngineIPCEnvelopeCodec {
             header: header,
             engineEpoch: engineEpoch,
             status: status,
+            failureCode: failureCode,
             errorMessage: errorMessage,
             payload: payload,
             fileDescriptor: fileDescriptor
@@ -219,6 +309,16 @@ package enum TorrentEngineIPCEnvelopeCodec {
         return xpc_uint64_get_value(object)
     }
 
+    private static func optionalUInt64(
+        _ field: String,
+        in dictionary: XPCDictionary
+    ) throws -> UInt64? {
+        guard dictionary.keys.contains(field) else {
+            return nil
+        }
+        return try requiredUInt64(field, in: dictionary)
+    }
+
     private static func requiredString(
         _ field: String,
         in dictionary: XPCDictionary
@@ -273,16 +373,21 @@ package enum TorrentEngineIPCEnvelopeCodec {
 
     private static func validateReplyError(
         status: TorrentEngineIPCReplyStatus,
+        failureCode: TorrentEngineIPCFailureCode?,
         message: String?
     ) throws {
-        switch (status, message) {
-        case (.success, nil):
+        switch (status, failureCode, message) {
+        case (.success, nil, nil):
             return
-        case (.success, .some):
+        case (.success, .some, _):
+            throw TorrentEngineIPCError.unexpectedFailureCode
+        case (.success, nil, .some):
             throw TorrentEngineIPCError.unexpectedErrorMessage
-        case (.failure, nil):
+        case (.failure, nil, _):
+            throw TorrentEngineIPCError.missingFailureCode
+        case (.failure, .some, nil):
             throw TorrentEngineIPCError.missingErrorMessage
-        case (.failure, let message?):
+        case (.failure, .some, let message?):
             guard !message.isEmpty else {
                 throw TorrentEngineIPCError.errorMessageEmpty
             }
@@ -301,6 +406,32 @@ package enum TorrentEngineIPCEnvelopeCodec {
 }
 
 package enum TorrentEngineIPCXPCValues {
+    package static func payloadByteCount(
+        in dictionary: XPCDictionary,
+        field: String = TorrentEngineIPCField.payload
+    ) throws -> Int {
+        guard dictionary.keys.contains(field) else {
+            return 0
+        }
+        guard let object = unsafe dictionary[field, as: XPC_TYPE_DATA] else {
+            throw TorrentEngineIPCError.wrongFieldType(field: field, expected: "data")
+        }
+        return xpc_data_get_length(object)
+    }
+
+    package static func hasFileDescriptor(
+        in dictionary: XPCDictionary,
+        field: String = TorrentEngineIPCField.fileDescriptor
+    ) throws -> Bool {
+        guard dictionary.keys.contains(field) else {
+            return false
+        }
+        guard unsafe dictionary[field, as: XPC_TYPE_FD] != nil else {
+            throw TorrentEngineIPCError.wrongFieldType(field: field, expected: "file descriptor")
+        }
+        return true
+    }
+
     package static func boxedFileDescriptor(_ fileDescriptor: Int32) throws -> xpc_object_t {
         guard fileDescriptor >= 0 else {
             throw TorrentEngineIPCError.invalidFileDescriptor

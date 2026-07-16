@@ -156,6 +156,7 @@ let package = Package(
     ],
     products: [
         .executable(name: "Torrent7", targets: ["TorrentApp"]),
+        .executable(name: "TorrentEngineService", targets: ["TorrentEngineService"]),
         .executable(name: "TorrentBridgeTests", targets: ["TorrentBridgeTests"])
     ],
     targets: [
@@ -179,6 +180,61 @@ let package = Package(
             ]
         ),
         .target(
+            name: "TorrentEngineClient",
+            dependencies: ["TorrentEngineIPC", "TorrentEngineModel"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .treatAllWarnings(as: .error),
+                .strictMemorySafety(),
+                .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
+            ]
+        ),
+        .target(
+            name: "TorrentNetworkSecurity",
+            dependencies: ["TorrentEngineModel"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .treatAllWarnings(as: .error),
+                .strictMemorySafety(),
+                .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
+            ]
+        ),
+        .target(
+            name: "TorrentEngineCore",
+            dependencies: ["TorrentEngineModel", "TorrentBridge"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .treatAllWarnings(as: .error),
+                .strictMemorySafety(),
+                .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
+            ]
+        ),
+        .target(
+            name: "TorrentEngineServiceSupport",
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .treatAllWarnings(as: .error),
+                .strictMemorySafety(),
+                .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
+            ]
+        ),
+        .executableTarget(
+            name: "TorrentEngineService",
+            dependencies: [
+                "TorrentEngineCore",
+                "TorrentEngineIPC",
+                "TorrentEngineModel",
+                "TorrentEngineServiceSupport",
+                "TorrentNetworkSecurity"
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .treatAllWarnings(as: .error),
+                .strictMemorySafety(),
+                .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
+            ]
+        ),
+        .target(
             name: "TorrentBridge",
             publicHeadersPath: "include",
             cxxSettings: [
@@ -193,7 +249,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "TorrentApp",
-            dependencies: ["TorrentEngineModel", "TorrentBridge"],
+            dependencies: ["TorrentEngineClient", "TorrentEngineModel", "TorrentNetworkSecurity"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
                 .treatAllWarnings(as: .error),
@@ -203,7 +259,7 @@ let package = Package(
         ),
         .testTarget(
             name: "TorrentAppTests",
-            dependencies: ["TorrentApp", "TorrentEngineModel", "TorrentBridge"],
+            dependencies: ["TorrentApp", "TorrentEngineModel", "TorrentEngineCore", "TorrentBridge"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
                 .treatAllWarnings(as: .error),
@@ -214,6 +270,46 @@ let package = Package(
         .testTarget(
             name: "TorrentEngineIPCTests",
             dependencies: ["TorrentEngineIPC", "TorrentEngineModel"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .treatAllWarnings(as: .error),
+                .strictMemorySafety(),
+                .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
+            ]
+        ),
+        .testTarget(
+            name: "TorrentEngineClientTests",
+            dependencies: ["TorrentEngineClient", "TorrentEngineIPC"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .treatAllWarnings(as: .error),
+                .strictMemorySafety(),
+                .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
+            ]
+        ),
+        .testTarget(
+            name: "TorrentEngineServiceSupportTests",
+            dependencies: ["TorrentEngineServiceSupport"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .treatAllWarnings(as: .error),
+                .strictMemorySafety(),
+                .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
+            ]
+        ),
+        .testTarget(
+            name: "TorrentEngineServiceTests",
+            dependencies: ["TorrentEngineService", "TorrentEngineIPC"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .treatAllWarnings(as: .error),
+                .strictMemorySafety(),
+                .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
+            ]
+        ),
+        .testTarget(
+            name: "TorrentNetworkSecurityTests",
+            dependencies: ["TorrentNetworkSecurity", "TorrentEngineModel"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
                 .treatAllWarnings(as: .error),

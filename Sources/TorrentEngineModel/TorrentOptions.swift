@@ -1,6 +1,6 @@
 import Foundation
 
-package enum TorrentQueuePriority: Int32, CaseIterable, Identifiable, Sendable {
+package enum TorrentQueuePriority: Int32, Codable, CaseIterable, Identifiable, Sendable {
     case low = 0
     case normal = 1
     case high = 2
@@ -22,7 +22,7 @@ package enum TorrentQueuePriority: Int32, CaseIterable, Identifiable, Sendable {
 
 }
 
-package enum TorrentQueueMove: Int32, Sendable {
+package enum TorrentQueueMove: Int32, Codable, Sendable {
     case top = 0
     case up = 1
     case down = 2
@@ -30,7 +30,7 @@ package enum TorrentQueueMove: Int32, Sendable {
 
 }
 
-package struct TorrentOptions: Equatable, Sendable {
+package struct TorrentOptions: Codable, Equatable, Sendable {
     package var downloadRateLimitKBps: Int
     package var uploadRateLimitKBps: Int
     package var uploadSlotLimit: Int

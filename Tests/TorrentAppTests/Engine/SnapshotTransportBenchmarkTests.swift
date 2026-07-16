@@ -4,7 +4,7 @@ import Foundation
 import Testing
 import TorrentBridge
 import TorrentEngineModel
-@testable import TorrentApp
+@testable import TorrentEngineCore
 
 @Suite("Snapshot transport resource model", .serialized)
 struct SnapshotTransportBenchmarkTests {

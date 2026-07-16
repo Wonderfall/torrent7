@@ -17,9 +17,19 @@ package enum TorrentEngineError: LocalizedError, Sendable {
     }
 }
 
-package enum TorrentRemovalOutcome: Equatable, Sendable {
+package enum TorrentRemovalOutcome: Codable, Equatable, Sendable {
     case removed
     case removedWithWarning(String)
+}
+
+package struct TorrentFolderAuthorization: Equatable, Sendable {
+    package let path: String
+    package let bookmarkData: Data
+
+    package init(path: String, bookmarkData: Data) {
+        self.path = path
+        self.bookmarkData = bookmarkData
+    }
 }
 
 package protocol TorrentEngineServicing: Sendable {
@@ -27,7 +37,16 @@ package protocol TorrentEngineServicing: Sendable {
     var libtorrentVersion: String { get }
     var isAvailable: Bool { get }
 
+    /// Ends the controller connection and waits for engine-owned resources to
+    /// be released. Implementations must be idempotent.
+    func shutdown() async
+    /// Immediately removes the controller transport as a fail-closed boundary.
+    func terminateConnection() async
     func restart(enablePeerExchangePlugin: Bool, authorizedSavePaths: [String]) async throws
+    func delegateFolderAuthorization(_ authorization: TorrentFolderAuthorization) async throws
+    func reconcileFolderAuthorizations(
+        _ authorizations: [TorrentFolderAuthorization]
+    ) async throws
     func wakeEvents() async -> AsyncStream<Void>
     func addMagnet(
         _ magnet: String,
@@ -55,7 +74,7 @@ package protocol TorrentEngineServicing: Sendable {
     func reannounce(id: String) async throws
     func forceRecheck(id: String) async throws
     func remove(id: String, deleteFiles: Bool) async throws -> TorrentRemovalOutcome
-    func applySettings(_ settings: TorrentSettings, networkBlocked: Bool) async throws
+    func applySettings(_ settings: TorrentSettings, networkBinding: TorrentNetworkBinding) async throws
     func blockNetworkNow() async throws
     func saveAll() async
     func saveAllChecked() async throws
@@ -63,6 +82,12 @@ package protocol TorrentEngineServicing: Sendable {
     func takeChanges() async -> UInt32
     func networkStatus() async -> TorrentNetworkStatus
     func bridgeHealth() async -> TorrentBridgeHealth
+    func poll(
+        since revision: UInt64?,
+        sortedBy sortOrder: TorrentSortOrder,
+        direction: TorrentSortDirection,
+        includeTrackerHosts: Bool
+    ) async -> TorrentEnginePollResult
     func snapshotsIfChanged(
         since revision: UInt64?,
         sortedBy sortOrder: TorrentSortOrder,
@@ -86,7 +111,103 @@ package protocol TorrentEngineServicing: Sendable {
     func pieceMapBatch(id: String, since revision: UInt64?) async -> TorrentPieceMapBatch?
 }
 
-package struct TorrentSnapshotBatch: Sendable {
+package struct TorrentEnginePollResult: Codable, Sendable {
+    package let dirtyMask: UInt32
+    package let alertErrors: [String]
+    package let networkStatus: TorrentNetworkStatus
+    package let bridgeHealth: TorrentBridgeHealth
+    package let snapshotBatch: TorrentSnapshotBatch?
+    package let trackerHostBatch: TorrentTrackerHostBatch?
+
+    package init(
+        dirtyMask: UInt32,
+        alertErrors: [String],
+        networkStatus: TorrentNetworkStatus,
+        bridgeHealth: TorrentBridgeHealth,
+        snapshotBatch: TorrentSnapshotBatch?,
+        trackerHostBatch: TorrentTrackerHostBatch?
+    ) {
+        self.dirtyMask = dirtyMask
+        self.alertErrors = Array(alertErrors.prefix(TorrentEngineLimits.maximumAlertErrorsPerPoll))
+        self.networkStatus = networkStatus
+        self.bridgeHealth = bridgeHealth
+        self.snapshotBatch = snapshotBatch
+        self.trackerHostBatch = trackerHostBatch
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case dirtyMask
+        case alertErrors
+        case networkStatus
+        case bridgeHealth
+        case snapshotBatch
+        case trackerHostBatch
+    }
+
+    package init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            dirtyMask: try values.decode(UInt32.self, forKey: .dirtyMask),
+            alertErrors: try values.decode([String].self, forKey: .alertErrors),
+            networkStatus: try values.decode(TorrentNetworkStatus.self, forKey: .networkStatus),
+            bridgeHealth: try values.decode(TorrentBridgeHealth.self, forKey: .bridgeHealth),
+            snapshotBatch: try values.decodeIfPresent(TorrentSnapshotBatch.self, forKey: .snapshotBatch),
+            trackerHostBatch: try values.decodeIfPresent(TorrentTrackerHostBatch.self, forKey: .trackerHostBatch)
+        )
+    }
+
+    package func encode(to encoder: any Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(dirtyMask, forKey: .dirtyMask)
+        try values.encode(alertErrors, forKey: .alertErrors)
+        try values.encode(networkStatus, forKey: .networkStatus)
+        try values.encode(bridgeHealth, forKey: .bridgeHealth)
+        try values.encodeIfPresent(snapshotBatch, forKey: .snapshotBatch)
+        try values.encodeIfPresent(trackerHostBatch, forKey: .trackerHostBatch)
+    }
+}
+
+extension TorrentEngineServicing {
+    package func poll(
+        since revision: UInt64?,
+        sortedBy sortOrder: TorrentSortOrder,
+        direction: TorrentSortDirection,
+        includeTrackerHosts: Bool
+    ) async -> TorrentEnginePollResult {
+        let health = await bridgeHealth()
+        let dirtyMask = await takeChanges()
+        var alertErrors = [String]()
+        alertErrors.reserveCapacity(TorrentEngineLimits.maximumAlertErrorsPerPoll)
+        for _ in 0..<TorrentEngineLimits.maximumAlertErrorsPerPoll {
+            guard let error = await takeAlertError() else {
+                break
+            }
+            if !error.isEmpty {
+                alertErrors.append(error)
+            }
+        }
+        let status = await networkStatus()
+        let trackerHostsChanged = TorrentEngineDirtySet(rawValue: dirtyMask).contains(.trackerHosts)
+        let trackerHosts = includeTrackerHosts || trackerHostsChanged
+            ? await trackerHostBatch()
+            : nil
+        let snapshots = await snapshotsIfChanged(
+            since: revision,
+            sortedBy: sortOrder,
+            direction: direction
+        )
+        return TorrentEnginePollResult(
+            dirtyMask: dirtyMask,
+            alertErrors: alertErrors,
+            networkStatus: status,
+            bridgeHealth: health,
+            snapshotBatch: snapshots,
+            trackerHostBatch: trackerHosts
+        )
+    }
+}
+
+package struct TorrentSnapshotBatch: Codable, Sendable {
     package var revision: UInt64
     package var torrents: [TorrentItem]
 
@@ -96,7 +217,7 @@ package struct TorrentSnapshotBatch: Sendable {
     }
 }
 
-package struct TorrentTrackerBatch: Sendable {
+package struct TorrentTrackerBatch: Codable, Sendable {
     package var revision: UInt64
     package var trackers: [TorrentTrackerItem]
 
@@ -106,7 +227,7 @@ package struct TorrentTrackerBatch: Sendable {
     }
 }
 
-package struct TorrentTrackerHostBatch: Sendable {
+package struct TorrentTrackerHostBatch: Codable, Sendable {
     package var revision: UInt64
     package var hosts: [TorrentTrackerHostItem]
 
@@ -116,7 +237,7 @@ package struct TorrentTrackerHostBatch: Sendable {
     }
 }
 
-package struct TorrentWebSeedBatch: Sendable {
+package struct TorrentWebSeedBatch: Codable, Sendable {
     package var revision: UInt64
     package var webSeeds: [TorrentWebSeedItem]
 
@@ -126,7 +247,7 @@ package struct TorrentWebSeedBatch: Sendable {
     }
 }
 
-package struct TorrentFileBatch: Sendable {
+package struct TorrentFileBatch: Codable, Sendable {
     package var revision: UInt64
     package var files: [TorrentFileItem]
 
@@ -136,7 +257,7 @@ package struct TorrentFileBatch: Sendable {
     }
 }
 
-package struct TorrentPieceMapBatch: Sendable {
+package struct TorrentPieceMapBatch: Codable, Sendable {
     package var revision: UInt64
     package var pieceMap: TorrentPieceMap
 

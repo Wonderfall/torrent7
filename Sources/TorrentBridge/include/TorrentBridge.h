@@ -53,7 +53,7 @@ inline constexpr int32_t TTORRENT_SOURCE_POLICY_ENABLE_LSD = 2;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS = 3;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS = 4;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT = 5;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 34;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 35;
 extern "C" {
 #else
 #define TORRENT_BRIDGE_NOEXCEPT
@@ -105,7 +105,7 @@ enum {
     TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS = 3,
     TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS = 4,
     TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT = 5,
-    TTORRENT_BRIDGE_ABI_VERSION = 34
+    TTORRENT_BRIDGE_ABI_VERSION = 35
 };
 #endif
 
@@ -561,16 +561,18 @@ int32_t TorrentClientResume(TTorrentClient *client, const char *torrent_id, char
 int32_t TorrentClientReannounce(TTorrentClient *client, const char *torrent_id, char *error_out, int32_t error_capacity) TORRENT_BRIDGE_NOEXCEPT;
 int32_t TorrentClientForceRecheck(TTorrentClient *client, const char *torrent_id, char *error_out, int32_t error_capacity) TORRENT_BRIDGE_NOEXCEPT;
 
-// Once libtorrent accepts an asynchronous deletion, a nonzero output token is
-// authoritative even if this call reports a later bookkeeping error. The
-// caller must either consume that token's terminal result before releasing
-// access to the save path, or blocking-destroy the client before releasing it.
+// removal_committed_out becomes true immediately after libtorrent accepts any
+// removal and remains authoritative even if later bridge bookkeeping fails. A
+// nonzero request token additionally identifies an asynchronous payload
+// deletion. After commit, the caller must either consume that token's terminal
+// result when present or blocking-destroy the client before releasing access.
 int32_t TorrentClientRemove(
     TTorrentClient *client,
     const char *torrent_id,
     uint8_t delete_files,
     uint8_t delete_partfile,
     uint64_t *request_token_out,
+    uint8_t *removal_committed_out,
     char *error_out,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;

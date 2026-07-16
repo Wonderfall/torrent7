@@ -1,6 +1,6 @@
 import Foundation
 
-package struct TorrentItem: Identifiable, Hashable, Sendable {
+package struct TorrentItem: Codable, Identifiable, Hashable, Sendable {
     package let id: String
     package let infoHash: String
     package let name: String
@@ -359,7 +359,7 @@ package struct TorrentTransferMetrics: Equatable, Sendable {
 }
 
 
-package enum TorrentState: Int32, Hashable, Sendable {
+package enum TorrentState: Int32, Codable, Hashable, Sendable {
     case checkingFiles = 1
     case downloadingMetadata = 2
     case downloading = 3

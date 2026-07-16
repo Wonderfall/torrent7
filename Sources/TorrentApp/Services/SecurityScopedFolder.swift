@@ -3,6 +3,7 @@ import Foundation
 protocol DownloadFolderAccessing: AnyObject {
     var url: URL { get }
     func bookmarkData() throws -> Data
+    func delegationBookmarkData() throws -> Data
 }
 
 protocol DownloadFolderAccessProviding {
@@ -74,6 +75,13 @@ final class SecurityScopedFolder: DownloadFolderAccessing {
 
     func bookmarkData() throws -> Data {
         try url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil)
+    }
+
+    func delegationBookmarkData() throws -> Data {
+        // A transient bookmark transfers the currently active sandbox extension
+        // to the XPC service without sharing the GUI's persistent app-scoped
+        // bookmark authority.
+        try url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
     }
 
     static func restore(defaults: UserDefaults = .standard) throws -> SecurityScopedFolder? {

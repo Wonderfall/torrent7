@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TorrentEngineModel
 import XPC
 @testable import TorrentEngineIPC
 
@@ -26,6 +27,7 @@ struct TorrentEngineIPCEnvelopeTests {
             header: header,
             engineEpoch: UUID(),
             status: .failure,
+            failureCode: .controllerBusy,
             errorMessage: "The operation failed safely.",
             payload: Data([3, 4, 5])
         )
@@ -55,6 +57,53 @@ struct TorrentEngineIPCEnvelopeTests {
             maximumPayloadBytes: 3
         )
         #expect(decoded.payload == Data([1, 2, 3]))
+    }
+
+    @Test("Request inspection reports resource cost before decoding")
+    func requestInspection() throws {
+        let request = TorrentEngineIPCRequest(
+            header: makeHeader(),
+            payload: Data([1, 2, 3, 4])
+        )
+        let dictionary = try TorrentEngineIPCEnvelopeCodec.encode(
+            request,
+            maximumPayloadBytes: 4
+        )
+
+        let metadata = try TorrentEngineIPCEnvelopeCodec.inspectRequest(dictionary)
+        #expect(metadata.header == request.header)
+        #expect(metadata.payloadByteCount == 4)
+        #expect(!metadata.hasFileDescriptor)
+        #expect(try TorrentEngineIPCEnvelopeCodec.decodeRequest(
+            dictionary,
+            metadata: metadata,
+            maximumPayloadBytes: 4
+        ) == request)
+    }
+
+    @Test("Inspected metadata must still match at resource acquisition")
+    func inspectedMetadataMustMatch() throws {
+        let request = TorrentEngineIPCRequest(
+            header: makeHeader(),
+            payload: Data([1, 2, 3, 4])
+        )
+        let dictionary = try TorrentEngineIPCEnvelopeCodec.encode(
+            request,
+            maximumPayloadBytes: 4
+        )
+        let metadata = TorrentEngineIPCRequestMetadata(
+            header: request.header,
+            payloadByteCount: 3,
+            hasFileDescriptor: false
+        )
+
+        expectIPCError(.requestMetadataMismatch) {
+            try TorrentEngineIPCEnvelopeCodec.decodeRequest(
+                dictionary,
+                metadata: metadata,
+                maximumPayloadBytes: 4
+            )
+        }
     }
 
     @Test("Unknown fields are rejected")
@@ -245,6 +294,7 @@ struct TorrentEngineIPCEnvelopeTests {
 
     @Test("Stable dataset, migration, and hint operation numbers")
     func stableOperationNumbers() {
+        #expect(TorrentEngineIPCOperation.replaceFolderCapabilities.rawValue == 7)
         #expect(TorrentEngineIPCOperation.openDataset.rawValue == 50)
         #expect(TorrentEngineIPCOperation.readDataset.rawValue == 51)
         #expect(TorrentEngineIPCOperation.closeDataset.rawValue == 52)
@@ -253,6 +303,9 @@ struct TorrentEngineIPCEnvelopeTests {
         #expect(TorrentEngineIPCOperation.commitStateMigration.rawValue == 62)
         #expect(TorrentEngineIPCOperation.abortStateMigration.rawValue == 63)
         #expect(TorrentEngineIPCOperation.changeHint.rawValue == 100)
+        #expect(TorrentEngineIPCFailureCode.operationRejected.rawValue == 1)
+        #expect(TorrentEngineIPCFailureCode.controllerBusy.rawValue == 2)
+        #expect(TorrentEngineIPCFailureCode.serviceShuttingDown.rawValue == 3)
     }
 
     private func encodedRequest() throws -> XPCDictionary {
@@ -287,6 +340,54 @@ struct TorrentEngineIPCPropertyListTests {
         #expect(decoded == value)
     }
 
+    @Test("Add responses use a property-list container instead of a scalar root")
+    func addedTorrentResponseRoundTrip() throws {
+        let value = TorrentEngineIPCAddedTorrentResponse(
+            identifier: "t:\(String(repeating: "a", count: 32))"
+        )
+        let data = try TorrentEngineIPCPropertyListCodec.encode(
+            value,
+            maximumBytes: 4_096
+        )
+
+        let decoded = try TorrentEngineIPCPropertyListCodec.decode(
+            TorrentEngineIPCAddedTorrentResponse.self,
+            from: data,
+            maximumBytes: 4_096
+        )
+        #expect(decoded == value)
+    }
+
+    @Test("Removal responses keep both outcomes inside a property-list container")
+    func removalResponseRoundTrips() throws {
+        for outcome in [
+            TorrentRemovalOutcome.removed,
+            TorrentRemovalOutcome.removedWithWarning("Files were retained safely."),
+        ] {
+            let value = TorrentEngineIPCRemovalResponse(outcome: outcome)
+            let data = try TorrentEngineIPCPropertyListCodec.encode(
+                value,
+                maximumBytes: 4_096
+            )
+            let decoded = try TorrentEngineIPCPropertyListCodec.decode(
+                TorrentEngineIPCRemovalResponse.self,
+                from: data,
+                maximumBytes: 4_096
+            )
+            #expect(decoded == value)
+        }
+    }
+
+    @Test("Bare scalar roots are rejected so wire messages must use containers")
+    func scalarRootsAreRejected() {
+        expectIPCError(.propertyListEncodingFailed) {
+            try TorrentEngineIPCPropertyListCodec.encode(
+                "not-a-wire-message",
+                maximumBytes: 4_096
+            )
+        }
+    }
+
     @Test("Property-list calls enforce their own limits")
     func propertyListBounds() throws {
         let value = ExamplePayload(name: "snapshot", values: [1, 2, 3])
@@ -316,6 +417,27 @@ struct TorrentEngineIPCPropertyListTests {
             )
         }
     }
+
+    @Test("Binary property-list collection amplification is rejected before decoding")
+    func propertyListCollectionAmplification() throws {
+        let amplified = Array(repeating: 0, count: 500_000)
+        let data = try TorrentEngineIPCPropertyListCodec.encode(
+            amplified,
+            maximumBytes: 1 * 1_024 * 1_024
+        )
+
+        expectIPCError(.propertyListDecodingFailed) {
+            try TorrentEngineIPCPropertyListCodec.decode(
+                [Int].self,
+                from: data,
+                maximumBytes: 1 * 1_024 * 1_024,
+                decodingLimits: .init(
+                    maximumContainerElementCount: 256,
+                    maximumCollectionReferenceCount: 128 * 1_024
+                )
+            )
+        }
+    }
 }
 
 @Suite("Torrent engine IPC file descriptors")
@@ -331,6 +453,9 @@ struct TorrentEngineIPCFileDescriptorTests {
             request,
             maximumPayloadBytes: 0
         )
+        let metadata = try TorrentEngineIPCEnvelopeCodec.inspectRequest(dictionary)
+        #expect(metadata.payloadByteCount == 0)
+        #expect(metadata.hasFileDescriptor)
         let decoded = try TorrentEngineIPCEnvelopeCodec.decodeRequest(
             dictionary,
             maximumPayloadBytes: 0

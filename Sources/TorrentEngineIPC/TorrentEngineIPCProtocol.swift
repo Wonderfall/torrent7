@@ -1,12 +1,26 @@
 import Foundation
+import TorrentEngineModel
 
 package enum TorrentEngineIPCProtocol {
-    package static let version: UInt64 = 1
+    package static let version: UInt64 = 3
 }
 
 package enum TorrentEngineIPCLimits {
-    package static let maximumPayloadBytes = 64 * 1_024 * 1_024
+    // The wire envelope must accommodate the 64 MiB torrent input plus bounded
+    // binary-property-list structure and file-priority metadata.
+    package static let maximumPayloadBytes = 66 * 1_024 * 1_024
     package static let maximumErrorBytes = 4 * 1_024
+    package static let maximumBookmarkBytes = 1 * 1_024 * 1_024
+    package static let maximumBookmarkAggregateBytes = 20 * 1_024 * 1_024
+    package static let maximumDatasetPageBytes = 1 * 1_024 * 1_024
+    package static let maximumDatasetPageItemCount = 256
+    package static let maximumDatasetAggregateBytes = 128 * 1_024 * 1_024
+    // A maximum-size authorization snapshot can carry about 20 MiB of
+    // canonical paths plus UUID and binary-property-list structure.
+    package static let maximumFolderCapabilityReplyBytes = 32 * 1_024 * 1_024
+    package static let maximumOpenDatasets = 4
+    package static let maximumAlertErrorsPerPoll = 16
+    package static let maximumStateMigrationFileCount = 20_000
 }
 
 package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
@@ -16,6 +30,7 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
     case poll = 4
     case grantFolderCapability = 5
     case revokeFolderCapability = 6
+    case replaceFolderCapabilities = 7
 
     case inspectMagnet = 10
     case previewTorrentFile = 11
@@ -59,11 +74,88 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
     case abortStateMigration = 63
 
     case changeHint = 100
+
+    package var maximumRequestPayloadBytes: Int {
+        switch self {
+        case .handshake, .replaceFolderCapabilities:
+            TorrentEngineIPCLimits.maximumBookmarkAggregateBytes
+                + TorrentEngineLimits.maximumAuthorizedSavePathCount * 1_024
+        case .grantFolderCapability:
+            TorrentEngineIPCLimits.maximumBookmarkBytes + 16 * 1_024
+        case .addTorrentFile, .previewTorrentFile:
+            TorrentEngineIPCLimits.maximumPayloadBytes
+        case .poll, .openDataset, .readDataset, .closeDataset,
+             .beginStateMigration, .importStateMigrationFile,
+             .commitStateMigration, .abortStateMigration, .changeHint:
+            64 * 1_024
+        default:
+            2 * 1_024 * 1_024
+        }
+    }
+
+    package var maximumReplyPayloadBytes: Int {
+        switch self {
+        case .previewTorrentFile:
+            TorrentEngineIPCLimits.maximumPayloadBytes
+        case .trackerBatch, .webSeedBatch, .fileBatch, .pieceMapBatch:
+            16 * 1_024 * 1_024
+        case .readDataset:
+            TorrentEngineIPCLimits.maximumDatasetPageBytes + 64 * 1_024
+        case .handshake, .replaceFolderCapabilities:
+            TorrentEngineIPCLimits.maximumFolderCapabilityReplyBytes
+        default:
+            2 * 1_024 * 1_024
+        }
+    }
+
+    package var propertyListDecodingLimits: TorrentEngineIPCPropertyListDecodingLimits {
+        switch self {
+        case .handshake, .replaceFolderCapabilities:
+            .init(
+                maximumContainerElementCount: TorrentEngineLimits.maximumAuthorizedSavePathCount,
+                maximumCollectionReferenceCount: 128 * 1_024
+            )
+        case .addTorrentFile, .previewTorrentFile, .fileBatch:
+            .init(
+                maximumContainerElementCount: TorrentEngineLimits.maximumFileCount,
+                maximumCollectionReferenceCount: 512 * 1_024
+            )
+        case .trackerBatch:
+            .init(
+                maximumContainerElementCount: TorrentEngineLimits.maximumTrackerCount,
+                maximumCollectionReferenceCount: 128 * 1_024
+            )
+        case .trackerHostBatch:
+            .init(
+                maximumContainerElementCount: TorrentEngineLimits.maximumTrackerHostRowCount,
+                maximumCollectionReferenceCount: 256 * 1_024
+            )
+        case .webSeedBatch:
+            .init(
+                maximumContainerElementCount: TorrentEngineLimits.maximumWebSeedCount,
+                maximumCollectionReferenceCount: 128 * 1_024
+            )
+        case .pieceMapBatch:
+            .init(
+                maximumContainerElementCount: TorrentEngineLimits.maximumPieceMapCount,
+                maximumCollectionReferenceCount: TorrentEngineLimits.maximumPieceMapCount
+                    + 64 * 1_024
+            )
+        default:
+            .standard
+        }
+    }
 }
 
 package enum TorrentEngineIPCReplyStatus: UInt64, Sendable {
     case success = 0
     case failure = 1
+}
+
+package enum TorrentEngineIPCFailureCode: UInt64, Sendable {
+    case operationRejected = 1
+    case controllerBusy = 2
+    case serviceShuttingDown = 3
 }
 
 package struct TorrentEngineIPCHeader: Equatable, Sendable {
@@ -113,6 +205,7 @@ package struct TorrentEngineIPCReply: Equatable, Sendable {
     package let header: TorrentEngineIPCHeader
     package let engineEpoch: UUID
     package let status: TorrentEngineIPCReplyStatus
+    package let failureCode: TorrentEngineIPCFailureCode?
     package let errorMessage: String?
     package let payload: Data?
     package let fileDescriptor: Int32?
@@ -121,6 +214,7 @@ package struct TorrentEngineIPCReply: Equatable, Sendable {
         header: TorrentEngineIPCHeader,
         engineEpoch: UUID,
         status: TorrentEngineIPCReplyStatus,
+        failureCode: TorrentEngineIPCFailureCode? = nil,
         errorMessage: String? = nil,
         payload: Data? = nil,
         fileDescriptor: Int32? = nil
@@ -128,6 +222,9 @@ package struct TorrentEngineIPCReply: Equatable, Sendable {
         self.header = header
         self.engineEpoch = engineEpoch
         self.status = status
+        self.failureCode = status == .failure
+            ? failureCode ?? .operationRejected
+            : failureCode
         self.errorMessage = errorMessage
         self.payload = payload
         self.fileDescriptor = fileDescriptor
@@ -141,6 +238,7 @@ package enum TorrentEngineIPCError: Error, Equatable, Sendable {
     case unsupportedProtocolVersion(UInt64)
     case unknownOperation(UInt64)
     case unknownReplyStatus(UInt64)
+    case unknownFailureCode(UInt64)
     case invalidUUID(field: String)
     case invalidSequence(UInt64)
     case invalidMaximumPayloadSize(Int)
@@ -150,9 +248,12 @@ package enum TorrentEngineIPCError: Error, Equatable, Sendable {
     case errorMessageTooLarge(actual: Int, maximum: Int)
     case unexpectedErrorMessage
     case missingErrorMessage
+    case unexpectedFailureCode
+    case missingFailureCode
     case invalidFileDescriptor
     case fileDescriptorBoxingFailed
     case fileDescriptorDuplicationFailed
+    case requestMetadataMismatch
     case propertyListEncodingFailed
     case propertyListDecodingFailed
 }

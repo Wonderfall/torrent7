@@ -2595,16 +2595,20 @@ extern "C" int32_t TorrentClientForceRecheck(TTorrentClient *client, const char 
 }
 
 extern "C" int32_t TorrentClientRemove(TTorrentClient *client, const char *torrent_id, uint8_t delete_files,
-                                       uint8_t delete_partfile, std::uint64_t *request_token_out, char *error_out,
-                                       int32_t error_capacity) noexcept
+                                       uint8_t delete_partfile, std::uint64_t *request_token_out,
+                                       uint8_t *removal_committed_out, char *error_out, int32_t error_capacity) noexcept
 {
     if (request_token_out != nullptr) {
         *request_token_out = 0;
     }
+    if (removal_committed_out != nullptr) {
+        *removal_committed_out = bridge_bool(false);
+    }
     WakeCallbackInvocation wake;
     int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 3, [&]() -> BridgeResult {
-        if (client == nullptr || torrent_id == nullptr || request_token_out == nullptr) {
-            return bridge_error(1, "Missing torrent client, torrent id, or removal request output.");
+        if (client == nullptr || torrent_id == nullptr || request_token_out == nullptr
+            || removal_committed_out == nullptr) {
+            return bridge_error(1, "Missing torrent client, torrent id, or removal operation output.");
         }
 
         std::string const id(c_string_view(torrent_id));
@@ -2656,6 +2660,7 @@ extern "C" int32_t TorrentClientRemove(TTorrentClient *client, const char *torre
             return client->cancel_tombstoned_operation_or_fault(removal_ids, 3, "Torrent could not be removed.");
         }
         *request_token_out = request_token;
+        *removal_committed_out = bridge_bool(true);
         client->mark_remove_requested(hashes, id, identity);
         if (waits_for_delete) {
             client->remember_pending_delete(hashes, removal_ids);

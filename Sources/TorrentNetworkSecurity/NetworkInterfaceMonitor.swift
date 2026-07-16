@@ -3,24 +3,40 @@ import Network
 import Darwin
 import SystemConfiguration
 
-struct NetworkInterfaceOption: Hashable, Identifiable, Sendable {
-    let name: String
-    let displayName: String
-    let fingerprint: String
-    let vpnServiceID: String?
-    let vpnServiceName: String?
-    let isLikelyVPN: Bool
+package struct NetworkInterfaceOption: Hashable, Identifiable, Sendable {
+    package let name: String
+    package let displayName: String
+    package let fingerprint: String
+    package let vpnServiceID: String?
+    package let vpnServiceName: String?
+    package let isLikelyVPN: Bool
 
-    var id: String {
+    package init(
+        name: String,
+        displayName: String,
+        fingerprint: String,
+        vpnServiceID: String?,
+        vpnServiceName: String?,
+        isLikelyVPN: Bool
+    ) {
+        self.name = name
+        self.displayName = displayName
+        self.fingerprint = fingerprint
+        self.vpnServiceID = vpnServiceID
+        self.vpnServiceName = vpnServiceName
+        self.isLikelyVPN = isLikelyVPN
+    }
+
+    package var id: String {
         name
     }
 
-    var isVPNBacked: Bool {
+    package var isVPNBacked: Bool {
         vpnServiceID != nil
     }
 }
 
-protocol NetworkInterfaceMonitoring: AnyObject, Sendable {
+package protocol NetworkInterfaceMonitoring: AnyObject, Sendable {
     func updates() -> AsyncStream<[NetworkInterfaceOption]>
     func cancel()
 }
@@ -50,10 +66,10 @@ private struct VPNServiceAssociation {
     let interfaceName: String
 }
 
-final class NetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchecked Sendable {
+package final class NetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchecked Sendable {
     private static let connectedVPNStatus = SCNetworkConnectionStatus(rawValue: 2)
 
-    private let queue = DispatchQueue(label: "torrent-app.network-interface-monitor")
+    private let queue = DispatchQueue(label: "torrent7.network-interface-monitor")
     private let queueKey = DispatchSpecificKey<Void>()
     private var monitor: NWPathMonitor?
     private var dynamicStore: SCDynamicStore?
@@ -63,7 +79,7 @@ final class NetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchecked Send
     private var isCancelled = true
     private var lastEmittedOptions: [NetworkInterfaceOption] = []
 
-    init() {
+    package init() {
         queue.setSpecific(key: queueKey, value: ())
     }
 
@@ -71,7 +87,7 @@ final class NetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchecked Send
         cancel()
     }
 
-    func updates() -> AsyncStream<[NetworkInterfaceOption]> {
+    package func updates() -> AsyncStream<[NetworkInterfaceOption]> {
         AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
             let streamID = UUID()
             continuation.onTermination = { [weak self] _ in
@@ -84,7 +100,7 @@ final class NetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchecked Send
         }
     }
 
-    func cancel() {
+    package func cancel() {
         cancel(streamID: nil)
     }
 

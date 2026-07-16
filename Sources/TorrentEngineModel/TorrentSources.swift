@@ -1,6 +1,6 @@
 import Foundation
 
-package struct TorrentTrackerItem: Identifiable, Hashable, Sendable {
+package struct TorrentTrackerItem: Codable, Identifiable, Hashable, Sendable {
     package let url: String
     package let message: String
     package let tier: Int32
@@ -90,7 +90,7 @@ package struct TorrentTrackerItem: Identifiable, Hashable, Sendable {
     }
 }
 
-package struct TorrentTrackerHostItem: Hashable, Sendable {
+package struct TorrentTrackerHostItem: Codable, Hashable, Sendable {
     package let torrentID: TorrentItem.ID
     package let host: String
 
@@ -100,7 +100,7 @@ package struct TorrentTrackerHostItem: Hashable, Sendable {
     }
 }
 
-package struct TorrentWebSeedItem: Identifiable, Hashable, Sendable {
+package struct TorrentWebSeedItem: Codable, Identifiable, Hashable, Sendable {
     package let url: String
 
     package init(url: String) {
@@ -112,7 +112,7 @@ package struct TorrentWebSeedItem: Identifiable, Hashable, Sendable {
     }
 }
 
-package struct TorrentWebSeedActivity: Hashable, Sendable {
+package struct TorrentWebSeedActivity: Codable, Hashable, Sendable {
     package let activeCount: Int32
     package let downloadRate: Int32
     package let totalDownload: Int64
@@ -127,7 +127,7 @@ package struct TorrentWebSeedActivity: Hashable, Sendable {
 
 }
 
-package struct TorrentPeerSources: Hashable, Sendable {
+package struct TorrentPeerSources: Codable, Hashable, Sendable {
     package let connected: Int32
     package let tracker: Int32
     package let dht: Int32
@@ -177,7 +177,7 @@ package struct TorrentPeerSources: Hashable, Sendable {
     }
 }
 
-package struct TorrentPieceMap: Equatable, Sendable {
+package struct TorrentPieceMap: Codable, Equatable, Sendable {
     package let totalPieces: Int
     package let completedPieces: Int
     package let availablePieces: Int
@@ -221,6 +221,71 @@ package struct TorrentPieceMap: Equatable, Sendable {
         completedPiecePrefixCounts = Self.completedPiecePrefixCounts(for: pieces)
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case totalPieces
+        case completedPieces
+        case availablePieces
+        case isMapAvailable
+        case isMapTruncated
+        case pieces
+    }
+
+    package init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let totalPieces = try values.decode(Int.self, forKey: .totalPieces)
+        let completedPieces = try values.decode(Int.self, forKey: .completedPieces)
+        let availablePieces = try values.decode(Int.self, forKey: .availablePieces)
+        let isMapAvailable = try values.decode(Bool.self, forKey: .isMapAvailable)
+        let isMapTruncated = try values.decode(Bool.self, forKey: .isMapTruncated)
+        let pieces = try values.decode([UInt8].self, forKey: .pieces)
+        guard totalPieces >= 0,
+              totalPieces <= Int(Int32.max),
+              (0...totalPieces).contains(completedPieces),
+              (0...min(totalPieces, TorrentEngineLimits.maximumPieceMapCount))
+                .contains(availablePieces),
+              pieces.count == availablePieces,
+              isMapAvailable == (availablePieces > 0),
+              isMapTruncated == (availablePieces < totalPieces) else {
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "The piece map exceeds its bounds or has inconsistent metadata."
+                )
+            )
+        }
+        let availableCompletedPieces = pieces.reduce(into: 0) { count, piece in
+            count += piece == 0 ? 0 : 1
+        }
+        guard pieces.allSatisfy({ $0 <= 1 }),
+              availableCompletedPieces <= completedPieces,
+              isMapTruncated || availableCompletedPieces == completedPieces else {
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "The piece map contains invalid piece states."
+                )
+            )
+        }
+        self.init(
+            totalPieces: totalPieces,
+            completedPieces: completedPieces,
+            availablePieces: availablePieces,
+            isMapAvailable: isMapAvailable,
+            isMapTruncated: isMapTruncated,
+            pieces: pieces
+        )
+    }
+
+    package func encode(to encoder: any Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(totalPieces, forKey: .totalPieces)
+        try values.encode(completedPieces, forKey: .completedPieces)
+        try values.encode(availablePieces, forKey: .availablePieces)
+        try values.encode(isMapAvailable, forKey: .isMapAvailable)
+        try values.encode(isMapTruncated, forKey: .isMapTruncated)
+        try values.encode(pieces, forKey: .pieces)
+    }
+
     package var progress: Double {
         guard totalPieces > 0 else {
             return 0
@@ -260,7 +325,7 @@ package struct TorrentPieceMap: Equatable, Sendable {
     }
 }
 
-package struct TorrentSourcePolicy: Equatable, Sendable {
+package struct TorrentSourcePolicy: Codable, Equatable, Sendable {
     package var isDHTEnabled: Bool
     package var isPeerExchangeEnabled: Bool
     package var isLocalServiceDiscoveryEnabled: Bool
@@ -345,7 +410,7 @@ package struct TorrentSourcePolicy: Equatable, Sendable {
     }
 }
 
-package enum TorrentSourcePolicyField: Sendable {
+package enum TorrentSourcePolicyField: Codable, Sendable {
     case dht
     case peerExchange
     case localServiceDiscovery
@@ -354,7 +419,7 @@ package enum TorrentSourcePolicyField: Sendable {
     case preMetadataDHT
 }
 
-package enum TorrentFilePriority: Int32, CaseIterable, Identifiable, Sendable {
+package enum TorrentFilePriority: Int32, Codable, CaseIterable, Identifiable, Sendable {
     case skip = 0
     case low = 1
     case normal = 4
@@ -379,7 +444,7 @@ package enum TorrentFilePriority: Int32, CaseIterable, Identifiable, Sendable {
 
 }
 
-package struct TorrentFileItem: Identifiable, Hashable, Sendable {
+package struct TorrentFileItem: Codable, Identifiable, Hashable, Sendable {
     package let path: String
     package let size: Int64
     package let downloaded: Int64
@@ -447,7 +512,7 @@ package struct TorrentFileItem: Identifiable, Hashable, Sendable {
     }
 }
 
-package struct TorrentFilePreview: Equatable, Sendable {
+package struct TorrentFilePreview: Codable, Equatable, Sendable {
     package let name: String
     package let id: String
     package let totalSize: Int64
@@ -480,7 +545,7 @@ package struct TorrentFilePreview: Equatable, Sendable {
     }
 }
 
-package struct TorrentNetworkStatus: Equatable, Sendable {
+package struct TorrentNetworkStatus: Codable, Equatable, Sendable {
     package let requestedRevision: UInt64
     package let submittedRevision: UInt64
     package let listenPort: Int32
@@ -522,7 +587,7 @@ package struct TorrentNetworkStatus: Equatable, Sendable {
     }
 }
 
-package struct TorrentBridgeHealth: Equatable, Sendable {
+package struct TorrentBridgeHealth: Codable, Equatable, Sendable {
     package let isAvailable: Bool
     package let totalAlertWorkerFailures: UInt64
     package let consecutiveAlertWorkerFailures: UInt64

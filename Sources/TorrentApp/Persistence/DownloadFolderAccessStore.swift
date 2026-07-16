@@ -13,6 +13,13 @@ struct PreparedDownloadFolder {
         lease = DownloadFolderAccessLease(access: access)
         self.bookmarkData = bookmarkData
     }
+
+    func engineAuthorization() throws -> TorrentFolderAuthorization {
+        TorrentFolderAuthorization(
+            path: path,
+            bookmarkData: try lease.access.delegationBookmarkData()
+        )
+    }
 }
 
 final class DownloadFolderAccessLease {
@@ -26,11 +33,13 @@ final class DownloadFolderAccessLease {
 struct DownloadFolderCapabilitySnapshot {
     static let maximumPathCount = TorrentEngineLimits.maximumAuthorizedSavePathCount
 
+    let revision: UInt64
     let paths: [String]
     // These accesses are lifetime tokens only; the snapshot never invokes them.
     private let accesses: [DownloadFolderAccessing]
 
     init(
+        revision: UInt64 = 0,
         defaultAccess: DownloadFolderAccessing?,
         additionalAccesses: [DownloadFolderAccessing]
     ) {
@@ -54,13 +63,24 @@ struct DownloadFolderCapabilitySnapshot {
             append(access)
         }
 
+        self.revision = revision
         self.paths = paths
         self.accesses = accesses
+    }
+
+    func engineAuthorizations() throws -> [TorrentFolderAuthorization] {
+        try zip(paths, accesses).map { path, access in
+            TorrentFolderAuthorization(
+                path: path,
+                bookmarkData: try access.delegationBookmarkData()
+            )
+        }
     }
 }
 
 protocol DownloadFolderAccessStoring: AnyObject {
     var defaultURL: URL? { get }
+    var capabilityRevision: UInt64 { get }
     var capabilitySnapshot: DownloadFolderCapabilitySnapshot { get }
     func restoreDefault() throws -> URL?
     func clearDefaultBookmarkAndAccess()
@@ -81,6 +101,7 @@ final class DownloadFolderAccessStore: DownloadFolderAccessStoring {
     private let accessProvider: DownloadFolderAccessProviding
     private var defaultAccess: DownloadFolderAccessing?
     private var additionalAccesses = [String: DownloadFolderAccessing]()
+    private(set) var capabilityRevision: UInt64 = 0
 
     init(
         defaults: UserDefaults = .standard,
@@ -97,12 +118,15 @@ final class DownloadFolderAccessStore: DownloadFolderAccessStoring {
 
     var capabilitySnapshot: DownloadFolderCapabilitySnapshot {
         DownloadFolderCapabilitySnapshot(
+            revision: capabilityRevision,
             defaultAccess: defaultAccess,
             additionalAccesses: Array(additionalAccesses.values)
         )
     }
 
     func restoreDefault() throws -> URL? {
+        let previousIdentity = capabilityIdentity
+        defer { advanceCapabilityRevision(ifChangedFrom: previousIdentity) }
         defaultAccess = try accessProvider.restoreDefault(defaults: defaults)
         if let defaultAccess {
             removeAdditionalDownloadFolderBookmark(for: defaultAccess.url)
@@ -113,6 +137,8 @@ final class DownloadFolderAccessStore: DownloadFolderAccessStoring {
     }
 
     func clearDefaultBookmarkAndAccess() {
+        let previousIdentity = capabilityIdentity
+        defer { advanceCapabilityRevision(ifChangedFrom: previousIdentity) }
         accessProvider.clearDefaultBookmark(defaults: defaults)
         defaultAccess = nil
     }
@@ -131,6 +157,8 @@ final class DownloadFolderAccessStore: DownloadFolderAccessStoring {
 
     @discardableResult
     func setDefault(_ url: URL, activeTorrents: [TorrentItem]) throws -> URL {
+        let previousIdentity = capabilityIdentity
+        defer { advanceCapabilityRevision(ifChangedFrom: previousIdentity) }
         let previousAccess = defaultAccess
         let previousURL = previousAccess?.url
         let newAccess = try accessProvider.createAccess(url: url, savesBookmark: false, defaults: defaults)
@@ -147,6 +175,8 @@ final class DownloadFolderAccessStore: DownloadFolderAccessStoring {
     }
 
     func clearDefault(activeTorrents: [TorrentItem]) {
+        let previousIdentity = capabilityIdentity
+        defer { advanceCapabilityRevision(ifChangedFrom: previousIdentity) }
         let previousAccess = defaultAccess
         let previousURL = previousAccess?.url
         accessProvider.clearDefaultBookmark(defaults: defaults)
@@ -186,6 +216,8 @@ final class DownloadFolderAccessStore: DownloadFolderAccessStoring {
         _ preparedFolder: PreparedDownloadFolder,
         activeTorrents: [TorrentItem]
     ) -> URL? {
+        let previousIdentity = capabilityIdentity
+        defer { advanceCapabilityRevision(ifChangedFrom: previousIdentity) }
         guard let bookmarkData = preparedFolder.bookmarkData else {
             return nil
         }
@@ -228,6 +260,8 @@ final class DownloadFolderAccessStore: DownloadFolderAccessStoring {
     }
 
     func prune(activeTorrents: [TorrentItem]) {
+        let previousIdentity = capabilityIdentity
+        defer { advanceCapabilityRevision(ifChangedFrom: previousIdentity) }
         var activeKeys = Set(activeTorrents.map { torrent in
             Self.accessKey(URL(fileURLWithPath: torrent.savePath, isDirectory: true))
         })
@@ -240,6 +274,31 @@ final class DownloadFolderAccessStore: DownloadFolderAccessStoring {
             additionalAccesses.removeValue(forKey: key)
         }
         pruneAdditionalDownloadFolderBookmarks(retaining: activeKeys)
+    }
+
+    private struct CapabilityIdentity: Equatable {
+        let defaultAccess: ObjectIdentifier?
+        let additionalAccesses: [String: ObjectIdentifier]
+    }
+
+    private var capabilityIdentity: CapabilityIdentity {
+        CapabilityIdentity(
+            defaultAccess: defaultAccess.map(ObjectIdentifier.init),
+            additionalAccesses: additionalAccesses.mapValues(ObjectIdentifier.init)
+        )
+    }
+
+    private func advanceCapabilityRevision(
+        ifChangedFrom previousIdentity: CapabilityIdentity
+    ) {
+        guard capabilityIdentity != previousIdentity else {
+            return
+        }
+        precondition(
+            capabilityRevision != UInt64.max,
+            "Download-folder capability revision exhausted"
+        )
+        capabilityRevision += 1
     }
 
     private static func accessKey(_ url: URL) -> String {

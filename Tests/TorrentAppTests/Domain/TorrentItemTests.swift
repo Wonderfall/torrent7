@@ -1,6 +1,7 @@
 import Testing
 import TorrentBridge
 import TorrentEngineModel
+@testable import TorrentEngineCore
 @testable import TorrentApp
 
 @Suite("Torrent item")

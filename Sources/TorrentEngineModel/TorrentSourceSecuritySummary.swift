@@ -1,4 +1,4 @@
-package struct TorrentSourceSecuritySummary: Equatable, Sendable {
+package struct TorrentSourceSecuritySummary: Codable, Equatable, Sendable {
     package let trackerCount: Int
     package let httpsTrackerCount: Int
     package let webSeedCount: Int

@@ -24,7 +24,7 @@ namespace bridge_fuzz {
 
 namespace fs = std::filesystem;
 
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 34, "Update the fuzz harnesses for the current TorrentBridge ABI.");
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 35, "Update the fuzz harnesses for the current TorrentBridge ABI.");
 #if !defined(TORRENT_USE_ASSERTS) || !TORRENT_USE_ASSERTS
 #error "Fuzz consumers must match the assertion-enabled Debug libtorrent archive."
 #endif
@@ -511,12 +511,14 @@ inline void remove_all_torrents(TTorrentClient *client)
         for (std::string const &id : ids) {
             ErrorBuffer error;
             std::uint64_t request_token = 0;
+            std::uint8_t removal_committed = 0;
             static_cast<void>(TorrentClientRemove(
                 client,
                 id.c_str(),
                 0,
                 0,
                 &request_token,
+                &removal_committed,
                 error.data(),
                 error.capacity()
             ));

@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import TorrentEngineModel
+@testable import TorrentEngineCore
 @testable import TorrentApp
 
 @Suite("Torrent source models")
@@ -77,6 +78,29 @@ struct TorrentSourceModelTests {
 
         #expect(summary.trackerCount == 0)
         #expect(summary.httpsTrackerCount == 0)
+    }
+
+    @Test("Magnet source security summary decodes parameter names exactly once")
+    func magnetSourceSecuritySummaryDecodesParameterNamesOnce() {
+        let summary = TorrentSourceSecurityInspector.summary(
+            magnetURI: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&t%72=https%3A%2F%2Fsecure.example%2Fannounce&t%2572=https%3A%2F%2Fignored.example%2Fannounce"
+        )
+
+        #expect(summary.trackerCount == 1)
+        #expect(summary.httpsTrackerCount == 1)
+    }
+
+    @Test("Magnet source security summary validates base32 v1 hashes")
+    func magnetSourceSecuritySummaryValidatesBase32V1Hashes() {
+        let valid = TorrentSourceSecurityInspector.summary(
+            magnetURI: "magnet:?xt=urn:btih:ABCDEFGHIJKLMNOPQRSTUVWXYZ234567&tr=https%3A%2F%2Fsecure.example%2Fannounce"
+        )
+        let invalid = TorrentSourceSecurityInspector.summary(
+            magnetURI: "magnet:?xt=urn:btih:ABCDEFGHIJKLMNOPQRSTUVWXYZ234568&tr=https%3A%2F%2Fsecure.example%2Fannounce"
+        )
+
+        #expect(valid.trackerCount == 1)
+        #expect(invalid == .empty)
     }
 
     @Test("Magnet source security summary recognizes numbered tracker parameters")
