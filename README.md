@@ -30,7 +30,9 @@
 ## Purpose
 
 Torrent 7 is a minimal macOS 26 torrent client built with SwiftUI and
-libtorrent-rasterbar 2.x. It targets Apple silicon as an arm64e app and leans
+libtorrent-rasterbar 2.x. It ships the torrent engine as an embedded,
+application-scoped XPC service so the GUI does not load libtorrent or the C++
+bridge. It targets Apple silicon as an arm64e app and leans
 into Apple's pointer-authentication model, including PAC-enabled Swift, C, and
 C++ code where the toolchain supports it. It also opts into Apple's Enhanced
 Security entitlements, including hardened heap, dyld read-only, platform
@@ -45,10 +47,18 @@ as small and explicit as possible.
 
 ## Architecture
 
-The project keeps SwiftUI and App Sandbox capabilities in Swift, while a narrow,
-bounded C ABI isolates libtorrent, native persistence, and protocol parsing.
-The rationale, snapshot model, security invariants, and refreshed implementation
-status are documented in [Architecture and Security Decisions](Documentation/Architecture.md).
+Torrent 7 has two separately sandboxed executables. The pure-Swift GUI owns
+SwiftUI state, user consent, and persistent security-scoped bookmarks. It talks
+over a versioned, bounded XPC protocol to an embedded engine service, which owns
+network access, resume state, native protocol parsing, and libtorrent. Inside
+that service, a narrow C ABI remains the language boundary around the C++23
+bridge; it is no longer part of the GUI process.
+
+Library rows remain immutable revisioned snapshots. High-cardinality library
+and tracker-host snapshots cross XPC as bounded, short-lived paged datasets;
+detail data remains demand-driven and revisioned. The rationale, trust
+boundaries, state migration, and non-negotiable security invariants are
+documented in [Architecture and Security Decisions](Documentation/Architecture.md).
 
 ## Features
 
@@ -67,16 +77,50 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
 
 - **Pure native UI:** SwiftUI for the interface, with tiny AppKit helpers only where
   macOS still requires them, such as Dock and notification integration.
+- **Process isolation:** all libtorrent, C++, torrent parsing, native persistence,
+  and torrent networking run in an embedded App Sandbox XPC service. The GUI
+  executable contains no torrent-engine symbols and has no network entitlement.
 - **Swift safety:** Swift 6, strict concurrency checking, strict memory-safety
-  checking, and pointer-authentication settings for the app target.
+  checking, and pointer-authentication settings for both Swift executables.
+- **Authenticated, bounded IPC:** identified builds require the exact app/service
+  signing identifiers from the same Team ID. Versioned envelopes, operation-specific
+  payload limits, pre-decode binary-property-list structure limits, epochs,
+  monotonic sequences, replay identifiers, queue budgets, typed failures, and
+  semantic response validation constrain both sides of the XPC boundary. Wire
+  messages are container-rooted; commit-ambiguous response serialization failures
+  close the controller instead of being reported as definite rejections. Errors
+  after native add begins receive the same treatment because libtorrent may have
+  accepted the torrent before a later bridge failure; they are not revoked or
+  retried as though rejection were certain.
 - **C++ bridge discipline:** C++23, RAII ownership, `std::span`, `std::expected`,
-  bounded C ABI buffers, explicit error returns, and no exception crossing into Swift.
+  bounded C ABI buffers, explicit error returns, and no exception crossing into
+  Swift. The removal ABI reports native commit separately from asynchronous
+  deletion tracking, preventing a post-commit bookkeeping failure from being
+  treated as a rejected removal. The bridge is linked only into the engine
+  service.
 - **Input bounds:** caps for torrent files, magnets, file counts, tracker/web-seed
-  counts, tracker host rows, snapshots, and piece-map data.
+  counts, tracker host rows, snapshots, piece-map data, XPC payloads, paged
+  datasets, queued requests, file descriptors, and open peers.
+- **Delegated folder authority:** the GUI persists app-scoped bookmarks, but sends
+  only transient delegation bookmarks over XPC. The service validates and scopes
+  each resolved directory by canonical path and filesystem identity; capability
+  IDs are bound to one controller and engine epoch. Prepared adds hold an
+  exclusive authorization transaction and always end in an exact capability-set
+  replacement or controller termination. Local bookmark/path validation failures
+  fail closed too, and restart reuses only an exactly reconciled capability set.
+- **Service-authoritative network policy:** the engine starts blocked. A network
+  binding can unblock it only after an independent service-side interface monitor
+  validates the interface fingerprint and VPN service identity. Constrained
+  interface changes, disconnects, replacement failures, and monitoring failures
+  block networking. Independent short containment and longer cleanup watchdogs
+  cover pre-authority startup, native restart, explicit shutdown, disconnect, and
+  scope cleanup, terminating only the helper if native progress stalls.
 - **Static dependencies:** libtorrent and OpenSSL are linked statically. The final
-  app bundle contains no third-party dylibs.
-- **Signing:** hardened runtime, `restrict`, library validation, and narrow sandbox
-  entitlements are enabled by the build script.
+  app bundle contains no third-party dylibs and exactly two Mach-O executables:
+  the GUI and its engine service.
+- **Signing:** both executables use hardened runtime, `restrict`, library
+  validation, and separately reviewed sandbox entitlements. Identified builds
+  require valid matching Team IDs.
 - **Enhanced Security entitlements:** hardened process, hardened heap, dyld
   read-only, platform restrictions, and checked allocations are enabled. The
   soft-mode checked-allocation entitlement is intentionally not used, so memory
@@ -95,25 +139,30 @@ policy, not a system-wide VPN kill switch.
 
 ## Sandbox Model
 
-Torrent 7 uses the App Sandbox with a deliberately small entitlement set:
+Torrent 7 splits authority between two App Sandbox profiles:
 
-- `com.apple.security.app-sandbox`
-- `com.apple.security.network.client`
-- `com.apple.security.network.server`
-- `com.apple.security.files.user-selected.read-write`
-- `com.apple.security.files.bookmarks.app-scope`
-- `com.apple.security.hardened-process`
-- `com.apple.security.hardened-process.dyld-ro`
-- `com.apple.security.hardened-process.hardened-heap`
-- `com.apple.security.hardened-process.checked-allocations`
-- `com.apple.security.hardened-process.enhanced-security-version-string`
-- `com.apple.security.hardened-process.platform-restrictions-string`
+| Authority or responsibility | GUI application | Engine XPC service |
+| --- | --- | --- |
+| User-selected read/write and app-scoped bookmark entitlements | Present | Absent |
+| Delegated download-folder access | Creates delegation from an active persistent scope | Holds a transient controller-scoped capability |
+| Outbound and inbound network entitlements | Absent | Present |
+| SwiftUI, Finder, notifications, and user preferences | Yes | No |
+| Libtorrent, C++ bridge, resume state, and torrent payload I/O | No | Yes |
+| Hardened process, hardened heap, dyld read-only, platform restrictions, checked allocations | Yes | Yes |
 
-Downloads are written to folders chosen by the user. Persistent access is stored
-only as app-scoped security bookmarks for the default download folder and active
-torrent-specific folders. Resume data lives in the app container and is written
-with owner-only permissions. Downloaded files are explicitly quarantined by the
-app bundle policy.
+The GUI stores persistent app-scoped bookmarks only for the default download
+folder and active torrent-specific folders. While one of those scopes is active,
+it creates a transient bookmark that delegates the current sandbox extension to
+the service. The service does not persist that bookmark: it explicitly starts
+and balances the delegated scope, holds a verified directory descriptor, and
+invalidates the capability when the controller disconnects.
+
+Resume data and removal tombstones now live in the service's container and are
+written with owner-only permissions and durability barriers. A one-time,
+descriptor-based migration copies allowlisted legacy files into service-owned
+state without granting the service path access to the GUI container or mutating
+the legacy tree. Both executable bundles enable file quarantine, including the
+service that creates downloaded payloads.
 
 ## Dependencies
 
@@ -162,7 +211,9 @@ The output is:
 ```
 
 By default the app is ad-hoc signed for local development. This default does not
-require a signing identity or Apple Developer credentials.
+require a signing identity or Apple Developer credentials, and both bundles are
+explicitly marked for reduced-assurance development XPC peer authentication.
+Identified builds omit that switch and use mutual same-team requirements.
 
 Verify the built app:
 
@@ -170,9 +221,11 @@ Verify the built app:
 Scripts/verify-app.zsh
 ```
 
-The verifier requires the signed entitlements to exactly match the canonical
-allowlist in `Packaging/Torrent7.entitlements`; missing, changed, or unexpected
-entitlements fail verification.
+The verifier requires both signed entitlement dictionaries to exactly match the
+canonical GUI and engine allowlists. It also checks the embedded-service identity,
+matching signature mode and Team IDs, quarantine policy, hardened runtime flags,
+the exact two-executable code inventory, and an allowlist of Mach-O load paths.
+Missing, changed, or unexpected authority fails verification.
 
 Use a shared dependency source cache if desired:
 
@@ -247,9 +300,10 @@ Run the opt-in maximum snapshot transport probe in release mode:
 Scripts/benchmark-snapshot-transport.zsh
 ```
 
-The probe prints native copy, Swift mapping/sorting, end-to-end latency, and
-incremental footprint measurements. It does not use wall-clock assertions;
-review gates and the transport decision are documented in
+The probe prints native C-ABI copy, Swift mapping/sorting, end-to-end latency,
+and incremental footprint measurements inside the engine implementation. The
+XPC boundary now pages the resulting high-cardinality datasets independently.
+The probe does not use wall-clock assertions; review gates are documented in
 [Architecture and Security Decisions](Documentation/Architecture.md).
 
 `clang-tidy` support is optional:
