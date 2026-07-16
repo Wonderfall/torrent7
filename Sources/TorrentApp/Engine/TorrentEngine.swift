@@ -140,13 +140,13 @@ protocol TorrentEngineServicing: Sendable {
     func requestFiles(id: String) async throws
     func setFilePriority(id: String, fileIndex: Int32, priority: TorrentFilePriority) async throws
     func requestPieceMap(id: String) async throws
-    func trackerBatch(id: String) async -> TorrentTrackerBatch
+    func trackerBatch(id: String, since revision: UInt64?) async -> TorrentTrackerBatch?
     func trackerHostBatch() async -> TorrentTrackerHostBatch
-    func webSeedBatch(id: String) async -> TorrentWebSeedBatch
+    func webSeedBatch(id: String, since revision: UInt64?) async -> TorrentWebSeedBatch?
     func webSeedActivity(id: String) async -> TorrentWebSeedActivity
     func peerSources(id: String) async -> TorrentPeerSources
-    func fileBatch(id: String) async -> TorrentFileBatch
-    func pieceMapBatch(id: String) async -> TorrentPieceMapBatch
+    func fileBatch(id: String, since revision: UInt64?) async -> TorrentFileBatch?
+    func pieceMapBatch(id: String, since revision: UInt64?) async -> TorrentPieceMapBatch?
 }
 
 @safe actor TorrentEngine {
@@ -766,15 +766,21 @@ protocol TorrentEngineServicing: Sendable {
         }
     }
 
-    func trackerBatch(id: String) -> TorrentTrackerBatch {
+    func trackerBatch(id: String, since previousRevision: UInt64?) -> TorrentTrackerBatch? {
         guard let client, let pointer = unsafe client.pointer else {
-            return TorrentTrackerBatch(revision: 0, trackers: [])
+            return previousRevision == 0 ? nil : TorrentTrackerBatch(revision: 0, trackers: [])
         }
 
         var revision: UInt64 = 0
         var requiredCount: Int32 = 0
         _ = unsafe id.withCString { idPointer in
             unsafe TorrentClientCopyTrackerBatch(pointer, idPointer, nil, 0, &revision, &requiredCount)
+        }
+        if previousRevision == revision {
+            return nil
+        }
+        guard requiredCount > 0 else {
+            return TorrentTrackerBatch(revision: revision, trackers: [])
         }
 
         var capacity = Self.cappedCapacity(requiredCount: requiredCount, minimum: 4, maximum: TTORRENT_MAX_TRACKER_COUNT)
@@ -876,15 +882,21 @@ protocol TorrentEngineServicing: Sendable {
         )
     }
 
-    func webSeedBatch(id: String) -> TorrentWebSeedBatch {
+    func webSeedBatch(id: String, since previousRevision: UInt64?) -> TorrentWebSeedBatch? {
         guard let client, let pointer = unsafe client.pointer else {
-            return TorrentWebSeedBatch(revision: 0, webSeeds: [])
+            return previousRevision == 0 ? nil : TorrentWebSeedBatch(revision: 0, webSeeds: [])
         }
 
         var revision: UInt64 = 0
         var requiredCount: Int32 = 0
         _ = unsafe id.withCString { idPointer in
             unsafe TorrentClientCopyWebSeedBatch(pointer, idPointer, nil, 0, &revision, &requiredCount)
+        }
+        if previousRevision == revision {
+            return nil
+        }
+        guard requiredCount > 0 else {
+            return TorrentWebSeedBatch(revision: revision, webSeeds: [])
         }
 
         var capacity = Self.cappedCapacity(requiredCount: requiredCount, minimum: 4, maximum: TTORRENT_MAX_WEB_SEED_COUNT)
@@ -957,15 +969,21 @@ protocol TorrentEngineServicing: Sendable {
         return TorrentPeerSources(snapshot: sources)
     }
 
-    func fileBatch(id: String) -> TorrentFileBatch {
+    func fileBatch(id: String, since previousRevision: UInt64?) -> TorrentFileBatch? {
         guard let client, let pointer = unsafe client.pointer else {
-            return TorrentFileBatch(revision: 0, files: [])
+            return previousRevision == 0 ? nil : TorrentFileBatch(revision: 0, files: [])
         }
 
         var revision: UInt64 = 0
         var requiredCount: Int32 = 0
         _ = unsafe id.withCString { idPointer in
             unsafe TorrentClientCopyFileBatch(pointer, idPointer, nil, 0, &revision, &requiredCount)
+        }
+        if previousRevision == revision {
+            return nil
+        }
+        guard requiredCount > 0 else {
+            return TorrentFileBatch(revision: revision, files: [])
         }
 
         var capacity = Self.cappedCapacity(requiredCount: requiredCount, minimum: 8, maximum: TTORRENT_MAX_FILE_COUNT)
@@ -1014,18 +1032,21 @@ protocol TorrentEngineServicing: Sendable {
         )
     }
 
-    func pieceMapBatch(id: String) -> TorrentPieceMapBatch {
+    func pieceMapBatch(id: String, since previousRevision: UInt64?) -> TorrentPieceMapBatch? {
         guard let client, let pointer = unsafe client.pointer else {
-            return TorrentPieceMapBatch(revision: 0, pieceMap: .empty)
+            return previousRevision == 0 ? nil : TorrentPieceMapBatch(revision: 0, pieceMap: .empty)
         }
 
         var revision: UInt64 = 0
         var requiredCount: Int32 = 0
-        var snapshot = TTorrentPieceMapSnapshot()
         _ = unsafe id.withCString { idPointer in
-            unsafe TorrentClientCopyPieceMap(pointer, idPointer, &snapshot, nil, 0, &revision, &requiredCount)
+            unsafe TorrentClientCopyPieceMap(pointer, idPointer, nil, nil, 0, &revision, &requiredCount)
+        }
+        if previousRevision == revision {
+            return nil
         }
 
+        var snapshot = TTorrentPieceMapSnapshot()
         var capacity = Self.cappedCapacity(
             requiredCount: requiredCount,
             minimum: 0,

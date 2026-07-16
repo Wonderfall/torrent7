@@ -1045,13 +1045,17 @@ private struct TorrentInfoView: View {
             }
             sourcePolicy = confirmedPolicy
             try? await store.requestSources(for: torrent.id)
-            let trackerBatch = await store.trackerBatch(for: torrent.id)
-            let webSeedBatch = await store.webSeedBatch(for: torrent.id)
+            let trackerBatch = await store.trackerBatch(for: torrent.id, since: nil)
+            let webSeedBatch = await store.webSeedBatch(for: torrent.id, since: nil)
             let peerSources = await store.peerSources(for: torrent.id)
-            trackerRevision = trackerBatch.revision
-            webSeedRevision = webSeedBatch.revision
-            trackers = trackerBatch.trackers
-            webSeeds = webSeedBatch.webSeeds
+            if let trackerBatch {
+                trackerRevision = trackerBatch.revision
+                trackers = trackerBatch.trackers
+            }
+            if let webSeedBatch {
+                webSeedRevision = webSeedBatch.revision
+                webSeeds = webSeedBatch.webSeeds
+            }
             webSeedActivity = await store.webSeedActivity(for: torrent.id)
             self.peerSources = peerSources
             sourcesLoaded = true
@@ -1099,25 +1103,25 @@ private struct TorrentInfoView: View {
             guard !Task.isCancelled else {
                 return
             }
-            let trackerBatch = await store.trackerBatch(for: torrent.id)
-            let webSeedBatch = await store.webSeedBatch(for: torrent.id)
+            let trackerBatch = await store.trackerBatch(for: torrent.id, since: trackerRevision)
+            let webSeedBatch = await store.webSeedBatch(for: torrent.id, since: webSeedRevision)
             let webSeedActivity = await store.webSeedActivity(for: torrent.id)
             let peerSources = await store.peerSources(for: torrent.id)
-            if !sourcesLoaded
-                || trackerRevision != trackerBatch.revision
-                || webSeedRevision != webSeedBatch.revision
-                || trackers != trackerBatch.trackers
-                || webSeeds != webSeedBatch.webSeeds
-                || self.webSeedActivity != webSeedActivity
-                || self.peerSources != peerSources {
+            if let trackerBatch {
                 trackerRevision = trackerBatch.revision
-                webSeedRevision = webSeedBatch.revision
                 trackers = trackerBatch.trackers
-                webSeeds = webSeedBatch.webSeeds
-                self.webSeedActivity = webSeedActivity
-                self.peerSources = peerSources
-                sourcesLoaded = true
             }
+            if let webSeedBatch {
+                webSeedRevision = webSeedBatch.revision
+                webSeeds = webSeedBatch.webSeeds
+            }
+            if self.webSeedActivity != webSeedActivity {
+                self.webSeedActivity = webSeedActivity
+            }
+            if self.peerSources != peerSources {
+                self.peerSources = peerSources
+            }
+            sourcesLoaded = true
 
             try? await Task.sleep(for: .seconds(3))
             guard !Task.isCancelled else {
@@ -1153,10 +1157,7 @@ private struct TorrentInfoView: View {
             guard !Task.isCancelled else {
                 return
             }
-            let fileBatch = await store.fileBatch(for: torrent.id)
-            if !filesLoaded
-                || fileRevision != fileBatch.revision
-                || files != fileBatch.files {
+            if let fileBatch = await store.fileBatch(for: torrent.id, since: fileRevision) {
                 fileRevision = fileBatch.revision
                 files = fileBatch.files
                 filesLoaded = true
@@ -1191,10 +1192,7 @@ private struct TorrentInfoView: View {
                 return
             }
 
-            let pieceMapBatch = await store.pieceMapBatch(for: torrent.id)
-            if !pieceMapLoaded
-                || pieceMapRevision != pieceMapBatch.revision
-                || pieceMap != pieceMapBatch.pieceMap {
+            if let pieceMapBatch = await store.pieceMapBatch(for: torrent.id, since: pieceMapRevision) {
                 pieceMapRevision = pieceMapBatch.revision
                 pieceMap = pieceMapBatch.pieceMap
                 pieceMapLoaded = true

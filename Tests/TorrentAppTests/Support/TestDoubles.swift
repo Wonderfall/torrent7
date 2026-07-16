@@ -208,7 +208,11 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     }
 
     var snapshotBatch: TorrentSnapshotBatch?
+    var trackerBatchValue = TorrentTrackerBatch(revision: 0, trackers: [])
     var trackerHostBatchValue = TorrentTrackerHostBatch(revision: 0, hosts: [])
+    var webSeedBatchValue = TorrentWebSeedBatch(revision: 0, webSeeds: [])
+    var fileBatchValue = TorrentFileBatch(revision: 0, files: [])
+    var pieceMapBatchValue = TorrentPieceMapBatch(revision: 0, pieceMap: .empty)
     private var trackerHostBatchSuspensionCount = 0
     private var trackerHostBatchContinuations = [CheckedContinuation<Void, Never>]()
     var dirtyMask: UInt32 = 0
@@ -261,6 +265,10 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private var removeSuspensionCount = 0
     private var removeContinuations = [CheckedContinuation<Void, Never>]()
     private(set) var snapshotRequests = [(revision: UInt64?, sortOrder: TorrentSortOrder, direction: TorrentSortDirection)]()
+    private(set) var trackerBatchRequests = [(id: String, revision: UInt64?)]()
+    private(set) var webSeedBatchRequests = [(id: String, revision: UInt64?)]()
+    private(set) var fileBatchRequests = [(id: String, revision: UInt64?)]()
+    private(set) var pieceMapBatchRequests = [(id: String, revision: UInt64?)]()
     private(set) var sourcePolicyUpdates = [(id: String, field: TorrentSourcePolicyField, enabled: Bool)]()
     private(set) var torrentOptionsUpdates = [(id: String, options: TorrentOptions)]()
     private(set) var filePriorityUpdates = [(id: String, fileIndex: Int32, priority: TorrentFilePriority)]()
@@ -290,6 +298,22 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func setTrackerHostBatch(_ batch: TorrentTrackerHostBatch) {
         trackerHostBatchValue = batch
+    }
+
+    func setTrackerBatch(_ batch: TorrentTrackerBatch) {
+        trackerBatchValue = batch
+    }
+
+    func setWebSeedBatch(_ batch: TorrentWebSeedBatch) {
+        webSeedBatchValue = batch
+    }
+
+    func setFileBatch(_ batch: TorrentFileBatch) {
+        fileBatchValue = batch
+    }
+
+    func setPieceMapBatch(_ batch: TorrentPieceMapBatch) {
+        pieceMapBatchValue = batch
     }
 
     func suspendNextTrackerHostBatchCall() {
@@ -607,8 +631,9 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         requestedPieceMapIDs.append(id)
     }
 
-    func trackerBatch(id: String) async -> TorrentTrackerBatch {
-        TorrentTrackerBatch(revision: 0, trackers: [])
+    func trackerBatch(id: String, since revision: UInt64?) async -> TorrentTrackerBatch? {
+        trackerBatchRequests.append((id, revision))
+        return revision == trackerBatchValue.revision ? nil : trackerBatchValue
     }
 
     func trackerHostBatch() async -> TorrentTrackerHostBatch {
@@ -622,8 +647,9 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         return batch
     }
 
-    func webSeedBatch(id: String) async -> TorrentWebSeedBatch {
-        TorrentWebSeedBatch(revision: 0, webSeeds: [])
+    func webSeedBatch(id: String, since revision: UInt64?) async -> TorrentWebSeedBatch? {
+        webSeedBatchRequests.append((id, revision))
+        return revision == webSeedBatchValue.revision ? nil : webSeedBatchValue
     }
 
     func webSeedActivity(id: String) async -> TorrentWebSeedActivity {
@@ -634,12 +660,14 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         .empty
     }
 
-    func fileBatch(id: String) async -> TorrentFileBatch {
-        TorrentFileBatch(revision: 0, files: [])
+    func fileBatch(id: String, since revision: UInt64?) async -> TorrentFileBatch? {
+        fileBatchRequests.append((id, revision))
+        return revision == fileBatchValue.revision ? nil : fileBatchValue
     }
 
-    func pieceMapBatch(id: String) async -> TorrentPieceMapBatch {
-        TorrentPieceMapBatch(revision: 0, pieceMap: .empty)
+    func pieceMapBatch(id: String, since revision: UInt64?) async -> TorrentPieceMapBatch? {
+        pieceMapBatchRequests.append((id, revision))
+        return revision == pieceMapBatchValue.revision ? nil : pieceMapBatchValue
     }
 }
 

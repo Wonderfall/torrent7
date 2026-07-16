@@ -13,14 +13,38 @@ struct TorrentEngineTests {
         #expect(engine.isAvailable == false)
         #expect(await engine.snapshots().isEmpty)
         #expect(await engine.snapshotsIfChanged(since: 1, sortedBy: .name, direction: .ascending)?.torrents.isEmpty == true)
-        #expect(await engine.trackerBatch(id: "missing").trackers.isEmpty)
-        #expect(await engine.webSeedBatch(id: "missing").webSeeds.isEmpty)
+        #expect(await engine.trackerBatch(id: "missing", since: nil)?.trackers.isEmpty == true)
+        #expect(await engine.webSeedBatch(id: "missing", since: nil)?.webSeeds.isEmpty == true)
         #expect(await engine.webSeedActivity(id: "missing") == .empty)
-        #expect(await engine.fileBatch(id: "missing").files.isEmpty)
-        #expect(await engine.pieceMapBatch(id: "missing").pieceMap == .empty)
+        #expect(await engine.fileBatch(id: "missing", since: nil)?.files.isEmpty == true)
+        #expect(await engine.pieceMapBatch(id: "missing", since: nil)?.pieceMap == .empty)
         #expect(await engine.networkStatus() == .empty)
         #expect(await engine.takeChanges() == 0)
         #expect(await engine.takeAlertError() == nil)
+    }
+
+    @Test("Unchanged detail revisions suppress mapped batches")
+    func unchangedDetailRevisionsSuppressMappedBatches() async throws {
+        let stateDirectory = try temporaryStateDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: stateDirectory)
+        }
+
+        let engine = try TorrentEngine(stateDirectory: stateDirectory, enablePeerExchangePlugin: true)
+
+        let trackerRevision = await engine.trackerBatch(id: "missing", since: nil)?.revision
+        let webSeedRevision = await engine.webSeedBatch(id: "missing", since: nil)?.revision
+        let fileRevision = await engine.fileBatch(id: "missing", since: nil)?.revision
+        let pieceMapRevision = await engine.pieceMapBatch(id: "missing", since: nil)?.revision
+
+        #expect(trackerRevision == 0)
+        #expect(webSeedRevision == 0)
+        #expect(fileRevision == 0)
+        #expect(pieceMapRevision == 0)
+        #expect(await engine.trackerBatch(id: "missing", since: trackerRevision) == nil)
+        #expect(await engine.webSeedBatch(id: "missing", since: webSeedRevision) == nil)
+        #expect(await engine.fileBatch(id: "missing", since: fileRevision) == nil)
+        #expect(await engine.pieceMapBatch(id: "missing", since: pieceMapRevision) == nil)
     }
 
     @Test("Startup failure engine throws startup error for mutations")

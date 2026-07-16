@@ -407,6 +407,50 @@ struct TorrentStoreIntegrationTests {
         #expect(await harness.engine.filePriorityUpdates.first?.priority == .skip)
     }
 
+    @Test("Unchanged detail batches preserve caller state")
+    func unchangedDetailBatchesPreserveCallerState() async {
+        let harness = makeStoreHarness()
+        await harness.engine.setTrackerBatch(TorrentTrackerBatch(revision: 9, trackers: []))
+        await harness.engine.setWebSeedBatch(TorrentWebSeedBatch(revision: 9, webSeeds: []))
+        await harness.engine.setFileBatch(TorrentFileBatch(revision: 9, files: []))
+        await harness.engine.setPieceMapBatch(TorrentPieceMapBatch(revision: 9, pieceMap: .empty))
+
+        let initialTrackerBatch = await harness.store.trackerBatch(for: "alpha", since: nil)
+        let initialWebSeedBatch = await harness.store.webSeedBatch(for: "alpha", since: nil)
+        let initialFileBatch = await harness.store.fileBatch(for: "alpha", since: nil)
+        let initialPieceMapBatch = await harness.store.pieceMapBatch(for: "alpha", since: nil)
+        #expect(initialTrackerBatch?.revision == 9)
+        #expect(initialWebSeedBatch?.revision == 9)
+        #expect(initialFileBatch?.revision == 9)
+        #expect(initialPieceMapBatch?.revision == 9)
+
+        var trackerState = "kept"
+        var webSeedState = "kept"
+        var fileState = "kept"
+        var pieceMapState = "kept"
+        if let batch = await harness.store.trackerBatch(for: "alpha", since: 9) {
+            trackerState = "replaced by revision \(batch.revision)"
+        }
+        if let batch = await harness.store.webSeedBatch(for: "alpha", since: 9) {
+            webSeedState = "replaced by revision \(batch.revision)"
+        }
+        if let batch = await harness.store.fileBatch(for: "alpha", since: 9) {
+            fileState = "replaced by revision \(batch.revision)"
+        }
+        if let batch = await harness.store.pieceMapBatch(for: "alpha", since: 9) {
+            pieceMapState = "replaced by revision \(batch.revision)"
+        }
+
+        #expect(trackerState == "kept")
+        #expect(webSeedState == "kept")
+        #expect(fileState == "kept")
+        #expect(pieceMapState == "kept")
+        #expect(await harness.engine.trackerBatchRequests.map(\.revision) == [nil, 9])
+        #expect(await harness.engine.webSeedBatchRequests.map(\.revision) == [nil, 9])
+        #expect(await harness.engine.fileBatchRequests.map(\.revision) == [nil, 9])
+        #expect(await harness.engine.pieceMapBatchRequests.map(\.revision) == [nil, 9])
+    }
+
     @Test("Add magnet disables peer exchange when PEX plugin is disabled")
     func addMagnetDisablesPeerExchangeWhenPEXPluginIsDisabled() async {
         var settings = TorrentSettings()

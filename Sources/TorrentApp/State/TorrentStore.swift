@@ -486,12 +486,12 @@ final class TorrentStore {
         }
     }
 
-    func trackerBatch(for id: TorrentItem.ID) async -> TorrentTrackerBatch {
-        await engine.trackerBatch(id: id)
+    func trackerBatch(for id: TorrentItem.ID, since revision: UInt64?) async -> TorrentTrackerBatch? {
+        await engine.trackerBatch(id: id, since: revision)
     }
 
-    func webSeedBatch(for id: TorrentItem.ID) async -> TorrentWebSeedBatch {
-        await engine.webSeedBatch(id: id)
+    func webSeedBatch(for id: TorrentItem.ID, since revision: UInt64?) async -> TorrentWebSeedBatch? {
+        await engine.webSeedBatch(id: id, since: revision)
     }
 
     func webSeedActivity(for id: TorrentItem.ID) async -> TorrentWebSeedActivity {
@@ -502,12 +502,12 @@ final class TorrentStore {
         await engine.peerSources(id: id)
     }
 
-    func fileBatch(for id: TorrentItem.ID) async -> TorrentFileBatch {
-        await engine.fileBatch(id: id)
+    func fileBatch(for id: TorrentItem.ID, since revision: UInt64?) async -> TorrentFileBatch? {
+        await engine.fileBatch(id: id, since: revision)
     }
 
-    func pieceMapBatch(for id: TorrentItem.ID) async -> TorrentPieceMapBatch {
-        await engine.pieceMapBatch(id: id)
+    func pieceMapBatch(for id: TorrentItem.ID, since revision: UInt64?) async -> TorrentPieceMapBatch? {
+        await engine.pieceMapBatch(id: id, since: revision)
     }
 
     func dismissLastError() {
