@@ -330,6 +330,19 @@ TTorrentClient *TorrentClientCreateWithError(
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
+// Atomically replaces the exact normalized save paths accepted by subsequent
+// live add operations. This does not alter already-active torrents or rerun
+// startup resume restoration. The blob has the same bounded format and
+// pointer/size rules as TorrentClientCreateWithError; pass exactly (NULL, 0)
+// to deny all subsequent live adds.
+int32_t TorrentClientReplaceAuthorizedSavePaths(
+    TTorrentClient *client,
+    const uint8_t *authorized_save_paths_blob,
+    int32_t authorized_save_paths_blob_size,
+    char *error_out,
+    int32_t error_capacity
+) TORRENT_BRIDGE_NOEXCEPT;
+
 // Consumes a client handle returned by TorrentClientCreateWithError. Passing NULL is allowed.
 // No other bridge call may race with destruction of the same client.
 void TorrentClientDestroy(TTorrentClient *client) TORRENT_BRIDGE_NOEXCEPT;

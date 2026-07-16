@@ -229,6 +229,63 @@ DirtyMask block_network_locked(TTorrentClient &client)
     return changes;
 }
 
+using NormalizedLiveSavePathResult = std::expected<std::string, BridgeError>;
+
+NormalizedLiveSavePathResult normalized_live_save_path(std::string_view const save_path)
+{
+    BridgeResult const valid_save_path = validate_save_path(save_path);
+    if (!valid_save_path) {
+        return std::unexpected(valid_save_path.error());
+    }
+
+    std::optional<std::string> normalized = normalize_authorized_save_path(save_path);
+    if (!normalized) {
+        return std::unexpected(BridgeError{
+            .code = 1,
+            .message = "The save path is invalid.",
+        });
+    }
+    return std::move(*normalized);
+}
+
+BridgeResult require_authorized_save_path(
+    TTorrentClient const &client,
+    std::string const &normalized_save_path
+)
+{
+    if (!client.authorized_save_paths.contains(normalized_save_path)) {
+        return bridge_error(1, "The save path is not authorized.");
+    }
+    return {};
+}
+
+AuthorizedSavePathResult authorized_save_paths_from_c_buffer(
+    std::uint8_t const *authorized_save_paths_blob,
+    int32_t const authorized_save_paths_blob_size
+)
+{
+    if (authorized_save_paths_blob_size < 0
+        || authorized_save_paths_blob_size > TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES) {
+        return std::unexpected(BridgeError{
+            .code = 1,
+            .message = "The authorized save path list has an invalid size.",
+        });
+    }
+
+    bool const has_authorized_save_paths_blob = authorized_save_paths_blob != nullptr;
+    bool const has_authorized_save_paths_bytes = authorized_save_paths_blob_size != 0;
+    if (has_authorized_save_paths_blob != has_authorized_save_paths_bytes) {
+        return std::unexpected(BridgeError{
+            .code = 1,
+            .message = "The authorized save path list pointer and size do not match.",
+        });
+    }
+
+    return parse_authorized_save_paths_blob(
+        input_span_from_c_buffer(authorized_save_paths_blob, authorized_save_paths_blob_size)
+    );
+}
+
 struct SourcePolicyApplicationResult {
     DirtyMask changes = 0;
     std::vector<lt::torrent_handle> handles_to_save;
@@ -1053,33 +1110,22 @@ extern "C" TTorrentClient *TorrentClientCreateWithError(
     }
     std::string_view const requested_state_path = c_string_view(state_path);
 
-    if (authorized_save_paths_blob_size < 0
-        || authorized_save_paths_blob_size > TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES) {
-        copy_error(error_buffer, "The authorized save path list has an invalid size.");
-        return nullptr;
-    }
-    bool const has_authorized_save_paths_blob = authorized_save_paths_blob != nullptr;
-    bool const has_authorized_save_paths_bytes = authorized_save_paths_blob_size != 0;
-    if (has_authorized_save_paths_blob != has_authorized_save_paths_bytes) {
-        copy_error(error_buffer, "The authorized save path list pointer and size do not match.");
-        return nullptr;
-    }
-
     try {
+        AuthorizedSavePathResult authorized_save_paths = authorized_save_paths_from_c_buffer(
+            authorized_save_paths_blob,
+            authorized_save_paths_blob_size
+        );
+        if (!authorized_save_paths) {
+            copy_error(error_buffer, authorized_save_paths.error().message);
+            return nullptr;
+        }
+
         fs::path const state_directory_path{std::string(requested_state_path)};
         if (!state_directory_path.is_absolute()) {
             copy_error(error_buffer, "The state path must be absolute.");
             return nullptr;
         }
         std::string normalized_state_path = state_directory_path.lexically_normal().native();
-
-        AuthorizedSavePathResult authorized_save_paths = parse_authorized_save_paths_blob(
-            input_span_from_c_buffer(authorized_save_paths_blob, authorized_save_paths_blob_size)
-        );
-        if (!authorized_save_paths) {
-            copy_error(error_buffer, authorized_save_paths.error().message);
-            return nullptr;
-        }
 
         return std::make_unique<TTorrentClient>(
             normalized_state_path,
@@ -1093,6 +1139,33 @@ extern "C" TTorrentClient *TorrentClientCreateWithError(
         copy_error(error_buffer, "Unexpected libtorrent error.");
         return nullptr;
     }
+}
+
+extern "C" int32_t TorrentClientReplaceAuthorizedSavePaths(
+    TTorrentClient *client,
+    std::uint8_t const *authorized_save_paths_blob,
+    int32_t authorized_save_paths_blob_size,
+    char *error_out,
+    int32_t error_capacity
+) noexcept
+{
+    return run_bridge_operation(output_buffer(error_out, error_capacity), 2, [&]() -> BridgeResult {
+        if (client == nullptr) {
+            return bridge_error(1, "Missing torrent client.");
+        }
+
+        AuthorizedSavePathResult authorized_save_paths = authorized_save_paths_from_c_buffer(
+            authorized_save_paths_blob,
+            authorized_save_paths_blob_size
+        );
+        if (!authorized_save_paths) {
+            return std::unexpected(authorized_save_paths.error());
+        }
+
+        std::scoped_lock guard(client->lock);
+        client->authorized_save_paths.swap(*authorized_save_paths);
+        return {};
+    });
 }
 
 extern "C" void TorrentClientDestroy(TTorrentClient *client) noexcept
@@ -1162,10 +1235,11 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         if (magnet.size() > kMaxMagnetURIBytes) {
             return bridge_error(2, "The magnet link is too large.");
         }
-        std::string_view const requested_save_path = c_string_view(save_path);
-        BridgeResult const valid_save_path = validate_save_path(requested_save_path);
-        if (!valid_save_path) {
-            return valid_save_path;
+        NormalizedLiveSavePathResult const normalized_save_path = normalized_live_save_path(
+            c_string_view(save_path)
+        );
+        if (!normalized_save_path) {
+            return std::unexpected(normalized_save_path.error());
         }
         if (!is_valid_queue_priority(add_options.queue_priority)) {
             return bridge_error(1, "Invalid queue priority.");
@@ -1173,6 +1247,13 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
 
         std::scoped_lock guard(client->lock);
         LockedChangePublisher publisher(*client, wake);
+        BridgeResult const authorized_save_path = require_authorized_save_path(
+            *client,
+            *normalized_save_path
+        );
+        if (!authorized_save_path) {
+            return authorized_save_path;
+        }
         BridgeResult const persistence = client->ensure_persistence_available(3);
         if (!persistence) {
             return persistence;
@@ -1238,7 +1319,7 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         }
         prepare_add_params(
             params,
-            requested_save_path,
+            *normalized_save_path,
             bridge_bool(add_options.starts_paused),
             enable_peer_exchange_value && !metadata_pending
         );
@@ -1439,10 +1520,11 @@ int32_t add_torrent_file_data_with_priorities(
         if (file_priority_count > 0 && file_priorities == nullptr) {
             return bridge_error(1, "Missing file priorities.");
         }
-        std::string_view const requested_save_path = c_string_view(save_path);
-        BridgeResult const valid_save_path = validate_save_path(requested_save_path);
-        if (!valid_save_path) {
-            return valid_save_path;
+        NormalizedLiveSavePathResult const normalized_save_path = normalized_live_save_path(
+            c_string_view(save_path)
+        );
+        if (!normalized_save_path) {
+            return std::unexpected(normalized_save_path.error());
         }
         if (!is_valid_queue_priority(add_options.queue_priority)) {
             return bridge_error(1, "Invalid queue priority.");
@@ -1474,6 +1556,13 @@ int32_t add_torrent_file_data_with_priorities(
 
         std::scoped_lock guard(client->lock);
         LockedChangePublisher publisher(*client, wake);
+        BridgeResult const authorized_save_path = require_authorized_save_path(
+            *client,
+            *normalized_save_path
+        );
+        if (!authorized_save_path) {
+            return authorized_save_path;
+        }
         BridgeResult const persistence =
             client->ensure_persistence_available(2);
         if (!persistence) {
@@ -1519,7 +1608,7 @@ int32_t add_torrent_file_data_with_priorities(
         }
         prepare_add_params(
             params,
-            requested_save_path,
+            *normalized_save_path,
             bridge_bool(add_options.starts_paused),
             enable_peer_exchange_value
         );

@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <ctime>
 #include <filesystem>
+#include <initializer_list>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -83,6 +84,18 @@ template <typename Predicate>
         .allow_non_https_web_seeds = bridge_bool(false),
         .allow_pre_metadata_dht = bridge_bool(false),
     };
+}
+
+[[nodiscard]] std::vector<std::uint8_t> authorized_path_blob(
+    std::initializer_list<std::string_view> paths
+)
+{
+    std::vector<std::uint8_t> blob;
+    for (std::string_view const path : paths) {
+        blob.insert(blob.end(), path.begin(), path.end());
+        blob.push_back(0U);
+    }
+    return blob;
 }
 
 [[nodiscard]] std::shared_ptr<lt::torrent_info const> make_torrent_info(bool is_private)
@@ -375,6 +388,135 @@ TEST_CASE("authorized resume restoration uses the exact lexically normalized cap
     CHECK_FALSE(client->take_alert_error(std::span{alert_error}));
 
     TorrentClientDestroyBlocking(client);
+}
+
+TEST_CASE("live magnet adds require the current exact authorized save path")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    fs::path const state_directory = temporary_directory.path() / "State";
+    fs::path const first_directory = temporary_directory.path() / "First";
+    fs::path const second_directory = temporary_directory.path() / "Second";
+    REQUIRE(fs::create_directories(first_directory));
+    REQUIRE(fs::create_directories(second_directory));
+
+    TTorrentClient client(state_directory.string());
+    client.set_session_shutdown_asynchronous(false);
+    TTorrentAddOptions add_options = default_add_options();
+    std::array<char, TTORRENT_ID_CAPACITY> added_id{};
+    std::array<char, 512> error{};
+
+    auto add_magnet = [&](char hash_digit, fs::path const &save_path) {
+        added_id.fill('\0');
+        error.fill('\0');
+        std::string const magnet = "magnet:?xt=urn:btih:" + std::string(40U, hash_digit);
+        return TorrentClientAddMagnet(
+            &client,
+            magnet.c_str(),
+            save_path.c_str(),
+            &add_options,
+            added_id.data(),
+            static_cast<int32_t>(added_id.size()),
+            error.data(),
+            static_cast<int32_t>(error.size())
+        );
+    };
+
+    CHECK(add_magnet('1', first_directory) != 0);
+    CHECK(std::string(error.data()) == "The save path is not authorized.");
+    CHECK(added_id.front() == '\0');
+
+    std::string const first_blob_path = (first_directory / "child" / "..").string();
+    std::vector<std::uint8_t> first_blob = authorized_path_blob({first_blob_path});
+    REQUIRE(TorrentClientReplaceAuthorizedSavePaths(
+        &client,
+        first_blob.data(),
+        static_cast<int32_t>(first_blob.size()),
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == 0);
+
+    CHECK(add_magnet('1', first_directory / ".") == 0);
+    CHECK(is_canonical_torrent_id(added_id.data()));
+    CHECK(add_magnet('2', first_directory / "child") != 0);
+    CHECK(std::string(error.data()) == "The save path is not authorized.");
+
+    std::string const second_blob_path = second_directory.string();
+    std::vector<std::uint8_t> second_blob = authorized_path_blob({second_blob_path});
+    REQUIRE(TorrentClientReplaceAuthorizedSavePaths(
+        &client,
+        second_blob.data(),
+        static_cast<int32_t>(second_blob.size()),
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == 0);
+
+    CHECK(add_magnet('2', first_directory) != 0);
+    CHECK(std::string(error.data()) == "The save path is not authorized.");
+    CHECK(add_magnet('2', second_directory) == 0);
+    CHECK(is_canonical_torrent_id(added_id.data()));
+
+    REQUIRE(TorrentClientReplaceAuthorizedSavePaths(
+        &client,
+        nullptr,
+        0,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == 0);
+    CHECK(add_magnet('3', second_directory) != 0);
+    CHECK(std::string(error.data()) == "The save path is not authorized.");
+}
+
+TEST_CASE("live torrent file adds require a dynamically authorized save path")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    fs::path const state_directory = temporary_directory.path() / "State";
+    fs::path const download_directory = temporary_directory.path() / "Downloads";
+    REQUIRE(fs::create_directories(download_directory));
+
+    std::vector<lt::create_file_entry> files;
+    files.emplace_back("authorized-file.bin", 4);
+    lt::create_torrent creator(std::move(files), 16 * 1024, lt::create_torrent::v1_only);
+    creator.set_hash(lt::piece_index_t(0), bridge_tests::sha1_hash_from_seed(45U));
+    std::vector<char> const torrent_data = creator.generate_buf();
+
+    TTorrentClient client(state_directory.string());
+    client.set_session_shutdown_asynchronous(false);
+    TTorrentAddOptions add_options = default_add_options();
+    std::array<char, TTORRENT_ID_CAPACITY> added_id{};
+    std::array<char, 512> error{};
+
+    auto add_torrent = [&] {
+        added_id.fill('\0');
+        error.fill('\0');
+        return TorrentClientAddTorrentFileData(
+            &client,
+            torrent_data.data(),
+            static_cast<int32_t>(torrent_data.size()),
+            download_directory.c_str(),
+            &add_options,
+            added_id.data(),
+            static_cast<int32_t>(added_id.size()),
+            error.data(),
+            static_cast<int32_t>(error.size())
+        );
+    };
+
+    CHECK(add_torrent() != 0);
+    CHECK(std::string(error.data()) == "The save path is not authorized.");
+    CHECK(added_id.front() == '\0');
+
+    std::string const authorized_path = download_directory.string();
+    std::vector<std::uint8_t> blob = authorized_path_blob({authorized_path});
+    REQUIRE(TorrentClientReplaceAuthorizedSavePaths(
+        &client,
+        blob.data(),
+        static_cast<int32_t>(blob.size()),
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == 0);
+
+    CHECK(add_torrent() == 0);
+    CHECK(is_canonical_torrent_id(added_id.data()));
 }
 
 TEST_CASE("clearing a wake callback waits for every in-flight invocation")
@@ -863,7 +1005,11 @@ TEST_CASE("resume metadata flows through add, async save alerts, and reload")
 
     std::string canonical_id;
     {
-        TTorrentClient client(state_directory.string());
+        TTorrentClient client(
+            state_directory.string(),
+            true,
+            AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
+        );
         client.set_session_shutdown_asynchronous(false);
 
         TTorrentAddOptions add_options = default_add_options();
@@ -2411,7 +2557,11 @@ TEST_CASE("hash-only torrent info is rejected as invalid metadata")
 TEST_CASE("metadata-less magnets replace retained file and piece details with authoritative empties")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
-    TTorrentClient client((temporary_directory.path() / "State").string());
+    TTorrentClient client(
+        (temporary_directory.path() / "State").string(),
+        true,
+        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
+    );
     client.set_session_shutdown_asynchronous(false);
 
     std::string const magnet = "magnet:?xt=urn:btih:0123456A89abcdef32056417897768acf0261b73";
@@ -2695,7 +2845,11 @@ TEST_CASE("source policy restore does not reinsert blocked HTTPS-only sources")
 TEST_CASE("magnet torrents gate payload files and untrusted discovery until metadata is validated")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
-    TTorrentClient client((temporary_directory.path() / "State").string());
+    TTorrentClient client(
+        (temporary_directory.path() / "State").string(),
+        true,
+        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
+    );
     client.set_session_shutdown_asynchronous(false);
 
     std::string const hash(40U, '2');
@@ -2741,7 +2895,11 @@ TEST_CASE("trackerless magnet can explicitly allow DHT before metadata validatio
     char error[512]{};
 
     {
-        TTorrentClient client(state_directory.string());
+        TTorrentClient client(
+            state_directory.string(),
+            true,
+            AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
+        );
         client.set_session_shutdown_asynchronous(false);
         REQUIRE(TorrentClientAddMagnet(
             &client,
@@ -2795,7 +2953,11 @@ TEST_CASE("pending magnet DHT revocation is durable before the setter returns")
     char added_id[TTORRENT_ID_CAPACITY]{};
     char error[512]{};
 
-    TTorrentClient client(state_directory.string());
+    TTorrentClient client(
+        state_directory.string(),
+        true,
+        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
+    );
     client.set_session_shutdown_asynchronous(false);
     REQUIRE(TorrentClientAddMagnet(
         &client,
@@ -3062,7 +3224,11 @@ TEST_CASE("a dropped terminal deletion alert fails the request and completes cle
 TEST_CASE("metadata-less magnet removal treats a zero-error failed alert conservatively")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
-    TTorrentClient client((temporary_directory.path() / "State").string());
+    TTorrentClient client(
+        (temporary_directory.path() / "State").string(),
+        true,
+        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
+    );
     client.set_session_shutdown_asynchronous(false);
 
     std::string const hash(40U, '9');
@@ -3125,7 +3291,11 @@ TEST_CASE("metadata validation gate survives resume reload")
     char error[512]{};
 
     {
-        TTorrentClient client(state_directory.string());
+        TTorrentClient client(
+            state_directory.string(),
+            true,
+            AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
+        );
         client.set_session_shutdown_asynchronous(false);
         REQUIRE(TorrentClientAddMagnet(
             &client,
@@ -3216,7 +3386,11 @@ TEST_CASE("app-default DHT changes do not bypass pending metadata consent after 
     char error[512]{};
 
     {
-        TTorrentClient client(state_directory.string());
+        TTorrentClient client(
+            state_directory.string(),
+            true,
+            AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
+        );
         client.set_session_shutdown_asynchronous(false);
 
         TTorrentSessionSettings settings{};

@@ -246,6 +246,55 @@ TEST_CASE("client creation validates authorized path blob pointer and size befor
     CHECK(std::string(error.data()) == "The authorized save path list has an invalid size.");
 }
 
+TEST_CASE("runtime authorized path replacement is bounded and atomic")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+    std::array<char, 512> error{};
+
+    std::vector<std::uint8_t> valid = authorized_path_blob({"/Downloads/B/../A"});
+    REQUIRE(TorrentClientReplaceAuthorizedSavePaths(
+        &client,
+        valid.data(),
+        static_cast<int32_t>(valid.size()),
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == 0);
+    CHECK(client.authorized_save_paths == AuthorizedSavePathSet{"/Downloads/A"});
+
+    std::vector<std::uint8_t> missing_terminator{'/', 'D'};
+    CHECK(TorrentClientReplaceAuthorizedSavePaths(
+        &client,
+        missing_terminator.data(),
+        static_cast<int32_t>(missing_terminator.size()),
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) != 0);
+    CHECK(std::string(error.data()) == "The authorized save path list is not NUL terminated.");
+    CHECK(client.authorized_save_paths == AuthorizedSavePathSet{"/Downloads/A"});
+
+    std::uint8_t byte = 0U;
+    CHECK(TorrentClientReplaceAuthorizedSavePaths(
+        &client,
+        &byte,
+        TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES + 1,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) != 0);
+    CHECK(std::string(error.data()) == "The authorized save path list has an invalid size.");
+    CHECK(client.authorized_save_paths == AuthorizedSavePathSet{"/Downloads/A"});
+
+    REQUIRE(TorrentClientReplaceAuthorizedSavePaths(
+        &client,
+        nullptr,
+        0,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == 0);
+    CHECK(client.authorized_save_paths.empty());
+}
+
 TEST_CASE("torrent metadata rejects symbolic links and paths that cannot fit the bridge ABI")
 {
     BridgeResult const symlink = validate_torrent_info(*make_raw_v1_torrent_info(
