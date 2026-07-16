@@ -143,6 +143,37 @@ template <typename Predicate>
     return bridge_tests::load_torrent_params(buffer, "queue torrent info").ti;
 }
 
+[[nodiscard]] fs::path write_valid_resume_entry(
+    fs::path const &state_directory,
+    std::string const &save_path,
+    unsigned char const seed,
+    char const canonical_id_seed
+)
+{
+    fs::path const resume_directory = state_directory / "ResumeData";
+    static_cast<void>(fs::create_directories(resume_directory));
+    REQUIRE(fs::exists(resume_directory));
+    std::shared_ptr<lt::torrent_info const> const info = make_queue_torrent_info(seed);
+    REQUIRE(info != nullptr);
+
+    lt::add_torrent_params params;
+    params.ti = info;
+    params.info_hashes = info->info_hashes();
+    params.save_path = save_path;
+    TorrentIdentity identity;
+    identity.canonical_id = bridge_tests::canonical_id(canonical_id_seed);
+    std::vector<char> const encoded = encoded_resume_data(params, &identity);
+
+    fs::path const resume_path = resume_directory
+        / (primary_hash_key(info->info_hashes()) + std::string(kResumeExtension));
+    ResumeSaveResult const written = write_owner_only_file_checked(
+        resume_path,
+        std::string_view(encoded.data(), encoded.size())
+    );
+    REQUIRE(written.has_value());
+    return resume_path;
+}
+
 [[nodiscard]] int32_t cached_url_seed_count(TTorrentClient &client, std::string const &id)
 {
     std::uint64_t revision = 0;
@@ -256,6 +287,92 @@ TEST_CASE("TTorrentClient creates owner-only state directories and holds an excl
     CHECK(has_owner_directory_permissions(resume_directory));
 
     CHECK_THROWS_AS(static_cast<void>(TTorrentClient(state_directory.string())), std::system_error);
+}
+
+TEST_CASE("resume restoration is fail-closed and preserves unauthorized entries with one aggregate error")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    fs::path const state_directory = temporary_directory.path() / "State";
+    fs::path const unauthorized_directory = temporary_directory.path() / "Unauthorized";
+    REQUIRE(fs::create_directories(unauthorized_directory));
+    fs::path const first_resume = write_valid_resume_entry(
+        state_directory,
+        unauthorized_directory.string(),
+        41U,
+        '1'
+    );
+    fs::path const second_resume = write_valid_resume_entry(
+        state_directory,
+        unauthorized_directory.string(),
+        42U,
+        '2'
+    );
+
+    TTorrentClient client(state_directory.string());
+    client.set_session_shutdown_asynchronous(false);
+    client.stop_alert_worker();
+
+    CHECK(client.session.get_torrents().empty());
+    CHECK(file_exists(first_resume));
+    CHECK(file_exists(second_resume));
+    std::array<char, 512> error{};
+    REQUIRE(client.take_alert_error(std::span{error}));
+    CHECK(std::string(error.data())
+          == "Skipped restoring 2 saved torrents because download folder access is not authorized. Resume data was preserved.");
+    CHECK_FALSE(client.take_alert_error(std::span{error}));
+    DirtyMask changes = 0U;
+    static_cast<void>(client.take_changes(&changes));
+    CHECK((changes & TTORRENT_DIRTY_ERRORS) != 0U);
+}
+
+TEST_CASE("authorized resume restoration uses the exact lexically normalized capability path")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    fs::path const state_directory = temporary_directory.path() / "State";
+    fs::path const authorized_directory = temporary_directory.path() / "Authorized";
+    fs::path const outside_directory = temporary_directory.path() / "Outside";
+    REQUIRE(fs::create_directories(authorized_directory));
+    REQUIRE(fs::create_directories(outside_directory));
+    fs::path const resume_path = write_valid_resume_entry(
+        state_directory,
+        (authorized_directory / ".").string(),
+        43U,
+        '3'
+    );
+    fs::path const denied_resume_path = write_valid_resume_entry(
+        state_directory,
+        (authorized_directory / ".." / "Outside").string(),
+        44U,
+        '4'
+    );
+
+    std::string const blob_path = (authorized_directory / "child" / "..").string();
+    std::vector<std::uint8_t> blob(blob_path.begin(), blob_path.end());
+    blob.push_back(0U);
+    std::array<char, 512> error{};
+    TTorrentClient *client = TorrentClientCreateWithError(
+        state_directory.c_str(),
+        1,
+        blob.data(),
+        static_cast<int32_t>(blob.size()),
+        error.data(),
+        static_cast<int32_t>(error.size())
+    );
+    REQUIRE(client != nullptr);
+    client->set_session_shutdown_asynchronous(false);
+    client->stop_alert_worker();
+
+    CHECK(error.front() == '\0');
+    CHECK(client->session.get_torrents().size() == 1U);
+    CHECK(file_exists(resume_path));
+    CHECK(file_exists(denied_resume_path));
+    std::array<char, 512> alert_error{};
+    REQUIRE(client->take_alert_error(std::span{alert_error}));
+    CHECK(std::string(alert_error.data())
+          == "Skipped restoring 1 saved torrent because download folder access is not authorized. Resume data was preserved.");
+    CHECK_FALSE(client->take_alert_error(std::span{alert_error}));
+
+    TorrentClientDestroyBlocking(client);
 }
 
 TEST_CASE("clearing a wake callback waits for every in-flight invocation")
@@ -705,7 +822,11 @@ TEST_CASE("resume persistence rejects unsafe serialized file renames")
         );
         REQUIRE(written.has_value());
 
-        TTorrentClient client(state_directory.string());
+        TTorrentClient client(
+            state_directory.string(),
+            true,
+            AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
+        );
         client.set_session_shutdown_asynchronous(false);
 
         CHECK(client.session.get_torrents().empty());
@@ -796,7 +917,11 @@ TEST_CASE("resume metadata flows through add, async save alerts, and reload")
         }));
     }
 
-    TTorrentClient reloaded(state_directory.string());
+    TTorrentClient reloaded(
+        state_directory.string(),
+        true,
+        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
+    );
     reloaded.set_session_shutdown_asynchronous(false);
     std::scoped_lock guard(reloaded.lock);
     auto const cached = reloaded.snapshot_indices.find(canonical_id);
@@ -1072,7 +1197,11 @@ TEST_CASE("queue moves normalize and persist app-owned queue ranks")
         }));
     }
 
-    TTorrentClient reloaded(state_directory.string());
+    TTorrentClient reloaded(
+        state_directory.string(),
+        true,
+        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
+    );
     reloaded.set_session_shutdown_asynchronous(false);
     TorrentIdentity *reloaded_third =
         identity_from_handle(reloaded.handle_by_id.at(primary_hash_key(third_info->info_hashes())));
@@ -2322,7 +2451,11 @@ TEST_CASE("trackerless magnet can explicitly allow DHT before metadata validatio
         CHECK(bridge_bool(policy.allow_pre_metadata_dht));
     }
 
-    TTorrentClient reloaded(state_directory.string());
+    TTorrentClient reloaded(
+        state_directory.string(),
+        true,
+        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
+    );
     reloaded.set_session_shutdown_asynchronous(false);
     lt::torrent_handle handle = reloaded.handle_by_id.at(bridge_tests::v1_id('6'));
     TorrentIdentity *identity = identity_from_handle(handle);
@@ -2390,7 +2523,11 @@ TEST_CASE("pending magnet DHT revocation is durable before the setter returns")
         fs::copy_options::none
     ));
 
-    TTorrentClient restarted(restart_state.string());
+    TTorrentClient restarted(
+        restart_state.string(),
+        true,
+        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
+    );
     restarted.set_session_shutdown_asynchronous(false);
     lt::torrent_handle restarted_handle = restarted.handle_by_id.at(resume_id);
     TorrentIdentity *restarted_identity = identity_from_handle(restarted_handle);
@@ -2685,7 +2822,11 @@ TEST_CASE("metadata validation gate survives resume reload")
         ) == 0);
     }
 
-    TTorrentClient reloaded(state_directory.string());
+    TTorrentClient reloaded(
+        state_directory.string(),
+        true,
+        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
+    );
     reloaded.set_session_shutdown_asynchronous(false);
     lt::torrent_handle handle = reloaded.handle_by_id.at(bridge_tests::v1_id('3'));
     TorrentIdentity *identity = identity_from_handle(handle);
@@ -2727,7 +2868,11 @@ TEST_CASE("pending resume discovery guards do not become source locks")
     );
     REQUIRE(written.has_value());
 
-    TTorrentClient reloaded(state_directory.string());
+    TTorrentClient reloaded(
+        state_directory.string(),
+        true,
+        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
+    );
     reloaded.set_session_shutdown_asynchronous(false);
     lt::torrent_handle handle = reloaded.handle_by_id.at(resume_id);
     TorrentIdentity *identity = identity_from_handle(handle);
@@ -2791,7 +2936,11 @@ TEST_CASE("app-default DHT changes do not bypass pending metadata consent after 
         CHECK(client.dht_disabled_by_app.contains(identity));
     }
 
-    TTorrentClient reloaded(state_directory.string());
+    TTorrentClient reloaded(
+        state_directory.string(),
+        true,
+        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
+    );
     reloaded.set_session_shutdown_asynchronous(false);
     lt::torrent_handle handle = reloaded.handle_by_id.at(bridge_tests::v1_id('4'));
     TorrentIdentity *identity = identity_from_handle(handle);

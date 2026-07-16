@@ -6,6 +6,60 @@ import TorrentBridge
 
 @Suite("Torrent engine", .serialized)
 struct TorrentEngineTests {
+    @Test("Authorized save path encoding is deterministic, bounded, and NUL delimited")
+    func authorizedSavePathEncodingIsDeterministicBoundedAndNULDelimited() throws {
+        let blob = try TorrentEngine.encodeAuthorizedSavePaths(["/Downloads/B", "/Downloads/A", "/Downloads/B"])
+        let records = blob.split(separator: 0).map { String(decoding: $0, as: UTF8.self) }
+
+        #expect(records == ["/Downloads/A", "/Downloads/B"])
+        #expect(blob.last == 0)
+        #expect(try TorrentEngine.encodeAuthorizedSavePaths([]).isEmpty)
+        #expect(throws: TorrentEngineError.self) {
+            try TorrentEngine.encodeAuthorizedSavePaths(["relative"])
+        }
+        #expect(throws: TorrentEngineError.self) {
+            try TorrentEngine.encodeAuthorizedSavePaths(["/Downloads/Bad\0Path"])
+        }
+        #expect(throws: TorrentEngineError.self) {
+            try TorrentEngine.encodeAuthorizedSavePaths([
+                "/" + String(repeating: "x", count: Int(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES))
+            ])
+        }
+        #expect(throws: TorrentEngineError.self) {
+            try TorrentEngine.encodeAuthorizedSavePaths(Array(
+                repeating: "/Downloads",
+                count: Int(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT) + 1
+            ))
+        }
+    }
+
+    @Test("Engine creation and restart forward authorized save path snapshots")
+    func engineCreationAndRestartForwardAuthorizedSavePathSnapshots() async throws {
+        let stateDirectory = try temporaryStateDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: stateDirectory)
+            TorrentEngine.clientCreationPreflight.withLock { $0 = nil }
+        }
+        let snapshots = Mutex([[String]]())
+        TorrentEngine.clientCreationPreflight.withLock { preflight in
+            preflight = { _, _, authorizedSavePaths in
+                snapshots.withLock { $0.append(authorizedSavePaths) }
+            }
+        }
+
+        let engine = try TorrentEngine(
+            stateDirectory: stateDirectory,
+            enablePeerExchangePlugin: true,
+            authorizedSavePaths: ["/Downloads/Initial"]
+        )
+        try await engine.restart(
+            enablePeerExchangePlugin: false,
+            authorizedSavePaths: ["/Downloads/Fresh"]
+        )
+
+        #expect(snapshots.withLock { $0 } == [["/Downloads/Initial"], ["/Downloads/Fresh"]])
+    }
+
     @Test("Startup failure engine reports unavailable and empty read models")
     func startupFailureEngineReportsUnavailableAndEmptyReadModels() async {
         let engine = TorrentEngine(startupFailureMessage: "boom")
@@ -74,13 +128,13 @@ struct TorrentEngineTests {
         #expect(engine.isAvailable == true)
 
         TorrentEngine.clientCreationPreflight.withLock { preflight in
-            preflight = { _, _ in
+            preflight = { _, _, _ in
                 throw TorrentEngineError.bridgeError("restart boom")
             }
         }
 
         do {
-            try await engine.restart(enablePeerExchangePlugin: false)
+            try await engine.restart(enablePeerExchangePlugin: false, authorizedSavePaths: [])
             Issue.record("Expected restart failure")
         } catch let error as TorrentEngineError {
             #expect(error.localizedDescription == "restart boom")
@@ -100,7 +154,7 @@ struct TorrentEngineTests {
         }
 
         TorrentEngine.clientCreationPreflight.withLock { $0 = nil }
-        try await engine.restart(enablePeerExchangePlugin: false)
+        try await engine.restart(enablePeerExchangePlugin: false, authorizedSavePaths: [])
 
         #expect(engine.isAvailable == true)
         try await engine.saveAllChecked()
@@ -169,7 +223,7 @@ struct TorrentEngineTests {
         #expect(completed.withLock { !$0 })
 
         do {
-            try await engine.restart(enablePeerExchangePlugin: true)
+            try await engine.restart(enablePeerExchangePlugin: true, authorizedSavePaths: [downloadDirectory.path])
             Issue.record("Expected restart to remain blocked while deletion is pending")
         } catch {
             #expect(error.localizedDescription.contains("cannot restart while removal is pending"))
@@ -243,7 +297,7 @@ private func verifyRemovalTrackingFault(_ fault: RemovalTrackingFault) async thr
     }
 
     try assertStateDirectoryCanBeReopened(stateDirectory)
-    try await engine.restart(enablePeerExchangePlugin: true)
+    try await engine.restart(enablePeerExchangePlugin: true, authorizedSavePaths: [downloadDirectory.path])
     #expect(engine.isAvailable == true)
     try await engine.saveAllChecked()
 }
@@ -255,6 +309,8 @@ private func assertStateDirectoryCanBeReopened(_ stateDirectory: URL) throws {
             unsafe TorrentClientCreateWithError(
                 path,
                 1,
+                nil,
+                0,
                 error.baseAddress,
                 Int32(error.count)
             )

@@ -18,7 +18,10 @@ enum TorrentStoreError: LocalizedError {
     case torrentFileTooLarge
     case emptyTorrentFile
     case unreadableTorrentFile
+    case engineStarting
+    case folderAuthorityChangeInProgress
     case tooManyPendingOperations
+    case tooManyAuthorizedDownloadFolders
     case downloadFolderAccessDenied
     case downloadFolderNotWritable
 
@@ -32,8 +35,14 @@ enum TorrentStoreError: LocalizedError {
             return "The torrent file is empty."
         case .unreadableTorrentFile:
             return "The torrent file could not be read."
+        case .engineStarting:
+            return "The torrent engine is still starting. Try again shortly."
+        case .folderAuthorityChangeInProgress:
+            return "Download folder authorization is currently in use. Try again shortly."
         case .tooManyPendingOperations:
             return "Too many torrent operations are waiting. Let the current operations finish, then try again."
+        case .tooManyAuthorizedDownloadFolders:
+            return "Too many download folders are authorized. Remove an unused torrent, then try again."
         case .downloadFolderAccessDenied:
             return "The selected download folder could not be accessed."
         case .downloadFolderNotWritable:

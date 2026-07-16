@@ -50,7 +50,11 @@ private func torrentWakeCallback(_ context: UnsafeMutableRawPointer?) {
     relay.signal()
 }
 
-typealias TorrentClientCreationPreflight = @Sendable (_ stateDirectory: URL, _ enablePeerExchangePlugin: Bool) throws -> Void
+typealias TorrentClientCreationPreflight = @Sendable (
+    _ stateDirectory: URL,
+    _ enablePeerExchangePlugin: Bool,
+    _ authorizedSavePaths: [String]
+) throws -> Void
 
 private struct TorrentRemovalResultStatus: Sendable {
     var state: Int32
@@ -91,7 +95,7 @@ protocol TorrentEngineServicing: Sendable {
     var libtorrentVersion: String { get }
     var isAvailable: Bool { get }
 
-    func restart(enablePeerExchangePlugin: Bool) async throws
+    func restart(enablePeerExchangePlugin: Bool, authorizedSavePaths: [String]) async throws
     func wakeEvents() async -> AsyncStream<Void>
     func addMagnet(
         _ magnet: String,
@@ -165,6 +169,7 @@ protocol TorrentEngineServicing: Sendable {
     init(
         stateDirectory: URL,
         enablePeerExchangePlugin: Bool,
+        authorizedSavePaths: [String] = [],
         removalResultReader: TorrentRemovalResultReader? = nil
     ) throws {
         self.stateDirectory = stateDirectory
@@ -174,7 +179,8 @@ protocol TorrentEngineServicing: Sendable {
         client = try Self.createClient(
             stateDirectory: stateDirectory,
             wakeRelay: wakeRelay,
-            enablePeerExchangePlugin: enablePeerExchangePlugin
+            enablePeerExchangePlugin: enablePeerExchangePlugin,
+            authorizedSavePaths: authorizedSavePaths
         )
     }
 
@@ -190,7 +196,7 @@ protocol TorrentEngineServicing: Sendable {
         startupFailureMessage == nil && runtimeFailureMessage.withLock { $0 == nil }
     }
 
-    func restart(enablePeerExchangePlugin: Bool) throws {
+    func restart(enablePeerExchangePlugin: Bool, authorizedSavePaths: [String]) throws {
         guard !hasPendingRemovalRequest else {
             throw TorrentEngineError.bridgeError("The torrent engine cannot restart while removal is pending.")
         }
@@ -207,7 +213,8 @@ protocol TorrentEngineServicing: Sendable {
             client = try Self.createClient(
                 stateDirectory: stateDirectory,
                 wakeRelay: wakeRelay,
-                enablePeerExchangePlugin: enablePeerExchangePlugin
+                enablePeerExchangePlugin: enablePeerExchangePlugin,
+                authorizedSavePaths: authorizedSavePaths
             )
         } catch {
             runtimeFailureMessage.withLock { $0 = error.localizedDescription }
@@ -1184,19 +1191,29 @@ protocol TorrentEngineServicing: Sendable {
     private static func createClient(
         stateDirectory: URL,
         wakeRelay: TorrentWakeRelay,
-        enablePeerExchangePlugin: Bool
+        enablePeerExchangePlugin: Bool,
+        authorizedSavePaths: [String]
     ) throws -> TorrentClientHandle {
-        try clientCreationPreflight.withLock { $0 }?(stateDirectory, enablePeerExchangePlugin)
+        try clientCreationPreflight.withLock { $0 }?(
+            stateDirectory,
+            enablePeerExchangePlugin,
+            authorizedSavePaths
+        )
 
         let path = stateDirectory.path
+        let authorizedSavePathsBlob = try encodeAuthorizedSavePaths(authorizedSavePaths)
         var errorBuffer = Array<CChar>(repeating: 0, count: 1024)
         guard let created = unsafe path.withCString({ pointer in
-            unsafe TorrentClientCreateWithError(
-                pointer,
-                enablePeerExchangePlugin.bridgeFlag,
-                &errorBuffer,
-                Int32(errorBuffer.count)
-            )
+            unsafe authorizedSavePathsBlob.withUnsafeBufferPointer { blob in
+                unsafe TorrentClientCreateWithError(
+                    pointer,
+                    enablePeerExchangePlugin.bridgeFlag,
+                    blob.isEmpty ? nil : blob.baseAddress,
+                    Int32(blob.count),
+                    &errorBuffer,
+                    Int32(errorBuffer.count)
+                )
+            }
         }) else {
             let message = unsafe errorBuffer.withUnsafeBufferPointer { buffer -> String in
                 guard let baseAddress = buffer.baseAddress else {
@@ -1207,6 +1224,35 @@ protocol TorrentEngineServicing: Sendable {
             throw TorrentEngineError.bridgeError(message.isEmpty ? "Unknown startup error." : message)
         }
         return unsafe TorrentClientHandle(created, wakeRelay: wakeRelay)
+    }
+
+    nonisolated static func encodeAuthorizedSavePaths(_ paths: [String]) throws -> [UInt8] {
+        guard paths.count <= Int(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT) else {
+            throw TorrentEngineError.bridgeError("Too many authorized download folders were provided.")
+        }
+
+        var uniquePaths = Set<String>(minimumCapacity: paths.count)
+        for path in paths {
+            let bytes = path.utf8
+            guard !bytes.isEmpty,
+                  bytes.count <= Int(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES),
+                  !bytes.contains(0),
+                  (path as NSString).isAbsolutePath else {
+                throw TorrentEngineError.bridgeError("An authorized download folder path is invalid.")
+            }
+            uniquePaths.insert(path)
+        }
+
+        var blob = [UInt8]()
+        for path in uniquePaths.sorted() {
+            let bytes = Array(path.utf8)
+            guard blob.count <= Int(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES) - bytes.count - 1 else {
+                throw TorrentEngineError.bridgeError("The authorized download folder list is too large.")
+            }
+            blob.append(contentsOf: bytes)
+            blob.append(0)
+        }
+        return blob
     }
 
     private func requireClient() throws -> OpaquePointer {

@@ -24,7 +24,7 @@ namespace bridge_fuzz {
 
 namespace fs = std::filesystem;
 
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 32, "Update the fuzz harnesses for the current TorrentBridge ABI.");
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 33, "Update the fuzz harnesses for the current TorrentBridge ABI.");
 #if !defined(TORRENT_USE_ASSERTS) || !TORRENT_USE_ASSERTS
 #error "Fuzz consumers must match the assertion-enabled Debug libtorrent archive."
 #endif
@@ -210,8 +210,17 @@ public:
         fs::create_directories(state_dir_);
         fs::create_directories(save_dir_);
 
+        std::vector<std::uint8_t> authorized_save_paths(save_path_.begin(), save_path_.end());
+        authorized_save_paths.push_back(0U);
         ErrorBuffer error;
-        client_ = TorrentClientCreateWithError(state_path_.c_str(), 1, error.data(), error.capacity());
+        client_ = TorrentClientCreateWithError(
+            state_path_.c_str(),
+            1,
+            authorized_save_paths.data(),
+            static_cast<int32_t>(authorized_save_paths.size()),
+            error.data(),
+            error.capacity()
+        );
         if (client_ == nullptr) {
             std::abort();
         }

@@ -18,6 +18,9 @@ inline constexpr int32_t TTORRENT_MAX_TRACKER_COUNT = 2000;
 inline constexpr int32_t TTORRENT_MAX_WEB_SEED_COUNT = 2000;
 inline constexpr int32_t TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT = 20000;
 inline constexpr int32_t TTORRENT_MAX_TRACKER_HOST_ROW_COUNT = 20000;
+inline constexpr int32_t TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT = 20000;
+inline constexpr int32_t TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES = 1023;
+inline constexpr int32_t TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES = 20480000;
 inline constexpr int32_t TTORRENT_ID_CAPACITY = 68;
 inline constexpr int32_t TTORRENT_TRACKER_HOST_CAPACITY = 256;
 inline constexpr uint32_t TTORRENT_DIRTY_TORRENTS = 1U << 0U;
@@ -50,7 +53,7 @@ inline constexpr int32_t TTORRENT_SOURCE_POLICY_ENABLE_LSD = 2;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS = 3;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS = 4;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT = 5;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 32;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 33;
 extern "C" {
 #else
 #define TORRENT_BRIDGE_NOEXCEPT
@@ -67,6 +70,9 @@ enum {
     TTORRENT_MAX_WEB_SEED_COUNT = 2000,
     TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT = 20000,
     TTORRENT_MAX_TRACKER_HOST_ROW_COUNT = 20000,
+    TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT = 20000,
+    TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES = 1023,
+    TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES = 20480000,
     TTORRENT_ID_CAPACITY = 68,
     TTORRENT_TRACKER_HOST_CAPACITY = 256,
     TTORRENT_DIRTY_TORRENTS = 1U << 0U,
@@ -99,7 +105,7 @@ enum {
     TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS = 3,
     TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS = 4,
     TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT = 5,
-    TTORRENT_BRIDGE_ABI_VERSION = 32
+    TTORRENT_BRIDGE_ABI_VERSION = 33
 };
 #endif
 
@@ -312,9 +318,14 @@ int32_t TorrentBridgeInspectMagnetSources(
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 // Returns an owned client handle. Release it exactly once with TorrentClientDestroy.
+// authorized_save_paths_blob is a bounded sequence of non-empty, absolute UTF-8
+// paths, each terminated by NUL. Pass exactly (NULL, 0) to deny all resume
+// restoration. Pointer/size mismatches and malformed records fail creation.
 TTorrentClient *TorrentClientCreateWithError(
     const char *state_path,
     uint8_t enable_pex_plugin,
+    const uint8_t *authorized_save_paths_blob,
+    int32_t authorized_save_paths_blob_size,
     char *error_out,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;

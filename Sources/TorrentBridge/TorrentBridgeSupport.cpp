@@ -1969,6 +1969,97 @@ BridgeResult validate_save_path(std::string_view save_path)
     return {};
 }
 
+std::optional<std::string> normalize_authorized_save_path(std::string_view const save_path)
+{
+    if (save_path.empty()
+        || save_path.size() > static_cast<std::size_t>(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES)
+        || save_path.contains('\0')) {
+        return std::nullopt;
+    }
+
+    std::size_t offset = 0U;
+    while (offset < save_path.size()) {
+        UTF8Sequence const sequence = utf8_sequence(save_path, offset);
+        if (!sequence.valid) {
+            return std::nullopt;
+        }
+        offset += sequence.length;
+    }
+
+    fs::path const path{std::string(save_path)};
+    if (!path.is_absolute()) {
+        return std::nullopt;
+    }
+
+    std::string normalized = path.lexically_normal().native();
+    if (normalized.empty()
+        || normalized.size() > static_cast<std::size_t>(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES)) {
+        return std::nullopt;
+    }
+    return normalized;
+}
+
+AuthorizedSavePathResult parse_authorized_save_paths_blob(std::span<std::uint8_t const> const blob)
+{
+    if (blob.empty()) {
+        return AuthorizedSavePathSet{};
+    }
+    if (blob.size() > static_cast<std::size_t>(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES)) {
+        return std::unexpected(BridgeError{
+            .code = 1,
+            .message = "The authorized save path list is too large.",
+        });
+    }
+    if (blob.back() != 0U) {
+        return std::unexpected(BridgeError{
+            .code = 1,
+            .message = "The authorized save path list is not NUL terminated.",
+        });
+    }
+
+    AuthorizedSavePathSet paths;
+    std::size_t offset = 0U;
+    std::size_t path_count = 0U;
+    while (offset < blob.size()) {
+        std::span<std::uint8_t const> const remaining = blob.subspan(offset);
+        auto const terminator = std::ranges::find(remaining, std::uint8_t{0});
+        std::size_t const length = static_cast<std::size_t>(std::ranges::distance(
+            remaining.begin(),
+            terminator
+        ));
+        if (length == 0U) {
+            return std::unexpected(BridgeError{
+                .code = 1,
+                .message = "The authorized save path list contains an empty path.",
+            });
+        }
+
+        ++path_count;
+        if (path_count > static_cast<std::size_t>(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT)) {
+            return std::unexpected(BridgeError{
+                .code = 1,
+                .message = "The authorized save path list contains too many paths.",
+            });
+        }
+
+        std::string path;
+        path.reserve(length);
+        for (std::uint8_t const byte : remaining.first(length)) {
+            path.push_back(static_cast<char>(byte));
+        }
+        std::optional<std::string> const normalized = normalize_authorized_save_path(path);
+        if (!normalized) {
+            return std::unexpected(BridgeError{
+                .code = 1,
+                .message = "The authorized save path list contains an invalid path.",
+            });
+        }
+        paths.insert(*normalized);
+        offset += length + 1U;
+    }
+    return paths;
+}
+
 std::string trimmed(std::string_view value)
 {
     auto const first = std::ranges::find_if_not(value, [](unsigned char character) {

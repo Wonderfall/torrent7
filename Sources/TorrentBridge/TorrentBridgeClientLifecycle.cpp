@@ -42,8 +42,18 @@ bool wait_for_alert_worker_backoff(
 }
 
 TTorrentClient::TTorrentClient(std::string_view state_path, bool enable_peer_exchange_plugin)
+    : TTorrentClient(state_path, enable_peer_exchange_plugin, {})
+{
+}
+
+TTorrentClient::TTorrentClient(
+    std::string_view state_path,
+    bool enable_peer_exchange_plugin,
+    AuthorizedSavePathSet authorized_paths
+)
     : state_directory(std::string(state_path)),
       resume_directory(state_directory / "ResumeData"),
+      authorized_save_paths(std::move(authorized_paths)),
       session(make_session_params(enable_peer_exchange_plugin)),
       peer_exchange_plugin_enabled(enable_peer_exchange_plugin)
 {

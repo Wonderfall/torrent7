@@ -1038,6 +1038,8 @@ extern "C" int32_t TorrentBridgeInspectMagnetSources(
 extern "C" TTorrentClient *TorrentClientCreateWithError(
     const char *state_path,
     uint8_t enable_pex_plugin,
+    const uint8_t *authorized_save_paths_blob,
+    int32_t authorized_save_paths_blob_size,
     char *error_out,
     int32_t error_capacity
 ) noexcept
@@ -1051,15 +1053,38 @@ extern "C" TTorrentClient *TorrentClientCreateWithError(
     }
     std::string_view const requested_state_path = c_string_view(state_path);
 
+    if (authorized_save_paths_blob_size < 0
+        || authorized_save_paths_blob_size > TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES) {
+        copy_error(error_buffer, "The authorized save path list has an invalid size.");
+        return nullptr;
+    }
+    bool const has_authorized_save_paths_blob = authorized_save_paths_blob != nullptr;
+    bool const has_authorized_save_paths_bytes = authorized_save_paths_blob_size != 0;
+    if (has_authorized_save_paths_blob != has_authorized_save_paths_bytes) {
+        copy_error(error_buffer, "The authorized save path list pointer and size do not match.");
+        return nullptr;
+    }
+
     try {
         fs::path const state_directory_path{std::string(requested_state_path)};
         if (!state_directory_path.is_absolute()) {
             copy_error(error_buffer, "The state path must be absolute.");
             return nullptr;
         }
+        std::string normalized_state_path = state_directory_path.lexically_normal().native();
+
+        AuthorizedSavePathResult authorized_save_paths = parse_authorized_save_paths_blob(
+            input_span_from_c_buffer(authorized_save_paths_blob, authorized_save_paths_blob_size)
+        );
+        if (!authorized_save_paths) {
+            copy_error(error_buffer, authorized_save_paths.error().message);
+            return nullptr;
+        }
+
         return std::make_unique<TTorrentClient>(
-            requested_state_path,
-            bridge_bool(enable_pex_plugin)
+            normalized_state_path,
+            bridge_bool(enable_pex_plugin),
+            std::move(*authorized_save_paths)
         ).release();
     } catch (std::exception const &exception) {
         copy_error(error_buffer, exception.what());

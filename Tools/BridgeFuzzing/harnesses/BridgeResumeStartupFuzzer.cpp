@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <span>
 #include <string>
+#include <vector>
 
 extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
     std::uint8_t const *data,
@@ -23,10 +24,18 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
     bridge_fuzz::write_file(resume_file, std::span<char const>{begin, size});
 
     std::string const state_path = state_dir.string();
+    std::string const authorized_save_path = root.string();
+    std::vector<std::uint8_t> authorized_save_paths(
+        authorized_save_path.begin(),
+        authorized_save_path.end()
+    );
+    authorized_save_paths.push_back(0U);
     bridge_fuzz::ErrorBuffer create_error;
     TTorrentClient *client = TorrentClientCreateWithError(
         state_path.c_str(),
         1,
+        authorized_save_paths.data(),
+        static_cast<int32_t>(authorized_save_paths.size()),
         create_error.data(),
         create_error.capacity()
     );

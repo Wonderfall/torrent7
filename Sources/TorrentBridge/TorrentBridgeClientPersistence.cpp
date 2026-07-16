@@ -852,6 +852,13 @@ void TTorrentClient::load_resume_data()
         tombstoned_ids = std::move(*tombstones);
     }
 
+    std::uint64_t unauthorized_resume_count = 0U;
+    auto const record_unauthorized_resume = [&unauthorized_resume_count] {
+        if (unauthorized_resume_count != std::numeric_limits<std::uint64_t>::max()) {
+            ++unauthorized_resume_count;
+        }
+    };
+
     for (auto const &entry : fs::directory_iterator(resume_directory, ec)) {
         std::error_code entry_error;
         if (ec || !entry.is_regular_file(entry_error)) {
@@ -894,6 +901,16 @@ void TTorrentClient::load_resume_data()
             sync_resume_directory_quietly();
             continue;
         }
+
+        std::optional<std::string> const authorized_save_path = normalize_authorized_save_path(
+            params.save_path
+        );
+        if (!authorized_save_path || !authorized_save_paths.contains(*authorized_save_path)) {
+            record_unauthorized_resume();
+            continue;
+        }
+        params.save_path = *authorized_save_path;
+
         if (!resume_filename_matches_identity(*resume_id, params)) {
             remove_resume_file_locked(entry.path());
             sync_resume_directory_quietly();
@@ -1060,6 +1077,14 @@ void TTorrentClient::load_resume_data()
         if (metadata_pending) {
             metadata_validation_pending.insert(identity);
         }
+    }
+
+    if (unauthorized_resume_count != 0U) {
+        std::string const noun = unauthorized_resume_count == 1U ? "torrent" : "torrents";
+        static_cast<void>(publish_changes_locked(queue_alert_error(
+            "Skipped restoring " + std::to_string(unauthorized_resume_count) + " saved " + noun
+            + " because download folder access is not authorized. Resume data was preserved."
+        )));
     }
     static_cast<void>(apply_queue_priority_order_locked());
 }

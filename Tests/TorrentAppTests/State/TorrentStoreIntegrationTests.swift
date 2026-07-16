@@ -1,4 +1,6 @@
+import Dispatch
 import Foundation
+import Synchronization
 import Testing
 import TorrentBridge
 @testable import TorrentApp
@@ -6,6 +8,81 @@ import TorrentBridge
 @MainActor
 @Suite("Torrent store integration")
 struct TorrentStoreIntegrationTests {
+    @Test("Detached startup installs the engine and applies current settings with fresh capabilities")
+    func detachedStartupInstallsEngineAndAppliesCurrentSettingsWithFreshCapabilities() async throws {
+        struct StartupCapture: Sendable {
+            var didEnter = false
+            var ranOffMainThread = false
+            var enablePeerExchangePlugin = false
+            var authorizedSavePaths = [String]()
+        }
+
+        let harness = makeStoreHarness()
+        let installedEngine = FakeTorrentEngine()
+        let capture = Mutex(StartupCapture())
+        let releaseStartup = DispatchSemaphore(value: 0)
+        defer {
+            releaseStartup.signal()
+            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
+        }
+        TorrentStore.engineStartupFactoryOverride.withLock { factory in
+            factory = { enablePeerExchangePlugin, authorizedSavePaths in
+                capture.withLock { state in
+                    state.didEnter = true
+                    state.ranOffMainThread = !Thread.isMainThread
+                    state.enablePeerExchangePlugin = enablePeerExchangePlugin
+                    state.authorizedSavePaths = authorizedSavePaths
+                }
+                releaseStartup.wait()
+                return installedEngine
+            }
+        }
+
+        var startupAccess: FakeDownloadFolderAccess? = FakeDownloadFolderAccess(
+            url: URL(filePath: "/Downloads/Initial", directoryHint: .isDirectory)
+        )
+        weak var weakStartupAccess: FakeDownloadFolderAccess?
+        weakStartupAccess = startupAccess
+        harness.accessStore.capabilityAdditionalAccesses = [try #require(startupAccess)]
+        harness.store.startProductionEngine(
+            enablePeerExchangePlugin: true,
+            capabilitySnapshot: harness.accessStore.capabilitySnapshot
+        )
+        while !capture.withLock({ $0.didEnter }) {
+            await Task.yield()
+        }
+
+        let settingsBeforeBlockedRestore = harness.store.settings
+        let folderChange = harness.store.chooseDownloadFolder(
+            URL(filePath: "/Downloads/Blocked", directoryHint: .isDirectory)
+        )
+        harness.store.restoreDefaultSettings()
+
+        #expect(isFolderAuthorityChangeInProgress(folderChange))
+        #expect(harness.accessStore.setDefaultCalls.isEmpty)
+        #expect(harness.accessStore.clearDefaultCalls.isEmpty)
+        #expect(harness.store.settings == settingsBeforeBlockedRestore)
+
+        harness.accessStore.capabilityAdditionalAccesses = []
+        startupAccess = nil
+        #expect(weakStartupAccess != nil)
+
+        harness.accessStore.setCapabilityPaths(["/Downloads/AddedAfterLaunch"])
+        var currentSettings = harness.store.settings
+        currentSettings.enablePeerExchangePlugin = false
+        harness.store.updateSettings(currentSettings)
+        releaseStartup.signal()
+
+        await harness.store.saveAll()
+
+        #expect(capture.withLock { $0.enablePeerExchangePlugin })
+        #expect(capture.withLock { $0.ranOffMainThread })
+        #expect(capture.withLock { $0.authorizedSavePaths } == ["/Downloads/Initial"])
+        #expect(await installedEngine.appliedSettings.last?.settings.enablePeerExchangePlugin == false)
+        #expect(await installedEngine.restartAuthorizedSavePathSnapshots == [["/Downloads/AddedAfterLaunch"]])
+        #expect(weakStartupAccess == nil)
+    }
+
     @Test("Refresh updates torrents, dependent services, selection, and bookmark pruning")
     func refreshUpdatesTorrentsDependentServicesSelectionAndBookmarkPruning() async {
         let harness = makeStoreHarness()
@@ -657,17 +734,47 @@ struct TorrentStoreIntegrationTests {
     }
 
     @Test("Changing PEX plugin setting restarts engine")
-    func changingPEXPluginSettingRestartsEngine() async {
+    func changingPEXPluginSettingRestartsEngine() async throws {
         let harness = makeStoreHarness()
+        var restartAccess: FakeDownloadFolderAccess? = FakeDownloadFolderAccess(
+            url: URL(filePath: "/Downloads/New", directoryHint: .isDirectory)
+        )
+        weak var weakRestartAccess: FakeDownloadFolderAccess?
+        weakRestartAccess = restartAccess
+        harness.accessStore.capabilityAdditionalAccesses = [
+            FakeDownloadFolderAccess(url: URL(filePath: "/Downloads/Existing", directoryHint: .isDirectory)),
+            try #require(restartAccess)
+        ]
+        await harness.engine.suspendNextRestart()
         var settings = harness.store.settings
         settings.enablePeerExchangePlugin = false
 
         harness.store.updateSettings(settings)
+        await harness.engine.waitForSuspendedRestart()
+
+        let settingsBeforeBlockedRestore = harness.store.settings
+        let folderChange = harness.store.chooseDownloadFolder(
+            URL(filePath: "/Downloads/Blocked", directoryHint: .isDirectory)
+        )
+        harness.store.restoreDefaultSettings()
+
+        #expect(isFolderAuthorityChangeInProgress(folderChange))
+        #expect(harness.accessStore.setDefaultCalls.isEmpty)
+        #expect(harness.accessStore.clearDefaultCalls.isEmpty)
+        #expect(harness.store.settings == settingsBeforeBlockedRestore)
+
+        harness.accessStore.capabilityAdditionalAccesses = []
+        restartAccess = nil
+        #expect(weakRestartAccess != nil)
+
+        await harness.engine.resumeSuspendedRestarts()
         await harness.store.saveAll()
 
         #expect(await harness.engine.blockNetworkCount >= 1)
         #expect(await harness.engine.restartPeerExchangePluginValues == [false])
+        #expect(await harness.engine.restartAuthorizedSavePathSnapshots == [["/Downloads/Existing", "/Downloads/New"]])
         #expect(await harness.engine.appliedSettings.last?.settings.enablePeerExchangePlugin == false)
+        #expect(weakRestartAccess == nil)
     }
 
     @Test("VPN-only mode remembers disabled network preferences")
@@ -801,6 +908,17 @@ struct TorrentStoreIntegrationTests {
         #expect(accepted)
         #expect(weakAccess != nil)
         #expect(harness.accessStore.commitPreparedForAddCalls.isEmpty)
+
+        let settingsBeforeBlockedRestore = harness.store.settings
+        let folderChange = harness.store.chooseDownloadFolder(
+            URL(filePath: "/Downloads/Blocked", directoryHint: .isDirectory)
+        )
+        harness.store.restoreDefaultSettings()
+
+        #expect(isFolderAuthorityChangeInProgress(folderChange))
+        #expect(harness.accessStore.setDefaultCalls.isEmpty)
+        #expect(harness.accessStore.clearDefaultCalls.isEmpty)
+        #expect(harness.store.settings == settingsBeforeBlockedRestore)
 
         await harness.engine.resumeSuspendedAddMagnets()
         await harness.store.saveAll()
@@ -1032,4 +1150,15 @@ private func makeStoreHarness(
         accessStore: accessStore,
         fileLocationService: fileLocationService
     )
+}
+
+private func isFolderAuthorityChangeInProgress(_ result: Result<Void, Error>) -> Bool {
+    guard case .failure(let error) = result,
+          let storeError = error as? TorrentStoreError else {
+        return false
+    }
+    if case .folderAuthorityChangeInProgress = storeError {
+        return true
+    }
+    return false
 }

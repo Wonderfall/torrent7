@@ -141,6 +141,18 @@ void append_bencoded_string(std::string &buffer, std::string_view value)
     return bridge_tests::load_torrent_params(buffer, "raw validation test torrent info").ti;
 }
 
+[[nodiscard]] std::vector<std::uint8_t> authorized_path_blob(
+    std::initializer_list<std::string_view> paths
+)
+{
+    std::vector<std::uint8_t> blob;
+    for (std::string_view const path : paths) {
+        blob.insert(blob.end(), path.begin(), path.end());
+        blob.push_back(0U);
+    }
+    return blob;
+}
+
 } // namespace
 
 TEST_CASE("save paths must be present and absolute")
@@ -156,6 +168,82 @@ TEST_CASE("save paths must be present and absolute")
     CHECK(relative.error().message == "The save path must be absolute.");
 
     CHECK(validate_save_path("/Users/dev/Downloads").has_value());
+}
+
+TEST_CASE("authorized save path blobs are strict bounded UTF-8 records")
+{
+    std::vector<std::uint8_t> const valid = authorized_path_blob({
+        "/Downloads/B/../A",
+        "/Downloads/A",
+        "/Downloads/日本語",
+    });
+    AuthorizedSavePathResult parsed = parse_authorized_save_paths_blob(valid);
+    REQUIRE(parsed.has_value());
+    CHECK(*parsed == AuthorizedSavePathSet{
+        "/Downloads/A",
+        "/Downloads/日本語",
+    });
+    CHECK(parse_authorized_save_paths_blob({}).has_value());
+
+    std::vector<std::uint8_t> missing_terminator{'/', 'a'};
+    CHECK_FALSE(parse_authorized_save_paths_blob(missing_terminator).has_value());
+    CHECK_FALSE(parse_authorized_save_paths_blob(authorized_path_blob({"relative"})).has_value());
+    CHECK_FALSE(parse_authorized_save_paths_blob(authorized_path_blob({"/valid", ""})).has_value());
+
+    std::vector<std::uint8_t> invalid_utf8{'/', 0xffU, 0U};
+    CHECK_FALSE(parse_authorized_save_paths_blob(invalid_utf8).has_value());
+
+    std::string const oversized_path(
+        static_cast<std::size_t>(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES),
+        'x'
+    );
+    CHECK_FALSE(parse_authorized_save_paths_blob(
+        authorized_path_blob({"/" + oversized_path})
+    ).has_value());
+
+    std::vector<std::uint8_t> too_many_paths;
+    for (int32_t index = 0; index <= TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT; ++index) {
+        too_many_paths.insert(too_many_paths.end(), {'/', 'x', 0U});
+    }
+    CHECK_FALSE(parse_authorized_save_paths_blob(too_many_paths).has_value());
+}
+
+TEST_CASE("client creation validates authorized path blob pointer and size before reading")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    std::string const state_path = (temporary_directory.path() / "State").string();
+    std::array<char, 512> error{};
+    std::uint8_t byte = 0U;
+
+    CHECK(TorrentClientCreateWithError(
+        state_path.c_str(),
+        1,
+        nullptr,
+        1,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == nullptr);
+    CHECK(std::string(error.data()) == "The authorized save path list pointer and size do not match.");
+
+    CHECK(TorrentClientCreateWithError(
+        state_path.c_str(),
+        1,
+        &byte,
+        0,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == nullptr);
+    CHECK(std::string(error.data()) == "The authorized save path list pointer and size do not match.");
+
+    CHECK(TorrentClientCreateWithError(
+        state_path.c_str(),
+        1,
+        &byte,
+        TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES + 1,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == nullptr);
+    CHECK(std::string(error.data()) == "The authorized save path list has an invalid size.");
 }
 
 TEST_CASE("torrent metadata rejects symbolic links and paths that cannot fit the bridge ABI")

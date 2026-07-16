@@ -6,7 +6,7 @@ import TorrentBridge
 struct TorrentBridgeContractTests {
     @Test("Pins bridge ABI version, limits, states, and dirty masks")
     func pinsBridgeConstants() {
-        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 32)
+        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 33)
         #expect(Int32(TTORRENT_BRIDGE_STATE_UNKNOWN) == -1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_CHECKING_FILES) == 1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_DOWNLOADING_METADATA) == 2)
@@ -20,6 +20,9 @@ struct TorrentBridgeContractTests {
         #expect(Int32(TTORRENT_MAX_WEB_SEED_COUNT) == 2_000)
         #expect(Int32(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT) == 20_000)
         #expect(Int32(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT) == 20_000)
+        #expect(Int32(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT) == 20_000)
+        #expect(Int32(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES) == 1_023)
+        #expect(Int32(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES) == 20_480_000)
         #expect(Int32(TTORRENT_ID_CAPACITY) == 68)
         #expect(Int32(TTORRENT_TRACKER_HOST_CAPACITY) == 256)
         #expect(Int32(TTORRENT_MAX_PIECE_MAP_COUNT) == 0x200000)
@@ -363,7 +366,7 @@ private func invalidCreateResult(path: String?) -> (didCreate: Bool, error: Stri
     let didCreate = errorBuffer.withMutableBuffer { buffer -> Bool in
         if let path {
             let client = unsafe path.withCString { statePath in
-                unsafe TorrentClientCreateWithError(statePath, 1, &buffer, Int32(buffer.count))
+                unsafe TorrentClientCreateWithError(statePath, 1, nil, 0, &buffer, Int32(buffer.count))
             }
             if let client = unsafe client {
                 unsafe TorrentClientDestroyBlocking(client)
@@ -371,7 +374,7 @@ private func invalidCreateResult(path: String?) -> (didCreate: Bool, error: Stri
             }
             return false
         }
-        let client = unsafe TorrentClientCreateWithError(nil, 1, &buffer, Int32(buffer.count))
+        let client = unsafe TorrentClientCreateWithError(nil, 1, nil, 0, &buffer, Int32(buffer.count))
         if let client = unsafe client {
             unsafe TorrentClientDestroyBlocking(client)
             return true
@@ -429,7 +432,7 @@ private func emptyClientSmokeResult(statePath: String) -> EmptyClientSmokeResult
     var creationErrorBuffer = BridgeErrorBuffer()
     let maybeClient = unsafe creationErrorBuffer.withMutableBuffer { buffer in
         unsafe statePath.withCString { statePathPointer in
-            unsafe TorrentClientCreateWithError(statePathPointer, 1, &buffer, Int32(buffer.count))
+            unsafe TorrentClientCreateWithError(statePathPointer, 1, nil, 0, &buffer, Int32(buffer.count))
         }
     }
     guard let client = unsafe maybeClient else {

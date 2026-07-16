@@ -95,6 +95,14 @@ final class FakeNetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchecked 
 
 final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
     var defaultURL: URL?
+    var capabilityDefaultAccess: DownloadFolderAccessing?
+    var capabilityAdditionalAccesses = [DownloadFolderAccessing]()
+    var capabilitySnapshot: DownloadFolderCapabilitySnapshot {
+        DownloadFolderCapabilitySnapshot(
+            defaultAccess: capabilityDefaultAccess,
+            additionalAccesses: capabilityAdditionalAccesses
+        )
+    }
     var restoreDefaultResult: Result<URL?, Error> = .success(nil)
     var validateSelectionResult: Result<Void, Error> = .success(())
     var setDefaultResult: Result<URL, Error>?
@@ -107,6 +115,13 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
     private(set) var commitPreparedForAddCalls = [(folder: PreparedDownloadFolder, activeTorrents: [TorrentItem])]()
     private(set) var leaseCalls = [String]()
     private(set) var pruneCalls = [[TorrentItem]]()
+
+    func setCapabilityPaths(_ paths: [String]) {
+        capabilityDefaultAccess = nil
+        capabilityAdditionalAccesses = paths.map { path in
+            FakeDownloadFolderAccess(url: URL(filePath: path, directoryHint: .isDirectory))
+        }
+    }
 
     func restoreDefault() throws -> URL? {
         try restoreDefaultResult.get()
@@ -224,6 +239,9 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     var nextAddedTorrentFileID = "alpha"
     private(set) var restartCount = 0
     private(set) var restartPeerExchangePluginValues = [Bool]()
+    private(set) var restartAuthorizedSavePathSnapshots = [[String]]()
+    private var restartSuspensionCount = 0
+    private var restartContinuations = [CheckedContinuation<Void, Never>]()
     private(set) var blockNetworkCount = 0
     private var blockNetworkSuspensionCount = 0
     private var blockNetworkContinuations = [CheckedContinuation<Void, Never>]()
@@ -431,9 +449,34 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         nextAddedTorrentFileID = id
     }
 
-    func restart(enablePeerExchangePlugin: Bool) async throws {
+    func suspendNextRestart() {
+        restartSuspensionCount += 1
+    }
+
+    func waitForSuspendedRestart() async {
+        while restartContinuations.isEmpty {
+            await Task.yield()
+        }
+    }
+
+    func resumeSuspendedRestarts() {
+        let continuations = restartContinuations
+        restartContinuations.removeAll()
+        for continuation in continuations {
+            continuation.resume()
+        }
+    }
+
+    func restart(enablePeerExchangePlugin: Bool, authorizedSavePaths: [String]) async throws {
         restartCount += 1
         restartPeerExchangePluginValues.append(enablePeerExchangePlugin)
+        restartAuthorizedSavePathSnapshots.append(authorizedSavePaths)
+        if restartSuspensionCount > 0 {
+            restartSuspensionCount -= 1
+            await withCheckedContinuation { continuation in
+                restartContinuations.append(continuation)
+            }
+        }
         availability.withLock { $0 = true }
     }
 

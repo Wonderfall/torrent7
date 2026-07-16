@@ -127,9 +127,14 @@ static_assert(TTORRENT_MAX_FILE_COUNT > 0);
 static_assert(TTORRENT_MAX_TRACKER_COUNT > 0);
 static_assert(TTORRENT_MAX_WEB_SEED_COUNT > 0);
 static_assert(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT > 0);
+static_assert(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT > 0);
+static_assert(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES > 0);
+static_assert(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES
+              == TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT
+                  * (TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES + 1));
 static_assert(kMaxTorrentIdentityTokenCount > static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 32U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 33U);
 #if defined(TORRENT_USE_ASSERTS) && TORRENT_USE_ASSERTS
 static_assert(sizeof(lt::add_torrent_params) == 760U);
 #else
@@ -266,6 +271,8 @@ using ResumeSaveResult = std::expected<void, std::string>;
 using ResumeIDListResult = std::expected<std::vector<std::string>, std::string>;
 using TombstoneIDResult = std::expected<std::set<std::string>, std::string>;
 using TorrentLoadResult = std::expected<lt::add_torrent_params, BridgeError>;
+using AuthorizedSavePathSet = std::set<std::string>;
+using AuthorizedSavePathResult = std::expected<AuthorizedSavePathSet, BridgeError>;
 
 [[nodiscard]] constexpr bool torrent_count_allows_admission(std::size_t count) noexcept
 {
@@ -980,6 +987,14 @@ void strip_resume_peer_cache(lt::add_torrent_params &params) noexcept;
 
 BridgeResult validate_save_path(std::string_view save_path);
 
+[[nodiscard]] std::optional<std::string> normalize_authorized_save_path(
+    std::string_view save_path
+);
+
+[[nodiscard]] AuthorizedSavePathResult parse_authorized_save_paths_blob(
+    std::span<std::uint8_t const> blob
+);
+
 std::string trimmed(std::string_view value);
 
 bool contains_invalid_interface_character(std::string_view value);
@@ -1054,6 +1069,12 @@ BridgeResult apply_file_priorities(
 struct TTorrentClient {
     explicit TTorrentClient(std::string_view state_path, bool enable_peer_exchange_plugin = true);
 
+    TTorrentClient(
+        std::string_view state_path,
+        bool enable_peer_exchange_plugin,
+        AuthorizedSavePathSet authorized_save_paths
+    );
+
     ~TTorrentClient() noexcept;
 
     TTorrentClient(TTorrentClient const &) = delete;
@@ -1066,6 +1087,7 @@ struct TTorrentClient {
     std::mutex lock;
     fs::path state_directory;
     fs::path resume_directory;
+    AuthorizedSavePathSet authorized_save_paths;
     UniqueFileDescriptor state_lock;
     mutable std::mutex resume_io_lock;
     std::mutex resume_capture_lock;

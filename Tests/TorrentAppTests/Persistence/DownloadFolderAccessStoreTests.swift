@@ -4,6 +4,129 @@ import Testing
 
 @Suite("Download folder access store")
 struct DownloadFolderAccessStoreTests {
+    @Test("Capability snapshots put the default first and sort and deduplicate additional paths")
+    func capabilitySnapshotsAreDeterministicAndDeduplicated() throws {
+        try withIsolatedDefaults { defaults in
+            try withTemporaryDirectory { root in
+                let alpha = root.appending(path: "alpha", directoryHint: .isDirectory)
+                let beta = root.appending(path: "beta", directoryHint: .isDirectory)
+                defaults.set(Data(beta.path.utf8), forKey: SecurityScopedFolder.defaultsKey)
+                defaults.set(
+                    [
+                        "beta": Data(beta.path.utf8),
+                        "alpha": Data(alpha.path.utf8)
+                    ],
+                    forKey: TorrentBookmarkKeys.additionalDownloadFolders
+                )
+                let store = DownloadFolderAccessStore(
+                    defaults: defaults,
+                    accessProvider: FakeDownloadFolderAccessProvider()
+                )
+
+                _ = try store.restoreDefault()
+
+                #expect(store.capabilitySnapshot.paths == [beta.path, alpha.path])
+            }
+        }
+    }
+
+    @Test("Capability snapshots defensively cap paths while retaining the default first")
+    func capabilitySnapshotsDefensivelyCapPaths() {
+        let maximumPathCount = DownloadFolderCapabilitySnapshot.maximumPathCount
+        let defaultAccess = FakeDownloadFolderAccess(
+            url: URL(filePath: "/Downloads/default", directoryHint: .isDirectory)
+        )
+        let additionalAccesses = (0..<maximumPathCount).reversed().map { index in
+            FakeDownloadFolderAccess(
+                url: URL(
+                    filePath: "/Downloads/additional-\(zeroPaddedIndex(index))",
+                    directoryHint: .isDirectory
+                )
+            )
+        }
+
+        let snapshot = DownloadFolderCapabilitySnapshot(
+            defaultAccess: defaultAccess,
+            additionalAccesses: additionalAccesses
+        )
+
+        #expect(snapshot.paths.count == maximumPathCount)
+        #expect(snapshot.paths.first == defaultAccess.url.path)
+        #expect(snapshot.paths[1] == "/Downloads/additional-00000")
+        #expect(snapshot.paths.last == "/Downloads/additional-\(zeroPaddedIndex(maximumPathCount - 2))")
+        #expect(!snapshot.paths.contains(
+            "/Downloads/additional-\(zeroPaddedIndex(maximumPathCount - 1))"
+        ))
+    }
+
+    @Test("Restoration and projected mutations enforce the distinct capability path limit")
+    func restorationAndProjectedMutationsEnforceCapabilityLimit() throws {
+        try withIsolatedDefaults { defaults in
+            try withTemporaryDirectory { root in
+                let maximumPathCount = DownloadFolderCapabilitySnapshot.maximumPathCount
+                let oldDefault = root.appending(path: "default", directoryHint: .isDirectory)
+                let additionalURLs = (0..<maximumPathCount).map { index in
+                    root.appending(
+                        path: "additional-\(zeroPaddedIndex(index))",
+                        directoryHint: .isDirectory
+                    )
+                }
+                var bookmarks = [String: Data](minimumCapacity: maximumPathCount)
+                for url in additionalURLs {
+                    bookmarks[accessKey(url)] = Data(url.path.utf8)
+                }
+                defaults.set(Data(oldDefault.path.utf8), forKey: SecurityScopedFolder.defaultsKey)
+                defaults.set(bookmarks, forKey: TorrentBookmarkKeys.additionalDownloadFolders)
+
+                let store = DownloadFolderAccessStore(
+                    defaults: defaults,
+                    accessProvider: FakeDownloadFolderAccessProvider()
+                )
+                _ = try store.restoreDefault()
+
+                let restoredBookmarks = additionalBookmarks(in: defaults)
+                #expect(restoredBookmarks.count == maximumPathCount - 1)
+                #expect(restoredBookmarks[accessKey(additionalURLs[0])] != nil)
+                #expect(restoredBookmarks[accessKey(additionalURLs[maximumPathCount - 1])] == nil)
+                #expect(store.capabilitySnapshot.paths.count == maximumPathCount)
+                #expect(store.capabilitySnapshot.paths.first == oldDefault.path)
+
+                let newAdditional = root.appending(path: "new-additional", directoryHint: .isDirectory)
+                do {
+                    _ = try store.prepareForAdd(
+                        newAdditional,
+                        setsDefault: false,
+                        activeTorrents: []
+                    )
+                    Issue.record("Preparing an additional folder beyond the capability limit succeeded")
+                } catch {
+                    #expect(isTooManyAuthorizedDownloadFolders(error))
+                }
+                #expect(additionalBookmarks(in: defaults) == restoredBookmarks)
+                #expect(defaults.data(forKey: SecurityScopedFolder.defaultsKey) == Data(oldDefault.path.utf8))
+
+                var activeTorrents = restoredBookmarks.values.compactMap { bookmark -> TorrentItem? in
+                    guard let path = String(data: bookmark, encoding: .utf8) else {
+                        return nil
+                    }
+                    return makeTorrent(savePath: path)
+                }
+                activeTorrents.append(makeTorrent(savePath: oldDefault.path))
+                let newDefault = root.appending(path: "new-default", directoryHint: .isDirectory)
+                do {
+                    _ = try store.setDefault(newDefault, activeTorrents: activeTorrents)
+                    Issue.record("Setting a default folder beyond the capability limit succeeded")
+                } catch {
+                    #expect(isTooManyAuthorizedDownloadFolders(error))
+                }
+
+                #expect(store.defaultURL?.path == oldDefault.path)
+                #expect(defaults.data(forKey: SecurityScopedFolder.defaultsKey) == Data(oldDefault.path.utf8))
+                #expect(additionalBookmarks(in: defaults) == restoredBookmarks)
+            }
+        }
+    }
+
     @Test("Removal leases require an exact active download root")
     func removalLeasesRequireExactActiveRoot() throws {
         try withIsolatedDefaults { defaults in
@@ -176,6 +299,21 @@ private func additionalBookmarks(in defaults: UserDefaults) -> [String: Data] {
 
 private func accessKey(_ url: URL) -> String {
     url.standardizedFileURL.resolvingSymlinksInPath().path
+}
+
+private func zeroPaddedIndex(_ index: Int) -> String {
+    let digits = String(index)
+    return String(repeating: "0", count: max(0, 5 - digits.count)) + digits
+}
+
+private func isTooManyAuthorizedDownloadFolders(_ error: Error) -> Bool {
+    guard let storeError = error as? TorrentStoreError else {
+        return false
+    }
+    if case .tooManyAuthorizedDownloadFolders = storeError {
+        return true
+    }
+    return false
 }
 
 private final class WeakDownloadFolderAccessTracker {

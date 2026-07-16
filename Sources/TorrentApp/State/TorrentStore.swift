@@ -2,6 +2,7 @@ import AppKit
 import Darwin
 import Foundation
 import Observation
+import Synchronization
 import System
 import TorrentBridge
 
@@ -31,11 +32,23 @@ private enum TorrentStorePendingOperation {
     case user(TorrentStoreUserOperation)
 }
 
+private enum TorrentStoreEngineStartupOutcome: Sendable {
+    case started(any TorrentEngineServicing)
+    case failed(String)
+    case cancelled
+}
+
+typealias TorrentStoreEngineStartupFactory = @Sendable (
+    _ enablePeerExchangePlugin: Bool,
+    _ authorizedSavePaths: [String]
+) throws -> any TorrentEngineServicing
+
 @MainActor
 @Observable
 final class TorrentStore {
     private static let maximumPendingUserOperationCount = 64
     private static let maximumPendingOperationCount = maximumPendingUserOperationCount * 2 + 1
+    static let engineStartupFactoryOverride = Mutex<TorrentStoreEngineStartupFactory?>(nil)
 
     let commandState = TorrentCommandState()
     let selectionState = TorrentSelectionState()
@@ -67,7 +80,7 @@ final class TorrentStore {
 
     let libtorrentVersion: String
 
-    private let engine: any TorrentEngineServicing
+    private var engine: any TorrentEngineServicing
     private let dockTileService: TorrentDockTileServicing
     private let completionNotifier: TorrentCompletionNotifier
     private let sleepPreventionService: SleepPreventionServicing
@@ -79,6 +92,8 @@ final class TorrentStore {
     private var refreshTask: Task<Void, Never>?
     private var wakeRefreshTask: Task<Void, Never>?
     private var networkInterfaceTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var engineStartupTask: Task<Void, Never>?
     @ObservationIgnored
     private var operationDrainTask: Task<Void, Never>?
     @ObservationIgnored
@@ -97,6 +112,10 @@ final class TorrentStore {
     private var pendingTrackerHostRefresh = false
     private var refreshGeneration = 0
     private var nextTorrentInfoTabRequestToken = 0
+    private var isEngineStarting = false
+    private var isEngineRestarting = false
+    private var isFolderCapabilityTransactionInProgress = false
+    private var engineStartupFailed = false
 
     init() {
         let defaults = UserDefaults.standard
@@ -130,29 +149,11 @@ final class TorrentStore {
         }
         settingsState = TorrentSettingsState(settings: loadedSettings, downloadFolder: restoredDownloadFolder)
 
-        var engineStartupError: String?
-        let createdEngine: TorrentEngine
-        do {
-            let stateDirectory = try Self.makeStateDirectory()
-            do {
-                createdEngine = try TorrentEngine(
-                    stateDirectory: stateDirectory,
-                    enablePeerExchangePlugin: loadedSettings.enablePeerExchangePlugin
-                )
-            } catch {
-                let message = Self.engineStartupErrorMessage(error)
-                engineStartupError = message
-                createdEngine = TorrentEngine(startupFailureMessage: message)
-            }
-        } catch {
-            let message = Self.engineStartupErrorMessage(error)
-            engineStartupError = message
-            createdEngine = TorrentEngine(startupFailureMessage: message)
-        }
-
-        engine = createdEngine
+        let startingEngine = TorrentEngine(startupFailureMessage: "Torrent engine startup is in progress.")
+        engine = startingEngine
+        isEngineStarting = true
         appliedPeerExchangePluginEnabled = loadedSettings.enablePeerExchangePlugin
-        libtorrentVersion = createdEngine.libtorrentVersion
+        libtorrentVersion = startingEngine.libtorrentVersion
         selectionState.didChange = { [weak self] in
             self?.updateCommandState()
         }
@@ -160,16 +161,13 @@ final class TorrentStore {
         completionNotifier.configure()
         startMonitoringNetworkInterfaces()
 
-        let startupErrors = [restoredFolderError, engineStartupError.map { TorrentEngineError.startupFailed($0).localizedDescription }]
-            .compactMap { $0 }
-        if !startupErrors.isEmpty {
-            setLastError(startupErrors.joined(separator: "\n\n"), source: .userAction)
+        if let restoredFolderError {
+            setLastError(restoredFolderError, source: .userAction)
         }
-
-        if createdEngine.isAvailable {
-            startInitialEngineSync()
-            startRefreshing()
-        }
+        startProductionEngine(
+            enablePeerExchangePlugin: loadedSettings.enablePeerExchangePlugin,
+            capabilitySnapshot: downloadFolderAccessStore.capabilitySnapshot
+        )
     }
 
     init(
@@ -225,6 +223,7 @@ final class TorrentStore {
     }
 
     isolated deinit {
+        engineStartupTask?.cancel()
         refreshTask?.cancel()
         wakeRefreshTask?.cancel()
         networkInterfaceTask?.cancel()
@@ -241,7 +240,7 @@ final class TorrentStore {
     }
 
     var engineAvailable: Bool {
-        engine.isAvailable
+        !isEngineStarting && engine.isAvailable
     }
 
     var selectedTorrentIDs: Set<TorrentItem.ID> {
@@ -640,16 +639,26 @@ final class TorrentStore {
     ) -> Bool {
         let enablePeerExchange = settings.effectiveUsePeerExchangeByDefault
         let sanitizedLabelIDs = sanitizeLabelIDs(labelIDs)
-        let engine = engine
         let errorGeneration = lastErrorGeneration
         return scheduleUserOperation { store in
             var preparedFolder: PreparedDownloadFolder?
+            let ownsFolderCapabilityTransaction = prepareFolder != nil
+            if ownsFolderCapabilityTransaction {
+                precondition(!store.isFolderCapabilityTransactionInProgress)
+                store.isFolderCapabilityTransactionInProgress = true
+            }
+            defer {
+                if ownsFolderCapabilityTransaction {
+                    store.isFolderCapabilityTransactionInProgress = false
+                }
+                withExtendedLifetime(preparedFolder?.lease) {}
+            }
             do {
                 preparedFolder = try prepareFolder?(store)
                 guard let resolvedSavePath = preparedFolder?.path ?? savePath else {
                     throw TorrentStoreError.downloadFolderAccessDenied
                 }
-                let addedTorrentID = try await engine.addMagnet(
+                let addedTorrentID = try await store.engine.addMagnet(
                     magnet,
                     savePath: resolvedSavePath,
                     startsPaused: startsPaused,
@@ -669,7 +678,6 @@ final class TorrentStore {
                 store.downloadFolderAccessStore.prune(activeTorrents: store.torrents)
                 store.setLastError(error.localizedDescription, source: .userAction)
             }
-            withExtendedLifetime(preparedFolder?.lease) {}
         }
     }
 
@@ -754,17 +762,24 @@ final class TorrentStore {
         allowNonHTTPSTrackers: Bool,
         allowNonHTTPSWebSeeds: Bool
     ) -> Bool {
-        let engine = engine
         let enablePeerExchange = settings.effectiveUsePeerExchangeByDefault
         let sanitizedLabelIDs = sanitizeLabelIDs(labelIDs)
         let errorGeneration = lastErrorGeneration
         return scheduleUserOperation { store in
             var didAddTorrent = false
             var preparedFolder: PreparedDownloadFolder?
+            let ownsFolderCapabilityTransaction = prepareFolder != nil
+            if ownsFolderCapabilityTransaction {
+                precondition(!store.isFolderCapabilityTransactionInProgress)
+                store.isFolderCapabilityTransactionInProgress = true
+            }
             let didAccess = url.startAccessingSecurityScopedResource()
             defer {
                 if didAccess {
                     url.stopAccessingSecurityScopedResource()
+                }
+                if ownsFolderCapabilityTransaction {
+                    store.isFolderCapabilityTransactionInProgress = false
                 }
                 withExtendedLifetime(preparedFolder?.lease) {}
             }
@@ -774,7 +789,7 @@ final class TorrentStore {
                 guard let resolvedSavePath = preparedFolder?.path ?? savePath else {
                     throw TorrentStoreError.downloadFolderAccessDenied
                 }
-                let addedTorrentID = try await engine.addTorrentFile(
+                let addedTorrentID = try await store.engine.addTorrentFile(
                     data: torrentData,
                     savePath: resolvedSavePath,
                     filePriorities: filePriorities,
@@ -915,7 +930,6 @@ final class TorrentStore {
             return
         }
 
-        let engine = engine
         let errorGeneration = lastErrorGeneration
         let torrentsToRemove = idsToRemove.compactMap { torrentsByID[$0] }
         scheduleUserOperation { store in
@@ -926,13 +940,13 @@ final class TorrentStore {
                     let outcome = try await store.removeFromEngine(
                         torrent,
                         deleteFiles: deleteFiles,
-                        using: engine
+                        using: store.engine
                     )
                     removedIDs.insert(torrent.id)
                     if case .removedWithWarning(let message) = outcome {
                         removalWarnings.append(message)
                     }
-                    if !engine.isAvailable {
+                    if !store.engine.isAvailable {
                         break
                     }
                 }
@@ -1027,6 +1041,7 @@ final class TorrentStore {
     }
 
     private func setDownloadFolder(_ url: URL) throws {
+        try requireFolderAuthorityMutationAllowed()
         let newURL = try downloadFolderAccessStore.setDefault(url, activeTorrents: torrents)
         downloadFolder = newURL
         settingsState.downloadFolder = downloadFolder
@@ -1043,20 +1058,29 @@ final class TorrentStore {
         settingsState.downloadFolder = defaultURL
     }
 
-    private func clearDownloadFolder() {
+    private func clearDownloadFolder() throws {
+        try requireFolderAuthorityMutationAllowed()
         downloadFolderAccessStore.clearDefault(activeTorrents: torrents)
         downloadFolder = nil
         settingsState.downloadFolder = nil
     }
 
     func saveAll() async {
+        let startupTask = engineStartupTask
+        await startupTask?.value
         await drainPendingOperations()
         await engine.saveAll()
     }
 
     @discardableResult
     func saveAllChecked() async -> Bool {
+        let startupTask = engineStartupTask
+        await startupTask?.value
         await drainPendingOperations()
+
+        if engineStartupFailed {
+            return true
+        }
 
         do {
             try await engine.saveAllChecked()
@@ -1111,8 +1135,13 @@ final class TorrentStore {
     }
 
     func restoreDefaultSettings() {
-        updateSettings(TorrentSettings())
-        clearDownloadFolder()
+        do {
+            try requireFolderAuthorityMutationAllowed()
+            updateSettings(TorrentSettings())
+            try clearDownloadFolder()
+        } catch {
+            setLastError(error.localizedDescription, source: .userAction)
+        }
     }
 
     var requiredNetworkInterfaceAvailable: Bool {
@@ -1320,6 +1349,73 @@ final class TorrentStore {
         )
     }
 
+    func startProductionEngine(
+        enablePeerExchangePlugin: Bool,
+        capabilitySnapshot: DownloadFolderCapabilitySnapshot
+    ) {
+        engineStartupTask?.cancel()
+        isEngineStarting = true
+        engineStartupFailed = false
+        let startupFactory = Self.engineStartupFactoryOverride.withLock { $0 }
+        let authorizedSavePaths = capabilitySnapshot.paths
+        engineStartupTask = Task { @MainActor [weak self, capabilitySnapshot] in
+            let creationTask = Task.detached(priority: .userInitiated) { [authorizedSavePaths] () -> TorrentStoreEngineStartupOutcome in
+                guard !Task.isCancelled else {
+                    return .cancelled
+                }
+                do {
+                    let engine: any TorrentEngineServicing
+                    if let startupFactory {
+                        engine = try startupFactory(enablePeerExchangePlugin, authorizedSavePaths)
+                    } else {
+                        let stateDirectory = try Self.makeStateDirectory()
+                        guard !Task.isCancelled else {
+                            return .cancelled
+                        }
+                        engine = try TorrentEngine(
+                            stateDirectory: stateDirectory,
+                            enablePeerExchangePlugin: enablePeerExchangePlugin,
+                            authorizedSavePaths: authorizedSavePaths
+                        )
+                    }
+                    guard !Task.isCancelled else {
+                        return .cancelled
+                    }
+                    return .started(engine)
+                } catch {
+                    return .failed(Self.engineStartupErrorMessage(error))
+                }
+            }
+            let outcome = await withTaskCancellationHandler {
+                await creationTask.value
+            } onCancel: {
+                creationTask.cancel()
+            }
+            withExtendedLifetime(capabilitySnapshot) {}
+
+            guard let self, !Task.isCancelled else {
+                return
+            }
+            self.engineStartupTask = nil
+            self.isEngineStarting = false
+            switch outcome {
+            case .started(let engine):
+                self.engine = engine
+                self.engineStartupFailed = false
+                self.startInitialEngineSync()
+                self.startRefreshing()
+            case .failed(let message):
+                self.engine = TorrentEngine(startupFailureMessage: message)
+                self.engineStartupFailed = true
+                let startupError = TorrentEngineError.startupFailed(message).localizedDescription
+                let messages = [self.lastError, startupError].compactMap { $0 }
+                self.setLastError(messages.joined(separator: "\n\n"), source: .userAction)
+            case .cancelled:
+                break
+            }
+        }
+    }
+
     private func startInitialEngineSync() {
         scheduleApplySettings(refreshes: true, notifiesCompletions: false)
     }
@@ -1369,11 +1465,10 @@ final class TorrentStore {
     }
 
     private func perform(_ operation: @escaping @Sendable (any TorrentEngineServicing) async throws -> Void) {
-        let engine = engine
         let errorGeneration = lastErrorGeneration
         scheduleUserOperation { store in
             do {
-                try await operation(engine)
+                try await operation(store.engine)
                 await store.refreshFromEngine()
                 store.clearLastError(ifUnchangedSince: errorGeneration)
             } catch {
@@ -1458,7 +1553,7 @@ final class TorrentStore {
     }
 
     private func scheduleApplySettings(refreshes: Bool = false, notifiesCompletions: Bool = true) {
-        guard engine.isAvailable else {
+        guard !isEngineStarting, engine.isAvailable else {
             return
         }
 
@@ -1491,6 +1586,10 @@ final class TorrentStore {
     private func scheduleUserOperation(
         _ operation: @escaping @MainActor @Sendable (TorrentStore) async -> Void
     ) -> Bool {
+        guard !isEngineStarting else {
+            setLastError(TorrentStoreError.engineStarting.localizedDescription, source: .userAction)
+            return false
+        }
         let pendingUserOperationCount = pendingOperations.reduce(into: 0) { count, operation in
             if case .user = operation {
                 count += 1
@@ -1510,11 +1609,13 @@ final class TorrentStore {
     private func performQueuedUserOperation<Result: Sendable>(
         _ operation: @escaping @Sendable (any TorrentEngineServicing) async throws -> Result
     ) async throws -> Result {
-        let engine = engine
+        guard !isEngineStarting else {
+            throw TorrentStoreError.engineStarting
+        }
         return try await withCheckedThrowingContinuation(isolation: MainActor.shared) { continuation in
-            let accepted = scheduleUserOperation { _ in
+            let accepted = scheduleUserOperation { store in
                 do {
-                    continuation.resume(returning: try await operation(engine))
+                    continuation.resume(returning: try await operation(store.engine))
                 } catch {
                     continuation.resume(throwing: error)
                 }
@@ -1609,7 +1710,7 @@ final class TorrentStore {
 
             if bindingChanged || peerExchangePluginChanged {
                 completionNotifier.beginBaseline()
-                try await engine.restart(enablePeerExchangePlugin: settings.enablePeerExchangePlugin)
+                try await restartEngine(enablePeerExchangePlugin: settings.enablePeerExchangePlugin)
                 lastSnapshotRevision = nil
                 lastTrackerHostRevision = nil
                 pendingTrackerHostRefresh = true
@@ -1624,6 +1725,27 @@ final class TorrentStore {
             clearLastError(from: .settingsApply)
         } catch {
             setLastError(error.localizedDescription, source: .settingsApply)
+        }
+    }
+
+    private func restartEngine(enablePeerExchangePlugin: Bool) async throws {
+        let capabilitySnapshot = downloadFolderAccessStore.capabilitySnapshot
+        isEngineRestarting = true
+        defer {
+            isEngineRestarting = false
+            withExtendedLifetime(capabilitySnapshot) {}
+        }
+        try await engine.restart(
+            enablePeerExchangePlugin: enablePeerExchangePlugin,
+            authorizedSavePaths: capabilitySnapshot.paths
+        )
+    }
+
+    private func requireFolderAuthorityMutationAllowed() throws {
+        guard !isEngineStarting,
+              !isEngineRestarting,
+              !isFolderCapabilityTransactionInProgress else {
+            throw TorrentStoreError.folderAuthorityChangeInProgress
         }
     }
 
@@ -1642,7 +1764,6 @@ final class TorrentStore {
         immediateNetworkBlockGeneration &+= 1
         let generation = immediateNetworkBlockGeneration
         let previousTask = immediateNetworkBlockTask
-        let engine = engine
         immediateNetworkBlockTask = Task { @MainActor [weak self] in
             await previousTask?.value
             defer {
@@ -1653,16 +1774,16 @@ final class TorrentStore {
             guard !Task.isCancelled else {
                 return
             }
+            guard let self else {
+                return
+            }
 
             do {
-                try await engine.blockNetworkNow()
-                guard let self else {
-                    return
-                }
+                try await self.engine.blockNetworkNow()
                 self.lastSnapshotRevision = nil
                 await self.refreshFromEngine(notifiesCompletions: false)
             } catch {
-                self?.setLastError(error.localizedDescription, source: .settingsApply)
+                self.setLastError(error.localizedDescription, source: .settingsApply)
             }
         }
     }
@@ -1713,7 +1834,7 @@ final class TorrentStore {
             ?? ""
     }
 
-    private static func makeStateDirectory() throws -> URL {
+    private nonisolated static func makeStateDirectory() throws -> URL {
         let base = try FileManager.default.url(
             for: .applicationSupportDirectory,
             in: .userDomainMask,
@@ -1725,7 +1846,7 @@ final class TorrentStore {
         return directory
     }
 
-    private static func engineStartupErrorMessage(_ error: Error) -> String {
+    private nonisolated static func engineStartupErrorMessage(_ error: Error) -> String {
         let message = error.localizedDescription
         return message.isEmpty ? "Unknown startup error." : message
     }
