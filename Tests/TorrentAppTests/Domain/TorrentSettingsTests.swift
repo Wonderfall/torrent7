@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TorrentEngineModel
 @testable import TorrentApp
 
 @Suite("Torrent settings")

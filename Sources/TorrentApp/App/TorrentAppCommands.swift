@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TorrentEngineModel
 
 struct TorrentAppCommands: Commands {
     @Environment(\.openWindow) private var openWindow

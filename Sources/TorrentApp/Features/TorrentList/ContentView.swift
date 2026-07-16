@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TorrentEngineModel
 
 struct ContentView: View {
     @Environment(TorrentStore.self) private var store

@@ -1,4 +1,5 @@
 import Testing
+import TorrentEngineModel
 @testable import TorrentApp
 
 @MainActor

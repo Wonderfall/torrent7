@@ -1,4 +1,5 @@
 import Foundation
+import TorrentEngineModel
 
 enum TorrentSidebarSelection: Hashable, Identifiable {
     case scope(TorrentSidebarScope)

@@ -1,6 +1,7 @@
 import Foundation
 import Synchronization
 import TorrentBridge
+import TorrentEngineModel
 
 @safe private final class TorrentWakeRelay: Sendable {
     private struct State: Sendable {
@@ -67,92 +68,6 @@ enum TorrentRemovalResultReadOverride: Sendable {
 }
 
 typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResultReadOverride?
-
-enum TorrentEngineError: LocalizedError, Sendable {
-    case failedToCreateClient
-    case startupFailed(String)
-    case bridgeError(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .failedToCreateClient:
-            return "Could not start libtorrent."
-        case .startupFailed(let message):
-            return message.isEmpty ? "Could not start libtorrent." : "Could not start libtorrent: \(message)"
-        case .bridgeError(let message):
-            return message.isEmpty ? "The torrent operation failed." : message
-        }
-    }
-}
-
-enum TorrentRemovalOutcome: Equatable, Sendable {
-    case removed
-    case removedWithWarning(String)
-}
-
-protocol TorrentEngineServicing: Sendable {
-    var startupFailureMessage: String? { get }
-    var libtorrentVersion: String { get }
-    var isAvailable: Bool { get }
-
-    func restart(enablePeerExchangePlugin: Bool, authorizedSavePaths: [String]) async throws
-    func wakeEvents() async -> AsyncStream<Void>
-    func addMagnet(
-        _ magnet: String,
-        savePath: String,
-        startsPaused: Bool,
-        queuePriority: TorrentQueuePriority,
-        enablePeerExchange: Bool,
-        allowNonHTTPSTrackers: Bool,
-        allowNonHTTPSWebSeeds: Bool,
-        allowPreMetadataDHT: Bool
-    ) async throws -> String
-    func addTorrentFile(
-        data: Data,
-        savePath: String,
-        filePriorities: [Int32: TorrentFilePriority]?,
-        startsPaused: Bool,
-        queuePriority: TorrentQueuePriority,
-        enablePeerExchange: Bool,
-        allowNonHTTPSTrackers: Bool,
-        allowNonHTTPSWebSeeds: Bool
-    ) async throws -> String
-    func previewTorrentFile(data: Data) async throws -> TorrentFilePreview
-    func pause(id: String) async throws
-    func resume(id: String) async throws
-    func reannounce(id: String) async throws
-    func forceRecheck(id: String) async throws
-    func remove(id: String, deleteFiles: Bool) async throws -> TorrentRemovalOutcome
-    func applySettings(_ settings: TorrentSettings, networkBlocked: Bool) async throws
-    func blockNetworkNow() async throws
-    func saveAll() async
-    func saveAllChecked() async throws
-    func takeAlertError() async -> String?
-    func takeChanges() async -> UInt32
-    func networkStatus() async -> TorrentNetworkStatus
-    func bridgeHealth() async -> TorrentBridgeHealth
-    func snapshotsIfChanged(
-        since revision: UInt64?,
-        sortedBy sortOrder: TorrentSortOrder,
-        direction: TorrentSortDirection
-    ) async -> TorrentSnapshotBatch?
-    func requestSources(id: String) async throws
-    func sourcePolicy(id: String) async throws -> TorrentSourcePolicy
-    func setSourcePolicy(id: String, field: TorrentSourcePolicyField, enabled: Bool) async throws
-    func torrentOptions(id: String) async throws -> TorrentOptions
-    func setTorrentOptions(id: String, options: TorrentOptions) async throws
-    func moveTorrentInQueue(id: String, move: TorrentQueueMove) async throws
-    func requestFiles(id: String) async throws
-    func setFilePriority(id: String, fileIndex: Int32, priority: TorrentFilePriority) async throws
-    func requestPieceMap(id: String) async throws
-    func trackerBatch(id: String, since revision: UInt64?) async -> TorrentTrackerBatch?
-    func trackerHostBatch() async -> TorrentTrackerHostBatch
-    func webSeedBatch(id: String, since revision: UInt64?) async -> TorrentWebSeedBatch?
-    func webSeedActivity(id: String) async -> TorrentWebSeedActivity?
-    func peerSources(id: String) async -> TorrentPeerSources?
-    func fileBatch(id: String, since revision: UInt64?) async -> TorrentFileBatch?
-    func pieceMapBatch(id: String, since revision: UInt64?) async -> TorrentPieceMapBatch?
-}
 
 @safe actor TorrentEngine {
     static let clientCreationPreflight = Mutex<TorrentClientCreationPreflight?>(nil)
@@ -1406,36 +1321,6 @@ protocol TorrentEngineServicing: Sendable {
 }
 
 extension TorrentEngine: TorrentEngineServicing {}
-
-struct TorrentSnapshotBatch: Sendable {
-    var revision: UInt64
-    var torrents: [TorrentItem]
-}
-
-struct TorrentTrackerBatch: Sendable {
-    var revision: UInt64
-    var trackers: [TorrentTrackerItem]
-}
-
-struct TorrentTrackerHostBatch: Sendable {
-    var revision: UInt64
-    var hosts: [TorrentTrackerHostItem]
-}
-
-struct TorrentWebSeedBatch: Sendable {
-    var revision: UInt64
-    var webSeeds: [TorrentWebSeedItem]
-}
-
-struct TorrentFileBatch: Sendable {
-    var revision: UInt64
-    var files: [TorrentFileItem]
-}
-
-struct TorrentPieceMapBatch: Sendable {
-    var revision: UInt64
-    var pieceMap: TorrentPieceMap
-}
 
 @safe private final class TorrentClientHandle: @unchecked Sendable {
     private var rawPointer: OpaquePointer?

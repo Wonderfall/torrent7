@@ -1,4 +1,5 @@
 import Foundation
+import TorrentEngineModel
 
 enum TorrentSidebarScope: String, CaseIterable, Identifiable {
     case all

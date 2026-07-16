@@ -1,6 +1,6 @@
 import Foundation
 
-enum TorrentSortOrder: String, CaseIterable, Identifiable, Sendable {
+package enum TorrentSortOrder: String, CaseIterable, Identifiable, Sendable {
     private static let defaultsKey = "TorrentSortOrder"
 
     case dateAdded
@@ -12,11 +12,11 @@ enum TorrentSortOrder: String, CaseIterable, Identifiable, Sendable {
     case peers
     case priority
 
-    var id: String {
+    package var id: String {
         rawValue
     }
 
-    var title: String {
+    package var title: String {
         switch self {
         case .dateAdded:
             return "Date Added"
@@ -37,7 +37,7 @@ enum TorrentSortOrder: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    var defaultDirection: TorrentSortDirection {
+    package var defaultDirection: TorrentSortDirection {
         switch self {
         case .dateAdded, .name, .status, .priority:
             return .ascending
@@ -46,7 +46,7 @@ enum TorrentSortOrder: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    static func load(defaults: UserDefaults = .standard) -> TorrentSortOrder {
+    package static func load(defaults: UserDefaults = .standard) -> TorrentSortOrder {
         guard let value = defaults.string(forKey: defaultsKey),
               let sortOrder = TorrentSortOrder(rawValue: value) else {
             return .dateAdded
@@ -54,11 +54,11 @@ enum TorrentSortOrder: String, CaseIterable, Identifiable, Sendable {
         return sortOrder
     }
 
-    func save(defaults: UserDefaults = .standard) {
+    package func save(defaults: UserDefaults = .standard) {
         defaults.set(rawValue, forKey: Self.defaultsKey)
     }
 
-    func sorted(_ torrents: [TorrentItem], direction: TorrentSortDirection) -> [TorrentItem] {
+    package func sorted(_ torrents: [TorrentItem], direction: TorrentSortDirection) -> [TorrentItem] {
         torrents.sorted { lhs, rhs in
             let result = compare(lhs, rhs)
             if result != .orderedSame {
@@ -129,15 +129,15 @@ enum TorrentSortOrder: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-enum TorrentSortDirection: String, CaseIterable, Identifiable, Sendable {
+package enum TorrentSortDirection: String, CaseIterable, Identifiable, Sendable {
     case ascending
     case descending
 
-    var id: String {
+    package var id: String {
         rawValue
     }
 
-    var title: String {
+    package var title: String {
         switch self {
         case .ascending:
             return "Ascending"
@@ -146,7 +146,7 @@ enum TorrentSortDirection: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    static func load(for sortOrder: TorrentSortOrder, defaults: UserDefaults = .standard) -> TorrentSortDirection {
+    package static func load(for sortOrder: TorrentSortOrder, defaults: UserDefaults = .standard) -> TorrentSortDirection {
         guard let value = defaults.string(forKey: defaultsKey(for: sortOrder)),
               let direction = TorrentSortDirection(rawValue: value) else {
             return sortOrder.defaultDirection
@@ -154,7 +154,7 @@ enum TorrentSortDirection: String, CaseIterable, Identifiable, Sendable {
         return direction
     }
 
-    func save(for sortOrder: TorrentSortOrder, defaults: UserDefaults = .standard) {
+    package func save(for sortOrder: TorrentSortOrder, defaults: UserDefaults = .standard) {
         defaults.set(rawValue, forKey: Self.defaultsKey(for: sortOrder))
     }
 

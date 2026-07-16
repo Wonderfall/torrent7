@@ -3,6 +3,7 @@ import Dispatch
 import Foundation
 import Testing
 import TorrentBridge
+import TorrentEngineModel
 @testable import TorrentApp
 
 @Suite("Snapshot transport resource model", .serialized)

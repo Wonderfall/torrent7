@@ -1,4 +1,5 @@
 import SwiftUI
+import TorrentEngineModel
 
 struct TorrentRow: View {
     let row: TorrentRowSnapshot

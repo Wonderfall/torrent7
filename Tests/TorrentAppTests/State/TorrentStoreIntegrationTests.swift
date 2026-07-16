@@ -3,6 +3,7 @@ import Foundation
 import Synchronization
 import Testing
 import TorrentBridge
+import TorrentEngineModel
 @testable import TorrentApp
 
 @MainActor

@@ -1,5 +1,6 @@
 import Foundation
 import TorrentBridge
+import TorrentEngineModel
 import UniformTypeIdentifiers
 
 let bittorrentFileType = UTType(importedAs: "org.bittorrent.torrent", conformingTo: .data)
@@ -86,64 +87,6 @@ struct TorrentAddOptions {
     let queuePriority: TorrentQueuePriority
     let labelIDs: Set<TorrentLabel.ID>
     let allowsPreMetadataDHT: Bool
-}
-
-struct TorrentSourceSecuritySummary: Equatable, Sendable {
-    let trackerCount: Int
-    let httpsTrackerCount: Int
-    let webSeedCount: Int
-    let httpsWebSeedCount: Int
-
-    var sourceCount: Int {
-        trackerCount + webSeedCount
-    }
-
-    var httpsSourceCount: Int {
-        httpsTrackerCount + httpsWebSeedCount
-    }
-
-    var nonHTTPSSourceCount: Int {
-        max(0, sourceCount - httpsSourceCount)
-    }
-
-    var nonHTTPSTrackerCount: Int {
-        max(0, trackerCount - httpsTrackerCount)
-    }
-
-    var nonHTTPSWebSeedCount: Int {
-        max(0, webSeedCount - httpsWebSeedCount)
-    }
-
-    var hasHTTPSSources: Bool {
-        httpsSourceCount > 0
-    }
-
-    var hasNonHTTPSSources: Bool {
-        nonHTTPSSourceCount > 0
-    }
-
-    var hasNonHTTPSTrackers: Bool {
-        nonHTTPSTrackerCount > 0
-    }
-
-    var hasNonHTTPSWebSeeds: Bool {
-        nonHTTPSWebSeedCount > 0
-    }
-
-    var needsTrackerExceptionPrompt: Bool {
-        trackerCount > 0 && httpsTrackerCount == 0
-    }
-
-    var needsWebSeedExceptionPrompt: Bool {
-        webSeedCount > 0 && httpsWebSeedCount == 0
-    }
-
-    static let empty = TorrentSourceSecuritySummary(
-        trackerCount: 0,
-        httpsTrackerCount: 0,
-        webSeedCount: 0,
-        httpsWebSeedCount: 0
-    )
 }
 
 enum TorrentSourceSecurityInspector {

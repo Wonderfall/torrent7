@@ -1,4 +1,5 @@
 import SwiftUI
+import TorrentEngineModel
 
 struct TorrentInfoWindow: View {
     @Environment(TorrentStore.self) private var store

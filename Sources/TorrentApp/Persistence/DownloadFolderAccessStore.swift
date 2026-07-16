@@ -1,5 +1,5 @@
 import Foundation
-import TorrentBridge
+import TorrentEngineModel
 
 struct PreparedDownloadFolder {
     let path: String
@@ -24,7 +24,7 @@ final class DownloadFolderAccessLease {
 }
 
 struct DownloadFolderCapabilitySnapshot {
-    static let maximumPathCount = Int(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT)
+    static let maximumPathCount = TorrentEngineLimits.maximumAuthorizedSavePathCount
 
     let paths: [String]
     // These accesses are lifetime tokens only; the snapshot never invokes them.

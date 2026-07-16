@@ -2,6 +2,7 @@ import Foundation
 import Synchronization
 import Testing
 import TorrentBridge
+import TorrentEngineModel
 @testable import TorrentApp
 
 @Suite("Torrent engine", .serialized)
@@ -116,7 +117,11 @@ struct TorrentEngineTests {
         }
         let downloadDirectory = stateDirectory.appending(path: "Downloads", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: downloadDirectory, withIntermediateDirectories: true)
-        let engine = try TorrentEngine(stateDirectory: stateDirectory, enablePeerExchangePlugin: true)
+        let engine = try TorrentEngine(
+            stateDirectory: stateDirectory,
+            enablePeerExchangePlugin: true,
+            authorizedSavePaths: [downloadDirectory.path]
+        )
         let id = try await engine.addMagnet(
             "magnet:?xt=urn:btih:\(String(repeating: "6", count: 40))",
             savePath: downloadDirectory.path
@@ -222,6 +227,7 @@ struct TorrentEngineTests {
         let engine = try TorrentEngine(
             stateDirectory: stateDirectory,
             enablePeerExchangePlugin: true,
+            authorizedSavePaths: [downloadDirectory.path],
             removalResultReader: {
                 pollState.withLock { state in
                     state.readCount += 1
@@ -297,6 +303,7 @@ private func verifyRemovalTrackingFault(_ fault: RemovalTrackingFault) async thr
     let engine = try TorrentEngine(
         stateDirectory: stateDirectory,
         enablePeerExchangePlugin: true,
+        authorizedSavePaths: [downloadDirectory.path],
         removalResultReader: {
             try fault.result()
         }

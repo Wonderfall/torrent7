@@ -1,4 +1,5 @@
 import Foundation
+import TorrentEngineModel
 
 protocol TorrentFileLocationServicing: AnyObject {
     func revealURL(for torrent: TorrentItem) -> URL?

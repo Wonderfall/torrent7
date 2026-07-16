@@ -1,5 +1,6 @@
 import Foundation
 import Synchronization
+import TorrentEngineModel
 @testable import TorrentApp
 
 final class RecordingCompletionHistoryStore: TorrentCompletionHistoryStoring {

@@ -4,7 +4,7 @@ import Foundation
 import Observation
 import Synchronization
 import System
-import TorrentBridge
+import TorrentEngineModel
 
 private struct AppliedNetworkBinding: Equatable {
     var interfaceName: String
@@ -1242,7 +1242,7 @@ final class TorrentStore {
         while let alertError = await engine.takeAlertError(), !alertError.isEmpty {
             setLastError(alertError, source: .userAction)
         }
-        if (dirtyMask & UInt32(TTORRENT_DIRTY_TRACKER_HOSTS)) != 0 {
+        if TorrentEngineDirtySet(rawValue: dirtyMask).contains(.trackerHosts) {
             pendingTrackerHostRefresh = true
         }
         let currentNetworkStatus = await engine.networkStatus()

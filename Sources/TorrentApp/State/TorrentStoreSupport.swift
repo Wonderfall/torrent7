@@ -1,9 +1,5 @@
 import Foundation
-
-enum TorrentInputLimits {
-    static let maxMagnetURIBytes = 64 * 1024
-    static let maxTorrentFileBytes = 64 * 1024 * 1024
-}
+import TorrentEngineModel
 
 enum TorrentBookmarkKeys {
     static let additionalDownloadFolders = "AdditionalDownloadFolderBookmarks"

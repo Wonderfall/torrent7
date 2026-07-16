@@ -1,4 +1,5 @@
 import Foundation
+import TorrentEngineModel
 @testable import TorrentApp
 
 func makeTorrent(

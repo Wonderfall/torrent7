@@ -1,6 +1,6 @@
 import Foundation
 
-enum TorrentSettingsTab: Hashable, Sendable {
+package enum TorrentSettingsTab: Hashable, Sendable {
     case general
     case interface
     case transfers
@@ -9,16 +9,16 @@ enum TorrentSettingsTab: Hashable, Sendable {
 }
 
 
-enum TorrentProtocolEncryption: Int, Codable, CaseIterable, Identifiable, Sendable {
+package enum TorrentProtocolEncryption: Int, Codable, CaseIterable, Identifiable, Sendable {
     case allowed = 0
     case required = 1
     case disabled = 2
 
-    var id: Int {
+    package var id: Int {
         rawValue
     }
 
-    var title: String {
+    package var title: String {
         switch self {
         case .allowed:
             return "Allowed"
@@ -30,44 +30,44 @@ enum TorrentProtocolEncryption: Int, Codable, CaseIterable, Identifiable, Sendab
     }
 }
 
-struct TorrentSettings: Codable, Equatable, Sendable {
+package struct TorrentSettings: Codable, Equatable, Sendable {
     private static let defaultsKey = "TorrentSettings"
     private static let maximumRateLimitKBps = 1_000_000
     private static let maximumActiveTorrentCount = 1_000
     private static let maximumStopSeedingRatioPercent = 10_000
     private static let maximumStopSeedingHours = 100_000
-    static let minimumManualIncomingPort = 1024
-    static let maximumIncomingPort = 65_535
+    package static let minimumManualIncomingPort = 1024
+    package static let maximumIncomingPort = 65_535
 
-    var downloadRateLimitKBps = 0
-    var uploadRateLimitKBps = 0
-    var maximumActiveDownloads = 3
-    var maximumActiveSeeds = 5
-    var stopSeedingRatioPercent = 200
-    var stopSeedingAfterHours = 24
-    var incomingPort = 0
-    var acceptIncomingConnections = true
-    var usePortForwarding = false
-    var enableDHTNetwork = true
-    var useDHTByDefault = true
-    var enablePeerExchangePlugin = true
-    var usePeerExchangeByDefault = true
-    var useHTTPSTrackersOnly = false
-    var useHTTPSWebSeedsOnly = false
-    var enableLocalServiceDiscovery = false
-    var useLocalServiceDiscoveryByDefault = false
-    var protocolEncryption = TorrentProtocolEncryption.allowed
-    var anonymousMode = true
-    var requireNetworkInterface = false
-    var showOnlyVPNInterfaces = false
-    var requiredNetworkInterfaceName = ""
-    var completionNotificationsEnabled = true
-    var completionNotificationSoundEnabled = true
-    var completionNotificationNamesEnabled = false
-    var dockTransferRatesEnabled = true
-    var preventSleepDuringTransfers = false
+    package var downloadRateLimitKBps = 0
+    package var uploadRateLimitKBps = 0
+    package var maximumActiveDownloads = 3
+    package var maximumActiveSeeds = 5
+    package var stopSeedingRatioPercent = 200
+    package var stopSeedingAfterHours = 24
+    package var incomingPort = 0
+    package var acceptIncomingConnections = true
+    package var usePortForwarding = false
+    package var enableDHTNetwork = true
+    package var useDHTByDefault = true
+    package var enablePeerExchangePlugin = true
+    package var usePeerExchangeByDefault = true
+    package var useHTTPSTrackersOnly = false
+    package var useHTTPSWebSeedsOnly = false
+    package var enableLocalServiceDiscovery = false
+    package var useLocalServiceDiscoveryByDefault = false
+    package var protocolEncryption = TorrentProtocolEncryption.allowed
+    package var anonymousMode = true
+    package var requireNetworkInterface = false
+    package var showOnlyVPNInterfaces = false
+    package var requiredNetworkInterfaceName = ""
+    package var completionNotificationsEnabled = true
+    package var completionNotificationSoundEnabled = true
+    package var completionNotificationNamesEnabled = false
+    package var dockTransferRatesEnabled = true
+    package var preventSleepDuringTransfers = false
 
-    init() {}
+    package init() {}
 
     private enum CodingKeys: String, CodingKey {
         case downloadRateLimitKBps
@@ -99,7 +99,7 @@ struct TorrentSettings: Codable, Equatable, Sendable {
         case preventSleepDuringTransfers
     }
 
-    init(from decoder: Decoder) throws {
+    package init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         var settings = TorrentSettings()
         settings.downloadRateLimitKBps = try values.decodeIfPresent(Int.self, forKey: .downloadRateLimitKBps) ?? settings.downloadRateLimitKBps
@@ -132,23 +132,23 @@ struct TorrentSettings: Codable, Equatable, Sendable {
         self = settings.clamped()
     }
 
-    var libtorrentDownloadRateLimit: Int32 {
+    package var libtorrentDownloadRateLimit: Int32 {
         rateLimitBytesPerSecond(downloadRateLimitKBps)
     }
 
-    var libtorrentUploadRateLimit: Int32 {
+    package var libtorrentUploadRateLimit: Int32 {
         rateLimitBytesPerSecond(uploadRateLimitKBps)
     }
 
-    var libtorrentActiveDownloads: Int32 {
+    package var libtorrentActiveDownloads: Int32 {
         activeLimit(maximumActiveDownloads)
     }
 
-    var libtorrentActiveSeeds: Int32 {
+    package var libtorrentActiveSeeds: Int32 {
         activeLimit(maximumActiveSeeds)
     }
 
-    var libtorrentActiveLimit: Int32 {
+    package var libtorrentActiveLimit: Int32 {
         let activeDownloads = Self.clampedActiveTorrentCount(maximumActiveDownloads)
         let activeSeeds = Self.clampedActiveTorrentCount(maximumActiveSeeds)
         if activeDownloads == 0 || activeSeeds == 0 {
@@ -157,51 +157,51 @@ struct TorrentSettings: Codable, Equatable, Sendable {
         return Int32(activeDownloads + activeSeeds)
     }
 
-    var libtorrentSeedTimeLimit: Int32 {
+    package var libtorrentSeedTimeLimit: Int32 {
         Int32(Self.clampedStopSeedingHours(stopSeedingAfterHours) * 60 * 60)
     }
 
-    var libtorrentShareRatioLimit: Int32 {
+    package var libtorrentShareRatioLimit: Int32 {
         Int32(Self.clampedStopSeedingRatioPercent(stopSeedingRatioPercent))
     }
 
-    var libtorrentIncomingPort: Int32 {
+    package var libtorrentIncomingPort: Int32 {
         Int32(Self.clampedIncomingPort(incomingPort))
     }
 
-    var libtorrentEncryptionPolicy: Int32 {
+    package var libtorrentEncryptionPolicy: Int32 {
         Int32(protocolEncryption.rawValue)
     }
 
-    var effectiveUsePortForwarding: Bool {
+    package var effectiveUsePortForwarding: Bool {
         acceptIncomingConnections && !showOnlyVPNInterfaces ? usePortForwarding : false
     }
 
-    var effectiveEnableLocalServiceDiscovery: Bool {
+    package var effectiveEnableLocalServiceDiscovery: Bool {
         showOnlyVPNInterfaces ? false : enableLocalServiceDiscovery
     }
 
-    var effectiveUseLocalServiceDiscoveryByDefault: Bool {
+    package var effectiveUseLocalServiceDiscoveryByDefault: Bool {
         effectiveEnableLocalServiceDiscovery && useLocalServiceDiscoveryByDefault
     }
 
-    var effectiveUseDHTByDefault: Bool {
+    package var effectiveUseDHTByDefault: Bool {
         enableDHTNetwork && useDHTByDefault
     }
 
-    var effectiveUsePeerExchangeByDefault: Bool {
+    package var effectiveUsePeerExchangeByDefault: Bool {
         enablePeerExchangePlugin && usePeerExchangeByDefault
     }
 
-    var effectiveAnonymousMode: Bool {
+    package var effectiveAnonymousMode: Bool {
         showOnlyVPNInterfaces || anonymousMode
     }
 
-    var libtorrentRequiredNetworkInterfaceName: String {
+    package var libtorrentRequiredNetworkInterfaceName: String {
         requireNetworkInterface ? requiredNetworkInterfaceName.trimmingCharacters(in: .whitespacesAndNewlines) : ""
     }
 
-    static func load(defaults: UserDefaults = .standard) -> TorrentSettings {
+    package static func load(defaults: UserDefaults = .standard) -> TorrentSettings {
         guard let data = defaults.data(forKey: defaultsKey),
               let settings = try? JSONDecoder().decode(TorrentSettings.self, from: data) else {
             return TorrentSettings()
@@ -209,14 +209,14 @@ struct TorrentSettings: Codable, Equatable, Sendable {
         return settings.clamped()
     }
 
-    func save(defaults: UserDefaults = .standard) {
+    package func save(defaults: UserDefaults = .standard) {
         guard let data = try? JSONEncoder().encode(clamped()) else {
             return
         }
         defaults.set(data, forKey: Self.defaultsKey)
     }
 
-    func clamped() -> TorrentSettings {
+    package func clamped() -> TorrentSettings {
         var settings = self
         settings.downloadRateLimitKBps = Self.clampedRateLimitKBps(settings.downloadRateLimitKBps)
         settings.uploadRateLimitKBps = Self.clampedRateLimitKBps(settings.uploadRateLimitKBps)

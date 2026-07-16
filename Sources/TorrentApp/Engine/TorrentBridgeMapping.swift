@@ -1,5 +1,83 @@
 import Foundation
 import TorrentBridge
+import TorrentEngineModel
+
+extension TorrentState {
+    init(rawBridgeValue: Int32) {
+        self = TorrentState(rawValue: rawBridgeValue) ?? .unknown
+    }
+}
+
+extension TorrentQueuePriority {
+    init(bridgeValue: Int32) {
+        switch bridgeValue {
+        case Self.low.rawValue:
+            self = .low
+        case Self.high.rawValue:
+            self = .high
+        default:
+            self = .normal
+        }
+    }
+
+    var bridgeValue: Int32 {
+        rawValue
+    }
+
+    var bridgeByteValue: UInt8 {
+        UInt8(bridgeValue)
+    }
+}
+
+extension TorrentQueueMove {
+    var bridgeValue: Int32 {
+        rawValue
+    }
+}
+
+extension TorrentOptions {
+    init(snapshot: TTorrentOptions) {
+        self.init(
+            downloadRateLimitKBps: Self.kilobytesPerSecond(fromBridgeLimit: snapshot.download_rate_limit),
+            uploadRateLimitKBps: Self.kilobytesPerSecond(fromBridgeLimit: snapshot.upload_rate_limit),
+            uploadSlotLimit: Self.countLimit(fromBridgeLimit: snapshot.max_uploads),
+            connectionLimit: Self.countLimit(fromBridgeLimit: snapshot.max_connections),
+            queuePriority: TorrentQueuePriority(bridgeValue: snapshot.queue_priority)
+        )
+    }
+
+    var bridgeValue: TTorrentOptions {
+        TTorrentOptions(
+            download_rate_limit: Self.bridgeLimit(fromKilobytesPerSecond: downloadRateLimitKBps),
+            upload_rate_limit: Self.bridgeLimit(fromKilobytesPerSecond: uploadRateLimitKBps),
+            max_uploads: Self.bridgeCountLimit(fromCountLimit: uploadSlotLimit),
+            max_connections: Self.bridgeCountLimit(fromCountLimit: connectionLimit),
+            queue_priority: queuePriority.bridgeValue
+        )
+    }
+
+    private static func kilobytesPerSecond(fromBridgeLimit limit: Int32) -> Int {
+        guard limit > 0 else {
+            return 0
+        }
+        return min(max(Int(limit) / 1024, 0), 1_000_000)
+    }
+
+    private static func bridgeLimit(fromKilobytesPerSecond value: Int) -> Int32 {
+        value <= 0 ? -1 : Int32(min(max(value, 0), 1_000_000) * 1024)
+    }
+
+    private static func countLimit(fromBridgeLimit limit: Int32) -> Int {
+        guard limit > 0 else {
+            return 0
+        }
+        return min(max(Int(limit), 2), 100_000)
+    }
+
+    private static func bridgeCountLimit(fromCountLimit value: Int) -> Int32 {
+        value <= 0 ? -1 : Int32(min(max(value, 2), 100_000))
+    }
+}
 
 extension TorrentItem {
     init(snapshot: TTorrentSnapshot) {
@@ -167,6 +245,34 @@ extension TorrentSourcePolicyField {
     }
 }
 
+extension TorrentFilePriority {
+    init(bridgeValue: Int32) {
+        switch bridgeValue {
+        case Int32(TTORRENT_FILE_PRIORITY_SKIP):
+            self = .skip
+        case Int32(TTORRENT_FILE_PRIORITY_LOW)...3:
+            self = .low
+        case 5...Int32(TTORRENT_FILE_PRIORITY_HIGH):
+            self = .high
+        default:
+            self = .normal
+        }
+    }
+
+    var bridgeValue: Int32 {
+        switch self {
+        case .skip:
+            Int32(TTORRENT_FILE_PRIORITY_SKIP)
+        case .low:
+            Int32(TTORRENT_FILE_PRIORITY_LOW)
+        case .normal:
+            Int32(TTORRENT_FILE_PRIORITY_NORMAL)
+        case .high:
+            Int32(TTORRENT_FILE_PRIORITY_HIGH)
+        }
+    }
+}
+
 extension TorrentFileItem {
     init(snapshot: TTorrentFileSnapshot) {
         self.init(
@@ -177,6 +283,19 @@ extension TorrentFileItem {
             index: snapshot.index,
             priority: TorrentFilePriority(bridgeValue: snapshot.priority),
             isPadFile: snapshot.pad_file.bridgeBool
+        )
+    }
+}
+
+extension TorrentPieceMap {
+    init(snapshot: TTorrentPieceMapSnapshot, pieces: [UInt8]) {
+        self.init(
+            totalPieces: Int(snapshot.total_pieces),
+            completedPieces: Int(snapshot.completed_pieces),
+            availablePieces: Int(snapshot.available_pieces),
+            isMapAvailable: snapshot.map_available != 0,
+            isMapTruncated: snapshot.map_truncated != 0,
+            pieces: pieces
         )
     }
 }

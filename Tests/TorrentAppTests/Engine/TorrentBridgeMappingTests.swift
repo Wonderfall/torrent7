@@ -1,5 +1,6 @@
 import Testing
 import TorrentBridge
+import TorrentEngineModel
 @testable import TorrentApp
 
 @Suite("Torrent bridge mapping")

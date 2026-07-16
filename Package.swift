@@ -160,6 +160,25 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "TorrentEngineModel",
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .treatAllWarnings(as: .error),
+                .strictMemorySafety(),
+                .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
+            ]
+        ),
+        .target(
+            name: "TorrentEngineIPC",
+            dependencies: ["TorrentEngineModel"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .treatAllWarnings(as: .error),
+                .strictMemorySafety(),
+                .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
+            ]
+        ),
+        .target(
             name: "TorrentBridge",
             publicHeadersPath: "include",
             cxxSettings: [
@@ -174,7 +193,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "TorrentApp",
-            dependencies: ["TorrentBridge"],
+            dependencies: ["TorrentEngineModel", "TorrentBridge"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
                 .treatAllWarnings(as: .error),
@@ -184,7 +203,17 @@ let package = Package(
         ),
         .testTarget(
             name: "TorrentAppTests",
-            dependencies: ["TorrentApp", "TorrentBridge"],
+            dependencies: ["TorrentApp", "TorrentEngineModel", "TorrentBridge"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .treatAllWarnings(as: .error),
+                .strictMemorySafety(),
+                .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
+            ]
+        ),
+        .testTarget(
+            name: "TorrentEngineIPCTests",
+            dependencies: ["TorrentEngineIPC", "TorrentEngineModel"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
                 .treatAllWarnings(as: .error),

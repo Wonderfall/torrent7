@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import TorrentEngineModel
 
 struct TorrentCommandSnapshot: Equatable {
     var hasTorrents = false

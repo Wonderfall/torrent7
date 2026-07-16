@@ -1,4 +1,5 @@
 import Foundation
+import TorrentEngineModel
 
 protocol TorrentCompletionHistoryStoring: AnyObject {
     func contains(_ id: TorrentItem.ID) -> Bool

@@ -1,4 +1,5 @@
 import Foundation
+import TorrentEngineModel
 
 struct TorrentLabelStore {
     private struct Storage: Codable {

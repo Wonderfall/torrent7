@@ -1,4 +1,5 @@
 import SwiftUI
+import TorrentEngineModel
 
 struct FooterBarContainer: View {
     @Environment(TorrentStore.self) private var store

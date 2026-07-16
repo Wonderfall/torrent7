@@ -1,4 +1,5 @@
 import SwiftUI
+import TorrentEngineModel
 import UniformTypeIdentifiers
 
 struct AddMagnetView: View {

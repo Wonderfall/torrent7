@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import TorrentEngineModel
 
 @MainActor
 protocol ApplicationActivationProviding {

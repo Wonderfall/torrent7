@@ -1,4 +1,5 @@
 import SwiftUI
+import TorrentEngineModel
 
 struct TorrentBrowser: View {
     let torrentState: TorrentListState

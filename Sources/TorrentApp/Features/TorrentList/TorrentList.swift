@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TorrentEngineModel
 
 private enum TorrentCardStyle {
     static let cornerRadius: CGFloat = 16
