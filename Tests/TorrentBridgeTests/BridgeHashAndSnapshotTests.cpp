@@ -4,10 +4,16 @@
 
 #include <libtorrent/create_torrent.hpp>
 
+#include <algorithm>
 #include <array>
+#include <chrono>
+#include <cstdlib>
+#include <iomanip>
+#include <iostream>
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -250,4 +256,67 @@ TEST_CASE("snapshot_from_status maps torrent metadata facts when available")
     CHECK(snapshot.created_time == 12'345);
     CHECK(snapshot.completed_time == 67'890);
     CHECK(bridge_bool(snapshot.private_torrent));
+}
+
+TEST_CASE("maximum snapshot batch copy benchmark is opt-in")
+{
+    char const *const enabled = std::getenv("RUN_SNAPSHOT_TRANSPORT_BENCHMARK");
+    if (enabled == nullptr || std::string_view{enabled} != "1") {
+        return;
+    }
+
+    constexpr std::size_t sample_count = 25U;
+    constexpr std::size_t warmup_count = 3U;
+    constexpr std::size_t maximum_snapshot_count =
+        static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT);
+    constexpr std::size_t snapshot_bytes = maximum_snapshot_count * sizeof(TTorrentSnapshot);
+
+    bridge_tests::TemporaryDirectory directory;
+    TTorrentClient client(directory.path().string());
+    client.stop_alert_worker();
+
+    TTorrentSnapshot seed{};
+    seed.total_done = 42;
+    client.snapshot_cache.assign(maximum_snapshot_count, seed);
+    std::vector<TTorrentSnapshot> output(maximum_snapshot_count);
+
+    std::uint64_t revision = 0U;
+    int32_t required_count = 0;
+    for (std::size_t index = 0; index < warmup_count; ++index) {
+        int32_t const copied = client.copy_snapshots(output, &revision, &required_count);
+        REQUIRE(copied == TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT);
+        REQUIRE(required_count == TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT);
+    }
+
+    std::vector<double> durations;
+    durations.reserve(sample_count);
+    for (std::size_t index = 0; index < sample_count; ++index) {
+        auto const started_at = std::chrono::steady_clock::now();
+        int32_t const copied = client.copy_snapshots(output, &revision, &required_count);
+        auto const finished_at = std::chrono::steady_clock::now();
+
+        REQUIRE(copied == TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT);
+        REQUIRE(required_count == TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT);
+        durations.push_back(std::chrono::duration<double, std::milli>{finished_at - started_at}.count());
+    }
+
+    REQUIRE(output.front().total_done == 42);
+    REQUIRE(output.back().total_done == 42);
+
+    std::ranges::sort(durations);
+    double const median_ms = durations.at(durations.size() / 2U);
+    std::size_t const p95_index = ((95U * durations.size() + 99U) / 100U) - 1U;
+    double const p95_ms = durations.at(p95_index);
+    double const median_gib_per_second =
+        (static_cast<double>(snapshot_bytes) / (1024.0 * 1024.0 * 1024.0)) / (median_ms / 1000.0);
+
+    std::cout << std::fixed << std::setprecision(3)
+              << "SNAPSHOT_TRANSPORT_NATIVE {\"count\":" << maximum_snapshot_count
+              << ",\"snapshot_stride\":" << sizeof(TTorrentSnapshot)
+              << ",\"bytes\":" << snapshot_bytes
+              << ",\"samples\":" << sample_count
+              << ",\"median_ms\":" << median_ms
+              << ",\"p95_ms\":" << p95_ms
+              << ",\"median_gib_per_second\":" << median_gib_per_second
+              << "}\n";
 }
