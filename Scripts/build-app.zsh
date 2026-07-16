@@ -28,6 +28,7 @@ typeset -r resources_dir="$contents_dir/Resources"
 typeset -r executable="$macos_dir/Torrent 7"
 typeset -r app_icon="$root_dir/Packaging/AppIcon.icon"
 typeset -r document_icon="$root_dir/Packaging/Torrent7Document.icns"
+typeset -r third_party_notices="$root_dir/Packaging/ThirdPartyNotices.txt"
 typeset -r app_icon_info_plist="$app_output_dir/AppIconInfo.plist"
 typeset -r sign_identity=${SIGN_IDENTITY:--}
 typeset -r sign_options="runtime,restrict,library"
@@ -104,6 +105,7 @@ if [[ $enable_diagnostics == "1" ]]; then
     /usr/libexec/PlistBuddy -c "Set :CFBundleURLTypes:0:CFBundleURLName app.torrent7.debug.magnet" "$contents_dir/Info.plist"
 fi
 cp "$document_icon" "$resources_dir/Torrent7Document.icns"
+cp "$third_party_notices" "$resources_dir/ThirdPartyNotices.txt"
 
 rm -f -- "$app_icon_info_plist"
 /usr/bin/xcrun actool \

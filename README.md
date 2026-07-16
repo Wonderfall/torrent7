@@ -124,6 +124,8 @@ pinned tag and commit through a local source cache, then receives an ordered,
 hashed patch series for Xcode compatibility, network boundaries, and storage
 confinement. WebTorrent support stays disabled to avoid adding its unused
 protocol and dependency surface.
+The app bundle also contains `ThirdPartyNotices.txt`; release verification requires
+it to exactly match the reviewed notices in `Packaging/ThirdPartyNotices.txt`.
 
 ## Build
 

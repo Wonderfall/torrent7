@@ -72,6 +72,7 @@ typeset -r info_plist="$app_dir/Contents/Info.plist"
 typeset -r executable="$app_dir/Contents/MacOS/Torrent 7"
 typeset -r resources_dir="$app_dir/Contents/Resources"
 typeset -r expected_entitlements="$root_dir/Packaging/Torrent7.entitlements"
+typeset -r expected_third_party_notices="$root_dir/Packaging/ThirdPartyNotices.txt"
 typeset -r homebrew_prefix=/opt/homebrew
 typeset -r entitlements_output=$(/usr/bin/mktemp)
 typeset -r signature_output=$(/usr/bin/mktemp)
@@ -155,6 +156,10 @@ fi
     || fail "Missing compiled AppIcon.icns"
 [[ -f "$resources_dir/Assets.car" ]] \
     || fail "Missing compiled Assets.car"
+[[ -f "$resources_dir/ThirdPartyNotices.txt" ]] \
+    || fail "Missing bundled third-party notices"
+/usr/bin/cmp -s "$expected_third_party_notices" "$resources_dir/ThirdPartyNotices.txt" \
+    || fail "Bundled third-party notices do not match Packaging/ThirdPartyNotices.txt"
 
 typeset -a bundled_dylibs=()
 while IFS= read -r dylib; do
