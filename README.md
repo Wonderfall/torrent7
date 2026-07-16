@@ -19,6 +19,7 @@
 ## Table of Contents
 
 - [Purpose](#purpose)
+- [Architecture](#architecture)
 - [Features](#features)
 - [Security and Hardening](#security-and-hardening)
 - [Sandbox Model](#sandbox-model)
@@ -41,6 +42,13 @@ The goal is not to be the largest torrent client. The goal is to keep the common
 workflow fast and understandable: add a torrent or magnet link, choose where it
 downloads, inspect transfer details when needed, and keep the security boundary
 as small and explicit as possible.
+
+## Architecture
+
+The project keeps SwiftUI and App Sandbox capabilities in Swift, while a narrow,
+bounded C ABI isolates libtorrent, native persistence, and protocol parsing.
+The rationale, snapshot model, security invariants, and refreshed implementation
+status are documented in [Architecture and Security Decisions](Documentation/Architecture.md).
 
 ## Features
 
@@ -232,6 +240,17 @@ Run the bridge static-analysis pass:
 ```sh
 Scripts/analyze-bridge.zsh
 ```
+
+Run the opt-in maximum snapshot transport probe in release mode:
+
+```sh
+Scripts/benchmark-snapshot-transport.zsh
+```
+
+The probe prints native copy, Swift mapping/sorting, end-to-end latency, and
+incremental footprint measurements. It does not use wall-clock assertions;
+review gates and the transport decision are documented in
+[Architecture and Security Decisions](Documentation/Architecture.md).
 
 `clang-tidy` support is optional:
 
