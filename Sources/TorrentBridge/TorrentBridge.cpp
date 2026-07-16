@@ -1006,6 +1006,35 @@ extern "C" const char *TorrentBridgeLibtorrentVersion(void) noexcept
     return LIBTORRENT_VERSION;
 }
 
+extern "C" int32_t TorrentBridgeInspectMagnetSources(
+    const char *magnet_uri,
+    TTorrentSourceSecurityInspection *inspection
+) noexcept
+{
+    if (inspection != nullptr) {
+        *inspection = {};
+    }
+
+    return run_bridge_operation({}, 3, [&]() -> BridgeResult {
+        if (magnet_uri == nullptr || inspection == nullptr) {
+            return bridge_error(1, "Missing magnet URI or source inspection output.");
+        }
+
+        TorrentLoadResult parsed = parse_sanitized_magnet(c_string_view(magnet_uri));
+        if (!parsed) {
+            return std::unexpected(parsed.error());
+        }
+
+        BridgeResult const valid_sources = validate_torrent_sources(*parsed);
+        if (!valid_sources) {
+            return valid_sources;
+        }
+
+        *inspection = torrent_source_counts(*parsed);
+        return {};
+    });
+}
+
 extern "C" TTorrentClient *TorrentClientCreateWithError(
     const char *state_path,
     uint8_t enable_pex_plugin,
@@ -1127,12 +1156,11 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         if (!admission) {
             return admission;
         }
-        lt::error_code parse_error;
-        lt::add_torrent_params params = lt::parse_magnet_uri(std::string(magnet), parse_error);
-        if (parse_error) {
-            return bridge_error(2, parse_error.message());
+        TorrentLoadResult parsed = parse_sanitized_magnet(magnet);
+        if (!parsed) {
+            return std::unexpected(parsed.error());
         }
-        sanitize_magnet_endpoint_hints(params);
+        lt::add_torrent_params params = std::move(*parsed);
         lt::add_torrent_params const source_params = params;
 
         bool const allows_non_https_trackers = bridge_bool(add_options.allow_non_https_trackers);

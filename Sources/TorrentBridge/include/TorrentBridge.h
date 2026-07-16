@@ -49,7 +49,7 @@ inline constexpr int32_t TTORRENT_SOURCE_POLICY_ENABLE_LSD = 2;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS = 3;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS = 4;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT = 5;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 30;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 31;
 extern "C" {
 #else
 #define TORRENT_BRIDGE_NOEXCEPT
@@ -97,7 +97,7 @@ enum {
     TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS = 3,
     TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS = 4,
     TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT = 5,
-    TTORRENT_BRIDGE_ABI_VERSION = 30
+    TTORRENT_BRIDGE_ABI_VERSION = 31
 };
 #endif
 
@@ -222,6 +222,13 @@ typedef struct TTorrentFilePreview {
     int32_t https_web_seed_count;
 } TTorrentFilePreview;
 
+typedef struct TTorrentSourceSecurityInspection {
+    int32_t tracker_count;
+    int32_t https_tracker_count;
+    int32_t web_seed_count;
+    int32_t https_web_seed_count;
+} TTorrentSourceSecurityInspection;
+
 typedef struct TTorrentSessionSettings {
     int32_t download_rate_limit;
     int32_t upload_rate_limit;
@@ -287,6 +294,13 @@ typedef struct TTorrentOptions {
 } TTorrentOptions;
 
 const char *TorrentBridgeLibtorrentVersion(void) TORRENT_BRIDGE_NOEXCEPT;
+
+// Parses and sanitizes the magnet with the same native path used by add.
+// Returns 0 only when all sources are valid and within the bridge limits.
+int32_t TorrentBridgeInspectMagnetSources(
+    const char *magnet_uri,
+    TTorrentSourceSecurityInspection *inspection
+) TORRENT_BRIDGE_NOEXCEPT;
 
 // Returns an owned client handle. Release it exactly once with TorrentClientDestroy.
 TTorrentClient *TorrentClientCreateWithError(

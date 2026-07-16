@@ -6,8 +6,8 @@ import Testing
 struct TorrentSourceModelTests {
     @Test("Magnet source security summary counts HTTPS and non-HTTPS sources")
     func magnetSourceSecuritySummaryCountsHTTPSSources() {
-        let summary = TorrentSourceSecurityParser.summary(
-            magnetURI: "magnet:?xt=urn:btih:abc&tr=http%3A%2F%2Ftracker.example%2Fannounce&tr=HTTPS%3A%2F%2Fsecure.example%2Fannounce&ws=http%3A%2F%2Fseed.example%2Ffile&ws=https%3A%2F%2Fsecure.example%2Ffile"
+        let summary = TorrentSourceSecurityInspector.summary(
+            magnetURI: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&tr=http%3A%2F%2Ftracker.example%2Fannounce&tr=HTTPS%3A%2F%2Fsecure.example%2Fannounce&ws=http%3A%2F%2Fseed.example%2Ffile&ws=https%3A%2F%2Fsecure.example%2Ffile"
         )
 
         #expect(summary.trackerCount == 2)
@@ -28,8 +28,8 @@ struct TorrentSourceModelTests {
 
     @Test("Magnet source security summary asks for exception when no HTTPS source exists")
     func magnetSourceSecuritySummaryRequiresExceptionWithoutHTTPSSources() {
-        let summary = TorrentSourceSecurityParser.summary(
-            magnetURI: "magnet:?xt=urn:btih:abc&tr=udp%3A%2F%2Ftracker.example%2Fannounce&ws=http%3A%2F%2Fseed.example%2Ffile"
+        let summary = TorrentSourceSecurityInspector.summary(
+            magnetURI: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&tr=udp%3A%2F%2Ftracker.example%2Fannounce&ws=http%3A%2F%2Fseed.example%2Ffile"
         )
 
         #expect(summary.sourceCount == 2)
@@ -40,8 +40,8 @@ struct TorrentSourceModelTests {
 
     @Test("Magnet source security summary ignores empty trackers")
     func magnetSourceSecuritySummaryIgnoresEmptyTrackers() {
-        let summary = TorrentSourceSecurityParser.summary(
-            magnetURI: "magnet:?xt=urn:btih:abc&tr=&tr"
+        let summary = TorrentSourceSecurityInspector.summary(
+            magnetURI: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&tr=&tr"
         )
 
         #expect(summary.trackerCount == 0)
@@ -50,8 +50,8 @@ struct TorrentSourceModelTests {
 
     @Test("Magnet source security summary ignores malformed HTTPS trackers")
     func magnetSourceSecuritySummaryIgnoresMalformedHTTPSTrackers() {
-        let summary = TorrentSourceSecurityParser.summary(
-            magnetURI: "magnet:?xt=urn:btih:abc&tr=https%3A%2F%2F&tr=https%3A%2F%2Funder_score.example%2Fannounce&tr=https%3A%2F%2Fsecure.example%2Fannounce%0A&tr=https%3A%2F%2Fsecure.example%2Fannounce%"
+        let summary = TorrentSourceSecurityInspector.summary(
+            magnetURI: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&tr=https%3A%2F%2F&tr=https%3A%2F%2Funder_score.example%2Fannounce&tr=https%3A%2F%2Fsecure.example%2Fannounce%0A&tr=https%3A%2F%2Fsecure.example%2Fannounce%"
         )
 
         #expect(summary.trackerCount == 0)
@@ -60,8 +60,8 @@ struct TorrentSourceModelTests {
 
     @Test("Magnet source security summary validates raw tracker hostnames")
     func magnetSourceSecuritySummaryValidatesRawTrackerHostnames() {
-        let summary = TorrentSourceSecurityParser.summary(
-            magnetURI: "magnet:?xt=urn:btih:abc&tr=https%3A%2F%2Fexa%252emple.com%2Fannounce&tr=https%3A%2F%2F%2565xample.com%2Fannounce"
+        let summary = TorrentSourceSecurityInspector.summary(
+            magnetURI: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&tr=https%3A%2F%2Fexa%252emple.com%2Fannounce&tr=https%3A%2F%2F%2565xample.com%2Fannounce"
         )
 
         #expect(summary.trackerCount == 0)
@@ -70,8 +70,8 @@ struct TorrentSourceModelTests {
 
     @Test("Magnet source security summary decodes tracker values once")
     func magnetSourceSecuritySummaryDecodesTrackerValuesOnce() {
-        let summary = TorrentSourceSecurityParser.summary(
-            magnetURI: "magnet:?xt=urn:btih:abc&tr=https%3A%2F%2Ftracker.example%2Fann+ounce&t%72=https%3A%2F%2Fsecure.example%2Fannounce"
+        let summary = TorrentSourceSecurityInspector.summary(
+            magnetURI: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&tr=https%3A%2F%2Ftracker.example%2Fann+ounce&t%72=https%3A%2F%2Fsecure.example%2Fannounce"
         )
 
         #expect(summary.trackerCount == 0)
@@ -80,8 +80,8 @@ struct TorrentSourceModelTests {
 
     @Test("Magnet source security summary recognizes numbered tracker parameters")
     func magnetSourceSecuritySummaryRecognizesNumberedTrackerParameters() {
-        let summary = TorrentSourceSecurityParser.summary(
-            magnetURI: "magnet:?xt=urn:btih:abc&tr.1=http%3A%2F%2Ftracker.example%2Fannounce&TR.=https%3A%2F%2Fsecure.example%2Fannounce&tr.label=https%3A%2F%2Fignored.example%2Fannounce"
+        let summary = TorrentSourceSecurityInspector.summary(
+            magnetURI: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&tr.1=http%3A%2F%2Ftracker.example%2Fannounce&TR.=https%3A%2F%2Fsecure.example%2Fannounce&tr.label=https%3A%2F%2Fignored.example%2Fannounce"
         )
 
         #expect(summary.trackerCount == 2)
@@ -90,8 +90,8 @@ struct TorrentSourceModelTests {
 
     @Test("Magnet source security summary rejects multiple-at tracker authorities")
     func magnetSourceSecuritySummaryRejectsMultipleAtTrackerAuthorities() {
-        let summary = TorrentSourceSecurityParser.summary(
-            magnetURI: "magnet:?xt=urn:btih:abc&tr=https%3A%2F%2Fu%3Ap%40evil%40host.example%2Fannounce"
+        let summary = TorrentSourceSecurityInspector.summary(
+            magnetURI: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&tr=https%3A%2F%2Fu%3Ap%40evil%40host.example%2Fannounce"
         )
 
         #expect(summary.trackerCount == 0)
@@ -100,12 +100,25 @@ struct TorrentSourceModelTests {
 
     @Test("Magnet source security summary accepts supported tracker authorities")
     func magnetSourceSecuritySummaryAcceptsSupportedTrackerAuthorities() {
-        let summary = TorrentSourceSecurityParser.summary(
-            magnetURI: "magnet:?xt=urn:btih:abc&tr=http%3A%2F%2Fuser%3Apass%40tracker.example%3A8080%2Fannounce&tr=HTTPS%3A%2F%2F%5Bfe80%3A%3A1%2525en0%5D%3A443%2Fannounce&tr=udp%3A%2F%2Ftracker.example%3A1337"
+        let summary = TorrentSourceSecurityInspector.summary(
+            magnetURI: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&tr=http%3A%2F%2Fuser%3Apass%40tracker.example%3A8080%2Fannounce&tr=HTTPS%3A%2F%2F%5Bfe80%3A%3A1%2525en0%5D%3A443%2Fannounce&tr=udp%3A%2F%2Ftracker.example%3A1337"
         )
 
         #expect(summary.trackerCount == 3)
         #expect(summary.httpsTrackerCount == 1)
+    }
+
+    @Test("Magnet source security inspection fails closed")
+    func magnetSourceSecurityInspectionFailsClosed() {
+        let invalid = TorrentSourceSecurityInspector.summary(
+            magnetURI: "magnet:?xt=urn:btih:not-a-hash&tr=https%3A%2F%2Ftracker.example%2Fannounce"
+        )
+        let oversized = TorrentSourceSecurityInspector.summary(
+            magnetURI: "magnet:?\(String(repeating: "x", count: TorrentInputLimits.maxMagnetURIBytes))"
+        )
+
+        #expect(invalid == .empty)
+        #expect(oversized == .empty)
     }
 
     @Test("Tracker status follows disabled updating error verified order")

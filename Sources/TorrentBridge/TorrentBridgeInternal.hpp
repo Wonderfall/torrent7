@@ -127,7 +127,7 @@ static_assert(TTORRENT_MAX_WEB_SEED_COUNT > 0);
 static_assert(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT > 0);
 static_assert(kMaxTorrentIdentityTokenCount > static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 30U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 31U);
 #if defined(TORRENT_USE_ASSERTS) && TORRENT_USE_ASSERTS
 static_assert(sizeof(lt::add_torrent_params) == 760U);
 #else
@@ -178,6 +178,8 @@ static_assert(std::is_standard_layout_v<TTorrentPieceMapSnapshot>);
 static_assert(std::is_trivially_copyable_v<TTorrentPieceMapSnapshot>);
 static_assert(std::is_standard_layout_v<TTorrentFilePreview>);
 static_assert(std::is_trivially_copyable_v<TTorrentFilePreview>);
+static_assert(std::is_standard_layout_v<TTorrentSourceSecurityInspection>);
+static_assert(std::is_trivially_copyable_v<TTorrentSourceSecurityInspection>);
 static_assert(std::is_standard_layout_v<TTorrentSessionSettings>);
 static_assert(std::is_trivially_copyable_v<TTorrentSessionSettings>);
 static_assert(std::is_standard_layout_v<TTorrentNetworkStatus>);
@@ -210,6 +212,8 @@ static_assert(sizeof(TTorrentPieceMapSnapshot) == 16U);
 static_assert(alignof(TTorrentPieceMapSnapshot) == 4U);
 static_assert(sizeof(TTorrentFilePreview) == 616U);
 static_assert(alignof(TTorrentFilePreview) == 8U);
+static_assert(sizeof(TTorrentSourceSecurityInspection) == 16U);
+static_assert(alignof(TTorrentSourceSecurityInspection) == 4U);
 static_assert(sizeof(TTorrentSessionSettings) == 72U);
 static_assert(alignof(TTorrentSessionSettings) == 8U);
 static_assert(sizeof(TTorrentNetworkStatus) == 664U);
@@ -445,12 +449,7 @@ struct RemovalRequestEntry {
     std::array<char, 512> error{};
 };
 
-struct TorrentSourceCounts {
-    int32_t tracker_count = 0;
-    int32_t https_tracker_count = 0;
-    int32_t web_seed_count = 0;
-    int32_t https_web_seed_count = 0;
-};
+using TorrentSourceCounts = TTorrentSourceSecurityInspection;
 
 using TombstoneEntriesResult = std::expected<std::vector<RemovalTombstoneEntry>, std::string>;
 using TombstoneCommitResult = std::expected<TombstoneCommitStatus, std::string>;
@@ -810,6 +809,8 @@ bool metadata_validation_pending_from_resume_data(std::vector<char> const &buffe
 bool allow_pre_metadata_dht_from_resume_data(std::vector<char> const &buffer);
 
 void sanitize_magnet_endpoint_hints(lt::add_torrent_params &params);
+
+TorrentLoadResult parse_sanitized_magnet(std::string_view magnet);
 
 void sanitize_resume_endpoint_hints(lt::add_torrent_params &params) noexcept;
 

@@ -12,6 +12,9 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
     auto &harness = bridge_fuzz::shared_harness("bridge-magnet");
     std::string magnet = bridge_fuzz::input_to_string(data, size, 64U * 1024U + 16U);
 
+    TTorrentSourceSecurityInspection inspection{};
+    static_cast<void>(TorrentBridgeInspectMagnetSources(magnet.c_str(), &inspection));
+
     TTorrentAddOptions options{
         .starts_paused = 1,
         .queue_priority = TTORRENT_QUEUE_PRIORITY_NORMAL,

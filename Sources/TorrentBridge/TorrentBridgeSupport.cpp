@@ -1654,7 +1654,7 @@ bool is_https_url(std::string_view url) noexcept
 
 TorrentSourceCounts torrent_source_counts(lt::add_torrent_params const &params)
 {
-    TorrentSourceCounts counts;
+    TorrentSourceCounts counts{};
     counts.tracker_count = static_cast<int32_t>(std::min(
         params.trackers.size(),
         static_cast<std::size_t>(std::numeric_limits<int32_t>::max())
@@ -1870,6 +1870,22 @@ void sanitize_magnet_endpoint_hints(lt::add_torrent_params &params)
 {
     sanitize_resume_endpoint_hints(params);
     params.peers.clear();
+}
+
+TorrentLoadResult parse_sanitized_magnet(std::string_view const magnet)
+{
+    if (magnet.size() > kMaxMagnetURIBytes) {
+        return std::unexpected(BridgeError{.code = 2, .message = "The magnet link is too large."});
+    }
+
+    lt::error_code parse_error;
+    lt::add_torrent_params params = lt::parse_magnet_uri(std::string(magnet), parse_error);
+    if (parse_error) {
+        return std::unexpected(BridgeError{.code = 2, .message = parse_error.message()});
+    }
+
+    sanitize_magnet_endpoint_hints(params);
+    return params;
 }
 
 void sanitize_resume_endpoint_hints(lt::add_torrent_params &params) noexcept

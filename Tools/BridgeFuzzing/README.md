@@ -13,7 +13,8 @@ tooling self-contained.
 
 ## Targets
 
-- `bridge_magnet`: calls `TorrentClientAddMagnet` with mutated C strings.
+- `bridge_magnet`: inspects and adds mutated magnet C strings through both
+  client-independent and session-backed bridge paths.
 - `bridge_torrent_file`: passes mutated `.torrent` bytes to
   `TorrentClientAddTorrentFileData`.
 - `bridge_resume_startup`: creates a temporary state directory with mutated

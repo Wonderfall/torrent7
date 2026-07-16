@@ -60,6 +60,37 @@ namespace {
     return creator.generate_buf();
 }
 
+[[nodiscard]] std::string source_inspection_magnet(std::string_view query = {})
+{
+    std::string magnet = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
+    magnet.append(query);
+    return magnet;
+}
+
+[[nodiscard]] TTorrentSourceSecurityInspection inspect_magnet_sources(std::string const &magnet)
+{
+    TTorrentSourceSecurityInspection inspection{};
+    REQUIRE(TorrentBridgeInspectMagnetSources(magnet.c_str(), &inspection) == 0);
+    return inspection;
+}
+
+void check_inspection_matches_native_parse(std::string const &magnet)
+{
+    TTorrentSourceSecurityInspection const inspection = inspect_magnet_sources(magnet);
+
+    lt::error_code parse_error;
+    lt::add_torrent_params params = lt::parse_magnet_uri(magnet, parse_error);
+    REQUIRE_FALSE(parse_error);
+    sanitize_magnet_endpoint_hints(params);
+    REQUIRE(validate_torrent_sources(params).has_value());
+    TorrentSourceCounts const counts = torrent_source_counts(params);
+
+    CHECK(inspection.tracker_count == counts.tracker_count);
+    CHECK(inspection.https_tracker_count == counts.https_tracker_count);
+    CHECK(inspection.web_seed_count == counts.web_seed_count);
+    CHECK(inspection.https_web_seed_count == counts.https_web_seed_count);
+}
+
 void append_bencoded_string(std::vector<char> &buffer, std::string_view value)
 {
     std::string const size = std::to_string(value.size());
@@ -365,6 +396,109 @@ TEST_CASE("source counts include trackers and web seeds")
     CHECK(counts.https_tracker_count == 1);
     CHECK(counts.web_seed_count == 2);
     CHECK(counts.https_web_seed_count == 1);
+}
+
+TEST_CASE("magnet source inspection matches native parsing for case and numbered parameters")
+{
+    std::string const magnet = source_inspection_magnet(
+        "&TR.1=HTTP%3A%2F%2Ftracker.example%2Fannounce"
+        "&tr.=HTTPS%3A%2F%2Fsecure.example%2Fannounce"
+        "&tr.label=https%3A%2F%2Fignored.example%2Fannounce"
+        "&WS.2=HTTPS%3A%2F%2Fseed.example%2Ffile"
+        "&ws.label=http%3A%2F%2Fignored-seed.example%2Ffile"
+    );
+
+    check_inspection_matches_native_parse(magnet);
+    TTorrentSourceSecurityInspection const inspection = inspect_magnet_sources(magnet);
+    CHECK(inspection.tracker_count == 2);
+    CHECK(inspection.https_tracker_count == 1);
+    CHECK(inspection.web_seed_count == 1);
+    CHECK(inspection.https_web_seed_count == 1);
+}
+
+TEST_CASE("magnet source inspection matches native authority validation and decode-once behavior")
+{
+    std::string const malformed_authorities = source_inspection_magnet(
+        "&tr=https%3A%2F%2F"
+        "&tr=https%3A%2F%2Funder_score.example%2Fannounce"
+        "&tr=https%3A%2F%2Fu%3Ap%40evil%40host.example%2Fannounce"
+        "&tr=https%3A%2F%2Fsecure.example%2Fannounce%0A"
+    );
+    check_inspection_matches_native_parse(malformed_authorities);
+    CHECK(inspect_magnet_sources(malformed_authorities).tracker_count == 0);
+
+    std::string const decoded_once = source_inspection_magnet(
+        "&tr=https%3A%2F%2Ftracker.example%2Fann+ounce"
+        "&tr=https%3A%2F%2F%2565xample.com%2Fannounce"
+        "&t%72=https%3A%2F%2Fignored.example%2Fannounce"
+    );
+    check_inspection_matches_native_parse(decoded_once);
+    CHECK(inspect_magnet_sources(decoded_once).tracker_count == 0);
+}
+
+TEST_CASE("magnet source inspection enforces source count caps")
+{
+    std::string maximum = source_inspection_magnet();
+    for (int32_t index = 0; index < TTORRENT_MAX_TRACKER_COUNT; ++index) {
+        maximum += "&tr=http://t/a";
+    }
+    for (int32_t index = 0; index < TTORRENT_MAX_WEB_SEED_COUNT; ++index) {
+        maximum += "&ws=http://s/f";
+    }
+    REQUIRE(maximum.size() <= kMaxMagnetURIBytes);
+
+    TTorrentSourceSecurityInspection const maximum_inspection = inspect_magnet_sources(maximum);
+    CHECK(maximum_inspection.tracker_count == TTORRENT_MAX_TRACKER_COUNT);
+    CHECK(maximum_inspection.web_seed_count == TTORRENT_MAX_WEB_SEED_COUNT);
+
+    std::string too_many_trackers = source_inspection_magnet();
+    for (int32_t index = 0; index <= TTORRENT_MAX_TRACKER_COUNT; ++index) {
+        too_many_trackers += "&tr=http://t/a";
+    }
+    REQUIRE(too_many_trackers.size() <= kMaxMagnetURIBytes);
+    TTorrentSourceSecurityInspection tracker_output{
+        .tracker_count = 1,
+        .https_tracker_count = 1,
+        .web_seed_count = 1,
+        .https_web_seed_count = 1
+    };
+    CHECK(TorrentBridgeInspectMagnetSources(too_many_trackers.c_str(), &tracker_output) == 2);
+    CHECK(tracker_output.tracker_count == 0);
+    CHECK(tracker_output.https_tracker_count == 0);
+    CHECK(tracker_output.web_seed_count == 0);
+    CHECK(tracker_output.https_web_seed_count == 0);
+
+    std::string too_many_web_seeds = source_inspection_magnet();
+    for (int32_t index = 0; index <= TTORRENT_MAX_WEB_SEED_COUNT; ++index) {
+        too_many_web_seeds += "&ws=http://s/f";
+    }
+    REQUIRE(too_many_web_seeds.size() <= kMaxMagnetURIBytes);
+    TTorrentSourceSecurityInspection web_seed_output{};
+    CHECK(TorrentBridgeInspectMagnetSources(too_many_web_seeds.c_str(), &web_seed_output) == 2);
+}
+
+TEST_CASE("magnet source inspection fails closed for invalid or oversized input")
+{
+    TTorrentSourceSecurityInspection output{
+        .tracker_count = 1,
+        .https_tracker_count = 1,
+        .web_seed_count = 1,
+        .https_web_seed_count = 1
+    };
+    CHECK(TorrentBridgeInspectMagnetSources("not-a-magnet", &output) == 2);
+    CHECK(output.tracker_count == 0);
+    CHECK(output.https_tracker_count == 0);
+    CHECK(output.web_seed_count == 0);
+    CHECK(output.https_web_seed_count == 0);
+
+    std::string oversized = source_inspection_magnet();
+    oversized.append(kMaxMagnetURIBytes, 'x');
+    CHECK(TorrentBridgeInspectMagnetSources(oversized.c_str(), &output) == 2);
+    CHECK(output.tracker_count == 0);
+
+    CHECK(TorrentBridgeInspectMagnetSources(nullptr, &output) == 1);
+    CHECK(output.tracker_count == 0);
+    CHECK(TorrentBridgeInspectMagnetSources(source_inspection_magnet().c_str(), nullptr) == 1);
 }
 
 TEST_CASE("source validation rejects source lists above bridge limits")

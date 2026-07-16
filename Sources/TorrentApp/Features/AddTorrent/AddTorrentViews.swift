@@ -346,7 +346,7 @@ struct AddTorrentConfirmationView: View {
         }
 
         if let magnetURI = draft.magnetURI {
-            return TorrentSourceSecurityParser.summary(magnetURI: magnetURI)
+            return TorrentSourceSecurityInspector.summary(magnetURI: magnetURI)
         }
 
         return nil

@@ -7,12 +7,12 @@ struct TorrentSourcesTests {
     @Test("Parses magnet sources case-insensitively")
     func parsesMagnetSourcesCaseInsensitively() throws {
         let draft = try #require(TorrentAddSourceParser.magnetDraft(
-            from: " \nMAGNET:?xt=urn:btih:abc&tr=HTTPS%3A%2F%2Ftracker.example%2Fannounce "
+            from: " \nMAGNET:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&tr=HTTPS%3A%2F%2Ftracker.example%2Fannounce "
         ))
         let magnetURI = try #require(draft.magnetURI)
-        let securitySummary = TorrentSourceSecurityParser.summary(magnetURI: magnetURI)
+        let securitySummary = TorrentSourceSecurityInspector.summary(magnetURI: magnetURI)
 
-        #expect(magnetURI == "magnet:?xt=urn:btih:abc&tr=HTTPS%3A%2F%2Ftracker.example%2Fannounce")
+        #expect(magnetURI == "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&tr=HTTPS%3A%2F%2Ftracker.example%2Fannounce")
         #expect(securitySummary.trackerCount == 1)
         #expect(securitySummary.httpsTrackerCount == 1)
         #expect(draft.fileURL == nil)
