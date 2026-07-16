@@ -1,5 +1,46 @@
 #include "TorrentBridgeInternal.hpp"
 
+namespace {
+
+[[nodiscard]] std::uint64_t saturating_increment(std::uint64_t const value) noexcept
+{
+    return value == std::numeric_limits<std::uint64_t>::max() ? value : value + 1U;
+}
+
+} // namespace
+
+std::chrono::milliseconds alert_worker_failure_backoff(std::uint64_t const consecutive_failures) noexcept
+{
+    auto delay = kAlertWorkerInitialFailureBackoff;
+    auto const maximum = std::chrono::duration_cast<std::chrono::milliseconds>(
+        kAlertWorkerMaximumFailureBackoff
+    );
+    std::uint64_t remaining_doublings = consecutive_failures > 1U ? consecutive_failures - 1U : 0U;
+    while (remaining_doublings > 0U && delay < maximum) {
+        delay = std::min(delay * 2, maximum);
+        --remaining_doublings;
+    }
+    return delay;
+}
+
+bool wait_for_alert_worker_backoff(
+    std::stop_token const &stop_token,
+    std::chrono::milliseconds const duration
+) noexcept
+{
+    try {
+        std::mutex wait_lock;
+        std::condition_variable_any stopped;
+        std::unique_lock guard(wait_lock);
+        static_cast<void>(stopped.wait_for(guard, stop_token, duration, [] {
+            return false;
+        }));
+        return !stop_token.stop_requested();
+    } catch (...) {
+        return false;
+    }
+}
+
 TTorrentClient::TTorrentClient(std::string_view state_path, bool enable_peer_exchange_plugin)
     : state_directory(std::string(state_path)),
       resume_directory(state_directory / "ResumeData"),
@@ -251,12 +292,76 @@ void TTorrentClient::alert_loop(std::stop_token const &stop_token)
                 request_snapshot_update();
                 next_snapshot_update = advance_deadline(next_snapshot_update, kSnapshotUpdateInterval, after_alerts);
             }
-        } catch (std::exception const &) {
-            continue;
+            record_alert_worker_recovery();
+        } catch (std::exception const &exception) {
+            std::uint64_t const failures = record_alert_worker_failure(exception.what());
+            if (!wait_for_alert_worker_backoff(stop_token, alert_worker_failure_backoff(failures))) {
+                return;
+            }
         } catch (...) {
-            continue;
+            std::uint64_t const failures = record_alert_worker_failure("Unexpected libtorrent alert worker error.");
+            if (!wait_for_alert_worker_backoff(stop_token, alert_worker_failure_backoff(failures))) {
+                return;
+            }
         }
     }
+}
+
+std::uint64_t TTorrentClient::record_alert_worker_failure(std::string_view error) noexcept
+{
+    constexpr std::string_view kFallbackError = "Unexpected libtorrent alert worker error.";
+    constexpr std::string_view kUserErrorPrefix = "Libtorrent alert worker failed and will retry: ";
+    constexpr std::size_t kMaximumQueuedErrorBytes = sizeof(TTorrentBridgeHealth::last_alert_worker_error) - 1U;
+    std::string_view const detail = error.empty() ? kFallbackError : error;
+    std::uint64_t consecutive_failures = 1;
+    WakeCallbackInvocation wake;
+    try {
+        std::scoped_lock guard(lock);
+        bridge_health.total_alert_worker_failures = saturating_increment(
+            bridge_health.total_alert_worker_failures
+        );
+        bridge_health.consecutive_alert_worker_failures = saturating_increment(
+            bridge_health.consecutive_alert_worker_failures
+        );
+        consecutive_failures = bridge_health.consecutive_alert_worker_failures;
+        bridge_health.alert_worker_degraded = bridge_bool(true);
+        copy_string(std::span{bridge_health.last_alert_worker_error}, detail);
+
+        DirtyMask changes = TTORRENT_DIRTY_HEALTH;
+        try {
+            std::string queued_error(kUserErrorPrefix);
+            std::size_t const remaining = kMaximumQueuedErrorBytes - queued_error.size();
+            queued_error.append(detail.substr(0, remaining));
+            changes |= queue_alert_error(std::move(queued_error));
+        } catch (...) {
+            // The fixed-size health snapshot still records and publishes the
+            // failure if allocating the optional user-facing queue entry fails.
+            ignore_shutdown_failure();
+        }
+        wake = publish_changes_locked(changes);
+    } catch (...) {
+        return consecutive_failures;
+    }
+    invoke_wake_callback(wake);
+    return consecutive_failures;
+}
+
+void TTorrentClient::record_alert_worker_recovery() noexcept
+{
+    WakeCallbackInvocation wake;
+    try {
+        std::scoped_lock guard(lock);
+        if (bridge_health.consecutive_alert_worker_failures == 0U
+            && !bridge_bool(bridge_health.alert_worker_degraded)) {
+            return;
+        }
+        bridge_health.consecutive_alert_worker_failures = 0;
+        bridge_health.alert_worker_degraded = bridge_bool(false);
+        wake = publish_changes_locked(TTORRENT_DIRTY_HEALTH);
+    } catch (...) {
+        return;
+    }
+    invoke_wake_callback(wake);
 }
 
 [[nodiscard]] bool TTorrentClient::canonical_id_in_collection_locked(

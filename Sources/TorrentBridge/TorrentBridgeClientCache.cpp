@@ -1634,6 +1634,11 @@ DirtyMask TTorrentClient::record_network_blocked() { return record_network_reque
     return status;
 }
 
+[[nodiscard]] TTorrentBridgeHealth TTorrentClient::health_status() const noexcept
+{
+    return bridge_health;
+}
+
 bool TTorrentClient::take_alert_error(std::span<char> output)
 {
     std::scoped_lock guard(lock);

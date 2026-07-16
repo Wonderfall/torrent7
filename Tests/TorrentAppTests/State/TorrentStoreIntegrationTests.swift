@@ -31,6 +31,29 @@ struct TorrentStoreIntegrationTests {
         #expect(await harness.engine.snapshotRequests.last?.sortOrder == .name)
     }
 
+    @Test("Refresh polls degraded bridge health without making the engine unavailable")
+    func refreshPollsDegradedBridgeHealthWithoutMakingEngineUnavailable() async {
+        let harness = makeStoreHarness()
+        let degradedHealth = TorrentBridgeHealth(
+            isAvailable: true,
+            totalAlertWorkerFailures: 4,
+            consecutiveAlertWorkerFailures: 2,
+            isAlertWorkerDegraded: true,
+            lastAlertWorkerError: "retrying"
+        )
+        await harness.engine.setBridgeHealth(degradedHealth)
+        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+            revision: 1,
+            torrents: [makeTorrent(id: "alpha", name: "Alpha")]
+        ))
+
+        await harness.store.refreshNow()
+
+        #expect(harness.store.bridgeHealth == degradedHealth)
+        #expect(harness.store.torrents.map(\.id) == ["alpha"])
+        #expect(harness.engine.isAvailable)
+    }
+
     @Test("Command snapshot ignores live rate-only torrent changes")
     func commandSnapshotIgnoresLiveRateOnlyTorrentChanges() async {
         let harness = makeStoreHarness()

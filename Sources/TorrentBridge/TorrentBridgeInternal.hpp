@@ -102,6 +102,8 @@ constexpr std::uintmax_t kMaxResumeFileBytes = 64U * kOneMegabyte;
 constexpr std::uintmax_t kMaxRemovalTombstoneBytes = 16U * kOneKilobyte;
 constexpr std::array<unsigned char, 3> kUTF8ReplacementCharacter{0xefU, 0xbfU, 0xbdU};
 constexpr auto kAlertWaitInterval = std::chrono::milliseconds(250);
+constexpr auto kAlertWorkerInitialFailureBackoff = std::chrono::milliseconds(100);
+constexpr auto kAlertWorkerMaximumFailureBackoff = std::chrono::seconds(5);
 constexpr auto kSnapshotUpdateInterval = std::chrono::milliseconds(500);
 constexpr std::size_t kMaxPendingAlertErrors = 16U;
 // Userdata tokens cannot be reused safely because late libtorrent alerts may
@@ -127,7 +129,7 @@ static_assert(TTORRENT_MAX_WEB_SEED_COUNT > 0);
 static_assert(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT > 0);
 static_assert(kMaxTorrentIdentityTokenCount > static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 31U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 32U);
 #if defined(TORRENT_USE_ASSERTS) && TORRENT_USE_ASSERTS
 static_assert(sizeof(lt::add_torrent_params) == 760U);
 #else
@@ -184,6 +186,8 @@ static_assert(std::is_standard_layout_v<TTorrentSessionSettings>);
 static_assert(std::is_trivially_copyable_v<TTorrentSessionSettings>);
 static_assert(std::is_standard_layout_v<TTorrentNetworkStatus>);
 static_assert(std::is_trivially_copyable_v<TTorrentNetworkStatus>);
+static_assert(std::is_standard_layout_v<TTorrentBridgeHealth>);
+static_assert(std::is_trivially_copyable_v<TTorrentBridgeHealth>);
 static_assert(std::is_standard_layout_v<TTorrentSourcePolicy>);
 static_assert(std::is_trivially_copyable_v<TTorrentSourcePolicy>);
 static_assert(std::is_standard_layout_v<TTorrentAddOptions>);
@@ -218,6 +222,8 @@ static_assert(sizeof(TTorrentSessionSettings) == 72U);
 static_assert(alignof(TTorrentSessionSettings) == 8U);
 static_assert(sizeof(TTorrentNetworkStatus) == 664U);
 static_assert(alignof(TTorrentNetworkStatus) == 8U);
+static_assert(sizeof(TTorrentBridgeHealth) == 536U);
+static_assert(alignof(TTorrentBridgeHealth) == 8U);
 static_assert(sizeof(TTorrentSourcePolicy) == 10U);
 static_assert(alignof(TTorrentSourcePolicy) == 1U);
 static_assert(sizeof(TTorrentAddOptions) == 6U);
@@ -1036,6 +1042,14 @@ BridgeResult apply_file_priorities(
     std::optional<std::span<TTorrentFilePriorityEntry const>> file_priorities
 );
 
+[[nodiscard]] std::chrono::milliseconds alert_worker_failure_backoff(
+    std::uint64_t consecutive_failures
+) noexcept;
+
+[[nodiscard]] bool wait_for_alert_worker_backoff(
+    std::stop_token const &stop_token,
+    std::chrono::milliseconds duration
+) noexcept;
 
 struct TTorrentClient {
     explicit TTorrentClient(std::string_view state_path, bool enable_peer_exchange_plugin = true);
@@ -1109,6 +1123,7 @@ struct TTorrentClient {
     int32_t listen_port = 0;
     std::string listen_endpoint;
     std::string last_network_error;
+    TTorrentBridgeHealth bridge_health{};
     std::vector<std::string> pending_alert_errors;
     std::uint64_t publication_epoch = 0;
     DirtyMask pending_changes = 0;
@@ -1123,6 +1138,10 @@ struct TTorrentClient {
     void stop_alert_worker() noexcept;
 
     void alert_loop(std::stop_token const &stop_token);
+
+    [[nodiscard]] std::uint64_t record_alert_worker_failure(std::string_view error) noexcept;
+
+    void record_alert_worker_recovery() noexcept;
 
     void set_wake_callback(TTorrentWakeCallback callback, void *context);
 
@@ -1438,6 +1457,8 @@ struct TTorrentClient {
     [[nodiscard]] DirtyMask record_network_blocked();
 
     [[nodiscard]] TTorrentNetworkStatus network_status() const;
+
+    [[nodiscard]] TTorrentBridgeHealth health_status() const noexcept;
 
     bool take_alert_error(std::span<char> output);
 

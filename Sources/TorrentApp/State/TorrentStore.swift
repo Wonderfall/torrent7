@@ -59,6 +59,7 @@ final class TorrentStore {
     private(set) var sortDirection: TorrentSortDirection
     private(set) var networkInterfaces: [NetworkInterfaceOption] = []
     private(set) var networkStatus: TorrentNetworkStatus = .empty
+    private(set) var bridgeHealth: TorrentBridgeHealth = .unavailable
     private(set) var torrentInfoTabRequests = [TorrentItem.ID: TorrentInfoTabRequest]()
     private(set) var labels: [TorrentLabel] = []
     private(set) var labelAssignments: [TorrentItem.ID: Set<TorrentLabel.ID>] = [:]
@@ -1196,6 +1197,10 @@ final class TorrentStore {
     }
 
     private func refreshFromEngine(notifiesCompletions: Bool = true) async {
+        let currentBridgeHealth = await engine.bridgeHealth()
+        if currentBridgeHealth != bridgeHealth {
+            bridgeHealth = currentBridgeHealth
+        }
         guard engine.isAvailable else {
             return
         }

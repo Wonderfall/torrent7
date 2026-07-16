@@ -217,6 +217,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private var trackerHostBatchContinuations = [CheckedContinuation<Void, Never>]()
     var dirtyMask: UInt32 = 0
     var networkStatusValue = TorrentNetworkStatus.empty
+    var bridgeHealthValue = TorrentBridgeHealth.healthy
     var alertErrors = [String]()
     var nextAddedMagnetID = "alpha"
     var addMagnetError: Error?
@@ -340,6 +341,10 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func setNetworkStatus(_ status: TorrentNetworkStatus) {
         networkStatusValue = status
+    }
+
+    func setBridgeHealth(_ health: TorrentBridgeHealth) {
+        bridgeHealthValue = health
     }
 
     func setRemoveError(_ error: Error?) {
@@ -584,6 +589,10 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func networkStatus() async -> TorrentNetworkStatus {
         networkStatusValue
+    }
+
+    func bridgeHealth() async -> TorrentBridgeHealth {
+        bridgeHealthValue
     }
 
     func snapshotsIfChanged(

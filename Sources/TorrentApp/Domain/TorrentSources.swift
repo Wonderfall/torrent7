@@ -434,3 +434,27 @@ struct TorrentNetworkStatus: Equatable, Sendable {
         requestedRevision > submittedRevision
     }
 }
+
+struct TorrentBridgeHealth: Equatable, Sendable {
+    let isAvailable: Bool
+    let totalAlertWorkerFailures: UInt64
+    let consecutiveAlertWorkerFailures: UInt64
+    let isAlertWorkerDegraded: Bool
+    let lastAlertWorkerError: String
+
+    static let healthy = TorrentBridgeHealth(
+        isAvailable: true,
+        totalAlertWorkerFailures: 0,
+        consecutiveAlertWorkerFailures: 0,
+        isAlertWorkerDegraded: false,
+        lastAlertWorkerError: ""
+    )
+
+    static let unavailable = TorrentBridgeHealth(
+        isAvailable: false,
+        totalAlertWorkerFailures: 0,
+        consecutiveAlertWorkerFailures: 0,
+        isAlertWorkerDegraded: false,
+        lastAlertWorkerError: ""
+    )
+}

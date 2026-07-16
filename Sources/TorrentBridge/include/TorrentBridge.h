@@ -28,6 +28,7 @@ inline constexpr uint32_t TTORRENT_DIRTY_NETWORK = 1U << 4U;
 inline constexpr uint32_t TTORRENT_DIRTY_ERRORS = 1U << 5U;
 inline constexpr uint32_t TTORRENT_DIRTY_PIECES = 1U << 6U;
 inline constexpr uint32_t TTORRENT_DIRTY_TRACKER_HOSTS = 1U << 7U;
+inline constexpr uint32_t TTORRENT_DIRTY_HEALTH = 1U << 8U;
 inline constexpr int32_t TTORRENT_MAX_PIECE_MAP_COUNT = 0x200000;
 inline constexpr int32_t TTORRENT_QUEUE_PRIORITY_LOW = 0;
 inline constexpr int32_t TTORRENT_QUEUE_PRIORITY_NORMAL = 1;
@@ -49,7 +50,7 @@ inline constexpr int32_t TTORRENT_SOURCE_POLICY_ENABLE_LSD = 2;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS = 3;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS = 4;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT = 5;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 31;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 32;
 extern "C" {
 #else
 #define TORRENT_BRIDGE_NOEXCEPT
@@ -76,6 +77,7 @@ enum {
     TTORRENT_DIRTY_ERRORS = 1U << 5U,
     TTORRENT_DIRTY_PIECES = 1U << 6U,
     TTORRENT_DIRTY_TRACKER_HOSTS = 1U << 7U,
+    TTORRENT_DIRTY_HEALTH = 1U << 8U,
     TTORRENT_MAX_PIECE_MAP_COUNT = 0x200000,
     TTORRENT_QUEUE_PRIORITY_LOW = 0,
     TTORRENT_QUEUE_PRIORITY_NORMAL = 1,
@@ -97,7 +99,7 @@ enum {
     TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS = 3,
     TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS = 4,
     TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT = 5,
-    TTORRENT_BRIDGE_ABI_VERSION = 31
+    TTORRENT_BRIDGE_ABI_VERSION = 32
 };
 #endif
 
@@ -262,6 +264,13 @@ typedef struct TTorrentNetworkStatus {
     char endpoint[128];
     char last_error[512];
 } TTorrentNetworkStatus;
+
+typedef struct TTorrentBridgeHealth {
+    uint64_t total_alert_worker_failures;
+    uint64_t consecutive_alert_worker_failures;
+    uint8_t alert_worker_degraded;
+    char last_alert_worker_error[512];
+} TTorrentBridgeHealth;
 
 typedef struct TTorrentSourcePolicy {
     uint8_t enable_dht;
@@ -565,6 +574,11 @@ int32_t TorrentClientBlockNetwork(
 int32_t TorrentClientCopyNetworkStatus(
     TTorrentClient *client,
     TTorrentNetworkStatus *status
+) TORRENT_BRIDGE_NOEXCEPT;
+
+int32_t TorrentClientCopyHealth(
+    TTorrentClient *client,
+    TTorrentBridgeHealth *health
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientSaveAllChecked(

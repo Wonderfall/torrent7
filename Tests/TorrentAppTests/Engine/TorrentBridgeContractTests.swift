@@ -6,7 +6,7 @@ import TorrentBridge
 struct TorrentBridgeContractTests {
     @Test("Pins bridge ABI version, limits, states, and dirty masks")
     func pinsBridgeConstants() {
-        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 31)
+        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 32)
         #expect(Int32(TTORRENT_BRIDGE_STATE_UNKNOWN) == -1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_CHECKING_FILES) == 1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_DOWNLOADING_METADATA) == 2)
@@ -32,6 +32,7 @@ struct TorrentBridgeContractTests {
         #expect(UInt32(TTORRENT_DIRTY_ERRORS) == 1 << 5)
         #expect(UInt32(TTORRENT_DIRTY_PIECES) == 1 << 6)
         #expect(UInt32(TTORRENT_DIRTY_TRACKER_HOSTS) == 1 << 7)
+        #expect(UInt32(TTORRENT_DIRTY_HEALTH) == 1 << 8)
         #expect(Int32(TTORRENT_QUEUE_PRIORITY_LOW) == 0)
         #expect(Int32(TTORRENT_QUEUE_PRIORITY_NORMAL) == 1)
         #expect(Int32(TTORRENT_QUEUE_PRIORITY_HIGH) == 2)
@@ -82,6 +83,8 @@ struct TorrentBridgeContractTests {
         #expect(sessionSettingsAlignment == 8)
         #expect(MemoryLayout<TTorrentNetworkStatus>.size == 664)
         #expect(MemoryLayout<TTorrentNetworkStatus>.alignment == 8)
+        #expect(MemoryLayout<TTorrentBridgeHealth>.size == 536)
+        #expect(MemoryLayout<TTorrentBridgeHealth>.alignment == 8)
         #expect(MemoryLayout<TTorrentSourcePolicy>.size == 10)
         #expect(MemoryLayout<TTorrentSourcePolicy>.alignment == 1)
         #expect(MemoryLayout<TTorrentAddOptions>.size == 6)
@@ -100,6 +103,7 @@ struct TorrentBridgeContractTests {
         let removal = TTorrentRemovalResult()
         let preview = TTorrentFilePreview()
         let network = TTorrentNetworkStatus()
+        let health = TTorrentBridgeHealth()
 
         #expect(MemoryLayout.size(ofValue: snapshot.id) == Int(TTORRENT_ID_CAPACITY))
         #expect(MemoryLayout.size(ofValue: snapshot.id) == 68)
@@ -119,6 +123,7 @@ struct TorrentBridgeContractTests {
         #expect(MemoryLayout.size(ofValue: preview.id) == 68)
         #expect(MemoryLayout.size(ofValue: network.endpoint) == 128)
         #expect(MemoryLayout.size(ofValue: network.last_error) == 512)
+        #expect(MemoryLayout.size(ofValue: health.last_alert_worker_error) == 512)
     }
 
     @Test("Libtorrent version is pinned to 2.1.0")
@@ -160,6 +165,20 @@ struct TorrentBridgeContractTests {
         #expect(status.listen_port == 0)
         #expect(status.network_blocked == 0)
         #expect(status.has_listener == 0)
+
+        var health = TTorrentBridgeHealth()
+        health.total_alert_worker_failures = 7
+        health.consecutive_alert_worker_failures = 3
+        health.alert_worker_degraded = 1
+        let copiedHealth = unsafe TorrentClientCopyHealth(nil, &health)
+        #expect(copiedHealth == 0)
+        #expect(health.total_alert_worker_failures == 0)
+        #expect(health.consecutive_alert_worker_failures == 0)
+        #expect(health.alert_worker_degraded == 0)
+        let firstHealthErrorByte = unsafe withUnsafeBytes(of: health.last_alert_worker_error) { bytes in
+            unsafe bytes[0]
+        }
+        #expect(firstHealthErrorByte == 0)
 
         var sourcePolicy = TTorrentSourcePolicy(
             enable_dht: 1,
@@ -308,6 +327,8 @@ struct TorrentBridgeContractTests {
             #expect(result.blockNetworkCode == 0, Comment(rawValue: result.blockNetworkError))
             #expect(result.copiedNetworkStatus == 1)
             #expect(result.networkBlocked)
+            #expect(result.copiedHealth == 1)
+            #expect(result.bridgeHealthIsHealthy)
             #expect(result.copiedSnapshots == 0)
             #expect(result.requiredSnapshotCount == 0)
             #expect(result.saveAllCheckedCode == 0, Comment(rawValue: result.saveAllCheckedError))
@@ -395,6 +416,8 @@ private struct EmptyClientSmokeResult {
     var blockNetworkError = ""
     var copiedNetworkStatus: Int32 = 0
     var networkBlocked = false
+    var copiedHealth: Int32 = 0
+    var bridgeHealthIsHealthy = false
     var copiedSnapshots: Int32 = -1
     var requiredSnapshotCount: Int32 = -1
     var saveAllCheckedCode: Int32 = -1
@@ -427,6 +450,12 @@ private func emptyClientSmokeResult(statePath: String) -> EmptyClientSmokeResult
     var status = TTorrentNetworkStatus()
     result.copiedNetworkStatus = unsafe TorrentClientCopyNetworkStatus(client, &status)
     result.networkBlocked = status.network_blocked != 0
+
+    var health = TTorrentBridgeHealth()
+    result.copiedHealth = unsafe TorrentClientCopyHealth(client, &health)
+    result.bridgeHealthIsHealthy = health.total_alert_worker_failures == 0
+        && health.consecutive_alert_worker_failures == 0
+        && health.alert_worker_degraded == 0
 
     var revision: UInt64 = UInt64.max
     var requiredCount: Int32 = -1

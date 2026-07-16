@@ -146,6 +146,24 @@ struct TorrentBridgeMappingTests {
         #expect(mapped.isApplying)
     }
 
+    @Test("Maps bridge health without treating a retrying worker as unavailable")
+    func mapsBridgeHealth() {
+        var snapshot = TTorrentBridgeHealth()
+        snapshot.total_alert_worker_failures = 7
+        snapshot.consecutive_alert_worker_failures = 2
+        snapshot.alert_worker_degraded = true.bridgeFlag
+        writeCString("retrying", to: &snapshot.last_alert_worker_error)
+
+        let health = TorrentBridgeHealth(snapshot: snapshot)
+
+        #expect(health.isAvailable)
+        #expect(health.totalAlertWorkerFailures == 7)
+        #expect(health.consecutiveAlertWorkerFailures == 2)
+        #expect(health.isAlertWorkerDegraded)
+        #expect(health.lastAlertWorkerError == "retrying")
+        #expect(health != .unavailable)
+    }
+
     @Test("Maps source policy")
     func mapsSourcePolicy() {
         let policy = TorrentSourcePolicy(

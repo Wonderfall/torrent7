@@ -2709,6 +2709,28 @@ extern "C" int32_t TorrentClientCopyNetworkStatus(
     }
 }
 
+extern "C" int32_t TorrentClientCopyHealth(
+    TTorrentClient *client,
+    TTorrentBridgeHealth *health
+) noexcept
+{
+    if (health != nullptr) {
+        *health = TTorrentBridgeHealth{};
+    }
+    if (client == nullptr || health == nullptr) {
+        return 0;
+    }
+
+    try {
+        std::scoped_lock guard(client->lock);
+        *health = client->health_status();
+        return 1;
+    } catch (...) {
+        *health = TTorrentBridgeHealth{};
+        return 0;
+    }
+}
+
 extern "C" int32_t TorrentClientSaveAllChecked(
     TTorrentClient *client,
     char *error_out,

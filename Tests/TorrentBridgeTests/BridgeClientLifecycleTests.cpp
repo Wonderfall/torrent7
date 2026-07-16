@@ -39,6 +39,12 @@ void blocking_wake_callback(void *context)
     });
 }
 
+void counting_wake_callback(void *context)
+{
+    auto *count = static_cast<std::atomic_uint64_t *>(context);
+    count->fetch_add(1U, std::memory_order_relaxed);
+}
+
 [[nodiscard]] bool has_owner_directory_permissions(fs::path const &path)
 {
     fs::perms const permissions = fs::status(path).permissions();
@@ -295,6 +301,115 @@ TEST_CASE("clearing a wake callback waits for every in-flight invocation")
     invocation.join();
     clearing.join();
     CHECK(cleared.load());
+}
+
+TEST_CASE("alert worker failure backoff grows exponentially and stays bounded")
+{
+    CHECK(alert_worker_failure_backoff(0) == kAlertWorkerInitialFailureBackoff);
+    CHECK(alert_worker_failure_backoff(1) == kAlertWorkerInitialFailureBackoff);
+    CHECK(alert_worker_failure_backoff(2) == std::chrono::milliseconds(200));
+    CHECK(alert_worker_failure_backoff(3) == std::chrono::milliseconds(400));
+    CHECK(alert_worker_failure_backoff(6) == std::chrono::milliseconds(3200));
+    CHECK(alert_worker_failure_backoff(7) == kAlertWorkerMaximumFailureBackoff);
+    CHECK(alert_worker_failure_backoff(std::numeric_limits<std::uint64_t>::max())
+          == kAlertWorkerMaximumFailureBackoff);
+}
+
+TEST_CASE("alert worker failure backoff stops promptly")
+{
+    std::atomic_bool entered = false;
+    std::atomic_bool completed_delay = true;
+    std::jthread waiter([&](std::stop_token const &stop_token) {
+        entered.store(true, std::memory_order_release);
+        completed_delay.store(
+            wait_for_alert_worker_backoff(stop_token, kAlertWorkerMaximumFailureBackoff),
+            std::memory_order_release
+        );
+    });
+    REQUIRE(eventually([&entered] {
+        return entered.load(std::memory_order_acquire);
+    }));
+
+    auto const started = std::chrono::steady_clock::now();
+    waiter.request_stop();
+    waiter.join();
+    auto const elapsed = std::chrono::steady_clock::now() - started;
+
+    CHECK_FALSE(completed_delay.load(std::memory_order_acquire));
+    CHECK(elapsed < std::chrono::milliseconds(500));
+}
+
+TEST_CASE("alert worker health publishes bounded failures and recovery")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+    client.stop_alert_worker();
+
+    DirtyMask discarded = 0;
+    static_cast<void>(client.take_changes(&discarded));
+    std::atomic_uint64_t wake_count = 0;
+    client.set_wake_callback(counting_wake_callback, &wake_count);
+
+    std::string const long_error(1024U, 'x');
+    CHECK(client.record_alert_worker_failure(long_error) == 1U);
+
+    TTorrentBridgeHealth health{};
+    REQUIRE(TorrentClientCopyHealth(&client, &health) == 1);
+    CHECK(health.total_alert_worker_failures == 1U);
+    CHECK(health.consecutive_alert_worker_failures == 1U);
+    CHECK(bridge_bool(health.alert_worker_degraded));
+    CHECK(std::string(health.last_alert_worker_error).size()
+          == sizeof(health.last_alert_worker_error) - 1U);
+
+    DirtyMask changes = 0;
+    static_cast<void>(client.take_changes(&changes));
+    CHECK((changes & TTORRENT_DIRTY_HEALTH) != 0U);
+    CHECK((changes & TTORRENT_DIRTY_ERRORS) != 0U);
+
+    std::array<char, 1024> alert_error{};
+    REQUIRE(client.take_alert_error(std::span{alert_error}));
+    std::string const queued_error(alert_error.data());
+    CHECK(queued_error.starts_with("Libtorrent alert worker failed and will retry: "));
+    CHECK(queued_error.size() <= sizeof(health.last_alert_worker_error) - 1U);
+
+    CHECK(client.record_alert_worker_failure("second failure") == 2U);
+    static_cast<void>(client.take_changes(&changes));
+    client.record_alert_worker_recovery();
+    static_cast<void>(client.take_changes(&changes));
+    CHECK(changes == TTORRENT_DIRTY_HEALTH);
+    REQUIRE(TorrentClientCopyHealth(&client, &health) == 1);
+    CHECK(health.total_alert_worker_failures == 2U);
+    CHECK(health.consecutive_alert_worker_failures == 0U);
+    CHECK_FALSE(bridge_bool(health.alert_worker_degraded));
+    CHECK(std::string(health.last_alert_worker_error) == "second failure");
+    CHECK(wake_count.load(std::memory_order_relaxed) == 3U);
+
+    client.clear_wake_callback();
+}
+
+TEST_CASE("alert worker failure accounting and error queue saturate")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+    client.stop_alert_worker();
+
+    {
+        std::scoped_lock guard(client.lock);
+        client.bridge_health.total_alert_worker_failures = std::numeric_limits<std::uint64_t>::max();
+        client.bridge_health.consecutive_alert_worker_failures = std::numeric_limits<std::uint64_t>::max();
+    }
+    CHECK(client.record_alert_worker_failure("saturated") == std::numeric_limits<std::uint64_t>::max());
+
+    for (std::size_t index = 0; index < kMaxPendingAlertErrors * 2U; ++index) {
+        static_cast<void>(client.record_alert_worker_failure("bounded queue"));
+    }
+
+    std::scoped_lock guard(client.lock);
+    CHECK(client.bridge_health.total_alert_worker_failures == std::numeric_limits<std::uint64_t>::max());
+    CHECK(client.bridge_health.consecutive_alert_worker_failures == std::numeric_limits<std::uint64_t>::max());
+    CHECK(client.pending_alert_errors.size() == kMaxPendingAlertErrors);
 }
 
 TEST_CASE("TTorrentClient startup completes durable tombstoned resume cleanup")

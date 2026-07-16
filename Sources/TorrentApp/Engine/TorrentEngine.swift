@@ -126,6 +126,7 @@ protocol TorrentEngineServicing: Sendable {
     func takeAlertError() async -> String?
     func takeChanges() async -> UInt32
     func networkStatus() async -> TorrentNetworkStatus
+    func bridgeHealth() async -> TorrentBridgeHealth
     func snapshotsIfChanged(
         since revision: UInt64?,
         sortedBy sortOrder: TorrentSortOrder,
@@ -648,6 +649,19 @@ protocol TorrentEngineServicing: Sendable {
             return .empty
         }
         return TorrentNetworkStatus(status: status)
+    }
+
+    func bridgeHealth() -> TorrentBridgeHealth {
+        guard let pointer = unsafe client?.pointer else {
+            return .unavailable
+        }
+
+        var health = TTorrentBridgeHealth()
+        let copied = unsafe TorrentClientCopyHealth(pointer, &health) != 0
+        guard copied else {
+            return .unavailable
+        }
+        return TorrentBridgeHealth(snapshot: health)
     }
 
     func snapshots() -> [TorrentItem] {

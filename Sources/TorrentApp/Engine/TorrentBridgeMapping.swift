@@ -57,6 +57,18 @@ extension TorrentNetworkStatus {
     }
 }
 
+extension TorrentBridgeHealth {
+    init(snapshot: TTorrentBridgeHealth) {
+        self.init(
+            isAvailable: true,
+            totalAlertWorkerFailures: snapshot.total_alert_worker_failures,
+            consecutiveAlertWorkerFailures: snapshot.consecutive_alert_worker_failures,
+            isAlertWorkerDegraded: snapshot.alert_worker_degraded.bridgeBool,
+            lastAlertWorkerError: String(cStringTuple: snapshot.last_alert_worker_error)
+        )
+    }
+}
+
 extension TorrentTrackerItem {
     init(snapshot: TTorrentTrackerSnapshot) {
         self.init(
