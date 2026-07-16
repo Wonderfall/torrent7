@@ -673,6 +673,147 @@ struct TorrentStoreIntegrationTests {
         #expect(harness.store.lastError == nil)
     }
 
+    @Test("Rejected add admission does not prepare or commit its folder")
+    func rejectedAddAdmissionDoesNotMutateFolderState() async {
+        let harness = makeStoreHarness()
+        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+            revision: 1,
+            torrents: [makeTorrent(id: "alpha")]
+        ))
+        await harness.store.refreshNow()
+        await harness.engine.suspendNextRemove()
+        harness.store.removeTorrent(id: "alpha", deleteFiles: false)
+        await harness.engine.waitForSuspendedRemove()
+
+        for _ in 0..<64 {
+            harness.store.pauseTorrent(id: "alpha")
+        }
+        let folder = URL(filePath: "/Downloads/New", directoryHint: .isDirectory)
+
+        let accepted = harness.store.addMagnet(
+            "magnet:?xt=urn:btih:abc",
+            downloadFolder: folder,
+            setsDownloadFolderAsDefault: true
+        )
+
+        #expect(!accepted)
+        #expect(harness.accessStore.prepareForAddCalls.isEmpty)
+        #expect(harness.accessStore.commitPreparedForAddCalls.isEmpty)
+        #expect(harness.accessStore.defaultURL == nil)
+        #expect(harness.store.downloadFolder == nil)
+        #expect(harness.store.lastError == TorrentStoreError.tooManyPendingOperations.localizedDescription)
+
+        await harness.engine.resumeSuspendedRemoves()
+        await harness.store.saveAll()
+    }
+
+    @Test("Prepared add retains folder access until the queued engine add completes")
+    func preparedAddRetainsFolderAccessThroughQueuedExecution() async throws {
+        let harness = makeStoreHarness()
+        let folder = URL(filePath: "/Downloads/New", directoryHint: .isDirectory)
+        var access: FakeDownloadFolderAccess? = FakeDownloadFolderAccess(url: folder)
+        weak let weakAccess = access
+        do {
+            let retainedAccess = try #require(access)
+            harness.accessStore.prepareForAddResult = .success(PreparedDownloadFolder(
+                access: retainedAccess,
+                defaultURL: folder,
+                bookmarkData: try retainedAccess.bookmarkData()
+            ))
+        }
+        access = nil
+        await harness.engine.suspendNextAddMagnet()
+
+        let accepted = harness.store.addMagnet(
+            "magnet:?xt=urn:btih:abc",
+            downloadFolder: folder,
+            setsDownloadFolderAsDefault: true
+        )
+        await harness.engine.waitForSuspendedAddMagnet()
+
+        #expect(accepted)
+        #expect(weakAccess != nil)
+        #expect(harness.accessStore.commitPreparedForAddCalls.isEmpty)
+
+        await harness.engine.resumeSuspendedAddMagnets()
+        await harness.store.saveAll()
+        #expect(harness.accessStore.commitPreparedForAddCalls.count == 1)
+        #expect(harness.store.downloadFolder?.path == folder.path)
+    }
+
+    @Test("Failed engine add does not commit its prepared folder")
+    func failedEngineAddDoesNotCommitPreparedFolder() async {
+        let harness = makeStoreHarness()
+        let folder = URL(filePath: "/Downloads/New", directoryHint: .isDirectory)
+        await harness.engine.setAddMagnetError(FakeBookmarkError())
+
+        let accepted = harness.store.addMagnet(
+            "magnet:?xt=urn:btih:abc",
+            downloadFolder: folder,
+            setsDownloadFolderAsDefault: true
+        )
+        await harness.store.saveAll()
+
+        #expect(accepted)
+        #expect(harness.accessStore.prepareForAddCalls.count == 1)
+        #expect(harness.accessStore.commitPreparedForAddCalls.isEmpty)
+        #expect(harness.accessStore.defaultURL == nil)
+        #expect(harness.store.downloadFolder == nil)
+        #expect(harness.store.lastError != nil)
+    }
+
+    @Test("Torrent Info mutations share FIFO ordering with list commands")
+    func torrentInfoMutationsShareFIFOOrdering() async throws {
+        let harness = makeStoreHarness()
+        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+            revision: 1,
+            torrents: [makeTorrent(id: "alpha")]
+        ))
+        await harness.store.refreshNow()
+        await harness.engine.suspendNextRemove()
+        harness.store.removeTorrent(id: "alpha", deleteFiles: false)
+        await harness.engine.waitForSuspendedRemove()
+
+        let mutation = Task { @MainActor in
+            try await harness.store.setFilePriority(for: "alpha", fileIndex: 3, priority: .skip)
+        }
+        await Task.yield()
+        #expect(await harness.engine.filePriorityUpdates.isEmpty)
+
+        await harness.engine.resumeSuspendedRemoves()
+        try await mutation.value
+        await harness.store.saveAll()
+        #expect(await harness.engine.filePriorityUpdates.map(\.fileIndex) == [3])
+    }
+
+    @Test("Save drains an urgent network block before a later unblock")
+    func saveDrainsNetworkSecurityBarrierBeforeLaterUnblock() async {
+        let harness = makeStoreHarness()
+        await harness.engine.suspendNextNetworkBlock()
+        var restricted = harness.store.settings
+        restricted.requireNetworkInterface = true
+        restricted.requiredNetworkInterfaceName = "utun-missing"
+        harness.store.updateSettings(restricted)
+        await harness.engine.waitForSuspendedNetworkBlock()
+
+        var relaxed = restricted
+        relaxed.requireNetworkInterface = false
+        harness.store.updateSettings(relaxed)
+        let save = Task { @MainActor in
+            await harness.store.saveAll()
+        }
+        await Task.yield()
+
+        #expect(await harness.engine.saveAllCount == 0)
+        #expect(await harness.engine.appliedSettings.isEmpty)
+
+        await harness.engine.resumeSuspendedNetworkBlocks()
+        await save.value
+
+        #expect(await harness.engine.appliedSettings.last?.networkBlocked == false)
+        #expect(await harness.engine.saveAllCount == 1)
+    }
+
     @Test("Pending settings applications coalesce to latest values")
     func pendingSettingsApplicationsCoalesceToLatestValues() async throws {
         let suiteName = "app.torrent7.operation-queue.\(UUID().uuidString)"

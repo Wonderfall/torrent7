@@ -53,7 +53,7 @@ struct AddTorrentConfirmationView: View {
 
     @Environment(TorrentStore.self) private var store
     let draft: TorrentAddDraft
-    let add: (TorrentAddOptions) -> Void
+    let add: (TorrentAddOptions) -> Bool
     let cancel: () -> Void
 
     @State private var isChoosingDownloadFolder = false
@@ -506,7 +506,7 @@ struct AddTorrentConfirmationView: View {
         guard let downloadFolder = selectedDownloadFolder else {
             return
         }
-        add(TorrentAddOptions(
+        let accepted = add(TorrentAddOptions(
             downloadFolder: downloadFolder,
             torrentData: preview?.torrentData,
             filePriorities: filePrioritiesForAdd,
@@ -517,6 +517,9 @@ struct AddTorrentConfirmationView: View {
             labelIDs: selectedLabelIDs,
             allowsPreMetadataDHT: allowsPreMetadataDHT
         ))
+        if !accepted {
+            folderError = store.lastError ?? TorrentStoreError.tooManyPendingOperations.localizedDescription
+        }
     }
 
     private func showsSourcePolicySection(for summary: TorrentSourceSecuritySummary) -> Bool {

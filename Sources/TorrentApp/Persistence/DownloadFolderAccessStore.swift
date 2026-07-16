@@ -3,10 +3,19 @@ import Foundation
 struct PreparedDownloadFolder {
     let path: String
     let defaultURL: URL?
+    let lease: DownloadFolderAccessLease
+    let bookmarkData: Data?
+
+    init(access: DownloadFolderAccessing, defaultURL: URL?, bookmarkData: Data?) {
+        path = access.url.path
+        self.defaultURL = defaultURL
+        lease = DownloadFolderAccessLease(access: access)
+        self.bookmarkData = bookmarkData
+    }
 }
 
 final class DownloadFolderAccessLease {
-    private let access: DownloadFolderAccessing
+    fileprivate let access: DownloadFolderAccessing
 
     init(access: DownloadFolderAccessing) {
         self.access = access
@@ -23,6 +32,8 @@ protocol DownloadFolderAccessStoring: AnyObject {
     func setDefault(_ url: URL, activeTorrents: [TorrentItem]) throws -> URL
     func clearDefault(activeTorrents: [TorrentItem])
     func prepareForAdd(_ url: URL, setsDefault: Bool, activeTorrents: [TorrentItem]) throws -> PreparedDownloadFolder
+    @discardableResult
+    func commitPreparedForAdd(_ preparedFolder: PreparedDownloadFolder, activeTorrents: [TorrentItem]) -> URL?
     func lease(forSavePath path: String) throws -> DownloadFolderAccessLease
     func prune(activeTorrents: [TorrentItem])
 }
@@ -93,19 +104,44 @@ final class DownloadFolderAccessStore: DownloadFolderAccessStoring {
     }
 
     func prepareForAdd(_ url: URL, setsDefault: Bool, activeTorrents: [TorrentItem]) throws -> PreparedDownloadFolder {
-        if isCurrentDefault(url), let defaultURL {
-            return PreparedDownloadFolder(path: defaultURL.path, defaultURL: nil)
-        }
-
-        if setsDefault {
-            let defaultURL = try setDefault(url, activeTorrents: activeTorrents)
-            return PreparedDownloadFolder(path: defaultURL.path, defaultURL: defaultURL)
+        if isCurrentDefault(url), let defaultAccess {
+            return PreparedDownloadFolder(access: defaultAccess, defaultURL: nil, bookmarkData: nil)
         }
 
         let access = try accessProvider.createAccess(url: url, savesBookmark: false, defaults: defaults)
-        try saveAdditionalDownloadFolderBookmark(for: access)
-        additionalAccesses[Self.accessKey(access.url)] = access
-        return PreparedDownloadFolder(path: access.url.path, defaultURL: nil)
+        let bookmarkData = try access.bookmarkData()
+        return PreparedDownloadFolder(
+            access: access,
+            defaultURL: setsDefault ? access.url : nil,
+            bookmarkData: bookmarkData
+        )
+    }
+
+    @discardableResult
+    func commitPreparedForAdd(
+        _ preparedFolder: PreparedDownloadFolder,
+        activeTorrents: [TorrentItem]
+    ) -> URL? {
+        guard let bookmarkData = preparedFolder.bookmarkData else {
+            return nil
+        }
+
+        if preparedFolder.defaultURL != nil {
+            let previousAccess = defaultAccess
+            let previousURL = previousAccess?.url
+            defaults.set(bookmarkData, forKey: SecurityScopedFolder.defaultsKey)
+            defaultAccess = preparedFolder.lease.access
+
+            preserveAdditionalAccessIfNeeded(previousAccess, url: previousURL, activeTorrents: activeTorrents)
+            removeAdditionalDownloadFolderBookmark(for: preparedFolder.lease.access.url)
+            additionalAccesses.removeValue(forKey: Self.accessKey(preparedFolder.lease.access.url))
+            prune(activeTorrents: activeTorrents)
+            return preparedFolder.lease.access.url
+        }
+
+        saveAdditionalDownloadFolderBookmark(bookmarkData, for: preparedFolder.lease.access.url)
+        additionalAccesses[Self.accessKey(preparedFolder.lease.access.url)] = preparedFolder.lease.access
+        return nil
     }
 
     func lease(forSavePath path: String) throws -> DownloadFolderAccessLease {
@@ -197,9 +233,13 @@ final class DownloadFolderAccessStore: DownloadFolderAccessStoring {
     }
 
     private func saveAdditionalDownloadFolderBookmark(for access: DownloadFolderAccessing) throws {
-        let key = Self.accessKey(access.url)
+        try saveAdditionalDownloadFolderBookmark(access.bookmarkData(), for: access.url)
+    }
+
+    private func saveAdditionalDownloadFolderBookmark(_ bookmarkData: Data, for url: URL) {
+        let key = Self.accessKey(url)
         var bookmarks = defaults.dictionary(forKey: TorrentBookmarkKeys.additionalDownloadFolders) as? [String: Data] ?? [:]
-        bookmarks[key] = try access.bookmarkData()
+        bookmarks[key] = bookmarkData
         defaults.set(bookmarks, forKey: TorrentBookmarkKeys.additionalDownloadFolders)
     }
 

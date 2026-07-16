@@ -30,8 +30,8 @@ struct DownloadFolderAccessStoreTests {
         }
     }
 
-    @Test("Pruning removes an additional bookmark while its lease retains live access")
-    func pruningRemovesAdditionalBookmarkWhileLeaseRetainsLiveAccess() throws {
+    @Test("A prepared add owns live access without persisting it")
+    func preparedAddOwnsLiveAccessWithoutPersistingIt() throws {
         try withIsolatedDefaults { defaults in
             try withTemporaryDirectory { root in
                 let tracker = WeakDownloadFolderAccessTracker()
@@ -40,22 +40,25 @@ struct DownloadFolderAccessStoreTests {
                     accessProvider: TrackingDownloadFolderAccessProvider(tracker: tracker)
                 )
                 let folder = root.appending(path: "folder", directoryHint: .isDirectory)
-                _ = try store.prepareForAdd(folder, setsDefault: false, activeTorrents: [])
-                var lease: DownloadFolderAccessLease? = try store.lease(forSavePath: folder.path)
+                var prepared: PreparedDownloadFolder? = try store.prepareForAdd(
+                    folder,
+                    setsDefault: false,
+                    activeTorrents: []
+                )
 
                 store.prune(activeTorrents: [])
 
                 #expect(additionalBookmarks(in: defaults).isEmpty)
                 #expect(tracker.access != nil)
-                lease = nil
-                #expect(lease == nil)
+                prepared = nil
+                #expect(prepared == nil)
                 #expect(tracker.access == nil)
             }
         }
     }
 
-    @Test("Preparing non-default folder saves and prunes additional bookmark")
-    func preparingNonDefaultFolderSavesAndPrunesAdditionalBookmark() throws {
+    @Test("Committing a non-default folder saves and prunes its bookmark")
+    func committingNonDefaultFolderSavesAndPrunesAdditionalBookmark() throws {
         try withIsolatedDefaults { defaults in
             try withTemporaryDirectory { root in
                 let store = DownloadFolderAccessStore(defaults: defaults, accessProvider: FakeDownloadFolderAccessProvider())
@@ -65,6 +68,9 @@ struct DownloadFolderAccessStoreTests {
 
                 #expect(prepared.path == folder.path)
                 #expect(prepared.defaultURL == nil)
+                #expect(additionalBookmarks(in: defaults).isEmpty)
+
+                store.commitPreparedForAdd(prepared, activeTorrents: [])
                 #expect(additionalBookmarks(in: defaults)[accessKey(folder)] == Data(folder.path.utf8))
 
                 store.prune(activeTorrents: [makeTorrent(savePath: folder.path)])
@@ -72,6 +78,30 @@ struct DownloadFolderAccessStoreTests {
 
                 store.prune(activeTorrents: [])
                 #expect(additionalBookmarks(in: defaults).isEmpty)
+            }
+        }
+    }
+
+    @Test("Preparing a default folder is side-effect free until commit")
+    func preparingDefaultFolderIsSideEffectFreeUntilCommit() throws {
+        try withIsolatedDefaults { defaults in
+            try withTemporaryDirectory { root in
+                let store = DownloadFolderAccessStore(
+                    defaults: defaults,
+                    accessProvider: FakeDownloadFolderAccessProvider()
+                )
+                let folder = root.appending(path: "folder", directoryHint: .isDirectory)
+
+                let prepared = try store.prepareForAdd(folder, setsDefault: true, activeTorrents: [])
+
+                #expect(store.defaultURL == nil)
+                #expect(defaults.data(forKey: SecurityScopedFolder.defaultsKey) == nil)
+
+                let committedDefault = store.commitPreparedForAdd(prepared, activeTorrents: [])
+
+                #expect(committedDefault?.path == folder.path)
+                #expect(store.defaultURL?.path == folder.path)
+                #expect(defaults.data(forKey: SecurityScopedFolder.defaultsKey) == Data(folder.path.utf8))
             }
         }
     }

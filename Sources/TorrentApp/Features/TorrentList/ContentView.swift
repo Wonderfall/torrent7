@@ -322,13 +322,14 @@ struct ContentView: View {
         activeTorrentAddDraft = queuedTorrentAddDrafts.removeFirst()
     }
 
-    private func confirmTorrentAdd(_ draft: TorrentAddDraft, options: TorrentAddOptions) {
+    private func confirmTorrentAdd(_ draft: TorrentAddDraft, options: TorrentAddOptions) -> Bool {
+        let accepted: Bool
         switch draft.source {
         case .torrentFile(let url):
             guard let torrentData = options.torrentData else {
-                return
+                return false
             }
-            store.addTorrentFile(
+            accepted = store.addTorrentFile(
                 url,
                 torrentData: torrentData,
                 downloadFolder: options.downloadFolder,
@@ -340,7 +341,7 @@ struct ContentView: View {
                 labelIDs: options.labelIDs
             )
         case .magnet(let uri):
-            store.addMagnet(
+            accepted = store.addMagnet(
                 uri,
                 downloadFolder: options.downloadFolder,
                 setsDownloadFolderAsDefault: options.setsDownloadFolderAsDefault,
@@ -351,7 +352,10 @@ struct ContentView: View {
             )
         }
 
-        activeTorrentAddDraft = nil
+        if accepted {
+            activeTorrentAddDraft = nil
+        }
+        return accepted
     }
 
     private func beginFileImport(_ mode: FileImportMode) {

@@ -104,6 +104,7 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
     private(set) var clearDefaultCalls = [[TorrentItem]]()
     private(set) var setDefaultCalls = [(url: URL, activeTorrents: [TorrentItem])]()
     private(set) var prepareForAddCalls = [(url: URL, setsDefault: Bool, activeTorrents: [TorrentItem])]()
+    private(set) var commitPreparedForAddCalls = [(folder: PreparedDownloadFolder, activeTorrents: [TorrentItem])]()
     private(set) var leaseCalls = [String]()
     private(set) var pruneCalls = [[TorrentItem]]()
 
@@ -142,11 +143,26 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
 
     func prepareForAdd(_ url: URL, setsDefault: Bool, activeTorrents: [TorrentItem]) throws -> PreparedDownloadFolder {
         prepareForAddCalls.append((url, setsDefault, activeTorrents))
-        let result = try (prepareForAddResult ?? .success(PreparedDownloadFolder(path: url.path, defaultURL: setsDefault ? url : nil))).get()
-        if let defaultURL = result.defaultURL {
+        let access = FakeDownloadFolderAccess(url: url)
+        let fallback = PreparedDownloadFolder(
+            access: access,
+            defaultURL: setsDefault ? url : nil,
+            bookmarkData: try access.bookmarkData()
+        )
+        let result = try (prepareForAddResult ?? .success(fallback)).get()
+        prepareForAddResult = nil
+        return result
+    }
+
+    func commitPreparedForAdd(
+        _ preparedFolder: PreparedDownloadFolder,
+        activeTorrents: [TorrentItem]
+    ) -> URL? {
+        commitPreparedForAddCalls.append((preparedFolder, activeTorrents))
+        if let defaultURL = preparedFolder.defaultURL {
             self.defaultURL = defaultURL
         }
-        return result
+        return preparedFolder.defaultURL
     }
 
     func lease(forSavePath path: String) throws -> DownloadFolderAccessLease {
@@ -199,10 +215,13 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     var networkStatusValue = TorrentNetworkStatus.empty
     var alertErrors = [String]()
     var nextAddedMagnetID = "alpha"
+    var addMagnetError: Error?
     var nextAddedTorrentFileID = "alpha"
     private(set) var restartCount = 0
     private(set) var restartPeerExchangePluginValues = [Bool]()
     private(set) var blockNetworkCount = 0
+    private var blockNetworkSuspensionCount = 0
+    private var blockNetworkContinuations = [CheckedContinuation<Void, Never>]()
     private(set) var currentNetworkBlocked = false
     private(set) var saveAllCount = 0
     private(set) var saveAllCheckedCount = 0
@@ -229,6 +248,8 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         allowNonHTTPSTrackers: Bool,
         allowNonHTTPSWebSeeds: Bool
     )]()
+    private var addMagnetSuspensionCount = 0
+    private var addMagnetContinuations = [CheckedContinuation<Void, Never>]()
     private(set) var pausedIDs = [String]()
     private(set) var pauseAppliedDHTValues = [Bool?]()
     private(set) var pauseNetworkBlockedValues = [Bool]()
@@ -333,8 +354,48 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         }
     }
 
+    func suspendNextNetworkBlock() {
+        blockNetworkSuspensionCount += 1
+    }
+
+    func waitForSuspendedNetworkBlock() async {
+        while blockNetworkContinuations.isEmpty {
+            await Task.yield()
+        }
+    }
+
+    func resumeSuspendedNetworkBlocks() {
+        let continuations = blockNetworkContinuations
+        blockNetworkContinuations.removeAll()
+        for continuation in continuations {
+            continuation.resume()
+        }
+    }
+
+    func suspendNextAddMagnet() {
+        addMagnetSuspensionCount += 1
+    }
+
+    func waitForSuspendedAddMagnet() async {
+        while addMagnetContinuations.isEmpty {
+            await Task.yield()
+        }
+    }
+
+    func resumeSuspendedAddMagnets() {
+        let continuations = addMagnetContinuations
+        addMagnetContinuations.removeAll()
+        for continuation in continuations {
+            continuation.resume()
+        }
+    }
+
     func setNextAddedMagnetID(_ id: String) {
         nextAddedMagnetID = id
+    }
+
+    func setAddMagnetError(_ error: Error?) {
+        addMagnetError = error
     }
 
     func setNextAddedTorrentFileID(_ id: String) {
@@ -394,6 +455,15 @@ actor FakeTorrentEngine: TorrentEngineServicing {
             allowNonHTTPSWebSeeds,
             allowPreMetadataDHT
         ))
+        if addMagnetSuspensionCount > 0 {
+            addMagnetSuspensionCount -= 1
+            await withCheckedContinuation { continuation in
+                addMagnetContinuations.append(continuation)
+            }
+        }
+        if let addMagnetError {
+            throw addMagnetError
+        }
         return nextAddedMagnetID
     }
 
@@ -461,6 +531,12 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func blockNetworkNow() async throws {
         blockNetworkCount += 1
+        if blockNetworkSuspensionCount > 0 {
+            blockNetworkSuspensionCount -= 1
+            await withCheckedContinuation { continuation in
+                blockNetworkContinuations.append(continuation)
+            }
+        }
         currentNetworkBlocked = true
     }
 

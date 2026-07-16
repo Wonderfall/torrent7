@@ -81,10 +81,13 @@ final class TorrentStore {
     @ObservationIgnored
     private var operationDrainTask: Task<Void, Never>?
     @ObservationIgnored
+    private var immediateNetworkBlockTask: Task<Void, Never>?
+    @ObservationIgnored
     private var pendingOperations = [TorrentStorePendingOperation]()
     private var appliedNetworkBinding: AppliedNetworkBinding?
     private var appliedPeerExchangePluginEnabled: Bool?
     private var immediateNetworkBlockBinding: AppliedNetworkBinding?
+    private var immediateNetworkBlockGeneration: UInt64 = 0
     private var torrentsByID = [TorrentItem.ID: TorrentItem]()
     private var lastErrorGeneration = 0
     private var lastErrorSource: TorrentStoreErrorSource?
@@ -225,6 +228,7 @@ final class TorrentStore {
         wakeRefreshTask?.cancel()
         networkInterfaceTask?.cancel()
         operationDrainTask?.cancel()
+        immediateNetworkBlockTask?.cancel()
         networkInterfaceMonitor.cancel()
     }
 
@@ -389,7 +393,9 @@ final class TorrentStore {
     }
 
     func requestSources(for id: TorrentItem.ID) async throws {
-        try await engine.requestSources(id: id)
+        try await performQueuedUserOperation { engine in
+            try await engine.requestSources(id: id)
+        }
     }
 
     func sourcePolicy(for id: TorrentItem.ID) async throws -> TorrentSourcePolicy {
@@ -401,7 +407,9 @@ final class TorrentStore {
         field: TorrentSourcePolicyField,
         enabled: Bool
     ) async throws {
-        try await engine.setSourcePolicy(id: id, field: field, enabled: enabled)
+        try await performQueuedUserOperation { engine in
+            try await engine.setSourcePolicy(id: id, field: field, enabled: enabled)
+        }
     }
 
     func torrentOptions(for id: TorrentItem.ID) async throws -> TorrentOptions {
@@ -409,11 +417,15 @@ final class TorrentStore {
     }
 
     func setTorrentOptions(for id: TorrentItem.ID, options: TorrentOptions) async throws {
-        try await engine.setTorrentOptions(id: id, options: options)
+        try await performQueuedUserOperation { engine in
+            try await engine.setTorrentOptions(id: id, options: options)
+        }
     }
 
     func moveTorrentInQueue(for id: TorrentItem.ID, move: TorrentQueueMove) async throws {
-        try await engine.moveTorrentInQueue(id: id, move: move)
+        try await performQueuedUserOperation { engine in
+            try await engine.moveTorrentInQueue(id: id, move: move)
+        }
     }
 
     func setQueuePriority(for ids: Set<TorrentItem.ID>, priority: TorrentQueuePriority) {
@@ -457,15 +469,21 @@ final class TorrentStore {
     }
 
     func requestFiles(for id: TorrentItem.ID) async throws {
-        try await engine.requestFiles(id: id)
+        try await performQueuedUserOperation { engine in
+            try await engine.requestFiles(id: id)
+        }
     }
 
     func setFilePriority(for id: TorrentItem.ID, fileIndex: Int32, priority: TorrentFilePriority) async throws {
-        try await engine.setFilePriority(id: id, fileIndex: fileIndex, priority: priority)
+        try await performQueuedUserOperation { engine in
+            try await engine.setFilePriority(id: id, fileIndex: fileIndex, priority: priority)
+        }
     }
 
     func requestPieceMap(for id: TorrentItem.ID) async throws {
-        try await engine.requestPieceMap(id: id)
+        try await performQueuedUserOperation { engine in
+            try await engine.requestPieceMap(id: id)
+        }
     }
 
     func trackerBatch(for id: TorrentItem.ID) async -> TorrentTrackerBatch {
@@ -539,6 +557,7 @@ final class TorrentStore {
         return try await engine.previewTorrentFile(data: torrentData)
     }
 
+    @discardableResult
     func addMagnet(
         _ magnet: String,
         savePath explicitSavePath: String? = nil,
@@ -548,42 +567,30 @@ final class TorrentStore {
         allowNonHTTPSTrackers: Bool = false,
         allowNonHTTPSWebSeeds: Bool = false,
         allowPreMetadataDHT: Bool = false
-    ) {
+    ) -> Bool {
         guard let savePath = explicitSavePath ?? downloadFolder?.path else {
             setLastError("Choose a download folder first.", source: .userAction)
-            return
+            return false
         }
         guard magnet.utf8.count <= TorrentInputLimits.maxMagnetURIBytes else {
             setLastError(TorrentStoreError.magnetTooLarge.localizedDescription, source: .userAction)
-            return
+            return false
         }
 
-        let enablePeerExchange = settings.effectiveUsePeerExchangeByDefault
-        let sanitizedLabelIDs = sanitizeLabelIDs(labelIDs)
-        let engine = engine
-        let errorGeneration = lastErrorGeneration
-        scheduleUserOperation { store in
-            do {
-                let addedTorrentID = try await engine.addMagnet(
-                    magnet,
-                    savePath: savePath,
-                    startsPaused: startsPaused,
-                    queuePriority: queuePriority,
-                    enablePeerExchange: enablePeerExchange,
-                    allowNonHTTPSTrackers: allowNonHTTPSTrackers,
-                    allowNonHTTPSWebSeeds: allowNonHTTPSWebSeeds,
-                    allowPreMetadataDHT: allowPreMetadataDHT
-                )
-                store.setSanitizedLabels(sanitizedLabelIDs, forTorrent: addedTorrentID)
-                await store.refreshFromEngine()
-                store.clearLastError(ifUnchangedSince: errorGeneration)
-            } catch {
-                store.downloadFolderAccessStore.prune(activeTorrents: store.torrents)
-                store.setLastError(error.localizedDescription, source: .userAction)
-            }
-        }
+        return scheduleMagnetAdd(
+            magnet,
+            savePath: savePath,
+            prepareFolder: nil,
+            startsPaused: startsPaused,
+            queuePriority: queuePriority,
+            labelIDs: labelIDs,
+            allowNonHTTPSTrackers: allowNonHTTPSTrackers,
+            allowNonHTTPSWebSeeds: allowNonHTTPSWebSeeds,
+            allowPreMetadataDHT: allowPreMetadataDHT
+        )
     }
 
+    @discardableResult
     func addMagnet(
         _ magnet: String,
         downloadFolder: URL,
@@ -594,29 +601,78 @@ final class TorrentStore {
         allowNonHTTPSTrackers: Bool = false,
         allowNonHTTPSWebSeeds: Bool = false,
         allowPreMetadataDHT: Bool = false
-    ) {
+    ) -> Bool {
         guard magnet.utf8.count <= TorrentInputLimits.maxMagnetURIBytes else {
             setLastError(TorrentStoreError.magnetTooLarge.localizedDescription, source: .userAction)
-            return
+            return false
         }
 
-        do {
-            let savePath = try prepareDownloadFolderForAdd(downloadFolder, setsDefault: setsDownloadFolderAsDefault)
-            addMagnet(
-                magnet,
-                savePath: savePath,
-                startsPaused: startsPaused,
-                queuePriority: queuePriority,
-                labelIDs: labelIDs,
-                allowNonHTTPSTrackers: allowNonHTTPSTrackers,
-                allowNonHTTPSWebSeeds: allowNonHTTPSWebSeeds,
-                allowPreMetadataDHT: allowPreMetadataDHT
-            )
-        } catch {
-            setLastError(error.localizedDescription, source: .userAction)
+        return scheduleMagnetAdd(
+            magnet,
+            savePath: nil,
+            prepareFolder: { store in
+                try store.downloadFolderAccessStore.prepareForAdd(
+                    downloadFolder,
+                    setsDefault: setsDownloadFolderAsDefault,
+                    activeTorrents: store.torrents
+                )
+            },
+            startsPaused: startsPaused,
+            queuePriority: queuePriority,
+            labelIDs: labelIDs,
+            allowNonHTTPSTrackers: allowNonHTTPSTrackers,
+            allowNonHTTPSWebSeeds: allowNonHTTPSWebSeeds,
+            allowPreMetadataDHT: allowPreMetadataDHT
+        )
+    }
+
+    private func scheduleMagnetAdd(
+        _ magnet: String,
+        savePath: String?,
+        prepareFolder: (@MainActor @Sendable (TorrentStore) throws -> PreparedDownloadFolder)?,
+        startsPaused: Bool,
+        queuePriority: TorrentQueuePriority,
+        labelIDs: Set<TorrentLabel.ID>,
+        allowNonHTTPSTrackers: Bool,
+        allowNonHTTPSWebSeeds: Bool,
+        allowPreMetadataDHT: Bool
+    ) -> Bool {
+        let enablePeerExchange = settings.effectiveUsePeerExchangeByDefault
+        let sanitizedLabelIDs = sanitizeLabelIDs(labelIDs)
+        let engine = engine
+        let errorGeneration = lastErrorGeneration
+        return scheduleUserOperation { store in
+            var preparedFolder: PreparedDownloadFolder?
+            do {
+                preparedFolder = try prepareFolder?(store)
+                guard let resolvedSavePath = preparedFolder?.path ?? savePath else {
+                    throw TorrentStoreError.downloadFolderAccessDenied
+                }
+                let addedTorrentID = try await engine.addMagnet(
+                    magnet,
+                    savePath: resolvedSavePath,
+                    startsPaused: startsPaused,
+                    queuePriority: queuePriority,
+                    enablePeerExchange: enablePeerExchange,
+                    allowNonHTTPSTrackers: allowNonHTTPSTrackers,
+                    allowNonHTTPSWebSeeds: allowNonHTTPSWebSeeds,
+                    allowPreMetadataDHT: allowPreMetadataDHT
+                )
+                if let preparedFolder {
+                    store.commitDownloadFolderForAdd(preparedFolder)
+                }
+                store.setSanitizedLabels(sanitizedLabelIDs, forTorrent: addedTorrentID)
+                await store.refreshFromEngine()
+                store.clearLastError(ifUnchangedSince: errorGeneration)
+            } catch {
+                store.downloadFolderAccessStore.prune(activeTorrents: store.torrents)
+                store.setLastError(error.localizedDescription, source: .userAction)
+            }
+            withExtendedLifetime(preparedFolder?.lease) {}
         }
     }
 
+    @discardableResult
     func addTorrentFile(
         _ url: URL,
         torrentData: Data,
@@ -628,29 +684,98 @@ final class TorrentStore {
         labelIDs: Set<TorrentLabel.ID> = [],
         allowNonHTTPSTrackers: Bool = false,
         allowNonHTTPSWebSeeds: Bool = false
-    ) {
+    ) -> Bool {
         guard let savePath = explicitSavePath ?? downloadFolder?.path else {
             setLastError("Choose a download folder first.", source: .userAction)
-            return
+            return false
         }
 
+        return scheduleTorrentFileAdd(
+            url,
+            torrentData: torrentData,
+            savePath: savePath,
+            prepareFolder: nil,
+            filePriorities: filePriorities,
+            moveOriginalToTrash: moveOriginalToTrash,
+            startsPaused: startsPaused,
+            queuePriority: queuePriority,
+            labelIDs: labelIDs,
+            allowNonHTTPSTrackers: allowNonHTTPSTrackers,
+            allowNonHTTPSWebSeeds: allowNonHTTPSWebSeeds
+        )
+    }
+
+    @discardableResult
+    func addTorrentFile(
+        _ url: URL,
+        torrentData: Data,
+        downloadFolder: URL,
+        filePriorities: [Int32: TorrentFilePriority]? = nil,
+        moveOriginalToTrash: Bool = false,
+        setsDownloadFolderAsDefault: Bool,
+        startsPaused: Bool = false,
+        queuePriority: TorrentQueuePriority = .normal,
+        labelIDs: Set<TorrentLabel.ID> = [],
+        allowNonHTTPSTrackers: Bool = false,
+        allowNonHTTPSWebSeeds: Bool = false
+    ) -> Bool {
+        scheduleTorrentFileAdd(
+            url,
+            torrentData: torrentData,
+            savePath: nil,
+            prepareFolder: { store in
+                try store.downloadFolderAccessStore.prepareForAdd(
+                    downloadFolder,
+                    setsDefault: setsDownloadFolderAsDefault,
+                    activeTorrents: store.torrents
+                )
+            },
+            filePriorities: filePriorities,
+            moveOriginalToTrash: moveOriginalToTrash,
+            startsPaused: startsPaused,
+            queuePriority: queuePriority,
+            labelIDs: labelIDs,
+            allowNonHTTPSTrackers: allowNonHTTPSTrackers,
+            allowNonHTTPSWebSeeds: allowNonHTTPSWebSeeds
+        )
+    }
+
+    private func scheduleTorrentFileAdd(
+        _ url: URL,
+        torrentData: Data,
+        savePath: String?,
+        prepareFolder: (@MainActor @Sendable (TorrentStore) throws -> PreparedDownloadFolder)?,
+        filePriorities: [Int32: TorrentFilePriority]?,
+        moveOriginalToTrash: Bool,
+        startsPaused: Bool,
+        queuePriority: TorrentQueuePriority,
+        labelIDs: Set<TorrentLabel.ID>,
+        allowNonHTTPSTrackers: Bool,
+        allowNonHTTPSWebSeeds: Bool
+    ) -> Bool {
         let engine = engine
         let enablePeerExchange = settings.effectiveUsePeerExchangeByDefault
         let sanitizedLabelIDs = sanitizeLabelIDs(labelIDs)
         let errorGeneration = lastErrorGeneration
-        scheduleUserOperation { store in
+        return scheduleUserOperation { store in
             var didAddTorrent = false
+            var preparedFolder: PreparedDownloadFolder?
             let didAccess = url.startAccessingSecurityScopedResource()
             defer {
                 if didAccess {
                     url.stopAccessingSecurityScopedResource()
                 }
+                withExtendedLifetime(preparedFolder?.lease) {}
             }
 
             do {
+                preparedFolder = try prepareFolder?(store)
+                guard let resolvedSavePath = preparedFolder?.path ?? savePath else {
+                    throw TorrentStoreError.downloadFolderAccessDenied
+                }
                 let addedTorrentID = try await engine.addTorrentFile(
                     data: torrentData,
-                    savePath: savePath,
+                    savePath: resolvedSavePath,
                     filePriorities: filePriorities,
                     startsPaused: startsPaused,
                     queuePriority: queuePriority,
@@ -659,6 +784,9 @@ final class TorrentStore {
                     allowNonHTTPSWebSeeds: allowNonHTTPSWebSeeds
                 )
                 didAddTorrent = true
+                if let preparedFolder {
+                    store.commitDownloadFolderForAdd(preparedFolder)
+                }
                 store.setSanitizedLabels(sanitizedLabelIDs, forTorrent: addedTorrentID)
                 if moveOriginalToTrash {
                     try unsafe FileManager.default.trashItem(at: url, resultingItemURL: nil)
@@ -672,38 +800,6 @@ final class TorrentStore {
                 store.downloadFolderAccessStore.prune(activeTorrents: store.torrents)
                 store.setLastError(error.localizedDescription, source: .userAction)
             }
-        }
-    }
-
-    func addTorrentFile(
-        _ url: URL,
-        torrentData: Data,
-        downloadFolder: URL,
-        filePriorities: [Int32: TorrentFilePriority]? = nil,
-        moveOriginalToTrash: Bool = false,
-        setsDownloadFolderAsDefault: Bool,
-        startsPaused: Bool = false,
-        queuePriority: TorrentQueuePriority = .normal,
-        labelIDs: Set<TorrentLabel.ID> = [],
-        allowNonHTTPSTrackers: Bool = false,
-        allowNonHTTPSWebSeeds: Bool = false
-    ) {
-        do {
-            let savePath = try prepareDownloadFolderForAdd(downloadFolder, setsDefault: setsDownloadFolderAsDefault)
-            addTorrentFile(
-                url,
-                torrentData: torrentData,
-                savePath: savePath,
-                filePriorities: filePriorities,
-                moveOriginalToTrash: moveOriginalToTrash,
-                startsPaused: startsPaused,
-                queuePriority: queuePriority,
-                labelIDs: labelIDs,
-                allowNonHTTPSTrackers: allowNonHTTPSTrackers,
-                allowNonHTTPSWebSeeds: allowNonHTTPSWebSeeds
-            )
-        } catch {
-            setLastError(error.localizedDescription, source: .userAction)
         }
     }
 
@@ -935,13 +1031,15 @@ final class TorrentStore {
         settingsState.downloadFolder = downloadFolder
     }
 
-    private func prepareDownloadFolderForAdd(_ url: URL, setsDefault: Bool) throws -> String {
-        let preparedFolder = try downloadFolderAccessStore.prepareForAdd(url, setsDefault: setsDefault, activeTorrents: torrents)
-        if let defaultURL = preparedFolder.defaultURL {
-            downloadFolder = defaultURL
-            settingsState.downloadFolder = defaultURL
+    private func commitDownloadFolderForAdd(_ preparedFolder: PreparedDownloadFolder) {
+        guard let defaultURL = downloadFolderAccessStore.commitPreparedForAdd(
+            preparedFolder,
+            activeTorrents: torrents
+        ) else {
+            return
         }
-        return preparedFolder.path
+        downloadFolder = defaultURL
+        settingsState.downloadFolder = defaultURL
     }
 
     private func clearDownloadFolder() {
@@ -951,15 +1049,13 @@ final class TorrentStore {
     }
 
     func saveAll() async {
-        let pendingOperations = operationDrainTask
-        await pendingOperations?.value
+        await drainPendingOperations()
         await engine.saveAll()
     }
 
     @discardableResult
     func saveAllChecked() async -> Bool {
-        let pendingOperations = operationDrainTask
-        await pendingOperations?.value
+        await drainPendingOperations()
 
         do {
             try await engine.saveAllChecked()
@@ -1386,7 +1482,10 @@ final class TorrentStore {
         startOperationDrainIfNeeded()
     }
 
-    private func scheduleUserOperation(_ operation: @escaping @MainActor @Sendable (TorrentStore) async -> Void) {
+    @discardableResult
+    private func scheduleUserOperation(
+        _ operation: @escaping @MainActor @Sendable (TorrentStore) async -> Void
+    ) -> Bool {
         let pendingUserOperationCount = pendingOperations.reduce(into: 0) { count, operation in
             if case .user = operation {
                 count += 1
@@ -1395,11 +1494,30 @@ final class TorrentStore {
         guard pendingUserOperationCount < Self.maximumPendingUserOperationCount,
               pendingOperations.count < Self.maximumPendingOperationCount else {
             setLastError(TorrentStoreError.tooManyPendingOperations.localizedDescription, source: .userAction)
-            return
+            return false
         }
 
         pendingOperations.append(.user(operation))
         startOperationDrainIfNeeded()
+        return true
+    }
+
+    private func performQueuedUserOperation<Result: Sendable>(
+        _ operation: @escaping @Sendable (any TorrentEngineServicing) async throws -> Result
+    ) async throws -> Result {
+        let engine = engine
+        return try await withCheckedThrowingContinuation(isolation: MainActor.shared) { continuation in
+            let accepted = scheduleUserOperation { _ in
+                do {
+                    continuation.resume(returning: try await operation(engine))
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+            if !accepted {
+                continuation.resume(throwing: TorrentStoreError.tooManyPendingOperations)
+            }
+        }
     }
 
     private func startOperationDrainIfNeeded() {
@@ -1431,6 +1549,7 @@ final class TorrentStore {
     }
 
     private func execute(_ operation: TorrentStorePendingOperation) async {
+        await drainImmediateNetworkBlocks()
         switch operation {
         case .applySettings(let application):
             await applySettingsToEngine(
@@ -1442,6 +1561,28 @@ final class TorrentStore {
             }
         case .user(let operation):
             await operation(self)
+        }
+    }
+
+    private func drainPendingOperations() async {
+        while true {
+            let operationTask = operationDrainTask
+            let networkBlockTask = immediateNetworkBlockTask
+            await networkBlockTask?.value
+            await operationTask?.value
+            guard operationDrainTask != nil || immediateNetworkBlockTask != nil else {
+                return
+            }
+        }
+    }
+
+    private func drainImmediateNetworkBlocks() async {
+        while let task = immediateNetworkBlockTask {
+            let generation = immediateNetworkBlockGeneration
+            await task.value
+            if generation == immediateNetworkBlockGeneration {
+                return
+            }
         }
     }
 
@@ -1493,8 +1634,21 @@ final class TorrentStore {
         }
         immediateNetworkBlockBinding = networkBinding
 
+        immediateNetworkBlockGeneration &+= 1
+        let generation = immediateNetworkBlockGeneration
+        let previousTask = immediateNetworkBlockTask
         let engine = engine
-        Task { @MainActor [weak self] in
+        immediateNetworkBlockTask = Task { @MainActor [weak self] in
+            await previousTask?.value
+            defer {
+                if let self, self.immediateNetworkBlockGeneration == generation {
+                    self.immediateNetworkBlockTask = nil
+                }
+            }
+            guard !Task.isCancelled else {
+                return
+            }
+
             do {
                 try await engine.blockNetworkNow()
                 guard let self else {
