@@ -148,8 +148,8 @@ protocol TorrentEngineServicing: Sendable {
     func trackerBatch(id: String, since revision: UInt64?) async -> TorrentTrackerBatch?
     func trackerHostBatch() async -> TorrentTrackerHostBatch
     func webSeedBatch(id: String, since revision: UInt64?) async -> TorrentWebSeedBatch?
-    func webSeedActivity(id: String) async -> TorrentWebSeedActivity
-    func peerSources(id: String) async -> TorrentPeerSources
+    func webSeedActivity(id: String) async -> TorrentWebSeedActivity?
+    func peerSources(id: String) async -> TorrentPeerSources?
     func fileBatch(id: String, since revision: UInt64?) async -> TorrentFileBatch?
     func pieceMapBatch(id: String, since revision: UInt64?) async -> TorrentPieceMapBatch?
 }
@@ -789,13 +789,25 @@ protocol TorrentEngineServicing: Sendable {
 
     func trackerBatch(id: String, since previousRevision: UInt64?) -> TorrentTrackerBatch? {
         guard let client, let pointer = unsafe client.pointer else {
-            return previousRevision == 0 ? nil : TorrentTrackerBatch(revision: 0, trackers: [])
+            return nil
         }
 
         var revision: UInt64 = 0
         var requiredCount: Int32 = 0
+        var resident: UInt8 = 0
         _ = unsafe id.withCString { idPointer in
-            unsafe TorrentClientCopyTrackerBatch(pointer, idPointer, nil, 0, &revision, &requiredCount)
+            unsafe TorrentClientCopyTrackerBatch(
+                pointer,
+                idPointer,
+                nil,
+                0,
+                &revision,
+                &requiredCount,
+                &resident
+            )
+        }
+        guard resident != 0 else {
+            return nil
         }
         if previousRevision == revision {
             return nil
@@ -814,7 +826,8 @@ protocol TorrentEngineServicing: Sendable {
                     buffer.baseAddress,
                     Int32(buffer.count),
                     &revision,
-                    &requiredCount
+                    &requiredCount,
+                    &resident
                 )
             }
         }
@@ -834,12 +847,16 @@ protocol TorrentEngineServicing: Sendable {
                         buffer.baseAddress,
                         Int32(buffer.count),
                         &revision,
-                        &requiredCount
+                        &requiredCount,
+                        &resident
                     )
                 }
             }
         }
 
+        guard resident != 0 else {
+            return nil
+        }
         guard copied > 0 else {
             return TorrentTrackerBatch(revision: revision, trackers: [])
         }
@@ -905,13 +922,25 @@ protocol TorrentEngineServicing: Sendable {
 
     func webSeedBatch(id: String, since previousRevision: UInt64?) -> TorrentWebSeedBatch? {
         guard let client, let pointer = unsafe client.pointer else {
-            return previousRevision == 0 ? nil : TorrentWebSeedBatch(revision: 0, webSeeds: [])
+            return nil
         }
 
         var revision: UInt64 = 0
         var requiredCount: Int32 = 0
+        var resident: UInt8 = 0
         _ = unsafe id.withCString { idPointer in
-            unsafe TorrentClientCopyWebSeedBatch(pointer, idPointer, nil, 0, &revision, &requiredCount)
+            unsafe TorrentClientCopyWebSeedBatch(
+                pointer,
+                idPointer,
+                nil,
+                0,
+                &revision,
+                &requiredCount,
+                &resident
+            )
+        }
+        guard resident != 0 else {
+            return nil
         }
         if previousRevision == revision {
             return nil
@@ -930,7 +959,8 @@ protocol TorrentEngineServicing: Sendable {
                     buffer.baseAddress,
                     Int32(buffer.count),
                     &revision,
-                    &requiredCount
+                    &requiredCount,
+                    &resident
                 )
             }
         }
@@ -950,12 +980,16 @@ protocol TorrentEngineServicing: Sendable {
                         buffer.baseAddress,
                         Int32(buffer.count),
                         &revision,
-                        &requiredCount
+                        &requiredCount,
+                        &resident
                     )
                 }
             }
         }
 
+        guard resident != 0 else {
+            return nil
+        }
         guard copied > 0 else {
             return TorrentWebSeedBatch(revision: revision, webSeeds: [])
         }
@@ -966,39 +1000,57 @@ protocol TorrentEngineServicing: Sendable {
         )
     }
 
-    func webSeedActivity(id: String) -> TorrentWebSeedActivity {
+    func webSeedActivity(id: String) -> TorrentWebSeedActivity? {
         guard let client, let pointer = unsafe client.pointer else {
-            return .empty
+            return nil
         }
 
         var activity = TTorrentWebSeedActivitySnapshot()
-        _ = unsafe id.withCString { idPointer in
+        let copied = unsafe id.withCString { idPointer in
             unsafe TorrentClientCopyWebSeedActivity(pointer, idPointer, &activity, nil)
+        }
+        guard copied != 0 else {
+            return nil
         }
         return TorrentWebSeedActivity(snapshot: activity)
     }
 
-    func peerSources(id: String) -> TorrentPeerSources {
+    func peerSources(id: String) -> TorrentPeerSources? {
         guard let client, let pointer = unsafe client.pointer else {
-            return .empty
+            return nil
         }
 
         var sources = TTorrentPeerSourceSnapshot()
-        _ = unsafe id.withCString { idPointer in
+        let copied = unsafe id.withCString { idPointer in
             unsafe TorrentClientCopyPeerSources(pointer, idPointer, &sources, nil)
+        }
+        guard copied != 0 else {
+            return nil
         }
         return TorrentPeerSources(snapshot: sources)
     }
 
     func fileBatch(id: String, since previousRevision: UInt64?) -> TorrentFileBatch? {
         guard let client, let pointer = unsafe client.pointer else {
-            return previousRevision == 0 ? nil : TorrentFileBatch(revision: 0, files: [])
+            return nil
         }
 
         var revision: UInt64 = 0
         var requiredCount: Int32 = 0
+        var resident: UInt8 = 0
         _ = unsafe id.withCString { idPointer in
-            unsafe TorrentClientCopyFileBatch(pointer, idPointer, nil, 0, &revision, &requiredCount)
+            unsafe TorrentClientCopyFileBatch(
+                pointer,
+                idPointer,
+                nil,
+                0,
+                &revision,
+                &requiredCount,
+                &resident
+            )
+        }
+        guard resident != 0 else {
+            return nil
         }
         if previousRevision == revision {
             return nil
@@ -1017,7 +1069,8 @@ protocol TorrentEngineServicing: Sendable {
                     buffer.baseAddress,
                     Int32(buffer.count),
                     &revision,
-                    &requiredCount
+                    &requiredCount,
+                    &resident
                 )
             }
         }
@@ -1037,12 +1090,16 @@ protocol TorrentEngineServicing: Sendable {
                         buffer.baseAddress,
                         Int32(buffer.count),
                         &revision,
-                        &requiredCount
+                        &requiredCount,
+                        &resident
                     )
                 }
             }
         }
 
+        guard resident != 0 else {
+            return nil
+        }
         guard copied > 0 else {
             return TorrentFileBatch(revision: revision, files: [])
         }
@@ -1055,13 +1112,26 @@ protocol TorrentEngineServicing: Sendable {
 
     func pieceMapBatch(id: String, since previousRevision: UInt64?) -> TorrentPieceMapBatch? {
         guard let client, let pointer = unsafe client.pointer else {
-            return previousRevision == 0 ? nil : TorrentPieceMapBatch(revision: 0, pieceMap: .empty)
+            return nil
         }
 
         var revision: UInt64 = 0
         var requiredCount: Int32 = 0
+        var resident: UInt8 = 0
         _ = unsafe id.withCString { idPointer in
-            unsafe TorrentClientCopyPieceMap(pointer, idPointer, nil, nil, 0, &revision, &requiredCount)
+            unsafe TorrentClientCopyPieceMap(
+                pointer,
+                idPointer,
+                nil,
+                nil,
+                0,
+                &revision,
+                &requiredCount,
+                &resident
+            )
+        }
+        guard resident != 0 else {
+            return nil
         }
         if previousRevision == revision {
             return nil
@@ -1083,7 +1153,8 @@ protocol TorrentEngineServicing: Sendable {
                     buffer.baseAddress,
                     Int32(buffer.count),
                     &revision,
-                    &requiredCount
+                    &requiredCount,
+                    &resident
                 )
             }
         }
@@ -1104,12 +1175,16 @@ protocol TorrentEngineServicing: Sendable {
                         buffer.baseAddress,
                         Int32(buffer.count),
                         &revision,
-                        &requiredCount
+                        &requiredCount,
+                        &resident
                     )
                 }
             }
         }
 
+        guard resident != 0 else {
+            return nil
+        }
         let copiedPieces = Array(pieces.prefix(max(0, Int(copied))))
         return TorrentPieceMapBatch(
             revision: revision,

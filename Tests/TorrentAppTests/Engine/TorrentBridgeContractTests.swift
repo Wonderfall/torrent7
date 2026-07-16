@@ -6,7 +6,7 @@ import TorrentBridge
 struct TorrentBridgeContractTests {
     @Test("Pins bridge ABI version, limits, states, and dirty masks")
     func pinsBridgeConstants() {
-        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 33)
+        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 34)
         #expect(Int32(TTORRENT_BRIDGE_STATE_UNKNOWN) == -1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_CHECKING_FILES) == 1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_DOWNLOADING_METADATA) == 2)
@@ -245,9 +245,19 @@ struct TorrentBridgeContractTests {
         )
         revision = UInt64.max
         requiredCount = -1
+        var resident: UInt8 = 1
         var pieces = Array<UInt8>(repeating: 1, count: 4)
         let copiedPieceMap = unsafe pieces.withUnsafeMutableBufferPointer { buffer in
-            unsafe TorrentClientCopyPieceMap(nil, nil, &pieceMap, buffer.baseAddress, Int32(buffer.count), &revision, &requiredCount)
+            unsafe TorrentClientCopyPieceMap(
+                nil,
+                nil,
+                &pieceMap,
+                buffer.baseAddress,
+                Int32(buffer.count),
+                &revision,
+                &requiredCount,
+                &resident
+            )
         }
         #expect(copiedPieceMap == 0)
         #expect(pieceMap.total_pieces == 0)
@@ -257,6 +267,7 @@ struct TorrentBridgeContractTests {
         #expect(pieceMap.map_truncated == 0)
         #expect(revision == 0)
         #expect(requiredCount == 0)
+        #expect(resident == 0)
 
         errorBuffer = BridgeErrorBuffer()
         errorBuffer.writeSentinel()

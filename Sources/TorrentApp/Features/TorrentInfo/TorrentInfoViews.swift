@@ -1056,8 +1056,12 @@ private struct TorrentInfoView: View {
                 webSeedRevision = webSeedBatch.revision
                 webSeeds = webSeedBatch.webSeeds
             }
-            webSeedActivity = await store.webSeedActivity(for: torrent.id)
-            self.peerSources = peerSources
+            if let webSeedActivity = await store.webSeedActivity(for: torrent.id) {
+                self.webSeedActivity = webSeedActivity
+            }
+            if let peerSources {
+                self.peerSources = peerSources
+            }
             sourcesLoaded = true
             sourceError = nil
             optionsError = nil
@@ -1115,10 +1119,10 @@ private struct TorrentInfoView: View {
                 webSeedRevision = webSeedBatch.revision
                 webSeeds = webSeedBatch.webSeeds
             }
-            if self.webSeedActivity != webSeedActivity {
+            if let webSeedActivity, self.webSeedActivity != webSeedActivity {
                 self.webSeedActivity = webSeedActivity
             }
-            if self.peerSources != peerSources {
+            if let peerSources, self.peerSources != peerSources {
                 self.peerSources = peerSources
             }
             sourcesLoaded = true

@@ -67,18 +67,23 @@ struct TorrentEngineTests {
         #expect(engine.isAvailable == false)
         #expect(await engine.snapshots().isEmpty)
         #expect(await engine.snapshotsIfChanged(since: 1, sortedBy: .name, direction: .ascending)?.torrents.isEmpty == true)
-        #expect(await engine.trackerBatch(id: "missing", since: nil)?.trackers.isEmpty == true)
-        #expect(await engine.webSeedBatch(id: "missing", since: nil)?.webSeeds.isEmpty == true)
-        #expect(await engine.webSeedActivity(id: "missing") == .empty)
-        #expect(await engine.fileBatch(id: "missing", since: nil)?.files.isEmpty == true)
-        #expect(await engine.pieceMapBatch(id: "missing", since: nil)?.pieceMap == .empty)
+        #expect(await engine.trackerBatch(id: "missing", since: nil) == nil)
+        #expect(await engine.webSeedBatch(id: "missing", since: nil) == nil)
+        #expect(await engine.trackerBatch(id: "missing", since: 42) == nil)
+        #expect(await engine.webSeedBatch(id: "missing", since: 42) == nil)
+        #expect(await engine.webSeedActivity(id: "missing") == nil)
+        #expect(await engine.peerSources(id: "missing") == nil)
+        #expect(await engine.fileBatch(id: "missing", since: nil) == nil)
+        #expect(await engine.pieceMapBatch(id: "missing", since: nil) == nil)
+        #expect(await engine.fileBatch(id: "missing", since: 42) == nil)
+        #expect(await engine.pieceMapBatch(id: "missing", since: 42) == nil)
         #expect(await engine.networkStatus() == .empty)
         #expect(await engine.takeChanges() == 0)
         #expect(await engine.takeAlertError() == nil)
     }
 
-    @Test("Unchanged detail revisions suppress mapped batches")
-    func unchangedDetailRevisionsSuppressMappedBatches() async throws {
+    @Test("Nonresident torrent details are cache misses rather than authoritative empty batches")
+    func nonresidentTorrentDetailsAreCacheMisses() async throws {
         let stateDirectory = try temporaryStateDirectory()
         defer {
             try? FileManager.default.removeItem(at: stateDirectory)
@@ -91,14 +96,37 @@ struct TorrentEngineTests {
         let fileRevision = await engine.fileBatch(id: "missing", since: nil)?.revision
         let pieceMapRevision = await engine.pieceMapBatch(id: "missing", since: nil)?.revision
 
-        #expect(trackerRevision == 0)
-        #expect(webSeedRevision == 0)
-        #expect(fileRevision == 0)
-        #expect(pieceMapRevision == 0)
+        #expect(trackerRevision == nil)
+        #expect(webSeedRevision == nil)
+        #expect(fileRevision == nil)
+        #expect(pieceMapRevision == nil)
+        #expect(await engine.webSeedActivity(id: "missing") == nil)
+        #expect(await engine.peerSources(id: "missing") == nil)
         #expect(await engine.trackerBatch(id: "missing", since: trackerRevision) == nil)
         #expect(await engine.webSeedBatch(id: "missing", since: webSeedRevision) == nil)
         #expect(await engine.fileBatch(id: "missing", since: fileRevision) == nil)
         #expect(await engine.pieceMapBatch(id: "missing", since: pieceMapRevision) == nil)
+    }
+
+    @Test("Resident empty torrent details remain authoritative")
+    func residentEmptyTorrentDetailsRemainAuthoritative() async throws {
+        let stateDirectory = try temporaryStateDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: stateDirectory)
+        }
+        let downloadDirectory = stateDirectory.appending(path: "Downloads", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: downloadDirectory, withIntermediateDirectories: true)
+        let engine = try TorrentEngine(stateDirectory: stateDirectory, enablePeerExchangePlugin: true)
+        let id = try await engine.addMagnet(
+            "magnet:?xt=urn:btih:\(String(repeating: "6", count: 40))",
+            savePath: downloadDirectory.path
+        )
+
+        try await engine.requestSources(id: id)
+        let batch = await engine.webSeedBatch(id: id, since: nil)
+
+        #expect(batch != nil)
+        #expect(batch?.webSeeds.isEmpty == true)
     }
 
     @Test("Startup failure engine throws startup error for mutations")

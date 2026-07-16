@@ -2107,17 +2107,27 @@ extern "C" int32_t TorrentClientCopyTrackerBatch(
     TTorrentTrackerSnapshot *trackers,
     int32_t capacity,
     uint64_t *revision_out,
-    int32_t *required_count_out
+    int32_t *required_count_out,
+    uint8_t *resident_out
 ) noexcept
 {
     clear_count_outputs(revision_out, required_count_out);
+    if (resident_out != nullptr) {
+        *resident_out = bridge_bool(false);
+    }
     if (client == nullptr || torrent_id == nullptr) {
         return 0;
     }
 
     try {
         std::span<TTorrentTrackerSnapshot> output = output_span_from_c_buffer(trackers, capacity);
-        return client->copy_trackers(std::string(c_string_view(torrent_id)), output, revision_out, required_count_out);
+        return client->copy_trackers(
+            std::string(c_string_view(torrent_id)),
+            output,
+            revision_out,
+            required_count_out,
+            resident_out
+        );
     } catch (...) {
         return 0;
     }
@@ -2146,16 +2156,26 @@ extern "C" int32_t TorrentClientCopyTrackerHostBatch(
 
 extern "C" int32_t TorrentClientCopyWebSeedBatch(TTorrentClient *client, const char *torrent_id,
                                                  TTorrentWebSeedSnapshot *web_seeds, int32_t capacity,
-                                                 uint64_t *revision_out, int32_t *required_count_out) noexcept
+                                                 uint64_t *revision_out, int32_t *required_count_out,
+                                                 uint8_t *resident_out) noexcept
 {
     clear_count_outputs(revision_out, required_count_out);
+    if (resident_out != nullptr) {
+        *resident_out = bridge_bool(false);
+    }
     if (client == nullptr || torrent_id == nullptr) {
         return 0;
     }
 
     try {
         std::span<TTorrentWebSeedSnapshot> output = output_span_from_c_buffer(web_seeds, capacity);
-        return client->copy_web_seeds(std::string(c_string_view(torrent_id)), output, revision_out, required_count_out);
+        return client->copy_web_seeds(
+            std::string(c_string_view(torrent_id)),
+            output,
+            revision_out,
+            required_count_out,
+            resident_out
+        );
     } catch (...) {
         return 0;
     }
@@ -2224,16 +2244,25 @@ extern "C" int32_t TorrentClientRequestFiles(TTorrentClient *client, const char 
 
 extern "C" int32_t TorrentClientCopyFileBatch(TTorrentClient *client, const char *torrent_id,
                                               TTorrentFileSnapshot *files, int32_t capacity, uint64_t *revision_out,
-                                              int32_t *required_count_out) noexcept
+                                              int32_t *required_count_out, uint8_t *resident_out) noexcept
 {
     clear_count_outputs(revision_out, required_count_out);
+    if (resident_out != nullptr) {
+        *resident_out = bridge_bool(false);
+    }
     if (client == nullptr || torrent_id == nullptr) {
         return 0;
     }
 
     try {
         std::span<TTorrentFileSnapshot> output = output_span_from_c_buffer(files, capacity);
-        return client->copy_files(std::string(c_string_view(torrent_id)), output, revision_out, required_count_out);
+        return client->copy_files(
+            std::string(c_string_view(torrent_id)),
+            output,
+            revision_out,
+            required_count_out,
+            resident_out
+        );
     } catch (...) {
         return 0;
     }
@@ -2265,10 +2294,14 @@ extern "C" int32_t TorrentClientCopyPieceMap(
     uint8_t *pieces,
     int32_t capacity,
     uint64_t *revision_out,
-    int32_t *required_count_out
+    int32_t *required_count_out,
+    uint8_t *resident_out
 ) noexcept
 {
     clear_count_outputs(revision_out, required_count_out);
+    if (resident_out != nullptr) {
+        *resident_out = bridge_bool(false);
+    }
     if (snapshot != nullptr) {
         *snapshot = TTorrentPieceMapSnapshot{};
     }
@@ -2283,7 +2316,8 @@ extern "C" int32_t TorrentClientCopyPieceMap(
             snapshot,
             output,
             revision_out,
-            required_count_out
+            required_count_out,
+            resident_out
         );
     } catch (...) {
         return 0;

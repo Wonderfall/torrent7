@@ -178,10 +178,12 @@ template <typename Predicate>
 {
     std::uint64_t revision = 0;
     int32_t required_count = 0;
-    REQUIRE(client.copy_web_seeds(id, {}, &revision, &required_count) == 0);
+    std::uint8_t resident = bridge_bool(false);
+    REQUIRE(client.copy_web_seeds(id, {}, &revision, &required_count, &resident) == 0);
+    REQUIRE(bridge_bool(resident));
 
     std::vector<TTorrentWebSeedSnapshot> web_seeds(static_cast<std::size_t>(required_count));
-    REQUIRE(client.copy_web_seeds(id, web_seeds, &revision, &required_count) == required_count);
+    REQUIRE(client.copy_web_seeds(id, web_seeds, &revision, &required_count, &resident) == required_count);
 
     return required_count;
 }
@@ -971,12 +973,283 @@ TEST_CASE("active file cache applies filenames renamed before add")
 
     std::uint64_t revision = 0;
     int32_t required_count = 0;
-    REQUIRE(client.copy_files(identity->canonical_id, {}, &revision, &required_count) == 0);
+    std::uint8_t resident = bridge_bool(false);
+    REQUIRE(client.copy_files(identity->canonical_id, {}, &revision, &required_count, &resident) == 0);
+    REQUIRE(bridge_bool(resident));
     REQUIRE(required_count == 1);
 
     std::array<TTorrentFileSnapshot, 1> files{};
-    REQUIRE(client.copy_files(identity->canonical_id, files, &revision, &required_count) == 1);
+    REQUIRE(client.copy_files(identity->canonical_id, files, &revision, &required_count, &resident) == 1);
     CHECK(std::string(files.front().path) == "renamed-public.bin");
+}
+
+TEST_CASE("detail cache distinguishes resident empty data from a silent eviction")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+
+    std::string const id = "empty-web-seeds";
+    std::uint64_t first_revision = 0;
+    {
+        std::scoped_lock guard(client.lock);
+        DirtyMask const changes = client.cache_web_seeds(id, {});
+        REQUIRE((changes & TTORRENT_DIRTY_WEB_SEEDS) != 0U);
+        static_cast<void>(client.publish_changes_locked(changes));
+        first_revision = client.web_seed_revision;
+    }
+
+    std::uint64_t revision = 0;
+    int32_t required_count = -1;
+    std::uint8_t resident = bridge_bool(false);
+    CHECK(client.copy_web_seeds(id, {}, &revision, &required_count, &resident) == 0);
+    CHECK(bridge_bool(resident));
+    CHECK(required_count == 0);
+    CHECK(revision == first_revision);
+
+    {
+        std::scoped_lock guard(client.lock);
+        client.evict_detail_cache_entry_locked(DetailCacheKind::web_seeds, id);
+        CHECK(client.web_seed_revision == first_revision);
+    }
+
+    resident = bridge_bool(true);
+    CHECK(client.copy_web_seeds(id, {}, &revision, &required_count, &resident) == 0);
+    CHECK_FALSE(bridge_bool(resident));
+    CHECK(required_count == 0);
+    CHECK(revision == first_revision);
+
+    {
+        std::scoped_lock guard(client.lock);
+        DirtyMask const changes = client.cache_web_seeds(id, {});
+        REQUIRE((changes & TTORRENT_DIRTY_WEB_SEEDS) != 0U);
+        static_cast<void>(client.publish_changes_locked(changes));
+    }
+    resident = bridge_bool(false);
+    CHECK(client.copy_web_seeds(id, {}, &revision, &required_count, &resident) == 0);
+    CHECK(bridge_bool(resident));
+    CHECK(revision > first_revision);
+}
+
+TEST_CASE("detail cache enforces one deterministic payload LRU across cache kinds")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+
+    auto insert_maximum_file_entry = [&](std::string const &id) {
+        std::vector<TTorrentFileSnapshot> files(static_cast<std::size_t>(TTORRENT_MAX_FILE_COUNT));
+        std::size_t const payload_bytes = files.capacity() * sizeof(TTorrentFileSnapshot);
+        std::scoped_lock guard(client.lock);
+        auto [cached, created] = client.file_cache.try_emplace(id);
+        REQUIRE(created);
+        REQUIRE(client.admit_detail_cache_entry_locked(DetailCacheKind::files, id, 0, payload_bytes));
+        cached->second.files = std::move(files);
+    };
+
+    insert_maximum_file_entry("a");
+    insert_maximum_file_entry("b");
+    insert_maximum_file_entry("c");
+    {
+        std::scoped_lock guard(client.lock);
+        REQUIRE(client.file_cache.size() == 3U);
+        REQUIRE(client.detail_cache_payload_bytes <= kDetailCachePayloadBudgetBytes);
+    }
+
+    std::uint64_t revision = 0;
+    int32_t required_count = 0;
+    std::uint8_t resident = bridge_bool(false);
+    CHECK(client.copy_files("a", {}, &revision, &required_count, &resident) == 0);
+    REQUIRE(bridge_bool(resident));
+
+    {
+        std::vector<std::uint8_t> pieces(static_cast<std::size_t>(TTORRENT_MAX_PIECE_MAP_COUNT));
+        std::size_t const payload_bytes = pieces.capacity() + sizeof(TTorrentPieceMapSnapshot);
+        std::scoped_lock guard(client.lock);
+        auto [cached, created] = client.piece_map_cache.try_emplace("piece-map");
+        REQUIRE(created);
+        REQUIRE(client.admit_detail_cache_entry_locked(
+            DetailCacheKind::piece_map,
+            "piece-map",
+            0,
+            payload_bytes
+        ));
+        cached->second.pieces = std::move(pieces);
+    }
+
+    insert_maximum_file_entry("d");
+    {
+        std::scoped_lock guard(client.lock);
+        CHECK(client.file_cache.contains("a"));
+        CHECK_FALSE(client.file_cache.contains("b"));
+        CHECK(client.file_cache.contains("c"));
+        CHECK(client.file_cache.contains("d"));
+        CHECK(client.piece_map_cache.contains("piece-map"));
+        CHECK(client.detail_cache_payload_bytes <= kDetailCachePayloadBudgetBytes);
+        CHECK(client.detail_cache_entry_count_locked() == 4U);
+    }
+}
+
+TEST_CASE("detail cache enforces its entry-count metadata bound")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+
+    std::scoped_lock guard(client.lock);
+    for (std::size_t index = 0; index <= kDetailCacheMaxEntryCount; ++index) {
+        std::string const id = "peer-" + std::to_string(index);
+        auto [cached, created] = client.peer_source_cache.try_emplace(id);
+        REQUIRE(created);
+        REQUIRE(client.admit_detail_cache_entry_locked(
+            DetailCacheKind::peer_sources,
+            id,
+            0,
+            sizeof(TTorrentPeerSourceSnapshot)
+        ));
+        static_cast<void>(cached);
+    }
+
+    CHECK(client.detail_cache_entry_count_locked() == kDetailCacheMaxEntryCount);
+    CHECK_FALSE(client.peer_source_cache.contains("peer-0"));
+    CHECK(client.peer_source_cache.contains("peer-256"));
+    CHECK(client.detail_cache_payload_bytes
+          == kDetailCacheMaxEntryCount * sizeof(TTorrentPeerSourceSnapshot));
+}
+
+TEST_CASE("tracker host materialization caps rows and backfills its deterministic prefix")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+    CHECK(client.tracker_host_cache.capacity() == 0U);
+
+    constexpr std::size_t torrent_count = 11U;
+    std::vector<lt::torrent_handle> handles;
+    std::vector<TorrentIdentity *> identities;
+    handles.reserve(torrent_count);
+    identities.reserve(torrent_count);
+
+    for (std::size_t torrent = 0; torrent < torrent_count; ++torrent) {
+        std::shared_ptr<lt::torrent_info const> const info = make_queue_torrent_info(
+            static_cast<unsigned char>(60U + torrent)
+        );
+        TorrentIdentity *identity = nullptr;
+        lt::torrent_handle handle = add_metadata_torrent(
+            client,
+            *info,
+            temporary_directory.path(),
+            identity
+        );
+        REQUIRE(identity != nullptr);
+
+        std::vector<lt::announce_entry> trackers;
+        trackers.reserve(static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT));
+        for (int32_t tracker = 0; tracker < TTORRENT_MAX_TRACKER_COUNT; ++tracker) {
+            trackers.emplace_back(
+                "https://tracker-" + std::to_string(torrent) + "-" + std::to_string(tracker)
+                + ".example/announce"
+            );
+        }
+        handle.replace_trackers(trackers);
+        {
+            std::scoped_lock guard(client.lock);
+            static_cast<void>(client.cache_snapshot(handle));
+        }
+        handles.push_back(handle);
+        identities.push_back(identity);
+    }
+
+    {
+        std::scoped_lock guard(client.lock);
+        REQUIRE(client.tracker_host_cache.size()
+                == static_cast<std::size_t>(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT));
+        CHECK(client.tracker_host_cache.capacity()
+              <= static_cast<std::size_t>(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT));
+        CHECK(std::ranges::none_of(client.tracker_host_cache, [&](TTorrentTrackerHostSnapshot const &row) {
+            return std::string_view(row.torrent_id) == identities.back()->canonical_id;
+        }));
+    }
+
+    handles.front().replace_trackers({});
+    DirtyMask host_changes = 0;
+    {
+        std::scoped_lock guard(client.lock);
+        host_changes = client.cache_tracker_hosts(identities.front()->canonical_id, {});
+        REQUIRE(client.tracker_host_cache.size()
+                == static_cast<std::size_t>(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT));
+        CHECK(client.tracker_host_cache.capacity()
+              <= static_cast<std::size_t>(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT));
+        CHECK(std::ranges::any_of(client.tracker_host_cache, [&](TTorrentTrackerHostSnapshot const &row) {
+            return std::string_view(row.torrent_id) == identities.back()->canonical_id;
+        }));
+    }
+    CHECK((host_changes & TTORRENT_DIRTY_TRACKER_HOSTS) != 0U);
+
+    std::uint64_t revision = 0;
+    int32_t required_count = 0;
+    CHECK(client.copy_tracker_hosts({}, &revision, &required_count) == 0);
+    CHECK(required_count == TTORRENT_MAX_TRACKER_HOST_ROW_COUNT);
+}
+
+TEST_CASE("unchanged tracker details do not rebuild the aggregate host cache")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+
+    std::shared_ptr<lt::torrent_info const> const first_info = make_queue_torrent_info(90U);
+    std::shared_ptr<lt::torrent_info const> const second_info = make_queue_torrent_info(91U);
+    TorrentIdentity *first_identity = nullptr;
+    TorrentIdentity *second_identity = nullptr;
+    lt::torrent_handle first_handle = add_metadata_torrent(
+        client,
+        *first_info,
+        temporary_directory.path(),
+        first_identity
+    );
+    lt::torrent_handle second_handle = add_metadata_torrent(
+        client,
+        *second_info,
+        temporary_directory.path(),
+        second_identity
+    );
+    REQUIRE(first_identity != nullptr);
+    REQUIRE(second_identity != nullptr);
+
+    std::vector<lt::announce_entry> const first_trackers{
+        lt::announce_entry{"https://first.example/announce"},
+    };
+    std::vector<lt::announce_entry> const original_second_trackers{
+        lt::announce_entry{"https://second-old.example/announce"},
+    };
+    first_handle.replace_trackers(first_trackers);
+    second_handle.replace_trackers(original_second_trackers);
+    {
+        std::scoped_lock guard(client.lock);
+        static_cast<void>(client.cache_snapshot(first_handle));
+        static_cast<void>(client.cache_snapshot(second_handle));
+        static_cast<void>(client.cache_trackers(first_handle, first_trackers));
+        REQUIRE(std::ranges::any_of(client.tracker_host_cache, [](TTorrentTrackerHostSnapshot const &row) {
+            return std::string_view(row.host) == "second-old.example";
+        }));
+    }
+
+    {
+        std::scoped_lock guard(client.lock);
+        {
+            std::scoped_lock io_guard(client.resume_io_lock);
+            client.handle_by_id.insert_or_assign(second_identity->canonical_id, lt::torrent_handle{});
+        }
+        CHECK(client.cache_trackers(first_handle, first_trackers) == 0U);
+        CHECK(std::ranges::any_of(client.tracker_host_cache, [](TTorrentTrackerHostSnapshot const &row) {
+            return std::string_view(row.host) == "second-old.example";
+        }));
+        {
+            std::scoped_lock io_guard(client.resume_io_lock);
+            client.handle_by_id.insert_or_assign(second_identity->canonical_id, second_handle);
+        }
+    }
 }
 
 TEST_CASE("settings apply toggles peer exchange for loaded torrents")
@@ -2091,7 +2364,16 @@ TEST_CASE("piece map reports metadata piece count before any piece is downloaded
     TTorrentPieceMapSnapshot snapshot{};
     std::uint64_t revision = 0;
     int32_t required_count = 0;
-    REQUIRE(client.copy_piece_map(identity->canonical_id, &snapshot, {}, &revision, &required_count) == 0);
+    std::uint8_t resident = bridge_bool(false);
+    REQUIRE(client.copy_piece_map(
+        identity->canonical_id,
+        &snapshot,
+        {},
+        &revision,
+        &required_count,
+        &resident
+    ) == 0);
+    REQUIRE(bridge_bool(resident));
 
     CHECK(snapshot.total_pieces == info->num_pieces());
     CHECK(snapshot.completed_pieces == 0);
@@ -2099,7 +2381,14 @@ TEST_CASE("piece map reports metadata piece count before any piece is downloaded
     CHECK(required_count == info->num_pieces());
 
     std::vector<std::uint8_t> pieces(static_cast<std::size_t>(required_count));
-    REQUIRE(client.copy_piece_map(identity->canonical_id, &snapshot, std::span{pieces}, &revision, &required_count)
+    REQUIRE(client.copy_piece_map(
+                identity->canonical_id,
+                &snapshot,
+                std::span{pieces},
+                &revision,
+                &required_count,
+                &resident
+            )
             == info->num_pieces());
     for (std::uint8_t const piece : pieces) {
         CHECK_FALSE(bridge_bool(piece));
@@ -2119,7 +2408,7 @@ TEST_CASE("hash-only torrent info is rejected as invalid metadata")
     CHECK(result.error().message == "The torrent file is invalid.");
 }
 
-TEST_CASE("piece map remains unavailable for a metadata-less magnet")
+TEST_CASE("metadata-less magnets replace retained file and piece details with authoritative empties")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
     TTorrentClient client((temporary_directory.path() / "State").string());
@@ -2152,6 +2441,22 @@ TEST_CASE("piece map remains unavailable for a metadata-less magnet")
     REQUIRE(torrent_file != nullptr);
     REQUIRE_FALSE(torrent_file->is_valid());
 
+    {
+        std::vector<TTorrentFileSnapshot> retained_files(4U);
+        std::size_t const retained_bytes = retained_files.capacity() * sizeof(TTorrentFileSnapshot);
+        std::scoped_lock guard(client.lock);
+        auto [cached, created] = client.file_cache.try_emplace(added_id);
+        REQUIRE(created);
+        REQUIRE(client.admit_detail_cache_entry_locked(
+            DetailCacheKind::files,
+            added_id,
+            0,
+            retained_bytes
+        ));
+        cached->second.files = std::move(retained_files);
+        REQUIRE(client.detail_cache_payload_bytes == retained_bytes);
+    }
+
     REQUIRE(TorrentClientRequestFiles(
         &client,
         added_id,
@@ -2159,17 +2464,27 @@ TEST_CASE("piece map remains unavailable for a metadata-less magnet")
         static_cast<int32_t>(sizeof(error))
     ) == 0);
     CHECK(error[0] == '\0');
+    {
+        std::scoped_lock guard(client.lock);
+        auto const cached = client.file_cache.find(added_id);
+        REQUIRE(cached != client.file_cache.end());
+        CHECK(cached->second.files.capacity() == 0U);
+        CHECK(client.detail_cache_payload_bytes == 0U);
+    }
 
     std::uint64_t revision = 0;
     int32_t required_count = -1;
+    std::uint8_t resident = bridge_bool(false);
     CHECK(TorrentClientCopyFileBatch(
         &client,
         added_id,
         nullptr,
         0,
         &revision,
-        &required_count
+        &required_count,
+        &resident
     ) == 0);
+    CHECK(bridge_bool(resident));
     CHECK(required_count == 0);
 
     lt::torrent_status synthetic_status = status;
@@ -2191,7 +2506,8 @@ TEST_CASE("piece map remains unavailable for a metadata-less magnet")
         nullptr,
         0,
         &revision,
-        &required_count
+        &required_count,
+        &resident
     ) == 0);
     CHECK(synthetic_snapshot.total_pieces == 3);
     CHECK(synthetic_snapshot.completed_pieces == 0);
@@ -2218,7 +2534,8 @@ TEST_CASE("piece map remains unavailable for a metadata-less magnet")
         nullptr,
         0,
         &revision,
-        &required_count
+        &required_count,
+        &resident
     ) == 0);
     CHECK(snapshot.total_pieces == 0);
     CHECK(snapshot.completed_pieces == 0);

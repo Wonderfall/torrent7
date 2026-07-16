@@ -295,6 +295,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             std::array<std::uint8_t, 256> pieces{};
             std::uint64_t revision = 0;
             int32_t required_count = 0;
+            std::uint8_t resident = 0;
             static_cast<void>(TorrentClientRequestPieceMap(
                 harness.client(),
                 maybe_null(reader, id),
@@ -308,7 +309,8 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
                 reader.read_bool() ? nullptr : pieces.data(),
                 reader.read_bool() ? -1 : static_cast<int32_t>(pieces.size()),
                 reader.read_bool() ? nullptr : &revision,
-                reader.read_bool() ? nullptr : &required_count
+                reader.read_bool() ? nullptr : &required_count,
+                reader.read_bool() ? nullptr : &resident
             ));
             break;
         }

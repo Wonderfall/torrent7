@@ -53,7 +53,7 @@ inline constexpr int32_t TTORRENT_SOURCE_POLICY_ENABLE_LSD = 2;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS = 3;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS = 4;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT = 5;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 33;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 34;
 extern "C" {
 #else
 #define TORRENT_BRIDGE_NOEXCEPT
@@ -105,7 +105,7 @@ enum {
     TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS = 3,
     TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS = 4,
     TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT = 5,
-    TTORRENT_BRIDGE_ABI_VERSION = 33
+    TTORRENT_BRIDGE_ABI_VERSION = 34
 };
 #endif
 
@@ -463,7 +463,8 @@ int32_t TorrentClientCopyTrackerBatch(
     TTorrentTrackerSnapshot *trackers,
     int32_t capacity,
     uint64_t *revision_out,
-    int32_t *required_count_out
+    int32_t *required_count_out,
+    uint8_t *resident_out
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientCopyTrackerHostBatch(
@@ -480,7 +481,8 @@ int32_t TorrentClientCopyWebSeedBatch(
     TTorrentWebSeedSnapshot *web_seeds,
     int32_t capacity,
     uint64_t *revision_out,
-    int32_t *required_count_out
+    int32_t *required_count_out,
+    uint8_t *resident_out
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientCopyWebSeedActivity(
@@ -510,7 +512,8 @@ int32_t TorrentClientCopyFileBatch(
     TTorrentFileSnapshot *files,
     int32_t capacity,
     uint64_t *revision_out,
-    int32_t *required_count_out
+    int32_t *required_count_out,
+    uint8_t *resident_out
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientRequestPieceMap(
@@ -527,7 +530,8 @@ int32_t TorrentClientCopyPieceMap(
     uint8_t *pieces,
     int32_t capacity,
     uint64_t *revision_out,
-    int32_t *required_count_out
+    int32_t *required_count_out,
+    uint8_t *resident_out
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientSetFilePriority(

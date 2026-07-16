@@ -494,11 +494,11 @@ final class TorrentStore {
         await engine.webSeedBatch(id: id, since: revision)
     }
 
-    func webSeedActivity(for id: TorrentItem.ID) async -> TorrentWebSeedActivity {
+    func webSeedActivity(for id: TorrentItem.ID) async -> TorrentWebSeedActivity? {
         await engine.webSeedActivity(id: id)
     }
 
-    func peerSources(for id: TorrentItem.ID) async -> TorrentPeerSources {
+    func peerSources(for id: TorrentItem.ID) async -> TorrentPeerSources? {
         await engine.peerSources(id: id)
     }
 

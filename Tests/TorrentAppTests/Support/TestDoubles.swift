@@ -704,11 +704,11 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         return revision == webSeedBatchValue.revision ? nil : webSeedBatchValue
     }
 
-    func webSeedActivity(id: String) async -> TorrentWebSeedActivity {
+    func webSeedActivity(id: String) async -> TorrentWebSeedActivity? {
         .empty
     }
 
-    func peerSources(id: String) async -> TorrentPeerSources {
+    func peerSources(id: String) async -> TorrentPeerSources? {
         .empty
     }
 

@@ -73,6 +73,15 @@ template <std::size_t Count>
     return char_arrays_equal(lhs.url, rhs.url);
 }
 
+[[nodiscard]] bool tracker_host_snapshots_equal(
+    TTorrentTrackerHostSnapshot const &lhs,
+    TTorrentTrackerHostSnapshot const &rhs
+) noexcept
+{
+    return char_arrays_equal(lhs.torrent_id, rhs.torrent_id)
+        && char_arrays_equal(lhs.host, rhs.host);
+}
+
 [[nodiscard]] bool file_snapshots_equal(TTorrentFileSnapshot const &lhs, TTorrentFileSnapshot const &rhs) noexcept
 {
     return char_arrays_equal(lhs.path, rhs.path)
@@ -119,7 +128,173 @@ template <typename Value, typename Equal>
         && std::ranges::equal(lhs, rhs, equal);
 }
 
+template <typename Value>
+[[nodiscard]] std::size_t vector_payload_bytes(std::vector<Value> const &values) noexcept
+{
+    if (values.capacity() > std::numeric_limits<std::size_t>::max() / sizeof(Value)) {
+        return std::numeric_limits<std::size_t>::max();
+    }
+    return values.capacity() * sizeof(Value);
+}
+
+[[nodiscard]] std::size_t saturating_payload_sum(std::size_t lhs, std::size_t rhs) noexcept
+{
+    if (rhs > std::numeric_limits<std::size_t>::max() - lhs) {
+        return std::numeric_limits<std::size_t>::max();
+    }
+    return lhs + rhs;
+}
+
+[[nodiscard]] std::size_t retained_payload_bytes(TrackerCacheEntry const &entry) noexcept
+{
+    return vector_payload_bytes(entry.trackers);
+}
+
+[[nodiscard]] std::size_t retained_payload_bytes(WebSeedCacheEntry const &entry) noexcept
+{
+    return saturating_payload_sum(vector_payload_bytes(entry.web_seeds), sizeof(entry.activity));
+}
+
+[[nodiscard]] constexpr std::size_t retained_payload_bytes(PeerSourceCacheEntry const &) noexcept
+{
+    return sizeof(TTorrentPeerSourceSnapshot);
+}
+
+[[nodiscard]] std::size_t retained_payload_bytes(FileCacheEntry const &entry) noexcept
+{
+    return vector_payload_bytes(entry.files);
+}
+
+[[nodiscard]] std::size_t retained_payload_bytes(PieceMapCacheEntry const &entry) noexcept
+{
+    return saturating_payload_sum(vector_payload_bytes(entry.pieces), sizeof(entry.snapshot));
+}
+
+struct DetailCacheVictim {
+    DetailCacheKind kind = DetailCacheKind::trackers;
+    std::string const *id = nullptr;
+    std::uint64_t last_access_sequence = 0;
+};
+
+[[nodiscard]] bool victim_precedes(
+    DetailCacheVictim const &candidate,
+    DetailCacheVictim const &current
+) noexcept
+{
+    if (current.id == nullptr) {
+        return true;
+    }
+    if (candidate.last_access_sequence != current.last_access_sequence) {
+        return candidate.last_access_sequence < current.last_access_sequence;
+    }
+    if (candidate.kind != current.kind) {
+        return candidate.kind < current.kind;
+    }
+    return *candidate.id < *current.id;
+}
+
 } // namespace
+
+void TTorrentClient::touch_detail_cache_entry(std::uint64_t &last_access_sequence) noexcept
+{
+    last_access_sequence = next_detail_cache_access_sequence;
+    if (next_detail_cache_access_sequence < std::numeric_limits<std::uint64_t>::max()) {
+        ++next_detail_cache_access_sequence;
+    }
+}
+
+std::size_t TTorrentClient::detail_cache_entry_count_locked() const noexcept
+{
+    return tracker_cache.size()
+        + web_seed_cache.size()
+        + peer_source_cache.size()
+        + file_cache.size()
+        + piece_map_cache.size();
+}
+
+void TTorrentClient::evict_detail_cache_entry_locked(DetailCacheKind kind, std::string const &id) noexcept
+{
+    switch (kind) {
+    case DetailCacheKind::trackers:
+        if (auto const cached = tracker_cache.find(id); cached != tracker_cache.end()) {
+            detail_cache_payload_bytes -= retained_payload_bytes(cached->second);
+            tracker_cache.erase(cached);
+        }
+        break;
+    case DetailCacheKind::web_seeds:
+        if (auto const cached = web_seed_cache.find(id); cached != web_seed_cache.end()) {
+            detail_cache_payload_bytes -= retained_payload_bytes(cached->second);
+            web_seed_cache.erase(cached);
+        }
+        break;
+    case DetailCacheKind::peer_sources:
+        if (auto const cached = peer_source_cache.find(id); cached != peer_source_cache.end()) {
+            detail_cache_payload_bytes -= retained_payload_bytes(cached->second);
+            peer_source_cache.erase(cached);
+        }
+        break;
+    case DetailCacheKind::files:
+        if (auto const cached = file_cache.find(id); cached != file_cache.end()) {
+            detail_cache_payload_bytes -= retained_payload_bytes(cached->second);
+            file_cache.erase(cached);
+        }
+        break;
+    case DetailCacheKind::piece_map:
+        if (auto const cached = piece_map_cache.find(id); cached != piece_map_cache.end()) {
+            detail_cache_payload_bytes -= retained_payload_bytes(cached->second);
+            piece_map_cache.erase(cached);
+        }
+        break;
+    }
+}
+
+bool TTorrentClient::admit_detail_cache_entry_locked(
+    DetailCacheKind kind,
+    std::string const &id,
+    std::size_t previous_payload_bytes,
+    std::size_t next_payload_bytes
+)
+{
+    if (next_payload_bytes > kDetailCachePayloadBudgetBytes
+        || previous_payload_bytes > detail_cache_payload_bytes) {
+        return false;
+    }
+
+    auto const projected_payload = [&]() noexcept {
+        return detail_cache_payload_bytes - previous_payload_bytes + next_payload_bytes;
+    };
+    while (projected_payload() > kDetailCachePayloadBudgetBytes
+           || detail_cache_entry_count_locked() > kDetailCacheMaxEntryCount) {
+        DetailCacheVictim victim;
+        auto consider = [&](DetailCacheKind candidate_kind, auto const &cache) {
+            for (auto const &[candidate_id, entry] : cache) {
+                if (candidate_kind == kind && candidate_id == id) {
+                    continue;
+                }
+                DetailCacheVictim const candidate{
+                    .kind = candidate_kind,
+                    .id = &candidate_id,
+                    .last_access_sequence = entry.last_access_sequence,
+                };
+                if (victim_precedes(candidate, victim)) {
+                    victim = candidate;
+                }
+            }
+        };
+        consider(DetailCacheKind::trackers, tracker_cache);
+        consider(DetailCacheKind::web_seeds, web_seed_cache);
+        consider(DetailCacheKind::peer_sources, peer_source_cache);
+        consider(DetailCacheKind::files, file_cache);
+        consider(DetailCacheKind::piece_map, piece_map_cache);
+        if (victim.id == nullptr) {
+            return false;
+        }
+        evict_detail_cache_entry_locked(victim.kind, *victim.id);
+    }
+
+    detail_cache_payload_bytes = projected_payload();
+    return true;
+}
 
 DirtyMask TTorrentClient::rebuild_snapshot_cache()
 {
@@ -134,7 +309,16 @@ DirtyMask TTorrentClient::rebuild_snapshot_cache()
     snapshot_cache.clear();
     snapshot_indices.clear();
     tracker_host_cache.clear();
-    DirtyMask changes = update_snapshot_cache(statuses);
+    rebuilding_snapshot_cache = true;
+    DirtyMask changes = 0;
+    try {
+        changes = update_snapshot_cache(statuses);
+    } catch (...) {
+        rebuilding_snapshot_cache = false;
+        throw;
+    }
+    rebuilding_snapshot_cache = false;
+    changes |= rebuild_tracker_host_cache_locked();
 
     if (had_snapshots && snapshot_cache.empty()) {
         changes |= mark_snapshot_cache_changed();
@@ -203,7 +387,6 @@ DirtyMask TTorrentClient::cache_snapshot(lt::torrent_status const &status)
     snapshot.queue_priority = identity == nullptr ? TTORRENT_QUEUE_PRIORITY_NORMAL : identity->queue_priority;
     auto const existing = snapshot_indices.find(id);
     if (existing != snapshot_indices.end()) {
-        changes |= cache_tracker_hosts(status.handle, id);
         TTorrentSnapshot &current = snapshot_cache.at(existing->second);
         if (!snapshots_equal(current, snapshot)) {
             current = snapshot;
@@ -215,9 +398,11 @@ DirtyMask TTorrentClient::cache_snapshot(lt::torrent_status const &status)
         return changes;
     }
 
-    changes |= cache_tracker_hosts(status.handle, id);
     snapshot_indices.emplace(id, snapshot_cache.size());
     snapshot_cache.push_back(snapshot);
+    if (!rebuilding_snapshot_cache) {
+        changes |= cache_tracker_hosts(status.handle, id);
+    }
     return changes | mark_snapshot_cache_changed();
 }
 
@@ -311,6 +496,7 @@ DirtyMask TTorrentClient::remove_snapshot(std::string_view id)
     }
     snapshot_cache.pop_back();
     snapshot_indices.erase(removed_id);
+    changes |= rebuild_tracker_host_cache_locked();
     return changes | mark_snapshot_cache_changed();
 }
 
@@ -319,33 +505,94 @@ DirtyMask TTorrentClient::mark_tracker_host_cache_changed() noexcept
     return TTORRENT_DIRTY_TRACKER_HOSTS;
 }
 
+DirtyMask TTorrentClient::rebuild_tracker_host_cache_locked(
+    std::string_view override_id,
+    std::vector<lt::announce_entry> const *override_trackers
+)
+{
+    std::vector<lt::torrent_handle> handles;
+    handles.reserve(snapshot_cache.size());
+    {
+        std::scoped_lock io_guard(resume_io_lock);
+        for (TTorrentSnapshot const &snapshot : snapshot_cache) {
+            auto const mapped = handle_by_id.find(snapshot.id);
+            handles.push_back(mapped == handle_by_id.end() ? lt::torrent_handle{} : mapped->second);
+        }
+    }
+
+    constexpr auto maximum_row_count = static_cast<std::size_t>(
+        TTORRENT_MAX_TRACKER_HOST_ROW_COUNT
+    );
+    std::vector<TTorrentTrackerHostSnapshot> rows;
+    auto append_row = [&](TTorrentTrackerHostSnapshot const &row) {
+        if (rows.size() >= maximum_row_count) {
+            return;
+        }
+        if (rows.size() == rows.capacity()) {
+            constexpr std::size_t initial_capacity = 16U;
+            std::size_t const next_capacity = std::min(
+                maximum_row_count,
+                rows.capacity() == 0U ? initial_capacity : rows.capacity() * 2U
+            );
+            rows.reserve(next_capacity);
+            if (rows.capacity() > maximum_row_count) {
+                throw std::length_error("Torrent tracker-host cache exceeded its capacity bound.");
+            }
+        }
+        rows.push_back(row);
+    };
+    for (std::size_t index = 0; index < snapshot_cache.size(); ++index) {
+        if (rows.size() >= maximum_row_count) {
+            break;
+        }
+
+        TTorrentSnapshot const &snapshot = snapshot_cache.at(index);
+        std::vector<lt::announce_entry> queried_trackers;
+        std::vector<lt::announce_entry> const *trackers = nullptr;
+        if (!override_id.empty() && std::string_view(snapshot.id) == override_id && override_trackers != nullptr) {
+            trackers = override_trackers;
+        } else if (handles.at(index).is_valid()) {
+            try {
+                queried_trackers = handles.at(index).trackers();
+                trackers = &queried_trackers;
+            } catch (...) {
+                trackers = nullptr;
+            }
+        }
+        if (trackers == nullptr) {
+            continue;
+        }
+
+        std::set<std::string> unique_hosts;
+        for (lt::announce_entry const &tracker : *trackers) {
+            if (std::optional<std::string> host = normalized_tracker_host(tracker.url)) {
+                unique_hosts.insert(std::move(*host));
+            }
+        }
+        for (std::string const &host : unique_hosts) {
+            if (rows.size() >= maximum_row_count) {
+                break;
+            }
+            TTorrentTrackerHostSnapshot row{};
+            copy_string(std::span{row.torrent_id}, std::string_view(snapshot.id));
+            copy_string(std::span{row.host}, host);
+            append_row(row);
+        }
+    }
+
+    if (vectors_equal(tracker_host_cache, rows, tracker_host_snapshots_equal)) {
+        return 0;
+    }
+    tracker_host_cache = std::move(rows);
+    return mark_tracker_host_cache_changed();
+}
+
 DirtyMask TTorrentClient::cache_tracker_hosts(std::string const &id, std::vector<lt::announce_entry> const &trackers)
 {
-    if (id.empty()) {
+    if (id.empty() || !snapshot_indices.contains(id)) {
         return 0;
     }
-
-    std::set<std::string> unique_hosts;
-    for (lt::announce_entry const &tracker : trackers) {
-        if (std::optional<std::string> host = normalized_tracker_host(tracker.url)) {
-            unique_hosts.insert(std::move(*host));
-        }
-    }
-
-    std::vector<std::string> hosts(unique_hosts.begin(), unique_hosts.end());
-    auto const existing = tracker_host_cache.find(id);
-    if (existing != tracker_host_cache.end() && existing->second == hosts) {
-        return 0;
-    }
-    if (hosts.empty()) {
-        if (existing == tracker_host_cache.end()) {
-            return 0;
-        }
-        tracker_host_cache.erase(existing);
-        return mark_tracker_host_cache_changed();
-    }
-    tracker_host_cache.insert_or_assign(id, std::move(hosts));
-    return mark_tracker_host_cache_changed();
+    return rebuild_tracker_host_cache_locked(id, &trackers);
 }
 
 DirtyMask TTorrentClient::cache_tracker_hosts(lt::torrent_handle const &handle, std::string const &id)
@@ -367,10 +614,10 @@ DirtyMask TTorrentClient::remove_tracker_hosts(std::string_view id)
         return 0;
     }
 
-    if (tracker_host_cache.erase(std::string(id)) > 0) {
-        return mark_tracker_host_cache_changed();
-    }
-    return 0;
+    auto const removed = std::erase_if(tracker_host_cache, [id](TTorrentTrackerHostSnapshot const &row) {
+        return std::string_view(row.torrent_id) == id;
+    });
+    return removed > 0 ? mark_tracker_host_cache_changed() : 0;
 }
 
 DirtyMask TTorrentClient::mark_tracker_cache_changed() noexcept
@@ -384,7 +631,9 @@ DirtyMask TTorrentClient::remove_trackers(std::string_view id)
         return 0;
     }
 
-    if (tracker_cache.erase(std::string(id)) > 0) {
+    if (auto const cached = tracker_cache.find(std::string(id)); cached != tracker_cache.end()) {
+        detail_cache_payload_bytes -= retained_payload_bytes(cached->second);
+        tracker_cache.erase(cached);
         return mark_tracker_cache_changed();
     }
     return 0;
@@ -401,7 +650,9 @@ DirtyMask TTorrentClient::remove_web_seeds(std::string_view id)
         return 0;
     }
 
-    if (web_seed_cache.erase(std::string(id)) > 0) {
+    if (auto const cached = web_seed_cache.find(std::string(id)); cached != web_seed_cache.end()) {
+        detail_cache_payload_bytes -= retained_payload_bytes(cached->second);
+        web_seed_cache.erase(cached);
         return mark_web_seed_cache_changed();
     }
     return 0;
@@ -413,7 +664,10 @@ void TTorrentClient::remove_peer_sources(std::string_view id)
         return;
     }
 
-    peer_source_cache.erase(std::string(id));
+    if (auto const cached = peer_source_cache.find(std::string(id)); cached != peer_source_cache.end()) {
+        detail_cache_payload_bytes -= retained_payload_bytes(cached->second);
+        peer_source_cache.erase(cached);
+    }
 }
 
 DirtyMask TTorrentClient::mark_file_cache_changed() noexcept
@@ -427,7 +681,9 @@ DirtyMask TTorrentClient::remove_files(std::string_view id)
         return 0;
     }
 
-    if (file_cache.erase(std::string(id)) > 0) {
+    if (auto const cached = file_cache.find(std::string(id)); cached != file_cache.end()) {
+        detail_cache_payload_bytes -= retained_payload_bytes(cached->second);
+        file_cache.erase(cached);
         return mark_file_cache_changed();
     }
     return 0;
@@ -444,7 +700,9 @@ DirtyMask TTorrentClient::remove_piece_map(std::string_view id)
         return 0;
     }
 
-    if (piece_map_cache.erase(std::string(id)) > 0) {
+    if (auto const cached = piece_map_cache.find(std::string(id)); cached != piece_map_cache.end()) {
+        detail_cache_payload_bytes -= retained_payload_bytes(cached->second);
+        piece_map_cache.erase(cached);
         return mark_piece_map_cache_changed();
     }
     return 0;
@@ -470,6 +728,7 @@ DirtyMask TTorrentClient::invalidate_detail_caches_locked()
         piece_map_cache.clear();
         changes |= mark_piece_map_cache_changed();
     }
+    detail_cache_payload_bytes = 0;
     return changes;
 }
 
@@ -520,9 +779,23 @@ DirtyMask TTorrentClient::cache_trackers(lt::torrent_handle const &handle, std::
         snapshots.push_back(tracker_snapshot_from_entry(tracker, hashes));
     }
 
-    auto &entry = tracker_cache[id];
-    if (vectors_equal(entry.trackers, snapshots, tracker_snapshots_equal)) {
-        return changes | cache_tracker_hosts(id, trackers);
+    auto [cached, created] = tracker_cache.try_emplace(id);
+    TrackerCacheEntry &entry = cached->second;
+    if (!created && vectors_equal(entry.trackers, snapshots, tracker_snapshots_equal)) {
+        return changes;
+    }
+    std::size_t const previous_payload_bytes = created ? 0U : retained_payload_bytes(entry);
+    std::size_t const next_payload_bytes = vector_payload_bytes(snapshots);
+    if (!admit_detail_cache_entry_locked(
+            DetailCacheKind::trackers,
+            id,
+            previous_payload_bytes,
+            next_payload_bytes
+        )) {
+        if (created) {
+            tracker_cache.erase(cached);
+        }
+        throw std::length_error("Torrent tracker details exceed the cache budget.");
     }
     entry.trackers = std::move(snapshots);
     entry.revision = tracker_revision + 1U;
@@ -576,9 +849,26 @@ BridgeResult TTorrentClient::cache_web_seeds(lt::torrent_handle const &handle, D
         }
     }
 
-    auto &entry = web_seed_cache[*cache_id];
-    if (vectors_equal(entry.web_seeds, snapshots, web_seed_snapshots_equal)) {
+    auto [cached, created] = web_seed_cache.try_emplace(*cache_id);
+    WebSeedCacheEntry &entry = cached->second;
+    if (!created && vectors_equal(entry.web_seeds, snapshots, web_seed_snapshots_equal)) {
         return {};
+    }
+    std::size_t const previous_payload_bytes = created ? 0U : retained_payload_bytes(entry);
+    std::size_t const next_payload_bytes = saturating_payload_sum(
+        vector_payload_bytes(snapshots),
+        sizeof(entry.activity)
+    );
+    if (!admit_detail_cache_entry_locked(
+            DetailCacheKind::web_seeds,
+            *cache_id,
+            previous_payload_bytes,
+            next_payload_bytes
+        )) {
+        if (created) {
+            web_seed_cache.erase(cached);
+        }
+        return bridge_error(2, "Torrent web-seed details exceed the cache budget.");
     }
     entry.web_seeds = std::move(snapshots);
     entry.revision = web_seed_revision + 1U;
@@ -603,9 +893,27 @@ DirtyMask TTorrentClient::cache_web_seeds(
     snapshots.reserve(count);
     append_web_seed_snapshots(snapshots, url_seeds, count);
 
-    auto &entry = web_seed_cache[std::string(id)];
-    if (vectors_equal(entry.web_seeds, snapshots, web_seed_snapshots_equal)) {
+    std::string const cache_id(id);
+    auto [cached, created] = web_seed_cache.try_emplace(cache_id);
+    WebSeedCacheEntry &entry = cached->second;
+    if (!created && vectors_equal(entry.web_seeds, snapshots, web_seed_snapshots_equal)) {
         return 0;
+    }
+    std::size_t const previous_payload_bytes = created ? 0U : retained_payload_bytes(entry);
+    std::size_t const next_payload_bytes = saturating_payload_sum(
+        vector_payload_bytes(snapshots),
+        sizeof(entry.activity)
+    );
+    if (!admit_detail_cache_entry_locked(
+            DetailCacheKind::web_seeds,
+            cache_id,
+            previous_payload_bytes,
+            next_payload_bytes
+        )) {
+        if (created) {
+            web_seed_cache.erase(cached);
+        }
+        throw std::length_error("Torrent web-seed details exceed the cache budget.");
     }
     entry.web_seeds = std::move(snapshots);
     entry.revision = web_seed_revision + 1U;
@@ -621,10 +929,23 @@ BridgeResult TTorrentClient::cache_file_metadata(lt::torrent_handle const &handl
 
     std::shared_ptr<lt::torrent_info const> const torrent_file = handle.torrent_file();
     if (!torrent_file || !torrent_file->is_valid()) {
-        auto existing = file_cache.find(*cache_id);
-        if (existing != file_cache.end() && !existing->second.files.empty()) {
-            existing->second.files.clear();
-            existing->second.revision = file_revision + 1U;
+        auto [cached, created] = file_cache.try_emplace(*cache_id);
+        FileCacheEntry &entry = cached->second;
+        if (created || !entry.files.empty()) {
+            std::size_t const previous_payload_bytes = created ? 0U : retained_payload_bytes(entry);
+            if (!admit_detail_cache_entry_locked(
+                    DetailCacheKind::files,
+                    *cache_id,
+                    previous_payload_bytes,
+                    0
+                )) {
+                if (created) {
+                    file_cache.erase(cached);
+                }
+                return bridge_error(2, "Torrent file details exceed the cache budget.");
+            }
+            entry.files = std::vector<TTorrentFileSnapshot>{};
+            entry.revision = file_revision + 1U;
             changes |= mark_file_cache_changed();
         }
         return {};
@@ -638,7 +959,16 @@ BridgeResult TTorrentClient::cache_file_metadata(lt::torrent_handle const &handl
     );
     if (!valid_info) {
         if (auto existing = file_cache.find(*cache_id); existing != file_cache.end() && !existing->second.files.empty()) {
-            existing->second.files.clear();
+            std::size_t const previous_payload_bytes = retained_payload_bytes(existing->second);
+            if (!admit_detail_cache_entry_locked(
+                    DetailCacheKind::files,
+                    *cache_id,
+                    previous_payload_bytes,
+                    0
+                )) {
+                return bridge_error(2, "Torrent file details exceed the cache budget.");
+            }
+            existing->second.files = std::vector<TTorrentFileSnapshot>{};
             existing->second.revision = file_revision + 1U;
             changes |= mark_file_cache_changed();
         }
@@ -647,13 +977,7 @@ BridgeResult TTorrentClient::cache_file_metadata(lt::torrent_handle const &handl
     lt::filenames const files(layout, renamed_files);
 
     std::vector<lt::download_priority_t> priorities = handle.get_file_priorities();
-    std::unordered_map<int32_t, TTorrentFileSnapshot> previous_files;
-    if (auto const previous = file_cache.find(*cache_id); previous != file_cache.end()) {
-        previous_files.reserve(previous->second.files.size());
-        for (TTorrentFileSnapshot const &file : previous->second.files) {
-            previous_files.emplace(file.index, file);
-        }
-    }
+    auto const previous = file_cache.find(*cache_id);
 
     std::vector<TTorrentFileSnapshot> snapshots;
     snapshots.reserve(static_cast<std::size_t>(files.num_files()));
@@ -665,11 +989,21 @@ BridgeResult TTorrentClient::cache_file_metadata(lt::torrent_handle const &handl
         }
 
         TTorrentFileSnapshot snapshot = file_snapshot_from_files(files, file, priority);
-        if (auto const previous = previous_files.find(snapshot.index); previous != previous_files.end()) {
-            snapshot.downloaded = std::clamp<std::int64_t>(previous->second.downloaded, 0, snapshot.size);
-            snapshot.progress = snapshot.size <= 0
-                ? 1.0
-                : std::clamp(static_cast<double>(snapshot.downloaded) / static_cast<double>(snapshot.size), 0.0, 1.0);
+        if (previous != file_cache.end() && snapshot.index >= 0
+            && static_cast<std::size_t>(snapshot.index) < previous->second.files.size()) {
+            TTorrentFileSnapshot const &previous_file = previous->second.files.at(
+                static_cast<std::size_t>(snapshot.index)
+            );
+            if (previous_file.index == snapshot.index) {
+                snapshot.downloaded = std::clamp<std::int64_t>(previous_file.downloaded, 0, snapshot.size);
+                snapshot.progress = snapshot.size <= 0
+                    ? 1.0
+                    : std::clamp(
+                        static_cast<double>(snapshot.downloaded) / static_cast<double>(snapshot.size),
+                        0.0,
+                        1.0
+                    );
+            }
         }
         snapshots.push_back(snapshot);
     }
@@ -680,9 +1014,23 @@ BridgeResult TTorrentClient::cache_file_metadata(lt::torrent_handle const &handl
         }
     }
 
-    auto &entry = file_cache[*cache_id];
-    if (vectors_equal(entry.files, snapshots, file_snapshots_equal)) {
+    auto [cached, created] = file_cache.try_emplace(*cache_id);
+    FileCacheEntry &entry = cached->second;
+    if (!created && vectors_equal(entry.files, snapshots, file_snapshots_equal)) {
         return {};
+    }
+    std::size_t const previous_payload_bytes = created ? 0U : retained_payload_bytes(entry);
+    std::size_t const next_payload_bytes = vector_payload_bytes(snapshots);
+    if (!admit_detail_cache_entry_locked(
+            DetailCacheKind::files,
+            *cache_id,
+            previous_payload_bytes,
+            next_payload_bytes
+        )) {
+        if (created) {
+            file_cache.erase(cached);
+        }
+        return bridge_error(2, "Torrent file details exceed the cache budget.");
     }
     entry.files = std::move(snapshots);
     entry.revision = file_revision + 1U;
@@ -795,11 +1143,28 @@ DirtyMask TTorrentClient::cache_piece_map(lt::torrent_status const &status)
         }
     }
 
-    auto &entry = piece_map_cache[id];
-    if (piece_map_snapshots_equal(entry.snapshot, snapshot) && entry.pieces == pieces) {
+    auto [cached, created] = piece_map_cache.try_emplace(id);
+    PieceMapCacheEntry &entry = cached->second;
+    if (!created && piece_map_snapshots_equal(entry.snapshot, snapshot) && entry.pieces == pieces) {
         return changes;
     }
 
+    std::size_t const previous_payload_bytes = created ? 0U : retained_payload_bytes(entry);
+    std::size_t const next_payload_bytes = saturating_payload_sum(
+        vector_payload_bytes(pieces),
+        sizeof(snapshot)
+    );
+    if (!admit_detail_cache_entry_locked(
+            DetailCacheKind::piece_map,
+            id,
+            previous_payload_bytes,
+            next_payload_bytes
+        )) {
+        if (created) {
+            piece_map_cache.erase(cached);
+        }
+        throw std::length_error("Torrent piece details exceed the cache budget.");
+    }
     entry.snapshot = snapshot;
     entry.pieces = std::move(pieces);
     entry.revision = piece_map_revision + 1U;
@@ -824,13 +1189,27 @@ DirtyMask TTorrentClient::cache_web_seed_activity(lt::torrent_handle const &hand
         activity.total_download += std::max<int64_t>(0, peer.total_download);
     }
 
-    auto &entry = web_seed_cache[*cache_id];
-    if (entry.activity.active_count == activity.active_count
+    auto [cached, created] = web_seed_cache.try_emplace(*cache_id);
+    WebSeedCacheEntry &entry = cached->second;
+    if (!created && entry.activity.active_count == activity.active_count
         && entry.activity.download_rate == activity.download_rate
         && entry.activity.total_download == activity.total_download) {
         return 0;
     }
 
+    std::size_t const previous_payload_bytes = created ? 0U : retained_payload_bytes(entry);
+    std::size_t const next_payload_bytes = retained_payload_bytes(entry);
+    if (!admit_detail_cache_entry_locked(
+            DetailCacheKind::web_seeds,
+            *cache_id,
+            previous_payload_bytes,
+            next_payload_bytes
+        )) {
+        if (created) {
+            web_seed_cache.erase(cached);
+        }
+        throw std::length_error("Torrent web-seed activity exceeds the cache budget.");
+    }
     entry.activity = activity;
     entry.revision = web_seed_revision + 1U;
     return mark_web_seed_cache_changed();
@@ -844,11 +1223,25 @@ void TTorrentClient::cache_peer_sources(lt::torrent_handle const &handle, std::v
     }
 
     TTorrentPeerSourceSnapshot const sources = peer_source_snapshot(peers);
-    auto &entry = peer_source_cache[*cache_id];
-    if (peer_source_snapshots_equal(entry.sources, sources)) {
+    auto [cached, created] = peer_source_cache.try_emplace(*cache_id);
+    PeerSourceCacheEntry &entry = cached->second;
+    if (!created && peer_source_snapshots_equal(entry.sources, sources)) {
         return;
     }
 
+    std::size_t const previous_payload_bytes = created ? 0U : retained_payload_bytes(entry);
+    std::size_t const next_payload_bytes = retained_payload_bytes(entry);
+    if (!admit_detail_cache_entry_locked(
+            DetailCacheKind::peer_sources,
+            *cache_id,
+            previous_payload_bytes,
+            next_payload_bytes
+        )) {
+        if (created) {
+            peer_source_cache.erase(cached);
+        }
+        throw std::length_error("Torrent peer-source details exceed the cache budget.");
+    }
     entry.sources = sources;
     entry.revision = ++peer_source_revision;
 }
@@ -863,6 +1256,16 @@ BridgeResult TTorrentClient::request_sources(std::string const &id, DirtyMask &c
     BridgeResult const cached_web_seeds = cache_web_seeds(*handle, changes);
     if (!cached_web_seeds) {
         return cached_web_seeds;
+    }
+
+    if (auto cached = tracker_cache.find(id); cached != tracker_cache.end()) {
+        touch_detail_cache_entry(cached->second.last_access_sequence);
+    }
+    if (auto cached = web_seed_cache.find(id); cached != web_seed_cache.end()) {
+        touch_detail_cache_entry(cached->second.last_access_sequence);
+    }
+    if (auto cached = peer_source_cache.find(id); cached != peer_source_cache.end()) {
+        touch_detail_cache_entry(cached->second.last_access_sequence);
     }
 
     handle->post_trackers();
@@ -1237,6 +1640,10 @@ BridgeResult TTorrentClient::request_files(std::string const &id, DirtyMask &cha
         return cached_files;
     }
 
+    if (auto cached = file_cache.find(id); cached != file_cache.end()) {
+        touch_detail_cache_entry(cached->second.last_access_sequence);
+    }
+
     handle->post_file_progress(lt::torrent_handle::piece_granularity);
     return {};
 }
@@ -1253,6 +1660,9 @@ BridgeResult TTorrentClient::request_piece_map(std::string const &id, DirtyMask 
         | lt::torrent_handle::query_pieces
     );
     changes |= cache_piece_map(status);
+    if (auto cached = piece_map_cache.find(id); cached != piece_map_cache.end()) {
+        touch_detail_cache_entry(cached->second.last_access_sequence);
+    }
     return {};
 }
 
@@ -1260,12 +1670,16 @@ int32_t TTorrentClient::copy_trackers(
     std::string const &id,
     std::span<TTorrentTrackerSnapshot> output,
     std::uint64_t *revision_out,
-    int32_t *required_count_out
+    int32_t *required_count_out,
+    std::uint8_t *resident_out
 )
 {
     std::scoped_lock guard(lock);
     auto const cached = tracker_cache.find(id);
     if (cached == tracker_cache.end()) {
+        if (resident_out != nullptr) {
+            *resident_out = bridge_bool(false);
+        }
         if (revision_out != nullptr) {
             *revision_out = tracker_revision;
         }
@@ -1275,6 +1689,10 @@ int32_t TTorrentClient::copy_trackers(
         return 0;
     }
 
+    if (resident_out != nullptr) {
+        *resident_out = bridge_bool(true);
+    }
+    touch_detail_cache_entry(cached->second.last_access_sequence);
     std::vector<TTorrentTrackerSnapshot> const &trackers = cached->second.trackers;
     if (revision_out != nullptr) {
         *revision_out = cached->second.revision;
@@ -1298,12 +1716,16 @@ int32_t TTorrentClient::copy_web_seeds(
     std::string const &id,
     std::span<TTorrentWebSeedSnapshot> output,
     std::uint64_t *revision_out,
-    int32_t *required_count_out
+    int32_t *required_count_out,
+    std::uint8_t *resident_out
 )
 {
     std::scoped_lock guard(lock);
     auto const cached = web_seed_cache.find(id);
     if (cached == web_seed_cache.end()) {
+        if (resident_out != nullptr) {
+            *resident_out = bridge_bool(false);
+        }
         if (revision_out != nullptr) {
             *revision_out = web_seed_revision;
         }
@@ -1313,6 +1735,10 @@ int32_t TTorrentClient::copy_web_seeds(
         return 0;
     }
 
+    if (resident_out != nullptr) {
+        *resident_out = bridge_bool(true);
+    }
+    touch_detail_cache_entry(cached->second.last_access_sequence);
     std::vector<TTorrentWebSeedSnapshot> const &web_seeds = cached->second.web_seeds;
     if (revision_out != nullptr) {
         *revision_out = cached->second.revision;
@@ -1350,6 +1776,7 @@ bool TTorrentClient::copy_web_seed_activity(
         return false;
     }
 
+    touch_detail_cache_entry(cached->second.last_access_sequence);
     if (revision_out != nullptr) {
         *revision_out = cached->second.revision;
     }
@@ -1377,6 +1804,7 @@ bool TTorrentClient::copy_peer_sources(
         return false;
     }
 
+    touch_detail_cache_entry(cached->second.last_access_sequence);
     if (revision_out != nullptr) {
         *revision_out = cached->second.revision;
     }
@@ -1390,12 +1818,16 @@ int32_t TTorrentClient::copy_files(
     std::string const &id,
     std::span<TTorrentFileSnapshot> output,
     std::uint64_t *revision_out,
-    int32_t *required_count_out
+    int32_t *required_count_out,
+    std::uint8_t *resident_out
 )
 {
     std::scoped_lock guard(lock);
     auto const cached = file_cache.find(id);
     if (cached == file_cache.end()) {
+        if (resident_out != nullptr) {
+            *resident_out = bridge_bool(false);
+        }
         if (revision_out != nullptr) {
             *revision_out = file_revision;
         }
@@ -1405,6 +1837,10 @@ int32_t TTorrentClient::copy_files(
         return 0;
     }
 
+    if (resident_out != nullptr) {
+        *resident_out = bridge_bool(true);
+    }
+    touch_detail_cache_entry(cached->second.last_access_sequence);
     std::vector<TTorrentFileSnapshot> const &files = cached->second.files;
     if (revision_out != nullptr) {
         *revision_out = cached->second.revision;
@@ -1429,12 +1865,16 @@ int32_t TTorrentClient::copy_piece_map(
     TTorrentPieceMapSnapshot *snapshot,
     std::span<std::uint8_t> output,
     std::uint64_t *revision_out,
-    int32_t *required_count_out
+    int32_t *required_count_out,
+    std::uint8_t *resident_out
 )
 {
     std::scoped_lock guard(lock);
     auto const cached = piece_map_cache.find(id);
     if (cached == piece_map_cache.end()) {
+        if (resident_out != nullptr) {
+            *resident_out = bridge_bool(false);
+        }
         if (revision_out != nullptr) {
             *revision_out = piece_map_revision;
         }
@@ -1447,6 +1887,10 @@ int32_t TTorrentClient::copy_piece_map(
         return 0;
     }
 
+    if (resident_out != nullptr) {
+        *resident_out = bridge_bool(true);
+    }
+    touch_detail_cache_entry(cached->second.last_access_sequence);
     PieceMapCacheEntry const &entry = cached->second;
     if (revision_out != nullptr) {
         *revision_out = entry.revision;
@@ -1527,38 +1971,21 @@ int32_t TTorrentClient::copy_tracker_hosts(
         *revision_out = tracker_host_revision;
     }
 
-    std::size_t required_count = 0;
-    for (auto const &[id, hosts] : tracker_host_cache) {
-        static_cast<void>(id);
-        required_count += hosts.size();
-        if (required_count >= static_cast<std::size_t>(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT)) {
-            required_count = static_cast<std::size_t>(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT);
-            break;
-        }
-    }
+    std::size_t const required_count = std::min(
+        tracker_host_cache.size(),
+        static_cast<std::size_t>(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT)
+    );
     if (required_count_out != nullptr) {
         *required_count_out = static_cast<int32_t>(required_count);
     }
 
-    std::size_t copied = 0;
-    for (TTorrentSnapshot const &snapshot : snapshot_cache) {
-        if (copied >= output.size() || copied >= static_cast<std::size_t>(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT)) {
-            break;
-        }
-        auto const cached = tracker_host_cache.find(snapshot.id);
-        if (cached == tracker_host_cache.end()) {
-            continue;
-        }
-        for (std::string const &host : cached->second) {
-            if (copied >= output.size() || copied >= static_cast<std::size_t>(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT)) {
-                break;
-            }
-            TTorrentTrackerHostSnapshot row{};
-            copy_string(std::span{row.torrent_id}, std::string_view(snapshot.id));
-            copy_string(std::span{row.host}, host);
-            *std::next(output.begin(), static_cast<std::ptrdiff_t>(copied)) = row;
-            ++copied;
-        }
+    std::size_t const copied = std::min(output.size(), required_count);
+    if (copied > 0) {
+        std::ranges::copy_n(
+            tracker_host_cache.begin(),
+            static_cast<std::ptrdiff_t>(copied),
+            output.begin()
+        );
     }
     return static_cast<int32_t>(copied);
 }

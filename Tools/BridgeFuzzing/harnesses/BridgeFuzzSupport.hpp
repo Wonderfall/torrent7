@@ -24,7 +24,7 @@ namespace bridge_fuzz {
 
 namespace fs = std::filesystem;
 
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 33, "Update the fuzz harnesses for the current TorrentBridge ABI.");
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 34, "Update the fuzz harnesses for the current TorrentBridge ABI.");
 #if !defined(TORRENT_USE_ASSERTS) || !TORRENT_USE_ASSERTS
 #error "Fuzz consumers must match the assertion-enabled Debug libtorrent archive."
 #endif
@@ -391,6 +391,7 @@ inline void exercise_detail_copies(TTorrentClient *client)
         std::array<std::uint8_t, 256> pieces{};
         std::uint64_t revision = 0;
         int32_t required_count = 0;
+        std::uint8_t resident = 0;
 
         static_cast<void>(TorrentClientCopySourcePolicy(client, id.c_str(), nullptr, error.data(), error.capacity()));
         static_cast<void>(TorrentClientCopySourcePolicy(client, id.c_str(), &policy, error.data(), error.capacity()));
@@ -405,30 +406,57 @@ inline void exercise_detail_copies(TTorrentClient *client)
         static_cast<void>(TorrentClientCopyTorrentOptions(client, id.c_str(), nullptr, error.data(), error.capacity()));
         static_cast<void>(TorrentClientCopyTorrentOptions(client, id.c_str(), &options, error.data(), error.capacity()));
         static_cast<void>(TorrentClientSetTorrentOptions(client, id.c_str(), &options, error.data(), error.capacity()));
-        static_cast<void>(TorrentClientCopyTrackerBatch(client, id.c_str(), nullptr, 0, &revision, &required_count));
+        static_cast<void>(TorrentClientCopyTrackerBatch(
+            client,
+            id.c_str(),
+            nullptr,
+            0,
+            &revision,
+            &required_count,
+            &resident
+        ));
         static_cast<void>(TorrentClientCopyTrackerBatch(
             client,
             id.c_str(),
             trackers.data(),
             static_cast<int32_t>(trackers.size()),
             &revision,
-            &required_count
+            &required_count,
+            &resident
         ));
-        static_cast<void>(TorrentClientCopyWebSeedBatch(client, id.c_str(), nullptr, 0, &revision, &required_count));
+        static_cast<void>(TorrentClientCopyWebSeedBatch(
+            client,
+            id.c_str(),
+            nullptr,
+            0,
+            &revision,
+            &required_count,
+            &resident
+        ));
         static_cast<void>(TorrentClientCopyWebSeedBatch(
             client,
             id.c_str(),
             web_seeds.data(),
             static_cast<int32_t>(web_seeds.size()),
             &revision,
-            &required_count
+            &required_count,
+            &resident
         ));
         static_cast<void>(TorrentClientCopyWebSeedActivity(client, id.c_str(), nullptr, &revision));
         static_cast<void>(TorrentClientCopyWebSeedActivity(client, id.c_str(), &activity, &revision));
         static_cast<void>(TorrentClientCopyPeerSources(client, id.c_str(), nullptr, &revision));
         static_cast<void>(TorrentClientCopyPeerSources(client, id.c_str(), &peer_sources, &revision));
         static_cast<void>(TorrentClientRequestPieceMap(client, id.c_str(), error.data(), error.capacity()));
-        static_cast<void>(TorrentClientCopyPieceMap(client, id.c_str(), nullptr, nullptr, 0, &revision, &required_count));
+        static_cast<void>(TorrentClientCopyPieceMap(
+            client,
+            id.c_str(),
+            nullptr,
+            nullptr,
+            0,
+            &revision,
+            &required_count,
+            &resident
+        ));
         static_cast<void>(TorrentClientCopyPieceMap(
             client,
             id.c_str(),
@@ -436,16 +464,26 @@ inline void exercise_detail_copies(TTorrentClient *client)
             pieces.data(),
             static_cast<int32_t>(pieces.size()),
             &revision,
-            &required_count
+            &required_count,
+            &resident
         ));
-        static_cast<void>(TorrentClientCopyFileBatch(client, id.c_str(), nullptr, 0, &revision, &required_count));
+        static_cast<void>(TorrentClientCopyFileBatch(
+            client,
+            id.c_str(),
+            nullptr,
+            0,
+            &revision,
+            &required_count,
+            &resident
+        ));
         static_cast<void>(TorrentClientCopyFileBatch(
             client,
             id.c_str(),
             files.data(),
             static_cast<int32_t>(files.size()),
             &revision,
-            &required_count
+            &required_count,
+            &resident
         ));
         static_cast<void>(TorrentClientSetFilePriority(
             client,

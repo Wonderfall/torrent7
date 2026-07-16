@@ -106,6 +106,8 @@ constexpr auto kAlertWorkerInitialFailureBackoff = std::chrono::milliseconds(100
 constexpr auto kAlertWorkerMaximumFailureBackoff = std::chrono::seconds(5);
 constexpr auto kSnapshotUpdateInterval = std::chrono::milliseconds(500);
 constexpr std::size_t kMaxPendingAlertErrors = 16U;
+constexpr std::size_t kDetailCachePayloadBudgetBytes = static_cast<std::size_t>(64U) * 1024U * 1024U;
+constexpr std::size_t kDetailCacheMaxEntryCount = 256U;
 // Userdata tokens cannot be reused safely because late libtorrent alerts may
 // still contain them. Bound their session-lifetime footprint while allowing
 // several complete replacements of the maximum live torrent set.
@@ -134,7 +136,7 @@ static_assert(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES
                   * (TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES + 1));
 static_assert(kMaxTorrentIdentityTokenCount > static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 33U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 34U);
 #if defined(TORRENT_USE_ASSERTS) && TORRENT_USE_ASSERTS
 static_assert(sizeof(lt::add_torrent_params) == 760U);
 #else
@@ -428,29 +430,42 @@ struct RemovalTombstonePayload {
     bool delete_partfile = false;
 };
 
+enum class DetailCacheKind : std::uint8_t {
+    trackers,
+    web_seeds,
+    peer_sources,
+    files,
+    piece_map,
+};
+
 struct TrackerCacheEntry {
     std::uint64_t revision = 0;
+    std::uint64_t last_access_sequence = 0;
     std::vector<TTorrentTrackerSnapshot> trackers;
 };
 
 struct WebSeedCacheEntry {
     std::uint64_t revision = 0;
+    std::uint64_t last_access_sequence = 0;
     std::vector<TTorrentWebSeedSnapshot> web_seeds;
     TTorrentWebSeedActivitySnapshot activity{};
 };
 
 struct PeerSourceCacheEntry {
     std::uint64_t revision = 0;
+    std::uint64_t last_access_sequence = 0;
     TTorrentPeerSourceSnapshot sources{};
 };
 
 struct FileCacheEntry {
     std::uint64_t revision = 0;
+    std::uint64_t last_access_sequence = 0;
     std::vector<TTorrentFileSnapshot> files;
 };
 
 struct PieceMapCacheEntry {
     std::uint64_t revision = 0;
+    std::uint64_t last_access_sequence = 0;
     TTorrentPieceMapSnapshot snapshot{};
     std::vector<std::uint8_t> pieces;
 };
@@ -1116,7 +1131,8 @@ struct TTorrentClient {
     std::vector<TTorrentSnapshot> snapshot_cache;
     std::unordered_map<std::string, std::size_t> snapshot_indices;
     std::uint64_t snapshot_revision = 0;
-    std::unordered_map<std::string, std::vector<std::string>> tracker_host_cache;
+    bool rebuilding_snapshot_cache = false;
+    std::vector<TTorrentTrackerHostSnapshot> tracker_host_cache;
     std::uint64_t tracker_host_revision = 0;
     std::unordered_map<std::string, TrackerCacheEntry> tracker_cache;
     std::uint64_t tracker_revision = 0;
@@ -1128,6 +1144,8 @@ struct TTorrentClient {
     std::uint64_t file_revision = 0;
     std::unordered_map<std::string, PieceMapCacheEntry> piece_map_cache;
     std::uint64_t piece_map_revision = 0;
+    std::size_t detail_cache_payload_bytes = 0;
+    std::uint64_t next_detail_cache_access_sequence = 1;
     std::uint64_t next_removal_request_token = 1;
     std::optional<RemovalRequestEntry> removal_request;
     std::uint64_t requested_network_revision = 0;
@@ -1327,6 +1345,11 @@ struct TTorrentClient {
 
     [[nodiscard]] DirtyMask mark_tracker_host_cache_changed() noexcept;
 
+    [[nodiscard]] DirtyMask rebuild_tracker_host_cache_locked(
+        std::string_view override_id = {},
+        std::vector<lt::announce_entry> const *override_trackers = nullptr
+    );
+
     [[nodiscard]] DirtyMask cache_tracker_hosts(std::string const &id, std::vector<lt::announce_entry> const &trackers);
 
     [[nodiscard]] DirtyMask cache_tracker_hosts(lt::torrent_handle const &handle, std::string const &id);
@@ -1352,6 +1375,19 @@ struct TTorrentClient {
     [[nodiscard]] DirtyMask remove_piece_map(std::string_view id);
 
     [[nodiscard]] DirtyMask invalidate_detail_caches_locked();
+
+    void touch_detail_cache_entry(std::uint64_t &last_access_sequence) noexcept;
+
+    [[nodiscard]] std::size_t detail_cache_entry_count_locked() const noexcept;
+
+    [[nodiscard]] bool admit_detail_cache_entry_locked(
+        DetailCacheKind kind,
+        std::string const &id,
+        std::size_t previous_payload_bytes,
+        std::size_t next_payload_bytes
+    );
+
+    void evict_detail_cache_entry_locked(DetailCacheKind kind, std::string const &id) noexcept;
 
     [[nodiscard]] DirtyMask cache_trackers(lt::torrent_handle const &handle, std::vector<lt::announce_entry> const &trackers);
 
@@ -1421,14 +1457,16 @@ struct TTorrentClient {
         std::string const &id,
         std::span<TTorrentTrackerSnapshot> output,
         std::uint64_t *revision_out,
-        int32_t *required_count_out
+        int32_t *required_count_out,
+        std::uint8_t *resident_out
     );
 
     int32_t copy_web_seeds(
         std::string const &id,
         std::span<TTorrentWebSeedSnapshot> output,
         std::uint64_t *revision_out,
-        int32_t *required_count_out
+        int32_t *required_count_out,
+        std::uint8_t *resident_out
     );
 
     bool copy_web_seed_activity(
@@ -1447,7 +1485,8 @@ struct TTorrentClient {
         std::string const &id,
         std::span<TTorrentFileSnapshot> output,
         std::uint64_t *revision_out,
-        int32_t *required_count_out
+        int32_t *required_count_out,
+        std::uint8_t *resident_out
     );
 
     int32_t copy_piece_map(
@@ -1455,7 +1494,8 @@ struct TTorrentClient {
         TTorrentPieceMapSnapshot *snapshot,
         std::span<std::uint8_t> output,
         std::uint64_t *revision_out,
-        int32_t *required_count_out
+        int32_t *required_count_out,
+        std::uint8_t *resident_out
     );
 
     [[nodiscard]] DirtyMask remove_snapshot(lt::info_hash_t const &hashes, std::string_view requested_id);
