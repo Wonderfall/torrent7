@@ -385,7 +385,7 @@ enum TorrentEngineServiceRequestDisposition: Equatable, Sendable {
         }
         if let engine {
             do {
-                try await engine.blockNetworkNow()
+                _ = try await engine.blockNetworkNow()
             } catch {
                 await engine.forceContainmentAfterNetworkBlockFailure(
                     detail: error.localizedDescription
@@ -1303,7 +1303,7 @@ enum TorrentEngineServiceRequestDisposition: Equatable, Sendable {
             return
         }
         do {
-            try await engine.blockNetworkNow()
+            _ = try await engine.blockNetworkNow()
         } catch {
             // A failed fail-closed operation makes the native engine unusable;
             // blocking destroy is the final containment boundary.
@@ -1601,7 +1601,7 @@ enum TorrentEngineServiceRequestDisposition: Equatable, Sendable {
         defer {
             containmentWatchdog.disarm(containmentToken)
         }
-        try await engine.blockNetworkNow()
+        _ = try await engine.blockNetworkNow()
     }
 
     private func requireActiveController(
@@ -1872,7 +1872,7 @@ enum TorrentEngineServiceRequestDisposition: Equatable, Sendable {
         networkAuthority = nil
         networkAuthorityID = nil
         if let engine {
-            try? await engine.blockNetworkNow()
+            _ = try? await engine.blockNetworkNow()
             try? await engine.shutdownSafely()
         }
         self.engine = nil

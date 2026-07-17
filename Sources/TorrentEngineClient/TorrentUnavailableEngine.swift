@@ -109,7 +109,7 @@ package actor TorrentUnavailableEngine: TorrentEngineServicing {
         throw unavailableError
     }
 
-    package func blockNetworkNow() throws { throw unavailableError }
+    package func blockNetworkNow() throws -> TorrentNetworkBlockDisposition { throw unavailableError }
     package func saveAll() {}
     package func saveAllChecked() throws { throw unavailableError }
     package func takeAlertError() -> String? { nil }

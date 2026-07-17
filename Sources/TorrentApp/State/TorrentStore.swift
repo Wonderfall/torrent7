@@ -34,6 +34,11 @@ private enum TorrentStoreEngineStartupOutcome: Sendable {
     case cancelled
 }
 
+private enum TorrentStoreEngineStartupKind {
+    case initial
+    case replacesTerminatedController
+}
+
 private struct TorrentStoreEngineAuthorizationState: Equatable {
     let lifecycleGeneration: UInt64
     let capabilityRevision: UInt64
@@ -49,6 +54,7 @@ typealias TorrentStoreEngineStartupFactory = @Sendable (
 final class TorrentStore {
     private static let maximumPendingUserOperationCount = 64
     private static let maximumPendingOperationCount = maximumPendingUserOperationCount * 2 + 1
+    private static let engineRestartRefreshDrainTimeout: Duration = .seconds(5)
     static let engineStartupFactoryOverride = Mutex<TorrentStoreEngineStartupFactory?>(nil)
 
     let commandState = TorrentCommandState()
@@ -112,12 +118,13 @@ final class TorrentStore {
     private var lastTrackerHostRevision: UInt64?
     private var pendingTrackerHostRefresh = false
     private var refreshGeneration = 0
-    private var refreshesInFlight = 0
+    private var refreshesInFlightByLifecycle = [UInt64: Int]()
     private var engineLifecycleGeneration: UInt64 = 0
     private var engineMutationGeneration: UInt64 = 0
     private var nextTorrentInfoTabRequestToken = 0
     private var isEngineStarting = false
     private var isEngineRestarting = false
+    private var engineReplacementRequested = false
     private var isFolderCapabilityTransactionInProgress = false
     private var folderAuthorizationLaneIsHeld = false
     private var folderAuthorizationLaneWaiters = [CheckedContinuation<Void, Never>]()
@@ -1325,14 +1332,14 @@ final class TorrentStore {
     }
 
     private func refreshFromEngine(notifiesCompletions: Bool = true) async {
-        let overlapsAnotherRefresh = refreshesInFlight > 0
-        refreshesInFlight += 1
-        defer {
-            refreshesInFlight -= 1
+        guard !isEngineStarting, !isEngineRestarting else {
+            return
         }
+        let lifecycleGeneration = engineLifecycleGeneration
+        let overlapsAnotherRefresh = beginRefresh(for: lifecycleGeneration)
+        defer { endRefresh(for: lifecycleGeneration) }
         refreshGeneration &+= 1
         let generation = refreshGeneration
-        let lifecycleGeneration = engineLifecycleGeneration
         let mutationGeneration = engineMutationGeneration
         let polledEngine = engine
         let sortOrder = sortOrder
@@ -1467,8 +1474,20 @@ final class TorrentStore {
     }
 
     func startProductionEngine(enablePeerExchangePlugin: Bool) {
+        startProductionEngine(
+            enablePeerExchangePlugin: enablePeerExchangePlugin,
+            kind: .initial
+        )
+    }
+
+    private func startProductionEngine(
+        enablePeerExchangePlugin: Bool,
+        kind: TorrentStoreEngineStartupKind
+    ) {
         precondition(operationDrainTask == nil && pendingOperations.isEmpty)
-        precondition(refreshesInFlight == 0)
+        if case .initial = kind {
+            precondition(refreshCount(for: engineLifecycleGeneration) == 0)
+        }
         precondition(!isEngineRestarting && !isFolderCapabilityTransactionInProgress)
 
         let startupFactory = Self.engineStartupFactoryOverride.withLock { $0 }
@@ -1496,6 +1515,8 @@ final class TorrentStore {
         wakeRefreshTask?.cancel()
         refreshTask = nil
         wakeRefreshTask = nil
+        appliedNetworkBinding = nil
+        immediateNetworkBlockBinding = nil
         advanceEngineLifecycleGeneration()
         let startupGeneration = engineLifecycleGeneration
         engine = TorrentUnavailableEngine(message: "Torrent engine startup is in progress.")
@@ -1504,9 +1525,17 @@ final class TorrentStore {
 
         engineStartupTask = Task { @MainActor [weak self, capabilitySnapshot] in
             await previousStartupTask?.value
-            await previousEngine.shutdown()
-            await previousRefreshTask?.value
-            await previousWakeRefreshTask?.value
+            switch kind {
+            case .initial:
+                await previousEngine.shutdown()
+                await previousRefreshTask?.value
+                await previousWakeRefreshTask?.value
+            case .replacesTerminatedController:
+                // The disconnected controller is already fail-closed. Do not
+                // let a cancellation-insensitive stale poll prevent recovery;
+                // lifecycle generations reject any result it later produces.
+                await previousEngine.terminateConnection()
+            }
             guard let self,
                   !Task.isCancelled,
                   self.engineLifecycleGeneration == startupGeneration else {
@@ -1557,6 +1586,7 @@ final class TorrentStore {
                     capabilityRevision: capabilitySnapshot.revision
                 )
                 self.libtorrentVersion = engine.libtorrentVersion
+                self.appliedPeerExchangePluginEnabled = enablePeerExchangePlugin
                 self.engineStartupFailed = false
                 self.startInitialEngineSync()
                 self.startRefreshing()
@@ -1801,11 +1831,13 @@ final class TorrentStore {
 
         operationDrainTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                guard let operation = self?.takeNextPendingOperation() else {
-                    self?.operationDrainTask = nil
+                guard let store = self else {
                     return
                 }
-                guard let store = self else {
+                await store.drainImmediateNetworkBlocks()
+                guard let operation = store.takeNextPendingOperation() else {
+                    store.operationDrainTask = nil
+                    store.startEngineReplacementIfNeeded()
                     return
                 }
                 await store.execute(operation)
@@ -1823,14 +1855,15 @@ final class TorrentStore {
     }
 
     private func execute(_ operation: TorrentStorePendingOperation) async {
-        await drainImmediateNetworkBlocks()
         switch operation {
         case .applySettings(let application):
-            await applySettingsToEngine(
-                application.settings,
-                networkBinding: application.networkBinding
-            )
-            if application.refreshes {
+            if !engineReplacementRequested {
+                await applySettingsToEngine(
+                    application.settings,
+                    networkBinding: application.networkBinding
+                )
+            }
+            if application.refreshes, !engineReplacementRequested {
                 await refreshFromEngine(notifiesCompletions: application.notifiesCompletions)
             }
         case .user(let operation):
@@ -1840,11 +1873,15 @@ final class TorrentStore {
 
     private func drainPendingOperations() async {
         while true {
+            let startupTask = engineStartupTask
             let operationTask = operationDrainTask
             let networkBlockTask = immediateNetworkBlockTask
             await networkBlockTask?.value
             await operationTask?.value
-            guard operationDrainTask != nil || immediateNetworkBlockTask != nil else {
+            await startupTask?.value
+            guard engineStartupTask != nil
+                    || operationDrainTask != nil
+                    || immediateNetworkBlockTask != nil else {
                 return
             }
         }
@@ -1873,12 +1910,17 @@ final class TorrentStore {
 
         do {
             if networkMustRemainBlocked || bindingChanged || peerExchangePluginChanged {
-                try await engine.blockNetworkNow()
+                guard await blockNetworkForSettingsTransition() else {
+                    return
+                }
             }
 
             if bindingChanged || peerExchangePluginChanged {
                 completionNotifier.beginBaseline()
                 try await restartEngine(enablePeerExchangePlugin: settings.enablePeerExchangePlugin)
+                guard !Task.isCancelled, !engineReplacementRequested else {
+                    return
+                }
                 lastSnapshotRevision = nil
                 lastTrackerHostRevision = nil
                 pendingTrackerHostRefresh = true
@@ -1908,14 +1950,15 @@ final class TorrentStore {
         }
         precondition(!isFolderCapabilityTransactionInProgress)
         let restartedEngine = engine
-        refreshTask?.cancel()
-        wakeRefreshTask?.cancel()
+        let previousLifecycleGeneration = engineLifecycleGeneration
+        let previousRefreshTask = refreshTask
+        let previousWakeRefreshTask = wakeRefreshTask
         refreshTask = nil
         wakeRefreshTask = nil
+        isEngineRestarting = true
         advanceEngineLifecycleGeneration()
         let lifecycleGeneration = engineLifecycleGeneration
         let capabilitySnapshot = downloadFolderAccessStore.capabilitySnapshot
-        isEngineRestarting = true
         defer {
             isEngineRestarting = false
             if lifecycleGeneration == engineLifecycleGeneration,
@@ -1924,6 +1967,28 @@ final class TorrentStore {
             }
             withExtendedLifetime(capabilitySnapshot) {}
         }
+        if refreshCount(for: previousLifecycleGeneration) > 0 {
+            guard await blockNetworkForSettingsTransition() else {
+                return
+            }
+        }
+        guard await drainRefreshesBeforeEngineRestart(
+            lifecycleGeneration: previousLifecycleGeneration
+        ) else {
+            guard !Task.isCancelled else {
+                return
+            }
+            // A refresh that does not unwind after network containment must
+            // never hold the restart lane forever. Closing the controller is
+            // the bounded fail-closed escape; recovery uses a fresh handshake.
+            await restartedEngine.terminateConnection()
+            requestEngineReplacement()
+            return
+        }
+        previousRefreshTask?.cancel()
+        previousWakeRefreshTask?.cancel()
+        await previousRefreshTask?.value
+        await previousWakeRefreshTask?.value
         do {
             // Exact reconciliation owns bookmark delegation. A restart reuses
             // its confirmed capability IDs and must not individually regenerate
@@ -1956,6 +2021,39 @@ final class TorrentStore {
             )
             throw error
         }
+    }
+
+    private func drainRefreshesBeforeEngineRestart(lifecycleGeneration: UInt64) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: Self.engineRestartRefreshDrainTimeout)
+        while refreshCount(for: lifecycleGeneration) > 0 {
+            guard !Task.isCancelled, clock.now < deadline else {
+                return false
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return true
+    }
+
+    private func beginRefresh(for lifecycleGeneration: UInt64) -> Bool {
+        let count = refreshCount(for: lifecycleGeneration)
+        precondition(count < Int.max)
+        refreshesInFlightByLifecycle[lifecycleGeneration] = count + 1
+        return count > 0
+    }
+
+    private func endRefresh(for lifecycleGeneration: UInt64) {
+        let count = refreshCount(for: lifecycleGeneration)
+        precondition(count > 0)
+        if count == 1 {
+            refreshesInFlightByLifecycle.removeValue(forKey: lifecycleGeneration)
+        } else {
+            refreshesInFlightByLifecycle[lifecycleGeneration] = count - 1
+        }
+    }
+
+    private func refreshCount(for lifecycleGeneration: UInt64) -> Int {
+        refreshesInFlightByLifecycle[lifecycleGeneration, default: 0]
     }
 
     private func reconcileFolderAuthorizationsIfNeeded(
@@ -2168,14 +2266,63 @@ final class TorrentStore {
                 return
             }
 
-            do {
-                try await self.engine.blockNetworkNow()
-                self.lastSnapshotRevision = nil
-                await self.refreshFromEngine(notifiesCompletions: false)
-            } catch {
-                self.setLastError(error.localizedDescription, source: .settingsApply)
+            guard await self.blockNetworkForSettingsTransition() else {
+                return
             }
+            self.lastSnapshotRevision = nil
+            await self.refreshFromEngine(notifiesCompletions: false)
         }
+    }
+
+    private func blockNetworkForSettingsTransition() async -> Bool {
+        let blockedEngine = engine
+        let lifecycleGeneration = engineLifecycleGeneration
+        do {
+            let disposition = try await blockedEngine.blockNetworkNow()
+            guard lifecycleGeneration == engineLifecycleGeneration else {
+                return false
+            }
+            switch disposition {
+            case .engineRemainsAvailable:
+                return true
+            case .engineReplacementRequired:
+                requestEngineReplacement()
+                return false
+            }
+        } catch {
+            // Failure to confirm an immediate block is terminal even if an
+            // implementation still reports itself as available. Disconnect
+            // containment is the fail-closed fallback.
+            await blockedEngine.terminateConnection()
+            guard lifecycleGeneration == engineLifecycleGeneration else {
+                return false
+            }
+            requestEngineReplacement()
+            return false
+        }
+    }
+
+    private func requestEngineReplacement() {
+        guard !engineReplacementRequested else {
+            return
+        }
+        engineReplacementRequested = true
+        lastSnapshotRevision = nil
+        lastTrackerHostRevision = nil
+        pendingTrackerHostRefresh = true
+        bridgeHealth = .unavailable
+        networkStatus = .empty
+    }
+
+    private func startEngineReplacementIfNeeded() {
+        guard engineReplacementRequested else {
+            return
+        }
+        engineReplacementRequested = false
+        startProductionEngine(
+            enablePeerExchangePlugin: settings.enablePeerExchangePlugin,
+            kind: .replacesTerminatedController
+        )
     }
 
     private func setLastError(_ message: String?, source: TorrentStoreErrorSource? = nil) {

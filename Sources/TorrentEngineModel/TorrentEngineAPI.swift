@@ -22,6 +22,20 @@ package enum TorrentRemovalOutcome: Codable, Equatable, Sendable {
     case removedWithWarning(String)
 }
 
+/// The engine-lifecycle disposition after an immediate fail-closed network
+/// revocation.
+///
+/// A busy isolated controller cannot safely put the revocation behind its
+/// ordered request. In that case the client closes the controller, which makes
+/// the service's disconnect path contain networking, and the owner must create
+/// a fresh controller before doing more work.
+package enum TorrentNetworkBlockDisposition: Equatable, Sendable {
+    /// Networking is blocked and this engine can accept later operations.
+    case engineRemainsAvailable
+    /// Containment made this engine terminal; its owner must replace it.
+    case engineReplacementRequired
+}
+
 package struct TorrentFolderAuthorization: Equatable, Sendable {
     package let path: String
     package let bookmarkData: Data
@@ -75,7 +89,15 @@ package protocol TorrentEngineServicing: Sendable {
     func forceRecheck(id: String) async throws
     func remove(id: String, deleteFiles: Bool) async throws -> TorrentRemovalOutcome
     func applySettings(_ settings: TorrentSettings, networkBinding: TorrentNetworkBinding) async throws
-    func blockNetworkNow() async throws
+    /// Establishes fail-closed network containment before returning.
+    ///
+    /// A successful return means either the live engine is confirmed blocked,
+    /// or its controller was terminated and disconnect containment was
+    /// initiated. The latter engine must not be used again, and a replacement
+    /// controller cannot complete its handshake until cleanup releases the old
+    /// one. A thrown error means containment was not confirmed; callers must
+    /// terminate that engine and replace it before allowing further work.
+    func blockNetworkNow() async throws -> TorrentNetworkBlockDisposition
     func saveAll() async
     func saveAllChecked() async throws
     func takeAlertError() async -> String?

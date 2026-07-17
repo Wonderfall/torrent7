@@ -651,9 +651,10 @@ package typealias TorrentAlertErrorReader = @Sendable () -> String?
         }
     }
 
-    package func blockNetworkNow() throws {
+    package func blockNetworkNow() throws -> TorrentNetworkBlockDisposition {
         let client = try unsafe requireClient()
         try unsafe blockNetwork(client: client)
+        return .engineRemainsAvailable
     }
 
     private func blockNetwork(client: OpaquePointer) throws {

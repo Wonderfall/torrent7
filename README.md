@@ -112,9 +112,12 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
   binding can unblock it only after an independent service-side interface monitor
   validates the interface fingerprint and VPN service identity. Constrained
   interface changes, disconnects, replacement failures, and monitoring failures
-  block networking. Independent short containment and longer cleanup watchdogs
-  cover pre-authority startup, native restart, explicit shutdown, disconnect, and
-  scope cleanup, terminating only the helper if native progress stalls.
+  block networking. A revocation that preempts an in-flight controller request
+  closes that controller and automatically replaces it from a fresh blocked
+  handshake without replaying ambiguous work. Independent short containment and
+  longer cleanup watchdogs cover pre-authority startup, native restart, explicit
+  shutdown, disconnect, and scope cleanup, terminating only the helper if native
+  progress stalls.
 - **Static dependencies:** libtorrent and OpenSSL are linked statically. The final
   app bundle contains no third-party dylibs and exactly two Mach-O executables:
   the GUI and its engine service.

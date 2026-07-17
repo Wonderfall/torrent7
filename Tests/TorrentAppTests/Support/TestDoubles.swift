@@ -341,6 +341,8 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private var restartSuspensionCount = 0
     private var restartContinuations = [CheckedContinuation<Void, Never>]()
     private(set) var blockNetworkCount = 0
+    private var nextNetworkBlockDisposition = TorrentNetworkBlockDisposition.engineRemainsAvailable
+    private var nextNetworkBlockError: Error?
     private var blockNetworkSuspensionCount = 0
     private var blockNetworkContinuations = [CheckedContinuation<Void, Never>]()
     private(set) var currentNetworkBlocked = false
@@ -533,8 +535,22 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         }
     }
 
+    func waitForNetworkBlockCount(_ expectedCount: Int) async {
+        while blockNetworkCount < expectedCount {
+            await Task.yield()
+        }
+    }
+
     func suspendNextNetworkBlock() {
         blockNetworkSuspensionCount += 1
+    }
+
+    func requireControllerReplacementOnNextNetworkBlock() {
+        nextNetworkBlockDisposition = .engineReplacementRequired
+    }
+
+    func setNextNetworkBlockError(_ error: Error?) {
+        nextNetworkBlockError = error
     }
 
     func waitForSuspendedNetworkBlock() async {
@@ -665,6 +681,10 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         }
     }
 
+    func emitWake() {
+        wakeContinuation?.yield()
+    }
+
     func waitForWakeStreamRequestCount(_ expectedCount: Int) async {
         while wakeStreamRequestCount < expectedCount {
             await Task.yield()
@@ -777,7 +797,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         ))
     }
 
-    func blockNetworkNow() async throws {
+    func blockNetworkNow() async throws -> TorrentNetworkBlockDisposition {
         blockNetworkCount += 1
         if blockNetworkSuspensionCount > 0 {
             blockNetworkSuspensionCount -= 1
@@ -785,7 +805,17 @@ actor FakeTorrentEngine: TorrentEngineServicing {
                 blockNetworkContinuations.append(continuation)
             }
         }
+        if let nextNetworkBlockError {
+            self.nextNetworkBlockError = nil
+            throw nextNetworkBlockError
+        }
         currentNetworkBlocked = true
+        let disposition = nextNetworkBlockDisposition
+        nextNetworkBlockDisposition = .engineRemainsAvailable
+        if disposition == .engineReplacementRequired {
+            availability.withLock { $0 = false }
+        }
+        return disposition
     }
 
     func saveAll() async {

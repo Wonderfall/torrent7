@@ -7,7 +7,7 @@ import TorrentEngineModel
 @testable import TorrentApp
 
 @MainActor
-@Suite("Torrent store integration")
+@Suite("Torrent store integration", .serialized)
 struct TorrentStoreIntegrationTests {
     @Test("Checked save cancels a pending production startup for prompt termination")
     func checkedSaveCancelsPendingProductionStartup() async {
@@ -447,11 +447,13 @@ struct TorrentStoreIntegrationTests {
         var settings = harness.store.settings
         settings.enablePeerExchangePlugin.toggle()
         harness.store.updateSettings(settings)
-        await harness.engine.waitForSuspendedRestart()
+        await Task.yield()
+        #expect(await harness.engine.restartCount == 0)
 
         await harness.engine.resumeSuspendedSnapshotBatchCalls()
         await staleRefresh.value
         #expect(harness.store.torrents.map(\.id) == [current.id])
+        await harness.engine.waitForSuspendedRestart()
 
         await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 3, torrents: [current]))
         await harness.engine.resumeSuspendedRestarts()
@@ -1320,6 +1322,177 @@ struct TorrentStoreIntegrationTests {
 
         #expect(await harness.engine.appliedSettings.last?.networkBlocked == false)
         #expect(await harness.engine.saveAllCount == 1)
+    }
+
+    @Test("A preempted network block replaces the isolated controller automatically")
+    func preemptedNetworkBlockReplacesController() async {
+        let interfaces = [
+            NetworkInterfaceOption(
+                name: "utun1",
+                displayName: "First VPN",
+                fingerprint: "first-vpn",
+                vpnServiceID: "first-service",
+                vpnServiceName: "First VPN",
+                isLikelyVPN: true
+            ),
+            NetworkInterfaceOption(
+                name: "utun2",
+                displayName: "Second VPN",
+                fingerprint: "second-vpn",
+                vpnServiceID: "second-service",
+                vpnServiceName: "Second VPN",
+                isLikelyVPN: true
+            ),
+        ]
+        let harness = makeStoreHarness(networkInterfaces: interfaces)
+        var initialBinding = harness.store.settings
+        initialBinding.requireNetworkInterface = true
+        initialBinding.requiredNetworkInterfaceName = "utun1"
+        harness.store.updateSettings(initialBinding)
+        await harness.store.saveAll()
+        await harness.engine.suspendNextSnapshotBatchCall()
+        let inFlightRefresh = Task { @MainActor in
+            await harness.store.refreshNow()
+        }
+        await harness.engine.waitForSuspendedSnapshotBatchCall()
+
+        let replacementEngine = FakeTorrentEngine()
+        let replacementCount = Mutex(0)
+        defer {
+            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
+        }
+        TorrentStore.engineStartupFactoryOverride.withLock { factory in
+            factory = { _, _ in
+                replacementCount.withLock { $0 += 1 }
+                return replacementEngine
+            }
+        }
+        await harness.engine.requireControllerReplacementOnNextNetworkBlock()
+        let expectedNetworkBlockCount = await harness.engine.blockNetworkCount + 1
+
+        var changedBinding = harness.store.settings
+        changedBinding.requiredNetworkInterfaceName = "utun2"
+        harness.store.updateSettings(changedBinding)
+        await harness.engine.waitForNetworkBlockCount(expectedNetworkBlockCount)
+
+        let replacementSave = Task { @MainActor in
+            await harness.store.saveAll()
+        }
+        let replacementClock = ContinuousClock()
+        let replacementDeadline = replacementClock.now.advanced(by: .seconds(1))
+        while replacementCount.withLock({ $0 }) == 0,
+              replacementClock.now < replacementDeadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        let replacementStartedWithStaleRefresh = replacementCount.withLock { $0 } == 1
+        await replacementSave.value
+
+        var pluginChanged = harness.store.settings
+        pluginChanged.enablePeerExchangePlugin.toggle()
+        harness.store.updateSettings(pluginChanged)
+        let restartSave = Task { @MainActor in
+            await harness.store.saveAll()
+        }
+        let restartClock = ContinuousClock()
+        let restartDeadline = restartClock.now.advanced(by: .seconds(1))
+        while await replacementEngine.restartCount == 0,
+              restartClock.now < restartDeadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        let replacementRestartedWithStaleRefresh = await replacementEngine.restartCount == 1
+
+        await harness.engine.resumeSuspendedSnapshotBatchCalls()
+        await inFlightRefresh.value
+        await restartSave.value
+
+        #expect(replacementStartedWithStaleRefresh)
+        #expect(replacementRestartedWithStaleRefresh)
+        #expect(replacementCount.withLock { $0 } == 1)
+        #expect(!harness.engine.isAvailable)
+        #expect(harness.store.engineAvailable)
+        #expect(await replacementEngine.appliedSettings.last?.networkBlocked == false)
+        #expect(await replacementEngine.appliedSettings.last?.settings.requiredNetworkInterfaceName == "utun2")
+        #expect(await replacementEngine.saveAllCount == 2)
+        #expect(harness.store.lastError != "The isolated torrent engine connection ended safely.")
+    }
+
+    @Test("Controller replacement does not await a cancellation-insensitive refresh task")
+    func controllerReplacementDoesNotAwaitStaleRefreshTask() async {
+        let harness = makeStoreHarness(startsTasks: true, keepsWakeStreamOpen: true)
+        await harness.store.saveAll()
+        await harness.engine.waitForOpenWakeStream()
+        await harness.engine.suspendNextSnapshotBatchCall()
+        await harness.engine.emitWake()
+        await harness.engine.waitForSuspendedSnapshotBatchCall()
+
+        let replacementEngine = FakeTorrentEngine()
+        let replacementCount = Mutex(0)
+        defer {
+            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
+        }
+        TorrentStore.engineStartupFactoryOverride.withLock { factory in
+            factory = { _, _ in
+                replacementCount.withLock { $0 += 1 }
+                return replacementEngine
+            }
+        }
+        await harness.engine.requireControllerReplacementOnNextNetworkBlock()
+        let expectedNetworkBlockCount = await harness.engine.blockNetworkCount + 1
+
+        var restricted = harness.store.settings
+        restricted.requireNetworkInterface = true
+        restricted.requiredNetworkInterfaceName = "utun-missing"
+        harness.store.updateSettings(restricted)
+        await harness.engine.waitForNetworkBlockCount(expectedNetworkBlockCount)
+        let save = Task { @MainActor in
+            await harness.store.saveAll()
+        }
+
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(1))
+        while replacementCount.withLock({ $0 }) == 0,
+              clock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        let replacementStartedBeforeRefreshUnwound = replacementCount.withLock { $0 } == 1
+
+        await harness.engine.resumeSuspendedSnapshotBatchCalls()
+        await save.value
+
+        #expect(replacementStartedBeforeRefreshUnwound)
+        #expect(!harness.engine.isAvailable)
+        #expect(harness.store.engineAvailable)
+        #expect(await replacementEngine.appliedSettings.last?.networkBlocked == true)
+    }
+
+    @Test("An unconfirmed network block terminates and replaces an available engine")
+    func failedNetworkBlockTerminatesAvailableEngine() async {
+        let harness = makeStoreHarness()
+        let replacementEngine = FakeTorrentEngine()
+        let replacementCount = Mutex(0)
+        defer {
+            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
+        }
+        TorrentStore.engineStartupFactoryOverride.withLock { factory in
+            factory = { _, _ in
+                replacementCount.withLock { $0 += 1 }
+                return replacementEngine
+            }
+        }
+        await harness.engine.setNextNetworkBlockError(FakeBookmarkError())
+
+        var restricted = harness.store.settings
+        restricted.requireNetworkInterface = true
+        restricted.requiredNetworkInterfaceName = "utun-missing"
+        harness.store.updateSettings(restricted)
+        await harness.store.saveAll()
+
+        #expect(replacementCount.withLock { $0 } == 1)
+        #expect(!harness.engine.isAvailable)
+        #expect(harness.store.engineAvailable)
+        #expect(await replacementEngine.appliedSettings.last?.networkBlocked == true)
+        #expect(await replacementEngine.appliedSettings.last?.settings.requiredNetworkInterfaceName == "utun-missing")
+        #expect(harness.store.lastError == nil)
     }
 
     @Test("Pending settings applications coalesce to latest values")

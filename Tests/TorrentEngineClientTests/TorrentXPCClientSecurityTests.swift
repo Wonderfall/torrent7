@@ -675,7 +675,7 @@ struct TorrentXPCClientSecurityTests {
         #expect(transport.sequences == [1, 2, 3])
     }
 
-    @Test("An urgent network block preempts an ordered request by closing the controller")
+    @Test("An urgent network block reports that its preempted controller must be replaced")
     func urgentNetworkBlockPreemptsInFlightRequest() async throws {
         let blocker = AsyncRequestBlocker()
         let epoch = epoch
@@ -703,15 +703,47 @@ struct TorrentXPCClientSecurityTests {
         }
         await blocker.waitUntilBlocked()
 
-        await #expect(throws: TorrentEngineClientError.self) {
-            try await client.blockNetworkNow()
-        }
+        let disposition = try await client.blockNetworkNow()
 
+        #expect(disposition == .engineReplacementRequired)
         #expect(!client.isAvailable)
         #expect(transport.isCancelled)
         #expect(transport.operations == [.handshake, .pause])
+        await #expect(throws: TorrentEngineClientError.self) {
+            try await client.reannounce(id: "alpha")
+        }
         await blocker.release()
         _ = try? await inFlight.value
+    }
+
+    @Test("A failed ordered network block closes and replaces the controller")
+    func failedNetworkBlockRequiresControllerReplacement() async throws {
+        let epoch = epoch
+        let transport = ScriptedTorrentEngineTransport { request in
+            switch request.header.operation {
+            case .handshake:
+                return try successReply(
+                    TorrentEngineIPCHandshakeResponse(
+                        libtorrentVersion: "2.1.0",
+                        folders: []
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .blockNetwork:
+                throw TorrentEngineClientError.serviceRejected("Rejected for testing")
+            default:
+                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
+            }
+        }
+        let client = try await makeClient(transport: transport)
+
+        let disposition = try await client.blockNetworkNow()
+
+        #expect(disposition == .engineReplacementRequired)
+        #expect(!client.isAvailable)
+        #expect(transport.isCancelled)
+        #expect(transport.operations == [.handshake, .blockNetwork])
     }
 
     private func makeClient(

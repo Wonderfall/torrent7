@@ -125,7 +125,14 @@ The following are protocol invariants:
 - a second peer racing an in-flight controller is classified as busy or
   shutting down, rather than as a same-controller protocol violation;
 - an urgent network revocation preempts a long ordered request by terminating
-  the controller and entering the service's out-of-band disconnect path;
+  the controller and entering the service's out-of-band disconnect path; the
+  GUI treats that containment as an engine-replacement disposition, lets
+  already-accepted work unwind against the terminated controller without
+  replaying it, and reconnects through a fresh blocked handshake before
+applying only the latest settings;
+- post-terminal calls are rejected before request-slot admission, and lifecycle
+  generation fencing prevents a cancellation-insensitive stale poll from
+  affecting or delaying the replacement controller;
 - malformed uncorrelatable messages and admission-limit violations cancel the
   session rather than entering the engine;
 - a fatal reply mismatch, invalid epoch, or semantic validation failure
@@ -324,6 +331,16 @@ pointer.
 This is an application-level binding policy, not a system-wide VPN kill switch.
 Hostname lookup still uses macOS system DNS, so selecting a libtorrent interface
 does not independently constrain DNS traffic.
+
+If a controller request is already in flight when the GUI must revoke network
+access, the revocation never waits behind that request. The GUI closes the
+controller, which activates the same watchdog-covered disconnect containment
+described above. Once its local ordered queue has unwound, it creates a new
+authenticated controller, delegates a fresh exact folder-capability snapshot,
+and applies the newest settings from the engine's blocked startup state. An
+interrupted or queued user mutation may report that its connection ended, but it
+is not replayed across this boundary because its native commit status may be
+ambiguous.
 
 ### Patch libtorrent only at boundaries the application cannot own
 

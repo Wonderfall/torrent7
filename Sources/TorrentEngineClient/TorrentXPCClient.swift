@@ -723,17 +723,25 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         )
     }
 
-    package func blockNetworkNow() async throws {
+    package func blockNetworkNow() async throws -> TorrentNetworkBlockDisposition {
         guard !requestIsInFlight else {
             // Network revocation must preempt long-running ordered operations
             // such as terminal file deletion. Cancelling the authenticated
             // controller invokes the service's out-of-band disconnect path,
             // which blocks (or force-contains) the native engine immediately.
-            let error = TorrentEngineClientError.connectionCancelled
-            terminalize(error)
-            throw error
+            terminalize(.connectionCancelled)
+            return .engineReplacementRequired
         }
-        try await invokeUnit(.blockNetwork, TorrentEngineIPCEmpty())
+        do {
+            try await invokeUnit(.blockNetwork, TorrentEngineIPCEmpty())
+            return .engineRemainsAvailable
+        } catch {
+            // A block that cannot be confirmed is itself a fail-closed
+            // boundary. Closing the controller enters the same independently
+            // watched service-disconnect containment path as urgent preemption.
+            terminalize(responseFailure(from: error))
+            return .engineReplacementRequired
+        }
     }
 
     package func saveAll() async {
@@ -1395,7 +1403,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     }
 
     private func acquireRequestSlot() async throws {
-        guard !Task.isCancelled else {
+        guard !Task.isCancelled, state.isAvailable else {
             throw TorrentEngineClientError.connectionCancelled
         }
         if !requestIsInFlight {
@@ -1409,7 +1417,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         let waiterID = UUID()
         let acquired = await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
-                guard !Task.isCancelled else {
+                guard !Task.isCancelled, state.isAvailable else {
                     continuation.resume(returning: false)
                     return
                 }
@@ -1424,6 +1432,13 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             }
         }
         guard acquired else {
+            throw TorrentEngineClientError.connectionCancelled
+        }
+        guard state.isAvailable else {
+            // Slot ownership was transferred before the connection became
+            // terminal. Release it here because invoke() has not installed its
+            // defer yet.
+            releaseRequestSlot()
             throw TorrentEngineClientError.connectionCancelled
         }
     }
