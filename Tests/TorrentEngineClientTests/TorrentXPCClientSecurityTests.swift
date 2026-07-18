@@ -435,8 +435,166 @@ struct TorrentXPCClientSecurityTests {
         }
 
         #expect(!client.isAvailable)
+        #expect(client.recoveryDisposition == .terminal)
         #expect(transport.isCancelled)
         #expect(transport.operations == [.handshake, .pause])
+    }
+
+    @Test("Connection loss requests a fresh controller")
+    func connectionLossRequestsControllerReplacement() async throws {
+        let epoch = epoch
+        let transport = ScriptedTorrentEngineTransport { request in
+            switch request.header.operation {
+            case .handshake:
+                try successReply(
+                    TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.0", folders: []),
+                    for: request,
+                    epoch: epoch
+                )
+            case .pause:
+                throw TorrentEngineClientError.connectionFailed
+            default:
+                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
+            }
+        }
+        let client = try await makeClient(transport: transport)
+
+        await #expect(throws: TorrentEngineClientError.self) {
+            try await client.pause(id: torrentID)
+        }
+
+        #expect(!client.isAvailable)
+        #expect(client.recoveryDisposition == .replaceController)
+        #expect(transport.isCancelled)
+    }
+
+    @Test("An engine epoch change is terminal")
+    func engineRestartIsTerminal() async throws {
+        let epoch = epoch
+        let transport = ScriptedTorrentEngineTransport { request in
+            switch request.header.operation {
+            case .handshake:
+                try successReply(
+                    TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.0", folders: []),
+                    for: request,
+                    epoch: epoch
+                )
+            case .pause:
+                throw TorrentEngineClientError.engineRestarted
+            default:
+                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
+            }
+        }
+        let client = try await makeClient(transport: transport)
+
+        await #expect(throws: TorrentEngineClientError.self) {
+            try await client.pause(id: torrentID)
+        }
+
+        #expect(!client.isAvailable)
+        #expect(client.recoveryDisposition == .terminal)
+        #expect(transport.isCancelled)
+    }
+
+    @Test("A terminal failure dominates transport cancellation ordering")
+    func terminalFailureDominatesTransportCancellation() {
+        let state = TorrentXPCClientState()
+
+        state.cancel(
+            message: TorrentEngineClientError.connectionCancelled.localizedDescription,
+            recoveryDisposition: .replaceController
+        )
+        state.cancel(
+            message: TorrentEngineClientError.invalidReply.localizedDescription,
+            recoveryDisposition: .terminal
+        )
+        state.cancel(
+            message: TorrentEngineClientError.connectionCancelled.localizedDescription,
+            recoveryDisposition: .replaceController
+        )
+
+        #expect(!state.isAvailable)
+        #expect(state.failure == TorrentEngineClientError.invalidReply.localizedDescription)
+        #expect(state.recoveryDisposition == .terminal)
+    }
+
+    @Test("Owner termination preserves terminal recovery intent")
+    func ownerTerminationPreservesTerminalRecoveryIntent() async throws {
+        let epoch = epoch
+        let transport = ScriptedTorrentEngineTransport { request in
+            guard request.header.operation == .handshake else {
+                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
+            }
+            return try successReply(
+                TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.0", folders: []),
+                for: request,
+                epoch: epoch
+            )
+        }
+        let client = try await makeClient(transport: transport)
+
+        await client.terminateConnection(recoveryDisposition: .terminal)
+        await client.terminateConnection(recoveryDisposition: .replaceController)
+
+        #expect(!client.isAvailable)
+        #expect(client.recoveryDisposition == .terminal)
+        #expect(transport.isCancelled)
+    }
+
+    @Test("A rejected poll is non-authoritative and terminal")
+    func rejectedPollIsNonAuthoritativeAndTerminal() async throws {
+        let epoch = epoch
+        let rejection = "The poll request violated service policy."
+        let transport = ScriptedTorrentEngineTransport { request in
+            switch request.header.operation {
+            case .handshake:
+                try successReply(
+                    TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.0", folders: []),
+                    for: request,
+                    epoch: epoch
+                )
+            case .poll:
+                throw TorrentEngineClientError.serviceRejected(rejection)
+            default:
+                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
+            }
+        }
+        let client = try await makeClient(transport: transport)
+
+        let result = await client.poll(
+            since: nil,
+            sortedBy: .dateAdded,
+            direction: .ascending,
+            includeTrackerHosts: false
+        )
+
+        #expect(!result.isAuthoritative)
+        #expect(result.alertErrors == [rejection])
+        #expect(!client.isAvailable)
+        #expect(client.recoveryDisposition == .terminal)
+        #expect(transport.isCancelled)
+    }
+
+    @Test("Recovery classification distinguishes lifecycle loss from trust failures")
+    func recoveryClassification() {
+        #expect(
+            TorrentEngineClientError.connectionCancelled.recoveryDisposition
+                == .replaceController
+        )
+        #expect(
+            TorrentEngineClientError.connectionFailed.recoveryDisposition
+                == .replaceController
+        )
+        #expect(
+            TorrentEngineClientError.serviceTemporarilyUnavailable("shutdown")
+                .recoveryDisposition == .replaceController
+        )
+        #expect(TorrentEngineClientError.invalidReply.recoveryDisposition == .terminal)
+        #expect(TorrentEngineClientError.engineRestarted.recoveryDisposition == .terminal)
+        #expect(
+            TorrentEngineClientError.serviceRejected("authentication failed")
+                .recoveryDisposition == .terminal
+        )
     }
 
     @Test("Typed busy failures are retryable without weakening other rejections")
@@ -603,6 +761,7 @@ struct TorrentXPCClientSecurityTests {
         #expect(rejected.networkInterfaceSnapshot == nil)
         #expect(rejected.alertErrors == [TorrentEngineClientError.invalidReply.localizedDescription])
         #expect(!client.isAvailable)
+        #expect(client.recoveryDisposition == .terminal)
         #expect(transport.isCancelled)
     }
 
@@ -799,6 +958,7 @@ struct TorrentXPCClientSecurityTests {
 
         #expect(disposition == .engineReplacementRequired)
         #expect(!client.isAvailable)
+        #expect(client.recoveryDisposition == .replaceController)
         #expect(transport.isCancelled)
         #expect(transport.operations == [.handshake, .pause])
         await #expect(throws: TorrentEngineClientError.self) {
@@ -834,6 +994,7 @@ struct TorrentXPCClientSecurityTests {
 
         #expect(disposition == .engineReplacementRequired)
         #expect(!client.isAvailable)
+        #expect(client.recoveryDisposition == .terminal)
         #expect(transport.isCancelled)
         #expect(transport.operations == [.handshake, .blockNetwork])
     }

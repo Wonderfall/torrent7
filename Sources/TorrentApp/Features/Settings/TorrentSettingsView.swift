@@ -618,9 +618,7 @@ struct TorrentSettingsView: View {
             if state.settings.requireNetworkInterface {
                 Picker("Interface", selection: requiredNetworkInterfaceName) {
                     if state.settings.requiredNetworkInterfaceName.isEmpty {
-                        Text(state.selectableNetworkInterfaces.isEmpty
-                            ? (state.settings.showOnlyVPNInterfaces ? "No active VPN interfaces" : "No interfaces available")
-                            : "Choose an interface")
+                        Text(interfacePickerPlaceholder)
                             .tag("")
                     }
 
@@ -641,6 +639,18 @@ struct TorrentSettingsView: View {
                 }
             }
         }
+    }
+
+    private var interfacePickerPlaceholder: String {
+        guard state.networkInterfacesAreAuthoritative else {
+            return "Refreshing interfaces…"
+        }
+        guard state.selectableNetworkInterfaces.isEmpty else {
+            return "Choose an interface"
+        }
+        return state.settings.showOnlyVPNInterfaces
+            ? "No active VPN interfaces"
+            : "No interfaces available"
     }
 
     private var vpnOnlyModeRow: some View {
@@ -892,9 +902,9 @@ struct TorrentSettingsView: View {
 
     private var requireNetworkInterfaceConfirmationMessage: String {
         if pendingRequireNetworkInterface == true {
-            return "Torrent sockets will bind to the selected interface and transfers will pause while it is unavailable. Hostname lookup still uses macOS system DNS. Applying this restarts the libtorrent session."
+            return "Torrent sockets will bind to the selected interface. Existing peer connections are closed while the binding is applied, and transfers pause whenever that interface is unavailable. Hostname lookup still uses macOS system DNS."
         }
-        return "Transfers will use the system network route again. Applying this restarts the libtorrent session."
+        return "Existing peer connections are closed while the binding is removed, then transfers use the system network route again."
     }
 
     private var peerExchangePluginConfirmationBinding: Binding<Bool> {

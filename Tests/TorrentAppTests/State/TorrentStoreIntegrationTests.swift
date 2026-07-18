@@ -3,6 +3,7 @@ import Foundation
 import Synchronization
 import Testing
 import TorrentBridge
+import TorrentEngineClient
 import TorrentEngineModel
 @testable import TorrentApp
 
@@ -113,9 +114,64 @@ struct TorrentStoreIntegrationTests {
         #expect(capture.withLock { $0.ranOffMainThread })
         #expect(capture.withLock { $0.authorizedSavePaths } == ["/Downloads/Initial"])
         #expect(await harness.engine.shutdownCount == 1)
-        #expect(await installedEngine.appliedSettings.last?.settings.enablePeerExchangePlugin == false)
-        #expect(await installedEngine.restartAuthorizedSavePathSnapshots == [["/Downloads/AddedAfterLaunch"]])
+        #expect(harness.store.settings == TorrentSettings())
+        #expect(harness.store.downloadFolder == nil)
+        #expect(harness.accessStore.clearDefaultCalls.count == 1)
+        #expect(await installedEngine.appliedSettings.last?.settings.enablePeerExchangePlugin == true)
+        #expect(await installedEngine.restartAuthorizedSavePathSnapshots.isEmpty)
         #expect(weakStartupAccess == nil)
+    }
+
+    @Test("Engine startup preserves visible interface choices until the fresh snapshot arrives")
+    func engineStartupPreservesVisibleInterfaceChoices() async {
+        let interfaces = [
+            NetworkInterfaceOption(
+                name: "en0",
+                displayName: "Wi-Fi",
+                fingerprint: "wifi-fingerprint",
+                vpnServiceID: nil,
+                vpnServiceName: nil,
+                isLikelyVPN: false
+            ),
+            NetworkInterfaceOption(
+                name: "utun4",
+                displayName: "ProtonVPN",
+                fingerprint: "vpn-fingerprint",
+                vpnServiceID: "proton-service",
+                vpnServiceName: "ProtonVPN",
+                isLikelyVPN: true
+            ),
+        ]
+        var settings = TorrentSettings()
+        settings.requireNetworkInterface = true
+        settings.requiredNetworkInterfaceName = "utun4"
+        let harness = makeStoreHarness(settings: settings, networkInterfaces: interfaces)
+        let startupEntered = Mutex(false)
+        let releaseStartup = DispatchSemaphore(value: 0)
+        defer {
+            releaseStartup.signal()
+            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
+        }
+        TorrentStore.engineStartupFactoryOverride.withLock { factory in
+            factory = { _, _ in
+                startupEntered.withLock { $0 = true }
+                releaseStartup.wait()
+                return FakeTorrentEngine()
+            }
+        }
+
+        harness.store.startProductionEngine(enablePeerExchangePlugin: true)
+        while !startupEntered.withLock({ $0 }) {
+            await Task.yield()
+        }
+
+        #expect(harness.store.networkInterfaces == interfaces)
+        #expect(harness.store.selectableNetworkInterfaces == interfaces)
+        #expect(!harness.store.requiredNetworkInterfaceAvailable)
+        #expect(harness.store.networkProtectionStatusText == "Refreshing interfaces…")
+
+        releaseStartup.signal()
+        await harness.store.saveAll()
     }
 
     @Test("Refresh updates torrents, dependent services, selection, and bookmark pruning")
@@ -516,18 +572,18 @@ struct TorrentStoreIntegrationTests {
         ])
     }
 
-    @Test("Clearing the default folder revokes its authorization only once")
-    func clearingDefaultFolderReconcilesEmptyAuthorizationsWithoutRedundantReplacement() async throws {
+    @Test("Repeated restore requests coalesce and revoke the default folder once")
+    func repeatedRestoreRequestsCoalesceAndRevokeDefaultFolderOnce() async throws {
         let harness = makeStoreHarness(mirrorsFolderCapabilityMutations: true)
         let folder = URL(filePath: "/Downloads/Default", directoryHint: .isDirectory)
         try harness.store.chooseDownloadFolder(folder).get()
         await harness.store.saveAll()
 
         harness.store.restoreDefaultSettings()
-        await harness.store.saveAll()
         harness.store.restoreDefaultSettings()
         await harness.store.saveAll()
 
+        #expect(harness.accessStore.clearDefaultCalls.count == 1)
         #expect(await harness.engine.reconciledFolderAuthorizationSnapshots == [
             [expectedFolderAuthorization(for: folder.path)],
             [],
@@ -1079,10 +1135,196 @@ struct TorrentStoreIntegrationTests {
         await harness.store.saveAll()
 
         #expect(await harness.engine.blockNetworkCount >= 1)
-        #expect(await harness.engine.restartPeerExchangePluginValues == [false])
-        #expect(await harness.engine.restartAuthorizedSavePathSnapshots == [["/Downloads/Existing", "/Downloads/New"]])
-        #expect(await harness.engine.appliedSettings.last?.settings.enablePeerExchangePlugin == false)
+        #expect(await harness.engine.restartPeerExchangePluginValues == [false, true])
+        #expect(await harness.engine.restartAuthorizedSavePathSnapshots == [
+            ["/Downloads/Existing", "/Downloads/New"],
+            [],
+        ])
+        #expect(harness.store.settings == TorrentSettings())
+        #expect(harness.store.downloadFolder == nil)
+        #expect(harness.accessStore.clearDefaultCalls.count == 1)
+        #expect(await harness.engine.appliedSettings.last?.settings.enablePeerExchangePlugin == true)
         #expect(weakRestartAccess == nil)
+    }
+
+    @Test("Enabling interface binding contains once without restarting the engine")
+    func enablingInterfaceBindingContainsOnceWithoutRestart() async throws {
+        let vpn = NetworkInterfaceOption(
+            name: "utun4",
+            displayName: "ProtonVPN",
+            fingerprint: "service-fingerprint",
+            vpnServiceID: "proton-service",
+            vpnServiceName: "ProtonVPN",
+            isLikelyVPN: true
+        )
+        let harness = makeStoreHarness(networkInterfaces: [vpn])
+        var settings = harness.store.settings
+        settings.requireNetworkInterface = true
+        settings.requiredNetworkInterfaceName = vpn.name
+
+        harness.store.updateSettings(settings)
+        await harness.store.saveAll()
+
+        #expect(await harness.engine.blockNetworkCount == 1)
+        #expect(await harness.engine.restartCount == 0)
+        #expect(harness.store.engineAvailable)
+        #expect(await harness.engine.appliedSettings.last?.networkBinding == TorrentNetworkBinding(
+            interfaceName: vpn.name,
+            interfaceFingerprint: vpn.fingerprint,
+            vpnServiceID: vpn.vpnServiceID,
+            networkBlocked: false
+        ))
+    }
+
+    @Test("Rapid interface changes share one containment and apply only the latest binding")
+    func rapidInterfaceChangesCoalesceContainment() async throws {
+        let firstVPN = NetworkInterfaceOption(
+            name: "utun1",
+            displayName: "First VPN",
+            fingerprint: "first-fingerprint",
+            vpnServiceID: "first-service",
+            vpnServiceName: "First VPN",
+            isLikelyVPN: true
+        )
+        let secondVPN = NetworkInterfaceOption(
+            name: "utun2",
+            displayName: "Second VPN",
+            fingerprint: "second-fingerprint",
+            vpnServiceID: "second-service",
+            vpnServiceName: "Second VPN",
+            isLikelyVPN: true
+        )
+        let harness = makeStoreHarness(networkInterfaces: [firstVPN, secondVPN])
+        await harness.engine.suspendNextNetworkBlock()
+        var settings = harness.store.settings
+        settings.requireNetworkInterface = true
+        settings.requiredNetworkInterfaceName = firstVPN.name
+
+        harness.store.updateSettings(settings)
+        await harness.engine.waitForSuspendedNetworkBlock()
+        settings.requiredNetworkInterfaceName = secondVPN.name
+        harness.store.updateSettings(settings)
+
+        let save = Task { @MainActor in
+            await harness.store.saveAll()
+        }
+        await harness.engine.resumeSuspendedNetworkBlocks()
+        await save.value
+
+        #expect(await harness.engine.blockNetworkCount == 1)
+        #expect(await harness.engine.restartCount == 0)
+        #expect(await harness.engine.appliedSettings.count == 1)
+        #expect(await harness.engine.appliedSettings.last?.networkBinding == TorrentNetworkBinding(
+            interfaceName: secondVPN.name,
+            interfaceFingerprint: secondVPN.fingerprint,
+            vpnServiceID: secondVPN.vpnServiceID,
+            networkBlocked: false
+        ))
+    }
+
+    @Test("A stale pre-containment poll cannot revoke a confirmed network block")
+    func stalePreContainmentPollCannotRevokeConfirmedBlock() async {
+        let harness = makeStoreHarness()
+        let replacementCount = Mutex(0)
+        defer {
+            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
+        }
+        TorrentStore.engineStartupFactoryOverride.withLock { factory in
+            factory = { _, _ in
+                replacementCount.withLock { $0 += 1 }
+                return FakeTorrentEngine()
+            }
+        }
+
+        await harness.engine.suspendNextSnapshotBatchCall()
+        let stalePoll = Task { @MainActor in
+            await harness.store.refreshNow()
+        }
+        await harness.engine.waitForSuspendedSnapshotBatchCall()
+        await harness.engine.suspendNextSettingsApplication()
+
+        var restricted = harness.store.settings
+        restricted.requireNetworkInterface = true
+        restricted.requiredNetworkInterfaceName = "utun-missing"
+        harness.store.updateSettings(restricted)
+        await harness.engine.waitForSuspendedSettingsApplication()
+
+        await harness.engine.resumeSuspendedSnapshotBatchCalls()
+        await stalePoll.value
+        await harness.engine.requireControllerReplacementOnNextNetworkBlock()
+
+        var updated = restricted
+        updated.downloadRateLimitKBps = 512
+        harness.store.updateSettings(updated)
+        await harness.engine.resumeSuspendedSettingsApplications()
+        await harness.store.saveAll()
+
+        #expect(await harness.engine.blockNetworkCount == 1)
+        #expect(replacementCount.withLock { $0 } == 0)
+        #expect(harness.store.engineAvailable)
+        #expect(await harness.engine.appliedSettings.last?.networkBlocked == true)
+    }
+
+    @Test("A synthetic blocked poll cannot suppress real binding containment")
+    func nonAuthoritativeBlockedPollCannotSuppressContainment() async {
+        let vpn = NetworkInterfaceOption(
+            name: "utun4",
+            displayName: "ProtonVPN",
+            fingerprint: "service-fingerprint",
+            vpnServiceID: "proton-service",
+            vpnServiceName: "ProtonVPN",
+            isLikelyVPN: true
+        )
+        let harness = makeStoreHarness(networkInterfaces: [vpn])
+        await harness.engine.setNetworkStatus(.empty)
+        await harness.engine.setNextPollIsAuthoritative(false)
+
+        await harness.store.refreshNow()
+
+        var settings = harness.store.settings
+        settings.requireNetworkInterface = true
+        settings.requiredNetworkInterfaceName = vpn.name
+        harness.store.updateSettings(settings)
+        await harness.store.saveAll()
+
+        #expect(await harness.engine.blockNetworkCount == 1)
+        #expect(harness.store.engineAvailable)
+        #expect(await harness.engine.appliedSettings.last?.networkBlocked == false)
+    }
+
+    @Test("Initial synchronization finishes before wake refresh starts")
+    func initialSynchronizationPrecedesWakeRefresh() async throws {
+        let vpn = NetworkInterfaceOption(
+            name: "utun4",
+            displayName: "ProtonVPN",
+            fingerprint: "service-fingerprint",
+            vpnServiceID: "proton-service",
+            vpnServiceName: "ProtonVPN",
+            isLikelyVPN: true
+        )
+        var settings = TorrentSettings()
+        settings.requireNetworkInterface = true
+        settings.requiredNetworkInterfaceName = vpn.name
+        let harness = makeStoreHarness(
+            settings: settings,
+            networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot(
+                revision: 1,
+                interfaces: [vpn]
+            ),
+            startsTasks: true,
+            keepsWakeStreamOpen: true,
+            suspendsInitialSnapshotBatch: true
+        )
+        await harness.engine.waitForSuspendedSnapshotBatchCall()
+
+        #expect(await harness.engine.wakeStreamRequestCount == 0)
+        await harness.engine.resumeSuspendedSnapshotBatchCalls()
+        await harness.store.saveAll()
+        await harness.engine.waitForWakeStreamRequestCount(1)
+
+        #expect(harness.store.networkInterfaces == [vpn])
+        #expect(await harness.engine.appliedSettings.last?.networkBinding.interfaceName == vpn.name)
+        await harness.engine.finishWakeStream()
     }
 
     @Test("Service interface snapshot populates VPN choices before initial binding")
@@ -1374,7 +1616,8 @@ struct TorrentStoreIntegrationTests {
         await harness.engine.resumeSuspendedAddMagnets()
         await harness.store.saveAll()
         #expect(harness.accessStore.commitPreparedForAddCalls.count == 1)
-        #expect(harness.store.downloadFolder?.path == folder.path)
+        #expect(harness.accessStore.clearDefaultCalls.count == 1)
+        #expect(harness.store.downloadFolder == nil)
     }
 
     @Test("Failed engine add revokes its provisional folder without a local revision change")
@@ -1544,6 +1787,257 @@ struct TorrentStoreIntegrationTests {
         #expect(await replacementEngine.appliedSettings.last?.settings.requiredNetworkInterfaceName == "utun2")
         #expect(await replacementEngine.saveAllCount == 2)
         #expect(harness.store.lastError != "The isolated torrent engine connection ended safely.")
+    }
+
+    @Test("A magnet queued behind replacement containment runs only after replacement synchronization")
+    func queuedMagnetRunsOnlyOnSynchronizedReplacement() async {
+        let vpn = NetworkInterfaceOption(
+            name: "utun4",
+            displayName: "ProtonVPN",
+            fingerprint: "vpn-fingerprint",
+            vpnServiceID: "proton-service",
+            vpnServiceName: "ProtonVPN",
+            isLikelyVPN: true
+        )
+        let harness = makeStoreHarness(networkInterfaces: [vpn])
+        let replacementEngine = FakeTorrentEngine(
+            networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot(
+                revision: 1,
+                interfaces: [vpn]
+            ),
+            suspendsInitialSnapshotBatch: true
+        )
+        let replacementCount = Mutex(0)
+        defer {
+            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
+        }
+        TorrentStore.engineStartupFactoryOverride.withLock { factory in
+            factory = { _, _ in
+                replacementCount.withLock { $0 += 1 }
+                return replacementEngine
+            }
+        }
+        await harness.engine.requireControllerReplacementOnNextNetworkBlock()
+        await harness.engine.suspendNextNetworkBlock()
+
+        var settings = harness.store.settings
+        settings.requireNetworkInterface = true
+        settings.requiredNetworkInterfaceName = vpn.name
+        harness.store.updateSettings(settings)
+        await harness.engine.waitForSuspendedNetworkBlock()
+
+        let accepted = harness.store.addMagnet(
+            "magnet:?xt=urn:btih:replacement",
+            savePath: "/Downloads"
+        )
+        #expect(accepted)
+        await harness.engine.resumeSuspendedNetworkBlocks()
+        await replacementEngine.waitForSuspendedSnapshotBatchCall()
+
+        #expect(await harness.engine.addedMagnets.isEmpty)
+        #expect(await replacementEngine.addedMagnets.isEmpty)
+        #expect(await replacementEngine.appliedSettings.isEmpty)
+
+        await replacementEngine.resumeSuspendedSnapshotBatchCalls()
+        await harness.store.saveAll()
+
+        #expect(replacementCount.withLock { $0 } == 1)
+        #expect(await harness.engine.addedMagnets.isEmpty)
+        #expect(await replacementEngine.addedMagnets.map(\.magnet) == [
+            "magnet:?xt=urn:btih:replacement"
+        ])
+        #expect(await replacementEngine.operations == [
+            .applySettings(dhtEnabled: true, networkBlocked: false),
+            .addMagnet(appliedDHTEnabled: true, networkBlocked: false),
+        ])
+    }
+
+    @Test("Replacement startup failure resolves a queued async operation")
+    func replacementStartupFailureResolvesQueuedAsyncOperation() async {
+        let harness = makeStoreHarness()
+        let replacementCount = Mutex(0)
+        let operationStarted = Mutex(false)
+        let operationOutcome = Mutex<String?>(nil)
+        defer {
+            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
+        }
+        TorrentStore.engineStartupFactoryOverride.withLock { factory in
+            factory = { _, _ in
+                replacementCount.withLock { $0 += 1 }
+                throw FakeBookmarkError()
+            }
+        }
+        await harness.engine.requireControllerReplacementOnNextNetworkBlock()
+        await harness.engine.suspendNextNetworkBlock()
+
+        var restricted = harness.store.settings
+        restricted.requireNetworkInterface = true
+        restricted.requiredNetworkInterfaceName = "utun-missing"
+        harness.store.updateSettings(restricted)
+        await harness.engine.waitForSuspendedNetworkBlock()
+
+        let queuedOperation = Task { @MainActor in
+            operationStarted.withLock { $0 = true }
+            do {
+                try await harness.store.requestSources(for: "alpha")
+                operationOutcome.withLock { $0 = "succeeded" }
+            } catch {
+                operationOutcome.withLock { $0 = error.localizedDescription }
+            }
+        }
+        while !operationStarted.withLock({ $0 }) {
+            await Task.yield()
+        }
+        await Task.yield()
+        await harness.engine.resumeSuspendedNetworkBlocks()
+
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(1))
+        while operationOutcome.withLock({ $0 }) == nil,
+              clock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        let resolvedOutcome = operationOutcome.withLock { $0 }
+        if resolvedOutcome != nil {
+            await queuedOperation.value
+        } else {
+            queuedOperation.cancel()
+        }
+
+        #expect(replacementCount.withLock { $0 } == 1)
+        #expect(resolvedOutcome != nil)
+        #expect(resolvedOutcome != "succeeded")
+        #expect(await harness.engine.requestedSourceIDs.isEmpty)
+        #expect(!harness.store.engineAvailable)
+    }
+
+    @Test("A recoverable background poll failure replaces the controller")
+    func recoverablePollFailureReplacesController() async {
+        let harness = makeStoreHarness()
+        let replacementEngine = FakeTorrentEngine()
+        let replacementCount = Mutex(0)
+        defer {
+            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
+        }
+        TorrentStore.engineStartupFactoryOverride.withLock { factory in
+            factory = { _, _ in
+                replacementCount.withLock { $0 += 1 }
+                return replacementEngine
+            }
+        }
+        await harness.engine.failNextSnapshotBatchCall(
+            recoveryDisposition: .replaceController
+        )
+
+        await harness.store.refreshNow(notifiesCompletions: false)
+        await harness.store.saveAll()
+
+        #expect(replacementCount.withLock { $0 } == 1)
+        #expect(harness.store.engineAvailable)
+        #expect(await replacementEngine.appliedSettings.count == 1)
+    }
+
+    @Test("A terminal background poll failure is not automatically reconnected")
+    func terminalPollFailureDoesNotReconnect() async {
+        let harness = makeStoreHarness()
+        let replacementCount = Mutex(0)
+        defer {
+            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
+        }
+        TorrentStore.engineStartupFactoryOverride.withLock { factory in
+            factory = { _, _ in
+                replacementCount.withLock { $0 += 1 }
+                return FakeTorrentEngine()
+            }
+        }
+        await harness.store.refreshNow(notifiesCompletions: false)
+        #expect(harness.store.bridgeHealth == .healthy)
+        #expect(!harness.store.networkStatus.networkBlocked)
+        await harness.engine.failNextSnapshotBatchCall(
+            recoveryDisposition: .terminal
+        )
+
+        await harness.store.refreshNow(notifiesCompletions: false)
+
+        #expect(replacementCount.withLock { $0 } == 0)
+        #expect(!harness.store.engineAvailable)
+        #expect(harness.store.bridgeHealth == .unavailable)
+        #expect(harness.store.networkStatus == .empty)
+    }
+
+    @Test("A terminal containment failure is not automatically reconnected")
+    func terminalContainmentFailureDoesNotReconnect() async {
+        let vpn = NetworkInterfaceOption(
+            name: "utun4",
+            displayName: "ProtonVPN",
+            fingerprint: "vpn-fingerprint",
+            vpnServiceID: "proton-service",
+            vpnServiceName: "ProtonVPN",
+            isLikelyVPN: true
+        )
+        let harness = makeStoreHarness(networkInterfaces: [vpn])
+        let replacementCount = Mutex(0)
+        defer {
+            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
+        }
+        TorrentStore.engineStartupFactoryOverride.withLock { factory in
+            factory = { _, _ in
+                replacementCount.withLock { $0 += 1 }
+                return FakeTorrentEngine()
+            }
+        }
+        await harness.engine.requireControllerReplacementOnNextNetworkBlock(
+            recoveryDisposition: .terminal
+        )
+        var settings = harness.store.settings
+        settings.requireNetworkInterface = true
+        settings.requiredNetworkInterfaceName = vpn.name
+
+        harness.store.updateSettings(settings)
+        await harness.store.saveAll()
+
+        #expect(await harness.engine.blockNetworkCount == 1)
+        #expect(replacementCount.withLock { $0 } == 0)
+        #expect(!harness.store.engineAvailable)
+    }
+
+    @Test("A terminal containment error overrides a replaceable published lifecycle")
+    func terminalContainmentErrorDominatesPublishedRecovery() async {
+        let vpn = NetworkInterfaceOption(
+            name: "utun4",
+            displayName: "ProtonVPN",
+            fingerprint: "vpn-fingerprint",
+            vpnServiceID: "proton-service",
+            vpnServiceName: "ProtonVPN",
+            isLikelyVPN: true
+        )
+        let harness = makeStoreHarness(networkInterfaces: [vpn])
+        let replacementCount = Mutex(0)
+        defer {
+            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
+        }
+        TorrentStore.engineStartupFactoryOverride.withLock { factory in
+            factory = { _, _ in
+                replacementCount.withLock { $0 += 1 }
+                return FakeTorrentEngine()
+            }
+        }
+        await harness.engine.setRecoveryDisposition(.replaceController)
+        await harness.engine.setNextNetworkBlockError(
+            TorrentEngineClientError.serviceRejected("Rejected by the service.")
+        )
+
+        var settings = harness.store.settings
+        settings.requireNetworkInterface = true
+        settings.requiredNetworkInterfaceName = vpn.name
+        harness.store.updateSettings(settings)
+        await harness.store.saveAll()
+
+        #expect(await harness.engine.blockNetworkCount == 1)
+        #expect(harness.engine.recoveryDisposition == .terminal)
+        #expect(replacementCount.withLock { $0 } == 0)
+        #expect(!harness.store.engineAvailable)
+        #expect(harness.store.lastError == "Rejected by the service.")
     }
 
     @Test("Controller replacement does not await a cancellation-insensitive refresh task")
@@ -1739,12 +2233,14 @@ private func makeStoreHarness(
     networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot? = nil,
     startsTasks: Bool = false,
     keepsWakeStreamOpen: Bool = false,
+    suspendsInitialSnapshotBatch: Bool = false,
     initialFolderCapabilityPaths: [String] = [],
     mirrorsFolderCapabilityMutations: Bool = false
 ) -> StoreHarness {
     let engine = FakeTorrentEngine(
         keepsWakeStreamOpen: keepsWakeStreamOpen,
-        networkInterfaceSnapshot: networkInterfaceSnapshot
+        networkInterfaceSnapshot: networkInterfaceSnapshot,
+        suspendsInitialSnapshotBatch: suspendsInitialSnapshotBatch
     )
     let dock = RecordingDockTileService()
     let notifications = RecordingNotificationService()

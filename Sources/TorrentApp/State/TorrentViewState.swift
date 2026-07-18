@@ -223,17 +223,20 @@ final class TorrentSettingsState {
     var settings: TorrentSettings
     var downloadFolder: URL?
     var networkInterfaces: [NetworkInterfaceOption]
+    var networkInterfacesAreAuthoritative: Bool
     var selectedTab: TorrentSettingsTab
 
     init(
         settings: TorrentSettings,
         downloadFolder: URL?,
         networkInterfaces: [NetworkInterfaceOption] = [],
+        networkInterfacesAreAuthoritative: Bool = true,
         selectedTab: TorrentSettingsTab = .general
     ) {
         self.settings = settings
         self.downloadFolder = downloadFolder
         self.networkInterfaces = networkInterfaces
+        self.networkInterfacesAreAuthoritative = networkInterfacesAreAuthoritative
         self.selectedTab = selectedTab
     }
 
@@ -244,6 +247,9 @@ final class TorrentSettingsState {
     var requiredNetworkInterfaceAvailable: Bool {
         guard settings.requireNetworkInterface else {
             return true
+        }
+        guard networkInterfacesAreAuthoritative else {
+            return false
         }
 
         let interfaceName = settings.libtorrentRequiredNetworkInterfaceName
@@ -263,6 +269,9 @@ final class TorrentSettingsState {
         let interfaceName = settings.libtorrentRequiredNetworkInterfaceName
         guard !interfaceName.isEmpty else {
             return "Choose an interface"
+        }
+        guard networkInterfacesAreAuthoritative else {
+            return "Refreshing interfaces…"
         }
 
         guard let option = networkInterfaces.first(where: { $0.name == interfaceName }) else {

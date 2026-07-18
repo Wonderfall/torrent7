@@ -73,10 +73,11 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     }
 }
 
-@safe private final class TorrentXPCClientState: Sendable {
+@safe final class TorrentXPCClientState: Sendable {
     private struct Values: Sendable {
         var available = true
         var failure: String?
+        var recoveryDisposition = TorrentEngineRecoveryDisposition.none
         var libtorrentVersion = "Unknown"
         var continuation: AsyncStream<Void>.Continuation?
     }
@@ -98,6 +99,10 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         values.withLock(\.failure)
     }
 
+    var recoveryDisposition: TorrentEngineRecoveryDisposition {
+        values.withLock(\.recoveryDisposition)
+    }
+
     var libtorrentVersion: String {
         values.withLock(\.libtorrentVersion)
     }
@@ -111,13 +116,25 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         continuation?.yield()
     }
 
-    func cancel(message: String) {
+    func cancel(
+        message: String,
+        recoveryDisposition: TorrentEngineRecoveryDisposition
+    ) {
         let continuation: AsyncStream<Void>.Continuation? = values.withLock { values in
             guard values.available else {
+                // A transport callback can race a typed protocol failure back
+                // to the actor. Never let a generic, replaceable cancellation
+                // mask the stricter trust-boundary outcome.
+                if recoveryDisposition == .terminal,
+                   values.recoveryDisposition != .terminal {
+                    values.failure = message
+                    values.recoveryDisposition = .terminal
+                }
                 return nil
             }
             values.available = false
             values.failure = message
+            values.recoveryDisposition = recoveryDisposition
             let continuation = values.continuation
             values.continuation = nil
             return continuation
@@ -126,7 +143,10 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     }
 
     deinit {
-        cancel(message: "The isolated torrent engine connection ended safely.")
+        cancel(
+            message: "The isolated torrent engine connection ended safely.",
+            recoveryDisposition: .terminal
+        )
     }
 }
 
@@ -387,6 +407,10 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         state.isAvailable
     }
 
+    package nonisolated var recoveryDisposition: TorrentEngineRecoveryDisposition {
+        state.recoveryDisposition
+    }
+
     private init(
         controllerID: UUID,
         transport: any TorrentEngineIPCTransport,
@@ -412,7 +436,10 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                     controllerID: controllerID,
                     hintHandler: { state.signal() },
                     cancellationHandler: {
-                        state.cancel(message: "The isolated torrent engine connection ended safely.")
+                        state.cancel(
+                            message: "The isolated torrent engine connection ended safely.",
+                            recoveryDisposition: .replaceController
+                        )
                     }
                 )
                 return try await establishConnection(
@@ -479,8 +506,12 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             )
             return client
         } catch {
+            let failure = error as? TorrentEngineClientError ?? .connectionFailed
+            state.cancel(
+                message: failure.localizedDescription,
+                recoveryDisposition: failure.recoveryDisposition
+            )
             transport.cancel()
-            state.cancel(message: error.localizedDescription)
             throw error
         }
     }
@@ -492,15 +523,23 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         capabilitiesByCanonicalPath.removeAll(keepingCapacity: false)
         legacyPollCache = nil
         engineEpoch = nil
+        state.cancel(
+            message: "The isolated torrent engine connection ended safely.",
+            recoveryDisposition: .terminal
+        )
         transport.cancel()
-        state.cancel(message: "The isolated torrent engine connection ended safely.")
     }
 
-    package func terminateConnection() async {
+    package func terminateConnection(
+        recoveryDisposition: TorrentEngineRecoveryDisposition
+    ) async {
         capabilitiesByCanonicalPath.removeAll(keepingCapacity: false)
         legacyPollCache = nil
         engineEpoch = nil
-        terminalize(.connectionCancelled)
+        terminalize(
+            message: TorrentEngineClientError.connectionCancelled.localizedDescription,
+            recoveryDisposition: recoveryDisposition
+        )
     }
 
     package func restart(
@@ -817,28 +856,18 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                 includeTrackerHosts: includeTrackerHosts
             )
         } catch {
-            return TorrentEnginePollResult(
-                dirtyMask: 0,
-                alertErrors: [error.localizedDescription],
-                networkStatus: .empty,
-                bridgeHealth: .unavailable,
-                snapshotBatch: nil,
-                trackerHostBatch: nil,
-                networkInterfaceSnapshot: nil
-            )
+            return failedPollResult(from: error)
         }
 
-        var dirtyMask = response.dirtyMask
-        var alertErrors = response.alertErrors
+        let dirtyMask = response.dirtyMask
+        let alertErrors = response.alertErrors
         var snapshotBatch: TorrentSnapshotBatch?
         var trackerHostBatch: TorrentTrackerHostBatch?
         if let snapshotDescriptor = response.snapshotDataset,
            let trackerDescriptor = response.trackerHostDataset,
            snapshotDescriptor.id == trackerDescriptor.id {
             try? await closeDataset(snapshotDescriptor.id)
-            alertErrors.append(TorrentEngineClientError.invalidReply.localizedDescription)
-            dirtyMask |= TorrentEngineDirtySet.torrents.rawValue
-            dirtyMask |= TorrentEngineDirtySet.trackerHosts.rawValue
+            return failedPollResult(from: TorrentEngineClientError.invalidReply)
         } else {
             if let descriptor = response.snapshotDataset {
                 do {
@@ -852,8 +881,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                         torrents: torrents
                     )
                 } catch {
-                    alertErrors.append(error.localizedDescription)
-                    dirtyMask |= TorrentEngineDirtySet.torrents.rawValue
+                    return failedPollResult(from: error)
                 }
             }
             if let descriptor = response.trackerHostDataset {
@@ -868,8 +896,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                         hosts: hosts
                     )
                 } catch {
-                    alertErrors.append(error.localizedDescription)
-                    dirtyMask |= TorrentEngineDirtySet.trackerHosts.rawValue
+                    return failedPollResult(from: error)
                 }
             }
         }
@@ -881,6 +908,23 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             snapshotBatch: snapshotBatch,
             trackerHostBatch: trackerHostBatch,
             networkInterfaceSnapshot: response.networkInterfaceSnapshot
+        )
+    }
+
+    private func failedPollResult(from error: any Error) -> TorrentEnginePollResult {
+        let failure = responseFailure(from: error)
+        if failure.recoveryDisposition == .terminal {
+            terminalize(failure)
+        }
+        return TorrentEnginePollResult(
+            isAuthoritative: false,
+            dirtyMask: 0,
+            alertErrors: [failure.localizedDescription],
+            networkStatus: .empty,
+            bridgeHealth: .unavailable,
+            snapshotBatch: nil,
+            trackerHostBatch: nil,
+            networkInterfaceSnapshot: nil
         )
     }
 
@@ -1427,13 +1471,26 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     }
 
     private func terminalize(_ error: TorrentEngineClientError) {
+        terminalize(
+            message: error.localizedDescription,
+            recoveryDisposition: error.recoveryDisposition
+        )
+    }
+
+    private func terminalize(
+        message: String,
+        recoveryDisposition: TorrentEngineRecoveryDisposition
+    ) {
         let waiters = requestWaiters
         requestWaiters.removeAll(keepingCapacity: false)
         for waiter in waiters {
             waiter.continuation.resume(returning: false)
         }
+        state.cancel(
+            message: message,
+            recoveryDisposition: recoveryDisposition
+        )
         transport.cancel()
-        state.cancel(message: error.localizedDescription)
     }
 
     private func responseFailure(from error: any Error) -> TorrentEngineClientError {
@@ -1565,7 +1622,23 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     }
 
     deinit {
+        state.cancel(
+            message: "The isolated torrent engine connection ended safely.",
+            recoveryDisposition: .terminal
+        )
         transport.cancel()
-        state.cancel(message: "The isolated torrent engine connection ended safely.")
+    }
+}
+
+extension TorrentEngineClientError {
+    package var recoveryDisposition: TorrentEngineRecoveryDisposition {
+        switch self {
+        case .connectionFailed, .connectionCancelled, .serviceTemporarilyUnavailable:
+            .replaceController
+        case .invalidReply, .engineRestarted, .serviceRejected,
+             .capabilityUnavailable, .capabilityPathMismatch,
+             .invalidBookmark, .migrationFailed, .requestQueueFull:
+            .terminal
+        }
     }
 }

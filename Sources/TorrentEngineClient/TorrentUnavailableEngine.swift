@@ -13,7 +13,11 @@ package actor TorrentUnavailableEngine: TorrentEngineServicing {
     }
 
     package func shutdown() async {}
-    package func terminateConnection() async {}
+    package func terminateConnection(
+        recoveryDisposition: TorrentEngineRecoveryDisposition
+    ) async {
+        _ = recoveryDisposition
+    }
 
     package func restart(
         enablePeerExchangePlugin: Bool,
@@ -128,6 +132,7 @@ package actor TorrentUnavailableEngine: TorrentEngineServicing {
         _ = direction
         _ = includeTrackerHosts
         return TorrentEnginePollResult(
+            isAuthoritative: false,
             dirtyMask: 0,
             alertErrors: [],
             networkStatus: .empty,

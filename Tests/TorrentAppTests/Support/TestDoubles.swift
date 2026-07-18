@@ -296,12 +296,17 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     nonisolated let startupFailureMessage: String? = nil
     nonisolated let libtorrentVersion = "fake-libtorrent"
     private nonisolated let availability = Mutex(true)
+    private nonisolated let recovery = Mutex(TorrentEngineRecoveryDisposition.none)
     private let keepsWakeStreamOpen: Bool
     private var wakeContinuation: AsyncStream<Void>.Continuation?
     private(set) var wakeStreamRequestCount = 0
 
     nonisolated var isAvailable: Bool {
         availability.withLock { $0 }
+    }
+
+    nonisolated var recoveryDisposition: TorrentEngineRecoveryDisposition {
+        recovery.withLock { $0 }
     }
 
     var snapshotBatch: TorrentSnapshotBatch?
@@ -314,8 +319,18 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private var trackerHostBatchContinuations = [CheckedContinuation<Void, Never>]()
     private var snapshotBatchSuspensionCount = 0
     private var snapshotBatchContinuations = [CheckedContinuation<Void, Never>]()
+    private var snapshotFailureDisposition: TorrentEngineRecoveryDisposition?
+    private var nextPollIsAuthoritative: Bool?
     var dirtyMask: UInt32 = 0
-    var networkStatusValue = TorrentNetworkStatus.empty
+    var networkStatusValue = TorrentNetworkStatus(
+        requestedRevision: 0,
+        submittedRevision: 0,
+        listenPort: 0,
+        networkBlocked: false,
+        hasListener: false,
+        endpoint: "",
+        lastError: ""
+    )
     var bridgeHealthValue = TorrentBridgeHealth.healthy
     var networkInterfaceSnapshotValue: TorrentNetworkInterfaceSnapshot?
     var alertErrors = [String]()
@@ -329,9 +344,12 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private var restartContinuations = [CheckedContinuation<Void, Never>]()
     private(set) var blockNetworkCount = 0
     private var nextNetworkBlockDisposition = TorrentNetworkBlockDisposition.engineRemainsAvailable
+    private var nextNetworkBlockRecoveryDisposition = TorrentEngineRecoveryDisposition.replaceController
     private var nextNetworkBlockError: Error?
     private var blockNetworkSuspensionCount = 0
     private var blockNetworkContinuations = [CheckedContinuation<Void, Never>]()
+    private var applySettingsSuspensionCount = 0
+    private var applySettingsContinuations = [CheckedContinuation<Void, Never>]()
     private(set) var currentNetworkBlocked = false
     private(set) var saveAllCount = 0
     private(set) var saveAllCheckedCount = 0
@@ -389,6 +407,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private(set) var filePriorityUpdates = [(id: String, fileIndex: Int32, priority: TorrentFilePriority)]()
     private(set) var queueMoves = [(id: String, move: TorrentQueueMove)]()
     private(set) var requestedPieceMapIDs = [String]()
+    private(set) var requestedSourceIDs = [String]()
     var sourcePolicyValue = TorrentSourcePolicy(
         isDHTEnabled: true,
         isPeerExchangeEnabled: true,
@@ -405,10 +424,12 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     init(
         keepsWakeStreamOpen: Bool = false,
-        networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot? = nil
+        networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot? = nil,
+        suspendsInitialSnapshotBatch: Bool = false
     ) {
         self.keepsWakeStreamOpen = keepsWakeStreamOpen
         networkInterfaceSnapshotValue = networkInterfaceSnapshot
+        snapshotBatchSuspensionCount = suspendsInitialSnapshotBatch ? 1 : 0
     }
 
     func shutdown() {
@@ -418,7 +439,18 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         wakeContinuation = nil
     }
 
-    func terminateConnection() {
+    func terminateConnection(
+        recoveryDisposition: TorrentEngineRecoveryDisposition
+    ) {
+        recovery.withLock { current in
+            if current == .terminal || recoveryDisposition == .terminal {
+                current = .terminal
+            } else if current == .replaceController || recoveryDisposition == .replaceController {
+                current = .replaceController
+            } else {
+                current = .none
+            }
+        }
         shutdown()
     }
 
@@ -498,6 +530,20 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         networkInterfaceSnapshotValue = snapshot
     }
 
+    func failNextSnapshotBatchCall(
+        recoveryDisposition: TorrentEngineRecoveryDisposition
+    ) {
+        snapshotFailureDisposition = recoveryDisposition
+    }
+
+    func setNextPollIsAuthoritative(_ isAuthoritative: Bool) {
+        nextPollIsAuthoritative = isAuthoritative
+    }
+
+    func setRecoveryDisposition(_ disposition: TorrentEngineRecoveryDisposition) {
+        recovery.withLock { $0 = disposition }
+    }
+
     func setRemoveError(_ error: Error?) {
         removeError = error
     }
@@ -544,8 +590,11 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         blockNetworkSuspensionCount += 1
     }
 
-    func requireControllerReplacementOnNextNetworkBlock() {
+    func requireControllerReplacementOnNextNetworkBlock(
+        recoveryDisposition: TorrentEngineRecoveryDisposition = .replaceController
+    ) {
         nextNetworkBlockDisposition = .engineReplacementRequired
+        nextNetworkBlockRecoveryDisposition = recoveryDisposition
     }
 
     func setNextNetworkBlockError(_ error: Error?) {
@@ -561,6 +610,24 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     func resumeSuspendedNetworkBlocks() {
         let continuations = blockNetworkContinuations
         blockNetworkContinuations.removeAll()
+        for continuation in continuations {
+            continuation.resume()
+        }
+    }
+
+    func suspendNextSettingsApplication() {
+        applySettingsSuspensionCount += 1
+    }
+
+    func waitForSuspendedSettingsApplication() async {
+        while applySettingsContinuations.isEmpty {
+            await Task.yield()
+        }
+    }
+
+    func resumeSuspendedSettingsApplications() {
+        let continuations = applySettingsContinuations
+        applySettingsContinuations.removeAll()
         for continuation in continuations {
             continuation.resume()
         }
@@ -642,6 +709,8 @@ actor FakeTorrentEngine: TorrentEngineServicing {
                 restartContinuations.append(continuation)
             }
         }
+        currentNetworkBlocked = true
+        networkStatusValue = networkStatusValue.withNetworkBlocked(true)
         availability.withLock { $0 = true }
     }
 
@@ -788,8 +857,15 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         _ settings: TorrentSettings,
         networkBinding: TorrentNetworkBinding
     ) async throws {
+        if applySettingsSuspensionCount > 0 {
+            applySettingsSuspensionCount -= 1
+            await withCheckedContinuation { continuation in
+                applySettingsContinuations.append(continuation)
+            }
+        }
         appliedSettings.append((settings, networkBinding, networkBinding.networkBlocked))
         currentNetworkBlocked = networkBinding.networkBlocked
+        networkStatusValue = networkStatusValue.withNetworkBlocked(networkBinding.networkBlocked)
         operations.append(.applySettings(
             dhtEnabled: settings.enableDHTNetwork,
             networkBlocked: networkBinding.networkBlocked
@@ -809,9 +885,12 @@ actor FakeTorrentEngine: TorrentEngineServicing {
             throw nextNetworkBlockError
         }
         currentNetworkBlocked = true
+        networkStatusValue = networkStatusValue.withNetworkBlocked(true)
         let disposition = nextNetworkBlockDisposition
         nextNetworkBlockDisposition = .engineRemainsAvailable
         if disposition == .engineReplacementRequired {
+            recovery.withLock { $0 = nextNetworkBlockRecoveryDisposition }
+            nextNetworkBlockRecoveryDisposition = .replaceController
             availability.withLock { $0 = false }
         }
         return disposition
@@ -847,6 +926,51 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         networkInterfaceSnapshotValue
     }
 
+    func poll(
+        since revision: UInt64?,
+        sortedBy sortOrder: TorrentSortOrder,
+        direction: TorrentSortDirection,
+        includeTrackerHosts: Bool
+    ) async -> TorrentEnginePollResult {
+        let isAuthoritative = nextPollIsAuthoritative ?? true
+        nextPollIsAuthoritative = nil
+        let health = bridgeHealthValue
+        let changes = dirtyMask
+        dirtyMask = 0
+        var errors = [String]()
+        errors.reserveCapacity(TorrentEngineLimits.maximumAlertErrorsPerPoll)
+        for _ in 0..<TorrentEngineLimits.maximumAlertErrorsPerPoll {
+            guard !alertErrors.isEmpty else {
+                break
+            }
+            let error = alertErrors.removeFirst()
+            if !error.isEmpty {
+                errors.append(error)
+            }
+        }
+        let status = networkStatusValue
+        let interfaceSnapshot = networkInterfaceSnapshotValue
+        let trackerHostsChanged = TorrentEngineDirtySet(rawValue: changes).contains(.trackerHosts)
+        let trackerHosts = includeTrackerHosts || trackerHostsChanged
+            ? await trackerHostBatch()
+            : nil
+        let snapshots = await snapshotsIfChanged(
+            since: revision,
+            sortedBy: sortOrder,
+            direction: direction
+        )
+        return TorrentEnginePollResult(
+            isAuthoritative: isAuthoritative,
+            dirtyMask: changes,
+            alertErrors: errors,
+            networkStatus: status,
+            bridgeHealth: health,
+            snapshotBatch: snapshots,
+            trackerHostBatch: trackerHosts,
+            networkInterfaceSnapshot: interfaceSnapshot
+        )
+    }
+
     func snapshotsIfChanged(
         since revision: UInt64?,
         sortedBy sortOrder: TorrentSortOrder,
@@ -862,10 +986,17 @@ actor FakeTorrentEngine: TorrentEngineServicing {
                 snapshotBatchContinuations.append(continuation)
             }
         }
+        if let snapshotFailureDisposition {
+            self.snapshotFailureDisposition = nil
+            recovery.withLock { $0 = snapshotFailureDisposition }
+            availability.withLock { $0 = false }
+        }
         return response
     }
 
-    func requestSources(id: String) async throws {}
+    func requestSources(id: String) async throws {
+        requestedSourceIDs.append(id)
+    }
 
     func sourcePolicy(id: String) async throws -> TorrentSourcePolicy {
         sourcePolicyValue
@@ -936,6 +1067,20 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     func pieceMapBatch(id: String, since revision: UInt64?) async -> TorrentPieceMapBatch? {
         pieceMapBatchRequests.append((id, revision))
         return revision == pieceMapBatchValue.revision ? nil : pieceMapBatchValue
+    }
+}
+
+private extension TorrentNetworkStatus {
+    func withNetworkBlocked(_ networkBlocked: Bool) -> TorrentNetworkStatus {
+        TorrentNetworkStatus(
+            requestedRevision: requestedRevision,
+            submittedRevision: submittedRevision,
+            listenPort: listenPort,
+            networkBlocked: networkBlocked,
+            hasListener: networkBlocked ? false : hasListener,
+            endpoint: networkBlocked ? "" : endpoint,
+            lastError: lastError
+        )
     }
 }
 

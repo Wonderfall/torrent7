@@ -38,6 +38,18 @@ package enum TorrentNetworkBlockDisposition: Equatable, Sendable {
     case engineReplacementRequired
 }
 
+/// Describes whether an unavailable engine can be recovered by creating a new
+/// isolated controller, or whether the failure must remain terminal.
+package enum TorrentEngineRecoveryDisposition: Equatable, Sendable {
+    /// The engine has not reported a terminal lifecycle event.
+    case none
+    /// The controller transport ended without a trust-boundary violation.
+    case replaceController
+    /// Reconnecting automatically could hide a protocol or authentication
+    /// failure, so the engine must remain unavailable.
+    case terminal
+}
+
 package struct TorrentFolderAuthorization: Equatable, Sendable {
     package let path: String
     package let bookmarkData: Data
@@ -52,12 +64,16 @@ package protocol TorrentEngineServicing: Sendable {
     var startupFailureMessage: String? { get }
     var libtorrentVersion: String { get }
     var isAvailable: Bool { get }
+    var recoveryDisposition: TorrentEngineRecoveryDisposition { get }
 
     /// Ends the controller connection and waits for engine-owned resources to
     /// be released. Implementations must be idempotent.
     func shutdown() async
-    /// Immediately removes the controller transport as a fail-closed boundary.
-    func terminateConnection() async
+    /// Immediately removes the controller transport as a fail-closed boundary
+    /// while preserving whether an owner may safely create a fresh controller.
+    func terminateConnection(
+        recoveryDisposition: TorrentEngineRecoveryDisposition
+    ) async
     func restart(enablePeerExchangePlugin: Bool, authorizedSavePaths: [String]) async throws
     func delegateFolderAuthorization(_ authorization: TorrentFolderAuthorization) async throws
     func reconcileFolderAuthorizations(
@@ -98,7 +114,8 @@ package protocol TorrentEngineServicing: Sendable {
     /// initiated. The latter engine must not be used again, and a replacement
     /// controller cannot complete its handshake until cleanup releases the old
     /// one. A thrown error means containment was not confirmed; callers must
-    /// terminate that engine and replace it before allowing further work.
+    /// terminate that engine and may replace it only when its recovery
+    /// disposition permits automatic reconnection.
     func blockNetworkNow() async throws -> TorrentNetworkBlockDisposition
     func saveAll() async
     func saveAllChecked() async throws
@@ -139,6 +156,9 @@ package protocol TorrentEngineServicing: Sendable {
 }
 
 package struct TorrentEnginePollResult: Codable, Sendable {
+    /// False when the values below are a local fail-safe fallback rather than
+    /// a response authenticated by the current engine controller.
+    package let isAuthoritative: Bool
     package let dirtyMask: UInt32
     package let alertErrors: [String]
     package let networkStatus: TorrentNetworkStatus
@@ -148,6 +168,7 @@ package struct TorrentEnginePollResult: Codable, Sendable {
     package let networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot?
 
     package init(
+        isAuthoritative: Bool = true,
         dirtyMask: UInt32,
         alertErrors: [String],
         networkStatus: TorrentNetworkStatus,
@@ -156,6 +177,7 @@ package struct TorrentEnginePollResult: Codable, Sendable {
         trackerHostBatch: TorrentTrackerHostBatch?,
         networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot? = nil
     ) {
+        self.isAuthoritative = isAuthoritative
         self.dirtyMask = dirtyMask
         self.alertErrors = Array(alertErrors.prefix(TorrentEngineLimits.maximumAlertErrorsPerPoll))
         self.networkStatus = networkStatus
@@ -166,6 +188,7 @@ package struct TorrentEnginePollResult: Codable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
+        case isAuthoritative
         case dirtyMask
         case alertErrors
         case networkStatus
@@ -178,6 +201,7 @@ package struct TorrentEnginePollResult: Codable, Sendable {
     package init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
+            isAuthoritative: try values.decode(Bool.self, forKey: .isAuthoritative),
             dirtyMask: try values.decode(UInt32.self, forKey: .dirtyMask),
             alertErrors: try values.decode([String].self, forKey: .alertErrors),
             networkStatus: try values.decode(TorrentNetworkStatus.self, forKey: .networkStatus),
@@ -193,6 +217,7 @@ package struct TorrentEnginePollResult: Codable, Sendable {
 
     package func encode(to encoder: any Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(isAuthoritative, forKey: .isAuthoritative)
         try values.encode(dirtyMask, forKey: .dirtyMask)
         try values.encode(alertErrors, forKey: .alertErrors)
         try values.encode(networkStatus, forKey: .networkStatus)
@@ -204,6 +229,10 @@ package struct TorrentEnginePollResult: Codable, Sendable {
 }
 
 extension TorrentEngineServicing {
+    package var recoveryDisposition: TorrentEngineRecoveryDisposition {
+        .none
+    }
+
     package func networkInterfaceSnapshot() async -> TorrentNetworkInterfaceSnapshot? {
         nil
     }

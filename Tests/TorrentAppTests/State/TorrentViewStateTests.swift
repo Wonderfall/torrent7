@@ -55,6 +55,24 @@ struct TorrentViewStateTests {
         #expect(state.networkProtectionStatusText == "en0 VPN inactive")
     }
 
+    @Test("Retained interface choices are not active until refreshed")
+    func retainedInterfacesAreNotAuthoritative() {
+        var settings = TorrentSettings()
+        settings.requireNetworkInterface = true
+        settings.requiredNetworkInterfaceName = "utun4"
+
+        let state = TorrentSettingsState(
+            settings: settings,
+            downloadFolder: nil,
+            networkInterfaces: [.ethernet, .vpn],
+            networkInterfacesAreAuthoritative: false
+        )
+
+        #expect(state.selectableNetworkInterfaces == [.ethernet, .vpn])
+        #expect(state.requiredNetworkInterfaceAvailable == false)
+        #expect(state.networkProtectionStatusText == "Refreshing interfaces…")
+    }
+
 }
 
 private extension NetworkInterfaceOption {

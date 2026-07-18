@@ -107,8 +107,7 @@ final class TorrentStore {
     private var pendingOperations = [TorrentStorePendingOperation]()
     private var appliedNetworkBinding: AppliedNetworkBinding?
     private var appliedPeerExchangePluginEnabled: Bool?
-    private var immediateNetworkBlockBinding: AppliedNetworkBinding?
-    private var immediateNetworkBlockGeneration: UInt64 = 0
+    private var confirmedNetworkBlockLifecycleGeneration: UInt64?
     private var torrentsByID = [TorrentItem.ID: TorrentItem]()
     private var lastErrorGeneration = 0
     private var lastErrorSource: TorrentStoreErrorSource?
@@ -127,8 +126,10 @@ final class TorrentStore {
     private var isFolderCapabilityTransactionInProgress = false
     private var folderAuthorizationLaneIsHeld = false
     private var folderAuthorizationLaneWaiters = [CheckedContinuation<Void, Never>]()
+    private var restoreDefaultsOperationIsPending = false
     private var engineStartupFailed = false
     private var engineAuthorizedFolderState: TorrentStoreEngineAuthorizationState?
+    private var backgroundRefreshesEnabled = false
 
     init() {
         let defaults = UserDefaults.standard
@@ -159,11 +160,16 @@ final class TorrentStore {
             downloadFolder = nil
             restoredFolderError = "The saved download folder could not be restored. Choose a download folder again."
         }
-        settingsState = TorrentSettingsState(settings: loadedSettings, downloadFolder: restoredDownloadFolder)
+        settingsState = TorrentSettingsState(
+            settings: loadedSettings,
+            downloadFolder: restoredDownloadFolder,
+            networkInterfacesAreAuthoritative: false
+        )
 
         let startingEngine = TorrentUnavailableEngine(message: "Torrent engine startup is in progress.")
         engine = startingEngine
         isEngineStarting = true
+        backgroundRefreshesEnabled = true
         appliedPeerExchangePluginEnabled = loadedSettings.enablePeerExchangePlugin
         libtorrentVersion = startingEngine.libtorrentVersion
         selectionState.didChange = { [weak self] in
@@ -222,6 +228,8 @@ final class TorrentStore {
             networkInterfaces: networkInterfaces
         )
         libtorrentVersion = engine.libtorrentVersion
+        appliedNetworkBinding = currentNetworkBinding
+        backgroundRefreshesEnabled = startsTasks
         selectionState.didChange = { [weak self] in
             self?.updateCommandState()
         }
@@ -229,7 +237,6 @@ final class TorrentStore {
         if startsTasks, engine.isAvailable {
             completionNotifier.configure()
             startInitialEngineSync()
-            startRefreshing()
         }
     }
 
@@ -1233,18 +1240,43 @@ final class TorrentStore {
     }
 
     func restoreDefaultSettings() {
-        do {
-            try requireFolderAuthorityMutationAllowed()
-            updateSettings(TorrentSettings())
-            try clearDownloadFolder()
-        } catch {
-            setLastError(error.localizedDescription, source: .userAction)
+        guard !restoreDefaultsOperationIsPending else {
+            return
         }
+        restoreDefaultsOperationIsPending = true
+        schedulePendingRestoreDefaultsIfPossible()
+    }
+
+    @discardableResult
+    private func schedulePendingRestoreDefaultsIfPossible() -> Bool {
+        guard restoreDefaultsOperationIsPending, !isEngineStarting else {
+            return false
+        }
+        let accepted = scheduleUserOperation { store in
+            defer {
+                store.restoreDefaultsOperationIsPending = false
+            }
+            do {
+                try store.requireFolderAuthorityMutationAllowed()
+                try store.requireRestoreDefaultsQueueCapacity()
+                store.updateSettings(TorrentSettings())
+                try store.clearDownloadFolder()
+            } catch {
+                store.setLastError(error.localizedDescription, source: .userAction)
+            }
+        }
+        if !accepted {
+            restoreDefaultsOperationIsPending = false
+        }
+        return accepted
     }
 
     var requiredNetworkInterfaceAvailable: Bool {
         guard settings.requireNetworkInterface else {
             return true
+        }
+        guard settingsState.networkInterfacesAreAuthoritative else {
+            return false
         }
 
         let interfaceName = settings.libtorrentRequiredNetworkInterfaceName
@@ -1264,6 +1296,9 @@ final class TorrentStore {
         let interfaceName = settings.libtorrentRequiredNetworkInterfaceName
         guard !interfaceName.isEmpty else {
             return "Choose an interface"
+        }
+        guard settingsState.networkInterfacesAreAuthoritative else {
+            return "Refreshing interfaces…"
         }
 
         guard let option = networkInterfaces.first(where: { $0.name == interfaceName }) else {
@@ -1347,12 +1382,12 @@ final class TorrentStore {
         guard generation == refreshGeneration,
               lifecycleGeneration == engineLifecycleGeneration,
               mutationGeneration == engineMutationGeneration,
-              !isFolderCapabilityTransactionInProgress,
-              polledEngine.isAvailable else {
+              !isFolderCapabilityTransactionInProgress else {
             return
         }
-        if let networkInterfaceSnapshot = poll.networkInterfaceSnapshot {
-            applyNetworkInterfaceSnapshot(networkInterfaceSnapshot)
+        guard polledEngine.isAvailable else {
+            handleUnavailableEngine(polledEngine, lifecycleGeneration: lifecycleGeneration)
+            return
         }
         if poll.bridgeHealth != bridgeHealth {
             bridgeHealth = poll.bridgeHealth
@@ -1360,12 +1395,22 @@ final class TorrentStore {
         for alertError in poll.alertErrors where !alertError.isEmpty {
             setLastError(alertError, source: .userAction)
         }
+        // A failed XPC poll carries deliberately blocked/empty fallback values.
+        // They are useful diagnostics, but are not authenticated evidence that
+        // the live controller applied containment or observed any interface.
+        guard poll.isAuthoritative else {
+            return
+        }
+        if let networkInterfaceSnapshot = poll.networkInterfaceSnapshot {
+            applyNetworkInterfaceSnapshot(networkInterfaceSnapshot)
+        }
         if TorrentEngineDirtySet(rawValue: poll.dirtyMask).contains(.trackerHosts) {
             pendingTrackerHostRefresh = true
         }
         if poll.networkStatus != networkStatus {
             networkStatus = poll.networkStatus
         }
+        updateConfirmedNetworkContainment(from: poll.networkStatus)
         if let trackerHostBatch = poll.trackerHostBatch {
             applyTrackerHostBatch(trackerHostBatch, generation: generation)
         }
@@ -1423,6 +1468,7 @@ final class TorrentStore {
             }
         }
         lastNetworkInterfaceRevision = snapshot.revision
+        settingsState.networkInterfacesAreAuthoritative = true
         if snapshot.interfaces != networkInterfaces {
             networkInterfaces = snapshot.interfaces
             settingsState.networkInterfaces = snapshot.interfaces
@@ -1498,9 +1544,21 @@ final class TorrentStore {
         enablePeerExchangePlugin: Bool,
         kind: TorrentStoreEngineStartupKind
     ) {
-        precondition(operationDrainTask == nil && pendingOperations.isEmpty)
+        backgroundRefreshesEnabled = true
+        precondition(operationDrainTask == nil)
         if case .initial = kind {
+            precondition(pendingOperations.isEmpty)
             precondition(refreshCount(for: engineLifecycleGeneration) == 0)
+        } else {
+            // The new controller will be synchronized from current local
+            // state. Intermediate settings applications captured for the old
+            // controller are stale; queued user operations remain FIFO.
+            pendingOperations.removeAll { operation in
+                if case .applySettings = operation {
+                    return true
+                }
+                return false
+            }
         }
         precondition(!isEngineRestarting && !isFolderCapabilityTransactionInProgress)
 
@@ -1523,6 +1581,10 @@ final class TorrentStore {
             engineStartupFailed = !engine.isAvailable
             let message = Self.engineStartupErrorMessage(error)
             setLastError(TorrentEngineError.startupFailed(message).localizedDescription, source: .userAction)
+            schedulePendingRestoreDefaultsIfPossible()
+            if !pendingOperations.isEmpty {
+                startOperationDrainIfNeeded()
+            }
             return
         }
 
@@ -1536,10 +1598,8 @@ final class TorrentStore {
         refreshTask = nil
         wakeRefreshTask = nil
         appliedNetworkBinding = nil
-        immediateNetworkBlockBinding = nil
         lastNetworkInterfaceRevision = nil
-        networkInterfaces = []
-        settingsState.networkInterfaces = []
+        settingsState.networkInterfacesAreAuthoritative = false
         advanceEngineLifecycleGeneration()
         let startupGeneration = engineLifecycleGeneration
         engine = TorrentUnavailableEngine(message: "Torrent engine startup is in progress.")
@@ -1557,7 +1617,9 @@ final class TorrentStore {
                 // The disconnected controller is already fail-closed. Do not
                 // let a cancellation-insensitive stale poll prevent recovery;
                 // lifecycle generations reject any result it later produces.
-                await previousEngine.terminateConnection()
+                await previousEngine.terminateConnection(
+                    recoveryDisposition: .replaceController
+                )
             }
             guard let self,
                   !Task.isCancelled,
@@ -1612,29 +1674,78 @@ final class TorrentStore {
                 self.libtorrentVersion = engine.libtorrentVersion
                 self.appliedPeerExchangePluginEnabled = enablePeerExchangePlugin
                 self.engineStartupFailed = false
-                self.startInitialEngineSync()
-                self.startRefreshing()
+                // A controller is accepted only after the service has created
+                // a fail-closed engine and started authoritative interface
+                // observation. Initial synchronization may therefore apply the
+                // first policy without redundantly revoking this controller.
+                self.confirmedNetworkBlockLifecycleGeneration = startupGeneration
+                let restoreMayPrecedeSynchronization = self.pendingOperations.isEmpty
+                let scheduledRestore = self.schedulePendingRestoreDefaultsIfPossible()
+                self.startInitialEngineSync(
+                    afterLeadingOperation: restoreMayPrecedeSynchronization && scheduledRestore
+                )
             case .failed(let message):
                 self.engine = TorrentUnavailableEngine(message: message)
                 self.engineStartupFailed = true
                 let startupError = TorrentEngineError.startupFailed(message).localizedDescription
                 let messages = [self.lastError, startupError].compactMap { $0 }
                 self.setLastError(messages.joined(separator: "\n\n"), source: .userAction)
+                // Resolve queued callers deterministically against the
+                // unavailable placeholder instead of leaving continuations
+                // suspended forever behind a failed replacement.
+                self.startOperationDrainIfNeeded()
+                self.schedulePendingRestoreDefaultsIfPossible()
             case .cancelled:
                 break
             }
         }
     }
 
-    private func startInitialEngineSync() {
-        let accepted = scheduleUserOperation { store in
+    private func startInitialEngineSync(afterLeadingOperation: Bool = false) {
+        precondition(!isEngineStarting)
+        precondition(pendingOperations.count < Self.maximumPendingOperationCount)
+        let operation = TorrentStorePendingOperation.user { store in
             await store.refreshFromEngine(notifiesCompletions: false)
-            store.scheduleApplySettings(
+            guard store.engine.isAvailable, !store.engineReplacementRequested else {
+                return
+            }
+            store.prioritizeCurrentSettingsApplication(
                 refreshes: true,
                 notifiesCompletions: false
             )
         }
-        precondition(accepted, "Initial engine synchronization must fit the operation queue")
+        // A replacement may have queued user work waiting. Its authoritative
+        // interface snapshot and current settings must be established before
+        // any engine work can reach the fresh controller. A reset requested
+        // during startup may lead because it only updates the desired local
+        // configuration while the handshaken controller remains blocked.
+        let insertionIndex = afterLeadingOperation
+            ? pendingOperations.index(after: pendingOperations.startIndex)
+            : pendingOperations.startIndex
+        pendingOperations.insert(operation, at: insertionIndex)
+        startOperationDrainIfNeeded()
+    }
+
+    private func prioritizeCurrentSettingsApplication(
+        refreshes: Bool,
+        notifiesCompletions: Bool
+    ) {
+        pendingOperations.removeAll { operation in
+            if case .applySettings = operation {
+                return true
+            }
+            return false
+        }
+        precondition(pendingOperations.count < Self.maximumPendingOperationCount)
+        pendingOperations.insert(
+            .applySettings(TorrentStorePendingSettingsApplication(
+                settings: settings,
+                networkBinding: currentNetworkBinding,
+                refreshes: refreshes,
+                notifiesCompletions: notifiesCompletions
+            )),
+            at: pendingOperations.startIndex
+        )
     }
 
     private func startRefreshing() {
@@ -1671,6 +1782,21 @@ final class TorrentStore {
                 await self.refreshFromEngine()
             }
         }
+    }
+
+    private func startRefreshingIfNeeded() {
+        guard backgroundRefreshesEnabled,
+              !isEngineStarting,
+              !isEngineRestarting,
+              engine.isAvailable,
+              !engineReplacementRequested,
+              operationDrainTask == nil,
+              pendingOperations.isEmpty,
+              refreshTask == nil,
+              wakeRefreshTask == nil else {
+            return
+        }
+        startRefreshing()
     }
 
     private func perform(_ operation: @escaping @Sendable (any TorrentEngineServicing) async throws -> Void) {
@@ -1848,15 +1974,31 @@ final class TorrentStore {
                     return
                 }
                 await store.drainImmediateNetworkBlocks()
+                if store.pauseOperationDrainForEngineReplacement() {
+                    return
+                }
                 guard let operation = store.takeNextPendingOperation() else {
                     store.operationDrainTask = nil
                     store.startEngineReplacementIfNeeded()
+                    store.startRefreshingIfNeeded()
                     return
                 }
                 await store.execute(operation)
+                if store.pauseOperationDrainForEngineReplacement() {
+                    return
+                }
             }
             self?.operationDrainTask = nil
         }
+    }
+
+    private func pauseOperationDrainForEngineReplacement() -> Bool {
+        guard engineReplacementRequested else {
+            return false
+        }
+        operationDrainTask = nil
+        startEngineReplacementIfNeeded()
+        return true
     }
 
     private func takeNextPendingOperation() -> TorrentStorePendingOperation? {
@@ -1870,13 +2012,13 @@ final class TorrentStore {
     private func execute(_ operation: TorrentStorePendingOperation) async {
         switch operation {
         case .applySettings(let application):
-            if !engineReplacementRequested {
+            if !engineReplacementRequested, engine.isAvailable {
                 await applySettingsToEngine(
                     application.settings,
                     networkBinding: application.networkBinding
                 )
             }
-            if application.refreshes, !engineReplacementRequested {
+            if application.refreshes, !engineReplacementRequested, engine.isAvailable {
                 await refreshFromEngine(notifiesCompletions: application.notifiesCompletions)
             }
         case .user(let operation):
@@ -1902,11 +2044,7 @@ final class TorrentStore {
 
     private func drainImmediateNetworkBlocks() async {
         while let task = immediateNetworkBlockTask {
-            let generation = immediateNetworkBlockGeneration
             await task.value
-            if generation == immediateNetworkBlockGeneration {
-                return
-            }
         }
     }
 
@@ -1920,6 +2058,9 @@ final class TorrentStore {
         let peerExchangePluginChanged = appliedPeerExchangePluginEnabled.map {
             $0 != settings.enablePeerExchangePlugin
         } ?? false
+        let settingsEngine = engine
+        var lifecycleGeneration = engineLifecycleGeneration
+        var settingsMutationIsInFlight = false
 
         do {
             if networkMustRemainBlocked || bindingChanged || peerExchangePluginChanged {
@@ -1928,30 +2069,64 @@ final class TorrentStore {
                 }
             }
 
-            if bindingChanged || peerExchangePluginChanged {
+            if peerExchangePluginChanged {
                 completionNotifier.beginBaseline()
                 try await restartEngine(enablePeerExchangePlugin: settings.enablePeerExchangePlugin)
                 guard !Task.isCancelled, !engineReplacementRequested else {
                     return
                 }
+                lifecycleGeneration = engineLifecycleGeneration
                 lastSnapshotRevision = nil
                 lastTrackerHostRevision = nil
                 pendingTrackerHostRefresh = true
             }
 
-            try await engine.applySettings(
-                settings,
-                networkBinding: TorrentNetworkBinding(
-                    interfaceName: networkBinding.interfaceName,
-                    interfaceFingerprint: networkBinding.interfaceFingerprint,
-                    vpnServiceID: networkBinding.vpnServiceID,
-                    networkBlocked: networkBinding.networkBlocked || networkBinding != currentNetworkBinding
-                )
+            // Non-network settings retain FIFO ordering across queued user
+            // operations. If this binding became stale while queued, submit it
+            // only in its blocked form; a later coalesced application owns the
+            // final authorization.
+            let submittedNetworkBinding = TorrentNetworkBinding(
+                interfaceName: networkBinding.interfaceName,
+                interfaceFingerprint: networkBinding.interfaceFingerprint,
+                vpnServiceID: networkBinding.vpnServiceID,
+                networkBlocked: networkBinding.networkBlocked || networkBinding != currentNetworkBinding
             )
+            // Poll results captured before or during a policy transition must
+            // not overwrite the containment evidence established by its ack.
+            advanceEngineMutationGeneration()
+            settingsMutationIsInFlight = true
+            try await settingsEngine.applySettings(
+                settings,
+                networkBinding: submittedNetworkBinding
+            )
+            guard lifecycleGeneration == engineLifecycleGeneration else {
+                return
+            }
+            advanceEngineMutationGeneration()
+            settingsMutationIsInFlight = false
+            guard settingsEngine.isAvailable else {
+                handleUnavailableEngine(settingsEngine, lifecycleGeneration: lifecycleGeneration)
+                return
+            }
             appliedNetworkBinding = networkBinding
             appliedPeerExchangePluginEnabled = settings.enablePeerExchangePlugin
+            if submittedNetworkBinding.networkBlocked {
+                confirmedNetworkBlockLifecycleGeneration = lifecycleGeneration
+            } else {
+                confirmedNetworkBlockLifecycleGeneration = nil
+            }
             clearLastError(from: .settingsApply)
         } catch {
+            if settingsMutationIsInFlight,
+               lifecycleGeneration == engineLifecycleGeneration {
+                advanceEngineMutationGeneration()
+            }
+            if !settingsEngine.isAvailable {
+                handleUnavailableEngine(settingsEngine, lifecycleGeneration: lifecycleGeneration)
+            }
+            guard !engineStartupFailed else {
+                return
+            }
             setLastError(error.localizedDescription, source: .settingsApply)
         }
     }
@@ -1969,15 +2144,15 @@ final class TorrentStore {
         refreshTask = nil
         wakeRefreshTask = nil
         isEngineRestarting = true
+        let networkWasConfirmedBlocked = networkIsConfirmedBlocked
         advanceEngineLifecycleGeneration()
         let lifecycleGeneration = engineLifecycleGeneration
+        if networkWasConfirmedBlocked {
+            confirmedNetworkBlockLifecycleGeneration = lifecycleGeneration
+        }
         let capabilitySnapshot = downloadFolderAccessStore.capabilitySnapshot
         defer {
             isEngineRestarting = false
-            if lifecycleGeneration == engineLifecycleGeneration,
-               restartedEngine.isAvailable {
-                startRefreshing()
-            }
             withExtendedLifetime(capabilitySnapshot) {}
         }
         if refreshCount(for: previousLifecycleGeneration) > 0 {
@@ -1994,7 +2169,9 @@ final class TorrentStore {
             // A refresh that does not unwind after network containment must
             // never hold the restart lane forever. Closing the controller is
             // the bounded fail-closed escape; recovery uses a fresh handshake.
-            await restartedEngine.terminateConnection()
+            await restartedEngine.terminateConnection(
+                recoveryDisposition: .replaceController
+            )
             requestEngineReplacement()
             return
         }
@@ -2002,38 +2179,52 @@ final class TorrentStore {
         previousWakeRefreshTask?.cancel()
         await previousRefreshTask?.value
         await previousWakeRefreshTask?.value
+        // Exact reconciliation owns bookmark delegation. A restart reuses its
+        // confirmed capability IDs and must not individually regenerate or
+        // incrementally grant persistent GUI authorization material.
+        try await reconcileFolderAuthorizationsIfNeeded(
+            duringRestart: true,
+            ownsFolderAuthorizationLane: true
+        )
         do {
-            // Exact reconciliation owns bookmark delegation. A restart reuses
-            // its confirmed capability IDs and must not individually regenerate
-            // or incrementally grant persistent GUI authorization material.
-            try await reconcileFolderAuthorizationsIfNeeded(
-                duringRestart: true,
-                ownsFolderAuthorizationLane: true
-            )
             try await restartedEngine.restart(
                 enablePeerExchangePlugin: enablePeerExchangePlugin,
                 authorizedSavePaths: capabilitySnapshot.paths
             )
-            guard lifecycleGeneration == engineLifecycleGeneration,
-                  restartedEngine.isAvailable else {
-                return
-            }
-            engineAuthorizedFolderState = TorrentStoreEngineAuthorizationState(
-                lifecycleGeneration: lifecycleGeneration,
-                capabilityRevision: capabilitySnapshot.revision
-            )
-            try await reconcileFolderAuthorizationsIfNeeded(
-                duringRestart: true,
-                ownsFolderAuthorizationLane: true
-            )
         } catch {
-            await containFolderAuthorizationFailure(
-                error,
-                affectedEngine: restartedEngine,
-                lifecycleGeneration: lifecycleGeneration
-            )
+            if lifecycleGeneration == engineLifecycleGeneration {
+                let disposition = recoveryDisposition(
+                    for: error,
+                    engine: restartedEngine
+                )
+                let terminationDisposition = disposition == .none
+                    ? TorrentEngineRecoveryDisposition.terminal
+                    : disposition
+                await restartedEngine.terminateConnection(
+                    recoveryDisposition: terminationDisposition
+                )
+                if terminationDisposition == .replaceController {
+                    requestEngineReplacement()
+                } else {
+                    preventAutomaticEngineRecoveryAfterTerminalFailure()
+                }
+            }
             throw error
         }
+        guard lifecycleGeneration == engineLifecycleGeneration,
+              restartedEngine.isAvailable else {
+            handleUnavailableEngine(restartedEngine, lifecycleGeneration: lifecycleGeneration)
+            return
+        }
+        confirmedNetworkBlockLifecycleGeneration = lifecycleGeneration
+        engineAuthorizedFolderState = TorrentStoreEngineAuthorizationState(
+            lifecycleGeneration: lifecycleGeneration,
+            capabilityRevision: capabilitySnapshot.revision
+        )
+        try await reconcileFolderAuthorizationsIfNeeded(
+            duringRestart: true,
+            ownsFolderAuthorizationLane: true
+        )
     }
 
     private func drainRefreshesBeforeEngineRestart(lifecycleGeneration: UInt64) async -> Bool {
@@ -2174,7 +2365,8 @@ final class TorrentStore {
         guard lifecycleGeneration == engineLifecycleGeneration else {
             return
         }
-        await affectedEngine.terminateConnection()
+        preventAutomaticEngineRecoveryAfterTerminalFailure()
+        await affectedEngine.terminateConnection(recoveryDisposition: .terminal)
         guard lifecycleGeneration == engineLifecycleGeneration else {
             return
         }
@@ -2201,6 +2393,7 @@ final class TorrentStore {
         lastTrackerHostRevision = nil
         pendingTrackerHostRefresh = true
         engineAuthorizedFolderState = nil
+        confirmedNetworkBlockLifecycleGeneration = nil
     }
 
     private func advanceEngineMutationGeneration() {
@@ -2242,6 +2435,32 @@ final class TorrentStore {
         }
     }
 
+    private func requireRestoreDefaultsQueueCapacity() throws {
+        let pendingUserOperationCount = pendingOperations.reduce(into: 0) { count, operation in
+            if case .user = operation {
+                count += 1
+            }
+        }
+        let defaultSettings = TorrentSettings().clamped()
+        let settingsApplicationNeedsSlot: Bool
+        if defaultSettings == settings {
+            settingsApplicationNeedsSlot = false
+        } else if let lastOperation = pendingOperations.last,
+                  case .applySettings = lastOperation {
+            settingsApplicationNeedsSlot = false
+        } else {
+            settingsApplicationNeedsSlot = true
+        }
+        // Reset schedules one exact folder reconciliation and, when it cannot
+        // coalesce, one settings application. Reserve both before changing
+        // either local/defaults state so bounded backpressure is atomic.
+        let requiredSlots = 1 + (settingsApplicationNeedsSlot ? 1 : 0)
+        guard pendingUserOperationCount < Self.maximumPendingUserOperationCount,
+              pendingOperations.count <= Self.maximumPendingOperationCount - requiredSlots else {
+            throw TorrentStoreError.tooManyPendingOperations
+        }
+    }
+
     private func requireFolderAuthorityMutationAllowed() throws {
         guard !isEngineStarting,
               !isEngineRestarting,
@@ -2253,24 +2472,15 @@ final class TorrentStore {
     private func applyImmediateNetworkBlockIfNeeded(for networkBinding: AppliedNetworkBinding) {
         let bindingChanged = appliedNetworkBinding.map { $0 != networkBinding } ?? false
         guard networkBinding.networkBlocked || bindingChanged else {
-            immediateNetworkBlockBinding = nil
             return
         }
 
-        guard immediateNetworkBlockBinding != networkBinding else {
+        guard !networkIsConfirmedBlocked, immediateNetworkBlockTask == nil else {
             return
         }
-        immediateNetworkBlockBinding = networkBinding
-
-        immediateNetworkBlockGeneration &+= 1
-        let generation = immediateNetworkBlockGeneration
-        let previousTask = immediateNetworkBlockTask
         immediateNetworkBlockTask = Task { @MainActor [weak self] in
-            await previousTask?.value
             defer {
-                if let self, self.immediateNetworkBlockGeneration == generation {
-                    self.immediateNetworkBlockTask = nil
-                }
+                self?.immediateNetworkBlockTask = nil
             }
             guard !Task.isCancelled else {
                 return
@@ -2279,56 +2489,93 @@ final class TorrentStore {
                 return
             }
 
-            guard await self.blockNetworkForSettingsTransition() else {
-                return
-            }
-            self.lastSnapshotRevision = nil
-            await self.refreshFromEngine(notifiesCompletions: false)
+            _ = await self.blockNetworkForSettingsTransition()
         }
     }
 
     private func blockNetworkForSettingsTransition() async -> Bool {
+        guard !networkIsConfirmedBlocked else {
+            return true
+        }
         let blockedEngine = engine
         let lifecycleGeneration = engineLifecycleGeneration
+        // Reject any poll that captured pre-containment network status. A
+        // second advance below also rejects a poll begun while the block RPC
+        // was suspended on the service.
+        advanceEngineMutationGeneration()
         do {
             let disposition = try await blockedEngine.blockNetworkNow()
             guard lifecycleGeneration == engineLifecycleGeneration else {
                 return false
             }
+            advanceEngineMutationGeneration()
             switch disposition {
             case .engineRemainsAvailable:
+                confirmedNetworkBlockLifecycleGeneration = lifecycleGeneration
                 return true
             case .engineReplacementRequired:
-                requestEngineReplacement()
+                if blockedEngine.recoveryDisposition == .terminal {
+                    handleUnavailableEngine(
+                        blockedEngine,
+                        lifecycleGeneration: lifecycleGeneration
+                    )
+                } else {
+                    requestEngineReplacement()
+                }
                 return false
             }
         } catch {
             // Failure to confirm an immediate block is terminal even if an
             // implementation still reports itself as available. Disconnect
             // containment is the fail-closed fallback.
-            await blockedEngine.terminateConnection()
+            let disposition = recoveryDisposition(
+                for: error,
+                engine: blockedEngine
+            )
+            await blockedEngine.terminateConnection(
+                recoveryDisposition: disposition == .terminal
+                    ? .terminal
+                    : .replaceController
+            )
             guard lifecycleGeneration == engineLifecycleGeneration else {
                 return false
             }
-            requestEngineReplacement()
+            advanceEngineMutationGeneration()
+            if disposition == .terminal {
+                preventAutomaticEngineRecoveryAfterTerminalFailure()
+                let message = error.localizedDescription
+                if !message.isEmpty {
+                    setLastError(message, source: .settingsApply)
+                }
+            } else {
+                requestEngineReplacement()
+            }
             return false
         }
     }
 
     private func requestEngineReplacement() {
-        guard !engineReplacementRequested else {
+        guard !engineReplacementRequested, !engineStartupFailed else {
             return
         }
         engineReplacementRequested = true
+        settingsState.networkInterfacesAreAuthoritative = false
         lastSnapshotRevision = nil
         lastTrackerHostRevision = nil
         pendingTrackerHostRefresh = true
         bridgeHealth = .unavailable
         networkStatus = .empty
+        startEngineReplacementIfNeeded()
     }
 
     private func startEngineReplacementIfNeeded() {
-        guard engineReplacementRequested else {
+        guard engineReplacementRequested,
+              !engineStartupFailed,
+              !isEngineStarting,
+              !isEngineRestarting,
+              operationDrainTask == nil,
+              immediateNetworkBlockTask == nil,
+              !isFolderCapabilityTransactionInProgress else {
             return
         }
         engineReplacementRequested = false
@@ -2336,6 +2583,67 @@ final class TorrentStore {
             enablePeerExchangePlugin: settings.enablePeerExchangePlugin,
             kind: .replacesTerminatedController
         )
+    }
+
+    private var networkIsConfirmedBlocked: Bool {
+        confirmedNetworkBlockLifecycleGeneration == engineLifecycleGeneration
+    }
+
+    private func updateConfirmedNetworkContainment(from status: TorrentNetworkStatus) {
+        if status.networkBlocked {
+            confirmedNetworkBlockLifecycleGeneration = engineLifecycleGeneration
+        } else {
+            confirmedNetworkBlockLifecycleGeneration = nil
+        }
+    }
+
+    private func handleUnavailableEngine(
+        _ unavailableEngine: any TorrentEngineServicing,
+        lifecycleGeneration: UInt64
+    ) {
+        guard lifecycleGeneration == engineLifecycleGeneration,
+              !unavailableEngine.isAvailable else {
+            return
+        }
+        switch unavailableEngine.recoveryDisposition {
+        case .replaceController:
+            requestEngineReplacement()
+        case .terminal:
+            preventAutomaticEngineRecoveryAfterTerminalFailure()
+            if let message = unavailableEngine.startupFailureMessage, !message.isEmpty {
+                setLastError(message, source: .userAction)
+            }
+        case .none:
+            break
+        }
+    }
+
+    private func recoveryDisposition(
+        for error: any Error,
+        engine: any TorrentEngineServicing
+    ) -> TorrentEngineRecoveryDisposition {
+        let engineDisposition = engine.recoveryDisposition
+        let errorDisposition = (error as? TorrentEngineClientError)?.recoveryDisposition ?? .none
+        if engineDisposition == .terminal || errorDisposition == .terminal {
+            return .terminal
+        }
+        if engineDisposition == .replaceController || errorDisposition == .replaceController {
+            return .replaceController
+        }
+        return .none
+    }
+
+    private func preventAutomaticEngineRecoveryAfterTerminalFailure() {
+        engineReplacementRequested = false
+        engineStartupFailed = true
+        settingsState.networkInterfacesAreAuthoritative = false
+        refreshTask?.cancel()
+        wakeRefreshTask?.cancel()
+        refreshTask = nil
+        wakeRefreshTask = nil
+        bridgeHealth = .unavailable
+        networkStatus = .empty
+        confirmedNetworkBlockLifecycleGeneration = nil
     }
 
     private func setLastError(_ message: String?, source: TorrentStoreErrorSource? = nil) {
