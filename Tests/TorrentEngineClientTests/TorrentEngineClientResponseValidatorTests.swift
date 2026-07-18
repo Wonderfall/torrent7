@@ -69,6 +69,67 @@ struct TorrentEngineClientResponseValidatorTests {
         }
     }
 
+    @Test("A valid service interface snapshot crosses the client trust boundary")
+    func acceptsValidNetworkInterfaceSnapshot() throws {
+        try TorrentEngineClientResponseValidator.validate(
+            makePollResponse(snapshot: TorrentNetworkInterfaceSnapshot(
+                revision: 1,
+                interfaces: [makeNetworkInterface()]
+            ))
+        )
+    }
+
+    @Test("Service interface snapshots require a positive revision and unique names")
+    func rejectsInvalidNetworkInterfaceSnapshotIdentity() {
+        let interface = makeNetworkInterface()
+        for snapshot in [
+            TorrentNetworkInterfaceSnapshot(revision: 0, interfaces: [interface]),
+            TorrentNetworkInterfaceSnapshot(revision: 1, interfaces: [interface, interface]),
+        ] {
+            #expect(throws: TorrentEngineClientError.self) {
+                try TorrentEngineClientResponseValidator.validate(
+                    makePollResponse(snapshot: snapshot)
+                )
+            }
+        }
+    }
+
+    @Test("Service interface strings and VPN identity remain bounded and consistent")
+    func rejectsMalformedNetworkInterfaceFields() {
+        let invalidInterfaces = [
+            makeNetworkInterface(name: "bad interface"),
+            makeNetworkInterface(displayName: ""),
+            makeNetworkInterface(fingerprint: "bad\0fingerprint"),
+            makeNetworkInterface(
+                vpnServiceID: "vpn-service",
+                vpnServiceName: nil,
+                isLikelyVPN: true
+            ),
+            makeNetworkInterface(
+                vpnServiceID: "vpn-service",
+                vpnServiceName: "VPN",
+                isLikelyVPN: false
+            ),
+            makeNetworkInterface(
+                fingerprint: String(
+                    repeating: "f",
+                    count: TorrentEngineLimits.maximumNetworkInterfaceFingerprintBytes + 1
+                )
+            ),
+        ]
+
+        for interface in invalidInterfaces {
+            #expect(throws: TorrentEngineClientError.self) {
+                try TorrentEngineClientResponseValidator.validate(
+                    makePollResponse(snapshot: TorrentNetworkInterfaceSnapshot(
+                        revision: 1,
+                        interfaces: [interface]
+                    ))
+                )
+            }
+        }
+    }
+
     @Test("Inconsistent piece metadata fails during decoding")
     func rejectsInconsistentPieceMapDuringDecoding() throws {
         let inconsistent = TorrentPieceMap(
@@ -201,6 +262,38 @@ struct TorrentEngineClientResponseValidatorTests {
             verified: false,
             hasError: false,
             enabled: true
+        )
+    }
+
+    private func makePollResponse(
+        snapshot: TorrentNetworkInterfaceSnapshot
+    ) -> TorrentEngineIPCPollResponse {
+        TorrentEngineIPCPollResponse(
+            dirtyMask: 0,
+            alertErrors: [],
+            networkStatus: .empty,
+            bridgeHealth: .healthy,
+            networkInterfaceSnapshot: snapshot,
+            snapshotDataset: nil,
+            trackerHostDataset: nil
+        )
+    }
+
+    private func makeNetworkInterface(
+        name: String = "utun4",
+        displayName: String = "VPN",
+        fingerprint: String = "fingerprint",
+        vpnServiceID: String? = "vpn-service",
+        vpnServiceName: String? = "VPN",
+        isLikelyVPN: Bool = true
+    ) -> NetworkInterfaceOption {
+        NetworkInterfaceOption(
+            name: name,
+            displayName: displayName,
+            fingerprint: fingerprint,
+            vpnServiceID: vpnServiceID,
+            vpnServiceName: vpnServiceName,
+            isLikelyVPN: isLikelyVPN
         )
     }
 

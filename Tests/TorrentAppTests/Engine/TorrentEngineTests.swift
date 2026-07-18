@@ -263,9 +263,9 @@ struct TorrentEngineTests {
 
     @Test("Engine errors expose safe localized descriptions")
     func engineErrorsExposeSafeLocalizedDescriptions() {
-        #expect(TorrentEngineError.failedToCreateClient.localizedDescription == "Could not start libtorrent.")
-        #expect(TorrentEngineError.startupFailed("").localizedDescription == "Could not start libtorrent.")
-        #expect(TorrentEngineError.startupFailed("boom").localizedDescription == "Could not start libtorrent: boom")
+        #expect(TorrentEngineError.failedToCreateClient.localizedDescription == "Could not start the torrent engine.")
+        #expect(TorrentEngineError.startupFailed("").localizedDescription == "Could not start the torrent engine.")
+        #expect(TorrentEngineError.startupFailed("boom").localizedDescription == "Could not start the torrent engine: boom")
         #expect(TorrentEngineError.bridgeError("").localizedDescription == "The torrent operation failed.")
         #expect(TorrentEngineError.bridgeError("bad magnet").localizedDescription == "bad magnet")
     }
@@ -568,7 +568,7 @@ private func expectStartupError(_ body: () async throws -> Void) async {
         try await body()
         Issue.record("Expected startup failure")
     } catch let error as TorrentEngineError {
-        #expect(error.localizedDescription == "Could not start libtorrent: boom")
+        #expect(error.localizedDescription == "Could not start the torrent engine: boom")
     } catch {
         Issue.record("Expected TorrentEngineError, got \(error)")
     }

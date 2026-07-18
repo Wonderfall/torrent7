@@ -298,6 +298,7 @@ package struct TorrentEngineIPCPollResponse: Codable, Sendable {
     package let alertErrors: [String]
     package let networkStatus: TorrentNetworkStatus
     package let bridgeHealth: TorrentBridgeHealth
+    package let networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot
     package let snapshotDataset: TorrentEngineIPCDatasetDescriptor?
     package let trackerHostDataset: TorrentEngineIPCDatasetDescriptor?
 
@@ -306,6 +307,7 @@ package struct TorrentEngineIPCPollResponse: Codable, Sendable {
         alertErrors: [String],
         networkStatus: TorrentNetworkStatus,
         bridgeHealth: TorrentBridgeHealth,
+        networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot,
         snapshotDataset: TorrentEngineIPCDatasetDescriptor?,
         trackerHostDataset: TorrentEngineIPCDatasetDescriptor?
     ) {
@@ -313,6 +315,7 @@ package struct TorrentEngineIPCPollResponse: Codable, Sendable {
         self.alertErrors = alertErrors
         self.networkStatus = networkStatus
         self.bridgeHealth = bridgeHealth
+        self.networkInterfaceSnapshot = networkInterfaceSnapshot
         self.snapshotDataset = snapshotDataset
         self.trackerHostDataset = trackerHostDataset
     }

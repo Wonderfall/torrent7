@@ -64,10 +64,6 @@ package enum TorrentNetworkBindingValidation: Equatable, Sendable {
 /// service-side interface snapshot. No controller-provided availability result
 /// is trusted as authority to unblock the engine.
 package enum TorrentNetworkBindingValidator {
-    private static let maximumInterfaceNameBytes = 64
-    private static let maximumFingerprintBytes = 16 * 1_024
-    private static let maximumVPNServiceIDBytes = 1_024
-
     package static func validate(
         settings: TorrentSettings,
         binding: TorrentNetworkBinding,
@@ -80,10 +76,21 @@ package enum TorrentNetworkBindingValidator {
         let settings = settings.clamped()
         let expectedInterfaceName = settings.libtorrentRequiredNetworkInterfaceName
 
-        guard isWithinUTF8Bound(binding.interfaceName, maximum: maximumInterfaceNameBytes),
-              isWithinUTF8Bound(binding.interfaceFingerprint, maximum: maximumFingerprintBytes),
+        guard (binding.interfaceName.isEmpty
+                || TorrentNetworkInterfaceSnapshotValidator.isValidInterfaceName(
+                    binding.interfaceName
+                )),
+              isWithinUTF8Bound(
+                binding.interfaceFingerprint,
+                maximum: TorrentEngineLimits.maximumNetworkInterfaceFingerprintBytes
+              ),
               binding.vpnServiceID.map({
-                  isWithinUTF8Bound($0, maximum: maximumVPNServiceIDBytes)
+                  !$0.isEmpty
+                      && !$0.contains("\0")
+                      && isWithinUTF8Bound(
+                          $0,
+                          maximum: TorrentEngineLimits.maximumVPNServiceIDBytes
+                      )
               }) ?? true else {
             return .blocked(.malformedBinding)
         }
@@ -174,11 +181,16 @@ package actor TorrentNetworkBindingAuthority {
     package typealias InvalidationHandler = @Sendable (
         TorrentNetworkBindingBlockReason
     ) async -> Void
+    package typealias ObservationHandler = @Sendable () async -> Void
 
     private let monitor: any NetworkInterfaceMonitoring
     private let invalidationHandler: InvalidationHandler
+    private let observationHandler: ObservationHandler
+    private let monitorReadinessTimeout: Duration
     private var monitorTask: Task<Void, Never>?
+    private var monitorReadinessTimeoutTask: Task<Void, Never>?
     private var latestInterfaces: [NetworkInterfaceOption]?
+    private var monitorReadinessWaiters = [CheckedContinuation<Void, Never>]()
     private var monitorGeneration: UInt64 = 0
     private var pendingLease: TorrentNetworkBindingLease?
     private var activeLease: TorrentNetworkBindingLease?
@@ -186,35 +198,66 @@ package actor TorrentNetworkBindingAuthority {
 
     package init(
         monitor: any NetworkInterfaceMonitoring = NetworkInterfaceMonitor(),
-        invalidationHandler: @escaping InvalidationHandler
+        invalidationHandler: @escaping InvalidationHandler,
+        observationHandler: @escaping ObservationHandler = {},
+        monitorReadinessTimeout: Duration = .seconds(5)
     ) {
+        precondition(monitorReadinessTimeout > .zero)
         self.monitor = monitor
         self.invalidationHandler = invalidationHandler
+        self.observationHandler = observationHandler
+        self.monitorReadinessTimeout = monitorReadinessTimeout
     }
 
-    package func start() async {
-        guard !isStopped, monitorTask == nil else {
-            return
+    /// Starts monitoring and does not report readiness until the first complete
+    /// service-side interface snapshot has been installed.
+    @discardableResult
+    package func start() async -> Bool {
+        guard !isStopped else {
+            return false
         }
 
-        await failClosed(reason: .monitorNotReady)
-        guard !isStopped, monitorTask == nil else {
-            return
-        }
-        let updates = monitor.updates()
-        monitorTask = Task { [weak self] in
-            for await interfaces in updates {
-                guard let self else {
-                    return
+        if monitorTask == nil {
+            await failClosed(reason: .monitorNotReady)
+            guard !isStopped else {
+                return false
+            }
+            if monitorTask == nil {
+                let updates = monitor.updates()
+                monitorTask = Task { [weak self] in
+                    for await interfaces in updates {
+                        guard let self else {
+                            return
+                        }
+                        await self.receive(interfaces: interfaces)
+                    }
+
+                    guard !Task.isCancelled, let self else {
+                        return
+                    }
+                    await self.monitorDidStop()
                 }
-                await self.receive(interfaces: interfaces)
+                monitorReadinessTimeoutTask = Task { [weak self, monitorReadinessTimeout] in
+                    do {
+                        try await Task.sleep(for: monitorReadinessTimeout)
+                    } catch {
+                        return
+                    }
+                    await self?.monitorReadinessDidTimeOut()
+                }
             }
-
-            guard !Task.isCancelled, let self else {
-                return
-            }
-            await self.monitorDidStop()
         }
+
+        if latestInterfaces == nil, !isStopped {
+            await withCheckedContinuation { continuation in
+                if latestInterfaces != nil || isStopped {
+                    continuation.resume()
+                } else {
+                    monitorReadinessWaiters.append(continuation)
+                }
+            }
+        }
+        return latestInterfaces != nil && !isStopped
     }
 
     /// Always blocks the current authorization before evaluating a replacement.
@@ -274,9 +317,12 @@ package actor TorrentNetworkBindingAuthority {
         isStopped = true
         monitorTask?.cancel()
         monitorTask = nil
+        monitorReadinessTimeoutTask?.cancel()
+        monitorReadinessTimeoutTask = nil
         monitor.cancel()
         latestInterfaces = nil
         incrementGeneration()
+        resumeMonitorReadinessWaiters()
         await failClosed(reason: .monitorStopped)
     }
 
@@ -289,24 +335,60 @@ package actor TorrentNetworkBindingAuthority {
         )
     }
 
+    package func interfaceSnapshot() -> TorrentNetworkInterfaceSnapshot? {
+        guard let latestInterfaces else {
+            return nil
+        }
+        let representableInterfaces = latestInterfaces.lazy
+            .filter(TorrentNetworkInterfaceSnapshotValidator.isValid)
+            .prefix(TorrentEngineLimits.maximumNetworkInterfaceCount)
+        return TorrentNetworkInterfaceSnapshot(
+            revision: monitorGeneration,
+            interfaces: Array(representableInterfaces)
+        )
+    }
+
     private func receive(interfaces: [NetworkInterfaceOption]) async {
+        let hadInterfaceSnapshot = latestInterfaces != nil
         latestInterfaces = interfaces
         incrementGeneration()
         pendingLease = nil
+        monitorReadinessTimeoutTask?.cancel()
+        monitorReadinessTimeoutTask = nil
+        resumeMonitorReadinessWaiters()
 
-        guard activeLease != nil else {
-            return
+        if activeLease != nil {
+            activeLease = nil
+            await invalidationHandler(.monitorChanged)
         }
-        activeLease = nil
-        await invalidationHandler(.monitorChanged)
+        if hadInterfaceSnapshot {
+            await observationHandler()
+        }
     }
 
     private func monitorDidStop() async {
         isStopped = true
         monitorTask = nil
+        monitorReadinessTimeoutTask?.cancel()
+        monitorReadinessTimeoutTask = nil
         latestInterfaces = nil
         incrementGeneration()
+        resumeMonitorReadinessWaiters()
         await failClosed(reason: .monitorStopped)
+    }
+
+    private func monitorReadinessDidTimeOut() async {
+        guard latestInterfaces == nil, !isStopped else {
+            return
+        }
+        isStopped = true
+        monitorTask?.cancel()
+        monitorTask = nil
+        monitorReadinessTimeoutTask = nil
+        monitor.cancel()
+        incrementGeneration()
+        resumeMonitorReadinessWaiters()
+        await failClosed(reason: .monitorNotReady)
     }
 
     private func failClosed(reason: TorrentNetworkBindingBlockReason) async {
@@ -316,6 +398,15 @@ package actor TorrentNetworkBindingAuthority {
     }
 
     private func incrementGeneration() {
-        monitorGeneration &+= 1
+        precondition(monitorGeneration != UInt64.max)
+        monitorGeneration += 1
+    }
+
+    private func resumeMonitorReadinessWaiters() {
+        let waiters = monitorReadinessWaiters
+        monitorReadinessWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
     }
 }

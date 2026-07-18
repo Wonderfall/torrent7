@@ -249,7 +249,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "TorrentApp",
-            dependencies: ["TorrentEngineClient", "TorrentEngineModel", "TorrentNetworkSecurity"],
+            dependencies: ["TorrentEngineClient", "TorrentEngineModel"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
                 .treatAllWarnings(as: .error),

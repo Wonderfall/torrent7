@@ -514,6 +514,98 @@ struct TorrentXPCClientSecurityTests {
         #expect(rejectionPolicy.delay(after: .invalidBookmark) == nil)
     }
 
+    @Test("Replacement startup survives generic failures for the bounded cleanup horizon")
+    func replacementCleanupRetryHorizon() {
+        var policy = TorrentEngineConnectionRetryPolicy(
+            mode: .replacingTerminatedController
+        )
+        var delays = [Duration]()
+
+        while let delay = policy.delay(after: .connectionFailed) {
+            delays.append(delay)
+        }
+
+        #expect(delays.reduce(.zero, +) == .seconds(305))
+        #expect(delays.allSatisfy { $0 > .zero && $0 <= .seconds(5) })
+        #expect(policy.delay(after: .connectionCancelled) == nil)
+
+        var rejectionPolicy = TorrentEngineConnectionRetryPolicy(
+            mode: .replacingTerminatedController
+        )
+        #expect(rejectionPolicy.delay(after: .serviceRejected("invalid peer")) == nil)
+        #expect(rejectionPolicy.delay(after: .invalidReply) == nil)
+    }
+
+    @Test("Interface snapshot revisions cannot move backward within one engine epoch")
+    func interfaceSnapshotRevisionIsMonotonic() async throws {
+        let epoch = epoch
+        let pollCount = Mutex(0)
+        let interface = NetworkInterfaceOption(
+            name: "utun4",
+            displayName: "VPN",
+            fingerprint: "fingerprint",
+            vpnServiceID: "vpn-service",
+            vpnServiceName: "VPN",
+            isLikelyVPN: true
+        )
+        let transport = ScriptedTorrentEngineTransport { request in
+            switch request.header.operation {
+            case .handshake:
+                return try successReply(
+                    TorrentEngineIPCHandshakeResponse(
+                        libtorrentVersion: "2.1.0",
+                        folders: []
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .poll:
+                let revision = pollCount.withLock { count in
+                    count += 1
+                    return count == 1 ? UInt64(2) : UInt64(1)
+                }
+                return try successReply(
+                    TorrentEngineIPCPollResponse(
+                        dirtyMask: 0,
+                        alertErrors: [],
+                        networkStatus: .empty,
+                        bridgeHealth: .healthy,
+                        networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot(
+                            revision: revision,
+                            interfaces: [interface]
+                        ),
+                        snapshotDataset: nil,
+                        trackerHostDataset: nil
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            default:
+                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
+            }
+        }
+        let client = try await makeClient(transport: transport)
+
+        let accepted = await client.poll(
+            since: nil,
+            sortedBy: .name,
+            direction: .ascending,
+            includeTrackerHosts: false
+        )
+        #expect(accepted.networkInterfaceSnapshot?.revision == 2)
+
+        let rejected = await client.poll(
+            since: nil,
+            sortedBy: .name,
+            direction: .ascending,
+            includeTrackerHosts: false
+        )
+        #expect(rejected.networkInterfaceSnapshot == nil)
+        #expect(rejected.alertErrors == [TorrentEngineClientError.invalidReply.localizedDescription])
+        #expect(!client.isAvailable)
+        #expect(transport.isCancelled)
+    }
+
     @Test("An absent optional detail is valid and keeps the connection alive")
     func absentOptionalDetailIsValid() async throws {
         let epoch = epoch

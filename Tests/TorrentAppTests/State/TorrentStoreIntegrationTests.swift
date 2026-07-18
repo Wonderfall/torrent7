@@ -1085,6 +1085,133 @@ struct TorrentStoreIntegrationTests {
         #expect(weakRestartAccess == nil)
     }
 
+    @Test("Service interface snapshot populates VPN choices before initial binding")
+    func serviceInterfaceSnapshotDrivesInitialBinding() async throws {
+        let vpn = NetworkInterfaceOption(
+            name: "utun4",
+            displayName: "ProtonVPN",
+            fingerprint: "service-fingerprint",
+            vpnServiceID: "proton-service",
+            vpnServiceName: "ProtonVPN",
+            isLikelyVPN: true
+        )
+        var settings = TorrentSettings()
+        settings.requireNetworkInterface = true
+        settings.showOnlyVPNInterfaces = true
+        settings.requiredNetworkInterfaceName = vpn.name
+        let harness = makeStoreHarness(
+            settings: settings,
+            networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot(
+                revision: 1,
+                interfaces: [vpn]
+            ),
+            startsTasks: true
+        )
+
+        await harness.store.saveAll()
+
+        #expect(harness.store.networkInterfaces == [vpn])
+        #expect(harness.store.selectableNetworkInterfaces == [vpn])
+        let application = try #require(await harness.engine.appliedSettings.last)
+        #expect(application.networkBinding == TorrentNetworkBinding(
+            interfaceName: vpn.name,
+            interfaceFingerprint: vpn.fingerprint,
+            vpnServiceID: vpn.vpnServiceID,
+            networkBlocked: false
+        ))
+        #expect(await harness.engine.restartCount == 0)
+    }
+
+    @Test("Every new service interface revision reauthorizes exactly once")
+    func serviceInterfaceRevisionReauthorizesOnce() async {
+        let vpn = NetworkInterfaceOption(
+            name: "utun4",
+            displayName: "ProtonVPN",
+            fingerprint: "service-fingerprint",
+            vpnServiceID: "proton-service",
+            vpnServiceName: "ProtonVPN",
+            isLikelyVPN: true
+        )
+        var settings = TorrentSettings()
+        settings.requireNetworkInterface = true
+        settings.showOnlyVPNInterfaces = true
+        settings.requiredNetworkInterfaceName = vpn.name
+        let harness = makeStoreHarness(
+            settings: settings,
+            networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot(
+                revision: 1,
+                interfaces: [vpn]
+            ),
+            startsTasks: true
+        )
+        await harness.store.saveAll()
+        let initialApplicationCount = await harness.engine.appliedSettings.count
+
+        await harness.engine.setNetworkInterfaceSnapshot(
+            TorrentNetworkInterfaceSnapshot(revision: 2, interfaces: [vpn])
+        )
+        await harness.store.refreshNow(notifiesCompletions: false)
+        await harness.store.saveAll()
+
+        #expect(await harness.engine.appliedSettings.count == initialApplicationCount + 1)
+        #expect(await harness.engine.appliedSettings.last?.networkBlocked == false)
+
+        await harness.store.refreshNow(notifiesCompletions: false)
+        await harness.store.saveAll()
+        #expect(await harness.engine.appliedSettings.count == initialApplicationCount + 1)
+    }
+
+    @Test("Loss and restoration of service VPN identity blocks then reauthorizes")
+    func serviceVPNIdentityChangesFailClosed() async {
+        let activeVPN = NetworkInterfaceOption(
+            name: "utun4",
+            displayName: "ProtonVPN",
+            fingerprint: "service-fingerprint",
+            vpnServiceID: "proton-service",
+            vpnServiceName: "ProtonVPN",
+            isLikelyVPN: true
+        )
+        var settings = TorrentSettings()
+        settings.requireNetworkInterface = true
+        settings.showOnlyVPNInterfaces = true
+        settings.requiredNetworkInterfaceName = activeVPN.name
+        let harness = makeStoreHarness(
+            settings: settings,
+            networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot(
+                revision: 1,
+                interfaces: [activeVPN]
+            ),
+            startsTasks: true
+        )
+        await harness.store.saveAll()
+
+        let inactiveVPN = NetworkInterfaceOption(
+            name: activeVPN.name,
+            displayName: activeVPN.name,
+            fingerprint: activeVPN.fingerprint,
+            vpnServiceID: nil,
+            vpnServiceName: nil,
+            isLikelyVPN: true
+        )
+        await harness.engine.setNetworkInterfaceSnapshot(
+            TorrentNetworkInterfaceSnapshot(revision: 2, interfaces: [inactiveVPN])
+        )
+        await harness.store.refreshNow(notifiesCompletions: false)
+        await harness.store.saveAll()
+
+        #expect(await harness.engine.appliedSettings.last?.networkBlocked == true)
+        #expect(harness.store.selectableNetworkInterfaces.isEmpty)
+
+        await harness.engine.setNetworkInterfaceSnapshot(
+            TorrentNetworkInterfaceSnapshot(revision: 3, interfaces: [activeVPN])
+        )
+        await harness.store.refreshNow(notifiesCompletions: false)
+        await harness.store.saveAll()
+
+        #expect(await harness.engine.appliedSettings.last?.networkBinding.vpnServiceID == "proton-service")
+        #expect(await harness.engine.appliedSettings.last?.networkBlocked == false)
+    }
+
     @Test("Automatic refresh tasks are renewed after an engine restart")
     func refreshTasksAreRenewedAfterRestart() async {
         let harness = makeStoreHarness(startsTasks: true, keepsWakeStreamOpen: true)
@@ -1357,6 +1484,9 @@ struct TorrentStoreIntegrationTests {
         await harness.engine.waitForSuspendedSnapshotBatchCall()
 
         let replacementEngine = FakeTorrentEngine()
+        await replacementEngine.setNetworkInterfaceSnapshot(
+            TorrentNetworkInterfaceSnapshot(revision: 1, interfaces: interfaces)
+        )
         let replacementCount = Mutex(0)
         defer {
             TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
@@ -1606,12 +1736,16 @@ private func makeStoreHarness(
     sortDirection: TorrentSortDirection = .ascending,
     defaults: UserDefaults = .standard,
     networkInterfaces: [NetworkInterfaceOption] = [],
+    networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot? = nil,
     startsTasks: Bool = false,
     keepsWakeStreamOpen: Bool = false,
     initialFolderCapabilityPaths: [String] = [],
     mirrorsFolderCapabilityMutations: Bool = false
 ) -> StoreHarness {
-    let engine = FakeTorrentEngine(keepsWakeStreamOpen: keepsWakeStreamOpen)
+    let engine = FakeTorrentEngine(
+        keepsWakeStreamOpen: keepsWakeStreamOpen,
+        networkInterfaceSnapshot: networkInterfaceSnapshot
+    )
     let dock = RecordingDockTileService()
     let notifications = RecordingNotificationService()
     let history = RecordingCompletionHistoryStore()
@@ -1634,7 +1768,6 @@ private func makeStoreHarness(
         dockTileService: dock,
         completionNotifier: notifier,
         sleepPreventionService: sleep,
-        networkInterfaceMonitor: FakeNetworkInterfaceMonitor(),
         downloadFolderAccessStore: accessStore,
         fileLocationService: fileLocationService,
         defaults: defaults,

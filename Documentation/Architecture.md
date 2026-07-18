@@ -290,18 +290,22 @@ partially importing state.
 
 ### Keep network authority inside the engine service and fail closed
 
-The GUI monitors interfaces for presentation and sends the network identity it
-expects. That observation is not authority to unblock libtorrent. The service
-runs an independent `NetworkInterfaceMonitor` and validates the controller's
-interface name, interface fingerprint, and VPN service ID against its own
-current snapshot.
+The networkless GUI does not inspect interfaces or VPN service state. The
+network-entitled service is the sole observer and publishes a revisioned,
+bounded presentation snapshot over XPC. Interface fingerprints are fixed-size,
+service-keyed HMAC-SHA-256 values, so local addresses used to detect identity
+changes do not cross into the GUI and cannot be recovered from an unsalted hash.
+The GUI may echo a selected name, fingerprint, and VPN service ID,
+but the service validates all three against its private current observation
+before libtorrent can be unblocked.
 
 The unblock sequence is deliberately transactional:
 
 1. The engine starts paused and network-blocked; handshake repeats the block
    before returning success.
-2. Starting the service-side monitor keeps networking blocked until an initial
-   interface snapshot exists.
+2. Handshake cannot succeed until the service-side monitor has produced an
+   initial interface snapshot. Readiness has a bounded timeout and an observed
+   empty list counts as ready while leaving unavailable bindings blocked.
 3. Preparing any replacement first blocks the current authorization.
 4. An unrestricted request must be structurally unbound. A constrained request
    must match one unique live interface and, when required, an active VPN service.
@@ -309,7 +313,9 @@ The unblock sequence is deliberately transactional:
    activates it immediately before applying native settings and confirms it
    immediately afterwards.
 6. Any monitor update while a constrained lease is active invalidates that lease
-   and blocks the native engine. A stopped monitor, controller request,
+   and blocks the native engine. Its new revision wakes the GUI, which refreshes
+   the picker and requests a fresh authorization even when display values are
+   unchanged. A stopped monitor, controller request,
    authorization replacement, controller disconnect, or lease race also blocks.
 7. If the native block operation fails, the service destroys the engine and
    cancels the controller session; it never continues with uncertain network
@@ -340,7 +346,14 @@ authenticated controller, delegates a fresh exact folder-capability snapshot,
 and applies the newest settings from the engine's blocked startup state. An
 interrupted or queued user mutation may report that its connection ended, but it
 is not replayed across this boundary because its native commit status may be
-ambiguous.
+ambiguous. Replacement admission treats typed busy/shutdown replies—and generic
+connection invalidation while the old controller is known to be cleaning up—as
+one bounded retry episode. Normal launch retains short connection retries, and
+definite authentication, protocol, capability, or semantic rejections are never
+retried. After sending a typed transient rejection, the service immediately
+latches that contender terminal, drains any queued successors without executing
+them, and owns a one-second reply-delivery deadline before closing the peer. A
+stalled client therefore cannot retain or later reuse an admission slot.
 
 ### Patch libtorrent only at boundaries the application cannot own
 

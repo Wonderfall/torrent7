@@ -5,6 +5,14 @@ package enum TorrentInputLimits {
 
 package enum TorrentEngineLimits {
     package static let maximumAlertErrorsPerPoll = 16
+    // A poll response is capped at 2 MiB. Keep the interface collection small
+    // enough that every semantically valid worst-case snapshot fits that cap.
+    package static let maximumNetworkInterfaceCount = 64
+    package static let maximumNetworkInterfaceNameBytes = 64
+    package static let maximumNetworkInterfaceDisplayNameBytes = 1_023
+    package static let maximumNetworkInterfaceFingerprintBytes = 16 * 1_024
+    package static let maximumVPNServiceIDBytes = 1_024
+    package static let maximumVPNServiceNameBytes = 1_023
     package static let maximumFileCount = 20_000
     package static let maximumTrackerCount = 2_000
     package static let maximumWebSeedCount = 2_000

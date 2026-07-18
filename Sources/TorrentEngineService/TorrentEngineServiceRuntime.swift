@@ -129,6 +129,7 @@ struct TorrentEngineServiceRuntimeDiagnostics: Equatable, Sendable {
 
 enum TorrentEngineServiceRequestDisposition: Equatable, Sendable {
     case continuePeer
+    case retirePeerAfterReply
     case terminatePeer
 }
 
@@ -226,11 +227,12 @@ enum TorrentEngineServiceRequestDisposition: Equatable, Sendable {
 
         guard !isHandlingRequest else {
             let inFlightError: TorrentEngineServiceRuntimeError
-            switch Self.inFlightFailureCode(
+            let failureCode = Self.inFlightFailureCode(
                 activePeerToken: activePeerToken,
                 incomingPeerToken: peerToken,
                 isShuttingDown: isShuttingDown
-            ) {
+            )
+            switch failureCode {
             case .controllerBusy:
                 inFlightError = .controllerBusy
             case .serviceShuttingDown:
@@ -238,14 +240,25 @@ enum TorrentEngineServiceRequestDisposition: Equatable, Sendable {
             case .operationRejected:
                 inFlightError = .concurrentRequest
             }
-            try? sendReply(
-                for: request.header,
-                status: .failure,
-                payload: nil,
-                failureCode: Self.failureCode(for: inFlightError),
-                errorMessage: Self.failureMessage(for: inFlightError),
-                pendingReply: pendingReply
-            )
+            do {
+                try sendReply(
+                    for: request.header,
+                    status: .failure,
+                    payload: nil,
+                    failureCode: failureCode,
+                    errorMessage: Self.failureMessage(for: inFlightError),
+                    pendingReply: pendingReply
+                )
+            } catch {
+                session.cancel(reason: "Torrent engine transient rejection serialization failed")
+                return .terminatePeer
+            }
+            if Self.isTransientAdmissionFailure(failureCode) {
+                // The establishing client closes its contender after decoding
+                // this typed reply. Cancelling here can let XPC invalidation
+                // overtake the reply and erase the retry classification.
+                return .retirePeerAfterReply
+            }
             session.cancel(reason: "Overlapping torrent engine request rejected")
             return .terminatePeer
         }
@@ -338,26 +351,39 @@ enum TorrentEngineServiceRequestDisposition: Equatable, Sendable {
                 shouldTerminatePeerAfterReply = shouldEndTransactionAfterReply
                     || shouldTerminatePeerAfterReply
             }
-            guard !isShuttingDown, !peerIsCancelled() else {
+            let failureCode = Self.failureCode(for: error)
+            let isTransientAdmissionFailure = Self.isTransientAdmissionFailure(failureCode)
+            guard !peerIsCancelled(), !isShuttingDown || isTransientAdmissionFailure else {
                 if shouldEndTransactionAfterReply {
                     endTransactionIfNeeded()
                 }
                 return .terminatePeer
             }
-            try? sendReply(
-                for: request.header,
-                status: .failure,
-                payload: nil,
-                failureCode: Self.failureCode(for: error),
-                errorMessage: Self.failureMessage(for: error),
-                pendingReply: pendingReply
-            )
+            do {
+                try sendReply(
+                    for: request.header,
+                    status: .failure,
+                    payload: nil,
+                    failureCode: failureCode,
+                    errorMessage: Self.failureMessage(for: error),
+                    pendingReply: pendingReply
+                )
+            } catch {
+                session.cancel(reason: "Torrent engine rejection serialization failed")
+                if shouldEndTransactionAfterReply {
+                    endTransactionIfNeeded()
+                }
+                return .terminatePeer
+            }
             if shouldEndTransactionAfterReply {
                 session.cancel(reason: "Torrent engine initialization failed")
                 endTransactionIfNeeded()
                 return .terminatePeer
             }
             if shouldTerminatePeerAfterReply {
+                if isTransientAdmissionFailure {
+                    return .retirePeerAfterReply
+                }
                 // A protocol-state rejection before sequence recording leaves
                 // the peer unable to resynchronize safely. Close it after the
                 // correlated failure reply instead of keeping a zombie
@@ -835,7 +861,9 @@ enum TorrentEngineServiceRequestDisposition: Equatable, Sendable {
             let responsePayload = try encode(response, for: operation)
             startChangeHints(for: created, controllerID: scope.controllerID)
             let authority = networkBindingAuthority()
-            await authority.start()
+            guard await authority.start() else {
+                throw TorrentEngineServiceRuntimeError.networkBindingRejected(.monitorNotReady)
+            }
             try requireActiveController(controllerLease)
             return responsePayload
         } catch {
@@ -1180,6 +1208,9 @@ enum TorrentEngineServiceRequestDisposition: Equatable, Sendable {
             direction: request.sortDirection,
             includeTrackerHosts: request.includeTrackerHosts
         )
+        guard let networkInterfaceSnapshot = await networkAuthority?.interfaceSnapshot() else {
+            throw TorrentEngineServiceRuntimeError.networkBindingRejected(.monitorNotReady)
+        }
         try requireActiveController(controllerLease)
 
         cleanupExpiredDatasets()
@@ -1213,6 +1244,7 @@ enum TorrentEngineServiceRequestDisposition: Equatable, Sendable {
             alertErrors: Array(result.alertErrors.prefix(TorrentEngineIPCLimits.maximumAlertErrorsPerPoll)),
             networkStatus: result.networkStatus,
             bridgeHealth: result.bridgeHealth,
+            networkInterfaceSnapshot: networkInterfaceSnapshot,
             snapshotDataset: snapshot?.descriptor,
             trackerHostDataset: trackerHosts?.descriptor
         )
@@ -1227,7 +1259,9 @@ enum TorrentEngineServiceRequestDisposition: Equatable, Sendable {
     ) async throws {
         let engine = try requireEngine()
         let authority = networkBindingAuthority()
-        await authority.start()
+        guard await authority.start() else {
+            throw TorrentEngineServiceRuntimeError.networkBindingRejected(.monitorNotReady)
+        }
         try requireActiveController(controllerLease)
         let decision = await authority.prepare(
             settings: request.settings,
@@ -1279,16 +1313,21 @@ enum TorrentEngineServiceRequestDisposition: Equatable, Sendable {
         }
         let authorityID = UUID()
         let containmentWatchdog = containmentWatchdog
-        let authority = TorrentNetworkBindingAuthority { [weak self] reason in
-            let watchdogToken = containmentWatchdog.arm()
-            defer {
-                containmentWatchdog.disarm(watchdogToken)
+        let authority = TorrentNetworkBindingAuthority(
+            invalidationHandler: { [weak self] reason in
+                let watchdogToken = containmentWatchdog.arm()
+                defer {
+                    containmentWatchdog.disarm(watchdogToken)
+                }
+                await self?.networkBindingWasInvalidated(
+                    reason: reason,
+                    authorityID: authorityID
+                )
+            },
+            observationHandler: { [weak self] in
+                await self?.networkInterfaceSnapshotDidChange(authorityID: authorityID)
             }
-            await self?.networkBindingWasInvalidated(
-                reason: reason,
-                authorityID: authorityID
-            )
-        }
+        )
         networkAuthority = authority
         networkAuthorityID = authorityID
         return authority
@@ -1321,6 +1360,14 @@ enum TorrentEngineServiceRequestDisposition: Equatable, Sendable {
                 reason: "Torrent engine network containment failed"
             )
         }
+    }
+
+    private func networkInterfaceSnapshotDidChange(authorityID: UUID) {
+        guard networkAuthorityID == authorityID,
+              let activeControllerID else {
+            return
+        }
+        sendChangeHint(controllerID: activeControllerID)
     }
 
     private func terminateActiveControllerAfterSecurityBoundaryFailure(
@@ -1773,6 +1820,17 @@ enum TorrentEngineServiceRequestDisposition: Equatable, Sendable {
             return .controllerBusy
         }
         return .operationRejected
+    }
+
+    static func isTransientAdmissionFailure(
+        _ failureCode: TorrentEngineIPCFailureCode
+    ) -> Bool {
+        switch failureCode {
+        case .controllerBusy, .serviceShuttingDown:
+            true
+        case .operationRejected:
+            false
+        }
     }
 
     private static func failureCode(

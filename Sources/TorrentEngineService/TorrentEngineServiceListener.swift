@@ -436,6 +436,7 @@ private enum TorrentEngineServiceStartupError: LocalizedError {
     private static let maximumQueuedRequestCount = 8
     private static let maximumQueuedPayloadBytes = TorrentEngineIPCLimits.maximumPayloadBytes
     private static let maximumQueuedFileDescriptorCount = 1
+    private static let transientReplyGracePeriod: Duration = .seconds(1)
 
     private let runtime: TorrentEngineServiceRuntime
     private let admissionBudget: TorrentEngineServiceAdmissionBudget
@@ -446,7 +447,9 @@ private enum TorrentEngineServiceStartupError: LocalizedError {
     private let lock = NSLock()
     private var session: XPCSession?
     private var isCancelled = false
+    private var isRetiringAfterReply = false
     private var tailTask: Task<Void, Never>?
+    private var retirementTask: Task<Void, Never>?
     private var queuedRequestCount = 0
     private var queuedPayloadByteCount = 0
     private var queuedFileDescriptorCount = 0
@@ -508,7 +511,7 @@ private enum TorrentEngineServiceStartupError: LocalizedError {
         var peerSession: XPCSession?
         var sessionToCancel: XPCSession?
         lock.withLock {
-            guard !isCancelled, let session else {
+            guard !isCancelled, !isRetiringAfterReply, let session else {
                 return
             }
             let fileDescriptorCount = metadata.hasFileDescriptor ? 1 : 0
@@ -586,7 +589,12 @@ private enum TorrentEngineServiceStartupError: LocalizedError {
                     },
                     pendingReply: pendingReply
                 )
-                if disposition == .terminatePeer {
+                switch disposition {
+                case .continuePeer:
+                    break
+                case .retirePeerAfterReply:
+                    self.retireAfterReply()
+                case .terminatePeer:
                     // Latch cancellation before this task completes so every
                     // already-queued successor observes a terminal peer instead
                     // of racing the asynchronous XPC cancellation callback.
@@ -610,21 +618,28 @@ private enum TorrentEngineServiceStartupError: LocalizedError {
         // observe isCancelled as soon as the peer lock is released and must
         // never enter native disconnect work without an armed deadline.
         let containmentToken = containmentWatchdog.arm()
-        let cancellation: (shouldNotify: Bool, tailTask: Task<Void, Never>?) = lock.withLock {
+        let cancellation: (
+            shouldNotify: Bool,
+            tailTask: Task<Void, Never>?,
+            retirementTask: Task<Void, Never>?
+        ) = lock.withLock {
             guard !isCancelled else {
-                return (false, nil)
+                return (false, nil, nil)
             }
             isCancelled = true
             session = nil
-            let task = self.tailTask
+            let tailTask = self.tailTask
             self.tailTask = nil
-            return (true, task)
+            let retirementTask = self.retirementTask
+            self.retirementTask = nil
+            return (true, tailTask, retirementTask)
         }
 
         guard cancellation.shouldNotify else {
             containmentWatchdog.disarm(containmentToken)
             return
         }
+        cancellation.retirementTask?.cancel()
         let peerAdmission = peerAdmission
         let containmentWatchdog = containmentWatchdog
         let cleanupWatchdog = cleanupWatchdog
@@ -644,7 +659,50 @@ private enum TorrentEngineServiceStartupError: LocalizedError {
     }
 
     private var peerIsCancelled: Bool {
-        lock.withLock { isCancelled }
+        lock.withLock { isCancelled || isRetiringAfterReply }
+    }
+
+    private func retireAfterReply() {
+        let retiringSession = lock.withLock { () -> XPCSession? in
+            guard !isCancelled,
+                  !isRetiringAfterReply,
+                  retirementTask == nil,
+                  let session else {
+                return nil
+            }
+            // Latch terminal state before the current request completes. Any
+            // queued successor drains without entering the runtime, and no new
+            // request can be admitted during the reply delivery window.
+            isRetiringAfterReply = true
+            return session
+        }
+        guard let retiringSession else {
+            return
+        }
+
+        let task = Task { [weak self, retiringSession] in
+            do {
+                try await Task.sleep(for: Self.transientReplyGracePeriod)
+            } catch {
+                return
+            }
+            self?.cancel()
+            retiringSession.cancel(
+                reason: "Torrent engine transient reply grace period elapsed"
+            )
+        }
+        let installed = lock.withLock {
+            guard !isCancelled,
+                  isRetiringAfterReply,
+                  retirementTask == nil else {
+                return false
+            }
+            retirementTask = task
+            return true
+        }
+        if !installed {
+            task.cancel()
+        }
     }
 
     private func reject(session: XPCSession, reason: String) {
@@ -670,7 +728,7 @@ private enum TorrentEngineServiceStartupError: LocalizedError {
 @safe final class TorrentEnginePendingReply: @unchecked Sendable {
     private enum Destination {
         case message(XPCDictionary)
-        case observer(@Sendable (TorrentEngineIPCReplyStatus) -> Void)
+        case observer(@Sendable (XPCDictionary, TorrentEngineIPCReplyStatus) -> Void)
     }
 
     private let destination: Destination
@@ -684,7 +742,18 @@ private enum TorrentEngineServiceStartupError: LocalizedError {
     init(
         sendObserver: @escaping @Sendable (TorrentEngineIPCReplyStatus) -> Void
     ) {
-        destination = .observer(sendObserver)
+        destination = .observer { _, status in
+            sendObserver(status)
+        }
+    }
+
+    init(
+        replyObserver: @escaping @Sendable (
+            XPCDictionary,
+            TorrentEngineIPCReplyStatus
+        ) -> Void
+    ) {
+        destination = .observer(replyObserver)
     }
 
     func send(_ reply: XPCDictionary, status: TorrentEngineIPCReplyStatus) {
@@ -699,8 +768,8 @@ private enum TorrentEngineServiceStartupError: LocalizedError {
             switch destination {
             case .message(let message):
                 message.reply(reply)
-            case .observer(let sendObserver):
-                sendObserver(status)
+            case .observer(let replyObserver):
+                replyObserver(reply, status)
             }
         }
     }

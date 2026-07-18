@@ -26,6 +26,107 @@ struct TorrentEngineServiceSecurityStateTests {
             incomingPeerToken: UUID(),
             isShuttingDown: true
         ) == .serviceShuttingDown)
+        #expect(TorrentEngineServiceRuntime.isTransientAdmissionFailure(.controllerBusy))
+        #expect(TorrentEngineServiceRuntime.isTransientAdmissionFailure(.serviceShuttingDown))
+        #expect(!TorrentEngineServiceRuntime.isTransientAdmissionFailure(.operationRejected))
+    }
+
+    @Test("A busy contender receives its typed reply before bounded retirement")
+    func busyContenderReceivesReply() async throws {
+        let temporary = try ServiceTemporaryDirectory()
+        let runtime = try TorrentEngineServiceRuntime(
+            stateDirectory: temporary.url,
+            authentication: .sameTeam,
+            transactionBegin: {},
+            transactionEnd: {}
+        )
+        let activePeer = UUID()
+        _ = await runtime.handle(
+            try beginMigrationRequest(),
+            from: activePeer,
+            session: TorrentEngineServiceSessionHandle(),
+            peerIsCancelled: { false },
+            pendingReply: TorrentEnginePendingReply { _ in }
+        )
+        let contenderCancellations = Mutex(0)
+        let contenderRequest = try beginMigrationRequest()
+        let replies = Mutex([TorrentEngineIPCReply]())
+
+        let disposition = await runtime.handle(
+            contenderRequest,
+            from: UUID(),
+            session: TorrentEngineServiceSessionHandle(
+                cancelObserver: { _ in contenderCancellations.withLock { $0 += 1 } }
+            ),
+            peerIsCancelled: { false },
+            pendingReply: TorrentEnginePendingReply { dictionary, _ in
+                if let reply = try? TorrentEngineIPCEnvelopeCodec.decodeReply(
+                    dictionary,
+                    maximumPayloadBytes: contenderRequest.header.operation.maximumReplyPayloadBytes
+                ) {
+                    replies.withLock { $0.append(reply) }
+                }
+            }
+        )
+
+        #expect(disposition == .retirePeerAfterReply)
+        #expect(replies.withLock { $0.map(\.header) } == [contenderRequest.header])
+        #expect(replies.withLock { $0.map(\.status) } == [.failure])
+        #expect(replies.withLock { $0.map(\.failureCode) } == [.controllerBusy])
+        #expect(contenderCancellations.withLock { $0 } == 0)
+        #expect(await runtime.diagnostics() == .activeMigration)
+
+        await runtime.beginDisconnect(peerToken: activePeer)
+        await runtime.finishDisconnect(peerToken: activePeer)
+    }
+
+    @Test("A shutting-down contender receives its typed reply before bounded retirement")
+    func shuttingDownContenderReceivesReply() async throws {
+        let temporary = try ServiceTemporaryDirectory()
+        let runtime = try TorrentEngineServiceRuntime(
+            stateDirectory: temporary.url,
+            authentication: .sameTeam,
+            transactionBegin: {},
+            transactionEnd: {}
+        )
+        let activePeer = UUID()
+        _ = await runtime.handle(
+            try beginMigrationRequest(),
+            from: activePeer,
+            session: TorrentEngineServiceSessionHandle(),
+            peerIsCancelled: { false },
+            pendingReply: TorrentEnginePendingReply { _ in }
+        )
+        await runtime.beginDisconnect(peerToken: activePeer)
+        let contenderCancellations = Mutex(0)
+        let contenderRequest = try beginMigrationRequest()
+        let replies = Mutex([TorrentEngineIPCReply]())
+
+        let disposition = await runtime.handle(
+            contenderRequest,
+            from: UUID(),
+            session: TorrentEngineServiceSessionHandle(
+                cancelObserver: { _ in contenderCancellations.withLock { $0 += 1 } }
+            ),
+            peerIsCancelled: { false },
+            pendingReply: TorrentEnginePendingReply { dictionary, _ in
+                if let reply = try? TorrentEngineIPCEnvelopeCodec.decodeReply(
+                    dictionary,
+                    maximumPayloadBytes: contenderRequest.header.operation.maximumReplyPayloadBytes
+                ) {
+                    replies.withLock { $0.append(reply) }
+                }
+            }
+        )
+
+        #expect(disposition == .retirePeerAfterReply)
+        #expect(replies.withLock { $0.map(\.header) } == [contenderRequest.header])
+        #expect(replies.withLock { $0.map(\.status) } == [.failure])
+        #expect(replies.withLock { $0.map(\.failureCode) } == [.serviceShuttingDown])
+        #expect(contenderCancellations.withLock { $0 } == 0)
+        #expect(await runtime.diagnostics() == .disconnectingMigration)
+
+        await runtime.finishDisconnect(peerToken: activePeer)
     }
 
     @Test("Admission limits are atomic and failed reservations do not consume budget")

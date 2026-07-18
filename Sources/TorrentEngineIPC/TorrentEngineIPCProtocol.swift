@@ -2,7 +2,7 @@ import Foundation
 import TorrentEngineModel
 
 package enum TorrentEngineIPCProtocol {
-    package static let version: UInt64 = 3
+    package static let version: UInt64 = 4
 }
 
 package enum TorrentEngineIPCLimits {
@@ -110,6 +110,11 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
 
     package var propertyListDecodingLimits: TorrentEngineIPCPropertyListDecodingLimits {
         switch self {
+        case .poll:
+            .init(
+                maximumContainerElementCount: TorrentEngineLimits.maximumNetworkInterfaceCount,
+                maximumCollectionReferenceCount: 8 * 1_024
+            )
         case .handshake, .replaceFolderCapabilities:
             .init(
                 maximumContainerElementCount: TorrentEngineLimits.maximumAuthorizedSavePathCount,

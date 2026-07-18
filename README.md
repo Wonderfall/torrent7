@@ -109,8 +109,10 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
   replacement or controller termination. Local bookmark/path validation failures
   fail closed too, and restart reuses only an exactly reconciled capability set.
 - **Service-authoritative network policy:** the engine starts blocked. A network
-  binding can unblock it only after an independent service-side interface monitor
-  validates the interface fingerprint and VPN service identity. Constrained
+  binding can unblock it only after the service-side interface monitor validates
+  the interface fingerprint and VPN service identity. The networkless GUI gets a
+  bounded, revisioned picker snapshot from that service; raw local addresses do
+  not cross the XPC boundary. Constrained
   interface changes, disconnects, replacement failures, and monitoring failures
   block networking. A revocation that preempts an in-flight controller request
   closes that controller and automatically replaces it from a fresh blocked

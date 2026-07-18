@@ -8,9 +8,11 @@ package enum TorrentEngineError: LocalizedError, Sendable {
     package var errorDescription: String? {
         switch self {
         case .failedToCreateClient:
-            return "Could not start libtorrent."
+            return "Could not start the torrent engine."
         case .startupFailed(let message):
-            return message.isEmpty ? "Could not start libtorrent." : "Could not start libtorrent: \(message)"
+            return message.isEmpty
+                ? "Could not start the torrent engine."
+                : "Could not start the torrent engine: \(message)"
         case .bridgeError(let message):
             return message.isEmpty ? "The torrent operation failed." : message
         }
@@ -104,6 +106,9 @@ package protocol TorrentEngineServicing: Sendable {
     func takeChanges() async -> UInt32
     func networkStatus() async -> TorrentNetworkStatus
     func bridgeHealth() async -> TorrentBridgeHealth
+    /// Returns the latest authoritative interface view when the engine owns
+    /// network discovery. In-process engines may return `nil`.
+    func networkInterfaceSnapshot() async -> TorrentNetworkInterfaceSnapshot?
     func poll(
         since revision: UInt64?,
         sortedBy sortOrder: TorrentSortOrder,
@@ -140,6 +145,7 @@ package struct TorrentEnginePollResult: Codable, Sendable {
     package let bridgeHealth: TorrentBridgeHealth
     package let snapshotBatch: TorrentSnapshotBatch?
     package let trackerHostBatch: TorrentTrackerHostBatch?
+    package let networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot?
 
     package init(
         dirtyMask: UInt32,
@@ -147,7 +153,8 @@ package struct TorrentEnginePollResult: Codable, Sendable {
         networkStatus: TorrentNetworkStatus,
         bridgeHealth: TorrentBridgeHealth,
         snapshotBatch: TorrentSnapshotBatch?,
-        trackerHostBatch: TorrentTrackerHostBatch?
+        trackerHostBatch: TorrentTrackerHostBatch?,
+        networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot? = nil
     ) {
         self.dirtyMask = dirtyMask
         self.alertErrors = Array(alertErrors.prefix(TorrentEngineLimits.maximumAlertErrorsPerPoll))
@@ -155,6 +162,7 @@ package struct TorrentEnginePollResult: Codable, Sendable {
         self.bridgeHealth = bridgeHealth
         self.snapshotBatch = snapshotBatch
         self.trackerHostBatch = trackerHostBatch
+        self.networkInterfaceSnapshot = networkInterfaceSnapshot
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -164,6 +172,7 @@ package struct TorrentEnginePollResult: Codable, Sendable {
         case bridgeHealth
         case snapshotBatch
         case trackerHostBatch
+        case networkInterfaceSnapshot
     }
 
     package init(from decoder: any Decoder) throws {
@@ -174,7 +183,11 @@ package struct TorrentEnginePollResult: Codable, Sendable {
             networkStatus: try values.decode(TorrentNetworkStatus.self, forKey: .networkStatus),
             bridgeHealth: try values.decode(TorrentBridgeHealth.self, forKey: .bridgeHealth),
             snapshotBatch: try values.decodeIfPresent(TorrentSnapshotBatch.self, forKey: .snapshotBatch),
-            trackerHostBatch: try values.decodeIfPresent(TorrentTrackerHostBatch.self, forKey: .trackerHostBatch)
+            trackerHostBatch: try values.decodeIfPresent(TorrentTrackerHostBatch.self, forKey: .trackerHostBatch),
+            networkInterfaceSnapshot: try values.decodeIfPresent(
+                TorrentNetworkInterfaceSnapshot.self,
+                forKey: .networkInterfaceSnapshot
+            )
         )
     }
 
@@ -186,10 +199,15 @@ package struct TorrentEnginePollResult: Codable, Sendable {
         try values.encode(bridgeHealth, forKey: .bridgeHealth)
         try values.encodeIfPresent(snapshotBatch, forKey: .snapshotBatch)
         try values.encodeIfPresent(trackerHostBatch, forKey: .trackerHostBatch)
+        try values.encodeIfPresent(networkInterfaceSnapshot, forKey: .networkInterfaceSnapshot)
     }
 }
 
 extension TorrentEngineServicing {
+    package func networkInterfaceSnapshot() async -> TorrentNetworkInterfaceSnapshot? {
+        nil
+    }
+
     package func poll(
         since revision: UInt64?,
         sortedBy sortOrder: TorrentSortOrder,
@@ -209,6 +227,7 @@ extension TorrentEngineServicing {
             }
         }
         let status = await networkStatus()
+        let networkInterfaceSnapshot = await networkInterfaceSnapshot()
         let trackerHostsChanged = TorrentEngineDirtySet(rawValue: dirtyMask).contains(.trackerHosts)
         let trackerHosts = includeTrackerHosts || trackerHostsChanged
             ? await trackerHostBatch()
@@ -224,7 +243,8 @@ extension TorrentEngineServicing {
             networkStatus: status,
             bridgeHealth: health,
             snapshotBatch: snapshots,
-            trackerHostBatch: trackerHosts
+            trackerHostBatch: trackerHosts,
+            networkInterfaceSnapshot: networkInterfaceSnapshot
         )
     }
 }

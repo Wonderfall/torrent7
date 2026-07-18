@@ -1,39 +1,26 @@
+import CryptoKit
 import Foundation
 import Network
 import Darwin
 import SystemConfiguration
+import TorrentEngineModel
 
-package struct NetworkInterfaceOption: Hashable, Identifiable, Sendable {
-    package let name: String
-    package let displayName: String
-    package let fingerprint: String
-    package let vpnServiceID: String?
-    package let vpnServiceName: String?
-    package let isLikelyVPN: Bool
-
-    package init(
-        name: String,
-        displayName: String,
-        fingerprint: String,
-        vpnServiceID: String?,
-        vpnServiceName: String?,
-        isLikelyVPN: Bool
-    ) {
-        self.name = name
-        self.displayName = displayName
-        self.fingerprint = fingerprint
-        self.vpnServiceID = vpnServiceID
-        self.vpnServiceName = vpnServiceName
-        self.isLikelyVPN = isLikelyVPN
+private func interfaceIdentityDigest(
+    _ identity: String,
+    key: SymmetricKey
+) -> String {
+    let hexadecimal = Array("0123456789abcdef".utf8)
+    let authenticationCode = HMAC<SHA256>.authenticationCode(
+        for: Data(identity.utf8),
+        using: key
+    )
+    var encoded = Array("hmac-sha256:".utf8)
+    encoded.reserveCapacity(encoded.count + SHA256.byteCount * 2)
+    for byte in authenticationCode {
+        encoded.append(hexadecimal[Int(byte >> 4)])
+        encoded.append(hexadecimal[Int(byte & 0x0f)])
     }
-
-    package var id: String {
-        name
-    }
-
-    package var isVPNBacked: Bool {
-        vpnServiceID != nil
-    }
+    return String(decoding: encoded, as: UTF8.self)
 }
 
 package protocol NetworkInterfaceMonitoring: AnyObject, Sendable {
@@ -49,9 +36,12 @@ private struct InterfaceSnapshot {
     var hasIPv4Address: Bool
     var hasIPv6Address: Bool
 
-    var fingerprint: String {
+    func fingerprint(using key: SymmetricKey) -> String {
         let addressList = addresses.sorted().joined(separator: ",")
-        return "name=\(name);index=\(index);flags=\(flags);ipv4=\(hasIPv4Address);ipv6=\(hasIPv6Address);addresses=\(addressList)"
+        return interfaceIdentityDigest(
+            "name=\(name);index=\(index);flags=\(flags);ipv4=\(hasIPv4Address);ipv6=\(hasIPv6Address);addresses=\(addressList)",
+            key: key
+        )
     }
 }
 
@@ -71,6 +61,7 @@ package final class NetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchec
 
     private let queue = DispatchQueue(label: "torrent7.network-interface-monitor")
     private let queueKey = DispatchSpecificKey<Void>()
+    private let fingerprintKey = SymmetricKey(size: .bits256)
     private var monitor: NWPathMonitor?
     private var dynamicStore: SCDynamicStore?
     private var continuation: AsyncStream<[NetworkInterfaceOption]>.Continuation?
@@ -176,7 +167,7 @@ package final class NetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchec
             return
         }
 
-        let options = Self.options(pathNames: pathNames)
+        let options = Self.options(pathNames: pathNames, fingerprintKey: fingerprintKey)
         guard force || options != lastEmittedOptions else {
             return
         }
@@ -236,23 +227,45 @@ package final class NetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchec
         Set(path.availableInterfaces.map(\.name))
     }
 
-    private static func options(pathNames: Set<String>) -> [NetworkInterfaceOption] {
+    private static func options(
+        pathNames: Set<String>,
+        fingerprintKey: SymmetricKey
+    ) -> [NetworkInterfaceOption] {
         let snapshots = interfaceSnapshots()
         let optionNames = snapshots.isEmpty ? pathNames : Set(snapshots.keys)
         let displayNames = displayNamesByInterfaceName()
         let vpnAssociations = activeVPNAssociationsByInterfaceName()
 
         return optionNames
-            .map { name in
+            .compactMap { name in
                 let vpnAssociation = vpnAssociations[name]
-                return NetworkInterfaceOption(
+                let option = NetworkInterfaceOption(
                     name: name,
                     displayName: optionDisplayName(for: name, using: displayNames, vpnServiceName: vpnAssociation?.serviceName),
-                    fingerprint: snapshots[name]?.fingerprint ?? fallbackFingerprint(for: name),
+                    fingerprint: snapshots[name]?.fingerprint(using: fingerprintKey)
+                        ?? fallbackFingerprint(for: name, fingerprintKey: fingerprintKey),
                     vpnServiceID: vpnAssociation?.serviceID,
                     vpnServiceName: vpnAssociation?.serviceName,
                     isLikelyVPN: vpnAssociation != nil || isLikelyVPN(name)
                 )
+                guard !TorrentNetworkInterfaceSnapshotValidator.isValid(option) else {
+                    return option
+                }
+
+                // SystemConfiguration strings are display data, not authority.
+                // If an association cannot cross IPC safely, omit that
+                // association and keep the interface conservatively VPN-like.
+                let conservativeOption = NetworkInterfaceOption(
+                    name: name,
+                    displayName: name,
+                    fingerprint: option.fingerprint,
+                    vpnServiceID: nil,
+                    vpnServiceName: nil,
+                    isLikelyVPN: option.isLikelyVPN
+                )
+                return TorrentNetworkInterfaceSnapshotValidator.isValid(conservativeOption)
+                    ? conservativeOption
+                    : nil
             }
             .sorted { lhs, rhs in
                 if lhs.isLikelyVPN != rhs.isLikelyVPN {
@@ -333,8 +346,12 @@ package final class NetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchec
         }
     }
 
-    private static func fallbackFingerprint(for name: String) -> String {
-        "name=\(name);index=\(interfaceIndex(for: name));ipv4=false;ipv6=false;addresses="
+    private static func fallbackFingerprint(
+        for name: String,
+        fingerprintKey: SymmetricKey
+    ) -> String {
+        let identity = "name=\(name);index=\(interfaceIndex(for: name));ipv4=false;ipv6=false;addresses="
+        return interfaceIdentityDigest(identity, key: fingerprintKey)
     }
 
     private static func numericAddress(from address: UnsafePointer<sockaddr>) -> String? {

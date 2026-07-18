@@ -294,6 +294,7 @@ struct TorrentEngineIPCEnvelopeTests {
 
     @Test("Stable dataset, migration, and hint operation numbers")
     func stableOperationNumbers() {
+        #expect(TorrentEngineIPCProtocol.version == 4)
         #expect(TorrentEngineIPCOperation.replaceFolderCapabilities.rawValue == 7)
         #expect(TorrentEngineIPCOperation.openDataset.rawValue == 50)
         #expect(TorrentEngineIPCOperation.readDataset.rawValue == 51)
@@ -378,6 +379,63 @@ struct TorrentEngineIPCPropertyListTests {
         }
     }
 
+    @Test("Poll responses carry the required bounded interface snapshot")
+    func pollResponseRoundTrip() throws {
+        let response = pollResponse(interfaceCount: 1)
+        let data = try TorrentEngineIPCPropertyListCodec.encode(
+            response,
+            maximumBytes: TorrentEngineIPCOperation.poll.maximumReplyPayloadBytes
+        )
+        let decoded = try TorrentEngineIPCPropertyListCodec.decode(
+            TorrentEngineIPCPollResponse.self,
+            from: data,
+            maximumBytes: TorrentEngineIPCOperation.poll.maximumReplyPayloadBytes,
+            decodingLimits: TorrentEngineIPCOperation.poll.propertyListDecodingLimits
+        )
+
+        #expect(decoded.networkInterfaceSnapshot == response.networkInterfaceSnapshot)
+    }
+
+    @Test("Poll decoding rejects interface collection amplification")
+    func pollInterfaceCollectionAmplification() throws {
+        let maximum = TorrentEngineLimits.maximumNetworkInterfaceCount
+        let accepted = pollResponse(interfaceCount: maximum)
+        let acceptedData = try TorrentEngineIPCPropertyListCodec.encode(
+            accepted,
+            maximumBytes: TorrentEngineIPCOperation.poll.maximumReplyPayloadBytes
+        )
+        _ = try TorrentEngineIPCPropertyListCodec.decode(
+            TorrentEngineIPCPollResponse.self,
+            from: acceptedData,
+            maximumBytes: TorrentEngineIPCOperation.poll.maximumReplyPayloadBytes,
+            decodingLimits: TorrentEngineIPCOperation.poll.propertyListDecodingLimits
+        )
+
+        let oversized = pollResponse(interfaceCount: maximum + 1)
+        let oversizedData = try TorrentEngineIPCPropertyListCodec.encode(
+            oversized,
+            maximumBytes: TorrentEngineIPCOperation.poll.maximumReplyPayloadBytes
+        )
+        expectIPCError(.propertyListDecodingFailed) {
+            try TorrentEngineIPCPropertyListCodec.decode(
+                TorrentEngineIPCPollResponse.self,
+                from: oversizedData,
+                maximumBytes: TorrentEngineIPCOperation.poll.maximumReplyPayloadBytes,
+                decodingLimits: TorrentEngineIPCOperation.poll.propertyListDecodingLimits
+            )
+        }
+        expectIPCError(.propertyListDecodingFailed) {
+            try TorrentEngineIPCPropertyListCodec.decode(
+                TorrentNetworkInterfaceSnapshot.self,
+                from: try TorrentEngineIPCPropertyListCodec.encode(
+                    oversized.networkInterfaceSnapshot,
+                    maximumBytes: TorrentEngineIPCOperation.poll.maximumReplyPayloadBytes
+                ),
+                maximumBytes: TorrentEngineIPCOperation.poll.maximumReplyPayloadBytes
+            )
+        }
+    }
+
     @Test("Bare scalar roots are rejected so wire messages must use containers")
     func scalarRootsAreRejected() {
         expectIPCError(.propertyListEncodingFailed) {
@@ -437,6 +495,31 @@ struct TorrentEngineIPCPropertyListTests {
                 )
             )
         }
+    }
+
+
+    private func pollResponse(interfaceCount: Int) -> TorrentEngineIPCPollResponse {
+        TorrentEngineIPCPollResponse(
+            dirtyMask: 0,
+            alertErrors: [],
+            networkStatus: .empty,
+            bridgeHealth: .healthy,
+            networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot(
+                revision: 1,
+                interfaces: (0..<interfaceCount).map { index in
+                    NetworkInterfaceOption(
+                        name: "en\(index)",
+                        displayName: "Interface \(index)",
+                        fingerprint: "fingerprint-\(index)",
+                        vpnServiceID: nil,
+                        vpnServiceName: nil,
+                        isLikelyVPN: false
+                    )
+                }
+            ),
+            snapshotDataset: nil,
+            trackerHostDataset: nil
+        )
     }
 }
 

@@ -80,20 +80,6 @@ final class RecordingSleepPreventionService: SleepPreventionServicing {
     }
 }
 
-final class FakeNetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchecked Sendable {
-    private(set) var cancelCount = 0
-
-    func updates() -> AsyncStream<[NetworkInterfaceOption]> {
-        AsyncStream { continuation in
-            continuation.finish()
-        }
-    }
-
-    func cancel() {
-        cancelCount += 1
-    }
-}
-
 final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
     var defaultURL: URL?
     private(set) var capabilityRevision: UInt64 = 0
@@ -331,6 +317,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     var dirtyMask: UInt32 = 0
     var networkStatusValue = TorrentNetworkStatus.empty
     var bridgeHealthValue = TorrentBridgeHealth.healthy
+    var networkInterfaceSnapshotValue: TorrentNetworkInterfaceSnapshot?
     var alertErrors = [String]()
     var nextAddedMagnetID = "alpha"
     var addMagnetError: Error?
@@ -349,7 +336,11 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private(set) var saveAllCount = 0
     private(set) var saveAllCheckedCount = 0
     private(set) var shutdownCount = 0
-    private(set) var appliedSettings = [(settings: TorrentSettings, networkBlocked: Bool)]()
+    private(set) var appliedSettings = [(
+        settings: TorrentSettings,
+        networkBinding: TorrentNetworkBinding,
+        networkBlocked: Bool
+    )]()
     private(set) var operations = [FakeTorrentEngineOperation]()
     private(set) var previewedTorrentFiles = [Data]()
     private(set) var delegatedFolderAuthorizations = [TorrentFolderAuthorization]()
@@ -412,8 +403,12 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     )
     var torrentOptionsValue = TorrentOptions.unlimited
 
-    init(keepsWakeStreamOpen: Bool = false) {
+    init(
+        keepsWakeStreamOpen: Bool = false,
+        networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot? = nil
+    ) {
         self.keepsWakeStreamOpen = keepsWakeStreamOpen
+        networkInterfaceSnapshotValue = networkInterfaceSnapshot
     }
 
     func shutdown() {
@@ -497,6 +492,10 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func setBridgeHealth(_ health: TorrentBridgeHealth) {
         bridgeHealthValue = health
+    }
+
+    func setNetworkInterfaceSnapshot(_ snapshot: TorrentNetworkInterfaceSnapshot?) {
+        networkInterfaceSnapshotValue = snapshot
     }
 
     func setRemoveError(_ error: Error?) {
@@ -789,7 +788,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         _ settings: TorrentSettings,
         networkBinding: TorrentNetworkBinding
     ) async throws {
-        appliedSettings.append((settings, networkBinding.networkBlocked))
+        appliedSettings.append((settings, networkBinding, networkBinding.networkBlocked))
         currentNetworkBlocked = networkBinding.networkBlocked
         operations.append(.applySettings(
             dhtEnabled: settings.enableDHTNetwork,
@@ -842,6 +841,10 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func bridgeHealth() async -> TorrentBridgeHealth {
         bridgeHealthValue
+    }
+
+    func networkInterfaceSnapshot() async -> TorrentNetworkInterfaceSnapshot? {
+        networkInterfaceSnapshotValue
     }
 
     func snapshotsIfChanged(

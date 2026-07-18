@@ -91,14 +91,12 @@ final class TorrentStore {
     private let dockTileService: TorrentDockTileServicing
     private let completionNotifier: TorrentCompletionNotifier
     private let sleepPreventionService: SleepPreventionServicing
-    private let networkInterfaceMonitor: NetworkInterfaceMonitoring
     private let downloadFolderAccessStore: DownloadFolderAccessStoring
     private let fileLocationService: TorrentFileLocationServicing
     private let labelStore: TorrentLabelStore
     private let defaults: UserDefaults
     private var refreshTask: Task<Void, Never>?
     private var wakeRefreshTask: Task<Void, Never>?
-    private var networkInterfaceTask: Task<Void, Never>?
     @ObservationIgnored
     private var engineStartupTask: Task<Void, Never>?
     @ObservationIgnored
@@ -116,6 +114,7 @@ final class TorrentStore {
     private var lastErrorSource: TorrentStoreErrorSource?
     private var lastSnapshotRevision: UInt64?
     private var lastTrackerHostRevision: UInt64?
+    private var lastNetworkInterfaceRevision: UInt64?
     private var pendingTrackerHostRefresh = false
     private var refreshGeneration = 0
     private var refreshesInFlightByLifecycle = [UInt64: Int]()
@@ -143,7 +142,6 @@ final class TorrentStore {
         self.dockTileService = dockTileService
         completionNotifier = TorrentCompletionNotifier(dockTileService: dockTileService)
         sleepPreventionService = SleepPreventionService()
-        networkInterfaceMonitor = NetworkInterfaceMonitor()
         downloadFolderAccessStore = DownloadFolderAccessStore()
         fileLocationService = TorrentFileLocationService()
         labelStore = TorrentLabelStore(defaults: defaults)
@@ -173,7 +171,6 @@ final class TorrentStore {
         }
         updateSidebarState()
         completionNotifier.configure()
-        startMonitoringNetworkInterfaces()
 
         if let restoredFolderError {
             setLastError(restoredFolderError, source: .userAction)
@@ -192,7 +189,6 @@ final class TorrentStore {
         dockTileService: TorrentDockTileServicing,
         completionNotifier: TorrentCompletionNotifier,
         sleepPreventionService: SleepPreventionServicing,
-        networkInterfaceMonitor: NetworkInterfaceMonitoring,
         downloadFolderAccessStore: DownloadFolderAccessStoring,
         fileLocationService: TorrentFileLocationServicing,
         defaults: UserDefaults = .standard,
@@ -207,7 +203,6 @@ final class TorrentStore {
         self.dockTileService = dockTileService
         self.completionNotifier = completionNotifier
         self.sleepPreventionService = sleepPreventionService
-        self.networkInterfaceMonitor = networkInterfaceMonitor
         self.downloadFolderAccessStore = downloadFolderAccessStore
         self.fileLocationService = fileLocationService
         labelStore = TorrentLabelStore(defaults: defaults)
@@ -233,7 +228,6 @@ final class TorrentStore {
         updateSidebarState()
         if startsTasks, engine.isAvailable {
             completionNotifier.configure()
-            startMonitoringNetworkInterfaces()
             startInitialEngineSync()
             startRefreshing()
         }
@@ -243,10 +237,8 @@ final class TorrentStore {
         engineStartupTask?.cancel()
         refreshTask?.cancel()
         wakeRefreshTask?.cancel()
-        networkInterfaceTask?.cancel()
         operationDrainTask?.cancel()
         immediateNetworkBlockTask?.cancel()
-        networkInterfaceMonitor.cancel()
     }
 
     var selectedTorrent: TorrentItem? {
@@ -1359,6 +1351,9 @@ final class TorrentStore {
               polledEngine.isAvailable else {
             return
         }
+        if let networkInterfaceSnapshot = poll.networkInterfaceSnapshot {
+            applyNetworkInterfaceSnapshot(networkInterfaceSnapshot)
+        }
         if poll.bridgeHealth != bridgeHealth {
             bridgeHealth = poll.bridgeHealth
         }
@@ -1417,6 +1412,25 @@ final class TorrentStore {
 
     private func shouldRefreshTrackerHosts() -> Bool {
         lastTrackerHostRevision == nil || pendingTrackerHostRefresh
+    }
+
+    private func applyNetworkInterfaceSnapshot(
+        _ snapshot: TorrentNetworkInterfaceSnapshot
+    ) {
+        if let lastNetworkInterfaceRevision {
+            guard snapshot.revision > lastNetworkInterfaceRevision else {
+                return
+            }
+        }
+        lastNetworkInterfaceRevision = snapshot.revision
+        if snapshot.interfaces != networkInterfaces {
+            networkInterfaces = snapshot.interfaces
+            settingsState.networkInterfaces = snapshot.interfaces
+        }
+
+        // The service revokes the current lease before publishing every new
+        // revision, even when the displayable interface list is unchanged.
+        scheduleApplySettings(refreshes: true, notifiesCompletions: false)
     }
 
     private func applyTrackerHostBatch(_ batch: TorrentTrackerHostBatch, generation: Int) {
@@ -1491,6 +1505,12 @@ final class TorrentStore {
         precondition(!isEngineRestarting && !isFolderCapabilityTransactionInProgress)
 
         let startupFactory = Self.engineStartupFactoryOverride.withLock { $0 }
+        let connectionRetryMode: TorrentEngineConnectionRetryMode = switch kind {
+        case .initial:
+            .initial
+        case .replacesTerminatedController:
+            .replacingTerminatedController
+        }
         let capabilitySnapshot = downloadFolderAccessStore.capabilitySnapshot
         let authorizedSavePaths = capabilitySnapshot.paths
         let folderAuthorizations: [TorrentFolderAuthorization]
@@ -1517,6 +1537,9 @@ final class TorrentStore {
         wakeRefreshTask = nil
         appliedNetworkBinding = nil
         immediateNetworkBlockBinding = nil
+        lastNetworkInterfaceRevision = nil
+        networkInterfaces = []
+        settingsState.networkInterfaces = []
         advanceEngineLifecycleGeneration()
         let startupGeneration = engineLifecycleGeneration
         engine = TorrentUnavailableEngine(message: "Torrent engine startup is in progress.")
@@ -1542,7 +1565,7 @@ final class TorrentStore {
                 return
             }
             let creationTask = Task.detached(priority: .userInitiated) {
-                [authorizedSavePaths, folderAuthorizations, legacyStateDirectory] () -> TorrentStoreEngineStartupOutcome in
+                [authorizedSavePaths, folderAuthorizations, legacyStateDirectory, connectionRetryMode] () -> TorrentStoreEngineStartupOutcome in
                 guard !Task.isCancelled else {
                     return .cancelled
                 }
@@ -1554,7 +1577,8 @@ final class TorrentStore {
                         engine = try await TorrentXPCClient.connect(
                             enablePeerExchangePlugin: enablePeerExchangePlugin,
                             folderAuthorizations: folderAuthorizations,
-                            legacyStateDirectory: legacyStateDirectory
+                            legacyStateDirectory: legacyStateDirectory,
+                            retryMode: connectionRetryMode
                         )
                     }
                     guard !Task.isCancelled else {
@@ -1603,7 +1627,14 @@ final class TorrentStore {
     }
 
     private func startInitialEngineSync() {
-        scheduleApplySettings(refreshes: true, notifiesCompletions: false)
+        let accepted = scheduleUserOperation { store in
+            await store.refreshFromEngine(notifiesCompletions: false)
+            store.scheduleApplySettings(
+                refreshes: true,
+                notifiesCompletions: false
+            )
+        }
+        precondition(accepted, "Initial engine synchronization must fit the operation queue")
     }
 
     private func startRefreshing() {
@@ -1638,24 +1669,6 @@ final class TorrentStore {
                     return
                 }
                 await self.refreshFromEngine()
-            }
-        }
-    }
-
-    private func startMonitoringNetworkInterfaces() {
-        let networkInterfaceMonitor = networkInterfaceMonitor
-        networkInterfaceTask = Task { @MainActor [weak self] in
-            for await interfaces in networkInterfaceMonitor.updates() {
-                guard !Task.isCancelled else {
-                    return
-                }
-                guard let self else {
-                    return
-                }
-
-                self.networkInterfaces = interfaces
-                self.settingsState.networkInterfaces = interfaces
-                self.scheduleApplySettings(refreshes: true)
             }
         }
     }

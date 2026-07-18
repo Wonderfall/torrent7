@@ -238,6 +238,80 @@ struct TorrentNetworkBindingAuthorityTests {
         await authority.stop()
     }
 
+    @Test("Authority startup waits for the first service-side snapshot")
+    func startupWaitsForFirstSnapshot() async throws {
+        let interface = networkInterface(
+            name: "utun7",
+            fingerprint: "fingerprint",
+            vpnServiceID: "vpn-service"
+        )
+        let monitor = TestNetworkInterfaceMonitor(
+            initialInterfaces: [],
+            emitsInitialSnapshot: false
+        )
+        let authority = TorrentNetworkBindingAuthority(monitor: monitor) { _ in }
+        let startup = Task {
+            await authority.start()
+        }
+
+        while monitor.updatesCallCount == 0 {
+            await Task.yield()
+        }
+        #expect(!(await authority.state().hasInterfaceSnapshot))
+
+        monitor.send([interface])
+        #expect(await startup.value)
+        #expect(await authority.interfaceSnapshot() == TorrentNetworkInterfaceSnapshot(
+            revision: 1,
+            interfaces: [interface]
+        ))
+
+        await authority.stop()
+    }
+
+    @Test("An empty first snapshot is ready and remains fail-closed for a missing interface")
+    func emptyFirstSnapshotIsReady() async {
+        let monitor = TestNetworkInterfaceMonitor(initialInterfaces: [])
+        let authority = TorrentNetworkBindingAuthority(monitor: monitor) { _ in }
+
+        #expect(await authority.start())
+        #expect(await authority.interfaceSnapshot() == TorrentNetworkInterfaceSnapshot(
+            revision: 1,
+            interfaces: []
+        ))
+        #expect(await authority.prepare(
+            settings: boundSettings(interfaceName: "utun7", vpnOnly: true),
+            binding: TorrentNetworkBinding(
+                interfaceName: "utun7",
+                interfaceFingerprint: "fingerprint",
+                vpnServiceID: "vpn-service",
+                networkBlocked: false
+            )
+        ) == .blocked(.interfaceUnavailable))
+
+        await authority.stop()
+    }
+
+    @Test("Monitor readiness has a bounded fail-closed timeout")
+    func monitorReadinessTimesOut() async {
+        let monitor = TestNetworkInterfaceMonitor(
+            initialInterfaces: [],
+            emitsInitialSnapshot: false
+        )
+        let invalidations = InvalidationRecorder()
+        let authority = TorrentNetworkBindingAuthority(
+            monitor: monitor,
+            invalidationHandler: { reason in
+                await invalidations.record(reason)
+            },
+            monitorReadinessTimeout: .milliseconds(10)
+        )
+
+        #expect(!(await authority.start()))
+        #expect(!(await authority.state().hasInterfaceSnapshot))
+        #expect(await invalidations.reasons.contains(.monitorNotReady))
+    }
+
     @Test("A monitor race before activation invalidates the pending lease")
     func monitoredChangeInvalidatesPendingLease() async throws {
         let initialInterface = networkInterface(
@@ -392,26 +466,33 @@ private final class TestNetworkInterfaceMonitor: NetworkInterfaceMonitoring, @un
     private struct State {
         var continuation: AsyncStream<[NetworkInterfaceOption]>.Continuation?
         var initialInterfaces: [NetworkInterfaceOption]
+        var emitsInitialSnapshot: Bool
         var updatesCallCount = 0
     }
 
     private let state: Mutex<State>
 
-    init(initialInterfaces: [NetworkInterfaceOption]) {
+    init(
+        initialInterfaces: [NetworkInterfaceOption],
+        emitsInitialSnapshot: Bool = true
+    ) {
         state = Mutex(State(
             continuation: nil,
-            initialInterfaces: initialInterfaces
+            initialInterfaces: initialInterfaces,
+            emitsInitialSnapshot: emitsInitialSnapshot
         ))
     }
 
     func updates() -> AsyncStream<[NetworkInterfaceOption]> {
         AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
-            let initialInterfaces = state.withLock { state in
+            let initial = state.withLock { state in
                 state.updatesCallCount += 1
                 state.continuation = continuation
-                return state.initialInterfaces
+                return (state.emitsInitialSnapshot, state.initialInterfaces)
             }
-            continuation.yield(initialInterfaces)
+            if initial.0 {
+                continuation.yield(initial.1)
+            }
         }
     }
 

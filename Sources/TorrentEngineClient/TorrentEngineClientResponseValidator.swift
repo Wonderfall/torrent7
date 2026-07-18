@@ -123,6 +123,11 @@ enum TorrentEngineClientResponseValidator {
         }
         try validate(response.networkStatus)
         try validate(response.bridgeHealth)
+        guard TorrentNetworkInterfaceSnapshotValidator.isValid(
+            response.networkInterfaceSnapshot
+        ) else {
+            throw TorrentEngineClientError.invalidReply
+        }
         if let descriptor = response.snapshotDataset {
             try validate(
                 descriptor,
