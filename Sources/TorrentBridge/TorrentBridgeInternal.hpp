@@ -416,7 +416,7 @@ struct PendingResumeHandle {
 };
 
 struct RemovalTombstoneEntry {
-    fs::path path;
+    std::string filename;
     std::vector<std::string> ids;
     RemovalTombstoneState state = RemovalTombstoneState::resume_cleanup;
     bool delete_files = false;
@@ -722,6 +722,13 @@ void remove_file_quietly(fs::path const &path) noexcept;
 
 ResumeTempFileResult open_resume_temp_file(fs::path const &final_path);
 
+void remove_file_at_quietly(int directory_descriptor, std::string const &filename) noexcept;
+
+ResumeTempFileResult open_resume_temp_file_at(
+    int directory_descriptor,
+    std::string const &final_filename
+);
+
 ResumeSaveResult write_all(int descriptor, std::span<char const> bytes);
 
 ResumeSaveResult close_resume_temp_file(UniqueFileDescriptor &file);
@@ -730,7 +737,15 @@ ResumeSaveResult sync_file(int descriptor);
 
 ResumeSaveResult sync_directory(fs::path const &directory);
 
+ResumeSaveResult sync_directory(int directory_descriptor);
+
 ResumeSaveResult write_owner_only_file_checked(fs::path const &path, std::string_view bytes);
+
+ResumeSaveResult write_owner_only_file_at_checked(
+    int directory_descriptor,
+    std::string const &filename,
+    std::string_view bytes
+);
 
 template <typename Operation>
 int32_t run_bridge_operation(std::span<char> error_out, int32_t exception_code, Operation operation) noexcept
@@ -1037,7 +1052,19 @@ bool is_valid_encryption_policy(int32_t value) noexcept;
 
 FileReadResult read_file(fs::path const &path, std::uintmax_t max_size);
 
+FileReadResult read_file_at(
+    int directory_descriptor,
+    std::string const &filename,
+    std::uintmax_t max_size
+);
+
 UniqueFileDescriptor open_directory_no_follow(fs::path const &path, std::string_view description);
+
+UniqueFileDescriptor open_directory_at_no_follow(
+    int parent_directory_descriptor,
+    char const *filename,
+    std::string_view description
+);
 
 void restrict_permissions(fs::path const &path, FileSystemNodeKind kind);
 
@@ -1103,6 +1130,8 @@ struct TTorrentClient {
     fs::path state_directory;
     fs::path resume_directory;
     AuthorizedSavePathSet authorized_save_paths;
+    UniqueFileDescriptor state_directory_descriptor;
+    UniqueFileDescriptor resume_directory_descriptor;
     UniqueFileDescriptor state_lock;
     mutable std::mutex resume_io_lock;
     std::mutex resume_capture_lock;
@@ -1292,9 +1321,9 @@ struct TTorrentClient {
 
     std::vector<std::string> retry_pending_delete_cleanups(bool reports_errors);
 
-    bool remove_resume_file_locked(fs::path const &path);
+    bool remove_resume_file_locked(std::string_view filename);
 
-    ResumeRemoveResult remove_resume_file_checked_locked(fs::path const &path);
+    ResumeRemoveResult remove_resume_file_checked_locked(std::string_view filename);
 
     void sync_resume_directory_quietly();
 

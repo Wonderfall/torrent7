@@ -425,7 +425,7 @@ ResumeSaveResult TTorrentClient::remove_resume_files_for_ids_checked(std::vector
     if (!removed) {
         return {};
     }
-    return sync_directory(resume_directory);
+    return sync_directory(resume_directory_descriptor.get());
 }
 
 BridgeResult TTorrentClient::persist_removal_tombstones(std::vector<std::string> const &ids,

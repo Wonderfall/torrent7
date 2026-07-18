@@ -73,7 +73,7 @@ ResumeSaveResult TTorrentClient::perform_resume_cleanups_locked(std::vector<Pend
     if (!removed) {
         return {};
     }
-    return sync_directory(resume_directory);
+    return sync_directory(resume_directory_descriptor.get());
 }
 
 ResumeSaveResult TTorrentClient::complete_resume_cleanups_locked(PendingEncodedResumeWrite const &write)
@@ -141,14 +141,17 @@ ResumeSaveResult TTorrentClient::commit_encoded_resume_data_checked(PendingEncod
         return {};
     }
 
-    fs::path const final_path = resume_directory / (id + std::string(kResumeExtension));
-    ResumeTempFileResult opened_temp_file = open_resume_temp_file(final_path);
+    std::string const final_filename = id + std::string(kResumeExtension);
+    ResumeTempFileResult opened_temp_file = open_resume_temp_file_at(
+        resume_directory_descriptor.get(),
+        final_filename
+    );
     if (!opened_temp_file) {
         return remember_resume_write_failure_locked(std::move(write), opened_temp_file.error());
     }
 
     ResumeTempFile temp_file = std::move(*opened_temp_file);
-    fs::path const &temp_path = temp_file.path;
+    std::string const temp_filename = temp_file.path.string();
 
     ResumeSaveResult written = write_all(temp_file.descriptor.get(), std::span<char const>{write.encoded});
     if (!written) {
@@ -156,7 +159,7 @@ ResumeSaveResult TTorrentClient::commit_encoded_resume_data_checked(PendingEncod
         if (close_error) {
             ignore_shutdown_failure();
         }
-        remove_file_quietly(temp_path);
+        remove_file_at_quietly(resume_directory_descriptor.get(), temp_filename);
         return remember_resume_write_failure_locked(std::move(write), written.error());
     }
 
@@ -166,19 +169,24 @@ ResumeSaveResult TTorrentClient::commit_encoded_resume_data_checked(PendingEncod
         if (close_error) {
             ignore_shutdown_failure();
         }
-        remove_file_quietly(temp_path);
+        remove_file_at_quietly(resume_directory_descriptor.get(), temp_filename);
         return remember_resume_write_failure_locked(std::move(write), synced.error());
     }
 
     ResumeSaveResult closed = close_resume_temp_file(temp_file.descriptor);
     if (!closed) {
-        remove_file_quietly(temp_path);
+        remove_file_at_quietly(resume_directory_descriptor.get(), temp_filename);
         return remember_resume_write_failure_locked(std::move(write), closed.error());
     }
 
-    if (::rename(temp_path.c_str(), final_path.c_str()) != 0) {
+    if (::renameat(
+            resume_directory_descriptor.get(),
+            temp_filename.c_str(),
+            resume_directory_descriptor.get(),
+            final_filename.c_str()
+        ) != 0) {
         int const error_number = errno;
-        remove_file_quietly(temp_path);
+        remove_file_at_quietly(resume_directory_descriptor.get(), temp_filename);
         return remember_resume_write_failure_locked(
             std::move(write), system_error_message("Resume data could not be committed", error_number));
     }
@@ -194,7 +202,7 @@ ResumeSaveResult TTorrentClient::commit_encoded_resume_data_checked(PendingEncod
         append_cleanup_ids_locked(write.cleanups, std::move(alias_cleanup));
     }
 
-    ResumeSaveResult directory_synced = sync_directory(resume_directory);
+    ResumeSaveResult directory_synced = sync_directory(resume_directory_descriptor.get());
     if (!directory_synced) {
         return remember_resume_write_failure_locked(std::move(write), directory_synced.error());
     }

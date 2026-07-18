@@ -382,6 +382,15 @@ void remove_file_quietly(fs::path const &path) noexcept
     fs::remove(path, ignored);
 }
 
+void remove_file_at_quietly(int const directory_descriptor, std::string const &filename) noexcept
+{
+    if (filename.empty() || filename.contains('/') || filename.contains('\0')) {
+        return;
+    }
+
+    static_cast<void>(::unlinkat(directory_descriptor, filename.c_str(), 0));
+}
+
 ResumeTempFileResult open_resume_temp_file(fs::path const &final_path)
 {
     constexpr std::uint32_t kMaxTempCreateAttempts = 16;
@@ -415,6 +424,50 @@ ResumeTempFileResult open_resume_temp_file(fs::path const &final_path)
         }
 
         return ResumeTempFile{.path = std::move(temp_path), .descriptor = std::move(file)};
+    }
+
+    return std::unexpected("Resume data temp file could not be created.");
+}
+
+ResumeTempFileResult open_resume_temp_file_at(
+    int const directory_descriptor,
+    std::string const &final_filename
+)
+{
+    constexpr std::uint32_t kMaxTempCreateAttempts = 16;
+    constexpr mode_t kOwnerReadWrite = S_IRUSR | S_IWUSR;
+
+    if (final_filename.empty() || final_filename.contains('/') || final_filename.contains('\0')) {
+        return std::unexpected("Resume data filename is invalid.");
+    }
+
+    for (std::uint32_t attempt = 0; attempt < kMaxTempCreateAttempts; ++attempt) {
+        std::string const temp_filename = final_filename + resume_temp_extension(attempt);
+        int const descriptor = ::openat(
+            directory_descriptor,
+            temp_filename.c_str(),
+            O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+            kOwnerReadWrite
+        );
+        if (descriptor < 0) {
+            if (errno == EEXIST) {
+                continue;
+            }
+            return std::unexpected(system_error_message("Resume data temp file could not be created", errno));
+        }
+
+        UniqueFileDescriptor file(descriptor);
+        if (::fchmod(file.get(), kOwnerReadWrite) != 0) {
+            int const error_number = errno;
+            std::error_code const close_error = file.close();
+            if (close_error) {
+                ignore_shutdown_failure();
+            }
+            remove_file_at_quietly(directory_descriptor, temp_filename);
+            return std::unexpected(system_error_message("Resume data permissions could not be restricted", error_number));
+        }
+
+        return ResumeTempFile{.path = temp_filename, .descriptor = std::move(file)};
     }
 
     return std::unexpected("Resume data temp file could not be created.");
@@ -485,6 +538,17 @@ ResumeSaveResult sync_directory(fs::path const &directory)
     return {};
 }
 
+ResumeSaveResult sync_directory(int const directory_descriptor)
+{
+    while (::fsync(directory_descriptor) != 0) {
+        if (errno == EINTR) {
+            continue;
+        }
+        return std::unexpected(system_error_message("Resume data directory could not be synced", errno));
+    }
+    return {};
+}
+
 ResumeSaveResult write_owner_only_file_checked(fs::path const &path, std::string_view bytes)
 {
     ResumeTempFileResult opened_temp_file = open_resume_temp_file(path);
@@ -526,6 +590,61 @@ ResumeSaveResult write_owner_only_file_checked(fs::path const &path, std::string
     if (::rename(temp_path.c_str(), path.c_str()) != 0) {
         int const error_number = errno;
         remove_file_quietly(temp_path);
+        return std::unexpected(system_error_message("File could not be committed", error_number));
+    }
+    return {};
+}
+
+ResumeSaveResult write_owner_only_file_at_checked(
+    int const directory_descriptor,
+    std::string const &filename,
+    std::string_view const bytes
+)
+{
+    ResumeTempFileResult opened_temp_file = open_resume_temp_file_at(directory_descriptor, filename);
+    if (!opened_temp_file) {
+        return std::unexpected(opened_temp_file.error());
+    }
+
+    ResumeTempFile temp_file = std::move(*opened_temp_file);
+    std::string const temp_filename = temp_file.path.string();
+    ResumeSaveResult written = write_all(
+        temp_file.descriptor.get(),
+        std::span<char const>{bytes.data(), bytes.size()}
+    );
+    if (!written) {
+        std::error_code const close_error = temp_file.descriptor.close();
+        if (close_error) {
+            ignore_shutdown_failure();
+        }
+        remove_file_at_quietly(directory_descriptor, temp_filename);
+        return written;
+    }
+
+    ResumeSaveResult synced = sync_file(temp_file.descriptor.get());
+    if (!synced) {
+        std::error_code const close_error = temp_file.descriptor.close();
+        if (close_error) {
+            ignore_shutdown_failure();
+        }
+        remove_file_at_quietly(directory_descriptor, temp_filename);
+        return synced;
+    }
+
+    ResumeSaveResult closed = close_resume_temp_file(temp_file.descriptor);
+    if (!closed) {
+        remove_file_at_quietly(directory_descriptor, temp_filename);
+        return closed;
+    }
+
+    if (::renameat(
+            directory_descriptor,
+            temp_filename.c_str(),
+            directory_descriptor,
+            filename.c_str()
+        ) != 0) {
+        int const error_number = errno;
+        remove_file_at_quietly(directory_descriptor, temp_filename);
         return std::unexpected(system_error_message("File could not be committed", error_number));
     }
     return {};
@@ -2188,9 +2307,10 @@ bool is_valid_encryption_policy(int32_t value) noexcept
     return value >= 0 && value <= 2;
 }
 
-FileReadResult read_file(fs::path const &path, std::uintmax_t max_size)
+namespace {
+
+FileReadResult read_open_file(UniqueFileDescriptor input, std::uintmax_t const max_size)
 {
-    UniqueFileDescriptor input(::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
     if (!input.is_valid()) {
         return std::unexpected(FileReadFailure::unreadable);
     }
@@ -2236,9 +2356,82 @@ FileReadResult read_file(fs::path const &path, std::uintmax_t max_size)
     return buffer;
 }
 
+} // namespace
+
+FileReadResult read_file(fs::path const &path, std::uintmax_t const max_size)
+{
+    return read_open_file(
+        UniqueFileDescriptor(::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW)),
+        max_size
+    );
+}
+
+FileReadResult read_file_at(
+    int const directory_descriptor,
+    std::string const &filename,
+    std::uintmax_t const max_size
+)
+{
+    if (filename.empty() || filename.contains('/') || filename.contains('\0')) {
+        return std::unexpected(FileReadFailure::unreadable);
+    }
+
+    return read_open_file(
+        UniqueFileDescriptor(::openat(
+            directory_descriptor,
+            filename.c_str(),
+            O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+        )),
+        max_size
+    );
+}
+
 UniqueFileDescriptor open_directory_no_follow(fs::path const &path, std::string_view description)
 {
     UniqueFileDescriptor descriptor(::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+    if (!descriptor.is_valid()) {
+        throw std::system_error(
+            std::error_code(errno, std::generic_category()),
+            "Could not open " + std::string(description)
+        );
+    }
+
+    struct stat metadata{};
+    if (::fstat(descriptor.get(), &metadata) != 0) {
+        int const error_number = errno;
+        throw std::system_error(
+            std::error_code(error_number, std::generic_category()),
+            "Invalid " + std::string(description)
+        );
+    }
+    if (!S_ISDIR(metadata.st_mode)) {
+        throw std::system_error(
+            std::error_code(ENOTDIR, std::generic_category()),
+            "Invalid " + std::string(description)
+        );
+    }
+    return descriptor;
+}
+
+UniqueFileDescriptor open_directory_at_no_follow(
+    int const parent_directory_descriptor,
+    char const *const filename,
+    std::string_view const description
+)
+{
+    std::string_view const filename_view = c_string_view(filename);
+    if (filename_view.empty() || filename_view.contains('/')) {
+        throw std::system_error(
+            std::error_code(EINVAL, std::generic_category()),
+            "Invalid " + std::string(description)
+        );
+    }
+
+    UniqueFileDescriptor descriptor(::openat(
+        parent_directory_descriptor,
+        filename,
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+    ));
     if (!descriptor.is_valid()) {
         throw std::system_error(
             std::error_code(errno, std::generic_category()),

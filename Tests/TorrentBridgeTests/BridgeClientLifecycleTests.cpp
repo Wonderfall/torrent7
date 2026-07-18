@@ -187,6 +187,89 @@ template <typename Predicate>
     return resume_path;
 }
 
+[[nodiscard]] std::size_t removal_tombstone_count(fs::path const &directory)
+{
+    return static_cast<std::size_t>(std::ranges::count_if(
+        fs::directory_iterator(directory),
+        [](fs::directory_entry const &entry) {
+            return is_removal_tombstone_path(entry.path());
+        }
+    ));
+}
+
+void check_replaced_resume_root_remains_confined(bool const replace_with_symlink)
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    fs::path const state_directory = temporary_directory.path() / "State";
+    fs::path const download_directory = temporary_directory.path() / "Downloads";
+    REQUIRE(fs::create_directory(download_directory));
+
+    TTorrentClient client(
+        state_directory.string(),
+        true,
+        AuthorizedSavePathSet{download_directory.lexically_normal().string()}
+    );
+    client.set_session_shutdown_asynchronous(false);
+    client.stop_alert_worker();
+
+    fs::path const resume_directory = state_directory / "ResumeData";
+    fs::path const retained_resume_directory = temporary_directory.path() / "RetainedResumeData";
+    fs::path const redirected_resume_directory = replace_with_symlink
+        ? temporary_directory.path() / "RedirectedResumeData"
+        : resume_directory;
+
+    std::error_code rename_error;
+    fs::rename(resume_directory, retained_resume_directory, rename_error);
+    REQUIRE_FALSE(rename_error);
+    if (replace_with_symlink) {
+        REQUIRE(fs::create_directory(redirected_resume_directory));
+        std::error_code link_error;
+        fs::create_directory_symlink(redirected_resume_directory, resume_directory, link_error);
+        REQUIRE_FALSE(link_error);
+    } else {
+        REQUIRE(fs::create_directory(resume_directory));
+    }
+
+    std::string const hash(40U, replace_with_symlink ? '6' : '7');
+    std::string const id = "v1:" + hash;
+    std::string const resume_filename = id + std::string(kResumeExtension);
+    fs::path const redirected_resume = redirected_resume_directory / resume_filename;
+    bridge_tests::write_text_file(redirected_resume, "redirected");
+
+    std::string const magnet = "magnet:?xt=urn:btih:" + hash;
+    TTorrentAddOptions add_options = default_add_options();
+    std::array<char, TTORRENT_ID_CAPACITY> added_id{};
+    std::array<char, 512> error{};
+    REQUIRE(TorrentClientAddMagnet(
+        &client,
+        magnet.c_str(),
+        download_directory.c_str(),
+        &add_options,
+        added_id.data(),
+        static_cast<int32_t>(added_id.size()),
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == 0);
+
+    CHECK(file_exists(retained_resume_directory / resume_filename));
+    CHECK(bridge_tests::read_text_file(redirected_resume) == "redirected");
+
+    BridgeResult const persisted = client.persist_removal_tombstones({id});
+    REQUIRE(persisted.has_value());
+    CHECK(removal_tombstone_count(retained_resume_directory) == 1U);
+    CHECK(removal_tombstone_count(redirected_resume_directory) == 0U);
+
+    ResumeSaveResult const removed = client.remove_resume_files_for_ids_checked({id});
+    REQUIRE(removed.has_value());
+    CHECK_FALSE(file_exists(retained_resume_directory / resume_filename));
+    CHECK(bridge_tests::read_text_file(redirected_resume) == "redirected");
+
+    ResumeSaveResult const cleared = client.clear_removal_tombstones({id});
+    REQUIRE(cleared.has_value());
+    CHECK(removal_tombstone_count(retained_resume_directory) == 0U);
+    CHECK(removal_tombstone_count(redirected_resume_directory) == 0U);
+}
+
 [[nodiscard]] int32_t cached_url_seed_count(TTorrentClient &client, std::string const &id)
 {
     std::uint64_t revision = 0;
@@ -302,6 +385,16 @@ TEST_CASE("TTorrentClient creates owner-only state directories and holds an excl
     CHECK(has_owner_directory_permissions(resume_directory));
 
     CHECK_THROWS_AS(static_cast<void>(TTorrentClient(state_directory.string())), std::system_error);
+}
+
+TEST_CASE("resume persistence retains its directory authority after root symlink replacement")
+{
+    check_replaced_resume_root_remains_confined(true);
+}
+
+TEST_CASE("resume persistence retains its directory authority after root directory replacement")
+{
+    check_replaced_resume_root_remains_confined(false);
 }
 
 TEST_CASE("resume restoration is fail-closed and preserves unauthorized entries with one aggregate error")

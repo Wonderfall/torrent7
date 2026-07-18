@@ -64,15 +64,23 @@ TTorrentClient::TTorrentClient(
     if (create_error) {
         throw std::system_error(create_error, "Could not create state directory");
     }
-    UniqueFileDescriptor state_directory_descriptor = open_directory_no_follow(state_directory, "state directory");
+    state_directory_descriptor = open_directory_no_follow(state_directory, "state directory");
     restrict_permissions(state_directory_descriptor.get(), "state directory", FileSystemNodeKind::directory);
     state_lock = acquire_state_directory_lock(state_directory_descriptor.get());
 
-    fs::create_directories(resume_directory, create_error);
-    if (create_error) {
-        throw std::system_error(create_error, "Could not create resume data directory");
+    constexpr mode_t kOwnerDirectoryPermissions = S_IRUSR | S_IWUSR | S_IXUSR;
+    if (::mkdirat(state_directory_descriptor.get(), "ResumeData", kOwnerDirectoryPermissions) != 0
+        && errno != EEXIST) {
+        throw std::system_error(
+            std::error_code(errno, std::generic_category()),
+            "Could not create resume data directory"
+        );
     }
-    UniqueFileDescriptor resume_directory_descriptor = open_directory_no_follow(resume_directory, "resume data directory");
+    resume_directory_descriptor = open_directory_at_no_follow(
+        state_directory_descriptor.get(),
+        "ResumeData",
+        "resume data directory"
+    );
     restrict_permissions(resume_directory_descriptor.get(), "resume data directory", FileSystemNodeKind::directory);
     remove_orphan_resume_temp_files();
     ResumeSaveResult completed_removals = complete_pending_removals();

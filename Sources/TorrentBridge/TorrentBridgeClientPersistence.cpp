@@ -1,5 +1,78 @@
 #include "TorrentBridgeInternal.hpp"
 
+#include <dirent.h>
+
+namespace {
+
+using DirectoryNamesResult = std::expected<std::vector<std::string>, std::string>;
+using RegularFileResult = std::expected<bool, std::string>;
+constexpr std::size_t kMaxResumeDirectoryEntryCount =
+    4U * static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT);
+
+DirectoryNamesResult directory_entry_names(
+    int const directory_descriptor,
+    std::string_view const description
+)
+{
+    int const enumeration_descriptor = ::openat(
+        directory_descriptor,
+        ".",
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC
+    );
+    if (enumeration_descriptor < 0) {
+        return std::unexpected(system_error_message(description, errno));
+    }
+
+    DIR *const raw_directory = ::fdopendir(enumeration_descriptor);
+    if (raw_directory == nullptr) {
+        int const error_number = errno;
+        static_cast<void>(::close(enumeration_descriptor));
+        return std::unexpected(system_error_message(description, error_number));
+    }
+    std::unique_ptr<DIR, decltype(&::closedir)> directory(raw_directory, &::closedir);
+
+    std::vector<std::string> names;
+    while (true) {
+        errno = 0;
+        dirent const *const entry = ::readdir(directory.get());
+        if (entry == nullptr) {
+            if (errno != 0) {
+                return std::unexpected(system_error_message(description, errno));
+            }
+            break;
+        }
+
+        std::string const name(entry->d_name);
+        if (name != "." && name != "..") {
+            if (names.size() >= kMaxResumeDirectoryEntryCount) {
+                return std::unexpected(std::string(description) + ": too many entries");
+            }
+            names.push_back(name);
+        }
+    }
+    return names;
+}
+
+RegularFileResult is_regular_file_at(
+    int const directory_descriptor,
+    std::string const &filename,
+    std::string_view const description
+)
+{
+    struct stat metadata{};
+    if (::fstatat(
+            directory_descriptor,
+            filename.c_str(),
+            &metadata,
+            AT_SYMLINK_NOFOLLOW
+        ) != 0) {
+        return std::unexpected(system_error_message(description, errno));
+    }
+    return S_ISREG(metadata.st_mode);
+}
+
+} // namespace
+
 [[nodiscard]] bool TTorrentClient::resume_write_is_installable_locked(PendingEncodedResumeWrite const &write) const
 {
     if (write.identity == nullptr) {
@@ -513,25 +586,35 @@ std::vector<std::string> TTorrentClient::retry_pending_delete_cleanups(bool repo
     return errors;
 }
 
-bool TTorrentClient::remove_resume_file_locked(fs::path const &path)
+bool TTorrentClient::remove_resume_file_locked(std::string_view const filename)
 {
-    std::error_code ignored;
-    return fs::remove(path, ignored);
+    if (filename.empty() || filename.contains('/') || filename.contains('\0')) {
+        return false;
+    }
+
+    std::string const owned_filename(filename);
+    return ::unlinkat(resume_directory_descriptor.get(), owned_filename.c_str(), 0) == 0;
 }
 
-ResumeRemoveResult TTorrentClient::remove_resume_file_checked_locked(fs::path const &path)
+ResumeRemoveResult TTorrentClient::remove_resume_file_checked_locked(std::string_view const filename)
 {
-    std::error_code error;
-    bool const removed = fs::remove(path, error);
-    if (error) {
-        return std::unexpected("Resume data file could not be removed: " + error.message());
+    if (filename.empty() || filename.contains('/') || filename.contains('\0')) {
+        return std::unexpected("Resume data filename is invalid.");
     }
-    return removed;
+
+    std::string const owned_filename(filename);
+    if (::unlinkat(resume_directory_descriptor.get(), owned_filename.c_str(), 0) == 0) {
+        return true;
+    }
+    if (errno == ENOENT) {
+        return false;
+    }
+    return std::unexpected(system_error_message("Resume data file could not be removed", errno));
 }
 
 void TTorrentClient::sync_resume_directory_quietly()
 {
-    ResumeSaveResult result = sync_directory(resume_directory);
+    ResumeSaveResult result = sync_directory(resume_directory_descriptor.get());
     if (!result) {
         ignore_shutdown_failure();
     }
@@ -541,52 +624,53 @@ ResumeRemoveResult TTorrentClient::remove_resume_temp_files_for_id_checked_locke
 {
     bool removed = false;
     std::string const prefix = id + std::string(kResumeExtension) + std::string(kTempExtension) + ".";
-    std::error_code iterator_error;
-    for (auto const &entry : fs::directory_iterator(resume_directory, iterator_error)) {
-        if (iterator_error) {
-            return std::unexpected("Resume data directory could not be scanned: " + iterator_error.message());
+    DirectoryNamesResult const names = directory_entry_names(
+        resume_directory_descriptor.get(),
+        "Resume data directory could not be scanned"
+    );
+    if (!names) {
+        return std::unexpected(names.error());
+    }
+    for (std::string const &name : *names) {
+        RegularFileResult const regular = is_regular_file_at(
+            resume_directory_descriptor.get(),
+            name,
+            "Resume data file could not be inspected"
+        );
+        if (!regular) {
+            return std::unexpected(regular.error());
         }
-
-        std::error_code entry_error;
-        if (!entry.is_regular_file(entry_error)) {
-            if (entry_error) {
-                return std::unexpected("Resume data file could not be inspected: " + entry_error.message());
-            }
+        if (!*regular) {
             continue;
         }
 
-        std::string const name = entry.path().filename().string();
         if (!name.starts_with(prefix)) {
             continue;
         }
 
-        ResumeRemoveResult removed_file = remove_resume_file_checked_locked(entry.path());
+        ResumeRemoveResult removed_file = remove_resume_file_checked_locked(name);
         if (!removed_file) {
             return removed_file;
         }
         removed = *removed_file || removed;
     }
 
-    if (iterator_error) {
-        return std::unexpected("Resume data directory could not be scanned: " + iterator_error.message());
-    }
     return removed;
 }
 
 ResumeRemoveResult TTorrentClient::remove_resume_files_for_id_checked_locked(std::string const &id)
 {
-    fs::path const final_path = resume_directory / (id + std::string(kResumeExtension));
-    fs::path temp_path = final_path;
-    temp_path += std::string(kTempExtension);
+    std::string const final_filename = id + std::string(kResumeExtension);
+    std::string const temp_filename = final_filename + std::string(kTempExtension);
 
     bool removed = false;
-    ResumeRemoveResult removed_final = remove_resume_file_checked_locked(final_path);
+    ResumeRemoveResult removed_final = remove_resume_file_checked_locked(final_filename);
     if (!removed_final) {
         return removed_final;
     }
     removed = *removed_final || removed;
 
-    ResumeRemoveResult removed_temp = remove_resume_file_checked_locked(temp_path);
+    ResumeRemoveResult removed_temp = remove_resume_file_checked_locked(temp_filename);
     if (!removed_temp) {
         return removed_temp;
     }
@@ -603,25 +687,35 @@ ResumeRemoveResult TTorrentClient::remove_resume_files_for_id_checked_locked(std
 TombstoneEntriesResult TTorrentClient::removal_tombstone_entries_locked()
 {
     std::vector<RemovalTombstoneEntry> entries;
-    std::error_code iterator_error;
-    for (auto const &entry : fs::directory_iterator(resume_directory, iterator_error)) {
-        if (iterator_error) {
-            return std::unexpected("Removal tombstones could not be scanned: " + iterator_error.message());
+    DirectoryNamesResult const names = directory_entry_names(
+        resume_directory_descriptor.get(),
+        "Removal tombstones could not be scanned"
+    );
+    if (!names) {
+        return std::unexpected(names.error());
+    }
+    for (std::string const &name : *names) {
+        RegularFileResult const regular = is_regular_file_at(
+            resume_directory_descriptor.get(),
+            name,
+            "Removal tombstone could not be inspected"
+        );
+        if (!regular) {
+            return std::unexpected(regular.error());
         }
-
-        std::error_code entry_error;
-        if (!entry.is_regular_file(entry_error)) {
-            if (entry_error) {
-                return std::unexpected("Removal tombstone could not be inspected: " + entry_error.message());
-            }
+        if (!*regular) {
             continue;
         }
 
-        if (!is_removal_tombstone_path(entry.path())) {
+        if (!is_removal_tombstone_path(fs::path(name))) {
             continue;
         }
 
-        FileReadResult const buffer = read_file(entry.path(), kMaxRemovalTombstoneBytes);
+        FileReadResult const buffer = read_file_at(
+            resume_directory_descriptor.get(),
+            name,
+            kMaxRemovalTombstoneBytes
+        );
         if (!buffer) {
             return std::unexpected(tombstone_read_error(buffer.error()));
         }
@@ -631,15 +725,12 @@ TombstoneEntriesResult TTorrentClient::removal_tombstone_entries_locked()
             return std::unexpected(payload.error());
         }
         entries.push_back(RemovalTombstoneEntry{
-            .path = entry.path(),
+            .filename = name,
             .ids = std::move(payload->ids),
             .state = payload->state,
             .delete_files = payload->delete_files,
             .delete_partfile = payload->delete_partfile
         });
-    }
-    if (iterator_error) {
-        return std::unexpected("Removal tombstones could not be scanned: " + iterator_error.message());
     }
     return entries;
 }
@@ -702,13 +793,17 @@ TombstoneCommitResult TTorrentClient::persist_removal_tombstones_locked(std::vec
         return std::unexpected("Removal tombstone payload is too large.");
     }
 
-    fs::path const tombstone_path = removal_tombstone_path(resume_directory);
-    ResumeSaveResult written = write_owner_only_file_checked(tombstone_path, payload);
+    std::string const tombstone_filename = make_removal_tombstone_filename();
+    ResumeSaveResult written = write_owner_only_file_at_checked(
+        resume_directory_descriptor.get(),
+        tombstone_filename,
+        payload
+    );
     if (!written) {
         return std::unexpected("Removal tombstone could not be saved: " + written.error());
     }
 
-    ResumeSaveResult synced = sync_directory(resume_directory);
+    ResumeSaveResult synced = sync_directory(resume_directory_descriptor.get());
     if (!synced) {
         return TombstoneCommitStatus{
             .directory_synced = false
@@ -741,7 +836,7 @@ ResumeSaveResult TTorrentClient::clear_removal_tombstones_locked(std::vector<std
             continue;
         }
 
-        ResumeRemoveResult removed_tombstone = remove_resume_file_checked_locked(entry.path);
+        ResumeRemoveResult removed_tombstone = remove_resume_file_checked_locked(entry.filename);
         if (!removed_tombstone) {
             return std::unexpected("Removal tombstone could not be cleared: " + removed_tombstone.error());
         }
@@ -749,9 +844,9 @@ ResumeSaveResult TTorrentClient::clear_removal_tombstones_locked(std::vector<std
     }
 
     if (!removed) {
-        return sync_directory(resume_directory);
+        return sync_directory(resume_directory_descriptor.get());
     }
-    return sync_directory(resume_directory);
+    return sync_directory(resume_directory_descriptor.get());
 }
 
 ResumeSaveResult TTorrentClient::complete_pending_removals()
@@ -774,13 +869,13 @@ ResumeSaveResult TTorrentClient::complete_pending_removals()
         }
 
         if (removed_any) {
-            ResumeSaveResult synced_resume_removal = sync_directory(resume_directory);
+            ResumeSaveResult synced_resume_removal = sync_directory(resume_directory_descriptor.get());
             if (!synced_resume_removal) {
                 return std::unexpected("Pending resume cleanup could not be synced: " +
                                        synced_resume_removal.error());
             }
         }
-        ResumeRemoveResult removed_tombstone = remove_resume_file_checked_locked(entry.path);
+        ResumeRemoveResult removed_tombstone = remove_resume_file_checked_locked(entry.filename);
         if (!removed_tombstone) {
             return std::unexpected("Removal tombstone could not be cleared: " + removed_tombstone.error());
         }
@@ -788,7 +883,7 @@ ResumeSaveResult TTorrentClient::complete_pending_removals()
             return std::unexpected("Removal tombstone disappeared before it could be cleared.");
         }
 
-        ResumeSaveResult synced_tombstone_removal = sync_directory(resume_directory);
+        ResumeSaveResult synced_tombstone_removal = sync_directory(resume_directory_descriptor.get());
         if (!synced_tombstone_removal) {
             return std::unexpected("Removal tombstone cleanup could not be synced: " +
                                    synced_tombstone_removal.error());
@@ -809,21 +904,25 @@ void TTorrentClient::remove_orphan_resume_temp_files()
     try {
         std::string const marker = std::string(kResumeExtension) + std::string(kTempExtension) + ".";
         std::string const tombstone_marker = removal_tombstone_suffix() + std::string(kTempExtension) + ".";
-        std::error_code ec;
-        for (auto const &entry : fs::directory_iterator(resume_directory, ec)) {
-            if (ec) {
-                break;
-            }
-
-            std::error_code entry_error;
-            if (!entry.is_regular_file(entry_error)) {
+        DirectoryNamesResult const names = directory_entry_names(
+            resume_directory_descriptor.get(),
+            "Resume data directory could not be scanned"
+        );
+        if (!names) {
+            return;
+        }
+        for (std::string const &name : *names) {
+            RegularFileResult const regular = is_regular_file_at(
+                resume_directory_descriptor.get(),
+                name,
+                "Resume data file could not be inspected"
+            );
+            if (!regular || !*regular) {
                 continue;
             }
 
-            std::string const name = entry.path().filename().string();
             if (name.contains(marker) || name.contains(tombstone_marker)) {
-                std::error_code ignored;
-                removed = fs::remove(entry.path(), ignored) || removed;
+                removed = remove_resume_file_locked(name) || removed;
             }
         }
     } catch (...) {
@@ -837,11 +936,6 @@ void TTorrentClient::remove_orphan_resume_temp_files()
 
 void TTorrentClient::load_resume_data()
 {
-    std::error_code ec;
-    if (!fs::exists(resume_directory, ec)) {
-        return;
-    }
-
     std::set<std::string> tombstoned_ids;
     {
         std::scoped_lock io_guard(resume_io_lock);
@@ -852,6 +946,14 @@ void TTorrentClient::load_resume_data()
         tombstoned_ids = std::move(*tombstones);
     }
 
+    DirectoryNamesResult const names = directory_entry_names(
+        resume_directory_descriptor.get(),
+        "Resume data directory could not be scanned"
+    );
+    if (!names) {
+        throw std::runtime_error(names.error());
+    }
+
     std::uint64_t unauthorized_resume_count = 0U;
     auto const record_unauthorized_resume = [&unauthorized_resume_count] {
         if (unauthorized_resume_count != std::numeric_limits<std::uint64_t>::max()) {
@@ -859,17 +961,21 @@ void TTorrentClient::load_resume_data()
         }
     };
 
-    for (auto const &entry : fs::directory_iterator(resume_directory, ec)) {
-        std::error_code entry_error;
-        if (ec || !entry.is_regular_file(entry_error)) {
+    for (std::string const &name : *names) {
+        RegularFileResult const regular = is_regular_file_at(
+            resume_directory_descriptor.get(),
+            name,
+            "Resume data file could not be inspected"
+        );
+        if (!regular || !*regular) {
             continue;
         }
-        std::optional<std::string> const resume_id = resume_id_from_resume_path(entry.path());
+        std::optional<std::string> const resume_id = resume_id_from_resume_path(fs::path(name));
         if (!resume_id) {
             continue;
         }
         if (tombstoned_ids.contains(*resume_id)) {
-            remove_resume_file_locked(entry.path());
+            remove_resume_file_locked(name);
             sync_resume_directory_quietly();
             continue;
         }
@@ -882,10 +988,14 @@ void TTorrentClient::load_resume_data()
             break;
         }
 
-        FileReadResult const buffer = read_file(entry.path(), kMaxResumeFileBytes);
+        FileReadResult const buffer = read_file_at(
+            resume_directory_descriptor.get(),
+            name,
+            kMaxResumeFileBytes
+        );
         if (!buffer) {
             if (resume_read_failure_is_definitively_invalid(buffer.error())) {
-                remove_resume_file_locked(entry.path());
+                remove_resume_file_locked(name);
                 sync_resume_directory_quietly();
             }
             continue;
@@ -897,7 +1007,7 @@ void TTorrentClient::load_resume_data()
             read_error
         );
         if (read_error) {
-            remove_resume_file_locked(entry.path());
+            remove_resume_file_locked(name);
             sync_resume_directory_quietly();
             continue;
         }
@@ -912,20 +1022,20 @@ void TTorrentClient::load_resume_data()
         params.save_path = *authorized_save_path;
 
         if (!resume_filename_matches_identity(*resume_id, params)) {
-            remove_resume_file_locked(entry.path());
+            remove_resume_file_locked(name);
             sync_resume_directory_quietly();
             continue;
         }
         std::string canonical_id = canonical_id_from_resume_data(*buffer);
         if (canonical_id.empty()) {
-            remove_resume_file_locked(entry.path());
+            remove_resume_file_locked(name);
             sync_resume_directory_quietly();
             continue;
         }
         if (params.ti) {
             BridgeResult const valid_info = validate_torrent_info(params);
             if (!valid_info) {
-                remove_resume_file_locked(entry.path());
+                remove_resume_file_locked(name);
                 sync_resume_directory_quietly();
                 continue;
             }
@@ -999,7 +1109,7 @@ void TTorrentClient::load_resume_data()
         }
         BridgeResult const valid_sources = validate_torrent_sources(params);
         if (!valid_sources) {
-            remove_resume_file_locked(entry.path());
+            remove_resume_file_locked(name);
             sync_resume_directory_quietly();
             continue;
         }
