@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Synchronization
 import Testing
@@ -7,58 +8,112 @@ import TorrentEngineModel
 
 @Suite("Torrent engine", .serialized)
 struct TorrentEngineTests {
-    @Test("Authorized save path encoding is deterministic, bounded, and NUL delimited")
-    func authorizedSavePathEncodingIsDeterministicBoundedAndNULDelimited() throws {
-        let blob = try TorrentEngine.encodeAuthorizedSavePaths(["/Downloads/B", "/Downloads/A", "/Downloads/B"])
-        let records = blob.split(separator: 0).map { String(decoding: $0, as: UTF8.self) }
+    @Test("Authorized save roots duplicate and validate directory authority")
+    func authorizedSaveRootsDuplicateAndValidateDirectoryAuthority() throws {
+        let stateDirectory = try temporaryStateDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: stateDirectory)
+        }
+        let downloadDirectory = stateDirectory.appending(path: "Downloads", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: downloadDirectory, withIntermediateDirectories: true)
+        let descriptor = try openDirectory(downloadDirectory)
+        defer {
+            Darwin.close(descriptor.value)
+        }
 
-        #expect(records == ["/Downloads/A", "/Downloads/B"])
-        #expect(blob.last == 0)
-        #expect(try TorrentEngine.encodeAuthorizedSavePaths([]).isEmpty)
+        let root = try TorrentAuthorizedSaveRoot(
+            canonicalPath: downloadDirectory.path,
+            borrowingDirectoryDescriptor: descriptor.value,
+            device: descriptor.device,
+            inode: descriptor.inode,
+            retaining: TestAuthorizedSaveRootLifetimeAnchor()
+        )
+        #expect(root.canonicalPath == downloadDirectory.path)
+        #expect(root.device == descriptor.device)
+        #expect(root.inode == descriptor.inode)
+        let hasDuplicatedDescriptor = unsafe (
+            root.nativeRecord().directory_descriptor != descriptor.value
+        )
+        #expect(hasDuplicatedDescriptor)
         #expect(throws: TorrentEngineError.self) {
-            try TorrentEngine.encodeAuthorizedSavePaths(["relative"])
+            try TorrentAuthorizedSaveRoot(
+                canonicalPath: "relative",
+                borrowingDirectoryDescriptor: descriptor.value,
+                device: descriptor.device,
+                inode: descriptor.inode,
+                retaining: TestAuthorizedSaveRootLifetimeAnchor()
+            )
         }
         #expect(throws: TorrentEngineError.self) {
-            try TorrentEngine.encodeAuthorizedSavePaths(["/Downloads/Bad\0Path"])
+            try TorrentAuthorizedSaveRoot(
+                canonicalPath: downloadDirectory.path,
+                borrowingDirectoryDescriptor: descriptor.value,
+                device: descriptor.device,
+                inode: descriptor.inode &+ 1,
+                retaining: TestAuthorizedSaveRootLifetimeAnchor()
+            )
         }
         #expect(throws: TorrentEngineError.self) {
-            try TorrentEngine.encodeAuthorizedSavePaths([
-                "/" + String(repeating: "x", count: Int(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES))
-            ])
-        }
-        #expect(throws: TorrentEngineError.self) {
-            try TorrentEngine.encodeAuthorizedSavePaths(Array(
-                repeating: "/Downloads",
-                count: Int(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT) + 1
-            ))
+            try TorrentAuthorizedSaveRoot(
+                canonicalPath: "/" + String(
+                    repeating: "x",
+                    count: Int(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES)
+                ),
+                borrowingDirectoryDescriptor: descriptor.value,
+                device: descriptor.device,
+                inode: descriptor.inode,
+                retaining: TestAuthorizedSaveRootLifetimeAnchor()
+            )
         }
     }
 
-    @Test("Engine creation and restart forward authorized save path snapshots")
-    func engineCreationAndRestartForwardAuthorizedSavePathSnapshots() async throws {
+    @Test("Authorized save root callbacks retain the security-scope anchor")
+    func authorizedSaveRootCallbacksRetainSecurityScopeAnchor() throws {
+        let stateDirectory = try temporaryStateDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: stateDirectory)
+        }
+        let lifetimeState = TestAuthorizedSaveRootLifetimeState()
+        let retainedLifetime = try TestRetainedAuthorizedSaveRootLifetime(
+            at: stateDirectory,
+            state: lifetimeState
+        )
+        #expect(retainedLifetime.hasStableContext)
+        #expect(!lifetimeState.isReleased)
+
+        retainedLifetime.release()
+        #expect(lifetimeState.isReleased)
+    }
+
+    @Test("Engine creation and restart forward authorized save root snapshots")
+    func engineCreationAndRestartForwardAuthorizedSaveRootSnapshots() async throws {
         let stateDirectory = try temporaryStateDirectory()
         defer {
             try? FileManager.default.removeItem(at: stateDirectory)
             TorrentEngine.clientCreationPreflight.withLock { $0 = nil }
         }
+        let initialDirectory = stateDirectory.appending(path: "Initial", directoryHint: .isDirectory)
+        let freshDirectory = stateDirectory.appending(path: "Fresh", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: initialDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: freshDirectory, withIntermediateDirectories: true)
         let snapshots = Mutex([[String]]())
         TorrentEngine.clientCreationPreflight.withLock { preflight in
-            preflight = { _, _, authorizedSavePaths in
-                snapshots.withLock { $0.append(authorizedSavePaths) }
+            preflight = { _, _, authorizedSaveRoots in
+                snapshots.withLock { $0.append(authorizedSaveRoots.map(\.canonicalPath)) }
             }
         }
 
         let engine = try TorrentEngine(
             stateDirectory: stateDirectory,
             enablePeerExchangePlugin: true,
-            authorizedSavePaths: ["/Downloads/Initial"]
+            authorizedSaveRoots: [try authorizedSaveRoot(at: initialDirectory)]
         )
         try await engine.restart(
             enablePeerExchangePlugin: false,
-            authorizedSavePaths: ["/Downloads/Fresh"]
+            authorizedSaveRoots: [try authorizedSaveRoot(at: freshDirectory)]
         )
 
-        #expect(snapshots.withLock { $0 } == [["/Downloads/Initial"], ["/Downloads/Fresh"]])
+        #expect(snapshots.withLock { $0 } == [[initialDirectory.path], [freshDirectory.path]])
     }
 
     @Test("Startup failure engine reports unavailable and empty read models")
@@ -188,7 +243,7 @@ struct TorrentEngineTests {
         let engine = try TorrentEngine(
             stateDirectory: stateDirectory,
             enablePeerExchangePlugin: true,
-            authorizedSavePaths: [downloadDirectory.path]
+            authorizedSaveRoots: [try authorizedSaveRoot(at: downloadDirectory)]
         )
         let id = try await engine.addMagnet(
             "magnet:?xt=urn:btih:\(String(repeating: "6", count: 40))",
@@ -235,7 +290,7 @@ struct TorrentEngineTests {
         }
 
         do {
-            try await engine.restart(enablePeerExchangePlugin: false, authorizedSavePaths: [])
+            try await engine.restart(enablePeerExchangePlugin: false, authorizedSaveRoots: [])
             Issue.record("Expected restart failure")
         } catch let error as TorrentEngineError {
             #expect(error.localizedDescription == "restart boom")
@@ -255,7 +310,7 @@ struct TorrentEngineTests {
         }
 
         TorrentEngine.clientCreationPreflight.withLock { $0 = nil }
-        try await engine.restart(enablePeerExchangePlugin: false, authorizedSavePaths: [])
+        try await engine.restart(enablePeerExchangePlugin: false, authorizedSaveRoots: [])
 
         #expect(engine.isAvailable == true)
         try await engine.saveAllChecked()
@@ -295,7 +350,7 @@ struct TorrentEngineTests {
         let engine = try TorrentEngine(
             stateDirectory: stateDirectory,
             enablePeerExchangePlugin: true,
-            authorizedSavePaths: [downloadDirectory.path],
+            authorizedSaveRoots: [try authorizedSaveRoot(at: downloadDirectory)],
             removalResultReader: {
                 pollState.withLock { state in
                     state.readCount += 1
@@ -325,7 +380,10 @@ struct TorrentEngineTests {
         #expect(completed.withLock { !$0 })
 
         do {
-            try await engine.restart(enablePeerExchangePlugin: true, authorizedSavePaths: [downloadDirectory.path])
+            try await engine.restart(
+                enablePeerExchangePlugin: true,
+                authorizedSaveRoots: [try authorizedSaveRoot(at: downloadDirectory)]
+            )
             Issue.record("Expected restart to remain blocked while deletion is pending")
         } catch {
             #expect(error.localizedDescription.contains("cannot restart while removal is pending"))
@@ -349,7 +407,7 @@ struct TorrentEngineTests {
         let engine = try TorrentEngine(
             stateDirectory: stateDirectory,
             enablePeerExchangePlugin: true,
-            authorizedSavePaths: [downloadDirectory.path],
+            authorizedSaveRoots: [try authorizedSaveRoot(at: downloadDirectory)],
             removalResultReader: {
                 readCount.withLock { $0 += 1 }
                 return .pending
@@ -391,10 +449,11 @@ struct TorrentEngineTests {
         let engine = try TorrentEngine(
             stateDirectory: stateDirectory,
             enablePeerExchangePlugin: true,
-            authorizedSavePaths: [firstDirectory.path]
+            authorizedSaveRoots: [try authorizedSaveRoot(at: firstDirectory)]
         )
 
-        try await engine.replaceAuthorizedSavePaths([secondDirectory.path])
+        let secondRoot = try authorizedSaveRoot(at: secondDirectory)
+        try await engine.replaceAuthorizedSaveRoots([secondRoot])
         await expectUnauthorizedSavePath(engine: engine, path: firstDirectory.path, hashCharacter: "a")
         _ = try await engine.addMagnet(
             "magnet:?xt=urn:btih:\(String(repeating: "b", count: 40))",
@@ -402,8 +461,8 @@ struct TorrentEngineTests {
         )
 
         do {
-            try await engine.replaceAuthorizedSavePaths(["relative"])
-            Issue.record("Expected an invalid replacement to fail")
+            try await engine.replaceAuthorizedSaveRoots([secondRoot, secondRoot])
+            Issue.record("Expected a duplicate replacement to fail")
         } catch {
             #expect(error.localizedDescription.contains("authorized download folder path is invalid"))
         }
@@ -412,7 +471,7 @@ struct TorrentEngineTests {
             savePath: secondDirectory.path
         )
 
-        try await engine.replaceAuthorizedSavePaths([])
+        try await engine.replaceAuthorizedSaveRoots([])
         await expectUnauthorizedSavePath(engine: engine, path: secondDirectory.path, hashCharacter: "d")
     }
 
@@ -436,7 +495,7 @@ struct TorrentEngineTests {
             try await engine.saveAllChecked()
         }
         await #expect(throws: TorrentEngineError.self) {
-            try await engine.restart(enablePeerExchangePlugin: true, authorizedSavePaths: [])
+            try await engine.restart(enablePeerExchangePlugin: true, authorizedSaveRoots: [])
         }
         try assertStateDirectoryCanBeReopened(stateDirectory)
     }
@@ -502,7 +561,7 @@ private func verifyRemovalTrackingFault(_ fault: RemovalTrackingFault) async thr
     let engine = try TorrentEngine(
         stateDirectory: stateDirectory,
         enablePeerExchangePlugin: true,
-        authorizedSavePaths: [downloadDirectory.path],
+        authorizedSaveRoots: [try authorizedSaveRoot(at: downloadDirectory)],
         removalResultReader: {
             try fault.result()
         }
@@ -531,7 +590,10 @@ private func verifyRemovalTrackingFault(_ fault: RemovalTrackingFault) async thr
     }
 
     try assertStateDirectoryCanBeReopened(stateDirectory)
-    try await engine.restart(enablePeerExchangePlugin: true, authorizedSavePaths: [downloadDirectory.path])
+    try await engine.restart(
+        enablePeerExchangePlugin: true,
+        authorizedSaveRoots: [try authorizedSaveRoot(at: downloadDirectory)]
+    )
     #expect(engine.isAvailable == true)
     try await engine.saveAllChecked()
 }
@@ -545,6 +607,10 @@ private func assertStateDirectoryCanBeReopened(_ stateDirectory: URL) throws {
                 1,
                 nil,
                 0,
+                nil,
+                0,
+                nil,
+                nil,
                 error.baseAddress,
                 Int32(error.count)
             )
@@ -561,6 +627,110 @@ private func temporaryStateDirectory() throws -> URL {
             .appending(path: "TorrentEngineTests-\(UUID().uuidString)", directoryHint: .isDirectory)
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url
+}
+
+private final class TestAuthorizedSaveRootLifetimeAnchor: @unchecked Sendable {}
+
+private final class TestAuthorizedSaveRootLifetimeState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var released = false
+
+    var isReleased: Bool {
+        lock.withLock { released }
+    }
+
+    func markReleased() {
+        lock.withLock { released = true }
+    }
+}
+
+private final class TestAuthorizedSaveRootLifetimeProbe: @unchecked Sendable {
+    private let state: TestAuthorizedSaveRootLifetimeState
+
+    init(state: TestAuthorizedSaveRootLifetimeState) {
+        self.state = state
+    }
+
+    deinit {
+        state.markReleased()
+    }
+}
+
+private struct TestDirectoryDescriptor {
+    let value: Int32
+    let device: UInt64
+    let inode: UInt64
+}
+
+private func openDirectory(_ directory: URL) throws -> TestDirectoryDescriptor {
+    let descriptor = unsafe directory.path.withCString {
+        unsafe Darwin.open($0, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+    }
+    guard descriptor >= 0 else {
+        throw TorrentEngineError.bridgeError("Could not open the test download directory.")
+    }
+    var metadata = stat()
+    guard unsafe Darwin.fstat(descriptor, &metadata) == 0 else {
+        Darwin.close(descriptor)
+        throw TorrentEngineError.bridgeError("Could not inspect the test download directory.")
+    }
+    return TestDirectoryDescriptor(
+        value: descriptor,
+        device: UInt64(truncatingIfNeeded: metadata.st_dev),
+        inode: UInt64(truncatingIfNeeded: metadata.st_ino)
+    )
+}
+
+private func authorizedSaveRoot(
+    at directory: URL,
+    retaining lifetimeAnchor: any AnyObject & Sendable = TestAuthorizedSaveRootLifetimeAnchor()
+) throws -> TorrentAuthorizedSaveRoot {
+    let descriptor = try openDirectory(directory)
+    defer {
+        Darwin.close(descriptor.value)
+    }
+    return try TorrentAuthorizedSaveRoot(
+        canonicalPath: directory.path,
+        borrowingDirectoryDescriptor: descriptor.value,
+        device: descriptor.device,
+        inode: descriptor.inode,
+        retaining: lifetimeAnchor
+    )
+}
+
+@safe private final class TestRetainedAuthorizedSaveRootLifetime: @unchecked Sendable {
+    let hasStableContext: Bool
+    private var context: UnsafeMutableRawPointer?
+
+    init(
+        at directory: URL,
+        state: TestAuthorizedSaveRootLifetimeState
+    ) throws {
+        let lifetimeAnchor = TestAuthorizedSaveRootLifetimeProbe(state: state)
+        let firstRoot = try authorizedSaveRoot(at: directory, retaining: lifetimeAnchor)
+        let secondRoot = try authorizedSaveRoot(at: directory, retaining: lifetimeAnchor)
+        let firstRecord = unsafe firstRoot.nativeRecord()
+        let secondRecord = unsafe secondRoot.nativeRecord()
+        guard let firstContext = unsafe firstRecord.lifetime_context,
+              let secondContext = unsafe secondRecord.lifetime_context else {
+            throw TorrentEngineError.bridgeError("An authorized root lifetime context is missing.")
+        }
+        hasStableContext = unsafe firstContext == secondContext
+        unsafe torrentAuthorizedSaveRootRetainCallback(firstContext)
+        unsafe context = firstContext
+    }
+
+    func release() {
+        guard let context = unsafe context else {
+            return
+        }
+        unsafe self.context = nil
+        unsafe torrentAuthorizedSaveRootReleaseCallback(context)
+    }
+
+    deinit {
+        release()
+    }
 }
 
 private func expectStartupError(_ body: () async throws -> Void) async {

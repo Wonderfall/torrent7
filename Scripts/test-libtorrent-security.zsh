@@ -107,8 +107,18 @@ restore_configuration=0
         "$source_dir/test/test_web_seed_redirect.cpp.web_seed_numeric_host_honors_ip_filter_with_socks_dns"
     ./test_file --no-redirect \
         "$source_dir/test/test_file.cpp.confined_filesystem_operations"
+    ./test_file --no-redirect \
+        "$source_dir/test/test_file.cpp.descriptor_backed_root_rejects_symlink_replacement"
+    ./test_file --no-redirect \
+        "$source_dir/test/test_file.cpp.descriptor_backed_root_rejects_directory_replacement"
     ./test_storage --no-redirect \
         "$source_dir/test/test_storage.cpp.confined_hard_link_write_pread"
     ./test_storage --no-redirect \
+        "$source_dir/test/test_storage.cpp.descriptor_backed_torrent_storage_pread"
+    ./test_storage --no-redirect \
+        "$source_dir/test/test_storage.cpp.descriptor_backed_torrent_storage_rejects_posix"
+    ./test_storage --no-redirect \
         "$source_dir/test/test_storage.cpp.confined_hard_link_write_mmap"
+    ./test_storage --no-redirect \
+        "$source_dir/test/test_storage.cpp.descriptor_backed_torrent_storage_rejects_mmap"
 )

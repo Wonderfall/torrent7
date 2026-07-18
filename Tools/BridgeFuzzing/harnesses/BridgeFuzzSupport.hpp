@@ -6,17 +6,21 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fcntl.h>
 #include <fstream>
 #include <iterator>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 
@@ -24,7 +28,7 @@ namespace bridge_fuzz {
 
 namespace fs = std::filesystem;
 
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 35, "Update the fuzz harnesses for the current TorrentBridge ABI.");
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 36, "Update the fuzz harnesses for the current TorrentBridge ABI.");
 #if !defined(TORRENT_USE_ASSERTS) || !TORRENT_USE_ASSERTS
 #error "Fuzz consumers must match the assertion-enabled Debug libtorrent archive."
 #endif
@@ -198,6 +202,84 @@ struct AddedIdBuffer {
     }
 };
 
+struct AuthorizedSaveRootLifetimeProbe {
+    std::atomic_uint32_t retain_count = 0;
+    std::atomic_uint32_t release_count = 0;
+};
+
+inline void retain_authorized_save_root(void *context)
+{
+    auto *probe = static_cast<AuthorizedSaveRootLifetimeProbe *>(context);
+    probe->retain_count.fetch_add(1U, std::memory_order_relaxed);
+}
+
+inline void release_authorized_save_root(void *context)
+{
+    auto *probe = static_cast<AuthorizedSaveRootLifetimeProbe *>(context);
+    probe->release_count.fetch_add(1U, std::memory_order_relaxed);
+}
+
+class AuthorizedSaveRoot {
+public:
+    explicit AuthorizedSaveRoot(fs::path const &path)
+        : descriptor_(::open(
+              path.c_str(),
+              O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+          ))
+    {
+        if (descriptor_ < 0) {
+            throw std::system_error(errno, std::generic_category(), "Could not open fuzz save root");
+        }
+
+        struct ::stat metadata {};
+        if (::fstat(descriptor_, &metadata) != 0) {
+            int const saved_errno = errno;
+            static_cast<void>(::close(descriptor_));
+            descriptor_ = -1;
+            throw std::system_error(
+                saved_errno,
+                std::generic_category(),
+                "Could not inspect fuzz save root"
+            );
+        }
+        if (!S_ISDIR(metadata.st_mode)) {
+            static_cast<void>(::close(descriptor_));
+            descriptor_ = -1;
+            throw std::runtime_error("The fuzz save root is not a directory");
+        }
+        device_ = static_cast<std::uint64_t>(metadata.st_dev);
+        inode_ = static_cast<std::uint64_t>(metadata.st_ino);
+    }
+
+    AuthorizedSaveRoot(AuthorizedSaveRoot const &) = delete;
+    AuthorizedSaveRoot &operator=(AuthorizedSaveRoot const &) = delete;
+    AuthorizedSaveRoot(AuthorizedSaveRoot &&) = delete;
+    AuthorizedSaveRoot &operator=(AuthorizedSaveRoot &&) = delete;
+
+    ~AuthorizedSaveRoot()
+    {
+        if (descriptor_ >= 0) {
+            static_cast<void>(::close(descriptor_));
+        }
+    }
+
+    [[nodiscard]] TTorrentAuthorizedSaveRoot record() noexcept
+    {
+        return TTorrentAuthorizedSaveRoot{
+            .directory_descriptor = descriptor_,
+            .device = device_,
+            .inode = inode_,
+            .lifetime_context = &lifetime_probe_,
+        };
+    }
+
+private:
+    int descriptor_ = -1;
+    std::uint64_t device_ = 0U;
+    std::uint64_t inode_ = 0U;
+    AuthorizedSaveRootLifetimeProbe lifetime_probe_;
+};
+
 class BridgeClientHarness {
 public:
     explicit BridgeClientHarness(std::string_view label)
@@ -212,12 +294,18 @@ public:
 
         std::vector<std::uint8_t> authorized_save_paths(save_path_.begin(), save_path_.end());
         authorized_save_paths.push_back(0U);
+        authorized_save_root_.emplace(save_dir_);
+        TTorrentAuthorizedSaveRoot native_root = authorized_save_root_->record();
         ErrorBuffer error;
         client_ = TorrentClientCreateWithError(
             state_path_.c_str(),
             1,
             authorized_save_paths.data(),
             static_cast<int32_t>(authorized_save_paths.size()),
+            &native_root,
+            1,
+            retain_authorized_save_root,
+            release_authorized_save_root,
             error.data(),
             error.capacity()
         );
@@ -264,6 +352,7 @@ private:
     fs::path save_dir_;
     std::string state_path_;
     std::string save_path_;
+    std::optional<AuthorizedSaveRoot> authorized_save_root_;
     TTorrentClient *client_ = nullptr;
     std::atomic_uint64_t wake_count_ = 0;
     std::optional<std::uint64_t> tracked_removal_token_;

@@ -1,4 +1,5 @@
 import Darwin
+import CryptoKit
 import Foundation
 import System
 
@@ -37,7 +38,7 @@ package struct TorrentFolderCapability: Equatable, Sendable {
 
 package struct TorrentFolderCapabilityLimits: Equatable, Sendable {
     package static let `default` = Self(
-        maximumCapabilityCount: 20_000,
+        maximumCapabilityCount: 32,
         maximumBookmarkBytes: 1_048_576,
         maximumAggregateBookmarkBytes: 20_480_000,
         maximumCanonicalPathBytes: 1_023
@@ -163,6 +164,12 @@ package final class TorrentFolderCapabilityPin: @unchecked Sendable {
         access.isActive
     }
 
+    /// Keeps the security scope and registry-owned descriptor alive while a
+    /// native storage root derived from this pin can still be used.
+    package var accessLifetimeAnchor: any AnyObject & Sendable {
+        access
+    }
+
     package func directoryFileDescriptor() throws -> Int32 {
         try access.fileDescriptor()
     }
@@ -187,8 +194,8 @@ package final class TorrentFolderCapabilityReplacement: @unchecked Sendable {
         entries.map(\.capability)
     }
 
-    package var canonicalPaths: [String] {
-        entries.map(\.capability.canonicalPath).sorted()
+    package var pins: [TorrentFolderCapabilityPin] {
+        entries.map(TorrentFolderCapabilityPin.init(entry:))
     }
 }
 
@@ -232,9 +239,9 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
     }
 
     /// Resolves and validates a complete replacement without publishing it.
-    /// The returned object retains every candidate scope and descriptor so a
-    /// caller can update the native allowlist before atomically committing the
-    /// registry snapshot.
+    /// The returned object retains one freshly validated or exactly reused
+    /// scope and descriptor per entry so a caller can update the native
+    /// allowlist before atomically committing the registry snapshot.
     package func prepareCommittedGrantReplacement(
         bookmarkData: [Data],
         scope: TorrentEngineServiceScope
@@ -255,10 +262,13 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
             candidates.append(candidate)
         }
 
-        return try lock.withLock {
+        let replacement = try lock.withLock {
             try requireConnectedController(scope: scope)
             let retainedEntries = entriesByID.values.filter {
                 $0.capability.scope.controllerID != scope.controllerID
+            }
+            let displacedEntries = entriesByID.values.filter {
+                $0.capability.scope.controllerID == scope.controllerID
             }
             try validateProjectedTotals(
                 retainedEntries: retainedEntries,
@@ -269,8 +279,15 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
             replacementEntries.reserveCapacity(candidates.count)
             var reservedIDs = Set(entriesByID.keys)
             for candidate in candidates {
+                let reusableEntry = displacedEntries.first {
+                    $0.bookmarkFingerprint == candidate.bookmarkFingerprint
+                        && $0.capability.canonicalPath == candidate.canonicalPath
+                        && $0.capability.identity == candidate.identity
+                        && $0.access.isActive
+                }
                 let capability = TorrentFolderCapability(
-                    id: makeCapabilityID(reserving: &reservedIDs),
+                    id: reusableEntry?.capability.id
+                        ?? makeCapabilityID(reserving: &reservedIDs),
                     scope: scope,
                     canonicalPath: candidate.canonicalPath,
                     identity: candidate.identity,
@@ -279,7 +296,8 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
                 replacementEntries.append(TorrentFolderCapabilityEntry(
                     capability: capability,
                     bookmarkByteCount: candidate.bookmarkByteCount,
-                    access: candidate.access
+                    bookmarkFingerprint: candidate.bookmarkFingerprint,
+                    access: reusableEntry?.access ?? candidate.access
                 ))
             }
             return TorrentFolderCapabilityReplacement(
@@ -288,6 +306,12 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
                 entries: replacementEntries
             )
         }
+        // Candidate accesses superseded by an identical active entry release
+        // here, outside the registry lock. Unchanged snapshots therefore keep
+        // one stable native lifetime context without skipping fresh bookmark,
+        // path, or descriptor validation.
+        candidates.removeAll()
+        return replacement
     }
 
     /// Publishes a prepared replacement only when the registry has not changed
@@ -368,6 +392,7 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
             let entry = TorrentFolderCapabilityEntry(
                 capability: capability,
                 bookmarkByteCount: candidate.bookmarkByteCount,
+                bookmarkFingerprint: candidate.bookmarkFingerprint,
                 access: candidate.access
             )
             entriesByID[capability.id] = entry
@@ -424,6 +449,32 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
                 throw TorrentFolderCapabilityError.capabilityInvalidated
             }
             return TorrentFolderCapabilityPin(entry: entry)
+        }
+    }
+
+    /// Captures one coherent descriptor-backed authorization snapshot. Each
+    /// pin retains its security scope even if the registry is changed after
+    /// this method returns.
+    package func pins(
+        scope: TorrentEngineServiceScope
+    ) throws -> [TorrentFolderCapabilityPin] {
+        try validate(scope: scope)
+        return try lock.withLock {
+            try requireConnectedController(scope: scope)
+            let entries = entriesByID.values
+                .filter { $0.capability.scope == scope }
+                .sorted { $0.capability.canonicalPath < $1.capability.canonicalPath }
+            guard entries.allSatisfy({ $0.access.isActive }) else {
+                let invalidIDs = entries.lazy
+                    .filter { !$0.access.isActive }
+                    .map(\.capability.id)
+                for capabilityID in invalidIDs {
+                    entriesByID.removeValue(forKey: capabilityID)
+                }
+                incrementRegistryRevision()
+                throw TorrentFolderCapabilityError.capabilityInvalidated
+            }
+            return entries.map(TorrentFolderCapabilityPin.init(entry:))
         }
     }
 
@@ -595,6 +646,7 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
                 canonicalPath: directory.path,
                 identity: directory.identity,
                 bookmarkByteCount: bookmarkData.count,
+                bookmarkFingerprint: TorrentFolderBookmarkFingerprint(bookmarkData),
                 access: access
             )
         } catch let error as TorrentFolderCapabilityError {
@@ -630,17 +682,17 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
         controllerID: UUID
     ) {
         var references = accessReferencesByController[controllerID] ?? []
-        let activeEntryCount = entriesByID.values.lazy.filter {
-            $0.capability.scope.controllerID == controllerID
-        }.count
-        // Register a complete replacement in one pass, while amortizing cleanup
-        // of stale weak entries from repeated grant/revoke churn.
-        if references.count > activeEntryCount,
-           references.count - activeEntryCount > 256 {
-            references.removeAll { $0.access == nil }
+        var knownAccesses = Set<ObjectIdentifier>()
+        references.removeAll { reference in
+            guard let access = reference.access else {
+                return true
+            }
+            return !knownAccesses.insert(ObjectIdentifier(access)).inserted
         }
-        references.reserveCapacity(references.count + accesses.count)
-        references.append(contentsOf: accesses.map(TorrentWeakFolderCapabilityAccess.init))
+        for access in accesses
+        where knownAccesses.insert(ObjectIdentifier(access)).inserted {
+            references.append(TorrentWeakFolderCapabilityAccess(access))
+        }
         accessReferencesByController[controllerID] = references
     }
 
@@ -670,6 +722,7 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
 fileprivate struct TorrentFolderCapabilityEntry {
     var capability: TorrentFolderCapability
     let bookmarkByteCount: Int
+    let bookmarkFingerprint: TorrentFolderBookmarkFingerprint
     let access: TorrentFolderCapabilityAccess
 }
 
@@ -677,7 +730,16 @@ private struct TorrentFolderCapabilityCandidate {
     let canonicalPath: String
     let identity: TorrentFolderIdentity
     let bookmarkByteCount: Int
+    let bookmarkFingerprint: TorrentFolderBookmarkFingerprint
     let access: TorrentFolderCapabilityAccess
+}
+
+fileprivate struct TorrentFolderBookmarkFingerprint: Equatable {
+    private let bytes: [UInt8]
+
+    init(_ bookmarkData: Data) {
+        bytes = Array(SHA256.hash(data: bookmarkData))
+    }
 }
 
 private final class TorrentWeakFolderCapabilityAccess: @unchecked Sendable {

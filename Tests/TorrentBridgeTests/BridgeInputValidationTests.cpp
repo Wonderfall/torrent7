@@ -177,27 +177,28 @@ TEST_CASE("authorized save path blobs are strict bounded UTF-8 records")
         "/Downloads/A",
         "/Downloads/日本語",
     });
-    AuthorizedSavePathResult parsed = parse_authorized_save_paths_blob(valid);
+    AuthorizedSavePathListResult parsed = parse_authorized_save_path_list_blob(valid);
     REQUIRE(parsed.has_value());
-    CHECK(*parsed == AuthorizedSavePathSet{
+    CHECK(*parsed == AuthorizedSavePathList{
+        "/Downloads/A",
         "/Downloads/A",
         "/Downloads/日本語",
     });
-    CHECK(parse_authorized_save_paths_blob({}).has_value());
+    CHECK(parse_authorized_save_path_list_blob({}).has_value());
 
     std::vector<std::uint8_t> missing_terminator{'/', 'a'};
-    CHECK_FALSE(parse_authorized_save_paths_blob(missing_terminator).has_value());
-    CHECK_FALSE(parse_authorized_save_paths_blob(authorized_path_blob({"relative"})).has_value());
-    CHECK_FALSE(parse_authorized_save_paths_blob(authorized_path_blob({"/valid", ""})).has_value());
+    CHECK_FALSE(parse_authorized_save_path_list_blob(missing_terminator).has_value());
+    CHECK_FALSE(parse_authorized_save_path_list_blob(authorized_path_blob({"relative"})).has_value());
+    CHECK_FALSE(parse_authorized_save_path_list_blob(authorized_path_blob({"/valid", ""})).has_value());
 
     std::vector<std::uint8_t> invalid_utf8{'/', 0xffU, 0U};
-    CHECK_FALSE(parse_authorized_save_paths_blob(invalid_utf8).has_value());
+    CHECK_FALSE(parse_authorized_save_path_list_blob(invalid_utf8).has_value());
 
     std::string const oversized_path(
         static_cast<std::size_t>(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES),
         'x'
     );
-    CHECK_FALSE(parse_authorized_save_paths_blob(
+    CHECK_FALSE(parse_authorized_save_path_list_blob(
         authorized_path_blob({"/" + oversized_path})
     ).has_value());
 
@@ -205,7 +206,7 @@ TEST_CASE("authorized save path blobs are strict bounded UTF-8 records")
     for (int32_t index = 0; index <= TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT; ++index) {
         too_many_paths.insert(too_many_paths.end(), {'/', 'x', 0U});
     }
-    CHECK_FALSE(parse_authorized_save_paths_blob(too_many_paths).has_value());
+    CHECK_FALSE(parse_authorized_save_path_list_blob(too_many_paths).has_value());
 }
 
 TEST_CASE("client creation validates authorized path blob pointer and size before reading")
@@ -220,6 +221,10 @@ TEST_CASE("client creation validates authorized path blob pointer and size befor
         1,
         nullptr,
         1,
+        nullptr,
+        0,
+        nullptr,
+        nullptr,
         error.data(),
         static_cast<int32_t>(error.size())
     ) == nullptr);
@@ -230,6 +235,10 @@ TEST_CASE("client creation validates authorized path blob pointer and size befor
         1,
         &byte,
         0,
+        nullptr,
+        0,
+        nullptr,
+        nullptr,
         error.data(),
         static_cast<int32_t>(error.size())
     ) == nullptr);
@@ -240,6 +249,10 @@ TEST_CASE("client creation validates authorized path blob pointer and size befor
         1,
         &byte,
         TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES + 1,
+        nullptr,
+        0,
+        nullptr,
+        nullptr,
         error.data(),
         static_cast<int32_t>(error.size())
     ) == nullptr);
@@ -249,50 +262,162 @@ TEST_CASE("client creation validates authorized path blob pointer and size befor
 TEST_CASE("runtime authorized path replacement is bounded and atomic")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
+    fs::path const authorized_directory = temporary_directory.path() / "Downloads" / "A";
+    REQUIRE(fs::create_directories(authorized_directory));
+    bridge_tests::AuthorizedSaveRoot authorized_root(authorized_directory);
     TTorrentClient client((temporary_directory.path() / "State").string());
     client.set_session_shutdown_asynchronous(false);
     std::array<char, 512> error{};
 
-    std::vector<std::uint8_t> valid = authorized_path_blob({"/Downloads/B/../A"});
+    std::string const unnormalized = (authorized_directory / "child" / "..").string();
+    std::string const normalized = fs::path(unnormalized).lexically_normal().native();
+    std::vector<std::uint8_t> valid = authorized_path_blob({unnormalized});
+    TTorrentAuthorizedSaveRoot record = authorized_root.record();
     REQUIRE(TorrentClientReplaceAuthorizedSavePaths(
         &client,
         valid.data(),
         static_cast<int32_t>(valid.size()),
+        &record,
+        1,
+        bridge_tests::retain_authorized_save_root,
+        bridge_tests::release_authorized_save_root,
         error.data(),
         static_cast<int32_t>(error.size())
     ) == 0);
-    CHECK(client.authorized_save_paths == AuthorizedSavePathSet{"/Downloads/A"});
+    CHECK(client.authorized_save_roots.contains(normalized));
 
     std::vector<std::uint8_t> missing_terminator{'/', 'D'};
     CHECK(TorrentClientReplaceAuthorizedSavePaths(
         &client,
         missing_terminator.data(),
         static_cast<int32_t>(missing_terminator.size()),
+        &record,
+        1,
+        bridge_tests::retain_authorized_save_root,
+        bridge_tests::release_authorized_save_root,
         error.data(),
         static_cast<int32_t>(error.size())
     ) != 0);
     CHECK(std::string(error.data()) == "The authorized save path list is not NUL terminated.");
-    CHECK(client.authorized_save_paths == AuthorizedSavePathSet{"/Downloads/A"});
+    CHECK(client.authorized_save_roots.contains(normalized));
 
     std::uint8_t byte = 0U;
     CHECK(TorrentClientReplaceAuthorizedSavePaths(
         &client,
         &byte,
         TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES + 1,
+        &record,
+        1,
+        bridge_tests::retain_authorized_save_root,
+        bridge_tests::release_authorized_save_root,
         error.data(),
         static_cast<int32_t>(error.size())
     ) != 0);
     CHECK(std::string(error.data()) == "The authorized save path list has an invalid size.");
-    CHECK(client.authorized_save_paths == AuthorizedSavePathSet{"/Downloads/A"});
+    CHECK(client.authorized_save_roots.contains(normalized));
 
     REQUIRE(TorrentClientReplaceAuthorizedSavePaths(
         &client,
         nullptr,
         0,
+        nullptr,
+        0,
+        nullptr,
+        nullptr,
         error.data(),
         static_cast<int32_t>(error.size())
     ) == 0);
-    CHECK(client.authorized_save_paths.empty());
+    CHECK(client.authorized_save_roots.empty());
+    CHECK(authorized_root.lifetime_probe().retain_count.load() == 1);
+    CHECK(authorized_root.lifetime_probe().release_count.load() == 1);
+}
+
+TEST_CASE("authorized save roots duplicate authority and reject root identity replacement atomically")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    fs::path const accepted_directory = temporary_directory.path() / "Accepted";
+    fs::path const candidate_directory = temporary_directory.path() / "Candidate";
+    fs::path const retained_candidate = temporary_directory.path() / "RetainedCandidate";
+    fs::path const replacement_directory = temporary_directory.path() / "Replacement";
+    REQUIRE(fs::create_directories(accepted_directory));
+    REQUIRE(fs::create_directories(candidate_directory));
+    REQUIRE(fs::create_directories(replacement_directory));
+    bridge_tests::AuthorizedSaveRoot accepted_root(accepted_directory);
+    bridge_tests::AuthorizedSaveRoot candidate_root(candidate_directory);
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+    std::array<char, 512> error{};
+
+    std::vector<std::uint8_t> accepted_blob = authorized_path_blob({accepted_directory.string()});
+    TTorrentAuthorizedSaveRoot accepted_record = accepted_root.record();
+    REQUIRE(TorrentClientReplaceAuthorizedSavePaths(
+        &client,
+        accepted_blob.data(),
+        static_cast<int32_t>(accepted_blob.size()),
+        &accepted_record,
+        1,
+        bridge_tests::retain_authorized_save_root,
+        bridge_tests::release_authorized_save_root,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == 0);
+    accepted_root.close_borrowed_descriptor();
+    lt::error_code duplicate_error;
+    int const duplicate = client.authorized_save_roots.at(accepted_directory.string())->duplicate(
+        duplicate_error
+    );
+    CHECK_FALSE(duplicate_error);
+    REQUIRE(duplicate >= 0);
+    CHECK(::close(duplicate) == 0);
+
+    fs::rename(candidate_directory, retained_candidate);
+    REQUIRE(fs::create_directories(candidate_directory));
+    std::vector<std::uint8_t> candidate_blob = authorized_path_blob({candidate_directory.string()});
+    TTorrentAuthorizedSaveRoot candidate_record = candidate_root.record();
+    CHECK(TorrentClientReplaceAuthorizedSavePaths(
+        &client,
+        candidate_blob.data(),
+        static_cast<int32_t>(candidate_blob.size()),
+        &candidate_record,
+        1,
+        bridge_tests::retain_authorized_save_root,
+        bridge_tests::release_authorized_save_root,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) != 0);
+    CHECK(client.authorized_save_roots.contains(accepted_directory.string()));
+
+    REQUIRE(fs::remove_all(candidate_directory) > 0U);
+    REQUIRE(::symlink(replacement_directory.c_str(), candidate_directory.c_str()) == 0);
+    CHECK(TorrentClientReplaceAuthorizedSavePaths(
+        &client,
+        candidate_blob.data(),
+        static_cast<int32_t>(candidate_blob.size()),
+        &candidate_record,
+        1,
+        bridge_tests::retain_authorized_save_root,
+        bridge_tests::release_authorized_save_root,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) != 0);
+    CHECK(client.authorized_save_roots.contains(accepted_directory.string()));
+    REQUIRE(fs::remove(candidate_directory));
+
+    REQUIRE(TorrentClientReplaceAuthorizedSavePaths(
+        &client,
+        nullptr,
+        0,
+        nullptr,
+        0,
+        nullptr,
+        nullptr,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == 0);
+    CHECK(accepted_root.lifetime_probe().retain_count.load()
+          == accepted_root.lifetime_probe().release_count.load());
+    CHECK(candidate_root.lifetime_probe().retain_count.load()
+          == candidate_root.lifetime_probe().release_count.load());
 }
 
 TEST_CASE("torrent metadata rejects symbolic links and paths that cannot fit the bridge ABI")

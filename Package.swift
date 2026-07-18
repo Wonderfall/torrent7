@@ -322,6 +322,8 @@ let package = Package(
             path: ".",
             sources: [
                 "Tests/TorrentBridgeTests/main.cpp",
+                "Tests/TorrentBridgeTests/BridgeAuthorizedRootIntegrationTests.cpp",
+                "Tests/TorrentBridgeTests/BridgeAuthorizedRootValidationTests.cpp",
                 "Tests/TorrentBridgeTests/BridgeClientLifecycleTests.cpp",
                 "Tests/TorrentBridgeTests/BridgeHashAndSnapshotTests.cpp",
                 "Tests/TorrentBridgeTests/BridgeInputValidationTests.cpp",
@@ -332,6 +334,7 @@ let package = Package(
             ],
             cxxSettings: [
                 .treatAllWarnings(as: .error),
+                .define("TORRENT_BRIDGE_TESTING"),
                 .unsafeFlags(bridgeTestCompilerFlags)
             ] + bridgeWarnings + bridgeDefines,
             linkerSettings: [

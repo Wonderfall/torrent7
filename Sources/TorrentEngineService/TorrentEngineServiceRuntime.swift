@@ -24,6 +24,7 @@ private enum TorrentEngineServiceRuntimeError: LocalizedError {
     case missingFileDescriptor
     case invalidFolderGrant
     case invalidFolderCapability
+    case folderAuthorizationInUse
     case invalidTorrentIdentifier
     case invalidMagnet
     case invalidTorrentFile
@@ -71,6 +72,8 @@ private enum TorrentEngineServiceRuntimeError: LocalizedError {
             "The download folder authorization request is invalid."
         case .invalidFolderCapability:
             "The download folder authorization is unavailable or changed."
+        case .folderAuthorizationInUse:
+            "Too many download folders are still in use by active torrents. Remove affected torrents before replacing these folders."
         case .invalidTorrentIdentifier:
             "The torrent identifier is invalid."
         case .invalidMagnet:
@@ -817,7 +820,12 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         } catch {
             throw TorrentEngineServiceRuntimeError.invalidFolderGrant
         }
-        let paths = replacement.canonicalPaths
+        let authorizedRoots: [TorrentAuthorizedSaveRoot]
+        do {
+            authorizedRoots = try Self.authorizedRoots(for: replacement.pins)
+        } catch {
+            throw TorrentEngineServiceRuntimeError.invalidFolderGrant
+        }
         // Native construction restores service-owned state and starts the
         // alert worker synchronously. Cover that work, and any cleanup after
         // partial startup, before entering the bridge.
@@ -828,7 +836,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         let created = try TorrentEngine(
             stateDirectory: stateDirectory,
             enablePeerExchangePlugin: request.enablePeerExchangePlugin,
-            authorizedSavePaths: paths
+            authorizedSaveRoots: authorizedRoots
         )
         engine = created
         do {
@@ -879,18 +887,18 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         }
 
         var pins = [TorrentFolderCapabilityPin]()
+        let authorizedRoots: [TorrentAuthorizedSaveRoot]
         pins.reserveCapacity(request.capabilityIDs.count)
         do {
             for capabilityID in request.capabilityIDs {
                 let pin = try capabilityRegistry.pin(capabilityID: capabilityID, scope: scope)
-                try Self.validate(pin: pin)
                 pins.append(pin)
             }
+            authorizedRoots = try Self.authorizedRoots(for: pins)
         } catch {
             throw TorrentEngineServiceRuntimeError.invalidFolderCapability
         }
 
-        let paths = pins.map(\.canonicalPath).sorted()
         datasetsByID.removeAll()
         do {
             if let networkAuthority {
@@ -904,7 +912,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             do {
                 try await restartedEngine.restart(
                     enablePeerExchangePlugin: request.enablePeerExchangePlugin,
-                    authorizedSavePaths: paths
+                    authorizedSaveRoots: authorizedRoots
                 )
                 cleanupWatchdog.disarm(cleanupToken)
             } catch {
@@ -946,13 +954,12 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         }
 
         do {
-            try await requireEngine().replaceAuthorizedSavePaths(
-                authorizedPaths(controllerID: scope.controllerID)
-            )
+            let roots = try authorizedRoots(scope: scope)
+            try await requireEngine().replaceAuthorizedSaveRoots(roots)
             try requireActiveController(controllerLease)
         } catch {
             _ = try? capabilityRegistry.revoke(capabilityID: capability.id, scope: scope)
-            await restoreAuthorizedPathsOrTerminate(
+            await restoreAuthorizedRootsOrTerminate(
                 scope: scope,
                 reason: "Torrent engine folder grant rollback failed"
             )
@@ -981,19 +988,19 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         ) != nil else {
             return
         }
-        let desiredPaths = capabilityRegistry.capabilities(controllerID: scope.controllerID)
-            .filter { $0.id != request.capabilityID }
-            .map(\.canonicalPath)
-            .sorted()
         do {
-            try await requireEngine().replaceAuthorizedSavePaths(desiredPaths)
+            let desiredPins = try capabilityRegistry.pins(scope: scope).filter {
+                $0.capabilityID != request.capabilityID
+            }
+            let desiredRoots = try Self.authorizedRoots(for: desiredPins)
+            try await requireEngine().replaceAuthorizedSaveRoots(desiredRoots)
             try requireActiveController(controllerLease)
             _ = try capabilityRegistry.revoke(
                 capabilityID: request.capabilityID,
                 scope: scope
             )
         } catch {
-            await restoreAuthorizedPathsOrTerminate(
+            await restoreAuthorizedRootsOrTerminate(
                 scope: scope,
                 reason: "Torrent engine folder revocation rollback failed"
             )
@@ -1019,10 +1026,17 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         try requireActiveController(controllerLease)
 
         do {
-            try await requireEngine().replaceAuthorizedSavePaths(
-                replacement.canonicalPaths
-            )
+            let roots = try Self.authorizedRoots(for: replacement.pins)
+            try await requireEngine().replaceAuthorizedSaveRoots(roots)
             try requireActiveController(controllerLease)
+        } catch let engineError as TorrentEngineError {
+            if case .authorizedRootCapacityReached = engineError {
+                throw TorrentEngineServiceRuntimeError.folderAuthorizationInUse
+            }
+            await terminateActiveControllerAfterSecurityBoundaryFailure(
+                reason: "Torrent engine folder authorization replacement failed"
+            )
+            throw engineError
         } catch {
             await terminateActiveControllerAfterSecurityBoundaryFailure(
                 reason: "Torrent engine folder authorization replacement failed"
@@ -1071,10 +1085,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         )?.state == .provisional
         var didInvokeNativeAdd = false
         do {
-            try await requireEngine().replaceAuthorizedSavePaths(
-                authorizedPaths(controllerID: scope.controllerID)
-            )
-            try requireActiveController(controllerLease)
             let addingEngine = try requireEngine()
             didInvokeNativeAdd = true
             let identifier = try await addingEngine.addMagnet(
@@ -1110,7 +1120,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
                     capabilityID: request.folderCapabilityID,
                     scope: scope
                 )
-                await restoreAuthorizedPathsOrTerminate(
+                await restoreAuthorizedRootsOrTerminate(
                     scope: scope,
                     reason: "Torrent engine magnet authorization rollback failed"
                 )
@@ -1133,10 +1143,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         )?.state == .provisional
         var didInvokeNativeAdd = false
         do {
-            try await requireEngine().replaceAuthorizedSavePaths(
-                authorizedPaths(controllerID: scope.controllerID)
-            )
-            try requireActiveController(controllerLease)
             let addingEngine = try requireEngine()
             didInvokeNativeAdd = true
             let identifier = try await addingEngine.addTorrentFile(
@@ -1171,7 +1177,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
                     capabilityID: request.folderCapabilityID,
                     scope: scope
                 )
-                await restoreAuthorizedPathsOrTerminate(
+                await restoreAuthorizedRootsOrTerminate(
                     scope: scope,
                     reason: "Torrent engine torrent-file authorization rollback failed"
                 )
@@ -1623,13 +1629,34 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         }
     }
 
-    private func authorizedPaths(controllerID: UUID) -> [String] {
-        capabilityRegistry.capabilities(controllerID: controllerID)
-            .map(\.canonicalPath)
-            .sorted()
+    private func authorizedRoots(
+        scope: TorrentEngineServiceScope
+    ) throws -> [TorrentAuthorizedSaveRoot] {
+        do {
+            return try Self.authorizedRoots(for: capabilityRegistry.pins(scope: scope))
+        } catch {
+            throw TorrentEngineServiceRuntimeError.invalidFolderCapability
+        }
     }
 
-    private func restoreAuthorizedPathsOrTerminate(
+    private static func authorizedRoots(
+        for pins: [TorrentFolderCapabilityPin]
+    ) throws -> [TorrentAuthorizedSaveRoot] {
+        // This synchronous conversion duplicates every borrowed registry
+        // descriptor before the resulting values cross into the engine actor.
+        try pins.map { pin in
+            try validate(pin: pin)
+            return try TorrentAuthorizedSaveRoot(
+                canonicalPath: pin.canonicalPath,
+                borrowingDirectoryDescriptor: pin.directoryFileDescriptor(),
+                device: pin.identity.device,
+                inode: pin.identity.inode,
+                retaining: pin.accessLifetimeAnchor
+            )
+        }
+    }
+
+    private func restoreAuthorizedRootsOrTerminate(
         scope: TorrentEngineServiceScope,
         reason: String
     ) async {
@@ -1638,9 +1665,8 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             return
         }
         do {
-            try await engine.replaceAuthorizedSavePaths(
-                authorizedPaths(controllerID: scope.controllerID)
-            )
+            let roots = try authorizedRoots(scope: scope)
+            try await engine.replaceAuthorizedSaveRoots(roots)
         } catch {
             await terminateActiveControllerAfterSecurityBoundaryFailure(reason: reason)
         }

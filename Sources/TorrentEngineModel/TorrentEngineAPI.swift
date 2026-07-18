@@ -3,6 +3,7 @@ import Foundation
 package enum TorrentEngineError: LocalizedError, Sendable {
     case failedToCreateClient
     case startupFailed(String)
+    case authorizedRootCapacityReached(String)
     case bridgeError(String)
 
     package var errorDescription: String? {
@@ -13,6 +14,10 @@ package enum TorrentEngineError: LocalizedError, Sendable {
             return message.isEmpty
                 ? "Could not start the torrent engine."
                 : "Could not start the torrent engine: \(message)"
+        case .authorizedRootCapacityReached(let message):
+            return message.isEmpty
+                ? "Too many download folders are still in use by active torrents."
+                : message
         case .bridgeError(let message):
             return message.isEmpty ? "The torrent operation failed." : message
         }

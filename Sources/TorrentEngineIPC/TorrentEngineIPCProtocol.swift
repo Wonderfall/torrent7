@@ -16,8 +16,9 @@ package enum TorrentEngineIPCLimits {
     package static let maximumDatasetPageItemCount = 256
     package static let maximumDatasetAggregateBytes = 128 * 1_024 * 1_024
     package static let maximumFileMetadataReplyBytes = 32 * 1_024 * 1_024
-    // A maximum-size authorization snapshot can carry about 20 MiB of
-    // canonical paths plus UUID and binary-property-list structure.
+    // Folder replies remain generously bounded for bookmark and
+    // binary-property-list overhead; canonical paths themselves are capped at
+    // 32 KiB by the 32-root engine authority budget.
     package static let maximumFolderCapabilityReplyBytes = 32 * 1_024 * 1_024
     package static let maximumOpenDatasets = 4
     package static let maximumAlertErrorsPerPoll = 16

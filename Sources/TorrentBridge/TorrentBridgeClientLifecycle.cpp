@@ -7,6 +7,42 @@ namespace {
     return value == std::numeric_limits<std::uint64_t>::max() ? value : value + 1U;
 }
 
+#if defined(TORRENT_BRIDGE_TESTING)
+[[nodiscard]] AuthorizedSaveRootMap test_authorized_save_roots(
+    AuthorizedSavePathSet const &paths
+)
+{
+    AuthorizedSaveRootMap roots;
+    for (std::string const &path : paths) {
+        UniqueFileDescriptor descriptor(::open(
+            path.c_str(),
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        ));
+        if (!descriptor.is_valid()) {
+            throw std::system_error(errno, std::generic_category(), "Could not open authorized test root");
+        }
+        struct ::stat metadata {};
+        if (::fstat(descriptor.get(), &metadata) != 0) {
+            throw std::system_error(errno, std::generic_category(), "Could not inspect authorized test root");
+        }
+        lt::error_code root_error;
+        std::shared_ptr<lt::aux::storage_root> root = lt::aux::make_storage_root(
+            path,
+            descriptor.get(),
+            static_cast<std::uint64_t>(metadata.st_dev),
+            static_cast<std::uint64_t>(metadata.st_ino),
+            {},
+            root_error
+        );
+        if (root_error || !root) {
+            throw std::runtime_error("Could not create authorized test root: " + root_error.message());
+        }
+        roots.emplace(path, std::move(root));
+    }
+    return roots;
+}
+#endif
+
 } // namespace
 
 std::chrono::milliseconds alert_worker_failure_backoff(std::uint64_t const consecutive_failures) noexcept
@@ -42,21 +78,42 @@ bool wait_for_alert_worker_backoff(
 }
 
 TTorrentClient::TTorrentClient(std::string_view state_path, bool enable_peer_exchange_plugin)
-    : TTorrentClient(state_path, enable_peer_exchange_plugin, {})
+    : TTorrentClient(state_path, enable_peer_exchange_plugin, AuthorizedSaveRootMap{})
 {
 }
+
+#if defined(TORRENT_BRIDGE_TESTING)
+TTorrentClient::TTorrentClient(
+    std::string_view state_path,
+    bool enable_peer_exchange_plugin,
+    AuthorizedSavePathSet const &authorized_paths
+)
+    : TTorrentClient(
+        state_path,
+        enable_peer_exchange_plugin,
+        test_authorized_save_roots(authorized_paths)
+    )
+{
+}
+#endif
 
 TTorrentClient::TTorrentClient(
     std::string_view state_path,
     bool enable_peer_exchange_plugin,
-    AuthorizedSavePathSet authorized_paths
+    AuthorizedSaveRootMap authorized_roots
 )
     : state_directory(std::string(state_path)),
       resume_directory(state_directory / "ResumeData"),
-      authorized_save_paths(std::move(authorized_paths)),
+      authorized_save_roots(std::move(authorized_roots)),
       session(make_session_params(enable_peer_exchange_plugin)),
       peer_exchange_plugin_enabled(enable_peer_exchange_plugin)
 {
+    authorized_save_root_lifetimes.reserve(authorized_save_roots.size());
+    for (auto const &[path, root] : authorized_save_roots) {
+        static_cast<void>(path);
+        authorized_save_root_lifetimes.emplace_back(root);
+    }
+
     session.pause();
 
     std::error_code create_error;

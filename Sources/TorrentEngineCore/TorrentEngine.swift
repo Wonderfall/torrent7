@@ -54,7 +54,7 @@ private func torrentWakeCallback(_ context: UnsafeMutableRawPointer?) {
 package typealias TorrentClientCreationPreflight = @Sendable (
     _ stateDirectory: URL,
     _ enablePeerExchangePlugin: Bool,
-    _ authorizedSavePaths: [String]
+    _ authorizedSaveRoots: [TorrentAuthorizedSaveRoot]
 ) throws -> Void
 
 private struct TorrentRemovalResultStatus: Sendable {
@@ -65,6 +65,19 @@ private struct TorrentRemovalResultStatus: Sendable {
 package enum TorrentRemovalResultReadOverride: Sendable {
     case pending
     case unknownState
+}
+
+@safe private struct TorrentEncodedAuthorizedSaveRoots {
+    let pathBlob: [UInt8]
+    let nativeRoots: [TTorrentAuthorizedSaveRoot]
+    // Native records contain unretained pointers into these roots. Keep the
+    // Swift owners alive until the synchronous bridge call returns.
+    let retainedRoots: [TorrentAuthorizedSaveRoot]
+}
+
+private struct TorrentAuthorizedSaveRootIdentity: Hashable {
+    let device: UInt64
+    let inode: UInt64
 }
 
 package typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResultReadOverride?
@@ -87,7 +100,7 @@ package typealias TorrentAlertErrorReader = @Sendable () -> String?
     package init(
         stateDirectory: URL,
         enablePeerExchangePlugin: Bool,
-        authorizedSavePaths: [String] = [],
+        authorizedSaveRoots: [TorrentAuthorizedSaveRoot] = [],
         removalResultReader: TorrentRemovalResultReader? = nil,
         alertErrorReader: TorrentAlertErrorReader? = nil
     ) throws {
@@ -100,7 +113,7 @@ package typealias TorrentAlertErrorReader = @Sendable () -> String?
             stateDirectory: stateDirectory,
             wakeRelay: wakeRelay,
             enablePeerExchangePlugin: enablePeerExchangePlugin,
-            authorizedSavePaths: authorizedSavePaths
+            authorizedSaveRoots: authorizedSaveRoots
         )
     }
 
@@ -117,7 +130,10 @@ package typealias TorrentAlertErrorReader = @Sendable () -> String?
         startupFailureMessage == nil && runtimeFailureMessage.withLock { $0 == nil }
     }
 
-    package func restart(enablePeerExchangePlugin: Bool, authorizedSavePaths: [String]) throws {
+    package func restart(
+        enablePeerExchangePlugin: Bool,
+        authorizedSaveRoots: [TorrentAuthorizedSaveRoot]
+    ) throws {
         guard !isShutdown else {
             throw TorrentEngineError.bridgeError("The torrent engine has been shut down.")
         }
@@ -138,7 +154,7 @@ package typealias TorrentAlertErrorReader = @Sendable () -> String?
                 stateDirectory: stateDirectory,
                 wakeRelay: wakeRelay,
                 enablePeerExchangePlugin: enablePeerExchangePlugin,
-                authorizedSavePaths: authorizedSavePaths
+                authorizedSaveRoots: authorizedSaveRoots
             )
         } catch {
             runtimeFailureMessage.withLock { $0 = error.localizedDescription }
@@ -146,18 +162,28 @@ package typealias TorrentAlertErrorReader = @Sendable () -> String?
         }
     }
 
-    package func replaceAuthorizedSavePaths(_ authorizedSavePaths: [String]) throws {
+    package func replaceAuthorizedSaveRoots(
+        _ authorizedSaveRoots: [TorrentAuthorizedSaveRoot]
+    ) throws {
         let client = try unsafe requireClient()
-        let blob = try Self.encodeAuthorizedSavePaths(authorizedSavePaths)
-        try throwingBridgeCall { errorBuffer, errorCapacity in
-            unsafe blob.withUnsafeBufferPointer { buffer in
-                unsafe TorrentClientReplaceAuthorizedSavePaths(
-                    client,
-                    buffer.isEmpty ? nil : buffer.baseAddress,
-                    Int32(buffer.count),
-                    &errorBuffer,
-                    errorCapacity
-                )
+        let encoded = try Self.encodeAuthorizedSaveRoots(authorizedSaveRoots)
+        try withExtendedLifetime(encoded.retainedRoots) {
+            try throwingAuthorizedRootReplacement { errorBuffer, errorCapacity in
+                unsafe encoded.pathBlob.withUnsafeBufferPointer { paths in
+                    unsafe encoded.nativeRoots.withUnsafeBufferPointer { roots in
+                        unsafe TorrentClientReplaceAuthorizedSavePaths(
+                            client,
+                            paths.isEmpty ? nil : paths.baseAddress,
+                            Int32(paths.count),
+                            roots.isEmpty ? nil : roots.baseAddress,
+                            Int32(roots.count),
+                            torrentAuthorizedSaveRootRetainCallback,
+                            torrentAuthorizedSaveRootReleaseCallback,
+                            &errorBuffer,
+                            errorCapacity
+                        )
+                    }
+                }
             }
         }
     }
@@ -1373,29 +1399,38 @@ package typealias TorrentAlertErrorReader = @Sendable () -> String?
         stateDirectory: URL,
         wakeRelay: TorrentWakeRelay,
         enablePeerExchangePlugin: Bool,
-        authorizedSavePaths: [String]
+        authorizedSaveRoots: [TorrentAuthorizedSaveRoot]
     ) throws -> TorrentClientHandle {
         try clientCreationPreflight.withLock { $0 }?(
             stateDirectory,
             enablePeerExchangePlugin,
-            authorizedSavePaths
+            authorizedSaveRoots
         )
 
         let path = stateDirectory.path
-        let authorizedSavePathsBlob = try encodeAuthorizedSavePaths(authorizedSavePaths)
+        let encoded = try encodeAuthorizedSaveRoots(authorizedSaveRoots)
         var errorBuffer = Array<CChar>(repeating: 0, count: 1024)
-        guard let created = unsafe path.withCString({ pointer in
-            unsafe authorizedSavePathsBlob.withUnsafeBufferPointer { blob in
-                unsafe TorrentClientCreateWithError(
-                    pointer,
-                    enablePeerExchangePlugin.bridgeFlag,
-                    blob.isEmpty ? nil : blob.baseAddress,
-                    Int32(blob.count),
-                    &errorBuffer,
-                    Int32(errorBuffer.count)
-                )
+        let created = unsafe withExtendedLifetime(encoded.retainedRoots) {
+            unsafe path.withCString { pointer in
+                unsafe encoded.pathBlob.withUnsafeBufferPointer { paths in
+                    unsafe encoded.nativeRoots.withUnsafeBufferPointer { roots in
+                        unsafe TorrentClientCreateWithError(
+                            pointer,
+                            enablePeerExchangePlugin.bridgeFlag,
+                            paths.isEmpty ? nil : paths.baseAddress,
+                            Int32(paths.count),
+                            roots.isEmpty ? nil : roots.baseAddress,
+                            Int32(roots.count),
+                            torrentAuthorizedSaveRootRetainCallback,
+                            torrentAuthorizedSaveRootReleaseCallback,
+                            &errorBuffer,
+                            Int32(errorBuffer.count)
+                        )
+                    }
+                }
             }
-        }) else {
+        }
+        guard let created = unsafe created else {
             let message = unsafe errorBuffer.withUnsafeBufferPointer { buffer -> String in
                 guard let baseAddress = buffer.baseAddress else {
                     return ""
@@ -1407,33 +1442,49 @@ package typealias TorrentAlertErrorReader = @Sendable () -> String?
         return unsafe TorrentClientHandle(created, wakeRelay: wakeRelay)
     }
 
-    package nonisolated static func encodeAuthorizedSavePaths(_ paths: [String]) throws -> [UInt8] {
-        guard paths.count <= Int(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT) else {
+    private nonisolated static func encodeAuthorizedSaveRoots(
+        _ roots: [TorrentAuthorizedSaveRoot]
+    ) throws -> TorrentEncodedAuthorizedSaveRoots {
+        guard roots.count <= Int(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT) else {
             throw TorrentEngineError.bridgeError("Too many authorized download folders were provided.")
         }
 
-        var uniquePaths = Set<String>(minimumCapacity: paths.count)
-        for path in paths {
+        var uniquePaths = Set<String>(minimumCapacity: roots.count)
+        var uniqueIdentities = Set<TorrentAuthorizedSaveRootIdentity>(minimumCapacity: roots.count)
+        for root in roots {
+            let path = root.canonicalPath
             let bytes = path.utf8
             guard !bytes.isEmpty,
                   bytes.count <= Int(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES),
                   !bytes.contains(0),
-                  (path as NSString).isAbsolutePath else {
+                  (path as NSString).isAbsolutePath,
+                  uniquePaths.insert(path).inserted,
+                  uniqueIdentities.insert(TorrentAuthorizedSaveRootIdentity(
+                      device: root.device,
+                      inode: root.inode
+                  )).inserted else {
                 throw TorrentEngineError.bridgeError("An authorized download folder path is invalid.")
             }
-            uniquePaths.insert(path)
         }
 
+        let sortedRoots = roots.sorted { $0.canonicalPath < $1.canonicalPath }
         var blob = [UInt8]()
-        for path in uniquePaths.sorted() {
-            let bytes = Array(path.utf8)
+        var nativeRoots = unsafe [TTorrentAuthorizedSaveRoot]()
+        unsafe nativeRoots.reserveCapacity(sortedRoots.count)
+        for root in sortedRoots {
+            let bytes = Array(root.canonicalPath.utf8)
             guard blob.count <= Int(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES) - bytes.count - 1 else {
                 throw TorrentEngineError.bridgeError("The authorized download folder list is too large.")
             }
             blob.append(contentsOf: bytes)
             blob.append(0)
+            unsafe nativeRoots.append(root.nativeRecord())
         }
-        return blob
+        return unsafe TorrentEncodedAuthorizedSaveRoots(
+            pathBlob: blob,
+            nativeRoots: nativeRoots,
+            retainedRoots: sortedRoots
+        )
     }
 
     private func requireClient() throws -> OpaquePointer {
@@ -1468,6 +1519,26 @@ package typealias TorrentAlertErrorReader = @Sendable () -> String?
             }
             throw TorrentEngineError.bridgeError(message)
         }
+    }
+
+    private func throwingAuthorizedRootReplacement(
+        _ body: (inout [CChar], Int32) -> Int32
+    ) throws {
+        var errorBuffer = Array<CChar>(repeating: 0, count: 1_024)
+        let result = body(&errorBuffer, Int32(errorBuffer.count))
+        guard result != 0 else {
+            return
+        }
+        let message = unsafe errorBuffer.withUnsafeBufferPointer { buffer -> String in
+            guard let baseAddress = buffer.baseAddress else {
+                return ""
+            }
+            return unsafe String(cString: baseAddress)
+        }
+        if result == Int32(TTORRENT_ERROR_AUTHORIZED_SAVE_ROOT_CAPACITY) {
+            throw TorrentEngineError.authorizedRootCapacityReached(message)
+        }
+        throw TorrentEngineError.bridgeError(message)
     }
 
     private func throwingBridgeCallReturningString(

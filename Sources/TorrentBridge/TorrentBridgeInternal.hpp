@@ -6,6 +6,7 @@
 #include <libtorrent/add_torrent_params.hpp>
 #include <libtorrent/alert.hpp>
 #include <libtorrent/alert_types.hpp>
+#include <libtorrent/aux_/path.hpp>
 #include <libtorrent/bencode.hpp>
 #include <libtorrent/client_data.hpp>
 #include <libtorrent/error_code.hpp>
@@ -136,11 +137,11 @@ static_assert(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES
                   * (TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES + 1));
 static_assert(kMaxTorrentIdentityTokenCount > static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 35U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 36U);
 #if defined(TORRENT_USE_ASSERTS) && TORRENT_USE_ASSERTS
-static_assert(sizeof(lt::add_torrent_params) == 760U);
+static_assert(sizeof(lt::add_torrent_params) == 776U);
 #else
-static_assert(sizeof(lt::add_torrent_params) == 744U);
+static_assert(sizeof(lt::add_torrent_params) == 760U);
 #endif
 static_assert(TTORRENT_FILE_PRIORITY_SKIP == static_cast<int32_t>(static_cast<std::uint8_t>(lt::dont_download)));
 static_assert(TTORRENT_FILE_PRIORITY_LOW == static_cast<int32_t>(static_cast<std::uint8_t>(lt::low_priority)));
@@ -201,6 +202,8 @@ static_assert(std::is_standard_layout_v<TTorrentAddOptions>);
 static_assert(std::is_trivially_copyable_v<TTorrentAddOptions>);
 static_assert(std::is_standard_layout_v<TTorrentOptions>);
 static_assert(std::is_trivially_copyable_v<TTorrentOptions>);
+static_assert(std::is_standard_layout_v<TTorrentAuthorizedSaveRoot>);
+static_assert(std::is_trivially_copyable_v<TTorrentAuthorizedSaveRoot>);
 static_assert(sizeof(TTorrentSnapshot) == 3360U);
 static_assert(alignof(TTorrentSnapshot) == 8U);
 static_assert(sizeof(TTorrentTrackerSnapshot) == 1560U);
@@ -237,6 +240,8 @@ static_assert(sizeof(TTorrentAddOptions) == 6U);
 static_assert(alignof(TTorrentAddOptions) == 1U);
 static_assert(sizeof(TTorrentOptions) == 20U);
 static_assert(alignof(TTorrentOptions) == 4U);
+static_assert(sizeof(TTorrentAuthorizedSaveRoot) == 32U);
+static_assert(alignof(TTorrentAuthorizedSaveRoot) == 8U);
 
 enum class FileSystemNodeKind : std::uint8_t {
     file,
@@ -274,7 +279,11 @@ using ResumeIDListResult = std::expected<std::vector<std::string>, std::string>;
 using TombstoneIDResult = std::expected<std::set<std::string>, std::string>;
 using TorrentLoadResult = std::expected<lt::add_torrent_params, BridgeError>;
 using AuthorizedSavePathSet = std::set<std::string>;
-using AuthorizedSavePathResult = std::expected<AuthorizedSavePathSet, BridgeError>;
+using AuthorizedSavePathList = std::vector<std::string>;
+using AuthorizedSavePathListResult = std::expected<AuthorizedSavePathList, BridgeError>;
+using AuthorizedSaveRootMap = std::map<std::string, std::shared_ptr<lt::aux::storage_root>>;
+using AuthorizedSaveRootWeakList = std::vector<std::weak_ptr<lt::aux::storage_root>>;
+using AuthorizedSaveRootResult = std::expected<AuthorizedSaveRootMap, BridgeError>;
 
 [[nodiscard]] constexpr bool torrent_count_allows_admission(std::size_t count) noexcept
 {
@@ -1021,7 +1030,7 @@ BridgeResult validate_save_path(std::string_view save_path);
     std::string_view save_path
 );
 
-[[nodiscard]] AuthorizedSavePathResult parse_authorized_save_paths_blob(
+[[nodiscard]] AuthorizedSavePathListResult parse_authorized_save_path_list_blob(
     std::span<std::uint8_t const> blob
 );
 
@@ -1111,10 +1120,18 @@ BridgeResult apply_file_priorities(
 struct TTorrentClient {
     explicit TTorrentClient(std::string_view state_path, bool enable_peer_exchange_plugin = true);
 
+#if defined(TORRENT_BRIDGE_TESTING)
     TTorrentClient(
         std::string_view state_path,
         bool enable_peer_exchange_plugin,
-        AuthorizedSavePathSet authorized_save_paths
+        AuthorizedSavePathSet const &authorized_save_paths
+    );
+#endif
+
+    TTorrentClient(
+        std::string_view state_path,
+        bool enable_peer_exchange_plugin,
+        AuthorizedSaveRootMap authorized_save_roots
     );
 
     ~TTorrentClient() noexcept;
@@ -1126,10 +1143,12 @@ struct TTorrentClient {
 
     void set_session_shutdown_asynchronous(bool value) noexcept;
 
+    std::mutex authorized_root_replacement_lock;
     std::mutex lock;
     fs::path state_directory;
     fs::path resume_directory;
-    AuthorizedSavePathSet authorized_save_paths;
+    AuthorizedSaveRootMap authorized_save_roots;
+    AuthorizedSaveRootWeakList authorized_save_root_lifetimes;
     UniqueFileDescriptor state_directory_descriptor;
     UniqueFileDescriptor resume_directory_descriptor;
     UniqueFileDescriptor state_lock;

@@ -30,12 +30,18 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
         authorized_save_path.end()
     );
     authorized_save_paths.push_back(0U);
+    bridge_fuzz::AuthorizedSaveRoot authorized_save_root(root);
+    TTorrentAuthorizedSaveRoot native_root = authorized_save_root.record();
     bridge_fuzz::ErrorBuffer create_error;
     TTorrentClient *client = TorrentClientCreateWithError(
         state_path.c_str(),
         1,
         authorized_save_paths.data(),
         static_cast<int32_t>(authorized_save_paths.size()),
+        &native_root,
+        1,
+        bridge_fuzz::retain_authorized_save_root,
+        bridge_fuzz::release_authorized_save_root,
         create_error.data(),
         create_error.capacity()
     );

@@ -1015,11 +1015,15 @@ void TTorrentClient::load_resume_data()
         std::optional<std::string> const authorized_save_path = normalize_authorized_save_path(
             params.save_path
         );
-        if (!authorized_save_path || !authorized_save_paths.contains(*authorized_save_path)) {
+        auto const authorized_root = authorized_save_path
+            ? authorized_save_roots.find(*authorized_save_path)
+            : authorized_save_roots.end();
+        if (!authorized_save_path || authorized_root == authorized_save_roots.end()) {
             record_unauthorized_resume();
             continue;
         }
         params.save_path = *authorized_save_path;
+        params.storage_root = authorized_root->second;
 
         if (!resume_filename_matches_identity(*resume_id, params)) {
             remove_resume_file_locked(name);

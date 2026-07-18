@@ -248,20 +248,227 @@ NormalizedLiveSavePathResult normalized_live_save_path(std::string_view const sa
     return std::move(*normalized);
 }
 
-BridgeResult require_authorized_save_path(
+using AuthorizedSaveRootLookupResult =
+    std::expected<std::shared_ptr<lt::aux::storage_root>, BridgeError>;
+
+AuthorizedSaveRootLookupResult require_authorized_save_path(
     TTorrentClient const &client,
     std::string const &normalized_save_path
 )
 {
-    if (!client.authorized_save_paths.contains(normalized_save_path)) {
-        return bridge_error(1, "The save path is not authorized.");
+    auto const root = client.authorized_save_roots.find(normalized_save_path);
+    if (root == client.authorized_save_roots.end() || !root->second) {
+        return std::unexpected(BridgeError{
+            .code = 1,
+            .message = "The save path is not authorized.",
+        });
+    }
+    return root->second;
+}
+
+BridgeResult prepare_authorized_root_lifetime_replacement(
+    TTorrentClient &client,
+    AuthorizedSaveRootMap const &replacement
+)
+{
+    std::set<lt::aux::storage_root const *> current_roots;
+    for (auto const &[path, root] : client.authorized_save_roots) {
+        static_cast<void>(path);
+        if (root) {
+            current_roots.insert(root.get());
+        }
+    }
+
+    std::set<lt::aux::storage_root const *> replacement_roots;
+    AuthorizedSaveRootWeakList tracked_roots;
+    tracked_roots.reserve(client.authorized_save_root_lifetimes.size() + replacement.size());
+    for (auto const &[path, root] : replacement) {
+        static_cast<void>(path);
+        if (root && replacement_roots.insert(root.get()).second) {
+            tracked_roots.emplace_back(root);
+        }
+    }
+
+    std::set<lt::aux::storage_root const *> roots_live_after_replacement = replacement_roots;
+    for (std::weak_ptr<lt::aux::storage_root> const &weak_root
+         : client.authorized_save_root_lifetimes) {
+        long const strong_reference_count = weak_root.use_count();
+        std::shared_ptr<lt::aux::storage_root> const root = weak_root.lock();
+        if (!root || replacement_roots.contains(root.get())) {
+            continue;
+        }
+
+        bool const expires_with_current_allowlist = current_roots.contains(root.get())
+            && strong_reference_count == 1;
+        if (expires_with_current_allowlist) {
+            continue;
+        }
+        if (roots_live_after_replacement.insert(root.get()).second) {
+            tracked_roots.emplace_back(root);
+        }
+    }
+
+    if (roots_live_after_replacement.size()
+        > static_cast<std::size_t>(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT)) {
+        return bridge_error(
+            TTORRENT_ERROR_AUTHORIZED_SAVE_ROOT_CAPACITY,
+            "Too many authorized save roots remain in use."
+        );
+    }
+
+    client.authorized_save_root_lifetimes.swap(tracked_roots);
+    return {};
+}
+
+struct AuthorizedRootLifetimeCallbacks {
+    TTorrentAuthorizedRootLifetimeCallback retain;
+    TTorrentAuthorizedRootLifetimeCallback release;
+};
+
+BridgeResult preflight_authorized_root_lifetime_replacement(
+    TTorrentClient &client,
+    std::uint8_t const *authorized_save_paths_blob,
+    int32_t const authorized_save_paths_blob_size,
+    TTorrentAuthorizedSaveRoot const *authorized_save_roots,
+    int32_t const authorized_save_root_count,
+    AuthorizedRootLifetimeCallbacks const callbacks
+)
+{
+    if (authorized_save_paths_blob_size < 0
+        || authorized_save_paths_blob_size > TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES
+        || authorized_save_root_count < 0
+        || authorized_save_root_count > TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT) {
+        return {};
+    }
+    bool const has_path_blob = authorized_save_paths_blob != nullptr;
+    bool const has_path_bytes = authorized_save_paths_blob_size != 0;
+    bool const has_roots = authorized_save_roots != nullptr;
+    bool const has_root_records = authorized_save_root_count != 0;
+    bool const has_retain_callback = callbacks.retain != nullptr;
+    bool const has_release_callback = callbacks.release != nullptr;
+    if (has_path_blob != has_path_bytes
+        || has_roots != has_root_records
+        || has_retain_callback != has_release_callback
+        || (has_root_records && !has_retain_callback)) {
+        return {};
+    }
+
+    AuthorizedSavePathListResult const paths = parse_authorized_save_path_list_blob(
+        input_span_from_c_buffer(authorized_save_paths_blob, authorized_save_paths_blob_size)
+    );
+    if (!paths || paths->size() != static_cast<std::size_t>(authorized_save_root_count)) {
+        return {};
+    }
+    std::span<TTorrentAuthorizedSaveRoot const> const borrowed_records =
+        input_span_from_c_buffer(authorized_save_roots, authorized_save_root_count);
+    std::vector<TTorrentAuthorizedSaveRoot> const records(
+        borrowed_records.begin(),
+        borrowed_records.end()
+    );
+    std::set<std::string> unique_paths;
+    std::set<std::pair<std::uint64_t, std::uint64_t>> unique_identities;
+    for (std::size_t index = 0U; index < records.size(); ++index) {
+        TTorrentAuthorizedSaveRoot const &record = records.at(index);
+        if (record.directory_descriptor < 0
+            || record.lifetime_context == nullptr
+            || !unique_paths.insert(paths->at(index)).second
+            || !unique_identities.emplace(record.device, record.inode).second) {
+            return {};
+        }
+    }
+
+    struct LiveRoot {
+        std::shared_ptr<lt::aux::storage_root> root;
+        bool expires_with_current_allowlist;
+    };
+
+    std::scoped_lock guard(client.lock);
+    std::set<lt::aux::storage_root const *> current_roots;
+    for (auto const &[path, root] : client.authorized_save_roots) {
+        static_cast<void>(path);
+        if (root) {
+            current_roots.insert(root.get());
+        }
+    }
+
+    std::vector<LiveRoot> live_roots;
+    live_roots.reserve(client.authorized_save_root_lifetimes.size());
+    std::set<lt::aux::storage_root const *> seen_roots;
+    for (std::weak_ptr<lt::aux::storage_root> const &weak_root
+         : client.authorized_save_root_lifetimes) {
+        long const strong_reference_count = weak_root.use_count();
+        std::shared_ptr<lt::aux::storage_root> root = weak_root.lock();
+        if (!root || !seen_roots.insert(root.get()).second) {
+            continue;
+        }
+        bool const expires_with_current_allowlist = current_roots.contains(root.get())
+            && strong_reference_count == 1;
+        live_roots.push_back(LiveRoot{
+            .root = std::move(root),
+            .expires_with_current_allowlist = expires_with_current_allowlist,
+        });
+    }
+
+    std::set<lt::aux::storage_root const *> roots_live_after_replacement;
+    for (LiveRoot const &live_root : live_roots) {
+        if (!live_root.expires_with_current_allowlist) {
+            roots_live_after_replacement.insert(live_root.root.get());
+        }
+    }
+
+    std::size_t new_root_count = 0U;
+    for (std::size_t index = 0U; index < records.size(); ++index) {
+        TTorrentAuthorizedSaveRoot const &record = records.at(index);
+        auto const reusable = std::ranges::find_if(
+            live_roots,
+            [&](LiveRoot const &live_root) {
+                return live_root.root->path() == paths->at(index)
+                    && live_root.root->device() == record.device
+                    && live_root.root->inode() == record.inode
+                    && live_root.root->lifetime_context() == record.lifetime_context;
+            }
+        );
+        if (reusable == live_roots.end()) {
+            ++new_root_count;
+        } else {
+            roots_live_after_replacement.insert(reusable->root.get());
+        }
+    }
+
+    if (roots_live_after_replacement.size() + new_root_count
+        > static_cast<std::size_t>(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT)) {
+        return bridge_error(
+            TTORRENT_ERROR_AUTHORIZED_SAVE_ROOT_CAPACITY,
+            "Too many authorized save roots remain in use."
+        );
     }
     return {};
 }
 
-AuthorizedSavePathResult authorized_save_paths_from_c_buffer(
+[[nodiscard]] std::shared_ptr<void> retain_authorized_root_lifetime(
+    void *context,
+    AuthorizedRootLifetimeCallbacks const callbacks
+)
+{
+    callbacks.retain(context);
+    try {
+        return {context, [callbacks](void *retained_context) noexcept {
+            callbacks.release(retained_context);
+        }};
+    } catch (...) {
+        callbacks.release(context);
+        throw;
+    }
+}
+
+AuthorizedSaveRootResult authorized_save_roots_from_c_buffer(
     std::uint8_t const *authorized_save_paths_blob,
-    int32_t const authorized_save_paths_blob_size
+    int32_t const authorized_save_paths_blob_size,
+    TTorrentAuthorizedSaveRoot const *authorized_save_roots,
+    int32_t const authorized_save_root_count,
+    TTorrentAuthorizedRootLifetimeCallback const retain_authorized_root,
+    TTorrentAuthorizedRootLifetimeCallback const release_authorized_root,
+    AuthorizedSaveRootWeakList const *reusable_roots = nullptr
 )
 {
     if (authorized_save_paths_blob_size < 0
@@ -271,19 +478,127 @@ AuthorizedSavePathResult authorized_save_paths_from_c_buffer(
             .message = "The authorized save path list has an invalid size.",
         });
     }
-
-    bool const has_authorized_save_paths_blob = authorized_save_paths_blob != nullptr;
-    bool const has_authorized_save_paths_bytes = authorized_save_paths_blob_size != 0;
-    if (has_authorized_save_paths_blob != has_authorized_save_paths_bytes) {
+    bool const has_path_blob = authorized_save_paths_blob != nullptr;
+    bool const has_path_bytes = authorized_save_paths_blob_size != 0;
+    if (has_path_blob != has_path_bytes) {
         return std::unexpected(BridgeError{
             .code = 1,
             .message = "The authorized save path list pointer and size do not match.",
         });
     }
+    if (authorized_save_root_count < 0
+        || authorized_save_root_count > TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT) {
+        return std::unexpected(BridgeError{
+            .code = 1,
+            .message = "The authorized save root list has an invalid count.",
+        });
+    }
+    bool const has_roots = authorized_save_roots != nullptr;
+    bool const has_root_records = authorized_save_root_count != 0;
+    if (has_roots != has_root_records) {
+        return std::unexpected(BridgeError{
+            .code = 1,
+            .message = "The authorized save root list pointer and count do not match.",
+        });
+    }
+    bool const has_retain_callback = retain_authorized_root != nullptr;
+    bool const has_release_callback = release_authorized_root != nullptr;
+    if (has_retain_callback != has_release_callback
+        || (has_root_records && !has_retain_callback)) {
+        return std::unexpected(BridgeError{
+            .code = 1,
+            .message = "The authorized save root lifetime callbacks are invalid.",
+        });
+    }
 
-    return parse_authorized_save_paths_blob(
+    AuthorizedSavePathListResult paths = parse_authorized_save_path_list_blob(
         input_span_from_c_buffer(authorized_save_paths_blob, authorized_save_paths_blob_size)
     );
+    if (!paths) {
+        return std::unexpected(paths.error());
+    }
+    if (paths->size() != static_cast<std::size_t>(authorized_save_root_count)) {
+        return std::unexpected(BridgeError{
+            .code = 1,
+            .message = "The authorized save paths and roots do not correspond.",
+        });
+    }
+
+    AuthorizedSaveRootMap roots;
+    std::set<std::pair<std::uint64_t, std::uint64_t>> identities;
+    // The retain callback is supplied by the caller and may release or mutate
+    // its borrowed input storage. Snapshot every bounded record before the
+    // first callback so validation never rereads caller-owned memory.
+    std::span<TTorrentAuthorizedSaveRoot const> const borrowed_records =
+        input_span_from_c_buffer(authorized_save_roots, authorized_save_root_count);
+    std::vector<TTorrentAuthorizedSaveRoot> records(
+        borrowed_records.begin(),
+        borrowed_records.end()
+    );
+    auto path = paths->cbegin();
+    AuthorizedRootLifetimeCallbacks const lifetime_callbacks{
+        .retain = retain_authorized_root,
+        .release = release_authorized_root,
+    };
+    for (TTorrentAuthorizedSaveRoot const &record : records) {
+        std::string const &canonical_path = *path;
+        ++path;
+        if (record.directory_descriptor < 0 || record.lifetime_context == nullptr) {
+            return std::unexpected(BridgeError{
+                .code = 1,
+                .message = "An authorized save root record is invalid.",
+            });
+        }
+        if (!identities.emplace(record.device, record.inode).second
+            || roots.contains(canonical_path)) {
+            return std::unexpected(BridgeError{
+                .code = 1,
+                .message = "The authorized save root list contains a duplicate.",
+            });
+        }
+
+        std::shared_ptr<void> lifetime = retain_authorized_root_lifetime(
+            record.lifetime_context,
+            lifetime_callbacks
+        );
+        lt::error_code root_error;
+        std::shared_ptr<lt::aux::storage_root> root = lt::aux::make_storage_root(
+            canonical_path,
+            record.directory_descriptor,
+            record.device,
+            record.inode,
+            std::move(lifetime),
+            root_error
+        );
+        if (root_error || !root) {
+            bool const descriptor_capacity_exhausted = root_error.value() == EMFILE
+                || root_error.value() == ENFILE;
+            return std::unexpected(BridgeError{
+                .code = descriptor_capacity_exhausted
+                    ? TTORRENT_ERROR_AUTHORIZED_SAVE_ROOT_CAPACITY
+                    : 1,
+                .message = descriptor_capacity_exhausted
+                    ? "Too many authorized save roots remain in use."
+                    : "An authorized save root does not match its directory capability.",
+            });
+        }
+
+        if (reusable_roots != nullptr) {
+            for (std::weak_ptr<lt::aux::storage_root> const &weak_root : *reusable_roots) {
+                std::shared_ptr<lt::aux::storage_root> candidate = weak_root.lock();
+                if (candidate
+                    && candidate->path() == canonical_path
+                    && candidate->device() == record.device
+                    && candidate->inode() == record.inode
+                    && candidate->lifetime_context() == record.lifetime_context) {
+                    root = std::move(candidate);
+                    break;
+                }
+            }
+        }
+        roots.emplace(canonical_path, std::move(root));
+    }
+    return roots;
 }
 
 struct SourcePolicyApplicationResult {
@@ -1097,6 +1412,10 @@ extern "C" TTorrentClient *TorrentClientCreateWithError(
     uint8_t enable_pex_plugin,
     const uint8_t *authorized_save_paths_blob,
     int32_t authorized_save_paths_blob_size,
+    TTorrentAuthorizedSaveRoot const *authorized_save_roots,
+    int32_t authorized_save_root_count,
+    TTorrentAuthorizedRootLifetimeCallback retain_authorized_root,
+    TTorrentAuthorizedRootLifetimeCallback release_authorized_root,
     char *error_out,
     int32_t error_capacity
 ) noexcept
@@ -1111,12 +1430,16 @@ extern "C" TTorrentClient *TorrentClientCreateWithError(
     std::string_view const requested_state_path = c_string_view(state_path);
 
     try {
-        AuthorizedSavePathResult authorized_save_paths = authorized_save_paths_from_c_buffer(
+        AuthorizedSaveRootResult authorized_roots = authorized_save_roots_from_c_buffer(
             authorized_save_paths_blob,
-            authorized_save_paths_blob_size
+            authorized_save_paths_blob_size,
+            authorized_save_roots,
+            authorized_save_root_count,
+            retain_authorized_root,
+            release_authorized_root
         );
-        if (!authorized_save_paths) {
-            copy_error(error_buffer, authorized_save_paths.error().message);
+        if (!authorized_roots) {
+            copy_error(error_buffer, authorized_roots.error().message);
             return nullptr;
         }
 
@@ -1130,7 +1453,7 @@ extern "C" TTorrentClient *TorrentClientCreateWithError(
         return std::make_unique<TTorrentClient>(
             normalized_state_path,
             bridge_bool(enable_pex_plugin),
-            std::move(*authorized_save_paths)
+            std::move(*authorized_roots)
         ).release();
     } catch (std::exception const &exception) {
         copy_error(error_buffer, exception.what());
@@ -1145,6 +1468,10 @@ extern "C" int32_t TorrentClientReplaceAuthorizedSavePaths(
     TTorrentClient *client,
     std::uint8_t const *authorized_save_paths_blob,
     int32_t authorized_save_paths_blob_size,
+    TTorrentAuthorizedSaveRoot const *authorized_save_roots,
+    int32_t authorized_save_root_count,
+    TTorrentAuthorizedRootLifetimeCallback retain_authorized_root,
+    TTorrentAuthorizedRootLifetimeCallback release_authorized_root,
     char *error_out,
     int32_t error_capacity
 ) noexcept
@@ -1154,16 +1481,53 @@ extern "C" int32_t TorrentClientReplaceAuthorizedSavePaths(
             return bridge_error(1, "Missing torrent client.");
         }
 
-        AuthorizedSavePathResult authorized_save_paths = authorized_save_paths_from_c_buffer(
+        // Root callbacks and descriptor duplication are intentionally outside
+        // the general client lock. Serialize the complete replacement so
+        // concurrent callers cannot transiently exceed the live-root budget.
+        std::scoped_lock replacement_guard(client->authorized_root_replacement_lock);
+        BridgeResult const capacity_preflight = preflight_authorized_root_lifetime_replacement(
+            *client,
             authorized_save_paths_blob,
-            authorized_save_paths_blob_size
+            authorized_save_paths_blob_size,
+            authorized_save_roots,
+            authorized_save_root_count,
+            AuthorizedRootLifetimeCallbacks{
+                .retain = retain_authorized_root,
+                .release = release_authorized_root,
+            }
         );
-        if (!authorized_save_paths) {
-            return std::unexpected(authorized_save_paths.error());
+        if (!capacity_preflight) {
+            return capacity_preflight;
+        }
+        AuthorizedSaveRootResult authorized_roots = [&] {
+            AuthorizedSaveRootWeakList reusable_roots;
+            {
+                std::scoped_lock guard(client->lock);
+                reusable_roots = client->authorized_save_root_lifetimes;
+            }
+            return authorized_save_roots_from_c_buffer(
+                authorized_save_paths_blob,
+                authorized_save_paths_blob_size,
+                authorized_save_roots,
+                authorized_save_root_count,
+                retain_authorized_root,
+                release_authorized_root,
+                &reusable_roots
+            );
+        }();
+        if (!authorized_roots) {
+            return std::unexpected(authorized_roots.error());
         }
 
         std::scoped_lock guard(client->lock);
-        client->authorized_save_paths.swap(*authorized_save_paths);
+        BridgeResult const lifetime_budget = prepare_authorized_root_lifetime_replacement(
+            *client,
+            *authorized_roots
+        );
+        if (!lifetime_budget) {
+            return lifetime_budget;
+        }
+        client->authorized_save_roots.swap(*authorized_roots);
         return {};
     });
 }
@@ -1247,12 +1611,12 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
 
         std::scoped_lock guard(client->lock);
         LockedChangePublisher publisher(*client, wake);
-        BridgeResult const authorized_save_path = require_authorized_save_path(
+        AuthorizedSaveRootLookupResult const authorized_save_root = require_authorized_save_path(
             *client,
             *normalized_save_path
         );
-        if (!authorized_save_path) {
-            return authorized_save_path;
+        if (!authorized_save_root) {
+            return std::unexpected(authorized_save_root.error());
         }
         BridgeResult const persistence = client->ensure_persistence_available(3);
         if (!persistence) {
@@ -1323,6 +1687,7 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
             bridge_bool(add_options.starts_paused),
             enable_peer_exchange_value && !metadata_pending
         );
+        params.storage_root = *authorized_save_root;
         bool const peer_exchange_disabled_by_app =
             !enable_peer_exchange_value && !peer_exchange_was_disabled && !peer_exchange_locked_by_source;
         if (client->delete_pending_for_hashes(params.info_hashes)) {
@@ -1556,12 +1921,12 @@ int32_t add_torrent_file_data_with_priorities(
 
         std::scoped_lock guard(client->lock);
         LockedChangePublisher publisher(*client, wake);
-        BridgeResult const authorized_save_path = require_authorized_save_path(
+        AuthorizedSaveRootLookupResult const authorized_save_root = require_authorized_save_path(
             *client,
             *normalized_save_path
         );
-        if (!authorized_save_path) {
-            return authorized_save_path;
+        if (!authorized_save_root) {
+            return std::unexpected(authorized_save_root.error());
         }
         BridgeResult const persistence =
             client->ensure_persistence_available(2);
@@ -1612,6 +1977,7 @@ int32_t add_torrent_file_data_with_priorities(
             bridge_bool(add_options.starts_paused),
             enable_peer_exchange_value
         );
+        params.storage_root = *authorized_save_root;
         bool const peer_exchange_disabled_by_app =
             !enable_peer_exchange_value && !peer_exchange_was_disabled && !peer_exchange_locked_by_source;
         if (client->delete_pending_for_hashes(params.info_hashes)) {

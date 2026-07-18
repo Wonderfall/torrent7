@@ -18,9 +18,13 @@ inline constexpr int32_t TTORRENT_MAX_TRACKER_COUNT = 2000;
 inline constexpr int32_t TTORRENT_MAX_WEB_SEED_COUNT = 2000;
 inline constexpr int32_t TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT = 20000;
 inline constexpr int32_t TTORRENT_MAX_TRACKER_HOST_ROW_COUNT = 20000;
-inline constexpr int32_t TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT = 20000;
+// Each live root authority holds several descriptors. Cap current and
+// torrent-retained historical roots together so a standard 256-FD XPC process
+// retains meaningful headroom for torrent files, sockets, and state.
+inline constexpr int32_t TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT = 32;
 inline constexpr int32_t TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES = 1023;
-inline constexpr int32_t TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES = 20480000;
+inline constexpr int32_t TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES = 32768;
+inline constexpr int32_t TTORRENT_ERROR_AUTHORIZED_SAVE_ROOT_CAPACITY = 4;
 inline constexpr int32_t TTORRENT_ID_CAPACITY = 68;
 inline constexpr int32_t TTORRENT_TRACKER_HOST_CAPACITY = 256;
 inline constexpr uint32_t TTORRENT_DIRTY_TORRENTS = 1U << 0U;
@@ -53,7 +57,7 @@ inline constexpr int32_t TTORRENT_SOURCE_POLICY_ENABLE_LSD = 2;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS = 3;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS = 4;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT = 5;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 35;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 36;
 extern "C" {
 #else
 #define TORRENT_BRIDGE_NOEXCEPT
@@ -70,9 +74,10 @@ enum {
     TTORRENT_MAX_WEB_SEED_COUNT = 2000,
     TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT = 20000,
     TTORRENT_MAX_TRACKER_HOST_ROW_COUNT = 20000,
-    TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT = 20000,
+    TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT = 32,
     TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES = 1023,
-    TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES = 20480000,
+    TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES = 32768,
+    TTORRENT_ERROR_AUTHORIZED_SAVE_ROOT_CAPACITY = 4,
     TTORRENT_ID_CAPACITY = 68,
     TTORRENT_TRACKER_HOST_CAPACITY = 256,
     TTORRENT_DIRTY_TORRENTS = 1U << 0U,
@@ -105,7 +110,7 @@ enum {
     TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS = 3,
     TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS = 4,
     TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT = 5,
-    TTORRENT_BRIDGE_ABI_VERSION = 35
+    TTORRENT_BRIDGE_ABI_VERSION = 36
 };
 #endif
 
@@ -308,6 +313,23 @@ typedef struct TTorrentOptions {
     int32_t queue_priority;
 } TTorrentOptions;
 
+typedef void (*TTorrentAuthorizedRootLifetimeCallback)(void *context);
+
+// A borrowed, descriptor-backed directory capability corresponding one-to-one
+// with a path in the authorized-save-path blob. The bridge validates the
+// descriptor, identity, and current canonical pathname, then duplicates the
+// descriptor and retains lifetime_context before returning. Input records and
+// contexts must remain valid for the synchronous bridge call. Callbacks must be
+// thread-safe, non-throwing, and must not reenter TorrentBridge. Every successful
+// retain is balanced by one release; release may run on a libtorrent worker or
+// detached-shutdown thread before blocking client destruction has completed.
+typedef struct TTorrentAuthorizedSaveRoot {
+    int32_t directory_descriptor;
+    uint64_t device;
+    uint64_t inode;
+    void *lifetime_context;
+} TTorrentAuthorizedSaveRoot;
+
 const char *TorrentBridgeLibtorrentVersion(void) TORRENT_BRIDGE_NOEXCEPT;
 
 // Parses and sanitizes the magnet with the same native path used by add.
@@ -319,26 +341,39 @@ int32_t TorrentBridgeInspectMagnetSources(
 
 // Returns an owned client handle. Release it exactly once with TorrentClientDestroy.
 // authorized_save_paths_blob is a bounded sequence of non-empty, absolute UTF-8
-// paths, each terminated by NUL. Pass exactly (NULL, 0) to deny all resume
-// restoration. Pointer/size mismatches and malformed records fail creation.
+// paths, each terminated by NUL. authorized_save_roots contains one matching
+// descriptor-backed capability per path in the same order. Pass NULL/0 for both
+// collections to deny all resume restoration. Pointer/count mismatches,
+// malformed records, and identity mismatches fail creation atomically.
 TTorrentClient *TorrentClientCreateWithError(
     const char *state_path,
     uint8_t enable_pex_plugin,
     const uint8_t *authorized_save_paths_blob,
     int32_t authorized_save_paths_blob_size,
+    const TTorrentAuthorizedSaveRoot *authorized_save_roots,
+    int32_t authorized_save_root_count,
+    TTorrentAuthorizedRootLifetimeCallback retain_authorized_root,
+    TTorrentAuthorizedRootLifetimeCallback release_authorized_root,
     char *error_out,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 // Atomically replaces the exact normalized save paths accepted by subsequent
 // live add operations. This does not alter already-active torrents or rerun
-// startup resume restoration. The blob has the same bounded format and
-// pointer/size rules as TorrentClientCreateWithError; pass exactly (NULL, 0)
-// to deny all subsequent live adds.
+// startup resume restoration. The path and root collections have the same
+// bounded format, ordering, and pointer/count rules as
+// TorrentClientCreateWithError; pass NULL/0 for both collections to deny all
+// subsequent live adds. Returns
+// TTORRENT_ERROR_AUTHORIZED_SAVE_ROOT_CAPACITY without changing the current
+// roots if active torrents retain too many historical root generations.
 int32_t TorrentClientReplaceAuthorizedSavePaths(
     TTorrentClient *client,
     const uint8_t *authorized_save_paths_blob,
     int32_t authorized_save_paths_blob_size,
+    const TTorrentAuthorizedSaveRoot *authorized_save_roots,
+    int32_t authorized_save_root_count,
+    TTorrentAuthorizedRootLifetimeCallback retain_authorized_root,
+    TTorrentAuthorizedRootLifetimeCallback release_authorized_root,
     char *error_out,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;

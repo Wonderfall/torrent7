@@ -18,9 +18,12 @@ package enum TorrentEngineLimits {
     package static let maximumWebSeedCount = 2_000
     package static let maximumTorrentSnapshotCount = 20_000
     package static let maximumTrackerHostRowCount = 20_000
-    package static let maximumAuthorizedSavePathCount = 20_000
+    // Each live descriptor-backed authority holds several FDs. Bound current
+    // and torrent-retained historical roots together so a standard 256-FD XPC
+    // process keeps headroom for payload files, sockets, and engine state.
+    package static let maximumAuthorizedSavePathCount = 32
     package static let maximumAuthorizedSavePathBytes = 1_023
-    package static let maximumAuthorizedSavePathBlobBytes = 20_480_000
+    package static let maximumAuthorizedSavePathBlobBytes = 32_768
     package static let maximumRemovalWarningBytes = 511
     package static let maximumPieceMapCount = 0x20_0000
     package static let torrentIDCapacity = 68

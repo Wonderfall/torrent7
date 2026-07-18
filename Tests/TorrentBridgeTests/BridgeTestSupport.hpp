@@ -4,6 +4,7 @@
 #include "TorrentBridgeInternal.hpp"
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
@@ -61,6 +62,84 @@ public:
 
 private:
     fs::path path_;
+};
+
+struct AuthorizedSaveRootLifetimeProbe {
+    std::atomic<int> retain_count = 0;
+    std::atomic<int> release_count = 0;
+};
+
+inline void retain_authorized_save_root(void *context)
+{
+    auto *probe = static_cast<AuthorizedSaveRootLifetimeProbe *>(context);
+    probe->retain_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+inline void release_authorized_save_root(void *context)
+{
+    auto *probe = static_cast<AuthorizedSaveRootLifetimeProbe *>(context);
+    probe->release_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+class AuthorizedSaveRoot {
+public:
+    explicit AuthorizedSaveRoot(fs::path path)
+        : path_(std::move(path)),
+          descriptor_(::open(path_.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC))
+    {
+        if (!descriptor_.is_valid()) {
+            throw std::system_error(errno, std::generic_category(), "Could not open authorized test root");
+        }
+        struct ::stat metadata {};
+        if (::fstat(descriptor_.get(), &metadata) != 0) {
+            throw std::system_error(errno, std::generic_category(), "Could not inspect authorized test root");
+        }
+        if (!S_ISDIR(metadata.st_mode)) {
+            throw std::runtime_error("Authorized test root is not a directory");
+        }
+        device_ = static_cast<std::uint64_t>(metadata.st_dev);
+        inode_ = static_cast<std::uint64_t>(metadata.st_ino);
+    }
+
+    AuthorizedSaveRoot(AuthorizedSaveRoot const &) = delete;
+    AuthorizedSaveRoot &operator=(AuthorizedSaveRoot const &) = delete;
+    AuthorizedSaveRoot(AuthorizedSaveRoot &&) = delete;
+    AuthorizedSaveRoot &operator=(AuthorizedSaveRoot &&) = delete;
+
+    [[nodiscard]] TTorrentAuthorizedSaveRoot record() noexcept
+    {
+        return TTorrentAuthorizedSaveRoot{
+            .directory_descriptor = descriptor_.get(),
+            .device = device_,
+            .inode = inode_,
+            .lifetime_context = &lifetime_probe_,
+        };
+    }
+
+    [[nodiscard]] fs::path const &path() const noexcept
+    {
+        return path_;
+    }
+
+    [[nodiscard]] AuthorizedSaveRootLifetimeProbe const &lifetime_probe() const noexcept
+    {
+        return lifetime_probe_;
+    }
+
+    void close_borrowed_descriptor()
+    {
+        std::error_code const error = descriptor_.close();
+        if (error) {
+            throw std::system_error(error, "Could not close authorized test root");
+        }
+    }
+
+private:
+    fs::path path_;
+    UniqueFileDescriptor descriptor_;
+    std::uint64_t device_ = 0U;
+    std::uint64_t inode_ = 0U;
+    AuthorizedSaveRootLifetimeProbe lifetime_probe_;
 };
 
 [[nodiscard]] inline std::string string_from_c_buffer(std::span<char const> buffer)

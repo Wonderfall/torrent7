@@ -166,7 +166,7 @@ struct TorrentFolderCapabilityRegistryTests {
                 bookmarkData: [secondBookmark],
                 scope: scope
             )
-        #expect(prepared?.canonicalPaths == [secondURL.path(percentEncoded: false)])
+        #expect(prepared?.pins.map(\.canonicalPath) == [secondURL.path(percentEncoded: false)])
         #expect(try registry.capability(capabilityID: original.id, scope: scope) == original)
         #expect(firstResource.stopCount == 0)
         #expect(secondResource.startCount == 1)
@@ -185,6 +185,85 @@ struct TorrentFolderCapabilityRegistryTests {
         #expect(committed.canonicalPath == secondURL.path(percentEncoded: false))
         #expect(try registry.capability(capabilityID: original.id, scope: scope) == nil)
         #expect(firstResource.stopCount == 1)
+    }
+
+    @Test("Identical committed replacements reuse the validated access context")
+    func identicalReplacementReusesAccessContext() throws {
+        let temporary = try TemporaryDirectory()
+        let bookmark = Data("stable-bookmark".utf8)
+        let resource = TestScopedResource(url: temporary.url)
+        let epoch = UUID()
+        let scope = TorrentEngineServiceScope(engineEpoch: epoch, controllerID: UUID())
+        let registry = TorrentFolderCapabilityRegistry(
+            engineEpoch: epoch,
+            bookmarkResolver: TestBookmarkResolver([bookmark: resource])
+        )
+        let original = try #require(registry.replaceCommittedGrants(
+            bookmarkData: [bookmark],
+            scope: scope
+        ).first)
+        let originalPin = try registry.pin(capabilityID: original.id, scope: scope)
+        let originalAnchor = ObjectIdentifier(originalPin.accessLifetimeAnchor)
+
+        let prepared = try registry.prepareCommittedGrantReplacement(
+            bookmarkData: [bookmark],
+            scope: scope
+        )
+        let replacementPin = try #require(prepared.pins.first)
+
+        #expect(prepared.capabilities.first?.id == original.id)
+        #expect(ObjectIdentifier(replacementPin.accessLifetimeAnchor) == originalAnchor)
+        #expect(resource.startCount == 2)
+        #expect(resource.stopCount == 1)
+
+        let committed = try #require(registry.commit(prepared).first)
+        #expect(committed.id == original.id)
+        #expect(try registry.pins(scope: scope).first?.capabilityID == original.id)
+
+        registry.disconnect(controllerID: scope.controllerID)
+        #expect(resource.stopCount == 2)
+        #expect(!originalPin.isValid)
+        #expect(!replacementPin.isValid)
+    }
+
+    @Test("Different bookmark bytes never reuse an existing access context")
+    func distinctBookmarkDoesNotReuseAccessContext() throws {
+        let temporary = try TemporaryDirectory()
+        let originalBookmark = Data("original-bookmark".utf8)
+        let replacementBookmark = Data("replacement-bookmark".utf8)
+        let resource = TestScopedResource(url: temporary.url)
+        let epoch = UUID()
+        let scope = TorrentEngineServiceScope(engineEpoch: epoch, controllerID: UUID())
+        let registry = TorrentFolderCapabilityRegistry(
+            engineEpoch: epoch,
+            bookmarkResolver: TestBookmarkResolver([
+                originalBookmark: resource,
+                replacementBookmark: resource,
+            ])
+        )
+        let original = try #require(registry.replaceCommittedGrants(
+            bookmarkData: [originalBookmark],
+            scope: scope
+        ).first)
+        let originalPin = try registry.pin(capabilityID: original.id, scope: scope)
+        let originalAnchor = ObjectIdentifier(originalPin.accessLifetimeAnchor)
+
+        let prepared = try registry.prepareCommittedGrantReplacement(
+            bookmarkData: [replacementBookmark],
+            scope: scope
+        )
+        let replacementPin = try #require(prepared.pins.first)
+
+        #expect(prepared.capabilities.first?.id != original.id)
+        #expect(ObjectIdentifier(replacementPin.accessLifetimeAnchor) != originalAnchor)
+        #expect(resource.startCount == 2)
+        #expect(resource.stopCount == 0)
+
+        _ = try registry.commit(prepared)
+        registry.disconnect(controllerID: scope.controllerID)
+        #expect(resource.stopCount == 2)
+        #expect(!originalPin.isValid)
+        #expect(!replacementPin.isValid)
     }
 
     @Test("A prepared replacement cannot overwrite an intervening registry change")
@@ -264,8 +343,11 @@ struct TorrentFolderCapabilityRegistryTests {
             scope: scope
         )
         let pin = try registry.pin(capabilityID: capability.id, scope: scope)
+        let snapshotPins = try registry.pins(scope: scope)
         var metadata = stat()
         #expect(unsafe Darwin.fstat(try pin.directoryFileDescriptor(), &metadata) == 0)
+        #expect(snapshotPins.map(\.capabilityID) == [capability.id])
+        #expect(snapshotPins.first?.isValid == true)
         #expect(capability.identity == TorrentFolderIdentity(
             device: UInt64(truncatingIfNeeded: metadata.st_dev),
             inode: UInt64(truncatingIfNeeded: metadata.st_ino)

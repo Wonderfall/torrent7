@@ -4,6 +4,7 @@
 #include <libtorrent/extensions/smart_ban.hpp>
 #include <libtorrent/extensions/ut_metadata.hpp>
 #include <libtorrent/extensions/ut_pex.hpp>
+#include <libtorrent/pread_disk_io.hpp>
 
 namespace {
 
@@ -2050,7 +2051,15 @@ lt::settings_pack make_settings()
 
 lt::session_params make_session_params(bool enable_peer_exchange_plugin)
 {
-    return {make_settings(), session_plugins(enable_peer_exchange_plugin)};
+    lt::session_params params{
+        make_settings(),
+        session_plugins(enable_peer_exchange_plugin),
+    };
+    // Descriptor-backed storage authority is implemented by the pread
+    // backend. Select it explicitly so a future libtorrent build default
+    // cannot silently fall back to pathname-only POSIX storage.
+    params.disk_io_constructor = lt::pread_disk_io_constructor;
+    return params;
 }
 
 void prepare_add_params(
@@ -2118,10 +2127,12 @@ std::optional<std::string> normalize_authorized_save_path(std::string_view const
     return normalized;
 }
 
-AuthorizedSavePathResult parse_authorized_save_paths_blob(std::span<std::uint8_t const> const blob)
+AuthorizedSavePathListResult parse_authorized_save_path_list_blob(
+    std::span<std::uint8_t const> const blob
+)
 {
     if (blob.empty()) {
-        return AuthorizedSavePathSet{};
+        return AuthorizedSavePathList{};
     }
     if (blob.size() > static_cast<std::size_t>(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES)) {
         return std::unexpected(BridgeError{
@@ -2136,7 +2147,7 @@ AuthorizedSavePathResult parse_authorized_save_paths_blob(std::span<std::uint8_t
         });
     }
 
-    AuthorizedSavePathSet paths;
+    AuthorizedSavePathList paths;
     std::size_t offset = 0U;
     std::size_t path_count = 0U;
     while (offset < blob.size()) {
@@ -2173,7 +2184,7 @@ AuthorizedSavePathResult parse_authorized_save_paths_blob(std::span<std::uint8_t
                 .message = "The authorized save path list contains an invalid path.",
             });
         }
-        paths.insert(*normalized);
+        paths.push_back(*normalized);
         offset += length + 1U;
     }
     return paths;

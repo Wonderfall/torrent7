@@ -457,12 +457,18 @@ TEST_CASE("authorized resume restoration uses the exact lexically normalized cap
     std::string const blob_path = (authorized_directory / "child" / "..").string();
     std::vector<std::uint8_t> blob(blob_path.begin(), blob_path.end());
     blob.push_back(0U);
+    bridge_tests::AuthorizedSaveRoot authorized_root(authorized_directory);
+    TTorrentAuthorizedSaveRoot root_record = authorized_root.record();
     std::array<char, 512> error{};
     TTorrentClient *client = TorrentClientCreateWithError(
         state_directory.c_str(),
         1,
         blob.data(),
         static_cast<int32_t>(blob.size()),
+        &root_record,
+        1,
+        bridge_tests::retain_authorized_save_root,
+        bridge_tests::release_authorized_save_root,
         error.data(),
         static_cast<int32_t>(error.size())
     );
@@ -491,6 +497,8 @@ TEST_CASE("live magnet adds require the current exact authorized save path")
     fs::path const second_directory = temporary_directory.path() / "Second";
     REQUIRE(fs::create_directories(first_directory));
     REQUIRE(fs::create_directories(second_directory));
+    bridge_tests::AuthorizedSaveRoot first_root(first_directory);
+    bridge_tests::AuthorizedSaveRoot second_root(second_directory);
 
     TTorrentClient client(state_directory.string());
     client.set_session_shutdown_asynchronous(false);
@@ -520,10 +528,15 @@ TEST_CASE("live magnet adds require the current exact authorized save path")
 
     std::string const first_blob_path = (first_directory / "child" / "..").string();
     std::vector<std::uint8_t> first_blob = authorized_path_blob({first_blob_path});
+    TTorrentAuthorizedSaveRoot first_record = first_root.record();
     REQUIRE(TorrentClientReplaceAuthorizedSavePaths(
         &client,
         first_blob.data(),
         static_cast<int32_t>(first_blob.size()),
+        &first_record,
+        1,
+        bridge_tests::retain_authorized_save_root,
+        bridge_tests::release_authorized_save_root,
         error.data(),
         static_cast<int32_t>(error.size())
     ) == 0);
@@ -535,10 +548,15 @@ TEST_CASE("live magnet adds require the current exact authorized save path")
 
     std::string const second_blob_path = second_directory.string();
     std::vector<std::uint8_t> second_blob = authorized_path_blob({second_blob_path});
+    TTorrentAuthorizedSaveRoot second_record = second_root.record();
     REQUIRE(TorrentClientReplaceAuthorizedSavePaths(
         &client,
         second_blob.data(),
         static_cast<int32_t>(second_blob.size()),
+        &second_record,
+        1,
+        bridge_tests::retain_authorized_save_root,
+        bridge_tests::release_authorized_save_root,
         error.data(),
         static_cast<int32_t>(error.size())
     ) == 0);
@@ -552,6 +570,10 @@ TEST_CASE("live magnet adds require the current exact authorized save path")
         &client,
         nullptr,
         0,
+        nullptr,
+        0,
+        nullptr,
+        nullptr,
         error.data(),
         static_cast<int32_t>(error.size())
     ) == 0);
@@ -565,6 +587,7 @@ TEST_CASE("live torrent file adds require a dynamically authorized save path")
     fs::path const state_directory = temporary_directory.path() / "State";
     fs::path const download_directory = temporary_directory.path() / "Downloads";
     REQUIRE(fs::create_directories(download_directory));
+    bridge_tests::AuthorizedSaveRoot download_root(download_directory);
 
     std::vector<lt::create_file_entry> files;
     files.emplace_back("authorized-file.bin", 4);
@@ -600,10 +623,15 @@ TEST_CASE("live torrent file adds require a dynamically authorized save path")
 
     std::string const authorized_path = download_directory.string();
     std::vector<std::uint8_t> blob = authorized_path_blob({authorized_path});
+    TTorrentAuthorizedSaveRoot root_record = download_root.record();
     REQUIRE(TorrentClientReplaceAuthorizedSavePaths(
         &client,
         blob.data(),
         static_cast<int32_t>(blob.size()),
+        &root_record,
+        1,
+        bridge_tests::retain_authorized_save_root,
+        bridge_tests::release_authorized_save_root,
         error.data(),
         static_cast<int32_t>(error.size())
     ) == 0);
