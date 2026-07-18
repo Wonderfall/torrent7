@@ -2,7 +2,7 @@ import Foundation
 import TorrentEngineModel
 
 package enum TorrentEngineIPCProtocol {
-    package static let version: UInt64 = 4
+    package static let version: UInt64 = 5
 }
 
 package enum TorrentEngineIPCLimits {
@@ -15,6 +15,7 @@ package enum TorrentEngineIPCLimits {
     package static let maximumDatasetPageBytes = 1 * 1_024 * 1_024
     package static let maximumDatasetPageItemCount = 256
     package static let maximumDatasetAggregateBytes = 128 * 1_024 * 1_024
+    package static let maximumFileMetadataReplyBytes = 32 * 1_024 * 1_024
     // A maximum-size authorization snapshot can carry about 20 MiB of
     // canonical paths plus UUID and binary-property-list structure.
     package static let maximumFolderCapabilityReplyBytes = 32 * 1_024 * 1_024
@@ -32,7 +33,6 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
     case revokeFolderCapability = 6
     case replaceFolderCapabilities = 7
 
-    case inspectMagnet = 10
     case previewTorrentFile = 11
     case addMagnet = 12
     case addTorrentFile = 13
@@ -57,14 +57,12 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
     case requestPieceMap = 38
 
     case trackerBatch = 40
-    case trackerHostBatch = 41
     case webSeedBatch = 42
     case webSeedActivity = 43
     case peerSources = 44
     case fileBatch = 45
     case pieceMapBatch = 46
 
-    case openDataset = 50
     case readDataset = 51
     case closeDataset = 52
 
@@ -82,9 +80,11 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
                 + TorrentEngineLimits.maximumAuthorizedSavePathCount * 1_024
         case .grantFolderCapability:
             TorrentEngineIPCLimits.maximumBookmarkBytes + 16 * 1_024
-        case .addTorrentFile, .previewTorrentFile:
+        case .addTorrentFile:
             TorrentEngineIPCLimits.maximumPayloadBytes
-        case .poll, .openDataset, .readDataset, .closeDataset,
+        case .previewTorrentFile:
+            TorrentInputLimits.maxTorrentFileBytes
+        case .poll, .readDataset, .closeDataset,
              .beginStateMigration, .importStateMigrationFile,
              .commitStateMigration, .abortStateMigration, .changeHint:
             64 * 1_024
@@ -96,9 +96,11 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
     package var maximumReplyPayloadBytes: Int {
         switch self {
         case .previewTorrentFile:
-            TorrentEngineIPCLimits.maximumPayloadBytes
-        case .trackerBatch, .webSeedBatch, .fileBatch, .pieceMapBatch:
+            TorrentEngineIPCLimits.maximumFileMetadataReplyBytes
+        case .trackerBatch, .webSeedBatch, .pieceMapBatch:
             16 * 1_024 * 1_024
+        case .fileBatch:
+            TorrentEngineIPCLimits.maximumFileMetadataReplyBytes
         case .readDataset:
             TorrentEngineIPCLimits.maximumDatasetPageBytes + 64 * 1_024
         case .handshake, .replaceFolderCapabilities:
@@ -129,11 +131,6 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
             .init(
                 maximumContainerElementCount: TorrentEngineLimits.maximumTrackerCount,
                 maximumCollectionReferenceCount: 128 * 1_024
-            )
-        case .trackerHostBatch:
-            .init(
-                maximumContainerElementCount: TorrentEngineLimits.maximumTrackerHostRowCount,
-                maximumCollectionReferenceCount: 256 * 1_024
             )
         case .webSeedBatch:
             .init(
@@ -205,7 +202,6 @@ package struct TorrentEngineIPCRequest: Equatable, Sendable {
     }
 }
 
-/// The receiver owns `fileDescriptor` and must close it exactly once.
 package struct TorrentEngineIPCReply: Equatable, Sendable {
     package let header: TorrentEngineIPCHeader
     package let engineEpoch: UUID
@@ -213,7 +209,6 @@ package struct TorrentEngineIPCReply: Equatable, Sendable {
     package let failureCode: TorrentEngineIPCFailureCode?
     package let errorMessage: String?
     package let payload: Data?
-    package let fileDescriptor: Int32?
 
     package init(
         header: TorrentEngineIPCHeader,
@@ -221,8 +216,7 @@ package struct TorrentEngineIPCReply: Equatable, Sendable {
         status: TorrentEngineIPCReplyStatus,
         failureCode: TorrentEngineIPCFailureCode? = nil,
         errorMessage: String? = nil,
-        payload: Data? = nil,
-        fileDescriptor: Int32? = nil
+        payload: Data? = nil
     ) {
         self.header = header
         self.engineEpoch = engineEpoch
@@ -232,7 +226,6 @@ package struct TorrentEngineIPCReply: Equatable, Sendable {
             : failureCode
         self.errorMessage = errorMessage
         self.payload = payload
-        self.fileDescriptor = fileDescriptor
     }
 }
 

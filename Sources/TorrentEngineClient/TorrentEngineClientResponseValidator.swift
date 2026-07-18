@@ -29,8 +29,8 @@ enum TorrentEngineClientResponseValidator {
             try validate(folders: response.folders)
         case let response as TorrentEngineIPCPollResponse:
             try validate(response)
-        case let preview as TorrentFilePreview:
-            try validate(preview)
+        case let response as TorrentEngineIPCFilePreviewResponse:
+            try validate(response)
         case let response as TorrentEngineIPCAddedTorrentResponse:
             guard isCanonicalTorrentID(response.identifier) else {
                 throw TorrentEngineClientError.invalidReply
@@ -163,15 +163,13 @@ enum TorrentEngineClientResponseValidator {
         }
     }
 
-    private static func validate(_ preview: TorrentFilePreview) throws {
+    private static func validate(_ preview: TorrentEngineIPCFilePreviewResponse) throws {
         guard isBoundedLeafName(
             preview.name,
             maximumBytes: maximumTorrentNameBytes
         ),
         isHashKey(preview.id),
         preview.totalSize >= 0,
-        !preview.torrentData.isEmpty,
-        preview.torrentData.count <= TorrentInputLimits.maxTorrentFileBytes,
         preview.files.count <= TorrentEngineLimits.maximumFileCount else {
             throw TorrentEngineClientError.invalidReply
         }

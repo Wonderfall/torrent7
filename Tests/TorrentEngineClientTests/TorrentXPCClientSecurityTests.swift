@@ -10,6 +10,178 @@ struct TorrentXPCClientSecurityTests {
     private let epoch = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
     private let torrentID = "t:\(String(repeating: "a", count: 32))"
 
+    @Test("Change hints are validated without acquiring message resources")
+    func changeHintValidationUsesMetadata() throws {
+        let controllerID = UUID()
+        let header = TorrentEngineIPCHeader(
+            requestID: UUID(),
+            controllerID: controllerID,
+            sequence: 1,
+            operation: .changeHint,
+            operationID: UUID(),
+            expectedEpoch: epoch
+        )
+
+        #expect(TorrentEngineXPCTransport.validateHint(
+            TorrentEngineIPCRequestMetadata(
+                header: header,
+                hasPayload: false,
+                payloadByteCount: 0,
+                hasFileDescriptor: false
+            ),
+            controllerID: controllerID
+        ))
+        #expect(!TorrentEngineXPCTransport.validateHint(
+            TorrentEngineIPCRequestMetadata(
+                header: header,
+                hasPayload: true,
+                payloadByteCount: 0,
+                hasFileDescriptor: false
+            ),
+            controllerID: controllerID
+        ))
+        #expect(!TorrentEngineXPCTransport.validateHint(
+            TorrentEngineIPCRequestMetadata(
+                header: header,
+                hasPayload: false,
+                payloadByteCount: 0,
+                hasFileDescriptor: true
+            ),
+            controllerID: controllerID
+        ))
+        #expect(!TorrentEngineXPCTransport.validateHint(
+            TorrentEngineIPCRequestMetadata(
+                header: header,
+                hasPayload: false,
+                payloadByteCount: 0,
+                hasFileDescriptor: false
+            ),
+            controllerID: UUID()
+        ))
+
+        let encodedEmptyPayload = try TorrentEngineIPCEnvelopeCodec.encode(
+            TorrentEngineIPCRequest(header: header, payload: Data()),
+            maximumPayloadBytes: 0
+        )
+        let inspectedEmptyPayload = try TorrentEngineIPCEnvelopeCodec.inspectRequest(
+            encodedEmptyPayload
+        )
+        #expect(inspectedEmptyPayload.hasPayload)
+        #expect(inspectedEmptyPayload.payloadByteCount == 0)
+        #expect(!TorrentEngineXPCTransport.validateHint(
+            inspectedEmptyPayload,
+            controllerID: controllerID
+        ))
+    }
+
+    @Test("Empty preview data is rejected before transport")
+    func emptyPreviewIsRejectedLocally() async throws {
+        let epoch = epoch
+        let transport = ScriptedTorrentEngineTransport { request in
+            guard request.header.operation == .handshake else {
+                Issue.record("Empty preview data reached the transport")
+                throw TorrentEngineClientError.serviceRejected("Unexpected request")
+            }
+            return try successReply(
+                TorrentEngineIPCHandshakeResponse(
+                    libtorrentVersion: "2.1.0",
+                    folders: []
+                ),
+                for: request,
+                epoch: epoch
+            )
+        }
+        let client = try await makeClient(transport: transport)
+
+        await #expect(throws: TorrentEngineClientError.self) {
+            try await client.previewTorrentFile(data: Data())
+        }
+    }
+
+    @Test("Preview metadata preserves the original client torrent bytes")
+    func previewPreservesOriginalTorrentBytes() async throws {
+        let epoch = epoch
+        let input = Data([0x64, 0x34, 0x3A, 0x69, 0x6E, 0x66, 0x6F])
+        let transport = ScriptedTorrentEngineTransport { request in
+            switch request.header.operation {
+            case .handshake:
+                return try successReply(
+                    TorrentEngineIPCHandshakeResponse(
+                        libtorrentVersion: "2.1.0",
+                        folders: []
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .previewTorrentFile:
+                #expect(request.payload == input)
+                return try successReply(
+                    TorrentEngineIPCFilePreviewResponse(TorrentFilePreview(
+                        name: "Preview",
+                        id: "v1:\(String(repeating: "b", count: 40))",
+                        totalSize: 42,
+                        sourceSecuritySummary: .empty,
+                        files: [],
+                        torrentData: Data([0xFF])
+                    )),
+                    for: request,
+                    epoch: epoch
+                )
+            default:
+                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
+            }
+        }
+        let client = try await makeClient(transport: transport)
+
+        let preview = try await client.previewTorrentFile(data: input)
+
+        #expect(preview.name == "Preview")
+        #expect(preview.totalSize == 42)
+        #expect(preview.torrentData == input)
+    }
+
+    @Test("Invalid preview metadata terminates the client")
+    func invalidPreviewMetadataIsTerminal() async throws {
+        let epoch = epoch
+        let input = Data([0x64])
+        let transport = ScriptedTorrentEngineTransport { request in
+            switch request.header.operation {
+            case .handshake:
+                return try successReply(
+                    TorrentEngineIPCHandshakeResponse(
+                        libtorrentVersion: "2.1.0",
+                        folders: []
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .previewTorrentFile:
+                return try successReply(
+                    TorrentEngineIPCFilePreviewResponse(TorrentFilePreview(
+                        name: "Preview",
+                        id: "v1:\(String(repeating: "b", count: 40))",
+                        totalSize: -1,
+                        sourceSecuritySummary: .empty,
+                        files: [],
+                        torrentData: input
+                    )),
+                    for: request,
+                    epoch: epoch
+                )
+            default:
+                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
+            }
+        }
+        let client = try await makeClient(transport: transport)
+
+        await #expect(throws: TorrentEngineClientError.self) {
+            try await client.previewTorrentFile(data: input)
+        }
+        #expect(!client.isAvailable)
+        #expect(client.recoveryDisposition == .terminal)
+        #expect(transport.isCancelled)
+    }
+
     @Test("Reconciliation replaces the committed capability map atomically")
     func reconciliationReplacesCommittedCapabilities() async throws {
         let oldPath = testPath("old")
@@ -81,7 +253,6 @@ struct TorrentXPCClientSecurityTests {
         )
         let replacement: TorrentEngineIPCReplaceFoldersRequest = try decodeRequest(replaceRequest)
         #expect(replacement.folders.count == 2)
-        #expect(replacement.folders.allSatisfy { !$0.provisional })
         #expect(Set(replacement.folders.map(\.bookmark)) == [Data([2]), Data([3])])
 
         await #expect(throws: TorrentEngineClientError.self) {
@@ -541,8 +712,8 @@ struct TorrentXPCClientSecurityTests {
         #expect(transport.isCancelled)
     }
 
-    @Test("A rejected poll is non-authoritative and terminal")
-    func rejectedPollIsNonAuthoritativeAndTerminal() async throws {
+    @Test("A rejected poll throws and is terminal")
+    func rejectedPollThrowsAndIsTerminal() async throws {
         let epoch = epoch
         let rejection = "The poll request violated service policy."
         let transport = ScriptedTorrentEngineTransport { request in
@@ -561,18 +732,119 @@ struct TorrentXPCClientSecurityTests {
         }
         let client = try await makeClient(transport: transport)
 
-        let result = await client.poll(
-            since: nil,
-            sortedBy: .dateAdded,
-            direction: .ascending,
-            includeTrackerHosts: false
-        )
+        await #expect(throws: TorrentEngineClientError.self) {
+            try await client.poll(
+                since: nil,
+                sortedBy: .dateAdded,
+                direction: .ascending,
+                includeTrackerHosts: false
+            )
+        }
 
-        #expect(!result.isAuthoritative)
-        #expect(result.alertErrors == [rejection])
         #expect(!client.isAvailable)
         #expect(client.recoveryDisposition == .terminal)
         #expect(transport.isCancelled)
+    }
+
+    @Test("Poll assembles and closes a paged tracker-host dataset")
+    func pollLoadsAndClosesTrackerHostDataset() async throws {
+        struct DatasetState: Sendable {
+            var didRead = false
+            var didClose = false
+        }
+
+        let epoch = epoch
+        let datasetID = UUID()
+        let host = TorrentTrackerHostItem(
+            torrentID: torrentID,
+            host: "tracker.example"
+        )
+        let state = Mutex(DatasetState())
+        let transport = ScriptedTorrentEngineTransport { request in
+            switch request.header.operation {
+            case .handshake:
+                return try successReply(
+                    TorrentEngineIPCHandshakeResponse(
+                        libtorrentVersion: "2.1.0",
+                        folders: []
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .poll:
+                let poll: TorrentEngineIPCPollRequest = try decodeRequest(request)
+                #expect(poll.snapshotRevision == 7)
+                #expect(poll.sortOrder == .name)
+                #expect(poll.sortDirection == .descending)
+                #expect(poll.includeTrackerHosts)
+                return try successReply(
+                    TorrentEngineIPCPollResponse(
+                        dirtyMask: TorrentEngineDirtySet.trackerHosts.rawValue,
+                        alertErrors: [],
+                        networkStatus: .empty,
+                        bridgeHealth: .healthy,
+                        networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot(
+                            revision: 1,
+                            interfaces: []
+                        ),
+                        snapshotDataset: nil,
+                        trackerHostDataset: TorrentEngineIPCDatasetDescriptor(
+                            id: datasetID,
+                            kind: .trackerHosts,
+                            revision: 9,
+                            itemCount: 1,
+                            pageCount: 1
+                        )
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .readDataset:
+                let read: TorrentEngineIPCReadDatasetRequest = try decodeRequest(request)
+                #expect(read.id == datasetID)
+                #expect(read.page == 0)
+                state.withLock { $0.didRead = true }
+                let encodedHosts = try TorrentEngineIPCPropertyListCodec.encode(
+                    [host],
+                    maximumBytes: TorrentEngineIPCLimits.maximumDatasetPageBytes
+                )
+                return try successReply(
+                    TorrentEngineIPCDatasetPage(
+                        id: datasetID,
+                        kind: .trackerHosts,
+                        page: 0,
+                        encodedItems: encodedHosts
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .closeDataset:
+                let close: TorrentEngineIPCCloseDatasetRequest = try decodeRequest(request)
+                #expect(close.id == datasetID)
+                state.withLock { $0.didClose = true }
+                return try successReply(
+                    TorrentEngineIPCEmpty(),
+                    for: request,
+                    epoch: epoch
+                )
+            default:
+                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
+            }
+        }
+        let client = try await makeClient(transport: transport)
+
+        let result = try await client.poll(
+            since: 7,
+            sortedBy: .name,
+            direction: .descending,
+            includeTrackerHosts: true
+        )
+
+        #expect(result.trackerHostBatch?.revision == 9)
+        #expect(result.trackerHostBatch?.hosts == [host])
+        let finalState = state.withLock { $0 }
+        #expect(finalState.didRead)
+        #expect(finalState.didClose)
     }
 
     @Test("Recovery classification distinguishes lifecycle loss from trust failures")
@@ -744,7 +1016,7 @@ struct TorrentXPCClientSecurityTests {
         }
         let client = try await makeClient(transport: transport)
 
-        let accepted = await client.poll(
+        let accepted = try await client.poll(
             since: nil,
             sortedBy: .name,
             direction: .ascending,
@@ -752,14 +1024,14 @@ struct TorrentXPCClientSecurityTests {
         )
         #expect(accepted.networkInterfaceSnapshot?.revision == 2)
 
-        let rejected = await client.poll(
-            since: nil,
-            sortedBy: .name,
-            direction: .ascending,
-            includeTrackerHosts: false
-        )
-        #expect(rejected.networkInterfaceSnapshot == nil)
-        #expect(rejected.alertErrors == [TorrentEngineClientError.invalidReply.localizedDescription])
+        await #expect(throws: TorrentEngineClientError.self) {
+            try await client.poll(
+                since: nil,
+                sortedBy: .name,
+                direction: .ascending,
+                includeTrackerHosts: false
+            )
+        }
         #expect(!client.isAvailable)
         #expect(client.recoveryDisposition == .terminal)
         #expect(transport.isCancelled)

@@ -373,20 +373,12 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         var state: CapabilityState
     }
 
-    private struct LegacyPollCache: Sendable {
-        var dirtyMask: UInt32
-        var alertErrors: [String]
-        var networkStatus: TorrentNetworkStatus
-        var bridgeHealth: TorrentBridgeHealth
-    }
-
     private let controllerID: UUID
     private let transport: any TorrentEngineIPCTransport
     private let state: TorrentXPCClientState
     private var engineEpoch: UUID?
     private var nextSequence: UInt64 = 1
     private var capabilitiesByCanonicalPath = [String: CapabilityRecord]()
-    private var legacyPollCache: LegacyPollCache?
     private var latestNetworkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot?
     private var requestIsInFlight = false
     private struct RequestWaiter {
@@ -427,6 +419,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         legacyStateDirectory: URL? = nil,
         retryMode: TorrentEngineConnectionRetryMode = .initial
     ) async throws -> TorrentXPCClient {
+        let configuration = try TorrentEngineXPCIdentity.configuration()
         var retryPolicy = TorrentEngineConnectionRetryPolicy(mode: retryMode)
         while true {
             do {
@@ -434,6 +427,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                 let state = TorrentXPCClientState()
                 let transport = try TorrentEngineXPCTransport(
                     controllerID: controllerID,
+                    configuration: configuration,
                     hintHandler: { state.signal() },
                     cancellationHandler: {
                         state.cancel(
@@ -521,7 +515,6 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             try? await invokeUnit(.shutdown, TorrentEngineIPCEmpty())
         }
         capabilitiesByCanonicalPath.removeAll(keepingCapacity: false)
-        legacyPollCache = nil
         engineEpoch = nil
         state.cancel(
             message: "The isolated torrent engine connection ended safely.",
@@ -534,7 +527,6 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         recoveryDisposition: TorrentEngineRecoveryDisposition
     ) async {
         capabilitiesByCanonicalPath.removeAll(keepingCapacity: false)
-        legacyPollCache = nil
         engineEpoch = nil
         terminalize(
             message: TorrentEngineClientError.connectionCancelled.localizedDescription,
@@ -614,10 +606,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                 .replaceFolderCapabilities,
                 TorrentEngineIPCReplaceFoldersRequest(
                     folders: normalized.map {
-                        TorrentEngineIPCFolderGrant(
-                            bookmark: $0.bookmarkData,
-                            provisional: false
-                        )
+                        TorrentEngineIPCFolderGrant(bookmark: $0.bookmarkData)
                     }
                 )
             )
@@ -738,7 +727,21 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     }
 
     package func previewTorrentFile(data: Data) async throws -> TorrentFilePreview {
-        try await invoke(.previewTorrentFile, TorrentEngineIPCValue(data))
+        guard !data.isEmpty else {
+            throw TorrentEngineClientError.serviceRejected("The torrent file is empty.")
+        }
+        let response: TorrentEngineIPCFilePreviewResponse = try await invokeRaw(
+            .previewTorrentFile,
+            payload: data
+        )
+        return TorrentFilePreview(
+            name: response.name,
+            id: response.id,
+            totalSize: response.totalSize,
+            sourceSecuritySummary: response.sourceSecuritySummary,
+            files: response.files,
+            torrentData: data
+        )
     }
 
     package func pause(id: String) async throws {
@@ -796,48 +799,8 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         }
     }
 
-    package func saveAll() async {
-        try? await invokeUnit(.saveAll, TorrentEngineIPCEmpty())
-    }
-
-    package func saveAllChecked() async throws {
+    package func saveAll() async throws {
         try await invokeUnit(.saveAll, TorrentEngineIPCEmpty())
-    }
-
-    package func takeAlertError() -> String? {
-        guard var poll = legacyPollCache, !poll.alertErrors.isEmpty else {
-            return nil
-        }
-        let error = poll.alertErrors.removeFirst()
-        legacyPollCache = poll
-        return error
-    }
-
-    package func takeChanges() async -> UInt32 {
-        if legacyPollCache == nil {
-            try? await refreshLegacyPoll()
-        }
-        return legacyPollCache?.dirtyMask ?? 0
-    }
-
-    package func networkStatus() async -> TorrentNetworkStatus {
-        if legacyPollCache == nil {
-            try? await refreshLegacyPoll()
-        }
-        return legacyPollCache?.networkStatus ?? .empty
-    }
-
-    package func bridgeHealth() async -> TorrentBridgeHealth {
-        do {
-            try await refreshLegacyPoll()
-            return legacyPollCache?.bridgeHealth ?? .unavailable
-        } catch {
-            return .unavailable
-        }
-    }
-
-    package func networkInterfaceSnapshot() async -> TorrentNetworkInterfaceSnapshot? {
-        latestNetworkInterfaceSnapshot
     }
 
     package func poll(
@@ -845,114 +808,50 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         sortedBy sortOrder: TorrentSortOrder,
         direction: TorrentSortDirection,
         includeTrackerHosts: Bool
-    ) async -> TorrentEnginePollResult {
-        let response: TorrentEngineIPCPollResponse
-        do {
-            response = try await pollWire(
-                since: revision,
-                sortedBy: sortOrder,
-                direction: direction,
-                includeSnapshot: true,
-                includeTrackerHosts: includeTrackerHosts
-            )
-        } catch {
-            return failedPollResult(from: error)
-        }
-
-        let dirtyMask = response.dirtyMask
-        let alertErrors = response.alertErrors
-        var snapshotBatch: TorrentSnapshotBatch?
-        var trackerHostBatch: TorrentTrackerHostBatch?
-        if let snapshotDescriptor = response.snapshotDataset,
-           let trackerDescriptor = response.trackerHostDataset,
-           snapshotDescriptor.id == trackerDescriptor.id {
-            try? await closeDataset(snapshotDescriptor.id)
-            return failedPollResult(from: TorrentEngineClientError.invalidReply)
-        } else {
-            if let descriptor = response.snapshotDataset {
-                do {
-                    let torrents: [TorrentItem] = try await loadDataset(
-                        descriptor,
-                        expectedKind: .torrentSnapshots,
-                        maximumItemCount: TorrentEngineLimits.maximumTorrentSnapshotCount
-                    )
-                    snapshotBatch = TorrentSnapshotBatch(
-                        revision: descriptor.revision,
-                        torrents: torrents
-                    )
-                } catch {
-                    return failedPollResult(from: error)
-                }
-            }
-            if let descriptor = response.trackerHostDataset {
-                do {
-                    let hosts: [TorrentTrackerHostItem] = try await loadDataset(
-                        descriptor,
-                        expectedKind: .trackerHosts,
-                        maximumItemCount: TorrentEngineLimits.maximumTrackerHostRowCount
-                    )
-                    trackerHostBatch = TorrentTrackerHostBatch(
-                        revision: descriptor.revision,
-                        hosts: hosts
-                    )
-                } catch {
-                    return failedPollResult(from: error)
-                }
-            }
-        }
-        return TorrentEnginePollResult(
-            dirtyMask: dirtyMask,
-            alertErrors: alertErrors,
-            networkStatus: response.networkStatus,
-            bridgeHealth: response.bridgeHealth,
-            snapshotBatch: snapshotBatch,
-            trackerHostBatch: trackerHostBatch,
-            networkInterfaceSnapshot: response.networkInterfaceSnapshot
-        )
-    }
-
-    private func failedPollResult(from error: any Error) -> TorrentEnginePollResult {
-        let failure = responseFailure(from: error)
-        if failure.recoveryDisposition == .terminal {
-            terminalize(failure)
-        }
-        return TorrentEnginePollResult(
-            isAuthoritative: false,
-            dirtyMask: 0,
-            alertErrors: [failure.localizedDescription],
-            networkStatus: .empty,
-            bridgeHealth: .unavailable,
-            snapshotBatch: nil,
-            trackerHostBatch: nil,
-            networkInterfaceSnapshot: nil
-        )
-    }
-
-    package func snapshotsIfChanged(
-        since revision: UInt64?,
-        sortedBy sortOrder: TorrentSortOrder,
-        direction: TorrentSortDirection
-    ) async -> TorrentSnapshotBatch? {
+    ) async throws -> TorrentEnginePollResult {
         do {
             let response = try await pollWire(
                 since: revision,
                 sortedBy: sortOrder,
                 direction: direction,
-                includeSnapshot: true,
-                includeTrackerHosts: false
+                includeTrackerHosts: includeTrackerHosts
             )
-            guard let descriptor = response.snapshotDataset else {
-                return nil
+            var snapshotBatch: TorrentSnapshotBatch?
+            var trackerHostBatch: TorrentTrackerHostBatch?
+            if let descriptor = response.snapshotDataset {
+                let torrents: [TorrentItem] = try await loadDataset(descriptor)
+                snapshotBatch = TorrentSnapshotBatch(
+                    revision: descriptor.revision,
+                    torrents: torrents
+                )
             }
-            let torrents: [TorrentItem] = try await loadDataset(
-                descriptor,
-                expectedKind: .torrentSnapshots,
-                maximumItemCount: TorrentEngineLimits.maximumTorrentSnapshotCount
+            if let descriptor = response.trackerHostDataset {
+                let hosts: [TorrentTrackerHostItem] = try await loadDataset(descriptor)
+                trackerHostBatch = TorrentTrackerHostBatch(
+                    revision: descriptor.revision,
+                    hosts: hosts
+                )
+            }
+            return TorrentEnginePollResult(
+                dirtyMask: response.dirtyMask,
+                alertErrors: response.alertErrors,
+                networkStatus: response.networkStatus,
+                bridgeHealth: response.bridgeHealth,
+                snapshotBatch: snapshotBatch,
+                trackerHostBatch: trackerHostBatch,
+                networkInterfaceSnapshot: response.networkInterfaceSnapshot
             )
-            return TorrentSnapshotBatch(revision: descriptor.revision, torrents: torrents)
         } catch {
-            return nil
+            throw pollFailure(from: error)
         }
+    }
+
+    private func pollFailure(from error: any Error) -> TorrentEngineClientError {
+        let failure = responseFailure(from: error)
+        if failure.recoveryDisposition == .terminal {
+            terminalize(failure)
+        }
+        return failure
     }
 
     package func requestSources(id: String) async throws {
@@ -1019,11 +918,6 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         )
     }
 
-    package func trackerHostBatch() async -> TorrentTrackerHostBatch {
-        (try? await invoke(.trackerHostBatch, TorrentEngineIPCEmpty()))
-            ?? TorrentTrackerHostBatch(revision: 0, hosts: [])
-    }
-
     package func webSeedBatch(id: String, since revision: UInt64?) async -> TorrentWebSeedBatch? {
         try? await invokeOptional(
             .webSeedBatch,
@@ -1059,11 +953,10 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     ) async throws {
         let authorizations = try Self.canonicalAuthorizations(folderAuthorizations)
         let folders = authorizations.map {
-            TorrentEngineIPCFolderGrant(bookmark: $0.bookmarkData, provisional: false)
+            TorrentEngineIPCFolderGrant(bookmark: $0.bookmarkData)
         }
         let request = TorrentEngineIPCHandshakeRequest(
             enablePeerExchangePlugin: enablePeerExchangePlugin,
-            authentication: TorrentEngineXPCIdentity.authentication,
             folders: folders
         )
         let (response, epoch): (TorrentEngineIPCHandshakeResponse, UUID) = try await invokeBeforeHandshake(
@@ -1141,27 +1034,10 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         }
     }
 
-    private func refreshLegacyPoll() async throws {
-        let response = try await pollWire(
-            since: nil,
-            sortedBy: .dateAdded,
-            direction: .ascending,
-            includeSnapshot: false,
-            includeTrackerHosts: false
-        )
-        legacyPollCache = LegacyPollCache(
-            dirtyMask: response.dirtyMask,
-            alertErrors: response.alertErrors,
-            networkStatus: response.networkStatus,
-            bridgeHealth: response.bridgeHealth
-        )
-    }
-
     private func pollWire(
         since revision: UInt64?,
         sortedBy sortOrder: TorrentSortOrder,
         direction: TorrentSortDirection,
-        includeSnapshot: Bool,
         includeTrackerHosts: Bool
     ) async throws -> TorrentEngineIPCPollResponse {
         let response: TorrentEngineIPCPollResponse = try await invoke(
@@ -1170,7 +1046,6 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                 snapshotRevision: revision,
                 sortOrder: sortOrder,
                 sortDirection: direction,
-                includeSnapshot: includeSnapshot,
                 includeTrackerHosts: includeTrackerHosts
             )
         )
@@ -1196,20 +1071,9 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     }
 
     private func loadDataset<Value: Codable & Sendable>(
-        _ descriptor: TorrentEngineIPCDatasetDescriptor,
-        expectedKind: TorrentEngineIPCDatasetKind,
-        maximumItemCount: Int
+        _ descriptor: TorrentEngineIPCDatasetDescriptor
     ) async throws -> [Value] {
         do {
-            guard descriptor.kind == expectedKind,
-                  descriptor.itemCount >= 0,
-                  descriptor.itemCount <= maximumItemCount,
-                  descriptor.pageCount >= 0,
-                  descriptor.pageCount <= maximumItemCount,
-                  (descriptor.itemCount == 0) == (descriptor.pageCount == 0),
-                  descriptor.pageCount <= descriptor.itemCount else {
-                throw TorrentEngineClientError.invalidReply
-            }
             var values = [Value]()
             values.reserveCapacity(descriptor.itemCount)
             var encodedByteCount = 0
@@ -1285,10 +1149,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     ) async throws -> TorrentEngineIPCGrantedFolder {
         let response: TorrentEngineIPCGrantFolderResponse = try await invoke(
             .grantFolderCapability,
-            TorrentEngineIPCFolderGrant(
-                bookmark: bookmarkData,
-                provisional: true
-            )
+            TorrentEngineIPCFolderGrant(bookmark: bookmarkData)
         )
         guard response.folder.resolvedPath == path else {
             try? await revoke(capabilityID: response.folder.capabilityID)
@@ -1328,6 +1189,28 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             maximumBytes: operation.maximumRequestPayloadBytes
         )
         let reply = try await send(operation: operation, payload: payload, expectedEpoch: engineEpoch)
+        return try decodeValidatedResponse(reply, for: operation)
+    }
+
+    private func invokeRaw<Response: Decodable & Sendable>(
+        _ operation: TorrentEngineIPCOperation,
+        payload: Data
+    ) async throws -> Response {
+        guard payload.count <= operation.maximumRequestPayloadBytes else {
+            throw TorrentEngineClientError.serviceRejected(
+                "The torrent file exceeds the supported size limit."
+            )
+        }
+        guard let engineEpoch else {
+            let error = TorrentEngineClientError.connectionFailed
+            terminalize(error)
+            throw error
+        }
+        let reply = try await send(
+            operation: operation,
+            payload: payload,
+            expectedEpoch: engineEpoch
+        )
         return try decodeValidatedResponse(reply, for: operation)
     }
 

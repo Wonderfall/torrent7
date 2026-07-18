@@ -36,7 +36,6 @@ struct TorrentEngineServiceSecurityStateTests {
         let temporary = try ServiceTemporaryDirectory()
         let runtime = try TorrentEngineServiceRuntime(
             stateDirectory: temporary.url,
-            authentication: .sameTeam,
             transactionBegin: {},
             transactionEnd: {}
         )
@@ -85,7 +84,6 @@ struct TorrentEngineServiceSecurityStateTests {
         let temporary = try ServiceTemporaryDirectory()
         let runtime = try TorrentEngineServiceRuntime(
             stateDirectory: temporary.url,
-            authentication: .sameTeam,
             transactionBegin: {},
             transactionEnd: {}
         )
@@ -244,7 +242,6 @@ struct TorrentEngineServiceSecurityStateTests {
         let lifecycle = LifecycleRecorder()
         let runtime = try TorrentEngineServiceRuntime(
             stateDirectory: temporary.url,
-            authentication: .sameTeam,
             transactionBegin: { lifecycle.begin() },
             transactionEnd: { lifecycle.end() }
         )
@@ -282,7 +279,6 @@ struct TorrentEngineServiceSecurityStateTests {
         let lifecycle = LifecycleRecorder()
         let runtime = try TorrentEngineServiceRuntime(
             stateDirectory: temporary.url,
-            authentication: .sameTeam,
             transactionBegin: { lifecycle.begin() },
             transactionEnd: { lifecycle.end() }
         )
@@ -325,7 +321,6 @@ struct TorrentEngineServiceSecurityStateTests {
         let lifecycle = LifecycleRecorder()
         let runtime = try TorrentEngineServiceRuntime(
             stateDirectory: temporary.url,
-            authentication: .sameTeam,
             transactionBegin: { lifecycle.begin() },
             transactionEnd: { lifecycle.end() }
         )
@@ -360,7 +355,6 @@ struct TorrentEngineServiceSecurityStateTests {
         let lifecycle = LifecycleRecorder()
         let runtime = try TorrentEngineServiceRuntime(
             stateDirectory: temporary.url,
-            authentication: .sameTeam,
             transactionBegin: { lifecycle.begin() },
             transactionEnd: { lifecycle.end() }
         )
@@ -397,7 +391,6 @@ struct TorrentEngineServiceSecurityStateTests {
         let lifecycle = LifecycleRecorder()
         let runtime = try TorrentEngineServiceRuntime(
             stateDirectory: temporary.url,
-            authentication: .sameTeam,
             transactionBegin: { lifecycle.begin() },
             transactionEnd: { lifecycle.end() }
         )
@@ -434,7 +427,6 @@ struct TorrentEngineServiceSecurityStateTests {
         let lifecycle = LifecycleRecorder()
         let runtime = try TorrentEngineServiceRuntime(
             stateDirectory: temporary.url,
-            authentication: .sameTeam,
             transactionBegin: { lifecycle.begin() },
             transactionEnd: { lifecycle.end() }
         )
@@ -461,7 +453,6 @@ struct TorrentEngineServiceSecurityStateTests {
         let lifecycle = LifecycleRecorder()
         let runtime = try TorrentEngineServiceRuntime(
             stateDirectory: temporary.url,
-            authentication: .sameTeam,
             transactionBegin: { lifecycle.begin() },
             transactionEnd: { lifecycle.end() }
         )

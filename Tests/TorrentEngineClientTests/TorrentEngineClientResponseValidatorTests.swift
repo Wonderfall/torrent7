@@ -94,6 +94,59 @@ struct TorrentEngineClientResponseValidatorTests {
         }
     }
 
+    @Test("Poll dataset descriptors are kinded, bounded, and distinct")
+    func rejectsInvalidPollDatasetDescriptors() throws {
+        let snapshot = TorrentNetworkInterfaceSnapshot(revision: 1, interfaces: [])
+        let sharedID = UUID()
+        let validSnapshots = TorrentEngineIPCDatasetDescriptor(
+            id: sharedID,
+            kind: .torrentSnapshots,
+            revision: 1,
+            itemCount: 1,
+            pageCount: 1
+        )
+        let validHosts = TorrentEngineIPCDatasetDescriptor(
+            id: sharedID,
+            kind: .trackerHosts,
+            revision: 1,
+            itemCount: 1,
+            pageCount: 1
+        )
+        let invalidResponses = [
+            makePollResponse(
+                snapshot: snapshot,
+                snapshotDataset: TorrentEngineIPCDatasetDescriptor(
+                    id: UUID(),
+                    kind: .trackerHosts,
+                    revision: 1,
+                    itemCount: 1,
+                    pageCount: 1
+                )
+            ),
+            makePollResponse(
+                snapshot: snapshot,
+                snapshotDataset: TorrentEngineIPCDatasetDescriptor(
+                    id: UUID(),
+                    kind: .torrentSnapshots,
+                    revision: 1,
+                    itemCount: 1,
+                    pageCount: 0
+                )
+            ),
+            makePollResponse(
+                snapshot: snapshot,
+                snapshotDataset: validSnapshots,
+                trackerHostDataset: validHosts
+            ),
+        ]
+
+        for response in invalidResponses {
+            #expect(throws: TorrentEngineClientError.self) {
+                try TorrentEngineClientResponseValidator.validate(response)
+            }
+        }
+    }
+
     @Test("Service interface strings and VPN identity remain bounded and consistent")
     func rejectsMalformedNetworkInterfaceFields() {
         let invalidInterfaces = [
@@ -266,7 +319,9 @@ struct TorrentEngineClientResponseValidatorTests {
     }
 
     private func makePollResponse(
-        snapshot: TorrentNetworkInterfaceSnapshot
+        snapshot: TorrentNetworkInterfaceSnapshot,
+        snapshotDataset: TorrentEngineIPCDatasetDescriptor? = nil,
+        trackerHostDataset: TorrentEngineIPCDatasetDescriptor? = nil
     ) -> TorrentEngineIPCPollResponse {
         TorrentEngineIPCPollResponse(
             dirtyMask: 0,
@@ -274,8 +329,8 @@ struct TorrentEngineClientResponseValidatorTests {
             networkStatus: .empty,
             bridgeHealth: .healthy,
             networkInterfaceSnapshot: snapshot,
-            snapshotDataset: nil,
-            trackerHostDataset: nil
+            snapshotDataset: snapshotDataset,
+            trackerHostDataset: trackerHostDataset
         )
     }
 

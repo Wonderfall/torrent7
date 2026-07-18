@@ -10,6 +10,33 @@ import TorrentEngineModel
 @MainActor
 @Suite("Torrent store integration", .serialized)
 struct TorrentStoreIntegrationTests {
+    @Test("Best-effort save suppresses engine failures")
+    func bestEffortSaveSuppressesFailure() async {
+        let harness = makeStoreHarness()
+        await harness.engine.setNextSaveAllError(
+            TorrentEngineClientError.serviceRejected("Save failed.")
+        )
+
+        await harness.store.saveAll()
+
+        #expect(await harness.engine.saveAllCount == 1)
+        #expect(harness.store.lastError == nil)
+    }
+
+    @Test("Checked save reports engine failures")
+    func checkedSaveReportsFailure() async {
+        let harness = makeStoreHarness()
+        await harness.engine.setNextSaveAllError(
+            TorrentEngineClientError.serviceRejected("Save failed.")
+        )
+
+        let didSave = await harness.store.saveAllChecked()
+
+        #expect(!didSave)
+        #expect(await harness.engine.saveAllCount == 1)
+        #expect(harness.store.lastError == "Save failed.")
+    }
+
     @Test("Checked save cancels a pending production startup for prompt termination")
     func checkedSaveCancelsPendingProductionStartup() async {
         struct StartupState: Sendable {
@@ -1265,8 +1292,8 @@ struct TorrentStoreIntegrationTests {
         #expect(await harness.engine.appliedSettings.last?.networkBlocked == true)
     }
 
-    @Test("A synthetic blocked poll cannot suppress real binding containment")
-    func nonAuthoritativeBlockedPollCannotSuppressContainment() async {
+    @Test("A failed poll cannot suppress real binding containment")
+    func failedPollCannotSuppressContainment() async {
         let vpn = NetworkInterfaceOption(
             name: "utun4",
             displayName: "ProtonVPN",
@@ -1277,7 +1304,7 @@ struct TorrentStoreIntegrationTests {
         )
         let harness = makeStoreHarness(networkInterfaces: [vpn])
         await harness.engine.setNetworkStatus(.empty)
-        await harness.engine.setNextPollIsAuthoritative(false)
+        await harness.engine.setNextPollError(FakeBookmarkError())
 
         await harness.store.refreshNow()
 

@@ -11,7 +11,6 @@ private enum TorrentEngineServiceRuntimeError: LocalizedError {
     case controllerBusy
     case handshakeRequired
     case handshakeAlreadyCompleted
-    case invalidAuthentication
     case invalidController
     case invalidEpoch
     case invalidSequence
@@ -46,8 +45,6 @@ private enum TorrentEngineServiceRuntimeError: LocalizedError {
             "A torrent engine handshake is required first."
         case .handshakeAlreadyCompleted:
             "The torrent engine handshake was already completed."
-        case .invalidAuthentication:
-            "The requested XPC authentication mode does not match the service."
         case .invalidController:
             "The torrent engine controller identity is invalid."
         case .invalidEpoch:
@@ -145,7 +142,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
 
     private let engineEpoch = UUID()
     private let stateDirectory: URL
-    private let authentication: TorrentEngineIPCPeerAuthentication
     private let capabilityRegistry: TorrentFolderCapabilityRegistry
     private let migrationCoordinator: TorrentLegacyStateMigrationCoordinator
     private let transactionBegin: @Sendable () -> Void
@@ -177,7 +173,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
 
     init(
         stateDirectory: URL,
-        authentication: TorrentEngineIPCPeerAuthentication,
         containmentWatchdog: TorrentEngineServiceContainmentWatchdog = .init(),
         cleanupWatchdog: TorrentEngineServiceContainmentWatchdog = .init(
             timeout: .seconds(300)
@@ -186,7 +181,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         transactionEnd: @escaping @Sendable () -> Void = { xpc_transaction_end() }
     ) throws {
         self.stateDirectory = stateDirectory
-        self.authentication = authentication
         self.containmentWatchdog = containmentWatchdog
         self.cleanupWatchdog = cleanupWatchdog
         self.transactionBegin = transactionBegin
@@ -607,13 +601,13 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
                 controllerLease: controllerLease
             )
 
-        case .inspectMagnet:
-            throw TorrentEngineServiceRuntimeError.unsupportedOperation
         case .previewTorrentFile:
-            let value = try decode(TorrentEngineIPCValue<Data>.self, from: request).value
+            guard let value = request.payload else {
+                throw TorrentEngineServiceRuntimeError.invalidPayload
+            }
             try Self.validateTorrentData(value)
             let preview = try await requireEngine().previewTorrentFile(data: value)
-            return try encode(preview, for: operation)
+            return try encode(TorrentEngineIPCFilePreviewResponse(preview), for: operation)
         case .addMagnet:
             let value = try decode(TorrentEngineIPCAddMagnetRequest.self, from: request)
             let identifier = try await handleAddMagnet(
@@ -743,9 +737,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             let value = try decodeTorrentRevisionRequest(request)
             let batch = try await requireEngine().trackerBatch(id: value.id, since: value.revision)
             return try encodeOptional(batch, for: operation)
-        case .trackerHostBatch:
-            _ = try decode(TorrentEngineIPCEmpty.self, from: request)
-            return try await encode(requireEngine().trackerHostBatch(), for: operation)
         case .webSeedBatch:
             let value = try decodeTorrentRevisionRequest(request)
             let batch = try await requireEngine().webSeedBatch(id: value.id, since: value.revision)
@@ -771,8 +762,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             let batch = try await requireEngine().pieceMapBatch(id: value.id, since: value.revision)
             return try encodeOptional(batch, for: operation)
 
-        case .openDataset:
-            throw TorrentEngineServiceRuntimeError.unsupportedOperation
         case .readDataset:
             let value = try decode(TorrentEngineIPCReadDatasetRequest.self, from: request)
             let page = try readDataset(value, controllerID: scope.controllerID)
@@ -819,13 +808,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         guard activeMigrationID == nil else {
             throw TorrentEngineServiceRuntimeError.stateMigrationAlreadyActive
         }
-        guard request.authentication == authentication else {
-            throw TorrentEngineServiceRuntimeError.invalidAuthentication
-        }
-        guard request.folders.allSatisfy({ !$0.provisional }) else {
-            throw TorrentEngineServiceRuntimeError.invalidFolderGrant
-        }
-
         let replacement: TorrentFolderCapabilityReplacement
         do {
             replacement = try capabilityRegistry.prepareCommittedGrantReplacement(
@@ -953,9 +935,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         operation: TorrentEngineIPCOperation,
         controllerLease: TorrentEngineControllerLease
     ) async throws -> Data {
-        guard request.provisional else {
-            throw TorrentEngineServiceRuntimeError.invalidFolderGrant
-        }
         let capability: TorrentFolderCapability
         do {
             capability = try capabilityRegistry.grantProvisional(
@@ -1028,10 +1007,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         operation: TorrentEngineIPCOperation,
         controllerLease: TorrentEngineControllerLease
     ) async throws -> Data {
-        guard request.folders.allSatisfy({ !$0.provisional }) else {
-            throw TorrentEngineServiceRuntimeError.invalidFolderGrant
-        }
-
         let replacement: TorrentFolderCapabilityReplacement
         do {
             replacement = try capabilityRegistry.prepareCommittedGrantReplacement(
@@ -1224,7 +1199,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
 
         cleanupExpiredDatasets()
         var candidates = [TorrentEngineServiceDataset]()
-        if request.includeSnapshot, let batch = result.snapshotBatch {
+        if let batch = result.snapshotBatch {
             guard batch.torrents.count <= TorrentEngineLimits.maximumTorrentSnapshotCount else {
                 throw TorrentEngineServiceRuntimeError.datasetStorageLimitExceeded
             }

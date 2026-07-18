@@ -19,15 +19,18 @@ package enum TorrentEngineIPCField {
 
 package struct TorrentEngineIPCRequestMetadata: Equatable, Sendable {
     package let header: TorrentEngineIPCHeader
+    package let hasPayload: Bool
     package let payloadByteCount: Int
     package let hasFileDescriptor: Bool
 
     package init(
         header: TorrentEngineIPCHeader,
+        hasPayload: Bool,
         payloadByteCount: Int,
         hasFileDescriptor: Bool
     ) {
         self.header = header
+        self.hasPayload = hasPayload
         self.payloadByteCount = payloadByteCount
         self.hasFileDescriptor = hasFileDescriptor
     }
@@ -43,10 +46,11 @@ package enum TorrentEngineIPCEnvelopeCodec {
         TorrentEngineIPCField.operationID,
         TorrentEngineIPCField.expectedEpoch,
         TorrentEngineIPCField.payload,
-        TorrentEngineIPCField.fileDescriptor,
     ]
 
-    private static let requestFields = commonFields
+    private static let requestFields = commonFields.union([
+        TorrentEngineIPCField.fileDescriptor,
+    ])
     private static let replyFields = commonFields.union([
         TorrentEngineIPCField.engineEpoch,
         TorrentEngineIPCField.status,
@@ -108,6 +112,7 @@ package enum TorrentEngineIPCEnvelopeCodec {
         )
         return TorrentEngineIPCRequestMetadata(
             header: header,
+            hasPayload: dictionary.keys.contains(TorrentEngineIPCField.payload),
             payloadByteCount: payloadByteCount,
             hasFileDescriptor: hasFileDescriptor
         )
@@ -169,10 +174,6 @@ package enum TorrentEngineIPCEnvelopeCodec {
             into: &dictionary,
             maximumBytes: maximumPayloadBytes
         )
-        try TorrentEngineIPCXPCValues.insertFileDescriptor(
-            reply.fileDescriptor,
-            into: &dictionary
-        )
         return dictionary
     }
 
@@ -222,17 +223,13 @@ package enum TorrentEngineIPCEnvelopeCodec {
             from: dictionary,
             maximumBytes: maximumPayloadBytes
         )
-        let fileDescriptor = try TorrentEngineIPCXPCValues.duplicateFileDescriptor(
-            from: dictionary
-        )
         return TorrentEngineIPCReply(
             header: header,
             engineEpoch: engineEpoch,
             status: status,
             failureCode: failureCode,
             errorMessage: errorMessage,
-            payload: payload,
-            fileDescriptor: fileDescriptor
+            payload: payload
         )
     }
 

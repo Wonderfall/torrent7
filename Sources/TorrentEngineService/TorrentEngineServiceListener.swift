@@ -4,36 +4,25 @@ import TorrentEngineIPC
 import XPC
 
 private enum TorrentEngineServiceIdentity {
-    static let releaseAppIdentifier = "app.torrent7"
-    static let debugAppIdentifier = "app.torrent7.debug"
-    static let releaseServiceIdentifier = "app.torrent7.engine"
-    static let debugServiceIdentifier = "app.torrent7.debug.engine"
-    static let reducedAssuranceInfoKey = "Torrent7AllowAdHocXPCPeer"
-
     static func configuration(bundle: Bundle) throws -> TorrentEngineServiceConfiguration {
         guard let serviceIdentifier = bundle.bundleIdentifier else {
             throw TorrentEngineServiceStartupError.missingBundleIdentifier
         }
-
-        let appIdentifier: String
-        switch serviceIdentifier {
-        case releaseServiceIdentifier:
-            appIdentifier = releaseAppIdentifier
-        case debugServiceIdentifier:
-            appIdentifier = debugAppIdentifier
-        default:
+        guard let identity = TorrentEngineIPCIdentity.pair(
+            serviceIdentifier: serviceIdentifier
+        ) else {
             throw TorrentEngineServiceStartupError.unrecognizedBundleIdentifier
         }
-
         let allowsAdHoc = bundle.object(
-            forInfoDictionaryKey: reducedAssuranceInfoKey
+            forInfoDictionaryKey: TorrentEngineIPCIdentity.reducedAssuranceInfoKey
         ) as? Bool == true
+        let authentication = TorrentEngineIPCIdentity.authentication(
+            allowsReducedAssurance: allowsAdHoc
+        )
         return TorrentEngineServiceConfiguration(
-            serviceIdentifier: serviceIdentifier,
-            appIdentifier: appIdentifier,
-            authentication: allowsAdHoc
-                ? .reducedAssuranceAdHocDevelopment
-                : .sameTeam
+            serviceIdentifier: identity.serviceIdentifier,
+            appIdentifier: identity.appIdentifier,
+            authentication: authentication
         )
     }
 }
@@ -316,7 +305,6 @@ private enum TorrentEngineServiceStartupError: LocalizedError {
         )
         let runtime = try TorrentEngineServiceRuntime(
             stateDirectory: stateDirectory,
-            authentication: configuration.authentication,
             containmentWatchdog: containmentWatchdog,
             cleanupWatchdog: cleanupWatchdog
         )

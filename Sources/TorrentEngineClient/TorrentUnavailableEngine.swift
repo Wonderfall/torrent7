@@ -114,43 +114,19 @@ package actor TorrentUnavailableEngine: TorrentEngineServicing {
     }
 
     package func blockNetworkNow() throws -> TorrentNetworkBlockDisposition { throw unavailableError }
-    package func saveAll() {}
-    package func saveAllChecked() throws { throw unavailableError }
-    package func takeAlertError() -> String? { nil }
-    package func takeChanges() -> UInt32 { 0 }
-    package func networkStatus() -> TorrentNetworkStatus { .empty }
-    package func bridgeHealth() -> TorrentBridgeHealth { .unavailable }
+    package func saveAll() throws { throw unavailableError }
 
     package func poll(
         since revision: UInt64?,
         sortedBy sortOrder: TorrentSortOrder,
         direction: TorrentSortDirection,
         includeTrackerHosts: Bool
-    ) -> TorrentEnginePollResult {
+    ) throws -> TorrentEnginePollResult {
         _ = revision
         _ = sortOrder
         _ = direction
         _ = includeTrackerHosts
-        return TorrentEnginePollResult(
-            isAuthoritative: false,
-            dirtyMask: 0,
-            alertErrors: [],
-            networkStatus: .empty,
-            bridgeHealth: .unavailable,
-            snapshotBatch: nil,
-            trackerHostBatch: nil
-        )
-    }
-
-    package func snapshotsIfChanged(
-        since revision: UInt64?,
-        sortedBy sortOrder: TorrentSortOrder,
-        direction: TorrentSortDirection
-    ) -> TorrentSnapshotBatch? {
-        _ = revision
-        _ = sortOrder
-        _ = direction
-        return nil
+        throw unavailableError
     }
 
     package func requestSources(id: String) throws { _ = id; throw unavailableError }
@@ -196,7 +172,6 @@ package actor TorrentUnavailableEngine: TorrentEngineServicing {
 
     package func requestPieceMap(id: String) throws { _ = id; throw unavailableError }
     package func trackerBatch(id: String, since revision: UInt64?) -> TorrentTrackerBatch? { nil }
-    package func trackerHostBatch() -> TorrentTrackerHostBatch { .init(revision: 0, hosts: []) }
     package func webSeedBatch(id: String, since revision: UInt64?) -> TorrentWebSeedBatch? { nil }
     package func webSeedActivity(id: String) -> TorrentWebSeedActivity? { nil }
     package func peerSources(id: String) -> TorrentPeerSources? { nil }

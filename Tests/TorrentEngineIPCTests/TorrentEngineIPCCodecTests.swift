@@ -72,6 +72,7 @@ struct TorrentEngineIPCEnvelopeTests {
 
         let metadata = try TorrentEngineIPCEnvelopeCodec.inspectRequest(dictionary)
         #expect(metadata.header == request.header)
+        #expect(metadata.hasPayload)
         #expect(metadata.payloadByteCount == 4)
         #expect(!metadata.hasFileDescriptor)
         #expect(try TorrentEngineIPCEnvelopeCodec.decodeRequest(
@@ -93,6 +94,7 @@ struct TorrentEngineIPCEnvelopeTests {
         )
         let metadata = TorrentEngineIPCRequestMetadata(
             header: request.header,
+            hasPayload: true,
             payloadByteCount: 3,
             hasFileDescriptor: false
         )
@@ -113,6 +115,30 @@ struct TorrentEngineIPCEnvelopeTests {
 
         expectIPCError(.unexpectedField("ambientAuthority")) {
             try TorrentEngineIPCEnvelopeCodec.decodeRequest(
+                dictionary,
+                maximumPayloadBytes: 64
+            )
+        }
+    }
+
+    @Test("Replies reject request-only file descriptors")
+    func replyFileDescriptorIsRejected() throws {
+        let pipe = Pipe()
+        let reply = TorrentEngineIPCReply(
+            header: makeHeader(),
+            engineEpoch: UUID(),
+            status: .success,
+            payload: Data()
+        )
+        var dictionary = try TorrentEngineIPCEnvelopeCodec.encode(
+            reply,
+            maximumPayloadBytes: 64
+        )
+        dictionary[TorrentEngineIPCField.fileDescriptor] = try TorrentEngineIPCXPCValues
+            .boxedFileDescriptor(pipe.fileHandleForReading.fileDescriptor)
+
+        expectIPCError(.unexpectedField(TorrentEngineIPCField.fileDescriptor)) {
+            try TorrentEngineIPCEnvelopeCodec.decodeReply(
                 dictionary,
                 maximumPayloadBytes: 64
             )
@@ -294,9 +320,11 @@ struct TorrentEngineIPCEnvelopeTests {
 
     @Test("Stable dataset, migration, and hint operation numbers")
     func stableOperationNumbers() {
-        #expect(TorrentEngineIPCProtocol.version == 4)
+        #expect(TorrentEngineIPCProtocol.version == 5)
         #expect(TorrentEngineIPCOperation.replaceFolderCapabilities.rawValue == 7)
-        #expect(TorrentEngineIPCOperation.openDataset.rawValue == 50)
+        #expect(TorrentEngineIPCOperation(rawValue: 10) == nil)
+        #expect(TorrentEngineIPCOperation(rawValue: 41) == nil)
+        #expect(TorrentEngineIPCOperation(rawValue: 50) == nil)
         #expect(TorrentEngineIPCOperation.readDataset.rawValue == 51)
         #expect(TorrentEngineIPCOperation.closeDataset.rawValue == 52)
         #expect(TorrentEngineIPCOperation.beginStateMigration.rawValue == 60)
@@ -307,6 +335,38 @@ struct TorrentEngineIPCEnvelopeTests {
         #expect(TorrentEngineIPCFailureCode.operationRejected.rawValue == 1)
         #expect(TorrentEngineIPCFailureCode.controllerBusy.rawValue == 2)
         #expect(TorrentEngineIPCFailureCode.serviceShuttingDown.rawValue == 3)
+    }
+
+    @Test("XPC bundle identities require exact release or debug pairs")
+    func exactBundleIdentities() {
+        #expect(
+            TorrentEngineIPCIdentity.pair(appIdentifier: "app.torrent7")
+                == .init(
+                    appIdentifier: "app.torrent7",
+                    serviceIdentifier: "app.torrent7.engine"
+                )
+        )
+        #expect(
+            TorrentEngineIPCIdentity.pair(serviceIdentifier: "app.torrent7.debug.engine")
+                == .init(
+                    appIdentifier: "app.torrent7.debug",
+                    serviceIdentifier: "app.torrent7.debug.engine"
+                )
+        )
+        #expect(TorrentEngineIPCIdentity.pair(appIdentifier: nil) == nil)
+        #expect(TorrentEngineIPCIdentity.pair(appIdentifier: "app.torrent7.beta") == nil)
+        #expect(TorrentEngineIPCIdentity.pair(serviceIdentifier: nil) == nil)
+        #expect(TorrentEngineIPCIdentity.pair(serviceIdentifier: "app.torrent7.helper") == nil)
+        #expect(
+            TorrentEngineIPCIdentity.authentication(
+                allowsReducedAssurance: false
+            ) == .sameTeam
+        )
+        #expect(
+            TorrentEngineIPCIdentity.authentication(
+                allowsReducedAssurance: true
+            ) == .reducedAssuranceAdHocDevelopment
+        )
     }
 
     private func encodedRequest() throws -> XPCDictionary {

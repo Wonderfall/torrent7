@@ -1167,7 +1167,7 @@ final class TorrentStore {
         let startupTask = engineStartupTask
         await startupTask?.value
         await drainPendingOperations()
-        await engine.saveAll()
+        try? await engine.saveAll()
     }
 
     @discardableResult
@@ -1188,7 +1188,7 @@ final class TorrentStore {
         }
 
         do {
-            try await engine.saveAllChecked()
+            try await engine.saveAll()
             clearLastError(from: .userAction)
             return true
         } catch {
@@ -1372,12 +1372,28 @@ final class TorrentStore {
         let sortOrder = sortOrder
         let sortDirection = sortDirection
         let previousRevision = lastSnapshotRevision
-        let poll = await polledEngine.poll(
-            since: previousRevision,
-            sortedBy: sortOrder,
-            direction: sortDirection,
-            includeTrackerHosts: shouldRefreshTrackerHosts() || overlapsAnotherRefresh
-        )
+        let poll: TorrentEnginePollResult
+        do {
+            poll = try await polledEngine.poll(
+                since: previousRevision,
+                sortedBy: sortOrder,
+                direction: sortDirection,
+                includeTrackerHosts: shouldRefreshTrackerHosts() || overlapsAnotherRefresh
+            )
+        } catch {
+            guard generation == refreshGeneration,
+                  lifecycleGeneration == engineLifecycleGeneration,
+                  mutationGeneration == engineMutationGeneration,
+                  !isFolderCapabilityTransactionInProgress else {
+                return
+            }
+            if polledEngine.isAvailable {
+                setLastError(error.localizedDescription, source: .userAction)
+            } else {
+                handleUnavailableEngine(polledEngine, lifecycleGeneration: lifecycleGeneration)
+            }
+            return
+        }
 
         guard generation == refreshGeneration,
               lifecycleGeneration == engineLifecycleGeneration,
@@ -1394,12 +1410,6 @@ final class TorrentStore {
         }
         for alertError in poll.alertErrors where !alertError.isEmpty {
             setLastError(alertError, source: .userAction)
-        }
-        // A failed XPC poll carries deliberately blocked/empty fallback values.
-        // They are useful diagnostics, but are not authenticated evidence that
-        // the live controller applied containment or observed any interface.
-        guard poll.isAuthoritative else {
-            return
         }
         if let networkInterfaceSnapshot = poll.networkInterfaceSnapshot {
             applyNetworkInterfaceSnapshot(networkInterfaceSnapshot)

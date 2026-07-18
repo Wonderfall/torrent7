@@ -5,14 +5,6 @@ package struct TorrentEngineIPCEmpty: Codable, Equatable, Sendable {
     package init() {}
 }
 
-package struct TorrentEngineIPCValue<Value: Codable & Sendable>: Codable, Sendable {
-    package let value: Value
-
-    package init(_ value: Value) {
-        self.value = value
-    }
-}
-
 package struct TorrentEngineIPCOptionalValue<Value: Codable & Sendable>: Codable, Sendable {
     package let value: Value?
 
@@ -21,18 +13,32 @@ package struct TorrentEngineIPCOptionalValue<Value: Codable & Sendable>: Codable
     }
 }
 
-package enum TorrentEngineIPCPeerAuthentication: String, Codable, Sendable {
+package struct TorrentEngineIPCFilePreviewResponse: Codable, Sendable {
+    package let name: String
+    package let id: String
+    package let totalSize: Int64
+    package let sourceSecuritySummary: TorrentSourceSecuritySummary
+    package let files: [TorrentFileItem]
+
+    package init(_ preview: TorrentFilePreview) {
+        name = preview.name
+        id = preview.id
+        totalSize = preview.totalSize
+        sourceSecuritySummary = preview.sourceSecuritySummary
+        files = preview.files
+    }
+}
+
+package enum TorrentEngineIPCPeerAuthentication: Equatable, Sendable {
     case sameTeam
     case reducedAssuranceAdHocDevelopment
 }
 
 package struct TorrentEngineIPCFolderGrant: Codable, Equatable, Sendable {
     package let bookmark: Data
-    package let provisional: Bool
 
-    package init(bookmark: Data, provisional: Bool) {
+    package init(bookmark: Data) {
         self.bookmark = bookmark
-        self.provisional = provisional
     }
 }
 
@@ -48,16 +54,13 @@ package struct TorrentEngineIPCGrantedFolder: Codable, Equatable, Sendable {
 
 package struct TorrentEngineIPCHandshakeRequest: Codable, Equatable, Sendable {
     package let enablePeerExchangePlugin: Bool
-    package let authentication: TorrentEngineIPCPeerAuthentication
     package let folders: [TorrentEngineIPCFolderGrant]
 
     package init(
         enablePeerExchangePlugin: Bool,
-        authentication: TorrentEngineIPCPeerAuthentication,
         folders: [TorrentEngineIPCFolderGrant]
     ) {
         self.enablePeerExchangePlugin = enablePeerExchangePlugin
-        self.authentication = authentication
         self.folders = folders
     }
 }
@@ -248,20 +251,17 @@ package struct TorrentEngineIPCPollRequest: Codable, Equatable, Sendable {
     package let snapshotRevision: UInt64?
     package let sortOrder: TorrentSortOrder
     package let sortDirection: TorrentSortDirection
-    package let includeSnapshot: Bool
     package let includeTrackerHosts: Bool
 
     package init(
         snapshotRevision: UInt64?,
         sortOrder: TorrentSortOrder,
         sortDirection: TorrentSortDirection,
-        includeSnapshot: Bool = true,
         includeTrackerHosts: Bool
     ) {
         self.snapshotRevision = snapshotRevision
         self.sortOrder = sortOrder
         self.sortDirection = sortDirection
-        self.includeSnapshot = includeSnapshot
         self.includeTrackerHosts = includeTrackerHosts
     }
 }

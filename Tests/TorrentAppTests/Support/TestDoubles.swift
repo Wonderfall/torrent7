@@ -320,7 +320,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private var snapshotBatchSuspensionCount = 0
     private var snapshotBatchContinuations = [CheckedContinuation<Void, Never>]()
     private var snapshotFailureDisposition: TorrentEngineRecoveryDisposition?
-    private var nextPollIsAuthoritative: Bool?
+    private var nextPollError: Error?
     var dirtyMask: UInt32 = 0
     var networkStatusValue = TorrentNetworkStatus(
         requestedRevision: 0,
@@ -352,7 +352,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private var applySettingsContinuations = [CheckedContinuation<Void, Never>]()
     private(set) var currentNetworkBlocked = false
     private(set) var saveAllCount = 0
-    private(set) var saveAllCheckedCount = 0
+    private var nextSaveAllError: Error?
     private(set) var shutdownCount = 0
     private(set) var appliedSettings = [(
         settings: TorrentSettings,
@@ -536,8 +536,12 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         snapshotFailureDisposition = recoveryDisposition
     }
 
-    func setNextPollIsAuthoritative(_ isAuthoritative: Bool) {
-        nextPollIsAuthoritative = isAuthoritative
+    func setNextPollError(_ error: Error?) {
+        nextPollError = error
+    }
+
+    func setNextSaveAllError(_ error: Error?) {
+        nextSaveAllError = error
     }
 
     func setRecoveryDisposition(_ disposition: TorrentEngineRecoveryDisposition) {
@@ -896,12 +900,12 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         return disposition
     }
 
-    func saveAll() async {
+    func saveAll() async throws {
         saveAllCount += 1
-    }
-
-    func saveAllChecked() async throws {
-        saveAllCheckedCount += 1
+        if let nextSaveAllError {
+            self.nextSaveAllError = nil
+            throw nextSaveAllError
+        }
     }
 
     func takeAlertError() async -> String? {
@@ -931,9 +935,11 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         sortedBy sortOrder: TorrentSortOrder,
         direction: TorrentSortDirection,
         includeTrackerHosts: Bool
-    ) async -> TorrentEnginePollResult {
-        let isAuthoritative = nextPollIsAuthoritative ?? true
-        nextPollIsAuthoritative = nil
+    ) async throws -> TorrentEnginePollResult {
+        if let nextPollError {
+            self.nextPollError = nil
+            throw nextPollError
+        }
         let health = bridgeHealthValue
         let changes = dirtyMask
         dirtyMask = 0
@@ -960,7 +966,6 @@ actor FakeTorrentEngine: TorrentEngineServicing {
             direction: direction
         )
         return TorrentEnginePollResult(
-            isAuthoritative: isAuthoritative,
             dirtyMask: changes,
             alertErrors: errors,
             networkStatus: status,

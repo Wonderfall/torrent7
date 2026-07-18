@@ -86,9 +86,11 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
   signing identifiers from the same Team ID. Versioned envelopes, operation-specific
   payload limits, pre-decode binary-property-list structure limits, epochs,
   monotonic sequences, replay identifiers, queue budgets, typed failures, and
-  semantic response validation constrain both sides of the XPC boundary. Wire
-  messages are container-rooted; commit-ambiguous response serialization failures
-  close the controller instead of being reported as definite rejections. Errors
+  semantic response validation constrain both sides of the XPC boundary.
+  Property-list messages are container-rooted; the bounded raw torrent-preview
+  request receives a metadata-only response. Commit-ambiguous response
+  serialization failures close the controller instead of being reported as
+  definite rejections. Errors
   after native add begins receive the same treatment because libtorrent may have
   accepted the torrent before a later bridge failure; they are not revoked or
   retried as though rejection were certain.

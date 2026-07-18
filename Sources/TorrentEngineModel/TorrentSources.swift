@@ -512,7 +512,7 @@ package struct TorrentFileItem: Codable, Identifiable, Hashable, Sendable {
     }
 }
 
-package struct TorrentFilePreview: Codable, Equatable, Sendable {
+package struct TorrentFilePreview: Equatable, Sendable {
     package let name: String
     package let id: String
     package let totalSize: Int64

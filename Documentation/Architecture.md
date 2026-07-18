@@ -105,19 +105,22 @@ static analysis, compiler hardening, or tests.
 ### Use a versioned, fail-closed XPC protocol
 
 Requests and replies use typed binary-property-list payloads inside a strict XPC
-envelope. The protocol includes a version, request ID, operation ID, controller
-ID, strictly increasing sequence, operation, and expected engine epoch.
+envelope, except that torrent preview sends the already-bounded file bytes
+directly and receives only typed metadata. The protocol includes a version,
+request ID, operation ID, controller ID, strictly increasing sequence,
+operation, and expected engine epoch.
 
 The following are protocol invariants:
 
 - operation-specific request and reply byte limits are checked before decode;
 - binary-property-list object tables, per-container elements, and aggregate
   collection references are structurally bounded before Foundation decoding;
-- every payload uses a keyed or collection root; scalar add/remove results are
-  wrapped in explicit response messages because Foundation rejects scalar
-  property-list roots;
+- every property-list payload uses a keyed or collection root; scalar add/remove
+  results are wrapped in explicit response messages because Foundation rejects
+  scalar property-list roots;
 - unknown, missing, duplicate, mistyped, or unexpected envelope fields fail;
-- only the legacy-state import operation may carry a file descriptor;
+- only a legacy-state import request may carry a file descriptor; replies reject
+  the request-only descriptor field;
 - request IDs and operation IDs are replay checked;
 - post-handshake operations must name the current engine epoch;
 - client requests are serialized, and service work is serialized per peer;
@@ -147,7 +150,9 @@ applying only the latest settings;
   relaunch interval; connection invalidation remains transient only after that
   typed cleanup episode begins, while identity, protocol, and semantic failures
   are never made retryable;
-- change notifications are coalesced hints only; revisions remain authoritative.
+- change notifications are coalesced hints only; the client inspects their
+  fixed-size envelope metadata without copying a payload or acquiring a file
+  descriptor, and revisions remain authoritative.
 
 Ad-hoc signatures do not have a Team ID. Local development builds therefore use
 an explicit reduced-assurance Info.plist switch on both bundles. Identified
@@ -171,6 +176,7 @@ transport uses this split:
 | Tracker-host index | Bounded immutable aggregate with one revision | Short-lived paged dataset returned by `poll` | Fully assembled and validated before replacing sidebar state |
 | Trackers and web seeds | Demand-driven revisioned batch | Bounded inline reply | Detail cache, evictable |
 | Files and piece map | Demand-driven revisioned batch | Bounded inline reply | Detail cache, evictable |
+| Torrent-file preview | Native parse result plus caller-owned input bytes | Raw bounded request; metadata-only reply | The GUI retains its original bytes for the eventual add |
 | Peer sources and web-seed activity | Small typed snapshot | Bounded inline reply | Refreshed on demand |
 | Network status, bridge health, and errors | Small poll snapshot | Bounded inline reply | Replaced on poll |
 | Commands | Serialized operation | Explicit success or bounded failure | No shared mutable native object |
@@ -187,6 +193,13 @@ dataset after successful assembly or a recoverable failure.
 Paging does not expose partially mutable application state. The GUI publishes a
 new torrent or tracker-host array only after every page has decoded and the
 complete dataset has passed semantic validation.
+
+The UI-facing engine contract has one aggregate, throwing poll operation. A
+transport or validation failure is lifecycle information, not an authoritative
+empty snapshot, so the client never manufactures fallback engine state. The
+service may coalesce wakeups, but every successful poll carries the bounded
+network, health, interface, error, and optional dataset state needed for one
+atomic refresh decision.
 
 Poll results are also scoped to GUI refresh, engine-lifecycle, and capability-
 mutation generations. A response captured before a restart or folder grant is
@@ -408,9 +421,10 @@ the explicit ASan runtime and its Xcode RPATH. `LC_DYLD_ENVIRONMENT` is forbidde
   directions. Reduced-assurance ad-hoc mode is explicit and development-only.
 - No decoded XPC value becomes engine or GUI state without operation-specific
   byte bounds, structural binary-plist bounds, and semantic validation.
-- Wire payloads are container-rooted. A response serialization failure is
-  commit-ambiguous and terminates the controller rather than masquerading as a
-  definite operation rejection.
+- Property-list wire payloads are container-rooted. The sole raw preview request
+  is independently byte-bounded and is not echoed in the response. A response
+  serialization failure is commit-ambiguous and terminates the controller
+  rather than masquerading as a definite operation rejection.
 - Requests are serialized and bound to one controller, monotonic sequence, and
   engine epoch; replayed identifiers are rejected.
 - Wake messages are hints. Revisions, not delivery count, determine freshness.
@@ -465,6 +479,16 @@ the explicit ASan runtime and its Xcode RPATH. `LC_DYLD_ENVIRONMENT` is forbidde
 | Network authority | Independent service monitor and generation lease completed | Binding-race, monitor-change, disconnect, and libtorrent network-security tests |
 | Packaging split | Separate entitlements, signing, quarantine, and code inventory completed | Production and sanitizer app builds plus verifier; distribution notarization and Gatekeeper |
 | Dependency confinement | Ordered pinned patch series completed | Patch provenance and focused security suite for every dependency or toolchain change |
+
+One boundedness follow-up remains from the XPC audit. The capability and legacy
+migration helpers currently retain disconnected controller UUID tombstones for
+the service process lifetime so a stale prepared operation can never become
+valid again. Those sets should not be capped or time-evicted: doing so would
+weaken the stale-scope fence. The clean replacement is a server-minted,
+per-connection generation with a shared one-way invalidation token, allowing
+state to remain proportional to live operations even if a wire controller UUID
+is reused. This is an internal service-lifecycle change and does not require a
+new wire identity or a weaker disconnect guarantee.
 
 The XPC migration is the production architecture, not a compatibility path.
 Future transport or performance work may change encoding and batching within the

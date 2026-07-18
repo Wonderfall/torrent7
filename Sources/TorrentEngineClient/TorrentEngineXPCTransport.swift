@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 import Synchronization
 import TorrentEngineIPC
@@ -46,29 +45,27 @@ package enum TorrentEngineClientError: LocalizedError, Sendable {
 }
 
 package enum TorrentEngineXPCIdentity {
-    package static let releaseAppIdentifier = "app.torrent7"
-    package static let debugAppIdentifier = "app.torrent7.debug"
-    package static let releaseServiceIdentifier = "app.torrent7.engine"
-    package static let debugServiceIdentifier = "app.torrent7.debug.engine"
-    package static let reducedAssuranceInfoKey = "Torrent7AllowAdHocXPCPeer"
-
-    package static var serviceIdentifier: String {
-        Bundle.main.bundleIdentifier == debugAppIdentifier
-            ? debugServiceIdentifier
-            : releaseServiceIdentifier
+    package static func configuration(bundle: Bundle = .main) throws -> TorrentEngineXPCConfiguration {
+        guard let identity = TorrentEngineIPCIdentity.pair(
+            appIdentifier: bundle.bundleIdentifier
+        ) else {
+            throw TorrentEngineClientError.connectionFailed
+        }
+        let authentication = TorrentEngineIPCIdentity.authentication(
+            allowsReducedAssurance: bundle.object(
+                forInfoDictionaryKey: TorrentEngineIPCIdentity.reducedAssuranceInfoKey
+            ) as? Bool == true
+        )
+        return TorrentEngineXPCConfiguration(
+            serviceIdentifier: identity.serviceIdentifier,
+            authentication: authentication
+        )
     }
+}
 
-    package static var appIdentifier: String {
-        Bundle.main.bundleIdentifier == debugAppIdentifier
-            ? debugAppIdentifier
-            : releaseAppIdentifier
-    }
-
-    package static var authentication: TorrentEngineIPCPeerAuthentication {
-        Bundle.main.object(forInfoDictionaryKey: reducedAssuranceInfoKey) as? Bool == true
-            ? .reducedAssuranceAdHocDevelopment
-            : .sameTeam
-    }
+package struct TorrentEngineXPCConfiguration: Equatable, Sendable {
+    package let serviceIdentifier: String
+    package let authentication: TorrentEngineIPCPeerAuthentication
 }
 
 package protocol TorrentEngineIPCTransport: Sendable {
@@ -79,7 +76,6 @@ package protocol TorrentEngineIPCTransport: Sendable {
 @safe package final class TorrentEngineXPCTransport: TorrentEngineIPCTransport, @unchecked Sendable {
     private struct State: Sendable {
         var isCancelled = false
-        var didNotifyCancellation = false
     }
 
     @safe private final class ConnectionState: Sendable {
@@ -88,28 +84,24 @@ package protocol TorrentEngineIPCTransport: Sendable {
 
     private let session: XPCSession
     private let state: ConnectionState
-    private let controllerID: UUID
-    private let hintHandler: @Sendable () -> Void
     private let cancellationHandler: @Sendable () -> Void
 
     package init(
         controllerID: UUID,
+        configuration: TorrentEngineXPCConfiguration,
         hintHandler: @escaping @Sendable () -> Void,
         cancellationHandler: @escaping @Sendable () -> Void
     ) throws {
-        self.controllerID = controllerID
-        self.hintHandler = hintHandler
         self.cancellationHandler = cancellationHandler
         let connectionState = ConnectionState()
         state = connectionState
 
-        let serviceIdentifier = TorrentEngineXPCIdentity.serviceIdentifier
+        let serviceIdentifier = configuration.serviceIdentifier
         let incomingHandler: @Sendable (XPCDictionary) -> XPCDictionary? = {
             [controllerID, hintHandler] dictionary in
-            guard let request = try? TorrentEngineIPCEnvelopeCodec.decodeRequest(
-                dictionary,
-                maximumPayloadBytes: 64 * 1_024
-            ), Self.validateDecodedHint(request, controllerID: controllerID) else {
+            guard let metadata = try? TorrentEngineIPCEnvelopeCodec.inspectRequest(
+                dictionary
+            ), Self.validateHint(metadata, controllerID: controllerID) else {
                 return nil
             }
             hintHandler()
@@ -117,11 +109,10 @@ package protocol TorrentEngineIPCTransport: Sendable {
         }
         let cancelled: @Sendable (XPCRichError) -> Void = { _ in
             let shouldNotify = connectionState.value.withLock { value in
-                value.isCancelled = true
-                guard !value.didNotifyCancellation else {
+                guard !value.isCancelled else {
                     return false
                 }
-                value.didNotifyCancellation = true
+                value.isCancelled = true
                 return true
             }
             if shouldNotify {
@@ -129,7 +120,7 @@ package protocol TorrentEngineIPCTransport: Sendable {
             }
         }
 
-        switch TorrentEngineXPCIdentity.authentication {
+        switch configuration.authentication {
         case .sameTeam:
             session = try XPCSession(
                 xpcService: serviceIdentifier,
@@ -199,11 +190,10 @@ package protocol TorrentEngineIPCTransport: Sendable {
 
     package func cancel() {
         let shouldCancel = state.value.withLock { value in
-            value.isCancelled = true
-            guard !value.didNotifyCancellation else {
+            guard !value.isCancelled else {
                 return false
             }
-            value.didNotifyCancellation = true
+            value.isCancelled = true
             return true
         }
         if shouldCancel {
@@ -212,32 +202,21 @@ package protocol TorrentEngineIPCTransport: Sendable {
         }
     }
 
-    package static func validateDecodedHint(
-        _ request: TorrentEngineIPCRequest,
+    package static func validateHint(
+        _ metadata: TorrentEngineIPCRequestMetadata,
         controllerID: UUID
     ) -> Bool {
-        defer {
-            if let descriptor = request.fileDescriptor {
-                Darwin.close(descriptor)
-            }
-        }
-        return request.header.controllerID == controllerID
-            && request.header.operation == .changeHint
-            && request.payload == nil
-            && request.fileDescriptor == nil
+        metadata.header.controllerID == controllerID
+            && metadata.header.operation == .changeHint
+            && !metadata.hasPayload
+            && !metadata.hasFileDescriptor
     }
 
     package static func validateDecodedReply(
         _ reply: TorrentEngineIPCReply,
         for request: TorrentEngineIPCRequest
     ) throws -> TorrentEngineIPCReply {
-        defer {
-            if let descriptor = reply.fileDescriptor {
-                Darwin.close(descriptor)
-            }
-        }
-        guard reply.header == request.header,
-              reply.fileDescriptor == nil else {
+        guard reply.header == request.header else {
             throw TorrentEngineClientError.invalidReply
         }
         if let expectedEpoch = request.header.expectedEpoch,
