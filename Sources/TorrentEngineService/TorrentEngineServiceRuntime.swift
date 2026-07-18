@@ -133,6 +133,11 @@ enum TorrentEngineServiceRequestDisposition: Equatable, Sendable {
     case terminatePeer
 }
 
+enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
+    case blocked
+    case engineUnavailable
+}
+
 @safe actor TorrentEngineServiceRuntime {
     private static let datasetLifetime: Duration = .seconds(30)
     private static let changeHintMinimumInterval: Duration = .milliseconds(100)
@@ -163,6 +168,7 @@ enum TorrentEngineServiceRequestDisposition: Equatable, Sendable {
     private var engine: TorrentEngine?
     private var networkAuthority: TorrentNetworkBindingAuthority?
     private var networkAuthorityID: UUID?
+    private var networkAuthorityStartIsPending = false
     private var activeMigrationID: UUID?
     private var datasetsByID = [UUID: TorrentEngineServiceDataset]()
     private var transactionIsActive = false
@@ -861,7 +867,10 @@ enum TorrentEngineServiceRequestDisposition: Equatable, Sendable {
             let responsePayload = try encode(response, for: operation)
             startChangeHints(for: created, controllerID: scope.controllerID)
             let authority = networkBindingAuthority()
-            guard await authority.start() else {
+            networkAuthorityStartIsPending = true
+            let networkAuthorityStarted = await authority.start()
+            networkAuthorityStartIsPending = false
+            guard networkAuthorityStarted else {
                 throw TorrentEngineServiceRuntimeError.networkBindingRejected(.monitorNotReady)
             }
             try requireActiveController(controllerLease)
@@ -1334,32 +1343,83 @@ enum TorrentEngineServiceRequestDisposition: Equatable, Sendable {
     }
 
     private func networkBindingWasInvalidated(
-        reason _: TorrentNetworkBindingBlockReason,
+        reason: TorrentNetworkBindingBlockReason,
         authorityID: UUID
     ) async {
         guard networkAuthorityID == authorityID,
+              let controllerGeneration = activeControllerGeneration,
               let engine else {
             return
         }
-        do {
-            _ = try await engine.blockNetworkNow()
-        } catch {
-            // A failed fail-closed operation makes the native engine unusable;
-            // blocking destroy is the final containment boundary.
-            await engine.forceContainmentAfterNetworkBlockFailure(
-                detail: error.localizedDescription
-            )
-            if self.engine === engine {
-                self.engine = nil
+        let result = await processNetworkBindingInvalidation(
+            reason: reason,
+            controllerReplacementIsAllowed: !networkAuthorityStartIsPending,
+            expectedControllerGeneration: controllerGeneration,
+            expectedAuthorityID: authorityID
+        ) {
+            do {
+                _ = try await engine.blockNetworkNow()
+                return .blocked
+            } catch {
+                // A failed fail-closed operation makes the native engine unusable;
+                // blocking destroy is the final containment boundary.
+                await engine.forceContainmentAfterNetworkBlockFailure(
+                    detail: error.localizedDescription
+                )
+                return .engineUnavailable
             }
-            isShuttingDown = true
-            activeControllerGeneration = nil
-            hintTask?.cancel()
-            hintTask = nil
-            activeSession?.cancel(
-                reason: "Torrent engine network containment failed"
-            )
         }
+        if result == .engineUnavailable,
+           self.engine === engine {
+            self.engine = nil
+        }
+    }
+
+    @discardableResult
+    func processNetworkBindingInvalidation(
+        reason: TorrentNetworkBindingBlockReason,
+        controllerReplacementIsAllowed: Bool = true,
+        expectedControllerGeneration: UUID? = nil,
+        expectedAuthorityID: UUID? = nil,
+        containment: @Sendable () async -> TorrentEngineServiceNetworkContainmentResult
+    ) async -> TorrentEngineServiceNetworkContainmentResult {
+        let result = await containment()
+        if let expectedControllerGeneration,
+           activeControllerGeneration != expectedControllerGeneration {
+            return result
+        }
+        if let expectedAuthorityID,
+           networkAuthorityID != expectedAuthorityID {
+            return result
+        }
+        let monitorCannotRecover = switch reason {
+        case .monitorNotReady, .monitorStopped:
+            true
+        default:
+            false
+        }
+        guard result == .engineUnavailable
+                || (monitorCannotRecover && controllerReplacementIsAllowed) else {
+            return result
+        }
+        guard !isShuttingDown else {
+            return result
+        }
+
+        // This callback is invoked by the authority actor. Calling
+        // beginDisconnect here would await that same authority and deadlock.
+        // Native containment has already completed, so invalidate the lease
+        // and cancel the session directly; listener cleanup finishes teardown.
+        isShuttingDown = true
+        activeControllerGeneration = nil
+        hintTask?.cancel()
+        hintTask = nil
+        activeSession?.cancel(
+            reason: result == .engineUnavailable
+                ? "Torrent engine network containment failed"
+                : "Torrent engine network interface monitor became unavailable"
+        )
+        return result
     }
 
     private func networkInterfaceSnapshotDidChange(authorityID: UUID) {
@@ -1929,6 +1989,7 @@ enum TorrentEngineServiceRequestDisposition: Equatable, Sendable {
         }
         networkAuthority = nil
         networkAuthorityID = nil
+        networkAuthorityStartIsPending = false
         if let engine {
             _ = try? await engine.blockNetworkNow()
             try? await engine.shutdownSafely()

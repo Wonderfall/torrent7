@@ -276,6 +276,158 @@ struct TorrentEngineServiceSecurityStateTests {
         #expect(lifecycle.snapshot == .init(beginCount: 1, endCount: 1))
     }
 
+    @Test("A stopped interface monitor blocks before releasing its controller")
+    func stoppedInterfaceMonitorReleasesControllerAfterContainment() async throws {
+        let temporary = try ServiceTemporaryDirectory()
+        let lifecycle = LifecycleRecorder()
+        let runtime = try TorrentEngineServiceRuntime(
+            stateDirectory: temporary.url,
+            authentication: .sameTeam,
+            transactionBegin: { lifecycle.begin() },
+            transactionEnd: { lifecycle.end() }
+        )
+        let peerToken = UUID()
+
+        _ = await runtime.handle(
+            try beginMigrationRequest(),
+            from: peerToken,
+            session: TorrentEngineServiceSessionHandle(
+                cancelObserver: { _ in lifecycle.cancel() }
+            ),
+            peerIsCancelled: { false },
+            pendingReply: TorrentEnginePendingReply { lifecycle.reply(status: $0) }
+        )
+
+        let result = await runtime.processNetworkBindingInvalidation(
+            reason: .monitorStopped
+        ) {
+            lifecycle.containNetwork()
+            return .blocked
+        }
+
+        #expect(result == .blocked)
+        #expect(lifecycle.events == [
+            .begin,
+            .reply(.success),
+            .containNetwork,
+            .cancel,
+        ])
+        #expect(await runtime.diagnostics() == .disconnectingMigration)
+
+        await runtime.finishDisconnect(peerToken: peerToken)
+        #expect(await runtime.diagnostics() == .inactive)
+        #expect(lifecycle.events.last == .end)
+    }
+
+    @Test("A not-ready monitor releases its controller after containment")
+    func notReadyInterfaceMonitorReleasesControllerAfterContainment() async throws {
+        let temporary = try ServiceTemporaryDirectory()
+        let lifecycle = LifecycleRecorder()
+        let runtime = try TorrentEngineServiceRuntime(
+            stateDirectory: temporary.url,
+            authentication: .sameTeam,
+            transactionBegin: { lifecycle.begin() },
+            transactionEnd: { lifecycle.end() }
+        )
+        let peerToken = UUID()
+
+        _ = await runtime.handle(
+            try beginMigrationRequest(),
+            from: peerToken,
+            session: TorrentEngineServiceSessionHandle(
+                cancelObserver: { _ in lifecycle.cancel() }
+            ),
+            peerIsCancelled: { false },
+            pendingReply: TorrentEnginePendingReply { lifecycle.reply(status: $0) }
+        )
+
+        _ = await runtime.processNetworkBindingInvalidation(
+            reason: .monitorNotReady
+        ) {
+            lifecycle.containNetwork()
+            return .blocked
+        }
+
+        #expect(lifecycle.events.suffix(2) == [.containNetwork, .cancel])
+        #expect(await runtime.diagnostics() == .disconnectingMigration)
+
+        await runtime.finishDisconnect(peerToken: peerToken)
+    }
+
+    @Test("The initial not-ready block does not release a starting controller")
+    func initialNotReadyBlockPreservesStartingController() async throws {
+        let temporary = try ServiceTemporaryDirectory()
+        let lifecycle = LifecycleRecorder()
+        let runtime = try TorrentEngineServiceRuntime(
+            stateDirectory: temporary.url,
+            authentication: .sameTeam,
+            transactionBegin: { lifecycle.begin() },
+            transactionEnd: { lifecycle.end() }
+        )
+        let peerToken = UUID()
+
+        _ = await runtime.handle(
+            try beginMigrationRequest(),
+            from: peerToken,
+            session: TorrentEngineServiceSessionHandle(
+                cancelObserver: { _ in lifecycle.cancel() }
+            ),
+            peerIsCancelled: { false },
+            pendingReply: TorrentEnginePendingReply { lifecycle.reply(status: $0) }
+        )
+
+        _ = await runtime.processNetworkBindingInvalidation(
+            reason: .monitorNotReady,
+            controllerReplacementIsAllowed: false
+        ) {
+            lifecycle.containNetwork()
+            return .blocked
+        }
+
+        #expect(lifecycle.events.last == .containNetwork)
+        #expect(await runtime.diagnostics() == .activeMigration)
+
+        await runtime.beginDisconnect(peerToken: peerToken)
+        await runtime.finishDisconnect(peerToken: peerToken)
+    }
+
+    @Test("A stale monitor callback cannot release a newer controller generation")
+    func staleMonitorCallbackDoesNotReleaseNewerController() async throws {
+        let temporary = try ServiceTemporaryDirectory()
+        let lifecycle = LifecycleRecorder()
+        let runtime = try TorrentEngineServiceRuntime(
+            stateDirectory: temporary.url,
+            authentication: .sameTeam,
+            transactionBegin: { lifecycle.begin() },
+            transactionEnd: { lifecycle.end() }
+        )
+        let peerToken = UUID()
+
+        _ = await runtime.handle(
+            try beginMigrationRequest(),
+            from: peerToken,
+            session: TorrentEngineServiceSessionHandle(
+                cancelObserver: { _ in lifecycle.cancel() }
+            ),
+            peerIsCancelled: { false },
+            pendingReply: TorrentEnginePendingReply { lifecycle.reply(status: $0) }
+        )
+
+        _ = await runtime.processNetworkBindingInvalidation(
+            reason: .monitorStopped,
+            expectedControllerGeneration: UUID()
+        ) {
+            lifecycle.containNetwork()
+            return .blocked
+        }
+
+        #expect(lifecycle.events.last == .containNetwork)
+        #expect(await runtime.diagnostics() == .activeMigration)
+
+        await runtime.beginDisconnect(peerToken: peerToken)
+        await runtime.finishDisconnect(peerToken: peerToken)
+    }
+
     @Test("Failed initial request replies before transaction release and clears controller state")
     func failedInitialRequestCleanupOrdering() async throws {
         let temporary = try ServiceTemporaryDirectory()
@@ -451,6 +603,7 @@ private func invalidHandshakeRequest() -> TorrentEngineIPCRequest {
     enum Event: Equatable, Sendable {
         case begin
         case reply(TorrentEngineIPCReplyStatus)
+        case containNetwork
         case cancel
         case end
     }
@@ -487,6 +640,10 @@ private func invalidHandshakeRequest() -> TorrentEngineIPCRequest {
 
     func cancel() {
         state.withLock { $0.events.append(.cancel) }
+    }
+
+    func containNetwork() {
+        state.withLock { $0.events.append(.containNetwork) }
     }
 
     var snapshot: Snapshot {
