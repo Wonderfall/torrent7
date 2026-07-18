@@ -321,11 +321,11 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
             )
             for entry in replacement.entries {
                 entriesByID[entry.capability.id] = entry
-                rememberAccess(
-                    entry.access,
-                    controllerID: replacement.scope.controllerID
-                )
             }
+            rememberAccesses(
+                replacement.entries.map(\.access),
+                controllerID: replacement.scope.controllerID
+            )
             incrementRegistryRevision()
             return replacement.capabilities
         }
@@ -371,7 +371,7 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
                 access: candidate.access
             )
             entriesByID[capability.id] = entry
-            rememberAccess(entry.access, controllerID: scope.controllerID)
+            rememberAccesses([entry.access], controllerID: scope.controllerID)
             incrementRegistryRevision()
             return capability
         }
@@ -625,13 +625,22 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
         }
     }
 
-    private func rememberAccess(
-        _ access: TorrentFolderCapabilityAccess,
+    private func rememberAccesses(
+        _ accesses: [TorrentFolderCapabilityAccess],
         controllerID: UUID
     ) {
         var references = accessReferencesByController[controllerID] ?? []
-        references.removeAll { $0.access == nil }
-        references.append(TorrentWeakFolderCapabilityAccess(access))
+        let activeEntryCount = entriesByID.values.lazy.filter {
+            $0.capability.scope.controllerID == controllerID
+        }.count
+        // Register a complete replacement in one pass, while amortizing cleanup
+        // of stale weak entries from repeated grant/revoke churn.
+        if references.count > activeEntryCount,
+           references.count - activeEntryCount > 256 {
+            references.removeAll { $0.access == nil }
+        }
+        references.reserveCapacity(references.count + accesses.count)
+        references.append(contentsOf: accesses.map(TorrentWeakFolderCapabilityAccess.init))
         accessReferencesByController[controllerID] = references
     }
 

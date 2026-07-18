@@ -343,6 +343,43 @@ struct TorrentFolderCapabilityRegistryTests {
         #expect(resource.stopCount == 1)
         #expect(registry.capabilities(controllerID: scope.controllerID).isEmpty)
     }
+
+    @Test("Disconnect invalidates every access registered by a batch replacement")
+    func disconnectInvalidatesBatchReplacement() throws {
+        let temporary = try TemporaryDirectory()
+        let firstBookmark = Data("first".utf8)
+        let secondBookmark = Data("second".utf8)
+        let firstResource = TestScopedResource(
+            url: try temporary.makeDirectory("First")
+        )
+        let secondResource = TestScopedResource(
+            url: try temporary.makeDirectory("Second")
+        )
+        let epoch = UUID()
+        let scope = TorrentEngineServiceScope(engineEpoch: epoch, controllerID: UUID())
+        let registry = TorrentFolderCapabilityRegistry(
+            engineEpoch: epoch,
+            bookmarkResolver: TestBookmarkResolver([
+                firstBookmark: firstResource,
+                secondBookmark: secondResource,
+            ])
+        )
+        let capabilities = try registry.replaceCommittedGrants(
+            bookmarkData: [firstBookmark, secondBookmark],
+            scope: scope
+        )
+        let pins = try capabilities.map {
+            try registry.pin(capabilityID: $0.id, scope: scope)
+        }
+        let descriptors = try pins.map { try $0.directoryFileDescriptor() }
+
+        registry.disconnect(controllerID: scope.controllerID)
+
+        #expect(firstResource.stopCount == 1)
+        #expect(secondResource.stopCount == 1)
+        #expect(pins.allSatisfy { !$0.isValid })
+        #expect(descriptors.allSatisfy { !descriptorIsOpen($0) })
+    }
 }
 
 private final class TestScopedResource:
