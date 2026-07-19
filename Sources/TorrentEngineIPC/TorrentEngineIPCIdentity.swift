@@ -17,6 +17,12 @@ package enum TorrentEngineIPCIdentity {
         appIdentifier: "app.torrent7.debug",
         serviceIdentifier: "app.torrent7.debug.engine"
     )
+    // This pair exists only for the separately assembled ad-hoc integration
+    // bundle. Production packaging never embeds either integration binary.
+    package static let integration = TorrentEngineIPCIdentityPair(
+        appIdentifier: "app.torrent7.integration",
+        serviceIdentifier: "app.torrent7.integration.engine"
+    )
     package static let reducedAssuranceInfoKey = "Torrent7AllowAdHocXPCPeer"
 
     package static func pair(appIdentifier: String?) -> TorrentEngineIPCIdentityPair? {
@@ -25,6 +31,8 @@ package enum TorrentEngineIPCIdentity {
             release
         case debug.appIdentifier:
             debug
+        case integration.appIdentifier:
+            integration
         default:
             nil
         }
@@ -36,6 +44,8 @@ package enum TorrentEngineIPCIdentity {
             release
         case debug.serviceIdentifier:
             debug
+        case integration.serviceIdentifier:
+            integration
         default:
             nil
         }

@@ -124,6 +124,16 @@ The following are protocol invariants:
 - request IDs and operation IDs are replay checked;
 - post-handshake operations must name the current engine epoch;
 - client requests are serialized, and service work is serialized per peer;
+- every request owns an operation-specific monotonic deadline; a missing reply
+  terminalizes that controller, and a timed-out mutation is reported as
+  commit-unknown and is never replayed automatically;
+- the deadline includes time waiting for the serialized request slot; expiry
+  before submission consumes no sequence and leaves the controller reusable;
+- cancellation of an observing Swift task does not cancel a transaction that
+  is already on the wire: the connection-owned request drains and validates
+  its reply before releasing the ordered slot; mandatory capability revokes and
+  dataset closes continue from uncancelled, deadline-bounded cleanup tasks,
+  while urgent containment and a missed deadline still terminate the controller;
 - typed busy/shutdown failures permit only a bounded fresh-session reconnect;
 - a second peer racing an in-flight controller is classified as busy or
   shutting down, rather than as a same-controller protocol violation;
@@ -146,8 +156,9 @@ applying only the latest settings;
 - removal warnings are UTF-8 bounded by one shared engine/client contract, so
   honest containment diagnostics remain semantically valid IPC responses;
 - typed controller-busy and service-shutdown handshakes retry in the background
-  with capped backoff through the service cleanup deadline and one final capped
-  relaunch interval; connection invalidation remains transient only after that
+  with capped backoff under one absolute monotonic recovery deadline that
+  includes connection attempts, handshakes, processing, and sleeps; connection
+  invalidation remains transient only after that
   typed cleanup episode begins, while identity, protocol, and semantic failures
   are never made retryable;
 - change notifications are coalesced hints only; the client inspects their
@@ -183,12 +194,15 @@ transport uses this split:
 
 The service captures the complete immutable high-cardinality value set first,
 then encodes pages of at most 256 items, shrinking a page further when necessary
-to stay under the one-MiB page limit. Datasets are owned by the controller, expire
-after 30 seconds, are limited to four open datasets, and share a 128-MiB encoded
-storage budget. The GUI verifies descriptor kind, revision metadata, page order,
-page identity, aggregate bytes, final item count, item uniqueness, string and
-numeric bounds, canonical paths, and save-path authorization. It closes a
-dataset after successful assembly or a recoverable failure.
+to stay under the one-MiB page limit. A descriptor may name at most 256 pages
+and must claim at least the number implied by its item count, preventing a
+hostile helper from amplifying one poll into tens of thousands of serial calls.
+Datasets are owned by the controller, expire after 30 seconds, are limited to
+four open datasets, and share a 128-MiB encoded storage budget. The GUI verifies
+descriptor kind, revision metadata, page order, page identity, aggregate bytes,
+final item count, item uniqueness, string and numeric bounds, canonical paths,
+and save-path authorization. It closes a dataset after successful assembly or
+a recoverable failure.
 
 Paging does not expose partially mutable application state. The GUI publishes a
 new torrent or tracker-host array only after every page has decoded and the
@@ -222,6 +236,21 @@ not to expose mutable libtorrent state to either Swift process. XPC page limits
 must not be raised without separate end-to-end measurement and a resource-budget
 review.
 
+`Scripts/test-bundled-xpc.zsh` supplies that separate transport measurement. It
+assembles an ad-hoc-signed sandboxed host with the production engine service,
+delegates a real security-scoped folder, adds paused tracker-bearing magnets
+while networking remains blocked, times full paged polls across restart and
+shutdown/reconnect, and samples both processes' peak resident memory. The
+interactive lifecycle uses a genuine Powerbox grant: the practical run exercises
+512 torrents and `--maximum` exercises the 20,000-torrent product bound. CI runs
+the actual signed pair without folder grants, asserting blocked-network empty
+polls across restart and shutdown/reconnect plus the service's exact rejection of
+a malformed nonempty bookmark. Positive folder delegation remains interactive;
+CI does not claim to simulate system-owned consent. The integration host/service
+bundles and their explicit reduced-assurance switch are assembled only by this
+test; production packaging never embeds them and identified builds never enable
+reduced assurance.
+
 ### Separate persistent bookmark ownership from transient delegation
 
 User consent and persistent bookmark authority belong to the GUI. It stores
@@ -247,13 +276,18 @@ applies the corresponding native save-path allowlist before atomically publishin
 the registry replacement; an unrecoverable cross-layer commit or rollback failure
 terminates the controller. A newly selected folder is a provisional capability
 until the add operation succeeds. Validation failures before native add are
-definite and revoke it. Once native add begins, any thrown bridge error is
-commit-ambiguous because libtorrent may have accepted the torrent before a later
-persistence or rollback error; the service contains and ends the controller
-instead of reporting a definite rejection. Ambiguous transport failure likewise
-does not issue a possibly incorrect explicit revoke. Controller disconnect is
-stronger than ordinary revocation: it invalidates outstanding scopes and descriptors,
-including those retained by pins.
+definite and revoke it. The native add ABI reports one of three outcomes:
+rejected, committed, or commit-unknown. It returns to rejected only after a
+pre-accept validation failure or a definite `add_torrent` rejection, and reports
+committed only after native persistence and bookkeeping complete. Every failure
+after libtorrent accepts the torrent remains commit-unknown—even if asynchronous
+rollback has been requested—so the service keeps the controller only after a
+definite rejection and contains it after an unknown native outcome or a failure
+following committed native success. Ambiguous
+transport failure likewise does not issue a possibly incorrect explicit revoke.
+Controller disconnect is stronger than ordinary revocation: it invalidates the
+server-minted connection generation immediately and later releases outstanding
+scopes and descriptors, including those retained by pins, after native teardown.
 
 The GUI serializes every folder delegation and exact-set replacement through an
 exclusive authorization lane. A prepared add invalidates older polls, holds the
@@ -283,6 +317,9 @@ The legacy in-process engine stored resume state in the GUI container. The
 service cannot and should not gain general path access to that container, so the
 one-time migration is descriptor based and occurs before the engine handshake:
 
+- the GUI asks the service for its authoritative completion state before opening
+  or enumerating the obsolete source tree, so a completed migration no longer
+  depends on legacy permissions or contents;
 - the GUI opens only the exact legacy state directory and allowlisted resume or
   tombstone filenames with no-follow descriptor operations;
 - owner, directory, regular-file, link, count, filename, per-file, and aggregate
@@ -431,11 +468,22 @@ the explicit ASan runtime and its Xcode RPATH. `LC_DYLD_ENVIRONMENT` is forbidde
 - Engine and capability-mutation generations reject poll and reconciliation
   completions captured before a restart, replacement, or prepared add.
 - Main and tracker-host snapshots are immutable and fully validated before
-  publication; XPC dataset pages, open datasets, lifetime, and aggregate storage
-  are bounded.
+  publication; XPC dataset pages, page count, open datasets, lifetime, and
+  aggregate storage are bounded.
 - Torrent adds are admitted before expensive native state is retained. Live
   torrents, sources, files, pieces, snapshots, queues, diagnostics, peers, and
   file descriptors retain hard caps.
+- Native add bookkeeping is incremental but remains fail-closed: canonical IDs
+  are reserved in a bounded index, queue membership is retained through the
+  exact removal alert, and any divergence or fallible membership transition
+  invalidates the fast queue index before a deterministic full reconciliation.
+- The aggregate tracker-host view keeps bounded per-torrent normalized entries
+  for the verified snapshot prefix. An unavailable tracker query is never
+  negative-cached; publication stops at that prefix and a later alert retries it.
+- Removal tombstones are scanned once through the retained ResumeData directory
+  descriptor at startup. Reserved marker names must be no-follow regular files;
+  the scan, ID-membership index, and total directory enumeration are bounded,
+  and index publication/removal follows the corresponding directory fsync.
 - Persistent bookmark ownership remains in the GUI. The service holds only
   transient, controller-scoped delegated access and invalidates it on disconnect.
 - Every possibly delegated prepared folder is followed by a forced exact-set
@@ -473,22 +521,20 @@ the explicit ASan runtime and its Xcode RPATH. `LC_DYLD_ENVIRONMENT` is forbidde
 | GUI/engine process isolation | Completed; production GUI is Swift-only and the embedded XPC service owns the engine | Bundle symbol and exact Mach-O inventory verification |
 | XPC identity and protocol | Completed; mutual identified-peer requirements, epochs, sequences, replay checks, budgets, and response validation | IPC codec/client security tests plus signed-bundle verification |
 | C++ bridge placement | Completed inside the service only | Bridge static analysis, strict warnings, lifecycle tests, and native symbol audit |
-| Snapshot transport | Immutable revision model retained; main and tracker-host XPC transport is paged | Dataset bound/validation tests and native snapshot benchmark before changing limits |
+| Snapshot transport | Immutable revision model retained; main and tracker-host XPC transport is paged and capped at 256 pages | Dataset validation, native snapshot benchmark, and real bundled-XPC lifecycle/timing/RSS test before changing limits |
 | Folder authority | Persistent GUI bookmarks plus transient service capabilities completed | Bookmark, transaction, replacement, disconnect, and restoration tests |
 | State ownership and migration | Service-owned persistence and one-time atomic descriptor migration completed | Persistence, crash-recovery, durability-failure, and migration tests |
 | Network authority | Independent service monitor and generation lease completed | Binding-race, monitor-change, disconnect, and libtorrent network-security tests |
 | Packaging split | Separate entitlements, signing, quarantine, and code inventory completed | Production and sanitizer app builds plus verifier; distribution notarization and Gatekeeper |
 | Dependency confinement | Ordered pinned patch series completed | Patch provenance and focused security suite for every dependency or toolchain change |
 
-One boundedness follow-up remains from the XPC audit. The capability and legacy
-migration helpers currently retain disconnected controller UUID tombstones for
-the service process lifetime so a stale prepared operation can never become
-valid again. Those sets should not be capped or time-evicted: doing so would
-weaken the stale-scope fence. The clean replacement is a server-minted,
-per-connection generation with a shared one-way invalidation token, allowing
-state to remain proportional to live operations even if a wire controller UUID
-is reused. This is an internal service-lifecycle change and does not require a
-new wire identity or a weaker disconnect guarantee.
+Capability and migration ownership uses a server-minted per-connection
+generation with a shared one-way invalidation token. Disconnect invalidates the
+token before its first suspension, so stale pins, migrations, leases, and
+prepared replacements fail immediately. Final cleanup still retains the exact
+generation until native teardown can safely release its descriptors and security
+scopes. No disconnected-UUID tombstone set remains, and a fresh connection may
+reuse the same wire controller UUID without reviving old authority.
 
 The XPC migration is the production architecture, not a compatibility path.
 Future transport or performance work may change encoding and batching within the

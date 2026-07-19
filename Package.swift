@@ -157,6 +157,10 @@ let package = Package(
     products: [
         .executable(name: "Torrent7", targets: ["TorrentApp"]),
         .executable(name: "TorrentEngineService", targets: ["TorrentEngineService"]),
+        .executable(
+            name: "TorrentEngineXPCIntegrationHost",
+            targets: ["TorrentEngineXPCIntegrationHost"]
+        ),
         .executable(name: "TorrentBridgeTests", targets: ["TorrentBridgeTests"])
     ],
     targets: [
@@ -182,6 +186,17 @@ let package = Package(
         .target(
             name: "TorrentEngineClient",
             dependencies: ["TorrentEngineIPC", "TorrentEngineModel"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .treatAllWarnings(as: .error),
+                .strictMemorySafety(),
+                .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
+            ]
+        ),
+        .executableTarget(
+            name: "TorrentEngineXPCIntegrationHost",
+            dependencies: ["TorrentEngineClient", "TorrentEngineModel"],
+            path: "Tools/XPCIntegrationHost",
             swiftSettings: [
                 .swiftLanguageMode(.v6),
                 .treatAllWarnings(as: .error),

@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - ".github/workflows/torrent-app.yml"
+      - "Documentation/BundledXPCIntegration.md"
       - "Package.swift"
       - "Packaging/**"
       - "Scripts/build-app.zsh"
@@ -15,11 +16,12 @@ on:
       - "Scripts/keys/**"
       - "Scripts/patches/**"
       - "Scripts/release-app.zsh"
+      - "Scripts/test-bundled-xpc.zsh"
       - "Scripts/test-swift.zsh"
       - "Scripts/verify-app.zsh"
-      - "Sources/TorrentApp/**"
-      - "Sources/TorrentBridge/**"
-      - "Tests/TorrentAppTests/**"
+      - "Sources/**"
+      - "Tests/**"
+      - "Tools/XPCIntegrationHost/**"
   pull_request:
     types:
       - opened
@@ -28,6 +30,7 @@ on:
       - ready_for_review
     paths:
       - ".github/workflows/torrent-app.yml"
+      - "Documentation/BundledXPCIntegration.md"
       - "Package.swift"
       - "Packaging/**"
       - "Scripts/build-app.zsh"
@@ -37,11 +40,12 @@ on:
       - "Scripts/keys/**"
       - "Scripts/patches/**"
       - "Scripts/release-app.zsh"
+      - "Scripts/test-bundled-xpc.zsh"
       - "Scripts/test-swift.zsh"
       - "Scripts/verify-app.zsh"
-      - "Sources/TorrentApp/**"
-      - "Sources/TorrentBridge/**"
-      - "Tests/TorrentAppTests/**"
+      - "Sources/**"
+      - "Tests/**"
+      - "Tools/XPCIntegrationHost/**"
   workflow_dispatch:
 
 permissions: {}
@@ -132,3 +136,9 @@ jobs:
         run: |
           set -euo pipefail
           Scripts/verify-app.zsh
+
+      - name: Exercise the bundled XPC lifecycle
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          SKIP_BUILD_DEPS=1 Scripts/test-bundled-xpc.zsh --automated

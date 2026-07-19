@@ -337,7 +337,7 @@ struct TorrentEngineIPCEnvelopeTests {
         #expect(TorrentEngineIPCFailureCode.serviceShuttingDown.rawValue == 3)
     }
 
-    @Test("XPC bundle identities require exact release or debug pairs")
+    @Test("XPC bundle identities require an exact packaged pair")
     func exactBundleIdentities() {
         #expect(
             TorrentEngineIPCIdentity.pair(appIdentifier: "app.torrent7")
@@ -351,6 +351,13 @@ struct TorrentEngineIPCEnvelopeTests {
                 == .init(
                     appIdentifier: "app.torrent7.debug",
                     serviceIdentifier: "app.torrent7.debug.engine"
+                )
+        )
+        #expect(
+            TorrentEngineIPCIdentity.pair(appIdentifier: "app.torrent7.integration")
+                == .init(
+                    appIdentifier: "app.torrent7.integration",
+                    serviceIdentifier: "app.torrent7.integration.engine"
                 )
         )
         #expect(TorrentEngineIPCIdentity.pair(appIdentifier: nil) == nil)
