@@ -30,9 +30,9 @@
 ## Purpose
 
 Torrent 7 is a minimal macOS 26 torrent client built with SwiftUI and
-libtorrent-rasterbar 2.x. It ships the torrent engine as an embedded,
-application-scoped XPC service so the GUI does not load libtorrent or the C++
-bridge. It targets Apple silicon as an arm64e app and leans
+libtorrent-rasterbar 2.x. It ships the torrent engine as an application-scoped
+Enhanced Security helper extension so the GUI does not load libtorrent or the
+C++ bridge. It targets Apple silicon as an arm64e app and leans
 into Apple's pointer-authentication model, including PAC-enabled Swift, C, and
 C++ code where the toolchain supports it. It also opts into Apple's Enhanced
 Security entitlements, including hardened heap, dyld read-only, platform
@@ -49,10 +49,10 @@ as small and explicit as possible.
 
 Torrent 7 has two separately sandboxed executables. The pure-Swift GUI owns
 SwiftUI state, user consent, and persistent security-scoped bookmarks. It talks
-over a versioned, bounded XPC protocol to an embedded engine service, which owns
-network access, resume state, native protocol parsing, and libtorrent. Inside
-that service, a narrow C ABI remains the language boundary around the C++23
-bridge; it is no longer part of the GUI process.
+over a versioned, bounded XPC protocol to a system-managed engine extension,
+which owns network access, resume state, native protocol parsing, and
+libtorrent. Inside that helper, a narrow C ABI remains the language boundary
+around the C++23 bridge; it is no longer part of the GUI process.
 
 Library rows remain immutable revisioned snapshots. High-cardinality library
 and tracker-host snapshots cross XPC as bounded, short-lived paged datasets;
@@ -78,11 +78,14 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
 - **Pure native UI:** SwiftUI for the interface, with tiny AppKit helpers only where
   macOS still requires them, such as Dock and notification integration.
 - **Process isolation:** all libtorrent, C++, torrent parsing, native persistence,
-  and torrent networking run in an embedded App Sandbox XPC service. The GUI
-  executable contains no torrent-engine symbols and has no network entitlement.
+  and torrent networking run in an App Sandbox Enhanced Security helper
+  extension. The GUI executable contains no torrent-engine symbols and has no
+  network entitlement. ExtensionFoundation performs application-scoped
+  discovery and process launch; the client retains one process coordinator and
+  creates a fresh authenticated XPC session for each controller generation.
 - **Swift safety:** Swift 6, strict concurrency checking, strict memory-safety
   checking, and pointer-authentication settings for both Swift executables.
-- **Authenticated, bounded IPC:** identified builds require the exact app/service
+- **Authenticated, bounded IPC:** identified builds require the exact app/helper
   signing identifiers from the same Team ID. Versioned envelopes, operation-specific
   payload limits, pre-decode binary-property-list structure limits, epochs,
   monotonic sequences, replay identifiers, queue budgets, typed failures, and
@@ -99,21 +102,21 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
   Swift. The removal ABI reports native commit separately from asynchronous
   deletion tracking, preventing a post-commit bookkeeping failure from being
   treated as a rejected removal. The bridge is linked only into the engine
-  service.
+  helper extension.
 - **Input bounds:** caps for torrent files, magnets, file counts, tracker/web-seed
   counts, tracker host rows, snapshots, piece-map data, XPC payloads, paged
   datasets, queued requests, file descriptors, and open peers.
 - **Delegated folder authority:** the GUI persists app-scoped bookmarks, but sends
-  only transient delegation bookmarks over XPC. The service validates and scopes
+  only transient delegation bookmarks over XPC. The helper validates and scopes
   each resolved directory by canonical path and filesystem identity; capability
   IDs are bound to one controller and engine epoch. Prepared adds hold an
   exclusive authorization transaction and always end in an exact capability-set
   replacement or controller termination. Local bookmark/path validation failures
   fail closed too, and restart reuses only an exactly reconciled capability set.
-- **Service-authoritative network policy:** the engine starts blocked. A network
-  binding can unblock it only after the service-side interface monitor validates
+- **Helper-authoritative network policy:** the engine starts blocked. A network
+  binding can unblock it only after the helper-side interface monitor validates
   the interface fingerprint and VPN service identity. The networkless GUI gets a
-  bounded, revisioned picker snapshot from that service; raw local addresses do
+  bounded, revisioned picker snapshot from that helper; raw local addresses do
   not cross the XPC boundary. Constrained
   interface changes, disconnects, replacement failures, and monitoring failures
   block networking. A revocation that preempts an in-flight controller request
@@ -124,7 +127,7 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
   progress stalls.
 - **Static dependencies:** libtorrent and OpenSSL are linked statically. The final
   app bundle contains no third-party dylibs and exactly two Mach-O executables:
-  the GUI and its engine service.
+  the GUI and its engine extension.
 - **Signing:** both executables use hardened runtime, `restrict`, library
   validation, and separately reviewed sandbox entitlements. Identified builds
   require valid matching Team IDs.
@@ -148,7 +151,7 @@ policy, not a system-wide VPN kill switch.
 
 Torrent 7 splits authority between two App Sandbox profiles:
 
-| Authority or responsibility | GUI application | Engine XPC service |
+| Authority or responsibility | GUI application | Engine helper extension |
 | --- | --- | --- |
 | User-selected read/write and app-scoped bookmark entitlements | Present | Absent |
 | Delegated download-folder access | Creates delegation from an active persistent scope | Holds a transient controller-scoped capability |
@@ -160,16 +163,16 @@ Torrent 7 splits authority between two App Sandbox profiles:
 The GUI stores persistent app-scoped bookmarks only for the default download
 folder and active torrent-specific folders. While one of those scopes is active,
 it creates a transient bookmark that delegates the current sandbox extension to
-the service. The service does not persist that bookmark: it explicitly starts
+the helper. The helper does not persist that bookmark: it explicitly starts
 and balances the delegated scope, holds a verified directory descriptor, and
 invalidates the capability when the controller disconnects.
 
-Resume data and removal tombstones now live in the service's container and are
+Resume data and removal tombstones live in the helper's container and are
 written with owner-only permissions and durability barriers. A one-time,
-descriptor-based migration copies allowlisted legacy files into service-owned
-state without granting the service path access to the GUI container or mutating
+descriptor-based migration copies allowlisted legacy files into helper-owned
+state without granting the helper path access to the GUI container or mutating
 the legacy tree. Both executable bundles enable file quarantine, including the
-service that creates downloaded payloads.
+helper that creates downloaded payloads.
 
 ## Dependencies
 
@@ -229,10 +232,11 @@ Scripts/verify-app.zsh
 ```
 
 The verifier requires both signed entitlement dictionaries to exactly match the
-canonical GUI and engine allowlists. It also checks the embedded-service identity,
-matching signature mode and Team IDs, quarantine policy, hardened runtime flags,
-the exact two-executable code inventory, and an allowlist of Mach-O load paths.
-Missing, changed, or unexpected authority fails verification.
+canonical GUI and engine allowlists. It also checks the embedded helper identity,
+the exact application-scoped Enhanced Security metadata, matching signature
+mode and Team IDs, quarantine policy, hardened runtime flags, the exact
+two-executable code inventory, and an allowlist of Mach-O load paths. Missing,
+changed, or unexpected authority fails verification.
 
 Use a shared dependency source cache if desired:
 
