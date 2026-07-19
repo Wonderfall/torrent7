@@ -1,7 +1,24 @@
 import Darwin
+import ExtensionFoundation
 import Foundation
 import TorrentEngineIPC
 import XPC
+
+package protocol TorrentEngineAppExtension: AppExtension {}
+
+extension TorrentEngineAppExtension {
+    @MainActor
+    package var configuration: some AppExtensionConfiguration {
+        do {
+            return try TorrentEngineExtensionConfiguration.make()
+        } catch {
+            fatalError(
+                "The isolated torrent engine extension could not start: "
+                    + error.localizedDescription
+            )
+        }
+    }
+}
 
 private enum TorrentEngineServiceIdentity {
     static func configuration(bundle: Bundle) throws -> TorrentEngineServiceConfiguration {
@@ -20,7 +37,6 @@ private enum TorrentEngineServiceIdentity {
             allowsReducedAssurance: allowsAdHoc
         )
         return TorrentEngineServiceConfiguration(
-            serviceIdentifier: identity.serviceIdentifier,
             appIdentifier: identity.appIdentifier,
             authentication: authentication
         )
@@ -28,7 +44,6 @@ private enum TorrentEngineServiceIdentity {
 }
 
 private struct TorrentEngineServiceConfiguration: Sendable {
-    let serviceIdentifier: String
     let appIdentifier: String
     let authentication: TorrentEngineIPCPeerAuthentication
 }
@@ -282,19 +297,18 @@ private enum TorrentEngineServiceStartupError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .missingBundleIdentifier:
-            "The XPC service bundle identifier is missing."
+            "The engine extension bundle identifier is missing."
         case .unrecognizedBundleIdentifier:
-            "The XPC service bundle identifier is not allowlisted."
+            "The engine extension bundle identifier is not allowlisted."
         case .stateDirectoryUnavailable:
             "The isolated torrent engine state directory is unavailable."
         }
     }
 }
 
-@safe final class TorrentEngineServiceBootstrap {
-    private let listener: XPCListener
-
-    init(bundle: Bundle = .main) throws {
+package enum TorrentEngineExtensionConfiguration {
+    @MainActor
+    package static func make(bundle: Bundle = .main) throws -> ConnectionHandler {
         let configuration = try TorrentEngineServiceIdentity.configuration(bundle: bundle)
         let stateDirectory = try Self.prepareStateDirectory()
         let containmentWatchdog = TorrentEngineServiceContainmentWatchdog(
@@ -309,62 +323,36 @@ private enum TorrentEngineServiceStartupError: LocalizedError {
             cleanupWatchdog: cleanupWatchdog
         )
         let queue = DispatchQueue(
-            label: "app.torrent7.engine.listener",
+            label: "app.torrent7.engine.connection-handler",
             qos: .userInitiated
         )
         let admissionBudget = TorrentEngineServiceAdmissionBudget()
-        let incomingHandler: @Sendable (
-            XPCListener.IncomingSessionRequest
-        ) -> XPCListener.IncomingSessionRequest.Decision = { request in
-            guard let peerAdmission = admissionBudget.acquirePeer() else {
-                return request.reject(reason: "Torrent engine peer limit exceeded")
-            }
-            let peer = TorrentEngineServicePeer(
-                runtime: runtime,
-                admissionBudget: admissionBudget,
-                peerAdmission: peerAdmission,
-                containmentWatchdog: containmentWatchdog,
-                cleanupWatchdog: cleanupWatchdog
-            )
-            let (decision, session) = request.accept(
-                incomingMessageHandler: { message in
-                    peer.receive(message)
-                    return nil
-                },
-                cancellationHandler: { _ in
-                    peer.cancel()
+        return ConnectionHandler(
+            onSessionRequest: { request in
+                guard let peerAdmission = admissionBudget.acquirePeer() else {
+                    return request.reject(reason: "Torrent engine peer limit exceeded")
                 }
-            )
-            peer.bind(session: session)
-            return decision
-        }
-
-        switch configuration.authentication {
-        case .sameTeam:
-            listener = try XPCListener(
-                service: configuration.serviceIdentifier,
-                targetQueue: queue,
-                options: .inactive,
-                requirement: .isFromSameTeam(
-                    andMatchesSigningIdentifier: configuration.appIdentifier
-                ),
-                incomingSessionHandler: incomingHandler
-            )
-        case .reducedAssuranceAdHocDevelopment:
-            // This weaker mode is reachable only through the explicit Info.plist
-            // development switch. Identified builds omit that switch and always
-            // use the exact signing requirement above.
-            listener = try XPCListener(
-                service: configuration.serviceIdentifier,
-                targetQueue: queue,
-                options: .inactive,
-                incomingSessionHandler: incomingHandler
-            )
-        }
-    }
-
-    func activate() throws {
-        try listener.activate()
+                let peer = TorrentEngineServicePeer(
+                    runtime: runtime,
+                    admissionBudget: admissionBudget,
+                    peerAdmission: peerAdmission,
+                    containmentWatchdog: containmentWatchdog,
+                    cleanupWatchdog: cleanupWatchdog
+                )
+                return request.accept { inactiveSession in
+                    inactiveSession.setTargetQueue(queue)
+                    if configuration.authentication == .sameTeam {
+                        inactiveSession.setPeerRequirement(
+                            .isFromSameTeam(
+                                andMatchesSigningIdentifier: configuration.appIdentifier
+                            )
+                        )
+                    }
+                    peer.bind(session: inactiveSession)
+                    return peer
+                }
+            }
+        )
     }
 
     private static func prepareStateDirectory() throws -> URL {
@@ -420,7 +408,9 @@ private enum TorrentEngineServiceStartupError: LocalizedError {
     }
 }
 
-@safe private final class TorrentEngineServicePeer: @unchecked Sendable {
+@safe private final class TorrentEngineServicePeer: XPCPeerHandler, @unchecked Sendable {
+    typealias Input = XPCDictionary
+    typealias Output = XPCDictionary
     private static let maximumQueuedRequestCount = 8
     private static let maximumQueuedPayloadBytes = TorrentEngineIPCLimits.maximumPayloadBytes
     private static let maximumQueuedFileDescriptorCount = 1
@@ -467,6 +457,15 @@ private enum TorrentEngineServiceStartupError: LocalizedError {
         if shouldCancel {
             session.cancel(reason: "Torrent engine peer closed before activation")
         }
+    }
+
+    func handleIncomingRequest(_ message: XPCDictionary) -> XPCDictionary? {
+        receive(message)
+        return nil
+    }
+
+    func handleCancellation(error _: XPCRichError) {
+        cancel()
     }
 
     func receive(_ message: XPCDictionary) {

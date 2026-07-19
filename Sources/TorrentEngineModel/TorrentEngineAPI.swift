@@ -34,7 +34,7 @@ package enum TorrentRemovalOutcome: Codable, Equatable, Sendable {
 ///
 /// A busy isolated controller cannot safely put the revocation behind its
 /// ordered request. In that case the client closes the controller, which makes
-/// the service's disconnect path contain networking, and the owner must create
+/// the helper's disconnect path contain networking, and the owner must create
 /// a fresh controller before doing more work.
 package enum TorrentNetworkBlockDisposition: Equatable, Sendable {
     /// Networking is blocked and this engine can accept later operations.

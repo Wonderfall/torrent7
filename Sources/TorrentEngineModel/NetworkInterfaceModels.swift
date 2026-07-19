@@ -1,7 +1,7 @@
 import Foundation
 
 /// A displayable interface identity observed inside the network-entitled
-/// engine service. The GUI may use this value to construct a binding request,
+/// engine helper. The GUI may use this value to construct a binding request,
 /// but the service always validates that request against its current snapshot.
 package struct NetworkInterfaceOption: Codable, Hashable, Identifiable, Sendable {
     package let name: String

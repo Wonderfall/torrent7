@@ -44,7 +44,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         case .requestTimedOut:
             // A timed-out bootstrap request has already terminalized its
             // controller. Retry only on a fresh controller, through the same
-            // absolute cleanup horizon as an explicitly busy service.
+            // absolute cleanup horizon as an explicitly busy helper.
             isCleanupEpisode = true
             return nextCleanupEpisodeDelay()
         case .connectionFailed, .connectionCancelled:
@@ -456,8 +456,11 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             do {
                 let controllerID = UUID()
                 let state = TorrentXPCClientState()
+                let session = try await TorrentEngineExtensionProcessCoordinator.shared
+                    .makeSession(configuration: configuration)
                 let transport = try TorrentEngineXPCTransport(
                     controllerID: controllerID,
+                    session: session,
                     configuration: configuration,
                     hintHandler: { state.signal() },
                     cancellationHandler: {
@@ -839,7 +842,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         guard !requestIsInFlight else {
             // Network revocation must preempt long-running ordered operations
             // such as terminal file deletion. Cancelling the authenticated
-            // controller invokes the service's out-of-band disconnect path,
+            // controller invokes the helper's out-of-band disconnect path,
             // which blocks (or force-contains) the native engine immediately.
             terminalize(.connectionCancelled)
             return .engineReplacementRequired

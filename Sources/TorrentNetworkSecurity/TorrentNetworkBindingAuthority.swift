@@ -23,7 +23,7 @@ package enum TorrentNetworkBindingBlockReason: String, Codable, Error, Sendable 
         case .controllerRequested:
             return "Network access was blocked by the controller."
         case .monitorNotReady:
-            return "Network access remains blocked until the engine service has observed the local interfaces."
+            return "Network access remains blocked until the engine helper has observed the local interfaces."
         case .malformedBinding:
             return "The requested network binding is malformed."
         case .unexpectedUnboundIdentity:
@@ -45,7 +45,7 @@ package enum TorrentNetworkBindingBlockReason: String, Codable, Error, Sendable 
         case .authorizationReplaced:
             return "Network access was blocked while the binding authorization was replaced."
         case .monitorChanged:
-            return "Network access was blocked because the engine service observed a network change."
+            return "Network access was blocked because the engine helper observed a network change."
         case .monitorStopped:
             return "Network access was blocked because interface monitoring stopped."
         case .controllerDisconnected:
@@ -167,7 +167,7 @@ package struct TorrentNetworkBindingAuthorityState: Equatable, Sendable {
     package let hasActiveLease: Bool
 }
 
-/// Owns the engine service's independent network observation and invalidates a
+/// Owns the engine helper's independent network observation and invalidates a
 /// constrained authorization on every emitted monitor change. A caller must:
 ///
 /// 1. await `prepare`, which first invokes the fail-closed handler;

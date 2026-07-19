@@ -2,6 +2,10 @@ package struct TorrentEngineIPCIdentityPair: Equatable, Sendable {
     package let appIdentifier: String
     package let serviceIdentifier: String
 
+    package var extensionPointIdentifier: String {
+        "\(appIdentifier).\(TorrentEngineIPCIdentity.extensionPointName)"
+    }
+
     package init(appIdentifier: String, serviceIdentifier: String) {
         self.appIdentifier = appIdentifier
         self.serviceIdentifier = serviceIdentifier
@@ -9,6 +13,8 @@ package struct TorrentEngineIPCIdentityPair: Equatable, Sendable {
 }
 
 package enum TorrentEngineIPCIdentity {
+    package static let extensionPointName = "torrent-engine"
+
     package static let release = TorrentEngineIPCIdentityPair(
         appIdentifier: "app.torrent7",
         serviceIdentifier: "app.torrent7.engine"

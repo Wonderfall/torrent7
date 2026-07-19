@@ -4,7 +4,8 @@ import Foundation
 
 /// A process-external safety boundary for cleanup that cannot rely on Swift
 /// actor progress when a synchronous native call is stuck. Missing a deadline
-/// terminates only the isolated helper; launchd can start a clean instance.
+/// terminates only the isolated helper; ExtensionFoundation can start a clean
+/// instance for the next connection attempt.
 @safe final class TorrentEngineServiceContainmentWatchdog: @unchecked Sendable {
     private let timeout: DispatchTimeInterval
     private let terminationHandler: @Sendable () -> Void

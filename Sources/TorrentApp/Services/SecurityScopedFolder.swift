@@ -79,7 +79,7 @@ final class SecurityScopedFolder: DownloadFolderAccessing {
 
     func delegationBookmarkData() throws -> Data {
         // A transient bookmark transfers the currently active sandbox extension
-        // to the XPC service without sharing the GUI's persistent app-scoped
+        // to the engine extension without sharing the GUI's persistent app-scoped
         // bookmark authority.
         try url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
     }

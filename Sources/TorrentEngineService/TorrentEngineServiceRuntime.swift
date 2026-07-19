@@ -1429,7 +1429,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         // This callback is invoked by the authority actor. Calling
         // beginDisconnect here would await that same authority and deadlock.
         // Native containment has already completed, so invalidate the lease
-        // and cancel the session directly; listener cleanup finishes teardown.
+        // and cancel the session directly; peer cleanup finishes teardown.
         isShuttingDown = true
         activeControllerScope?.invalidate()
         hintTask?.cancel()

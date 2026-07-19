@@ -6,17 +6,18 @@ on:
       - main
     paths:
       - ".github/workflows/torrent-app.yml"
-      - "Documentation/BundledXPCIntegration.md"
+      - "Documentation/EnhancedSecurityExtensionIntegration.md"
       - "Package.swift"
       - "Packaging/**"
       - "Scripts/build-app.zsh"
       - "Scripts/build-deps.zsh"
       - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/compare-entitlements.swift"
+      - "Scripts/verify-enhanced-security-metadata.swift"
       - "Scripts/keys/**"
       - "Scripts/patches/**"
       - "Scripts/release-app.zsh"
-      - "Scripts/test-bundled-xpc.zsh"
+      - "Scripts/test-enhanced-security-extension.zsh"
       - "Scripts/test-swift.zsh"
       - "Scripts/verify-app.zsh"
       - "Sources/**"
@@ -30,17 +31,18 @@ on:
       - ready_for_review
     paths:
       - ".github/workflows/torrent-app.yml"
-      - "Documentation/BundledXPCIntegration.md"
+      - "Documentation/EnhancedSecurityExtensionIntegration.md"
       - "Package.swift"
       - "Packaging/**"
       - "Scripts/build-app.zsh"
       - "Scripts/build-deps.zsh"
       - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/compare-entitlements.swift"
+      - "Scripts/verify-enhanced-security-metadata.swift"
       - "Scripts/keys/**"
       - "Scripts/patches/**"
       - "Scripts/release-app.zsh"
-      - "Scripts/test-bundled-xpc.zsh"
+      - "Scripts/test-enhanced-security-extension.zsh"
       - "Scripts/test-swift.zsh"
       - "Scripts/verify-app.zsh"
       - "Sources/**"
@@ -103,8 +105,10 @@ jobs:
         shell: zsh {0}
         run: |
           set -euo pipefail
-          zsh -n Scripts/build-app.zsh Scripts/release-app.zsh Scripts/verify-app.zsh
+          zsh -n Scripts/build-app.zsh Scripts/release-app.zsh \
+            Scripts/test-enhanced-security-extension.zsh Scripts/verify-app.zsh
           xcrun swiftc -typecheck Scripts/compare-entitlements.swift
+          xcrun swiftc -typecheck Scripts/verify-enhanced-security-metadata.swift
           xcrun swift Scripts/compare-entitlements.swift \
             Packaging/Torrent7.entitlements \
             Packaging/Torrent7.entitlements
@@ -137,8 +141,8 @@ jobs:
           set -euo pipefail
           Scripts/verify-app.zsh
 
-      - name: Exercise the bundled XPC lifecycle
+      - name: Exercise the Enhanced Security extension lifecycle
         shell: zsh {0}
         run: |
           set -euo pipefail
-          SKIP_BUILD_DEPS=1 Scripts/test-bundled-xpc.zsh --automated
+          SKIP_BUILD_DEPS=1 Scripts/test-enhanced-security-extension.zsh --automated

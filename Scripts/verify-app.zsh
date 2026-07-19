@@ -71,10 +71,8 @@ typeset -r app_dir=${app_argument:-$root_dir/.build/App/Torrent 7.app}
 typeset -r info_plist="$app_dir/Contents/Info.plist"
 typeset -r executable="$app_dir/Contents/MacOS/Torrent 7"
 typeset -r resources_dir="$app_dir/Contents/Resources"
-typeset -r xpc_services_dir="$app_dir/Contents/XPCServices"
-typeset -r engine_service_dir="$xpc_services_dir/app.torrent7.engine.xpc"
-typeset -r engine_service_info_plist="$engine_service_dir/Contents/Info.plist"
-typeset -r engine_service_executable="$engine_service_dir/Contents/MacOS/TorrentEngineService"
+typeset -r plugins_dir="$app_dir/Contents/PlugIns"
+typeset -r extension_points_dir="$app_dir/Contents/Extensions"
 typeset -r expected_app_entitlements="$root_dir/Packaging/Torrent7.entitlements"
 typeset -r expected_engine_entitlements="$root_dir/Packaging/Torrent7Engine.entitlements"
 typeset -r expected_third_party_notices="$root_dir/Packaging/ThirdPartyNotices.txt"
@@ -243,67 +241,143 @@ verify_mach_o_load_commands() {
     done
 }
 
-[[ -d "$xpc_services_dir" ]] || fail "Missing Contents/XPCServices"
-typeset -a embedded_service_entries=()
-while IFS= read -r -d $'\0' entry; do
-    embedded_service_entries+=("$entry")
-done < <(/usr/bin/find "$xpc_services_dir" -mindepth 1 -maxdepth 1 -print0)
-(( ${#embedded_service_entries} == 1 )) \
-    || fail "Contents/XPCServices must contain exactly one embedded service"
-[[ ${embedded_service_entries[1]} == "$engine_service_dir" ]] \
-    || fail "Unexpected embedded service: ${embedded_service_entries[1]}"
-[[ ! -L "$engine_service_dir" ]] || fail "Engine service bundle must not be a symbolic link"
-[[ -f "$engine_service_info_plist" && ! -L "$engine_service_info_plist" ]] \
-    || fail "Missing or linked engine service Info.plist"
+[[ -f "$info_plist" && ! -L "$info_plist" ]] \
+    || fail "Missing or linked app Info.plist"
 [[ -f "$executable" && -x "$executable" && ! -L "$executable" ]] \
     || fail "Missing or linked app executable"
-[[ -f "$engine_service_executable" && -x "$engine_service_executable" \
-    && ! -L "$engine_service_executable" ]] \
-    || fail "Missing or linked engine service executable"
 
 typeset -r app_bundle_id=$(info_plist_value "$info_plist" CFBundleIdentifier)
 typeset expected_engine_bundle_id
+typeset expected_extension_point_identifier
+typeset expected_engine_info_plist
+typeset expected_extension_point
 case "$app_bundle_id" in
     app.torrent7)
         expected_engine_bundle_id=app.torrent7.engine
+        expected_extension_point_identifier=app.torrent7.torrent-engine
+        expected_engine_info_plist="$root_dir/Packaging/TorrentEngineExtension-Info.plist"
+        expected_extension_point="$root_dir/Packaging/TorrentApp.appexpt"
         ;;
     app.torrent7.debug)
         [[ $mode == "development" ]] \
             || fail "Distribution verification does not allow the debug bundle identifier"
         expected_engine_bundle_id=app.torrent7.debug.engine
+        expected_extension_point_identifier=app.torrent7.debug.torrent-engine
+        expected_engine_info_plist="$root_dir/Packaging/Debug/TorrentEngineExtension-Info.plist"
+        expected_extension_point="$root_dir/Packaging/Debug/TorrentApp.appexpt"
         ;;
     *)
         fail "Unexpected app bundle identifier: $app_bundle_id"
         ;;
 esac
-typeset -r engine_bundle_id=$(info_plist_value "$engine_service_info_plist" CFBundleIdentifier)
+
+typeset -r engine_extension_dir="$plugins_dir/$expected_engine_bundle_id.appex"
+typeset -r engine_extension_info_plist="$engine_extension_dir/Contents/Info.plist"
+typeset -r engine_extension_executable="$engine_extension_dir/Contents/MacOS/TorrentEngineExtension"
+typeset -r installed_extension_point="$extension_points_dir/TorrentApp.appexpt"
+
+[[ ! -e "$app_dir/Contents/XPCServices" ]] \
+    || fail "Legacy Contents/XPCServices must be absent"
+[[ -d "$plugins_dir" && ! -L "$plugins_dir" ]] || fail "Missing or linked Contents/PlugIns"
+typeset -a embedded_extension_entries=()
+while IFS= read -r -d $'\0' entry; do
+    embedded_extension_entries+=("$entry")
+done < <(/usr/bin/find "$plugins_dir" -mindepth 1 -maxdepth 1 -print0)
+(( ${#embedded_extension_entries} == 1 )) \
+    || fail "Contents/PlugIns must contain exactly one engine extension"
+[[ ${embedded_extension_entries[1]} == "$engine_extension_dir" ]] \
+    || fail "Unexpected embedded extension: ${embedded_extension_entries[1]}"
+[[ ! -L "$engine_extension_dir" ]] \
+    || fail "Engine extension bundle must not be a symbolic link"
+[[ -f "$engine_extension_info_plist" && ! -L "$engine_extension_info_plist" ]] \
+    || fail "Missing or linked engine extension Info.plist"
+[[ -f "$engine_extension_executable" && -x "$engine_extension_executable" \
+    && ! -L "$engine_extension_executable" ]] \
+    || fail "Missing or linked engine extension executable"
+
+[[ -d "$extension_points_dir" && ! -L "$extension_points_dir" ]] \
+    || fail "Missing or linked Contents/Extensions"
+typeset -a extension_point_entries=()
+while IFS= read -r -d $'\0' entry; do
+    extension_point_entries+=("$entry")
+done < <(/usr/bin/find "$extension_points_dir" -mindepth 1 -maxdepth 1 -print0)
+(( ${#extension_point_entries} == 1 )) \
+    || fail "Contents/Extensions must contain exactly one extension point"
+[[ ${extension_point_entries[1]} == "$installed_extension_point" ]] \
+    || fail "Unexpected extension point: ${extension_point_entries[1]}"
+[[ -f "$installed_extension_point" && ! -L "$installed_extension_point" ]] \
+    || fail "Missing or linked engine extension-point metadata"
+
+/usr/bin/plutil -lint \
+    "$expected_engine_info_plist" \
+    "$expected_extension_point" \
+    "$engine_extension_info_plist" \
+    "$installed_extension_point" \
+    >/dev/null
+/usr/bin/cmp -s "$expected_extension_point" "$installed_extension_point" \
+    || fail "Installed extension-point metadata differs from its reviewed packaging source"
+/usr/bin/xcrun swift "$root_dir/Scripts/verify-enhanced-security-metadata.swift" \
+    "$installed_extension_point" \
+    "$engine_extension_info_plist" \
+    "$expected_extension_point_identifier"
+
+typeset -r engine_bundle_id=$(info_plist_value "$engine_extension_info_plist" CFBundleIdentifier)
 [[ $engine_bundle_id == "$expected_engine_bundle_id" ]] \
-    || fail "Unexpected engine service bundle identifier: $engine_bundle_id"
+    || fail "Unexpected engine extension bundle identifier: $engine_bundle_id"
 [[ $(info_plist_value "$info_plist" CFBundlePackageType) == "APPL" ]] \
     || fail "App CFBundlePackageType is not APPL"
 [[ $(info_plist_value "$info_plist" CFBundleExecutable) == "Torrent 7" ]] \
     || fail "App CFBundleExecutable is unexpected"
-[[ $(info_plist_value "$engine_service_info_plist" CFBundlePackageType) == "XPC!" ]] \
-    || fail "Engine service CFBundlePackageType is not XPC!"
-[[ $(info_plist_value "$engine_service_info_plist" CFBundleExecutable) == "TorrentEngineService" ]] \
-    || fail "Engine service CFBundleExecutable is unexpected"
-[[ $(info_plist_value "$engine_service_info_plist" XPCService:ServiceType) == "Application" ]] \
-    || fail "Engine service is not application-scoped"
-[[ $(info_plist_value "$engine_service_info_plist" LSMinimumSystemVersion) == "26.0" ]] \
-    || fail "Engine service minimum system version is not 26.0"
-[[ $(info_plist_boolean_value "$engine_service_info_plist" LSFileQuarantineEnabled) \
-    == "true" ]] || fail "Engine service LSFileQuarantineEnabled is not true"
-[[ $(info_plist_value "$engine_service_info_plist" CFBundleVersion) \
+[[ $(info_plist_value "$engine_extension_info_plist" CFBundlePackageType) == "XPC!" ]] \
+    || fail "Engine extension CFBundlePackageType is not XPC!"
+[[ $(info_plist_value "$engine_extension_info_plist" CFBundleExecutable) == "TorrentEngineExtension" ]] \
+    || fail "Engine extension CFBundleExecutable is unexpected"
+[[ $(info_plist_value \
+    "$engine_extension_info_plist" \
+    EXAppExtensionAttributes:EXExtensionPointIdentifier) \
+    == "$expected_extension_point_identifier" ]] \
+    || fail "Engine extension identifier does not match its extension point"
+if /usr/libexec/PlistBuddy -c "Print :XPCService" \
+    "$engine_extension_info_plist" >/dev/null 2>&1; then
+    fail "Engine extension retains legacy XPCService metadata"
+fi
+if /usr/libexec/PlistBuddy -c "Print :NSExtension" \
+    "$engine_extension_info_plist" >/dev/null 2>&1; then
+    fail "Engine extension unexpectedly declares NSExtension metadata"
+fi
+[[ $(info_plist_value "$installed_extension_point" EXVersion) == "2" ]] \
+    || fail "Extension-point metadata version is not 2"
+[[ $(info_plist_value \
+    "$installed_extension_point" \
+    "$expected_extension_point_identifier:EXExtensionPointName") \
+    == "torrent-engine" ]] || fail "Extension-point name is unexpected"
+[[ $(info_plist_value \
+    "$installed_extension_point" \
+    "$expected_extension_point_identifier:_EXScopeRestriction") \
+    == "application" ]] || fail "Engine extension point is not application-scoped"
+[[ $(info_plist_value \
+    "$installed_extension_point" \
+    "$expected_extension_point_identifier:EXPresentsUserInterface") == "false" ]] \
+    || fail "Engine extension point unexpectedly presents UI"
+[[ $(info_plist_value \
+    "$installed_extension_point" \
+    "$expected_extension_point_identifier:EXRequiresEnhancedSecurity") == "true" ]] \
+    || fail "Engine extension point does not require Enhanced Security"
+[[ $(info_plist_value "$engine_extension_info_plist" LSMinimumSystemVersion) == "26.0" ]] \
+    || fail "Engine extension minimum system version is not 26.0"
+[[ $(info_plist_boolean_value "$engine_extension_info_plist" LSFileQuarantineEnabled) \
+    == "true" ]] || fail "Engine extension LSFileQuarantineEnabled is not true"
+[[ $(info_plist_value "$engine_extension_info_plist" CFBundleVersion) \
     == $(info_plist_value "$info_plist" CFBundleVersion) ]] \
-    || fail "App and engine service build versions do not match"
-[[ $(info_plist_value "$engine_service_info_plist" CFBundleShortVersionString) \
+    || fail "App and engine extension build versions do not match"
+[[ $(info_plist_value "$engine_extension_info_plist" CFBundleShortVersionString) \
     == $(info_plist_value "$info_plist" CFBundleShortVersionString) ]] \
-    || fail "App and engine service release versions do not match"
+    || fail "App and engine extension release versions do not match"
 
-/usr/bin/codesign --verify --strict --verbose=2 "$engine_service_dir"
+/usr/bin/codesign --verify --strict --verbose=2 "$engine_extension_dir"
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$app_dir"
 /usr/bin/codesign --display --verbose=4 "$app_dir" >"$app_signature_output" 2>&1
-/usr/bin/codesign --display --verbose=4 "$engine_service_dir" >"$engine_signature_output" 2>&1
+/usr/bin/codesign --display --verbose=4 "$engine_extension_dir" >"$engine_signature_output" 2>&1
 /bin/cat "$app_signature_output"
 /bin/cat "$engine_signature_output"
 
@@ -316,7 +390,7 @@ if /usr/libexec/PlistBuddy -c "Print :Torrent7AllowAdHocXPCPeer" "$info_plist" \
     app_allows_ad_hoc_peer=true
 fi
 if /usr/libexec/PlistBuddy -c "Print :Torrent7AllowAdHocXPCPeer" \
-    "$engine_service_info_plist" >/dev/null 2>&1; then
+    "$engine_extension_info_plist" >/dev/null 2>&1; then
     engine_allows_ad_hoc_peer=true
 fi
 if /usr/bin/grep -Eq "^Signature=adhoc$" "$app_signature_output"; then
@@ -330,13 +404,13 @@ if [[ $app_is_ad_hoc == true || $engine_is_ad_hoc == true ]]; then
     [[ $mode == "development" ]] \
         || fail "Ad-hoc peer mode is forbidden outside development verification"
     [[ $app_is_ad_hoc == true && $engine_is_ad_hoc == true ]] \
-        || fail "App and engine service must use the same signing mode"
+        || fail "App and engine extension must use the same signing mode"
     [[ $app_allows_ad_hoc_peer == true && $engine_allows_ad_hoc_peer == true ]] \
         || fail "Ad-hoc development signatures require explicit reduced-assurance peer mode"
     [[ $(info_plist_boolean_value "$info_plist" Torrent7AllowAdHocXPCPeer) == "true" ]] \
         || fail "App reduced-assurance peer mode is not true"
     [[ $(info_plist_boolean_value \
-        "$engine_service_info_plist" \
+        "$engine_extension_info_plist" \
         Torrent7AllowAdHocXPCPeer) == "true" ]] \
         || fail "Engine reduced-assurance peer mode is not true"
 else
@@ -346,7 +420,7 @@ fi
 
 /usr/bin/codesign --display --xml --entitlements - "$app_dir" \
     >"$app_entitlements_output" 2>/dev/null
-/usr/bin/codesign --display --xml --entitlements - "$engine_service_dir" \
+/usr/bin/codesign --display --xml --entitlements - "$engine_extension_dir" \
     >"$engine_entitlements_output" 2>/dev/null
 /bin/cat "$app_entitlements_output"
 /bin/cat "$engine_entitlements_output"
@@ -364,20 +438,20 @@ fi
 reject_match "com\\.apple\\.security\\.network\\.(client|server)" "$app_entitlements_output" \
     "GUI process unexpectedly has network entitlements"
 require_match "com\\.apple\\.security\\.network\\.client" "$engine_entitlements_output" \
-    "Engine service is missing the network client entitlement"
+    "Engine extension is missing the network client entitlement"
 require_match "com\\.apple\\.security\\.network\\.server" "$engine_entitlements_output" \
-    "Engine service is missing the network server entitlement"
+    "Engine extension is missing the network server entitlement"
 reject_match "com\\.apple\\.security\\.files\\.(bookmarks|user-selected)" "$engine_entitlements_output" \
-    "Engine service unexpectedly has bookmark or user-selected-file authority"
+    "Engine extension unexpectedly has bookmark or user-selected-file authority"
 
 /usr/bin/xcrun lipo -info "$executable" >"$app_arch_output"
-/usr/bin/xcrun lipo -info "$engine_service_executable" >"$engine_arch_output"
+/usr/bin/xcrun lipo -info "$engine_extension_executable" >"$engine_arch_output"
 /bin/cat "$app_arch_output"
 /bin/cat "$engine_arch_output"
 /usr/bin/xcrun otool -tvV "$executable" >"$app_text_output"
-/usr/bin/xcrun otool -tvV "$engine_service_executable" >"$engine_text_output"
+/usr/bin/xcrun otool -tvV "$engine_extension_executable" >"$engine_text_output"
 /usr/bin/xcrun nm -m "$executable" >"$app_symbol_output"
-/usr/bin/xcrun nm -m "$engine_service_executable" >"$engine_symbol_output"
+/usr/bin/xcrun nm -m "$engine_extension_executable" >"$engine_symbol_output"
 
 # The GUI is now pure Swift. Swift arm64e emits PAC but has no BTI codegen
 # switch; the native engine remains the executable where BTI is applicable.
@@ -389,16 +463,18 @@ verify_binary_hardening \
     "$app_text_output" \
     false
 verify_binary_hardening \
-    "Engine service" \
+    "Engine extension" \
     "$engine_signature_output" \
     "$engine_entitlements_output" \
     "$engine_arch_output" \
     "$engine_text_output" \
     true
 require_match "_malloc_type_malloc" "$engine_symbol_output" \
-    "Engine service has no typed malloc symbol"
+    "Engine extension has no typed malloc symbol"
 require_match "__ZnwmSt19__type_descriptor_t" "$engine_symbol_output" \
-    "Engine service has no typed C++ operator new symbol"
+    "Engine extension has no typed C++ operator new symbol"
+require_match "[[:space:]]_NSExtensionMain" "$engine_symbol_output" \
+    "Engine extension is not linked with the ExtensionKit process entry point"
 reject_match "[[:space:]]_Torrent(Client|Bridge)|__ZN10libtorrent|libtorrent-rasterbar" \
     "$app_symbol_output" \
     "GUI executable still contains native torrent-engine symbols"
@@ -419,14 +495,14 @@ if [[ $app_is_ad_hoc == false ]]; then
     valid_team_identifier "$engine_team_identifier" \
         || fail "Identified engine signature has a missing or invalid TeamIdentifier"
     [[ $app_team_identifier == "$engine_team_identifier" ]] \
-        || fail "App and engine service TeamIdentifiers do not match"
+        || fail "App and engine extension TeamIdentifiers do not match"
 fi
 
 if [[ $mode == "distribution" ]]; then
     [[ $app_bundle_id == "app.torrent7" ]] \
         || fail "Distribution app has an unexpected bundle identifier"
     verify_distribution_signature "Distribution app" "$app_signature_output"
-    verify_distribution_signature "Distribution engine service" "$engine_signature_output"
+    verify_distribution_signature "Distribution engine extension" "$engine_signature_output"
 
     if [[ $notarization == "required" ]]; then
         /usr/bin/xcrun stapler validate "$app_dir"
@@ -469,7 +545,7 @@ while IFS= read -r -d $'\0' entry; do
 done < <(/usr/bin/find "$app_dir" -type f -print0)
 
 (( ${#mach_o_entries} == 2 )) \
-    || fail "App bundle must contain exactly the GUI and engine service Mach-O executables"
+    || fail "App bundle must contain exactly the GUI and engine extension Mach-O executables"
 typeset found_app_executable=false
 typeset found_engine_executable=false
 for entry in "${mach_o_entries[@]}"; do
@@ -477,7 +553,7 @@ for entry in "${mach_o_entries[@]}"; do
         "$executable")
             found_app_executable=true
             ;;
-        "$engine_service_executable")
+        "$engine_extension_executable")
             found_engine_executable=true
             ;;
         *)
@@ -493,4 +569,4 @@ if [[ $app_bundle_id == "app.torrent7.debug" ]]; then
     allows_diagnostic_runtime=true
 fi
 verify_mach_o_load_commands "$executable" "$allows_diagnostic_runtime"
-verify_mach_o_load_commands "$engine_service_executable" "$allows_diagnostic_runtime"
+verify_mach_o_load_commands "$engine_extension_executable" "$allows_diagnostic_runtime"

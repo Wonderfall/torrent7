@@ -26,11 +26,23 @@ typeset -r contents_dir="$app_dir/Contents"
 typeset -r macos_dir="$contents_dir/MacOS"
 typeset -r resources_dir="$contents_dir/Resources"
 typeset -r executable="$macos_dir/Torrent 7"
-typeset -r xpc_services_dir="$contents_dir/XPCServices"
-typeset -r engine_service_dir="$xpc_services_dir/app.torrent7.engine.xpc"
-typeset -r engine_service_contents_dir="$engine_service_dir/Contents"
-typeset -r engine_service_macos_dir="$engine_service_contents_dir/MacOS"
-typeset -r engine_service_executable="$engine_service_macos_dir/TorrentEngineService"
+typeset engine_extension_product=TorrentEngineExtension
+typeset engine_extension_bundle_id=app.torrent7.engine
+typeset engine_extension_info_plist="$root_dir/Packaging/TorrentEngineExtension-Info.plist"
+typeset extension_point_source="$root_dir/Packaging/TorrentApp.appexpt"
+if [[ $enable_diagnostics == "1" ]]; then
+    engine_extension_product=TorrentEngineDebugExtension
+    engine_extension_bundle_id=app.torrent7.debug.engine
+    engine_extension_info_plist="$root_dir/Packaging/Debug/TorrentEngineExtension-Info.plist"
+    extension_point_source="$root_dir/Packaging/Debug/TorrentApp.appexpt"
+fi
+typeset -r plugins_dir="$contents_dir/PlugIns"
+typeset -r engine_extension_dir="$plugins_dir/$engine_extension_bundle_id.appex"
+typeset -r engine_extension_contents_dir="$engine_extension_dir/Contents"
+typeset -r engine_extension_macos_dir="$engine_extension_contents_dir/MacOS"
+typeset -r engine_extension_executable="$engine_extension_macos_dir/TorrentEngineExtension"
+typeset -r extensions_dir="$contents_dir/Extensions"
+typeset -r extension_point="$extensions_dir/TorrentApp.appexpt"
 typeset -r app_icon="$root_dir/Packaging/AppIcon.icon"
 typeset -r document_icon="$root_dir/Packaging/Torrent7Document.icns"
 typeset -r third_party_notices="$root_dir/Packaging/ThirdPartyNotices.txt"
@@ -38,8 +50,7 @@ typeset -r app_icon_info_plist="$app_output_dir/AppIconInfo.plist"
 typeset -r sign_identity=${SIGN_IDENTITY:--}
 typeset -r sign_options="runtime,restrict,library"
 typeset -r app_entitlements="$root_dir/Packaging/Torrent7.entitlements"
-typeset -r engine_service_entitlements="$root_dir/Packaging/Torrent7Engine.entitlements"
-typeset -r engine_service_info_plist="$root_dir/Packaging/TorrentEngineService-Info.plist"
+typeset -r engine_extension_entitlements="$root_dir/Packaging/Torrent7Engine.entitlements"
 typeset -r expected_team_id=${EXPECTED_TEAM_ID:-}
 typeset -a timestamp_flag=(--timestamp=none)
 
@@ -115,39 +126,41 @@ fi
 /usr/bin/swift build \
     --scratch-path "$swift_build_dir" \
     "${swift_build_args[@]}" \
-    --product TorrentEngineService
+    --product "$engine_extension_product"
 
 rm -rf -- "$app_dir"
-mkdir -p -- "$macos_dir" "$resources_dir" "$engine_service_macos_dir"
+mkdir -p -- \
+    "$macos_dir" \
+    "$resources_dir" \
+    "$engine_extension_macos_dir" \
+    "$extensions_dir"
 
 cp "$swift_build_dir/arm64e-apple-macosx/$configuration/Torrent7" "$executable"
 cp \
-    "$swift_build_dir/arm64e-apple-macosx/$configuration/TorrentEngineService" \
-    "$engine_service_executable"
+    "$swift_build_dir/arm64e-apple-macosx/$configuration/$engine_extension_product" \
+    "$engine_extension_executable"
 cp "$root_dir/Packaging/Info.plist" "$contents_dir/Info.plist"
-cp "$engine_service_info_plist" "$engine_service_contents_dir/Info.plist"
+cp "$engine_extension_info_plist" "$engine_extension_contents_dir/Info.plist"
+cp "$extension_point_source" "$extension_point"
+/usr/bin/plutil -lint \
+    "$engine_extension_info_plist" \
+    "$extension_point_source" \
+    "$engine_extension_contents_dir/Info.plist" \
+    "$extension_point" \
+    >/dev/null
 if [[ $sign_identity == "-" ]]; then
     /usr/libexec/PlistBuddy \
         -c "Add :Torrent7AllowAdHocXPCPeer bool true" \
         "$contents_dir/Info.plist"
     /usr/libexec/PlistBuddy \
         -c "Add :Torrent7AllowAdHocXPCPeer bool true" \
-        "$engine_service_contents_dir/Info.plist"
+        "$engine_extension_contents_dir/Info.plist"
 fi
 if [[ $enable_diagnostics == "1" ]]; then
     /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier app.torrent7.debug" "$contents_dir/Info.plist"
     /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Torrent 7 (debug)" "$contents_dir/Info.plist"
     /usr/libexec/PlistBuddy -c "Set :CFBundleName Torrent 7 (debug)" "$contents_dir/Info.plist"
     /usr/libexec/PlistBuddy -c "Set :CFBundleURLTypes:0:CFBundleURLName app.torrent7.debug.magnet" "$contents_dir/Info.plist"
-    /usr/libexec/PlistBuddy \
-        -c "Set :CFBundleIdentifier app.torrent7.debug.engine" \
-        "$engine_service_contents_dir/Info.plist"
-    /usr/libexec/PlistBuddy \
-        -c "Set :CFBundleDisplayName Torrent 7 Engine (debug)" \
-        "$engine_service_contents_dir/Info.plist"
-    /usr/libexec/PlistBuddy \
-        -c "Set :CFBundleName Torrent 7 Engine (debug)" \
-        "$engine_service_contents_dir/Info.plist"
 fi
 cp "$document_icon" "$resources_dir/Torrent7Document.icns"
 cp "$third_party_notices" "$resources_dir/ThirdPartyNotices.txt"
@@ -167,9 +180,9 @@ rm -f -- "$app_icon_info_plist"
     --force \
     --sign "$sign_identity" \
     --options "$sign_options" \
-    --entitlements "$engine_service_entitlements" \
+    --entitlements "$engine_extension_entitlements" \
     "${timestamp_flag[@]}" \
-    "$engine_service_dir"
+    "$engine_extension_dir"
 
 /usr/bin/codesign \
     --force \
@@ -179,20 +192,20 @@ rm -f -- "$app_icon_info_plist"
     "${timestamp_flag[@]}" \
     "$app_dir"
 
-/usr/bin/codesign --verify --strict --verbose=2 "$engine_service_dir"
+/usr/bin/codesign --verify --strict --verbose=2 "$engine_extension_dir"
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$app_dir"
 
 if [[ $sign_identity != "-" ]]; then
     typeset -r signed_app_team_id=$(code_signing_team_identifier "$app_dir")
     typeset -r signed_engine_team_id=$(
-        code_signing_team_identifier "$engine_service_dir"
+        code_signing_team_identifier "$engine_extension_dir"
     )
     valid_team_identifier "$signed_app_team_id" \
         || fail "Identified app signature has a missing or invalid TeamIdentifier"
     valid_team_identifier "$signed_engine_team_id" \
         || fail "Identified engine signature has a missing or invalid TeamIdentifier"
     [[ $signed_app_team_id == "$signed_engine_team_id" ]] \
-        || fail "App and engine service TeamIdentifiers do not match"
+        || fail "App and engine extension TeamIdentifiers do not match"
 fi
 
 if [[ $signing_mode == "distribution" ]]; then
@@ -201,6 +214,8 @@ if [[ $signing_mode == "distribution" ]]; then
         --notarization pending \
         --team-id "$expected_team_id" \
         "$app_dir"
+else
+    "$root_dir/Scripts/verify-app.zsh" --mode development "$app_dir"
 fi
 
 echo "$app_dir"

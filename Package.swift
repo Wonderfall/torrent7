@@ -45,6 +45,7 @@ let bridgeFortifyFlags = [
 let bridgeCompilerHardeningFlags = [
     "-fstack-protector-strong",
     "-fPIE",
+    "-fapplication-extension",
     "-ftrivial-auto-var-init=zero",
     "-fzero-call-used-regs=used-gpr",
     "-fstrict-flex-arrays=3",
@@ -148,6 +149,13 @@ let appSwiftPointerAuthenticationFlags = [
     "-swift-ptrauth-mode",
     "NewAndAuth"
 ]
+let engineExtensionSwiftFlags = appSwiftStrictnessFlags
+    + appSwiftPointerAuthenticationFlags
+    + ["-application-extension"]
+let engineExtensionLinkerFlags = [
+    "-Xlinker", "-e",
+    "-Xlinker", "_NSExtensionMain"
+]
 
 let package = Package(
     name: "Torrent7",
@@ -156,7 +164,15 @@ let package = Package(
     ],
     products: [
         .executable(name: "Torrent7", targets: ["TorrentApp"]),
-        .executable(name: "TorrentEngineService", targets: ["TorrentEngineService"]),
+        .executable(name: "TorrentEngineExtension", targets: ["TorrentEngineExtension"]),
+        .executable(
+            name: "TorrentEngineDebugExtension",
+            targets: ["TorrentEngineDebugExtension"]
+        ),
+        .executable(
+            name: "TorrentEngineIntegrationExtension",
+            targets: ["TorrentEngineIntegrationExtension"]
+        ),
         .executable(
             name: "TorrentEngineXPCIntegrationHost",
             targets: ["TorrentEngineXPCIntegrationHost"]
@@ -170,7 +186,7 @@ let package = Package(
                 .swiftLanguageMode(.v6),
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
-                .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
+                .unsafeFlags(engineExtensionSwiftFlags)
             ]
         ),
         .target(
@@ -180,7 +196,7 @@ let package = Package(
                 .swiftLanguageMode(.v6),
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
-                .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
+                .unsafeFlags(engineExtensionSwiftFlags)
             ]
         ),
         .target(
@@ -211,7 +227,7 @@ let package = Package(
                 .swiftLanguageMode(.v6),
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
-                .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
+                .unsafeFlags(engineExtensionSwiftFlags)
             ]
         ),
         .target(
@@ -221,7 +237,7 @@ let package = Package(
                 .swiftLanguageMode(.v6),
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
-                .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
+                .unsafeFlags(engineExtensionSwiftFlags)
             ]
         ),
         .target(
@@ -230,10 +246,10 @@ let package = Package(
                 .swiftLanguageMode(.v6),
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
-                .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
+                .unsafeFlags(engineExtensionSwiftFlags)
             ]
         ),
-        .executableTarget(
+        .target(
             name: "TorrentEngineService",
             dependencies: [
                 "TorrentEngineCore",
@@ -246,7 +262,46 @@ let package = Package(
                 .swiftLanguageMode(.v6),
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
-                .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
+                .unsafeFlags(engineExtensionSwiftFlags)
+            ]
+        ),
+        .executableTarget(
+            name: "TorrentEngineExtension",
+            dependencies: ["TorrentEngineService"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .treatAllWarnings(as: .error),
+                .strictMemorySafety(),
+                .unsafeFlags(engineExtensionSwiftFlags)
+            ],
+            linkerSettings: [
+                .unsafeFlags(engineExtensionLinkerFlags)
+            ]
+        ),
+        .executableTarget(
+            name: "TorrentEngineDebugExtension",
+            dependencies: ["TorrentEngineService"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .treatAllWarnings(as: .error),
+                .strictMemorySafety(),
+                .unsafeFlags(engineExtensionSwiftFlags)
+            ],
+            linkerSettings: [
+                .unsafeFlags(engineExtensionLinkerFlags)
+            ]
+        ),
+        .executableTarget(
+            name: "TorrentEngineIntegrationExtension",
+            dependencies: ["TorrentEngineService"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .treatAllWarnings(as: .error),
+                .strictMemorySafety(),
+                .unsafeFlags(engineExtensionSwiftFlags)
+            ],
+            linkerSettings: [
+                .unsafeFlags(engineExtensionLinkerFlags)
             ]
         ),
         .target(

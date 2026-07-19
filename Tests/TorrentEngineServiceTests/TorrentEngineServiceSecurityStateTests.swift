@@ -6,7 +6,7 @@ import XPC
 @testable import TorrentEngineService
 @testable import TorrentEngineServiceSupport
 
-@Suite("Torrent engine XPC service security state")
+@Suite("Torrent engine extension security state")
 struct TorrentEngineServiceSecurityStateTests {
     @Test("Only commit-ambiguous or post-commit add failures require containment")
     func addFailureContainmentClassification() {

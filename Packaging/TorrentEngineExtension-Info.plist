@@ -5,29 +5,29 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>TorrentEngineService</string>
+    <string>TorrentEngineExtension</string>
     <key>CFBundleIdentifier</key>
-    <string>app.torrent7.integration.engine</string>
+    <string>app.torrent7.engine</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Torrent 7 XPC Integration Engine</string>
+    <string>Torrent 7 Engine</string>
+    <key>CFBundleDisplayName</key>
+    <string>Torrent 7 Engine</string>
     <key>CFBundlePackageType</key>
     <string>XPC!</string>
     <key>CFBundleShortVersionString</key>
-    <string>1</string>
+    <string>0.1.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
-    <key>LSFileQuarantineEnabled</key>
-    <true/>
     <key>LSMinimumSystemVersion</key>
     <string>26.0</string>
-    <key>Torrent7AllowAdHocXPCPeer</key>
+    <key>LSFileQuarantineEnabled</key>
     <true/>
-    <key>XPCService</key>
+    <key>EXAppExtensionAttributes</key>
     <dict>
-        <key>ServiceType</key>
-        <string>Application</string>
+        <key>EXExtensionPointIdentifier</key>
+        <string>app.torrent7.torrent-engine</string>
     </dict>
 </dict>
 </plist>

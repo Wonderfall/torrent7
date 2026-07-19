@@ -2511,7 +2511,7 @@ final class TorrentStore {
         let lifecycleGeneration = engineLifecycleGeneration
         // Reject any poll that captured pre-containment network status. A
         // second advance below also rejects a poll begun while the block RPC
-        // was suspended on the service.
+        // was suspended on the helper.
         advanceEngineMutationGeneration()
         do {
             let disposition = try await blockedEngine.blockNetworkNow()

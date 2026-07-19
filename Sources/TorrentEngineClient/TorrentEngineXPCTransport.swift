@@ -69,6 +69,7 @@ package enum TorrentEngineXPCIdentity {
         )
         return TorrentEngineXPCConfiguration(
             serviceIdentifier: identity.serviceIdentifier,
+            extensionPointIdentifier: identity.extensionPointIdentifier,
             authentication: authentication
         )
     }
@@ -76,6 +77,7 @@ package enum TorrentEngineXPCIdentity {
 
 package struct TorrentEngineXPCConfiguration: Equatable, Sendable {
     package let serviceIdentifier: String
+    package let extensionPointIdentifier: String
     package let authentication: TorrentEngineIPCPeerAuthentication
 }
 
@@ -228,6 +230,7 @@ package protocol TorrentEngineIPCTransport: Sendable {
 
     package init(
         controllerID: UUID,
+        session: XPCSession,
         configuration: TorrentEngineXPCConfiguration,
         hintHandler: @escaping @Sendable () -> Void,
         cancellationHandler: @escaping @Sendable () -> Void
@@ -236,7 +239,6 @@ package protocol TorrentEngineIPCTransport: Sendable {
         let replyCoordinator = ReplyCoordinator()
         replies = replyCoordinator
 
-        let serviceIdentifier = configuration.serviceIdentifier
         let incomingHandler: @Sendable (XPCDictionary) -> XPCDictionary? = {
             [controllerID, hintHandler] dictionary in
             guard let metadata = try? TorrentEngineIPCEnvelopeCodec.inspectRequest(
@@ -255,23 +257,14 @@ package protocol TorrentEngineIPCTransport: Sendable {
             }
         }
 
-        switch configuration.authentication {
-        case .sameTeam:
-            session = try XPCSession(
-                xpcService: serviceIdentifier,
-                options: .inactive,
-                requirement: .isFromSameTeam(
-                    andMatchesSigningIdentifier: serviceIdentifier
-                ),
-                incomingMessageHandler: incomingHandler,
-                cancellationHandler: cancelled
-            )
-        case .reducedAssuranceAdHocDevelopment:
-            session = try XPCSession(
-                xpcService: serviceIdentifier,
-                options: .inactive,
-                incomingMessageHandler: incomingHandler,
-                cancellationHandler: cancelled
+        self.session = session
+        session.setIncomingMessageHandler(incomingHandler)
+        session.setCancellationHandler(cancelled)
+        if configuration.authentication == .sameTeam {
+            session.setPeerRequirement(
+                .isFromSameTeam(
+                    andMatchesSigningIdentifier: configuration.serviceIdentifier
+                )
             )
         }
         try session.activate()

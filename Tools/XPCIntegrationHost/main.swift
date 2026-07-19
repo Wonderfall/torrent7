@@ -21,6 +21,9 @@ private enum IntegrationFailure: LocalizedError {
     case applicationRunLoopStopped
     case malformedBookmarkWasAccepted
     case malformedBookmarkUnexpectedError(String)
+    case forcedExitCoordinationTimedOut
+    case forcedExitWasNotObserved
+    case missingNetworkInterfaces(String)
 
     var errorDescription: String? {
         switch self {
@@ -58,6 +61,12 @@ private enum IntegrationFailure: LocalizedError {
             "The service accepted a malformed nonempty folder bookmark."
         case .malformedBookmarkUnexpectedError(let description):
             "The malformed bookmark failed outside service authorization: \(description)"
+        case .forcedExitCoordinationTimedOut:
+            "The integration runner did not force the engine helper to exit in time."
+        case .forcedExitWasNotObserved:
+            "The client did not observe the forced engine-helper exit."
+        case .missingNetworkInterfaces(let phase):
+            "The \(phase) poll did not return any locally observed network interfaces."
         }
     }
 }
@@ -162,7 +171,7 @@ private struct IntegrationFolder {
         panel.canCreateDirectories = false
         panel.directoryURL = directory
         panel.prompt = "Authorize Integration Folder"
-        panel.message = "Authorizing an isolated folder for the bundled XPC integration test."
+        panel.message = "Authorizing an isolated folder for the Enhanced Security extension test."
 
         // Bring the explicitly interactive merge gate to the foreground. The
         // user must still approve the exact folder in the system-owned panel.
@@ -197,6 +206,7 @@ private enum TorrentEngineXPCIntegrationHost {
     private static let trackerHost = "tracker.invalid"
     private static let realisticTorrentCount = 512
     private static let clock = ContinuousClock()
+    private static let recoveryMarkerDirectoryName = "Torrent7EnhancedSecurityIntegration"
 
     static func main() throws {
         let state = IntegrationRunState()
@@ -355,15 +365,32 @@ private enum TorrentEngineXPCIntegrationHost {
     private static func runAutomatedLifecycle() async throws {
         let totalStart = clock.now
         let expectedIDs = Set<String>()
-        let client = try await measure("connect") {
+        let initialClient = try await measure("connect") {
             try await connect([])
         }
-        try requireAvailable(client, phase: "automated initial connection")
+        try requireAvailable(initialClient, phase: "automated initial connection")
 
         try await measure("poll_empty_initial") {
             try await verifyPoll(
-                client,
+                initialClient,
                 phase: "automated initial empty poll",
+                expectedIDs: expectedIDs,
+                expectedCount: 0
+            )
+        }
+        try await measure("force_helper_exit") {
+            try await coordinateForcedHelperExit(client: initialClient)
+        }
+        await initialClient.shutdown()
+
+        let client = try await measure("recover_after_forced_exit") {
+            try await connect([], retryMode: .replacingTerminatedController)
+        }
+        try requireAvailable(client, phase: "automated forced-exit recovery")
+        try await measure("poll_empty_after_forced_exit") {
+            try await verifyPoll(
+                client,
+                phase: "automated post-forced-exit empty poll",
                 expectedIDs: expectedIDs,
                 expectedCount: 0
             )
@@ -412,9 +439,59 @@ private enum TorrentEngineXPCIntegrationHost {
         printTiming("total", duration: totalStart.duration(to: clock.now))
     }
 
+    private static func coordinateForcedHelperExit(
+        client: TorrentXPCClient
+    ) async throws {
+        let fileManager = FileManager.default
+        let markerDirectory = try fileManager.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        ).appendingPathComponent(
+            recoveryMarkerDirectoryName,
+            isDirectory: true
+        )
+        try fileManager.createDirectory(
+            at: markerDirectory,
+            withIntermediateDirectories: true
+        )
+        let readyMarker = markerDirectory.appendingPathComponent("ready")
+        let killedMarker = markerDirectory.appendingPathComponent("killed")
+        try? fileManager.removeItem(at: readyMarker)
+        try? fileManager.removeItem(at: killedMarker)
+        guard fileManager.createFile(
+            atPath: readyMarker.path(percentEncoded: false),
+            contents: Data()
+        ) else {
+            throw IntegrationFailure.forcedExitCoordinationTimedOut
+        }
+
+        let coordinationDeadline = clock.now.advanced(by: .seconds(20))
+        while !fileManager.fileExists(
+            atPath: killedMarker.path(percentEncoded: false)
+        ) {
+            guard clock.now < coordinationDeadline else {
+                throw IntegrationFailure.forcedExitCoordinationTimedOut
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try? fileManager.removeItem(at: readyMarker)
+        try? fileManager.removeItem(at: killedMarker)
+
+        let interruptionDeadline = clock.now.advanced(by: .seconds(5))
+        while client.isAvailable, clock.now < interruptionDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        guard !client.isAvailable else {
+            throw IntegrationFailure.forcedExitWasNotObserved
+        }
+        print("integration.forced_helper_exit=observed")
+    }
+
     private static func requireMalformedBookmarkRejection() async throws {
         let malformedAuthorization = TorrentFolderAuthorization(
-            path: "/private/tmp/Torrent7BundledXPCInvalidBookmark",
+            path: "/private/tmp/Torrent7EnhancedSecurityInvalidBookmark",
             bookmarkData: Data("not-a-bookmark".utf8)
         )
         do {
@@ -533,6 +610,14 @@ private enum TorrentEngineXPCIntegrationHost {
         guard result.networkStatus.networkBlocked else {
             throw IntegrationFailure.networkWasNotBlocked(phase)
         }
+        guard let networkInterfaces = result.networkInterfaceSnapshot?.interfaces,
+              !networkInterfaces.isEmpty else {
+            throw IntegrationFailure.missingNetworkInterfaces(phase)
+        }
+        let vpnInterfaceCount = networkInterfaces.lazy.filter(\.isLikelyVPN).count
+        let phaseKey = phase.replacingOccurrences(of: " ", with: "_")
+        print("integration.\(phaseKey).interfaces=\(networkInterfaces.count)")
+        print("integration.\(phaseKey).vpn_interfaces=\(vpnInterfaceCount)")
 
         let torrents = result.snapshotBatch?.torrents ?? []
         guard torrents.count == expectedCount else {
@@ -561,7 +646,6 @@ private enum TorrentEngineXPCIntegrationHost {
               trackerHosts.allSatisfy({ $0.host == trackerHost }) else {
             throw IntegrationFailure.trackerIdentityMismatch(phase)
         }
-        let phaseKey = phase.replacingOccurrences(of: " ", with: "_")
         print("integration.\(phaseKey).alerts=\(result.alertErrors.count)")
         for (index, alert) in result.alertErrors.enumerated() {
             print(

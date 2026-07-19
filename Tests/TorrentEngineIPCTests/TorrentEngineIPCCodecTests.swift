@@ -374,6 +374,18 @@ struct TorrentEngineIPCEnvelopeTests {
                 allowsReducedAssurance: true
             ) == .reducedAssuranceAdHocDevelopment
         )
+        #expect(
+            TorrentEngineIPCIdentity.release.extensionPointIdentifier
+                == "app.torrent7.torrent-engine"
+        )
+        #expect(
+            TorrentEngineIPCIdentity.debug.extensionPointIdentifier
+                == "app.torrent7.debug.torrent-engine"
+        )
+        #expect(
+            TorrentEngineIPCIdentity.integration.extensionPointIdentifier
+                == "app.torrent7.integration.torrent-engine"
+        )
     }
 
     private func encodedRequest() throws -> XPCDictionary {
