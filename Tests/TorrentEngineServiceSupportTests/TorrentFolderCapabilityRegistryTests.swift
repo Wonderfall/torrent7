@@ -35,7 +35,7 @@ struct TorrentFolderCapabilityRegistryTests {
         #expect(capability.state == .provisional)
         #expect(resource.startCount == 1)
         #expect(resource.stopCount == 0)
-        registry.disconnect(controllerID: scope.controllerID)
+        registry.disconnect(scope: scope)
         #expect(resource.stopCount == 1)
     }
 
@@ -220,7 +220,7 @@ struct TorrentFolderCapabilityRegistryTests {
         #expect(committed.id == original.id)
         #expect(try registry.pins(scope: scope).first?.capabilityID == original.id)
 
-        registry.disconnect(controllerID: scope.controllerID)
+        registry.disconnect(scope: scope)
         #expect(resource.stopCount == 2)
         #expect(!originalPin.isValid)
         #expect(!replacementPin.isValid)
@@ -260,7 +260,7 @@ struct TorrentFolderCapabilityRegistryTests {
         #expect(resource.stopCount == 0)
 
         _ = try registry.commit(prepared)
-        registry.disconnect(controllerID: scope.controllerID)
+        registry.disconnect(scope: scope)
         #expect(resource.stopCount == 2)
         #expect(!originalPin.isValid)
         #expect(!replacementPin.isValid)
@@ -410,7 +410,7 @@ struct TorrentFolderCapabilityRegistryTests {
             _ = try registry.pin(capabilityID: capability.id, scope: scope)
         }
 
-        registry.disconnect(controllerID: scope.controllerID)
+        registry.disconnect(scope: scope)
         #expect(resource.stopCount == 1)
         #expect(!descriptorIsOpen(descriptor))
         #expect(pin?.isValid == false)
@@ -423,7 +423,7 @@ struct TorrentFolderCapabilityRegistryTests {
         #expect(resource.startCount == 1)
         pin = nil
         #expect(resource.stopCount == 1)
-        #expect(registry.capabilities(controllerID: scope.controllerID).isEmpty)
+        #expect(registry.capabilities(scope: scope).isEmpty)
     }
 
     @Test("Disconnect invalidates every access registered by a batch replacement")
@@ -455,7 +455,7 @@ struct TorrentFolderCapabilityRegistryTests {
         }
         let descriptors = try pins.map { try $0.directoryFileDescriptor() }
 
-        registry.disconnect(controllerID: scope.controllerID)
+        registry.disconnect(scope: scope)
 
         #expect(firstResource.stopCount == 1)
         #expect(secondResource.stopCount == 1)

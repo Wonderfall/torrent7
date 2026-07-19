@@ -112,8 +112,7 @@ private struct TorrentEngineServiceDataset: Sendable {
 
 private struct TorrentEngineControllerLease: Equatable, Sendable {
     let peerToken: UUID
-    let controllerID: UUID
-    let generation: UUID
+    let scope: TorrentEngineServiceScope
 }
 
 struct TorrentEngineServiceRuntimeDiagnostics: Equatable, Sendable {
@@ -155,7 +154,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
 
     private var activePeerToken: UUID?
     private var activeControllerID: UUID?
-    private var activeControllerGeneration: UUID?
+    private var activeControllerScope: TorrentEngineServiceScope?
     private var activeSession: TorrentEngineServiceSessionHandle?
     private var lastSequence: UInt64 = 0
     private var recentOperationIDs = [UUID]()
@@ -199,7 +198,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         TorrentEngineServiceRuntimeDiagnostics(
             hasActivePeer: activePeerToken != nil,
             hasActiveController: activeControllerID != nil,
-            hasActiveControllerGeneration: activeControllerGeneration != nil,
+            hasActiveControllerGeneration: activeControllerScope?.isActive == true,
             hasActiveSession: activeSession != nil,
             hasEngine: engine != nil,
             hasActiveMigration: activeMigrationID != nil,
@@ -406,7 +405,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             return
         }
         isShuttingDown = true
-        activeControllerGeneration = nil
+        activeControllerScope?.invalidate()
         hintTask?.cancel()
         hintTask = nil
         if let networkAuthority {
@@ -428,7 +427,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         endsTransaction: Bool = true
     ) async {
         guard activePeerToken == peerToken,
-              let controllerID = activeControllerID else {
+              let scope = activeControllerScope else {
             return
         }
         if !isShuttingDown {
@@ -439,7 +438,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             cleanupWatchdog.disarm(cleanupToken)
         }
         await finishShutDownActiveController(
-            controllerID: controllerID,
+            scope: scope,
             endsTransaction: endsTransaction
         )
     }
@@ -457,10 +456,9 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             guard activePeerToken == peerToken else {
                 throw TorrentEngineServiceRuntimeError.controllerBusy
             }
-            guard activeControllerID == header.controllerID else {
-                throw TorrentEngineServiceRuntimeError.invalidController
-            }
-            guard activeControllerGeneration != nil else {
+            guard let activeControllerScope,
+                  activeControllerScope.isActive,
+                  activeControllerScope.controllerID == header.controllerID else {
                 throw TorrentEngineServiceRuntimeError.invalidController
             }
             guard lastSequence != UInt64.max,
@@ -478,7 +476,10 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             }
             activePeerToken = peerToken
             activeControllerID = header.controllerID
-            activeControllerGeneration = UUID()
+            activeControllerScope = TorrentEngineServiceScope(
+                engineEpoch: engineEpoch,
+                controllerID: header.controllerID
+            )
             activeSession = session
             beginTransactionIfNeeded()
         }
@@ -520,13 +521,13 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             membership: &recentRequestIDSet
         )
 
-        guard let generation = activeControllerGeneration else {
+        guard let activeControllerScope,
+              activeControllerScope.isActive else {
             throw TorrentEngineServiceRuntimeError.invalidController
         }
         return TorrentEngineControllerLease(
             peerToken: peerToken,
-            controllerID: header.controllerID,
-            generation: generation
+            scope: activeControllerScope
         )
     }
 
@@ -549,10 +550,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         controllerLease: TorrentEngineControllerLease
     ) async throws -> Data {
         let operation = request.header.operation
-        let scope = TorrentEngineServiceScope(
-            engineEpoch: engineEpoch,
-            controllerID: request.header.controllerID
-        )
+        let scope = controllerLease.scope
 
         switch operation {
         case .handshake:
@@ -855,7 +853,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
                 }
             )
             let responsePayload = try encode(response, for: operation)
-            startChangeHints(for: created, controllerID: scope.controllerID)
+            startChangeHints(for: created, scope: scope)
             let authority = networkBindingAuthority()
             networkAuthorityStartIsPending = true
             let networkAuthorityStarted = await authority.start()
@@ -925,7 +923,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             for capabilityID in request.capabilityIDs {
                 _ = try capabilityRegistry.commit(capabilityID: capabilityID, scope: scope)
             }
-            for capability in capabilityRegistry.capabilities(controllerID: scope.controllerID)
+            for capability in capabilityRegistry.capabilities(scope: scope)
             where !retainedIDs.contains(capability.id) {
                 _ = try capabilityRegistry.revoke(capabilityID: capability.id, scope: scope)
             }
@@ -1083,10 +1081,9 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             capabilityID: request.folderCapabilityID,
             scope: scope
         )?.state == .provisional
-        var didInvokeNativeAdd = false
+        var nativeAddCommitted = false
         do {
             let addingEngine = try requireEngine()
-            didInvokeNativeAdd = true
             let identifier = try await addingEngine.addMagnet(
                 request.magnet,
                 savePath: pin.canonicalPath,
@@ -1097,6 +1094,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
                 allowNonHTTPSWebSeeds: request.allowNonHTTPSWebSeeds,
                 allowPreMetadataDHT: request.allowPreMetadataDHT
             )
+            nativeAddCommitted = true
             try await validateAddedTorrentID(identifier)
             try requireActiveController(controllerLease)
             _ = try capabilityRegistry.commit(
@@ -1105,26 +1103,17 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             )
             return identifier
         } catch {
-            if didInvokeNativeAdd {
-                // The bridge can fail after libtorrent accepted the torrent
-                // (for example, if a later policy rollback fails). Without a
-                // typed rollback proof this outcome is commit-ambiguous: close
-                // the controller and let disconnect cleanup revoke authority.
-                await terminateActiveControllerAfterSecurityBoundaryFailure(
-                    reason: "Torrent engine magnet add outcome is unknown"
-                )
-                throw error
-            }
-            if wasProvisional, !isShuttingDown {
-                _ = try? capabilityRegistry.revoke(
-                    capabilityID: request.folderCapabilityID,
-                    scope: scope
-                )
-                await restoreAuthorizedRootsOrTerminate(
-                    scope: scope,
-                    reason: "Torrent engine magnet authorization rollback failed"
-                )
-            }
+            await recoverAfterAddFailure(
+                error,
+                nativeAddCommitted: nativeAddCommitted,
+                wasProvisional: wasProvisional,
+                capabilityID: request.folderCapabilityID,
+                scope: scope,
+                containmentReason: nativeAddCommitted
+                    ? "Torrent engine magnet post-commit validation failed"
+                    : "Torrent engine magnet add outcome is unknown",
+                authorizationRollbackReason: "Torrent engine magnet authorization rollback failed"
+            )
             throw error
         }
     }
@@ -1141,10 +1130,9 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             capabilityID: request.folderCapabilityID,
             scope: scope
         )?.state == .provisional
-        var didInvokeNativeAdd = false
+        var nativeAddCommitted = false
         do {
             let addingEngine = try requireEngine()
-            didInvokeNativeAdd = true
             let identifier = try await addingEngine.addTorrentFile(
                 data: request.torrentData,
                 savePath: pin.canonicalPath,
@@ -1155,6 +1143,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
                 allowNonHTTPSTrackers: request.allowNonHTTPSTrackers,
                 allowNonHTTPSWebSeeds: request.allowNonHTTPSWebSeeds
             )
+            nativeAddCommitted = true
             try await validateAddedTorrentID(identifier)
             try requireActiveController(controllerLease)
             _ = try capabilityRegistry.commit(
@@ -1163,27 +1152,76 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             )
             return identifier
         } catch {
-            if didInvokeNativeAdd {
-                // A thrown bridge error does not prove libtorrent rolled the
-                // add back. Contain the potentially committed torrent instead
-                // of returning a definite rejection or revoking its folder.
-                await terminateActiveControllerAfterSecurityBoundaryFailure(
-                    reason: "Torrent engine torrent-file add outcome is unknown"
-                )
-                throw error
-            }
-            if wasProvisional, !isShuttingDown {
-                _ = try? capabilityRegistry.revoke(
-                    capabilityID: request.folderCapabilityID,
-                    scope: scope
-                )
-                await restoreAuthorizedRootsOrTerminate(
-                    scope: scope,
-                    reason: "Torrent engine torrent-file authorization rollback failed"
-                )
-            }
+            await recoverAfterAddFailure(
+                error,
+                nativeAddCommitted: nativeAddCommitted,
+                wasProvisional: wasProvisional,
+                capabilityID: request.folderCapabilityID,
+                scope: scope,
+                containmentReason: nativeAddCommitted
+                    ? "Torrent engine torrent-file post-commit validation failed"
+                    : "Torrent engine torrent-file add outcome is unknown",
+                authorizationRollbackReason: "Torrent engine torrent-file authorization rollback failed"
+            )
             throw error
         }
+    }
+
+    private func recoverAfterAddFailure(
+        _ error: Error,
+        nativeAddCommitted: Bool,
+        wasProvisional: Bool,
+        capabilityID: UUID,
+        scope: TorrentEngineServiceScope,
+        containmentReason: String,
+        authorizationRollbackReason: String
+    ) async {
+        let nativeCommitStatusUnknown = if let addError = error as? TorrentAddError,
+                                           case .commitStatusUnknown = addError {
+            true
+        } else {
+            false
+        }
+        let requiresContainment = Self.addFailureRequiresContainment(
+            nativeAddCommitted: nativeAddCommitted,
+            nativeCommitStatusUnknown: nativeCommitStatusUnknown
+        )
+
+        if requiresContainment {
+            // A successfully returned native add, a malformed success result,
+            // or a failed rollback can leave an active torrent retaining the
+            // delegated folder. Destroy the controller before releasing it.
+            await terminateActiveControllerAfterSecurityBoundaryFailure(
+                reason: containmentReason
+            )
+            return
+        }
+
+        if wasProvisional, !isShuttingDown {
+            _ = try? capabilityRegistry.revoke(
+                capabilityID: capabilityID,
+                scope: scope
+            )
+            await restoreAuthorizedRootsOrTerminate(
+                scope: scope,
+                reason: authorizationRollbackReason
+            )
+        }
+    }
+
+    nonisolated static func addFailureRequiresContainment(
+        nativeAddCommitted: Bool,
+        nativeCommitStatusUnknown: Bool
+    ) -> Bool {
+        nativeAddCommitted || nativeCommitStatusUnknown
+    }
+
+    nonisolated static func changeHintBelongsToActiveController(
+        scope: TorrentEngineServiceScope,
+        activeScope: TorrentEngineServiceScope?,
+        isShuttingDown: Bool
+    ) -> Bool {
+        !isShuttingDown && scope.isActive && activeScope == scope
     }
 
     private func handlePoll(
@@ -1328,14 +1366,15 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         authorityID: UUID
     ) async {
         guard networkAuthorityID == authorityID,
-              let controllerGeneration = activeControllerGeneration,
+              let controllerScope = activeControllerScope,
+              controllerScope.isActive,
               let engine else {
             return
         }
         let result = await processNetworkBindingInvalidation(
             reason: reason,
             controllerReplacementIsAllowed: !networkAuthorityStartIsPending,
-            expectedControllerGeneration: controllerGeneration,
+            expectedControllerGeneration: controllerScope.generation,
             expectedAuthorityID: authorityID
         ) {
             do {
@@ -1366,7 +1405,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
     ) async -> TorrentEngineServiceNetworkContainmentResult {
         let result = await containment()
         if let expectedControllerGeneration,
-           activeControllerGeneration != expectedControllerGeneration {
+           activeControllerScope?.generation != expectedControllerGeneration {
             return result
         }
         if let expectedAuthorityID,
@@ -1392,7 +1431,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         // Native containment has already completed, so invalidate the lease
         // and cancel the session directly; listener cleanup finishes teardown.
         isShuttingDown = true
-        activeControllerGeneration = nil
+        activeControllerScope?.invalidate()
         hintTask?.cancel()
         hintTask = nil
         activeSession?.cancel(
@@ -1405,10 +1444,10 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
 
     private func networkInterfaceSnapshotDidChange(authorityID: UUID) {
         guard networkAuthorityID == authorityID,
-              let activeControllerID else {
+              let activeControllerScope else {
             return
         }
-        sendChangeHint(controllerID: activeControllerID)
+        sendChangeHint(scope: activeControllerScope)
     }
 
     private func terminateActiveControllerAfterSecurityBoundaryFailure(
@@ -1430,6 +1469,33 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         items: [Value],
         ownerControllerID: UUID
     ) throws -> TorrentEngineServiceDataset {
+        let encoded = try Self.paginateDataset(items) { pageItems in
+            try TorrentEngineIPCPropertyListCodec.encode(
+                pageItems,
+                maximumBytes: TorrentEngineIPCLimits.maximumDatasetPageBytes
+            )
+        }
+
+        let descriptor = TorrentEngineIPCDatasetDescriptor(
+            id: UUID(),
+            kind: kind,
+            revision: revision,
+            itemCount: items.count,
+            pageCount: encoded.pages.count
+        )
+        return TorrentEngineServiceDataset(
+            descriptor: descriptor,
+            ownerControllerID: ownerControllerID,
+            pages: encoded.pages,
+            byteCount: encoded.byteCount,
+            expiresAt: clock.now.advanced(by: Self.datasetLifetime)
+        )
+    }
+
+    nonisolated static func paginateDataset<Value: Sendable>(
+        _ items: [Value],
+        encodePage: @Sendable ([Value]) throws -> Data
+    ) throws -> (pages: [Data], byteCount: Int) {
         var pages = [Data]()
         pages.reserveCapacity(
             max(
@@ -1440,6 +1506,9 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         var byteCount = 0
         var index = 0
         while index < items.count {
+            guard pages.count < TorrentEngineIPCLimits.maximumDatasetPageCount else {
+                throw TorrentEngineServiceRuntimeError.datasetStorageLimitExceeded
+            }
             var pageEnd = min(
                 index + TorrentEngineIPCLimits.maximumDatasetPageItemCount,
                 items.count
@@ -1447,10 +1516,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             var encodedPage: Data?
             while pageEnd > index {
                 do {
-                    encodedPage = try TorrentEngineIPCPropertyListCodec.encode(
-                        Array(items[index..<pageEnd]),
-                        maximumBytes: TorrentEngineIPCLimits.maximumDatasetPageBytes
-                    )
+                    encodedPage = try encodePage(Array(items[index..<pageEnd]))
                     break
                 } catch TorrentEngineIPCError.payloadTooLarge {
                     let count = pageEnd - index
@@ -1461,6 +1527,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
                 }
             }
             guard let encodedPage,
+                  encodedPage.count <= TorrentEngineIPCLimits.maximumDatasetPageBytes,
                   encodedPage.count <= TorrentEngineIPCLimits.maximumDatasetAggregateBytes - byteCount else {
                 throw TorrentEngineServiceRuntimeError.datasetStorageLimitExceeded
             }
@@ -1468,21 +1535,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             byteCount += encodedPage.count
             index = pageEnd
         }
-
-        let descriptor = TorrentEngineIPCDatasetDescriptor(
-            id: UUID(),
-            kind: kind,
-            revision: revision,
-            itemCount: items.count,
-            pageCount: pages.count
-        )
-        return TorrentEngineServiceDataset(
-            descriptor: descriptor,
-            ownerControllerID: ownerControllerID,
-            pages: pages,
-            byteCount: byteCount,
-            expiresAt: clock.now.advanced(by: Self.datasetLifetime)
-        )
+        return (pages, byteCount)
     }
 
     private func registerDatasets(_ datasets: [TorrentEngineServiceDataset]) throws {
@@ -1717,8 +1770,9 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
     ) throws {
         guard !isShuttingDown,
               activePeerToken == lease.peerToken,
-              activeControllerID == lease.controllerID,
-              activeControllerGeneration == lease.generation else {
+              activeControllerID == lease.scope.controllerID,
+              activeControllerScope == lease.scope,
+              lease.scope.isActive else {
             throw TorrentEngineServiceRuntimeError.serviceShuttingDown
         }
     }
@@ -1912,7 +1966,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
 
     private func startChangeHints(
         for engine: TorrentEngine,
-        controllerID: UUID
+        scope: TorrentEngineServiceScope
     ) {
         hintTask?.cancel()
         hintTask = Task { [weak self] in
@@ -1921,7 +1975,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
                 guard !Task.isCancelled else {
                     return
                 }
-                await self?.sendChangeHint(controllerID: controllerID)
+                await self?.sendChangeHint(scope: scope)
                 do {
                     try await Task.sleep(for: Self.changeHintMinimumInterval)
                 } catch {
@@ -1931,16 +1985,19 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         }
     }
 
-    private func sendChangeHint(controllerID: UUID) {
-        guard !isShuttingDown,
-              activeControllerID == controllerID,
+    private func sendChangeHint(scope: TorrentEngineServiceScope) {
+        guard Self.changeHintBelongsToActiveController(
+            scope: scope,
+            activeScope: activeControllerScope,
+            isShuttingDown: isShuttingDown
+        ),
               let session = activeSession,
               hintSequence != UInt64.max else {
             return
         }
         let header = TorrentEngineIPCHeader(
             requestID: UUID(),
-            controllerID: controllerID,
+            controllerID: scope.controllerID,
             sequence: hintSequence,
             operation: .changeHint,
             operationID: UUID(),
@@ -1982,7 +2039,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
     }
 
     private func finishShutDownActiveController(
-        controllerID: UUID,
+        scope: TorrentEngineServiceScope,
         endsTransaction: Bool
     ) async {
         if let networkAuthority {
@@ -1998,12 +2055,12 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         self.engine = nil
         datasetsByID.removeAll()
         activeMigrationID = nil
-        migrationCoordinator.disconnect(controllerID: controllerID)
-        capabilityRegistry.disconnect(controllerID: controllerID)
+        migrationCoordinator.disconnect(scope: scope)
+        capabilityRegistry.disconnect(scope: scope)
 
         activePeerToken = nil
         activeControllerID = nil
-        activeControllerGeneration = nil
+        activeControllerScope = nil
         activeSession = nil
         lastSequence = 0
         recentOperationIDs.removeAll(keepingCapacity: true)

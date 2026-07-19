@@ -73,6 +73,7 @@ void TTorrentClient::pump_alerts()
     {
         std::scoped_lock guard(lock);
         session.pop_alerts(&alerts);
+        synchronous_adds_since_alert_drain = 0U;
         DirtyMask changes = 0;
 
         for (lt::alert const *alert : alerts) {

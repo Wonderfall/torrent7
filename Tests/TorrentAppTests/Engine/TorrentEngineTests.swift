@@ -323,6 +323,8 @@ struct TorrentEngineTests {
         #expect(TorrentEngineError.startupFailed("boom").localizedDescription == "Could not start the torrent engine: boom")
         #expect(TorrentEngineError.bridgeError("").localizedDescription == "The torrent operation failed.")
         #expect(TorrentEngineError.bridgeError("bad magnet").localizedDescription == "bad magnet")
+        #expect(TorrentAddError.rejected("").localizedDescription == "The torrent could not be added.")
+        #expect(TorrentAddError.commitStatusUnknown("uncertain").localizedDescription == "uncertain")
     }
 
     @Test("Untrackable deletion states stop the engine before returning and can recover")
@@ -473,6 +475,61 @@ struct TorrentEngineTests {
 
         try await engine.replaceAuthorizedSaveRoots([])
         await expectUnauthorizedSavePath(engine: engine, path: secondDirectory.path, hashCharacter: "d")
+    }
+
+    @Test("Native add failures distinguish rejection from an unknown commit status")
+    func nativeAddFailuresExposeCommitStatus() async throws {
+        let stateDirectory = try temporaryStateDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: stateDirectory)
+        }
+        let downloadDirectory = stateDirectory.appending(path: "Downloads", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: downloadDirectory, withIntermediateDirectories: true)
+        let engine = try TorrentEngine(
+            stateDirectory: stateDirectory,
+            enablePeerExchangePlugin: true,
+            authorizedSaveRoots: [try authorizedSaveRoot(at: downloadDirectory)]
+        )
+
+        do {
+            _ = try await engine.addMagnet(
+                "magnet:?xt=urn:btih:\(String(repeating: "e", count: 40))",
+                savePath: stateDirectory.path
+            )
+            Issue.record("Expected the unauthorized add to be rejected")
+        } catch let error as TorrentAddError {
+            guard case .rejected(let message) = error else {
+                Issue.record("Expected a definite add rejection, got \(error)")
+                return
+            }
+            #expect(message.contains("save path is not authorized"))
+        }
+
+        let resumeDirectory = stateDirectory.appending(path: "ResumeData", directoryHint: .isDirectory)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o500],
+            ofItemAtPath: resumeDirectory.path
+        )
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: resumeDirectory.path
+            )
+        }
+
+        do {
+            _ = try await engine.addMagnet(
+                "magnet:?xt=urn:btih:\(String(repeating: "f", count: 40))",
+                savePath: downloadDirectory.path
+            )
+            Issue.record("Expected the add with unpersistable state to fail")
+        } catch let error as TorrentAddError {
+            guard case .commitStatusUnknown(let message) = error else {
+                Issue.record("Expected an unknown add commit status, got \(error)")
+                return
+            }
+            #expect(message.contains("Torrent was added, but resume data could not be saved"))
+        }
     }
 
     @Test("Safe shutdown blocks, saves, destroys, and permanently marks the engine unavailable")

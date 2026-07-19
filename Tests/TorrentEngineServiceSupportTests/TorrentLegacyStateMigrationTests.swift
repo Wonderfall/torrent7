@@ -562,12 +562,69 @@ struct TorrentLegacyStateMigrationTests {
         let disconnectedStagingURL = coordinator.migrationRootURL.appendingPathComponent(
             "migration-\(disconnected.id.uuidString.lowercased()).staging"
         )
-        coordinator.disconnect(controllerID: controllerID)
+        coordinator.disconnect(scope: scope)
         #expect(!FileManager.default.fileExists(atPath: disconnectedStagingURL.path(percentEncoded: false)))
         expectMigrationError(.controllerDisconnected) {
             _ = try coordinator.migration(migrationID: disconnected.id, scope: scope)
         }
         #expect(try Data(contentsOf: sourceURL) == Data("legacy".utf8))
+    }
+
+    @Test("Migration cleanup is generation-exact and permits wire identifier reuse")
+    func migrationCleanupUsesExactGeneration() throws {
+        let temporary = try MigrationTemporaryDirectory()
+        let epoch = UUID()
+        let controllerID = UUID()
+        let oldScope = TorrentEngineServiceScope(
+            engineEpoch: epoch,
+            controllerID: controllerID
+        )
+        let freshScope = TorrentEngineServiceScope(
+            engineEpoch: epoch,
+            controllerID: controllerID
+        )
+        let coordinator = try TorrentLegacyStateMigrationCoordinator(
+            engineEpoch: epoch,
+            stateDirectoryURL: try temporary.makeDirectory("State")
+        )
+        let oldMigration = try coordinator.begin(scope: oldScope)
+        let oldStagingURL = coordinator.migrationRootURL.appendingPathComponent(
+            "migration-\(oldMigration.id.uuidString.lowercased()).staging"
+        )
+        let freshMigration = try coordinator.begin(scope: freshScope)
+        let freshStagingURL = coordinator.migrationRootURL.appendingPathComponent(
+            "migration-\(freshMigration.id.uuidString.lowercased()).staging"
+        )
+
+        #expect(oldScope.controllerID == freshScope.controllerID)
+        #expect(oldScope.generation != freshScope.generation)
+
+        oldScope.invalidate()
+
+        expectMigrationError(.controllerDisconnected) {
+            _ = try coordinator.migration(migrationID: oldMigration.id, scope: oldScope)
+        }
+        #expect(FileManager.default.fileExists(atPath: oldStagingURL.path(percentEncoded: false)))
+        #expect(try coordinator.migration(
+            migrationID: freshMigration.id,
+            scope: freshScope
+        ) == freshMigration)
+
+        coordinator.disconnect(scope: oldScope)
+
+        #expect(!FileManager.default.fileExists(atPath: oldStagingURL.path(percentEncoded: false)))
+        #expect(FileManager.default.fileExists(atPath: freshStagingURL.path(percentEncoded: false)))
+        #expect(freshMigration.scope == freshScope)
+        expectMigrationError(.controllerDisconnected) {
+            _ = try coordinator.migration(migrationID: freshMigration.id, scope: oldScope)
+        }
+        #expect(try coordinator.migration(
+            migrationID: freshMigration.id,
+            scope: freshScope
+        ) == freshMigration)
+
+        coordinator.disconnect(scope: freshScope)
+        #expect(!FileManager.default.fileExists(atPath: freshStagingURL.path(percentEncoded: false)))
     }
 
     @Test("Migration identifiers are epoch and controller scoped")

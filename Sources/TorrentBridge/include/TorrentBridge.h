@@ -48,6 +48,9 @@ inline constexpr int32_t TTORRENT_QUEUE_MOVE_TOP = 0;
 inline constexpr int32_t TTORRENT_QUEUE_MOVE_UP = 1;
 inline constexpr int32_t TTORRENT_QUEUE_MOVE_DOWN = 2;
 inline constexpr int32_t TTORRENT_QUEUE_MOVE_BOTTOM = 3;
+inline constexpr int32_t TTORRENT_ADD_REJECTED = 0;
+inline constexpr int32_t TTORRENT_ADD_COMMITTED = 1;
+inline constexpr int32_t TTORRENT_ADD_OUTCOME_UNKNOWN = 2;
 inline constexpr int32_t TTORRENT_REMOVAL_PENDING = 0;
 inline constexpr int32_t TTORRENT_REMOVAL_SUCCEEDED = 1;
 inline constexpr int32_t TTORRENT_REMOVAL_FAILED = 2;
@@ -57,7 +60,7 @@ inline constexpr int32_t TTORRENT_SOURCE_POLICY_ENABLE_LSD = 2;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS = 3;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS = 4;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT = 5;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 36;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 37;
 extern "C" {
 #else
 #define TORRENT_BRIDGE_NOEXCEPT
@@ -101,6 +104,9 @@ enum {
     TTORRENT_QUEUE_MOVE_UP = 1,
     TTORRENT_QUEUE_MOVE_DOWN = 2,
     TTORRENT_QUEUE_MOVE_BOTTOM = 3,
+    TTORRENT_ADD_REJECTED = 0,
+    TTORRENT_ADD_COMMITTED = 1,
+    TTORRENT_ADD_OUTCOME_UNKNOWN = 2,
     TTORRENT_REMOVAL_PENDING = 0,
     TTORRENT_REMOVAL_SUCCEEDED = 1,
     TTORRENT_REMOVAL_FAILED = 2,
@@ -110,7 +116,7 @@ enum {
     TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS = 3,
     TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS = 4,
     TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT = 5,
-    TTORRENT_BRIDGE_ABI_VERSION = 36
+    TTORRENT_BRIDGE_ABI_VERSION = 37
 };
 #endif
 
@@ -398,6 +404,11 @@ uint64_t TorrentClientTakeChanges(
     uint32_t *dirty_mask_out
 ) TORRENT_BRIDGE_NOEXCEPT;
 
+// add_outcome_out is mandatory. It reports REJECTED until the native add can
+// have committed, OUTCOME_UNKNOWN while libtorrent acceptance or rollback is
+// not yet proven, and COMMITTED only after every bridge invariant and durable
+// bookkeeping step succeeds. A failed call may therefore be distinguished as
+// a definite rejection or a commit-ambiguous failure without replaying it.
 int32_t TorrentClientAddMagnet(
     TTorrentClient *client,
     const char *magnet_uri,
@@ -405,6 +416,7 @@ int32_t TorrentClientAddMagnet(
     const TTorrentAddOptions *options,
     char *added_id_out,
     int32_t added_id_capacity,
+    int32_t *add_outcome_out,
     char *error_out,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
@@ -417,6 +429,7 @@ int32_t TorrentClientAddTorrentFileData(
     const TTorrentAddOptions *options,
     char *added_id_out,
     int32_t added_id_capacity,
+    int32_t *add_outcome_out,
     char *error_out,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
@@ -431,6 +444,7 @@ int32_t TorrentClientAddTorrentFileDataWithPriorities(
     int32_t file_priority_count,
     char *added_id_out,
     int32_t added_id_capacity,
+    int32_t *add_outcome_out,
     char *error_out,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;

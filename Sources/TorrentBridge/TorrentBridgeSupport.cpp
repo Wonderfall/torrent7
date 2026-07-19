@@ -2038,6 +2038,7 @@ lt::settings_pack make_settings()
     settings.set_bool(lt::settings_pack::always_send_user_agent, false);
     settings.set_bool(lt::settings_pack::allow_idna, false);
     settings.set_bool(lt::settings_pack::no_connect_privileged_ports, true);
+    settings.set_int(lt::settings_pack::alert_queue_size, kLibtorrentAlertQueueSize);
 
     auto const categories = lt::alert_category::error
         | lt::alert_category::storage

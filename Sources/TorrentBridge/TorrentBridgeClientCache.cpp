@@ -82,6 +82,53 @@ template <std::size_t Count>
         && char_arrays_equal(lhs.host, rhs.host);
 }
 
+[[nodiscard]] std::vector<std::string> normalized_tracker_hosts(
+    std::vector<libtorrent::announce_entry> const &trackers
+)
+{
+    std::set<std::string> unique_hosts;
+    for (libtorrent::announce_entry const &tracker : trackers) {
+        if (std::optional<std::string> host = normalized_tracker_host(tracker.url)) {
+            unique_hosts.insert(std::move(*host));
+        }
+    }
+    return {unique_hosts.begin(), unique_hosts.end()};
+}
+
+struct TrackerHostRowValue {
+    std::string_view torrent_id;
+    std::string_view host;
+};
+
+void append_tracker_host_row(
+    std::vector<TTorrentTrackerHostSnapshot> &rows,
+    TrackerHostRowValue value
+)
+{
+    constexpr auto maximum_row_count = static_cast<std::size_t>(
+        TTORRENT_MAX_TRACKER_HOST_ROW_COUNT
+    );
+    if (rows.size() >= maximum_row_count) {
+        return;
+    }
+    if (rows.size() == rows.capacity()) {
+        constexpr std::size_t initial_capacity = 16U;
+        std::size_t const next_capacity = std::min(
+            maximum_row_count,
+            rows.capacity() == 0U ? initial_capacity : rows.capacity() * 2U
+        );
+        rows.reserve(next_capacity);
+        if (rows.capacity() > maximum_row_count) {
+            throw std::length_error("Torrent tracker-host cache exceeded its capacity bound.");
+        }
+    }
+
+    TTorrentTrackerHostSnapshot row{};
+    copy_string(std::span{row.torrent_id}, value.torrent_id);
+    copy_string(std::span{row.host}, value.host);
+    rows.push_back(row);
+}
+
 [[nodiscard]] bool file_snapshots_equal(TTorrentFileSnapshot const &lhs, TTorrentFileSnapshot const &rhs) noexcept
 {
     return char_arrays_equal(lhs.path, rhs.path)
@@ -299,7 +346,6 @@ bool TTorrentClient::admit_detail_cache_entry_locked(
 DirtyMask TTorrentClient::rebuild_snapshot_cache()
 {
     bool const had_snapshots = !snapshot_cache.empty();
-    bool const had_tracker_hosts = !tracker_host_cache.empty();
     std::vector<lt::torrent_status> const statuses = session.get_torrent_status(
         [](lt::torrent_status const &) {
             return true;
@@ -308,7 +354,6 @@ DirtyMask TTorrentClient::rebuild_snapshot_cache()
     );
     snapshot_cache.clear();
     snapshot_indices.clear();
-    tracker_host_cache.clear();
     rebuilding_snapshot_cache = true;
     DirtyMask changes = 0;
     try {
@@ -322,9 +367,6 @@ DirtyMask TTorrentClient::rebuild_snapshot_cache()
 
     if (had_snapshots && snapshot_cache.empty()) {
         changes |= mark_snapshot_cache_changed();
-    }
-    if (had_tracker_hosts && tracker_host_cache.empty()) {
-        changes |= mark_tracker_host_cache_changed();
     }
     return changes;
 }
@@ -496,7 +538,8 @@ DirtyMask TTorrentClient::remove_snapshot(std::string_view id)
     }
     snapshot_cache.pop_back();
     snapshot_indices.erase(removed_id);
-    changes |= rebuild_tracker_host_cache_locked();
+    tracker_hosts_by_id.erase(removed_id);
+    changes |= refresh_tracker_host_cache_locked();
     return changes | mark_snapshot_cache_changed();
 }
 
@@ -505,80 +548,87 @@ DirtyMask TTorrentClient::mark_tracker_host_cache_changed() noexcept
     return TTORRENT_DIRTY_TRACKER_HOSTS;
 }
 
-DirtyMask TTorrentClient::rebuild_tracker_host_cache_locked(
-    std::string_view override_id,
-    std::vector<lt::announce_entry> const *override_trackers
-)
+DirtyMask TTorrentClient::rebuild_tracker_host_cache_locked()
 {
-    std::vector<lt::torrent_handle> handles;
-    handles.reserve(snapshot_cache.size());
-    {
-        std::scoped_lock io_guard(resume_io_lock);
-        for (TTorrentSnapshot const &snapshot : snapshot_cache) {
-            auto const mapped = handle_by_id.find(snapshot.id);
-            handles.push_back(mapped == handle_by_id.end() ? lt::torrent_handle{} : mapped->second);
-        }
-    }
+    tracker_hosts_by_id.clear();
+    return refresh_tracker_host_cache_locked();
+}
 
+DirtyMask TTorrentClient::refresh_tracker_host_cache_locked()
+{
     constexpr auto maximum_row_count = static_cast<std::size_t>(
         TTORRENT_MAX_TRACKER_HOST_ROW_COUNT
     );
     std::vector<TTorrentTrackerHostSnapshot> rows;
-    auto append_row = [&](TTorrentTrackerHostSnapshot const &row) {
-        if (rows.size() >= maximum_row_count) {
-            return;
-        }
-        if (rows.size() == rows.capacity()) {
-            constexpr std::size_t initial_capacity = 16U;
-            std::size_t const next_capacity = std::min(
-                maximum_row_count,
-                rows.capacity() == 0U ? initial_capacity : rows.capacity() * 2U
-            );
-            rows.reserve(next_capacity);
-            if (rows.capacity() > maximum_row_count) {
-                throw std::length_error("Torrent tracker-host cache exceeded its capacity bound.");
-            }
-        }
-        rows.push_back(row);
-    };
+    std::size_t completed_snapshot_count = 0;
+    std::optional<std::size_t> partial_snapshot_index;
+
     for (std::size_t index = 0; index < snapshot_cache.size(); ++index) {
         if (rows.size() >= maximum_row_count) {
             break;
         }
 
         TTorrentSnapshot const &snapshot = snapshot_cache.at(index);
-        std::vector<lt::announce_entry> queried_trackers;
-        std::vector<lt::announce_entry> const *trackers = nullptr;
-        if (!override_id.empty() && std::string_view(snapshot.id) == override_id && override_trackers != nullptr) {
-            trackers = override_trackers;
-        } else if (handles.at(index).is_valid()) {
-            try {
-                queried_trackers = handles.at(index).trackers();
-                trackers = &queried_trackers;
-            } catch (...) {
-                trackers = nullptr;
+        std::string const id(snapshot.id);
+        auto cached = tracker_hosts_by_id.find(id);
+        TrackerHostCacheEntry unavailable_entry{.hosts = {}, .complete = false};
+        TrackerHostCacheEntry *entry = nullptr;
+        if (cached == tracker_hosts_by_id.end() || !cached->second.complete) {
+            lt::torrent_handle handle;
+            {
+                std::scoped_lock io_guard(resume_io_lock);
+                auto const mapped = handle_by_id.find(id);
+                handle = mapped == handle_by_id.end() ? lt::torrent_handle{} : mapped->second;
             }
-        }
-        if (trackers == nullptr) {
-            continue;
+
+            std::optional<std::vector<std::string>> queried_hosts;
+            if (handle.is_valid()) {
+                try {
+                    queried_hosts.emplace(normalized_tracker_hosts(handle.trackers()));
+                } catch (...) {
+                    queried_hosts.reset();
+                }
+            }
+            if (queried_hosts) {
+                cached = tracker_hosts_by_id.insert_or_assign(
+                    id,
+                    TrackerHostCacheEntry{.hosts = std::move(*queried_hosts), .complete = true}
+                ).first;
+                entry = &cached->second;
+            } else {
+                entry = cached == tracker_hosts_by_id.end()
+                    ? &unavailable_entry
+                    : &cached->second;
+            }
+        } else {
+            entry = &cached->second;
         }
 
-        std::set<std::string> unique_hosts;
-        for (lt::announce_entry const &tracker : *trackers) {
-            if (std::optional<std::string> host = normalized_tracker_host(tracker.url)) {
-                unique_hosts.insert(std::move(*host));
-            }
+        std::size_t const available = maximum_row_count - rows.size();
+        std::size_t const retained_count = std::min(available, entry->hosts.size());
+        for (std::string const &host : std::span{entry->hosts}.first(retained_count)) {
+            append_tracker_host_row(rows, {.torrent_id = id, .host = host});
         }
-        for (std::string const &host : unique_hosts) {
-            if (rows.size() >= maximum_row_count) {
-                break;
-            }
-            TTorrentTrackerHostSnapshot row{};
-            copy_string(std::span{row.torrent_id}, std::string_view(snapshot.id));
-            copy_string(std::span{row.host}, host);
-            append_row(row);
+        if (!entry->complete || retained_count < entry->hosts.size()) {
+            entry->hosts.resize(retained_count);
+            entry->complete = false;
+            partial_snapshot_index = index;
+            break;
         }
+        completed_snapshot_count = index + 1U;
     }
+
+    std::erase_if(tracker_hosts_by_id, [&](auto const &entry) {
+        auto const snapshot = snapshot_indices.find(entry.first);
+        if (snapshot == snapshot_indices.end()) {
+            return true;
+        }
+        if (snapshot->second < completed_snapshot_count) {
+            return false;
+        }
+        return !partial_snapshot_index.has_value()
+            || snapshot->second != *partial_snapshot_index;
+    });
 
     if (vectors_equal(tracker_host_cache, rows, tracker_host_snapshots_equal)) {
         return 0;
@@ -589,16 +639,71 @@ DirtyMask TTorrentClient::rebuild_tracker_host_cache_locked(
 
 DirtyMask TTorrentClient::cache_tracker_hosts(std::string const &id, std::vector<lt::announce_entry> const &trackers)
 {
-    if (id.empty() || !snapshot_indices.contains(id)) {
+    auto const snapshot = snapshot_indices.find(id);
+    if (id.empty() || snapshot == snapshot_indices.end()) {
         return 0;
     }
-    return rebuild_tracker_host_cache_locked(id, &trackers);
+
+    constexpr auto maximum_row_count = static_cast<std::size_t>(
+        TTORRENT_MAX_TRACKER_HOST_ROW_COUNT
+    );
+    auto cached = tracker_hosts_by_id.find(id);
+    if (cached == tracker_hosts_by_id.end()
+        && tracker_host_cache.size() >= maximum_row_count) {
+        return 0;
+    }
+
+    std::vector<std::string> hosts = normalized_tracker_hosts(trackers);
+    if (cached != tracker_hosts_by_id.end()) {
+        TrackerHostCacheEntry const &entry = cached->second;
+        if (entry.complete && entry.hosts == hosts) {
+            return 0;
+        }
+        if (!entry.complete
+            && tracker_host_cache.size() >= maximum_row_count
+            && hosts.size() >= entry.hosts.size()
+            && std::ranges::equal(entry.hosts, std::span{hosts}.first(entry.hosts.size()))) {
+            return 0;
+        }
+    }
+
+    if (cached == tracker_hosts_by_id.end()
+        && snapshot->second + 1U == snapshot_cache.size()
+        && tracker_hosts_by_id.size() + 1U == snapshot_cache.size()
+        && tracker_host_cache.size() < maximum_row_count) {
+        std::size_t const available = maximum_row_count - tracker_host_cache.size();
+        std::size_t const retained_count = std::min(available, hosts.size());
+        std::span<std::string const> const retained_hosts = std::span{hosts}.first(retained_count);
+        TrackerHostCacheEntry entry{
+            .hosts = std::vector<std::string>(retained_hosts.begin(), retained_hosts.end()),
+            .complete = retained_count == hosts.size(),
+        };
+        tracker_hosts_by_id.emplace(id, std::move(entry));
+        for (std::string const &host : retained_hosts) {
+            append_tracker_host_row(tracker_host_cache, {.torrent_id = id, .host = host});
+        }
+        return retained_count > 0U ? mark_tracker_host_cache_changed() : 0;
+    }
+
+    tracker_hosts_by_id.insert_or_assign(
+        id,
+        TrackerHostCacheEntry{.hosts = std::move(hosts), .complete = true}
+    );
+    return refresh_tracker_host_cache_locked();
 }
 
 DirtyMask TTorrentClient::cache_tracker_hosts(lt::torrent_handle const &handle, std::string const &id)
 {
     if (!handle.is_valid()) {
-        return remove_tracker_hosts(id);
+        return 0;
+    }
+
+    constexpr auto maximum_row_count = static_cast<std::size_t>(
+        TTORRENT_MAX_TRACKER_HOST_ROW_COUNT
+    );
+    if (tracker_host_cache.size() >= maximum_row_count
+        && !tracker_hosts_by_id.contains(id)) {
+        return 0;
     }
 
     try {
@@ -614,6 +719,7 @@ DirtyMask TTorrentClient::remove_tracker_hosts(std::string_view id)
         return 0;
     }
 
+    tracker_hosts_by_id.erase(std::string(id));
     auto const removed = std::erase_if(tracker_host_cache, [id](TTorrentTrackerHostSnapshot const &row) {
         return std::string_view(row.torrent_id) == id;
     });
@@ -782,7 +888,7 @@ DirtyMask TTorrentClient::cache_trackers(lt::torrent_handle const &handle, std::
     auto [cached, created] = tracker_cache.try_emplace(id);
     TrackerCacheEntry &entry = cached->second;
     if (!created && vectors_equal(entry.trackers, snapshots, tracker_snapshots_equal)) {
-        return changes;
+        return changes | cache_tracker_hosts(id, trackers);
     }
     std::size_t const previous_payload_bytes = created ? 0U : retained_payload_bytes(entry);
     std::size_t const next_payload_bytes = vector_payload_bytes(snapshots);
@@ -1289,6 +1395,7 @@ DirtyMask TTorrentClient::remove_torrent_with_invalid_metadata(lt::torrent_handl
             identity->metadata_validation_retry_after =
                 std::chrono::steady_clock::now() + kResumeRetryInterval;
         }
+        invalidate_queue_order_index_locked();
         try {
             handle.pause();
             handle.set_flags(lt::torrent_flags::disable_dht);
@@ -1299,6 +1406,7 @@ DirtyMask TTorrentClient::remove_torrent_with_invalid_metadata(lt::torrent_handl
         }
         return queue_alert_error("Invalid torrent metadata could not be removed durably: " + tombstoned.error().message + ".");
     }
+    invalidate_queue_order_index_locked();
     try {
         session.remove_torrent(handle);
     } catch (...) {
@@ -1359,6 +1467,28 @@ DirtyMask TTorrentClient::resolve_torrent_conflict(
 
     TorrentIdentity *metadata_identity = identity_from_handle(metadata_handle);
     TorrentIdentity *conflicting_identity = identity_from_handle(conflicting_handle);
+    if (metadata_identity == nullptr || conflicting_identity == nullptr) {
+        session_identity_authority_faulted = true;
+        invalidate_queue_order_index_locked();
+        auto contain_unidentified = [](lt::torrent_handle const &handle, TorrentIdentity const *identity) noexcept {
+            if (identity != nullptr) {
+                return;
+            }
+            try {
+                handle.pause();
+                handle.set_flags(lt::torrent_flags::disable_dht);
+                handle.set_flags(lt::torrent_flags::disable_pex);
+                handle.set_flags(lt::torrent_flags::disable_lsd);
+            } catch (...) {
+                ignore_shutdown_failure();
+            }
+        };
+        contain_unidentified(metadata_handle, metadata_identity);
+        contain_unidentified(conflicting_handle, conflicting_identity);
+        changes |= queue_alert_error(
+            "Torrent additions were blocked because a hybrid conflict participant had no bridge identity. Restart the app to recover."
+        );
+    }
     bool const preserve_metadata_handle = conflict_participant_is_preferred(
         metadata_identity,
         conflicting_identity
@@ -1398,6 +1528,7 @@ DirtyMask TTorrentClient::resolve_torrent_conflict(
         return queue_alert_error("A duplicate hybrid torrent could not be removed durably: " + tombstoned.error().message + ".");
     }
 
+    invalidate_queue_order_index_locked();
     try {
         session.remove_torrent(duplicate);
     } catch (...) {
@@ -1452,7 +1583,7 @@ DirtyMask TTorrentClient::resolve_torrent_conflict(
         std::string_view const duplicate_canonical_id = duplicate_identity == nullptr
             ? std::string_view()
             : std::string_view(duplicate_identity->canonical_id);
-        forget_removed_identity_aliases(duplicate_hashes, duplicate_identity);
+        mark_conflict_remove_requested(duplicate_hashes, duplicate_identity);
         changes |= remove_snapshot(duplicate_hashes, duplicate_canonical_id);
     }
     changes |= cache_snapshot(survivor);

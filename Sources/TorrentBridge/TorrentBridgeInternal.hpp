@@ -56,6 +56,7 @@
 #include <tuple>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include <fcntl.h>
@@ -101,8 +102,25 @@ constexpr std::size_t kMaxMagnetURIBytes = 64U * kOneKilobyte;
 constexpr std::uintmax_t kMaxTorrentFileBytes = 64U * kOneMegabyte;
 constexpr std::uintmax_t kMaxResumeFileBytes = 64U * kOneMegabyte;
 constexpr std::uintmax_t kMaxRemovalTombstoneBytes = 16U * kOneKilobyte;
+// Outstanding cleanup failures must not grow persistent recovery state beyond
+// one complete live-torrent population. A marker normally carries the v1, v2,
+// and app IDs; four memberships per live slot leaves one additional cleanup ID
+// on average while still failing closed under pathological churn.
+constexpr std::size_t kMaxRemovalTombstoneEntryCount =
+    static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT);
+constexpr std::size_t kMaxRemovalTombstoneIDMembershipCount =
+    4U * static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT);
 constexpr std::array<unsigned char, 3> kUTF8ReplacementCharacter{0xefU, 0xbfU, 0xbdU};
 constexpr auto kAlertWaitInterval = std::chrono::milliseconds(250);
+// Synchronous adds post critical and high-priority alerts. The worker normally
+// drains them immediately; this bounded queue extends burst tolerance when it
+// is temporarily starved on the client lock. Explicit cadence drains below are
+// the guarantee that a product-sized add burst cannot fill it.
+constexpr int kLibtorrentAlertQueueSize = 8192;
+// Construction deliberately remains single-threaded, and live adds can
+// repeatedly reacquire the client lock before the worker. Drain both paths at
+// a fixed cadence without exposing partially initialized restore indexes.
+constexpr std::size_t kSynchronousAddAlertDrainInterval = 256U;
 constexpr auto kAlertWorkerInitialFailureBackoff = std::chrono::milliseconds(100);
 constexpr auto kAlertWorkerMaximumFailureBackoff = std::chrono::seconds(5);
 constexpr auto kSnapshotUpdateInterval = std::chrono::milliseconds(500);
@@ -130,6 +148,12 @@ static_assert(TTORRENT_MAX_FILE_COUNT > 0);
 static_assert(TTORRENT_MAX_TRACKER_COUNT > 0);
 static_assert(TTORRENT_MAX_WEB_SEED_COUNT > 0);
 static_assert(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT > 0);
+static_assert(kLibtorrentAlertQueueSize > 0);
+static_assert(kSynchronousAddAlertDrainInterval > 0U);
+static_assert(
+    kSynchronousAddAlertDrainInterval
+    < static_cast<std::size_t>(kLibtorrentAlertQueueSize)
+);
 static_assert(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT > 0);
 static_assert(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES > 0);
 static_assert(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES
@@ -137,7 +161,10 @@ static_assert(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES
                   * (TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES + 1));
 static_assert(kMaxTorrentIdentityTokenCount > static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 36U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 37U);
+static_assert(TTORRENT_ADD_REJECTED == 0);
+static_assert(TTORRENT_ADD_COMMITTED == 1);
+static_assert(TTORRENT_ADD_OUTCOME_UNKNOWN == 2);
 #if defined(TORRENT_USE_ASSERTS) && TORRENT_USE_ASSERTS
 static_assert(sizeof(lt::add_torrent_params) == 776U);
 #else
@@ -348,6 +375,59 @@ struct TorrentIdentityToken {
 
 static_assert(sizeof(TorrentIdentityToken) <= 2U * sizeof(std::uintptr_t));
 
+struct QueuePriorityState {
+    std::size_t count = 0;
+    int32_t next_rank = 0;
+};
+
+struct QueueOrderIndex {
+    QueuePriorityState low;
+    QueuePriorityState normal;
+    QueuePriorityState high;
+    bool valid = false;
+
+    [[nodiscard]] QueuePriorityState *state(int32_t priority) noexcept
+    {
+        switch (priority) {
+        case TTORRENT_QUEUE_PRIORITY_LOW:
+            return &low;
+        case TTORRENT_QUEUE_PRIORITY_NORMAL:
+            return &normal;
+        case TTORRENT_QUEUE_PRIORITY_HIGH:
+            return &high;
+        default:
+            return nullptr;
+        }
+    }
+
+    [[nodiscard]] std::size_t total_count() const noexcept
+    {
+        return low.count + normal.count + high.count;
+    }
+
+    [[nodiscard]] std::optional<std::size_t> insertion_position(int32_t priority) const noexcept
+    {
+        switch (priority) {
+        case TTORRENT_QUEUE_PRIORITY_HIGH:
+            return high.count;
+        case TTORRENT_QUEUE_PRIORITY_NORMAL:
+            return high.count + normal.count;
+        case TTORRENT_QUEUE_PRIORITY_LOW:
+            return high.count + normal.count + low.count;
+        default:
+            return std::nullopt;
+        }
+    }
+
+    void reset() noexcept
+    {
+        low = {};
+        normal = {};
+        high = {};
+        valid = false;
+    }
+};
+
 struct TorrentIdentity {
     TorrentIdentityToken *token = nullptr;
     std::uint64_t generation = 0;
@@ -372,6 +452,7 @@ struct TorrentIdentity {
     bool intended_default_dont_download = false;
     int32_t queue_priority = TTORRENT_QUEUE_PRIORITY_NORMAL;
     int32_t queue_rank = kUnsetQueueRank;
+    bool queue_order_tracked = false;
     std::vector<lt::announce_entry> source_trackers;
     std::vector<std::string> source_web_seeds;
     std::vector<lt::download_priority_t> intended_file_priorities;
@@ -432,6 +513,11 @@ struct RemovalTombstoneEntry {
     bool delete_partfile = false;
 };
 
+struct RemovalTombstoneIndexLimits {
+    std::size_t entry_count = 0;
+    std::size_t id_membership_count = 0;
+};
+
 struct RemovalTombstonePayload {
     std::vector<std::string> ids;
     RemovalTombstoneState state = RemovalTombstoneState::resume_cleanup;
@@ -451,6 +537,11 @@ struct TrackerCacheEntry {
     std::uint64_t revision = 0;
     std::uint64_t last_access_sequence = 0;
     std::vector<TTorrentTrackerSnapshot> trackers;
+};
+
+struct TrackerHostCacheEntry {
+    std::vector<std::string> hosts;
+    bool complete = true;
 };
 
 struct WebSeedCacheEntry {
@@ -491,6 +582,8 @@ using TorrentSourceCounts = TTorrentSourceSecurityInspection;
 using TombstoneEntriesResult = std::expected<std::vector<RemovalTombstoneEntry>, std::string>;
 using TombstoneCommitResult = std::expected<TombstoneCommitStatus, std::string>;
 using TombstonePayloadResult = std::expected<RemovalTombstonePayload, std::string>;
+using RemovalTombstoneEntryMap = std::map<std::string, std::unique_ptr<RemovalTombstoneEntry>>;
+using RemovalTombstoneIDIndex = std::map<std::string, std::set<RemovalTombstoneEntry const *>>;
 using DirtyMask = std::uint32_t;
 
 struct WakeCallbackInvocation {
@@ -1158,10 +1251,15 @@ struct TTorrentClient {
     std::vector<std::unique_ptr<TorrentIdentityToken>> identity_tokens;
     std::vector<std::unique_ptr<TorrentIdentity>> torrent_identities;
     std::vector<std::unique_ptr<TorrentIdentity>> retiring_torrent_identities;
+    std::unordered_set<std::string> canonical_ids_in_use;
     std::atomic<std::size_t> identity_reclamation_blockers = 0;
     std::unordered_map<std::string, TorrentIdentity *> active_identity_by_id;
     std::unordered_map<std::string, TorrentIdentity *> removing_identity_by_id;
     std::unordered_map<std::string, lt::torrent_handle> handle_by_id;
+    QueueOrderIndex queue_order_index;
+#if defined(TORRENT_BRIDGE_TESTING)
+    std::size_t queue_order_rebuild_count = 0;
+#endif
     std::set<TorrentIdentity *> dht_disabled_by_app;
     std::set<TorrentIdentity *> peer_exchange_disabled_by_app;
     std::set<TorrentIdentity const *> metadata_validation_pending;
@@ -1170,8 +1268,13 @@ struct TTorrentClient {
     std::unordered_map<std::string, std::vector<std::string>> pending_resume_cleanup_ids_by_id;
     std::unordered_map<std::string, std::vector<std::string>> terminal_delete_cleanup_ids_by_id;
     std::unordered_map<std::string, std::vector<std::string>> pending_tombstone_clear_ids_by_id;
+    RemovalTombstoneEntryMap removal_tombstones_by_filename;
+    RemovalTombstoneIDIndex removal_tombstones_by_id;
+    std::size_t removal_tombstone_id_membership_count = 0;
+#if defined(TORRENT_BRIDGE_TESTING)
+    std::size_t removal_tombstone_directory_scan_count = 0;
+#endif
     std::set<TorrentIdentity *> unidentified_removing_identities;
-    bool persistence_faulted = false;
     std::string persistence_fault_message;
     DeferredSessionProxy deferred_session_shutdown;
     lt::session session;
@@ -1179,8 +1282,8 @@ struct TTorrentClient {
     std::vector<TTorrentSnapshot> snapshot_cache;
     std::unordered_map<std::string, std::size_t> snapshot_indices;
     std::uint64_t snapshot_revision = 0;
-    bool rebuilding_snapshot_cache = false;
     std::vector<TTorrentTrackerHostSnapshot> tracker_host_cache;
+    std::unordered_map<std::string, TrackerHostCacheEntry> tracker_hosts_by_id;
     std::uint64_t tracker_host_revision = 0;
     std::unordered_map<std::string, TrackerCacheEntry> tracker_cache;
     std::uint64_t tracker_revision = 0;
@@ -1198,6 +1301,12 @@ struct TTorrentClient {
     std::optional<RemovalRequestEntry> removal_request;
     std::uint64_t requested_network_revision = 0;
     std::uint64_t submitted_network_revision = 0;
+#if defined(TORRENT_BRIDGE_TESTING)
+    bool fail_next_queue_order_rebuild_before_collection = false;
+#endif
+    bool session_identity_authority_faulted = false;
+    bool persistence_faulted = false;
+    bool rebuilding_snapshot_cache = false;
     bool requested_network_blocked = true;
     bool dht_node_enabled = true;
     bool dht_enabled_by_default = true;
@@ -1213,17 +1322,22 @@ struct TTorrentClient {
     std::string last_network_error;
     TTorrentBridgeHealth bridge_health{};
     std::vector<std::string> pending_alert_errors;
+    std::size_t synchronous_adds_since_alert_drain = 0U;
     std::uint64_t publication_epoch = 0;
     DirtyMask pending_changes = 0;
-    bool wake_pending = false;
     TTorrentWakeCallback wake_callback = nullptr;
     void *wake_callback_context = nullptr;
     int32_t wake_callbacks_in_flight = 0;
+    bool wake_pending = false;
     std::condition_variable wake_callback_quiesced;
 
     void start_alert_worker();
 
     void stop_alert_worker() noexcept;
+
+    void record_synchronous_add_alert_locked() noexcept;
+
+    void drain_synchronous_add_alerts_if_needed() noexcept;
 
     void alert_loop(std::stop_token const &stop_token);
 
@@ -1243,20 +1357,17 @@ struct TTorrentClient {
 
     void invoke_wake_callback(WakeCallbackInvocation wake) noexcept;
 
-    [[nodiscard]] bool canonical_id_in_collection_locked(
-        std::vector<std::unique_ptr<TorrentIdentity>> const &identities,
-        std::string_view canonical_id
-    ) const;
-
-    [[nodiscard]] bool canonical_id_in_use_locked(std::string_view canonical_id) const;
-
-    [[nodiscard]] std::string make_unique_canonical_torrent_id_locked() const;
+    [[nodiscard]] std::string reserve_canonical_torrent_id_locked(std::string canonical_id);
 
     TorrentIdentity *make_identity(std::string canonical_id = {});
 
     TorrentIdentity *attach_identity(lt::add_torrent_params &params, std::string canonical_id = {});
 
     [[nodiscard]] BridgeResult ensure_torrent_admission_available(int32_t code) const;
+
+    void untrack_queue_identity_locked(TorrentIdentity *identity) noexcept;
+
+    void invalidate_queue_order_index_locked() noexcept;
 
     std::uint64_t allocate_resume_generation_locked(TorrentIdentity *identity);
 
@@ -1350,6 +1461,12 @@ struct TTorrentClient {
 
     ResumeRemoveResult remove_resume_files_for_id_checked_locked(std::string const &id);
 
+    TombstoneEntriesResult scan_removal_tombstone_entries_locked(RemovalTombstoneIndexLimits limits);
+
+    ResumeSaveResult load_removal_tombstone_index_locked(RemovalTombstoneIndexLimits limits);
+
+    void unindex_removal_tombstone_locked(RemovalTombstoneEntry const *entry) noexcept;
+
     TombstoneEntriesResult removal_tombstone_entries_locked();
 
     TombstoneIDResult removal_tombstone_ids_locked();
@@ -1387,16 +1504,20 @@ struct TTorrentClient {
 
     std::vector<lt::torrent_handle> apply_queue_priority_order_locked();
 
+    void insert_added_queue_priority_order_locked(
+        lt::torrent_handle const &handle,
+        TorrentIdentity *identity
+    );
+
     [[nodiscard]] DirtyMask update_snapshot_cache(std::vector<lt::torrent_status> const &statuses);
 
     [[nodiscard]] DirtyMask remove_snapshot(std::string_view id);
 
     [[nodiscard]] DirtyMask mark_tracker_host_cache_changed() noexcept;
 
-    [[nodiscard]] DirtyMask rebuild_tracker_host_cache_locked(
-        std::string_view override_id = {},
-        std::vector<lt::announce_entry> const *override_trackers = nullptr
-    );
+    [[nodiscard]] DirtyMask rebuild_tracker_host_cache_locked();
+
+    [[nodiscard]] DirtyMask refresh_tracker_host_cache_locked();
 
     [[nodiscard]] DirtyMask cache_tracker_hosts(std::string const &id, std::vector<lt::announce_entry> const &trackers);
 
@@ -1631,7 +1752,7 @@ struct TTorrentClient {
 
     void mark_remove_requested(lt::info_hash_t const &hashes, std::string_view requested_id, TorrentIdentity *identity);
 
-    void forget_removed_identity_aliases(lt::info_hash_t const &hashes, TorrentIdentity *identity);
+    void mark_conflict_remove_requested(lt::info_hash_t const &hashes, TorrentIdentity *identity);
 
     bool accepts_removed_alert(lt::info_hash_t const &hashes, TorrentIdentity *identity);
 
@@ -1742,6 +1863,36 @@ struct TTorrentClient {
     ResumeIDListResult tombstone_ids_overlapping(std::vector<std::string> const &ids);
 
     ResumeSaveResult clear_removal_tombstones(std::vector<std::string> const &ids);
+};
+
+class UnpublishedIdentityGuard final {
+public:
+    UnpublishedIdentityGuard(TTorrentClient &client, TorrentIdentity *identity) noexcept
+        : client_(client)
+        , identity_(identity)
+    {
+    }
+
+    ~UnpublishedIdentityGuard() noexcept
+    {
+        if (identity_ != nullptr) {
+            client_.discard_unpublished_identity(identity_);
+        }
+    }
+
+    UnpublishedIdentityGuard(UnpublishedIdentityGuard const &) = delete;
+    UnpublishedIdentityGuard &operator=(UnpublishedIdentityGuard const &) = delete;
+    UnpublishedIdentityGuard(UnpublishedIdentityGuard &&) = delete;
+    UnpublishedIdentityGuard &operator=(UnpublishedIdentityGuard &&) = delete;
+
+    void release() noexcept
+    {
+        identity_ = nullptr;
+    }
+
+private:
+    TTorrentClient &client_;
+    TorrentIdentity *identity_;
 };
 
 class IdentityReclamationBlock final {

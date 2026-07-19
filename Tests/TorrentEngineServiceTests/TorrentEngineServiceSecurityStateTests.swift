@@ -4,9 +4,85 @@ import Testing
 import XPC
 @testable import TorrentEngineIPC
 @testable import TorrentEngineService
+@testable import TorrentEngineServiceSupport
 
 @Suite("Torrent engine XPC service security state")
 struct TorrentEngineServiceSecurityStateTests {
+    @Test("Only commit-ambiguous or post-commit add failures require containment")
+    func addFailureContainmentClassification() {
+        #expect(!TorrentEngineServiceRuntime.addFailureRequiresContainment(
+            nativeAddCommitted: false,
+            nativeCommitStatusUnknown: false
+        ))
+        #expect(TorrentEngineServiceRuntime.addFailureRequiresContainment(
+            nativeAddCommitted: false,
+            nativeCommitStatusUnknown: true
+        ))
+        #expect(TorrentEngineServiceRuntime.addFailureRequiresContainment(
+            nativeAddCommitted: true,
+            nativeCommitStatusUnknown: false
+        ))
+    }
+
+    @Test("Change hints are scoped to the exact server generation")
+    func changeHintsRequireExactServerGeneration() {
+        let epoch = UUID()
+        let controllerID = UUID()
+        let oldScope = TorrentEngineServiceScope(
+            engineEpoch: epoch,
+            controllerID: controllerID
+        )
+        let freshScope = TorrentEngineServiceScope(
+            engineEpoch: epoch,
+            controllerID: controllerID
+        )
+
+        #expect(TorrentEngineServiceRuntime.changeHintBelongsToActiveController(
+            scope: oldScope,
+            activeScope: oldScope,
+            isShuttingDown: false
+        ))
+        #expect(!TorrentEngineServiceRuntime.changeHintBelongsToActiveController(
+            scope: oldScope,
+            activeScope: freshScope,
+            isShuttingDown: false
+        ))
+
+        oldScope.invalidate()
+        #expect(!TorrentEngineServiceRuntime.changeHintBelongsToActiveController(
+            scope: oldScope,
+            activeScope: oldScope,
+            isShuttingDown: false
+        ))
+        #expect(TorrentEngineServiceRuntime.changeHintBelongsToActiveController(
+            scope: freshScope,
+            activeScope: freshScope,
+            isShuttingDown: false
+        ))
+    }
+
+    @Test("Dataset production rejects a two-hundred-fifty-seventh page")
+    func datasetProductionEnforcesPageCap() {
+        let items = Array(
+            0...TorrentEngineIPCLimits.maximumDatasetPageCount
+        )
+
+        do {
+            _ = try TorrentEngineServiceRuntime.paginateDataset(items) { pageItems in
+                guard pageItems.count == 1 else {
+                    throw TorrentEngineIPCError.payloadTooLarge(
+                        actual: pageItems.count,
+                        maximum: 1
+                    )
+                }
+                return Data([0])
+            }
+            Issue.record("Expected dataset page production to stop at the page cap")
+        } catch {
+            #expect(error.localizedDescription == "The torrent engine dataset storage limit was exceeded.")
+        }
+    }
+
     @Test("Overlapping peers receive retryable busy and shutdown classifications")
     func overlappingPeerFailureCodes() {
         let activePeer = UUID()
@@ -271,6 +347,50 @@ struct TorrentEngineServiceSecurityStateTests {
         #expect(await runtime.diagnostics() == .inactive)
         #expect(lifecycle.events == [.begin, .reply(.success), .end])
         #expect(lifecycle.snapshot == .init(beginCount: 1, endCount: 1))
+    }
+
+    @Test("A fresh service generation accepts the same wire controller identifier")
+    func reconnectWithSameWireControllerID() async throws {
+        let temporary = try ServiceTemporaryDirectory()
+        let lifecycle = LifecycleRecorder()
+        let runtime = try TorrentEngineServiceRuntime(
+            stateDirectory: temporary.url,
+            transactionBegin: { lifecycle.begin() },
+            transactionEnd: { lifecycle.end() }
+        )
+        let controllerID = UUID()
+        let firstPeerToken = UUID()
+
+        let firstDisposition = await runtime.handle(
+            try beginMigrationRequest(controllerID: controllerID),
+            from: firstPeerToken,
+            session: TorrentEngineServiceSessionHandle(),
+            peerIsCancelled: { false },
+            pendingReply: TorrentEnginePendingReply { lifecycle.reply(status: $0) }
+        )
+        #expect(firstDisposition == .continuePeer)
+        #expect(await runtime.diagnostics() == .activeMigration)
+
+        await runtime.beginDisconnect(peerToken: firstPeerToken)
+        await runtime.finishDisconnect(peerToken: firstPeerToken)
+        #expect(await runtime.diagnostics() == .inactive)
+
+        let secondPeerToken = UUID()
+        let secondDisposition = await runtime.handle(
+            try beginMigrationRequest(controllerID: controllerID),
+            from: secondPeerToken,
+            session: TorrentEngineServiceSessionHandle(),
+            peerIsCancelled: { false },
+            pendingReply: TorrentEnginePendingReply { lifecycle.reply(status: $0) }
+        )
+
+        #expect(secondDisposition == .continuePeer)
+        #expect(await runtime.diagnostics() == .activeMigration)
+
+        await runtime.beginDisconnect(peerToken: secondPeerToken)
+        await runtime.finishDisconnect(peerToken: secondPeerToken)
+        #expect(await runtime.diagnostics() == .inactive)
+        #expect(lifecycle.snapshot == .init(beginCount: 2, endCount: 2))
     }
 
     @Test("A stopped interface monitor blocks before releasing its controller")

@@ -3,13 +3,58 @@ import CryptoKit
 import Foundation
 import System
 
+private final class TorrentEngineServiceScopeValidity: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active = true
+
+    init() {}
+
+    var isActive: Bool {
+        lock.withLock { active }
+    }
+
+    func invalidate() {
+        lock.withLock { active = false }
+    }
+}
+
 package struct TorrentEngineServiceScope: Hashable, Sendable {
     package let engineEpoch: UUID
     package let controllerID: UUID
+    package let generation: UUID
+    private let validity: TorrentEngineServiceScopeValidity
 
-    package init(engineEpoch: UUID, controllerID: UUID) {
+    package init(
+        engineEpoch: UUID,
+        controllerID: UUID
+    ) {
         self.engineEpoch = engineEpoch
         self.controllerID = controllerID
+        generation = UUID()
+        validity = TorrentEngineServiceScopeValidity()
+    }
+
+    package var isActive: Bool {
+        validity.isActive
+    }
+
+    package func invalidate() {
+        validity.invalidate()
+    }
+
+    package static func == (
+        lhs: TorrentEngineServiceScope,
+        rhs: TorrentEngineServiceScope
+    ) -> Bool {
+        lhs.engineEpoch == rhs.engineEpoch
+            && lhs.controllerID == rhs.controllerID
+            && lhs.generation == rhs.generation
+    }
+
+    package func hash(into hasher: inout Hasher) {
+        hasher.combine(engineEpoch)
+        hasher.combine(controllerID)
+        hasher.combine(generation)
     }
 }
 
@@ -161,7 +206,7 @@ package final class TorrentFolderCapabilityPin: @unchecked Sendable {
     }
 
     package var isValid: Bool {
-        access.isActive
+        scope.isActive && access.isActive
     }
 
     /// Keeps the security scope and registry-owned descriptor alive while a
@@ -171,7 +216,10 @@ package final class TorrentFolderCapabilityPin: @unchecked Sendable {
     }
 
     package func directoryFileDescriptor() throws -> Int32 {
-        try access.fileDescriptor()
+        guard scope.isActive else {
+            throw TorrentFolderCapabilityError.capabilityInvalidated
+        }
+        return try access.fileDescriptor()
     }
 }
 
@@ -206,9 +254,9 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
     private let bookmarkResolver: any TorrentFolderBookmarkResolving
     private let lock = NSLock()
     private var entriesByID = [UUID: TorrentFolderCapabilityEntry]()
-    private var accessReferencesByController = [UUID: [TorrentWeakFolderCapabilityAccess]]()
-    private var knownControllerIDs = Set<UUID>()
-    private var disconnectedControllerIDs = Set<UUID>()
+    private var accessReferencesByScope = [
+        TorrentEngineServiceScope: [TorrentWeakFolderCapabilityAccess]
+    ]()
     private var registryRevision: UInt64 = 0
 
     package init(
@@ -265,10 +313,10 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
         let replacement = try lock.withLock {
             try requireConnectedController(scope: scope)
             let retainedEntries = entriesByID.values.filter {
-                $0.capability.scope.controllerID != scope.controllerID
+                $0.capability.scope != scope
             }
             let displacedEntries = entriesByID.values.filter {
-                $0.capability.scope.controllerID == scope.controllerID
+                $0.capability.scope == scope
             }
             try validateProjectedTotals(
                 retainedEntries: retainedEntries,
@@ -300,11 +348,16 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
                     access: reusableEntry?.access ?? candidate.access
                 ))
             }
-            return TorrentFolderCapabilityReplacement(
+            let replacement = TorrentFolderCapabilityReplacement(
                 scope: scope,
                 expectedRegistryRevision: registryRevision,
                 entries: replacementEntries
             )
+            rememberAccesses(
+                replacementEntries.map(\.access),
+                scope: scope
+            )
+            return replacement
         }
         // Candidate accesses superseded by an identical active entry release
         // here, outside the registry lock. Unchanged snapshots therefore keep
@@ -329,7 +382,7 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
             }
 
             let retainedEntries = entriesByID.values.filter {
-                $0.capability.scope.controllerID != replacement.scope.controllerID
+                $0.capability.scope != replacement.scope
             }
             let retainedIDs = Set(retainedEntries.map(\.capability.id))
             let replacementIDs = replacement.entries.map(\.capability.id)
@@ -338,7 +391,7 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
                 throw TorrentFolderCapabilityError.staleReplacement
             }
             displacedEntries = entriesByID.values.filter {
-                $0.capability.scope.controllerID == replacement.scope.controllerID
+                $0.capability.scope == replacement.scope
             }
             entriesByID = Dictionary(
                 uniqueKeysWithValues: retainedEntries.map { ($0.capability.id, $0) }
@@ -346,10 +399,6 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
             for entry in replacement.entries {
                 entriesByID[entry.capability.id] = entry
             }
-            rememberAccesses(
-                replacement.entries.map(\.access),
-                controllerID: replacement.scope.controllerID
-            )
             incrementRegistryRevision()
             return replacement.capabilities
         }
@@ -374,7 +423,7 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
                 candidateBookmarkBytes: [candidate.bookmarkByteCount]
             )
             guard !entriesByID.values.contains(where: {
-                $0.capability.scope.controllerID == scope.controllerID
+                $0.capability.scope == scope
                     && ($0.capability.canonicalPath == candidate.canonicalPath
                         || $0.capability.identity == candidate.identity)
             }) else {
@@ -396,7 +445,7 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
                 access: candidate.access
             )
             entriesByID[capability.id] = entry
-            rememberAccesses([entry.access], controllerID: scope.controllerID)
+            rememberAccesses([entry.access], scope: scope)
             incrementRegistryRevision()
             return capability
         }
@@ -502,15 +551,14 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
 
     /// A disconnect is stronger than ordinary revocation: it invalidates resources
     /// retained by outstanding pins so no descriptor or security scope crosses sessions.
-    package func disconnect(controllerID: UUID) {
+    package func disconnect(scope: TorrentEngineServiceScope) {
+        scope.invalidate()
         let accesses = lock.withLock {
-            knownControllerIDs.insert(controllerID)
-            disconnectedControllerIDs.insert(controllerID)
             entriesByID = entriesByID.filter {
-                $0.value.capability.scope.controllerID != controllerID
+                $0.value.capability.scope != scope
             }
             incrementRegistryRevision()
-            let references = accessReferencesByController.removeValue(forKey: controllerID) ?? []
+            let references = accessReferencesByScope.removeValue(forKey: scope) ?? []
             return references.compactMap(\.access)
         }
         for access in uniqueAccesses(accesses) {
@@ -533,11 +581,11 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
         }
     }
 
-    package func capabilities(controllerID: UUID) -> [TorrentFolderCapability] {
+    package func capabilities(scope: TorrentEngineServiceScope) -> [TorrentFolderCapability] {
         lock.withLock {
             entriesByID.values
                 .map(\.capability)
-                .filter { $0.scope.controllerID == controllerID }
+                .filter { $0.scope == scope }
                 .sorted { $0.id.uuidString < $1.id.uuidString }
         }
     }
@@ -552,7 +600,6 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
         try validate(scope: scope)
         try lock.withLock {
             try requireConnectedController(scope: scope)
-            knownControllerIDs.insert(scope.controllerID)
         }
     }
 
@@ -561,7 +608,7 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
     }
 
     private func requireConnectedController(scope: TorrentEngineServiceScope) throws {
-        guard !disconnectedControllerIDs.contains(scope.controllerID) else {
+        guard scope.isActive else {
             throw TorrentFolderCapabilityError.controllerDisconnected
         }
     }
@@ -679,9 +726,9 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
 
     private func rememberAccesses(
         _ accesses: [TorrentFolderCapabilityAccess],
-        controllerID: UUID
+        scope: TorrentEngineServiceScope
     ) {
-        var references = accessReferencesByController[controllerID] ?? []
+        var references = accessReferencesByScope[scope] ?? []
         var knownAccesses = Set<ObjectIdentifier>()
         references.removeAll { reference in
             guard let access = reference.access else {
@@ -693,17 +740,20 @@ package final class TorrentFolderCapabilityRegistry: @unchecked Sendable {
         where knownAccesses.insert(ObjectIdentifier(access)).inserted {
             references.append(TorrentWeakFolderCapabilityAccess(access))
         }
-        accessReferencesByController[controllerID] = references
+        accessReferencesByScope[scope] = references
     }
 
     private func invalidateEveryAccess() {
         let accesses = lock.withLock {
-            disconnectedControllerIDs.formUnion(knownControllerIDs)
-            disconnectedControllerIDs.formUnion(accessReferencesByController.keys)
+            let scopes = Set(entriesByID.values.map(\.capability.scope))
+                .union(accessReferencesByScope.keys)
+            for scope in scopes {
+                scope.invalidate()
+            }
             entriesByID.removeAll()
             incrementRegistryRevision()
-            let references = accessReferencesByController.values.joined()
-            accessReferencesByController.removeAll()
+            let references = accessReferencesByScope.values.joined()
+            accessReferencesByScope.removeAll()
             return references.compactMap(\.access)
         }
         for access in uniqueAccesses(accesses) {

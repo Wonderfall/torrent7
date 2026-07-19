@@ -114,8 +114,12 @@ void save_and_publish_policy_handles(TTorrentClient &client, std::span<lt::torre
     }
 }
 
-std::vector<lt::torrent_handle> apply_queue_order(std::span<QueueOrderingEntry> entries)
+std::vector<lt::torrent_handle> apply_queue_order(
+    std::span<QueueOrderingEntry> entries,
+    bool *positions_applied_out = nullptr
+)
 {
+    bool positions_applied = true;
     std::vector<lt::torrent_handle> changed_handles;
     changed_handles.reserve(entries.size());
 
@@ -138,14 +142,19 @@ std::vector<lt::torrent_handle> apply_queue_order(std::span<QueueOrderingEntry> 
         try {
             entry.handle.queue_position_set(lt::queue_position_t(position));
         } catch (...) {
+            positions_applied = false;
             ignore_shutdown_failure();
         }
 
         if (changed) {
-            append_unique_handle_by_identity(changed_handles, entry.handle);
+            // queue_ordering_entries already guarantees one entry per identity.
+            changed_handles.push_back(entry.handle);
         }
         ++position;
         ++rank;
+    }
+    if (positions_applied_out != nullptr) {
+        *positions_applied_out = positions_applied;
     }
     return changed_handles;
 }
@@ -202,8 +211,99 @@ bool move_queue_entry(std::vector<QueueOrderingEntry> &entries, TorrentIdentity 
 
 std::vector<lt::torrent_handle> TTorrentClient::apply_queue_priority_order_locked()
 {
+#if defined(TORRENT_BRIDGE_TESTING)
+    ++queue_order_rebuild_count;
+    if (fail_next_queue_order_rebuild_before_collection) {
+        fail_next_queue_order_rebuild_before_collection = false;
+        throw std::runtime_error("Injected queue-order rebuild failure.");
+    }
+#endif
     std::vector<QueueOrderingEntry> entries = queue_ordering_entries(*this);
-    return apply_queue_order(entries);
+    bool positions_applied = false;
+    std::vector<lt::torrent_handle> changed_handles = apply_queue_order(entries, &positions_applied);
+
+    queue_order_index.reset();
+    for (auto const &owned_identity : torrent_identities) {
+        if (owned_identity != nullptr) {
+            owned_identity->queue_order_tracked = false;
+        }
+    }
+    queue_order_index.valid = positions_applied;
+    if (!positions_applied) {
+        return changed_handles;
+    }
+
+    for (auto const &entry : entries) {
+        auto *const priority = queue_order_index.state(entry.identity->queue_priority);
+        if (priority == nullptr) {
+            invalidate_queue_order_index_locked();
+            break;
+        }
+        if (priority->count >= static_cast<std::size_t>(std::numeric_limits<int32_t>::max())) {
+            invalidate_queue_order_index_locked();
+            break;
+        }
+        ++priority->count;
+        priority->next_rank = static_cast<int32_t>(priority->count);
+        entry.identity->queue_order_tracked = true;
+    }
+    return changed_handles;
+}
+
+void TTorrentClient::insert_added_queue_priority_order_locked(
+    lt::torrent_handle const &handle,
+    TorrentIdentity *identity
+)
+{
+    if (identity == nullptr || !is_valid_queue_priority(identity->queue_priority)) {
+        invalidate_queue_order_index_locked();
+        return;
+    }
+
+    std::optional<int> const position = queue_position_value(handle);
+    if (!position) {
+        identity->queue_rank = kUnsetQueueRank;
+        identity->queue_order_tracked = false;
+        return;
+    }
+
+    auto const queued_count = queue_order_index.total_count();
+    if (!queue_order_index.valid) {
+        return;
+    }
+    if (std::cmp_not_equal(*position, queued_count)) {
+        invalidate_queue_order_index_locked();
+        return;
+    }
+
+    auto *const priority = queue_order_index.state(identity->queue_priority);
+    auto const insertion_position = queue_order_index.insertion_position(identity->queue_priority);
+    if (priority == nullptr || !insertion_position) {
+        invalidate_queue_order_index_locked();
+        return;
+    }
+    if (priority->next_rank == std::numeric_limits<int32_t>::max()) {
+        invalidate_queue_order_index_locked();
+        return;
+    }
+    if (*insertion_position > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        invalidate_queue_order_index_locked();
+        return;
+    }
+
+    try {
+        if (std::cmp_not_equal(*insertion_position, *position)) {
+            handle.queue_position_set(lt::queue_position_t(static_cast<int>(*insertion_position)));
+        }
+    } catch (...) {
+        invalidate_queue_order_index_locked();
+        ignore_shutdown_failure();
+        return;
+    }
+
+    identity->queue_rank = priority->next_rank++;
+    identity->queue_order_tracked = true;
+    ++priority->count;
 }
 
 DirtyMask block_network_locked(TTorrentClient &client)
@@ -1585,14 +1685,19 @@ extern "C" uint64_t TorrentClientTakeChanges(TTorrentClient *client, uint32_t *d
 extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *magnet_uri, const char *save_path,
                                           const TTorrentAddOptions *options,
                                           char *added_id_out, int32_t added_id_capacity,
+                                          int32_t *add_outcome_out,
                                           char *error_out, int32_t error_capacity) noexcept
 {
+    if (add_outcome_out != nullptr) {
+        *add_outcome_out = TTORRENT_ADD_REJECTED;
+    }
     WakeCallbackInvocation wake;
     std::span<char> const added_id_buffer = output_buffer(added_id_out, added_id_capacity);
     copy_string_dynamic(added_id_buffer, "");
     int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 4, [&]() -> BridgeResult {
-        if (client == nullptr || magnet_uri == nullptr || save_path == nullptr || options == nullptr) {
-            return bridge_error(1, "Missing torrent client, magnet URI, save path, or add options.");
+        if (client == nullptr || magnet_uri == nullptr || save_path == nullptr || options == nullptr
+            || add_outcome_out == nullptr) {
+            return bridge_error(1, "Missing torrent client, magnet URI, save path, add options, or add outcome output.");
         }
         TTorrentAddOptions const add_options = *options;
         std::string_view const magnet = c_string_view(magnet_uri);
@@ -1694,6 +1799,7 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
             return bridge_error(3, "Torrent data deletion is still pending.");
         }
         TorrentIdentity *identity = client->attach_identity(params);
+        UnpublishedIdentityGuard identity_guard(*client, identity);
         identity->allows_non_https_trackers = allows_non_https_trackers;
         identity->allows_non_https_web_seeds = allows_non_https_web_seeds;
         identity->queue_priority = add_options.queue_priority;
@@ -1706,11 +1812,16 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         remember_source_policy_sources(*identity, source_params);
         lt::add_torrent_params resume_params = params;
         lt::error_code add_error;
+        *add_outcome_out = TTORRENT_ADD_OUTCOME_UNKNOWN;
+        identity_guard.release();
         lt::torrent_handle handle = client->session.add_torrent(std::move(params), add_error);
+        client->record_synchronous_add_alert_locked();
         if (add_error) {
+            *add_outcome_out = TTORRENT_ADD_REJECTED;
             client->discard_unpublished_identity(identity);
             return bridge_error(3, add_error.message());
         }
+        client->insert_added_queue_priority_order_locked(handle, identity);
 
         lt::info_hash_t hashes;
         try {
@@ -1723,6 +1834,9 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         }
         std::vector<std::string> const resume_ids = hash_keys_with_requested(hashes, identity->canonical_id);
         client->mark_active(hashes, handle, identity);
+        if (!client->queue_order_index.valid) {
+            static_cast<void>(client->apply_queue_priority_order_locked());
+        }
         if (dht_disabled_by_app) {
             client->dht_disabled_by_app.insert(identity);
         }
@@ -1735,7 +1849,6 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         if (metadata_pending) {
             client->metadata_validation_pending.insert(identity);
         }
-        client->apply_queue_priority_order_locked();
         ResumeSaveResult saved_resume = client->save_added_torrent_resume_data(
             std::move(resume_params),
             hashes,
@@ -1834,10 +1947,12 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         publisher.add(client->cache_snapshot(handle));
         client->request_snapshot_update_locked();
         copy_string_dynamic(added_id_buffer, identity->canonical_id);
+        *add_outcome_out = TTORRENT_ADD_COMMITTED;
         return {};
     });
     if (client != nullptr) {
         client->invoke_wake_callback(wake);
+        client->drain_synchronous_add_alerts_if_needed();
     }
     return result;
 }
@@ -1863,17 +1978,21 @@ int32_t add_torrent_file_data_with_priorities(
     int32_t file_priority_count,
     char *added_id_out,
     int32_t added_id_capacity,
+    int32_t *add_outcome_out,
     char *error_out,
     int32_t error_capacity,
     LoadTorrent load_torrent
 ) noexcept
 {
+    if (add_outcome_out != nullptr) {
+        *add_outcome_out = TTORRENT_ADD_REJECTED;
+    }
     WakeCallbackInvocation wake;
     std::span<char> const added_id_buffer = output_buffer(added_id_out, added_id_capacity);
     copy_string_dynamic(added_id_buffer, "");
     int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 3, [&]() -> BridgeResult {
-        if (client == nullptr || save_path == nullptr || options == nullptr) {
-            return bridge_error(1, "Missing torrent client, save path, or add options.");
+        if (client == nullptr || save_path == nullptr || options == nullptr || add_outcome_out == nullptr) {
+            return bridge_error(1, "Missing torrent client, save path, add options, or add outcome output.");
         }
         TTorrentAddOptions const add_options = *options;
         if (file_priority_count < -1) {
@@ -1985,6 +2104,7 @@ int32_t add_torrent_file_data_with_priorities(
         }
 
         TorrentIdentity *identity = client->attach_identity(params);
+        UnpublishedIdentityGuard identity_guard(*client, identity);
         identity->allows_non_https_trackers = allows_non_https_trackers;
         identity->allows_non_https_web_seeds = allows_non_https_web_seeds;
         identity->queue_priority = add_options.queue_priority;
@@ -1994,11 +2114,16 @@ int32_t add_torrent_file_data_with_priorities(
         remember_source_policy_sources(*identity, source_params);
         lt::add_torrent_params resume_params = params;
         lt::error_code add_error;
+        *add_outcome_out = TTORRENT_ADD_OUTCOME_UNKNOWN;
+        identity_guard.release();
         lt::torrent_handle handle = client->session.add_torrent(std::move(params), add_error);
+        client->record_synchronous_add_alert_locked();
         if (add_error) {
+            *add_outcome_out = TTORRENT_ADD_REJECTED;
             client->discard_unpublished_identity(identity);
             return bridge_error(2, add_error.message());
         }
+        client->insert_added_queue_priority_order_locked(handle, identity);
 
         lt::info_hash_t hashes;
         try {
@@ -2011,6 +2136,9 @@ int32_t add_torrent_file_data_with_priorities(
         }
         std::vector<std::string> const resume_ids = hash_keys_with_requested(hashes, identity->canonical_id);
         client->mark_active(hashes, handle, identity);
+        if (!client->queue_order_index.valid) {
+            static_cast<void>(client->apply_queue_priority_order_locked());
+        }
         if (dht_disabled_by_app) {
             client->dht_disabled_by_app.insert(identity);
         }
@@ -2020,7 +2148,6 @@ int32_t add_torrent_file_data_with_priorities(
         if (peer_exchange_disabled_by_app) {
             client->peer_exchange_disabled_by_app.insert(identity);
         }
-        client->apply_queue_priority_order_locked();
         ResumeSaveResult saved_resume = client->save_added_torrent_resume_data(
             std::move(resume_params),
             hashes,
@@ -2100,10 +2227,12 @@ int32_t add_torrent_file_data_with_priorities(
         publisher.add(client->cache_snapshot(handle));
         client->request_snapshot_update_locked();
         copy_string_dynamic(added_id_buffer, identity->canonical_id);
+        *add_outcome_out = TTORRENT_ADD_COMMITTED;
         return {};
     });
     if (client != nullptr) {
         client->invoke_wake_callback(wake);
+        client->drain_synchronous_add_alerts_if_needed();
     }
     return result;
 }
@@ -2116,6 +2245,7 @@ extern "C" int32_t TorrentClientAddTorrentFileData(
     const TTorrentAddOptions *options,
     char *added_id_out,
     int32_t added_id_capacity,
+    int32_t *add_outcome_out,
     char *error_out,
     int32_t error_capacity
 ) noexcept
@@ -2128,6 +2258,7 @@ extern "C" int32_t TorrentClientAddTorrentFileData(
         -1,
         added_id_out,
         added_id_capacity,
+        add_outcome_out,
         error_out,
         error_capacity,
         [torrent_data, torrent_data_size]() {
@@ -2146,6 +2277,7 @@ extern "C" int32_t TorrentClientAddTorrentFileDataWithPriorities(
     int32_t file_priority_count,
     char *added_id_out,
     int32_t added_id_capacity,
+    int32_t *add_outcome_out,
     char *error_out,
     int32_t error_capacity
 ) noexcept
@@ -2158,6 +2290,7 @@ extern "C" int32_t TorrentClientAddTorrentFileDataWithPriorities(
         file_priority_count,
         added_id_out,
         added_id_capacity,
+        add_outcome_out,
         error_out,
         error_capacity,
         [torrent_data, torrent_data_size]() {
@@ -2479,6 +2612,7 @@ extern "C" int32_t TorrentClientSetTorrentOptions(
         std::vector<lt::torrent_handle> queue_handles_to_save;
         bool queue_priority_changed = false;
         if (identity->queue_priority != options->queue_priority) {
+            client->invalidate_queue_order_index_locked();
             identity->queue_priority = options->queue_priority;
             identity->queue_rank = kUnsetQueueRank;
             queue_handles_to_save = client->apply_queue_priority_order_locked();
@@ -2539,7 +2673,14 @@ extern "C" int32_t TorrentClientMoveTorrentInQueue(
 
         std::vector<QueueOrderingEntry> entries = queue_ordering_entries(*client);
         if (move_queue_entry(entries, identity, move)) {
-            std::vector<lt::torrent_handle> queue_handles_to_save = apply_queue_order(entries);
+            bool positions_applied = false;
+            std::vector<lt::torrent_handle> queue_handles_to_save = apply_queue_order(
+                entries,
+                &positions_applied
+            );
+            if (!positions_applied) {
+                client->invalidate_queue_order_index_locked();
+            }
             append_unique_handle_by_identity(queue_handles_to_save, *handle);
             save_and_publish_policy_handles(
                 *client,
@@ -2863,6 +3004,7 @@ extern "C" int32_t TorrentClientPause(TTorrentClient *client, const char *torren
             return bridge_error(2, "Torrent not found.");
         }
 
+        client->invalidate_queue_order_index_locked();
         handle->set_flags(lt::torrent_flags::paused, lt::torrent_flags::paused | lt::torrent_flags::auto_managed);
         client->request_save(*handle);
         publisher.add(client->cache_snapshot(*handle));
@@ -2895,6 +3037,7 @@ extern "C" int32_t TorrentClientResume(TTorrentClient *client, const char *torre
             return bridge_error(2, "Torrent not found.");
         }
 
+        client->invalidate_queue_order_index_locked();
         handle->set_flags(lt::torrent_flags::auto_managed, lt::torrent_flags::paused | lt::torrent_flags::auto_managed);
         std::vector<lt::torrent_handle> queue_handles_to_save = client->apply_queue_priority_order_locked();
         std::span<lt::torrent_handle const> queue_handles_span(queue_handles_to_save);
@@ -3016,6 +3159,7 @@ extern "C" int32_t TorrentClientRemove(TTorrentClient *client, const char *torre
             return tombstoned;
         }
 
+        client->invalidate_queue_order_index_locked();
         try {
             client->session.remove_torrent(*handle, flags);
         } catch (std::exception const &exception) {

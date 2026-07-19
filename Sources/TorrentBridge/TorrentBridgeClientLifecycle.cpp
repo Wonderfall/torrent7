@@ -140,6 +140,18 @@ TTorrentClient::TTorrentClient(
     );
     restrict_permissions(resume_directory_descriptor.get(), "resume data directory", FileSystemNodeKind::directory);
     remove_orphan_resume_temp_files();
+    {
+        std::scoped_lock io_guard(resume_io_lock);
+        ResumeSaveResult indexed_tombstones = load_removal_tombstone_index_locked(
+            RemovalTombstoneIndexLimits{
+                .entry_count = kMaxRemovalTombstoneEntryCount,
+                .id_membership_count = kMaxRemovalTombstoneIDMembershipCount,
+            }
+        );
+        if (!indexed_tombstones) {
+            throw std::runtime_error(indexed_tombstones.error());
+        }
+    }
     ResumeSaveResult completed_removals = complete_pending_removals();
     if (!completed_removals) {
         throw std::runtime_error(completed_removals.error());
@@ -324,6 +336,32 @@ void TTorrentClient::stop_alert_worker() noexcept
     }
 }
 
+void TTorrentClient::record_synchronous_add_alert_locked() noexcept
+{
+    if (synchronous_adds_since_alert_drain < kSynchronousAddAlertDrainInterval) {
+        ++synchronous_adds_since_alert_drain;
+    }
+}
+
+void TTorrentClient::drain_synchronous_add_alerts_if_needed() noexcept
+{
+    {
+        std::scoped_lock guard(lock);
+        if (synchronous_adds_since_alert_drain < kSynchronousAddAlertDrainInterval) {
+            return;
+        }
+    }
+
+    // The ordinary worker remains the fallback if an opportunistic drain
+    // fails. pump_alerts resets the pressure counter only after pop_alerts has
+    // successfully transferred ownership of the queued batch.
+    try {
+        pump_alerts();
+    } catch (...) {
+        ignore_shutdown_failure();
+    }
+}
+
 void TTorrentClient::alert_loop(std::stop_token const &stop_token)
 {
     using clock = std::chrono::steady_clock;
@@ -439,32 +477,18 @@ void TTorrentClient::record_alert_worker_recovery() noexcept
     invoke_wake_callback(wake);
 }
 
-[[nodiscard]] bool TTorrentClient::canonical_id_in_collection_locked(
-    std::vector<std::unique_ptr<TorrentIdentity>> const &identities,
-    std::string_view canonical_id
-) const
+[[nodiscard]] std::string TTorrentClient::reserve_canonical_torrent_id_locked(std::string canonical_id)
 {
-    if (!is_canonical_torrent_id(canonical_id)) {
-        return false;
+    if (is_canonical_torrent_id(canonical_id)
+        && canonical_ids_in_use.insert(canonical_id).second) {
+        return canonical_id;
     }
 
-    return std::ranges::any_of(identities, [canonical_id](auto const &identity) {
-        return identity != nullptr && identity->canonical_id == canonical_id;
-    });
-}
-
-[[nodiscard]] bool TTorrentClient::canonical_id_in_use_locked(std::string_view canonical_id) const
-{
-    return canonical_id_in_collection_locked(torrent_identities, canonical_id);
-}
-
-[[nodiscard]] std::string TTorrentClient::make_unique_canonical_torrent_id_locked() const
-{
     constexpr int kMaxCanonicalIDGenerationAttempts = 256;
     for (int attempt = 0; attempt < kMaxCanonicalIDGenerationAttempts; ++attempt) {
-        std::string canonical_id = make_canonical_torrent_id();
-        if (!canonical_id_in_use_locked(canonical_id)) {
-            return canonical_id;
+        std::string generated = make_canonical_torrent_id();
+        if (canonical_ids_in_use.insert(generated).second) {
+            return generated;
         }
     }
 
@@ -487,21 +511,21 @@ TorrentIdentity *TTorrentClient::make_identity(std::string canonical_id)
     auto identity = std::make_unique<TorrentIdentity>();
     identity->generation = next_identity_generation++;
     token->generation = identity->generation;
-    identity->canonical_id = canonical_id_in_use_locked(canonical_id)
-        ? make_unique_canonical_torrent_id_locked()
-        : std::move(canonical_id);
-    if (!is_canonical_torrent_id(identity->canonical_id)) {
-        identity->canonical_id = make_unique_canonical_torrent_id_locked();
-    }
+    identity->canonical_id = reserve_canonical_torrent_id_locked(std::move(canonical_id));
     TorrentIdentity *const raw = identity.get();
     TorrentIdentityToken *const raw_token = token.get();
     identity->token = raw_token;
     raw_token->active_identity.store(raw, std::memory_order_release);
-    identity_tokens.push_back(std::move(token));
     try {
-        torrent_identities.push_back(std::move(identity));
+        identity_tokens.push_back(std::move(token));
+        try {
+            torrent_identities.push_back(std::move(identity));
+        } catch (...) {
+            identity_tokens.pop_back();
+            throw;
+        }
     } catch (...) {
-        identity_tokens.pop_back();
+        canonical_ids_in_use.erase(raw->canonical_id);
         throw;
     }
     return raw;
@@ -520,6 +544,13 @@ TorrentIdentity *TTorrentClient::attach_identity(lt::add_torrent_params &params,
 
 BridgeResult TTorrentClient::ensure_torrent_admission_available(int32_t code) const
 {
+    if (session_identity_authority_faulted) {
+        return bridge_error(
+            code,
+            "Torrent admission is blocked because the session identity authority is uncertain. Restart the app to recover."
+        );
+    }
+
     std::size_t tracked_count = 0;
     std::size_t identity_token_count = 0;
     {
@@ -527,8 +558,11 @@ BridgeResult TTorrentClient::ensure_torrent_admission_available(int32_t code) co
         tracked_count = torrent_identities.size();
         identity_token_count = identity_tokens.size();
     }
-    std::size_t const session_count = session.get_torrents().size();
-    if (!torrent_count_allows_admission(std::max(tracked_count, session_count))) {
+    // Every bridge-controlled session add attaches an identity before entering
+    // libtorrent, and that identity remains tracked until asynchronous removal
+    // completes. This count therefore bounds the session without copying every
+    // torrent handle on each admission check.
+    if (!torrent_count_allows_admission(tracked_count)) {
         return bridge_error(code, "The torrent limit has been reached.");
     }
     if (!torrent_identity_token_count_allows_admission(identity_token_count)) {

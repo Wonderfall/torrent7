@@ -6,7 +6,7 @@ import TorrentBridge
 struct TorrentBridgeContractTests {
     @Test("Pins bridge ABI version, limits, states, and dirty masks")
     func pinsBridgeConstants() {
-        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 36)
+        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 37)
         #expect(Int32(TTORRENT_BRIDGE_STATE_UNKNOWN) == -1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_CHECKING_FILES) == 1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_DOWNLOADING_METADATA) == 2)
@@ -44,6 +44,9 @@ struct TorrentBridgeContractTests {
         #expect(Int32(TTORRENT_FILE_PRIORITY_LOW) == 1)
         #expect(Int32(TTORRENT_FILE_PRIORITY_NORMAL) == 4)
         #expect(Int32(TTORRENT_FILE_PRIORITY_HIGH) == 7)
+        #expect(Int32(TTORRENT_ADD_REJECTED) == 0)
+        #expect(Int32(TTORRENT_ADD_COMMITTED) == 1)
+        #expect(Int32(TTORRENT_ADD_OUTCOME_UNKNOWN) == 2)
         #expect(Int32(TTORRENT_REMOVAL_PENDING) == 0)
         #expect(Int32(TTORRENT_REMOVAL_SUCCEEDED) == 1)
         #expect(Int32(TTORRENT_REMOVAL_FAILED) == 2)
@@ -285,9 +288,10 @@ struct TorrentBridgeContractTests {
 
     @Test("Null client mutation APIs report contract errors")
     func nullClientMutationAPIsReportContractErrors() {
+        var addOutcome = Int32.max
         expectBridgeError(
             code: 1,
-            message: "Missing torrent client, magnet URI, save path, or add options."
+            message: "Missing torrent client, magnet URI, save path, add options, or add outcome output."
         ) { errorBuffer, capacity in
             var addedID = Array<CChar>(repeating: 1, count: Int(TTORRENT_ID_CAPACITY))
             return unsafe addedID.withUnsafeMutableBufferPointer { addedIDBuffer in
@@ -298,11 +302,13 @@ struct TorrentBridgeContractTests {
                     nil,
                     addedIDBuffer.baseAddress,
                     Int32(addedIDBuffer.count),
+                    &addOutcome,
                     &errorBuffer,
                     capacity
                 )
             }
         }
+        #expect(addOutcome == Int32(TTORRENT_ADD_REJECTED))
 
         expectBridgeError(
             code: 1,

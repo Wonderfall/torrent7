@@ -243,6 +243,7 @@ struct TorrentFixture {
     };
     std::array<char, TTORRENT_ID_CAPACITY> added_id{};
     std::array<char, 512> error{};
+    int32_t add_outcome = TTORRENT_ADD_REJECTED;
     int32_t const result = TorrentClientAddTorrentFileDataWithPriorities(
         client,
         fixture.metainfo.data(),
@@ -253,11 +254,13 @@ struct TorrentFixture {
         1,
         added_id.data(),
         static_cast<std::int32_t>(added_id.size()),
+        &add_outcome,
         error.data(),
         static_cast<std::int32_t>(error.size())
     );
     INFO(error.data());
     REQUIRE(result == 0);
+    REQUIRE(add_outcome == TTORRENT_ADD_COMMITTED);
     REQUIRE(is_canonical_torrent_id(added_id.data()));
     return added_id.data();
 }

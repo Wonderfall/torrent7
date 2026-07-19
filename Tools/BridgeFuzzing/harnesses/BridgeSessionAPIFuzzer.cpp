@@ -77,6 +77,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             std::string save_path = reader.read_bool() ? std::string(harness.save_path()) : reader.read_string(256);
             TTorrentAddOptions options = bridge_fuzz::add_options_from_reader(reader);
             bridge_fuzz::AddedIdBuffer added_id;
+            int32_t add_outcome = TTORRENT_ADD_REJECTED;
             static_cast<void>(TorrentClientAddMagnet(
                 harness.client(),
                 maybe_null(reader, magnet),
@@ -84,6 +85,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
                 reader.read_bool() ? nullptr : &options,
                 reader.read_bool() ? nullptr : added_id.data(),
                 reader.read_bool() ? -1 : added_id.capacity(),
+                reader.read_bool() ? nullptr : &add_outcome,
                 error.data(),
                 error.capacity()
             ));
@@ -94,6 +96,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             std::string save_path = reader.read_bool() ? std::string(harness.save_path()) : reader.read_string(256);
             TTorrentAddOptions options = bridge_fuzz::add_options_from_reader(reader);
             bridge_fuzz::AddedIdBuffer added_id;
+            int32_t add_outcome = TTORRENT_ADD_REJECTED;
             static_cast<void>(TorrentClientAddTorrentFileData(
                 harness.client(),
                 bytes.empty() || reader.read_bool() ? nullptr : bytes.data(),
@@ -102,6 +105,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
                 reader.read_bool() ? nullptr : &options,
                 reader.read_bool() ? nullptr : added_id.data(),
                 reader.read_bool() ? -1 : added_id.capacity(),
+                reader.read_bool() ? nullptr : &add_outcome,
                 error.data(),
                 error.capacity()
             ));
@@ -113,6 +117,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             std::string save_path = reader.read_bool() ? std::string(harness.save_path()) : reader.read_string(256);
             TTorrentAddOptions options = bridge_fuzz::add_options_from_reader(reader);
             bridge_fuzz::AddedIdBuffer added_id;
+            int32_t add_outcome = TTORRENT_ADD_REJECTED;
             int32_t const priority_count = reader.read_bool()
                 ? -1
                 : static_cast<int32_t>(priorities.size());
@@ -126,6 +131,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
                 priority_count,
                 reader.read_bool() ? nullptr : added_id.data(),
                 reader.read_bool() ? -1 : added_id.capacity(),
+                reader.read_bool() ? nullptr : &add_outcome,
                 error.data(),
                 error.capacity()
             ));

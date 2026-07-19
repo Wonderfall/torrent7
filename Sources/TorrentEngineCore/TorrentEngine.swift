@@ -83,6 +83,18 @@ private struct TorrentAuthorizedSaveRootIdentity: Hashable {
 package typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResultReadOverride?
 package typealias TorrentAlertErrorReader = @Sendable () -> String?
 
+package enum TorrentAddError: LocalizedError, Sendable {
+    case rejected(String)
+    case commitStatusUnknown(String)
+
+    package var errorDescription: String? {
+        switch self {
+        case .rejected(let message), .commitStatusUnknown(let message):
+            message.isEmpty ? "The torrent could not be added." : message
+        }
+    }
+}
+
 @safe package actor TorrentEngine {
     package static let clientCreationPreflight = Mutex<TorrentClientCreationPreflight?>(nil)
 
@@ -288,7 +300,7 @@ package typealias TorrentAlertErrorReader = @Sendable () -> String?
             allow_non_https_web_seeds: allowNonHTTPSWebSeeds.bridgeFlag,
             allow_pre_metadata_dht: allowPreMetadataDHT.bridgeFlag
         )
-        return try unsafe throwingBridgeCallReturningString(capacity: Int(TTORRENT_ID_CAPACITY)) { outputBuffer, outputCapacity, errorBuffer, errorCapacity in
+        return try unsafe throwingBridgeAddReturningString(capacity: Int(TTORRENT_ID_CAPACITY)) { outputBuffer, outputCapacity, addOutcome, errorBuffer, errorCapacity in
             unsafe magnet.withCString { magnetPointer in
                 unsafe savePath.withCString { savePointer in
                     unsafe TorrentClientAddMagnet(
@@ -298,6 +310,7 @@ package typealias TorrentAlertErrorReader = @Sendable () -> String?
                         &options,
                         outputBuffer,
                         outputCapacity,
+                        addOutcome,
                         &errorBuffer,
                         errorCapacity
                     )
@@ -332,7 +345,7 @@ package typealias TorrentAlertErrorReader = @Sendable () -> String?
             allow_pre_metadata_dht: false.bridgeFlag
         )
         if let priorityEntries {
-            return try unsafe throwingBridgeCallReturningString(capacity: Int(TTORRENT_ID_CAPACITY)) { outputBuffer, outputCapacity, errorBuffer, errorCapacity in
+            return try unsafe throwingBridgeAddReturningString(capacity: Int(TTORRENT_ID_CAPACITY)) { outputBuffer, outputCapacity, addOutcome, errorBuffer, errorCapacity in
                 unsafe data.withUnsafeBytes { dataBuffer in
                     unsafe savePath.withCString { savePointer in
                         unsafe priorityEntries.withUnsafeBufferPointer { priorities in
@@ -346,6 +359,7 @@ package typealias TorrentAlertErrorReader = @Sendable () -> String?
                                 Int32(priorities.count),
                                 outputBuffer,
                                 outputCapacity,
+                                addOutcome,
                                 &errorBuffer,
                                 errorCapacity
                             )
@@ -354,7 +368,7 @@ package typealias TorrentAlertErrorReader = @Sendable () -> String?
                 }
             }
         } else {
-            return try unsafe throwingBridgeCallReturningString(capacity: Int(TTORRENT_ID_CAPACITY)) { outputBuffer, outputCapacity, errorBuffer, errorCapacity in
+            return try unsafe throwingBridgeAddReturningString(capacity: Int(TTORRENT_ID_CAPACITY)) { outputBuffer, outputCapacity, addOutcome, errorBuffer, errorCapacity in
                 unsafe data.withUnsafeBytes { dataBuffer in
                     unsafe savePath.withCString { savePointer in
                         unsafe TorrentClientAddTorrentFileData(
@@ -365,6 +379,7 @@ package typealias TorrentAlertErrorReader = @Sendable () -> String?
                             &options,
                             outputBuffer,
                             outputCapacity,
+                            addOutcome,
                             &errorBuffer,
                             errorCapacity
                         )
@@ -1541,16 +1556,47 @@ package typealias TorrentAlertErrorReader = @Sendable () -> String?
         throw TorrentEngineError.bridgeError(message)
     }
 
-    private func throwingBridgeCallReturningString(
+    private func throwingBridgeAddReturningString(
         capacity: Int,
-        _ body: (UnsafeMutablePointer<CChar>?, Int32, inout [CChar], Int32) -> Int32
+        _ body: (
+            UnsafeMutablePointer<CChar>?,
+            Int32,
+            UnsafeMutablePointer<Int32>,
+            inout [CChar],
+            Int32
+        ) -> Int32
     ) throws -> String {
         var outputBuffer = Array<CChar>(repeating: 0, count: capacity)
-        try throwingBridgeCall { errorBuffer, errorCapacity in
-            unsafe outputBuffer.withUnsafeMutableBufferPointer { output in
-                unsafe body(output.baseAddress, Int32(output.count), &errorBuffer, errorCapacity)
-            }
+        var errorBuffer = Array<CChar>(repeating: 0, count: 1_024)
+        var addOutcome = Int32(TTORRENT_ADD_REJECTED)
+        let result = unsafe outputBuffer.withUnsafeMutableBufferPointer { output in
+            unsafe body(
+                output.baseAddress,
+                Int32(output.count),
+                &addOutcome,
+                &errorBuffer,
+                Int32(errorBuffer.count)
+            )
         }
+        let errorMessage = unsafe errorBuffer.withUnsafeBufferPointer { buffer -> String in
+            guard let baseAddress = buffer.baseAddress else {
+                return ""
+            }
+            return unsafe String(cString: baseAddress)
+        }
+
+        guard result == 0 else {
+            if addOutcome == Int32(TTORRENT_ADD_REJECTED) {
+                throw TorrentAddError.rejected(errorMessage)
+            }
+            throw TorrentAddError.commitStatusUnknown(errorMessage)
+        }
+        guard addOutcome == Int32(TTORRENT_ADD_COMMITTED) else {
+            throw TorrentAddError.commitStatusUnknown(
+                "The bridge returned an inconsistent torrent add outcome."
+            )
+        }
+
         let value = unsafe outputBuffer.withUnsafeBufferPointer { buffer -> String in
             guard let baseAddress = buffer.baseAddress else {
                 return ""
@@ -1558,7 +1604,9 @@ package typealias TorrentAlertErrorReader = @Sendable () -> String?
             return unsafe String(cString: baseAddress)
         }
         guard !value.isEmpty else {
-            throw TorrentEngineError.bridgeError("Torrent was added, but its identity was not returned.")
+            throw TorrentAddError.commitStatusUnknown(
+                "Torrent was added, but its identity was not returned."
+            )
         }
         return value
     }

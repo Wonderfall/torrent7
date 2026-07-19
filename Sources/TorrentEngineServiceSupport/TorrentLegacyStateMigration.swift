@@ -98,8 +98,6 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
     private let fileOperations: TorrentLegacyStateMigrationFileOperations
     private let lock = NSLock()
     private var sessionsByID = [UUID: TorrentLegacyStateMigrationSession]()
-    private var knownControllerIDs = Set<UUID>()
-    private var disconnectedControllerIDs = Set<UUID>()
 
     package init(
         engineEpoch: UUID,
@@ -139,7 +137,6 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
         try validate(scope: scope)
         return try lock.withLock {
             try requireConnectedController(scope: scope)
-            knownControllerIDs.insert(scope.controllerID)
             guard sessionsByID.count < limits.maximumConcurrentMigrationCount else {
                 throw TorrentLegacyStateMigrationError.tooManyConcurrentMigrations(
                     maximum: limits.maximumConcurrentMigrationCount
@@ -422,12 +419,11 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
         }
     }
 
-    package func disconnect(controllerID: UUID) {
+    package func disconnect(scope: TorrentEngineServiceScope) {
+        scope.invalidate()
         lock.withLock {
-            knownControllerIDs.insert(controllerID)
-            disconnectedControllerIDs.insert(controllerID)
             let sessions = sessionsByID.values.filter {
-                $0.scope.controllerID == controllerID
+                $0.scope == scope
             }
             for session in sessions {
                 if case .committed = session.state {
@@ -440,7 +436,7 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
                 ))
             }
             sessionsByID = sessionsByID.filter {
-                $0.value.scope.controllerID != controllerID
+                $0.value.scope != scope
             }
         }
     }
@@ -463,7 +459,7 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
     }
 
     private func requireConnectedController(scope: TorrentEngineServiceScope) throws {
-        guard !disconnectedControllerIDs.contains(scope.controllerID) else {
+        guard scope.isActive else {
             throw TorrentLegacyStateMigrationError.controllerDisconnected
         }
     }

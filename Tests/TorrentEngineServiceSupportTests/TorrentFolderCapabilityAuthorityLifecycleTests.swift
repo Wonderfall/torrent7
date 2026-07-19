@@ -100,7 +100,7 @@ struct TorrentFolderCapabilityAuthorityLifecycleTests {
         // only through the native-style anchor and the registry's weak index.
         originalPin = nil
         replacementPin = nil
-        registry.disconnect(controllerID: scope.controllerID)
+        registry.disconnect(scope: scope)
 
         #expect(!authorityLifecycleDescriptorIsOpen(originalDescriptor))
         #expect(!authorityLifecycleDescriptorIsOpen(replacementDescriptor))
@@ -111,6 +111,129 @@ struct TorrentFolderCapabilityAuthorityLifecycleTests {
         replacementNativeAnchor = nil
         #expect(originalResource.snapshot.stopCount == 1)
         #expect(replacementResource.snapshot.stopCount == 1)
+    }
+
+    @Test("Disconnect start rejects retained authority before final teardown releases it")
+    func disconnectStartInvalidatesPreparedAuthorityBeforeCleanup() throws {
+        let temporary = try AuthorityLifecycleTemporaryDirectory()
+        let bookmark = Data("prepared-root".utf8)
+        let resource = AuthorityLifecycleScopedResource(url: temporary.url)
+        let epoch = UUID()
+        let scope = TorrentEngineServiceScope(engineEpoch: epoch, controllerID: UUID())
+        let registry = TorrentFolderCapabilityRegistry(
+            engineEpoch: epoch,
+            bookmarkResolver: AuthorityLifecycleBookmarkResolver([bookmark: resource])
+        )
+        let prepared = try registry.prepareCommittedGrantReplacement(
+            bookmarkData: [bookmark],
+            scope: scope
+        )
+        let pin = try #require(prepared.pins.first)
+        let descriptor = try pin.directoryFileDescriptor()
+        let nativeAnchor = pin.accessLifetimeAnchor
+
+        #expect(resource.snapshot == .init(startCount: 1, stopCount: 0))
+        #expect(pin.isValid)
+        #expect(authorityLifecycleDescriptorIsOpen(descriptor))
+
+        // Models TorrentEngineServiceRuntime.beginDisconnect. The shared,
+        // one-way token rejects every retained view immediately, but native
+        // teardown can still use the already-installed descriptor authority.
+        scope.invalidate()
+
+        #expect(!pin.isValid)
+        authorityLifecycleExpectError(.capabilityInvalidated) {
+            _ = try pin.directoryFileDescriptor()
+        }
+        authorityLifecycleExpectError(.controllerDisconnected) {
+            _ = try registry.commit(prepared)
+        }
+        #expect(resource.snapshot == .init(startCount: 1, stopCount: 0))
+        #expect(authorityLifecycleDescriptorIsOpen(descriptor))
+
+        // Models final teardown after the native engine has stopped. Prepared
+        // candidates are not published, so the registry's weak exact-scope
+        // index is what makes this retained access discoverable for cleanup.
+        registry.disconnect(scope: scope)
+
+        #expect(resource.snapshot == .init(startCount: 1, stopCount: 1))
+        #expect(!authorityLifecycleDescriptorIsOpen(descriptor))
+        withExtendedLifetime(nativeAnchor) {}
+        withExtendedLifetime(prepared) {}
+    }
+
+    @Test("A fresh generation may reuse a disconnected controller's wire identifier")
+    func freshGenerationMayReuseWireControllerID() throws {
+        let temporary = try AuthorityLifecycleTemporaryDirectory()
+        let oldBookmark = Data("old-generation".utf8)
+        let freshBookmark = Data("fresh-generation".utf8)
+        let oldResource = AuthorityLifecycleScopedResource(
+            url: try temporary.makeDirectory("OldGeneration")
+        )
+        let freshResource = AuthorityLifecycleScopedResource(
+            url: try temporary.makeDirectory("FreshGeneration")
+        )
+        let epoch = UUID()
+        let controllerID = UUID()
+        let oldScope = TorrentEngineServiceScope(
+            engineEpoch: epoch,
+            controllerID: controllerID
+        )
+        let freshScope = TorrentEngineServiceScope(
+            engineEpoch: epoch,
+            controllerID: controllerID
+        )
+        let registry = TorrentFolderCapabilityRegistry(
+            engineEpoch: epoch,
+            bookmarkResolver: AuthorityLifecycleBookmarkResolver([
+                oldBookmark: oldResource,
+                freshBookmark: freshResource,
+            ])
+        )
+        let oldCapability = try #require(registry.replaceCommittedGrants(
+            bookmarkData: [oldBookmark],
+            scope: oldScope
+        ).first)
+        let oldPin = try registry.pin(capabilityID: oldCapability.id, scope: oldScope)
+        let oldDescriptor = try oldPin.directoryFileDescriptor()
+        let freshCapability = try #require(registry.replaceCommittedGrants(
+            bookmarkData: [freshBookmark],
+            scope: freshScope
+        ).first)
+        let freshPin = try registry.pin(
+            capabilityID: freshCapability.id,
+            scope: freshScope
+        )
+        let freshDescriptor = try freshPin.directoryFileDescriptor()
+
+        #expect(oldScope.controllerID == freshScope.controllerID)
+        #expect(oldScope.generation != freshScope.generation)
+        #expect(oldPin.isValid)
+        #expect(freshPin.isValid)
+
+        oldScope.invalidate()
+        authorityLifecycleExpectError(.controllerDisconnected) {
+            _ = try registry.pin(capabilityID: oldCapability.id, scope: oldScope)
+        }
+        #expect(!oldPin.isValid)
+        #expect(freshPin.isValid)
+        #expect(authorityLifecycleDescriptorIsOpen(oldDescriptor))
+        #expect(authorityLifecycleDescriptorIsOpen(freshDescriptor))
+
+        registry.disconnect(scope: oldScope)
+
+        #expect(!authorityLifecycleDescriptorIsOpen(oldDescriptor))
+        #expect(authorityLifecycleDescriptorIsOpen(freshDescriptor))
+        #expect(oldResource.snapshot == .init(startCount: 1, stopCount: 1))
+        #expect(freshResource.snapshot == .init(startCount: 1, stopCount: 0))
+        #expect(freshPin.isValid)
+        #expect(freshCapability.scope == freshScope)
+        #expect(registry.capabilities(scope: oldScope).isEmpty)
+        #expect(registry.capabilities(scope: freshScope) == [freshCapability])
+
+        registry.disconnect(scope: freshScope)
+        #expect(!authorityLifecycleDescriptorIsOpen(freshDescriptor))
+        #expect(freshResource.snapshot == .init(startCount: 1, stopCount: 1))
     }
 
     @Test("Successful restart handoff releases only the superseded native root")
@@ -180,7 +303,7 @@ struct TorrentFolderCapabilityAuthorityLifecycleTests {
 
         newNativeAnchor = nil
         #expect(authorityLifecycleDescriptorIsOpen(newDescriptor))
-        registry.disconnect(controllerID: scope.controllerID)
+        registry.disconnect(scope: scope)
         #expect(!authorityLifecycleDescriptorIsOpen(newDescriptor))
         #expect(newResource.snapshot.stopCount == 1)
     }
@@ -250,7 +373,7 @@ struct TorrentFolderCapabilityAuthorityLifecycleTests {
 
         oldNativeAnchor = nil
         #expect(oldResource.snapshot.stopCount == 1)
-        freshRegistry.disconnect(controllerID: controllerID)
+        freshRegistry.disconnect(scope: freshScope)
         #expect(!freshPin.isValid)
         #expect(freshResource.snapshot == .init(startCount: 1, stopCount: 1))
     }
