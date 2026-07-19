@@ -164,12 +164,13 @@ struct TorrentRow: View {
     }
 
     private var etaText: String? {
-        guard metrics.downloadPayloadRate > 0, metrics.totalWanted > metrics.totalDone else {
+        guard let seconds = TorrentPresentationMath.estimatedRemainingSeconds(
+            totalWanted: metrics.totalWanted,
+            totalDone: metrics.totalDone,
+            downloadRate: Int64(metrics.downloadPayloadRate)
+        ) else {
             return nil
         }
-
-        let remainingBytes = metrics.totalWanted - metrics.totalDone
-        let seconds = Int(ceil(Double(remainingBytes) / Double(metrics.downloadPayloadRate)))
         return "\(Self.formatDuration(seconds)) left"
     }
 
@@ -216,7 +217,7 @@ struct TorrentRow: View {
         )
     }
 
-    private static func formatDuration(_ seconds: Int) -> String {
+    private static func formatDuration(_ seconds: Int64) -> String {
         if seconds < 60 {
             return "<1 min"
         }

@@ -413,10 +413,9 @@ struct AddTorrentConfirmationView: View {
         let selectedCount = selectedFiles.count
         let totalCount = preview.visibleFileCount
         let fileText = "\(totalCount) \(totalCount == 1 ? "file" : "files")"
-        let selectedSize = selectedFiles
-            .reduce(Int64(0)) { total, file in
-                total + max(0, file.size)
-            }
+        let selectedSize = TorrentPresentationMath.saturatingNonnegativeSum(
+            selectedFiles.lazy.map(\.size)
+        )
 
         if selectedCount == 0 {
             return "0 of \(fileText) · Nothing selected"
