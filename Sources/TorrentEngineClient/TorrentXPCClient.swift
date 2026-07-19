@@ -23,13 +23,13 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         .seconds(4),
         .seconds(5)
     ]
-    // The service cleanup watchdog expires at 300 seconds. One final capped
-    // interval gives process termination and launchd relaunch time to settle.
+    // The service cleanup watchdog expires at 300 seconds. Recovery owns one
+    // absolute wall-clock deadline with five seconds of relaunch headroom;
+    // this value is no longer accumulated from sleeps.
     package static let cleanupEpisodeRetryBudget: Duration = .seconds(305)
 
     private var connectionFailureAttempt = 0
     private var cleanupEpisodeAttempt = 0
-    private var cleanupEpisodeDelay: Duration = .zero
     private var isCleanupEpisode = false
 
     package init(mode: TorrentEngineConnectionRetryMode = .initial) {
@@ -39,6 +39,12 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     package mutating func delay(after error: TorrentEngineClientError) -> Duration? {
         switch error {
         case .serviceTemporarilyUnavailable:
+            isCleanupEpisode = true
+            return nextCleanupEpisodeDelay()
+        case .requestTimedOut:
+            // A timed-out bootstrap request has already terminalized its
+            // controller. Retry only on a fresh controller, through the same
+            // absolute cleanup horizon as an explicitly busy service.
             isCleanupEpisode = true
             return nextCleanupEpisodeDelay()
         case .connectionFailed, .connectionCancelled:
@@ -57,19 +63,27 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         }
     }
 
-    private mutating func nextCleanupEpisodeDelay() -> Duration? {
-        let remaining = Self.cleanupEpisodeRetryBudget - cleanupEpisodeDelay
-        guard remaining > .zero else {
+    package static func retryWake(
+        now: ContinuousClock.Instant,
+        deadline: ContinuousClock.Instant?,
+        after delay: Duration
+    ) -> ContinuousClock.Instant? {
+        guard let deadline else {
+            return now.advanced(by: delay)
+        }
+        guard now < deadline else {
             return nil
         }
+        return min(now.advanced(by: delay), deadline)
+    }
+
+    private mutating func nextCleanupEpisodeDelay() -> Duration? {
         let delayIndex = min(
             cleanupEpisodeAttempt,
             Self.cleanupEpisodeDelays.index(before: Self.cleanupEpisodeDelays.endIndex)
         )
-        let delay = min(Self.cleanupEpisodeDelays[delayIndex], remaining)
         cleanupEpisodeAttempt += 1
-        cleanupEpisodeDelay += delay
-        return delay
+        return Self.cleanupEpisodeDelays[delayIndex]
     }
 }
 
@@ -376,6 +390,8 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     private let controllerID: UUID
     private let transport: any TorrentEngineIPCTransport
     private let state: TorrentXPCClientState
+    private let requestTimeoutOverrides: [TorrentEngineIPCOperation: Duration]
+    private var connectionDeadline: ContinuousClock.Instant?
     private var engineEpoch: UUID?
     private var nextSequence: UInt64 = 1
     private var capabilitiesByCanonicalPath = [String: CapabilityRecord]()
@@ -383,7 +399,8 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     private var requestIsInFlight = false
     private struct RequestWaiter {
         let id: UUID
-        let continuation: CheckedContinuation<Bool, Never>
+        let deadlineTask: Task<Void, Never>
+        let continuation: CheckedContinuation<RequestSlotAcquisition, Never>
     }
     private var requestWaiters = [RequestWaiter]()
 
@@ -406,11 +423,15 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     private init(
         controllerID: UUID,
         transport: any TorrentEngineIPCTransport,
-        state: TorrentXPCClientState
+        state: TorrentXPCClientState,
+        requestTimeoutOverrides: [TorrentEngineIPCOperation: Duration],
+        connectionDeadline: ContinuousClock.Instant?
     ) {
         self.controllerID = controllerID
         self.transport = transport
         self.state = state
+        self.requestTimeoutOverrides = requestTimeoutOverrides
+        self.connectionDeadline = connectionDeadline
     }
 
     package static func connect(
@@ -421,7 +442,17 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     ) async throws -> TorrentXPCClient {
         let configuration = try TorrentEngineXPCIdentity.configuration()
         var retryPolicy = TorrentEngineConnectionRetryPolicy(mode: retryMode)
+        let clock = ContinuousClock()
+        // One connect call owns one wall-clock horizon. This includes the
+        // first transport attempt, migration/bootstrap requests, processing,
+        // and every retry sleep; a late first busy reply cannot restart it.
+        let recoveryDeadline = clock.now.advanced(
+            by: TorrentEngineConnectionRetryPolicy.cleanupEpisodeRetryBudget
+        )
         while true {
+            if clock.now >= recoveryDeadline {
+                throw TorrentEngineClientError.recoveryDeadlineExceeded
+            }
             do {
                 let controllerID = UUID()
                 let state = TorrentXPCClientState()
@@ -442,17 +473,29 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                     state: state,
                     enablePeerExchangePlugin: enablePeerExchangePlugin,
                     folderAuthorizations: folderAuthorizations,
-                    legacyStateDirectory: legacyStateDirectory
+                    legacyStateDirectory: legacyStateDirectory,
+                    requestTimeoutOverrides: [:],
+                    connectionDeadline: recoveryDeadline
                 )
             } catch {
                 guard !(error is CancellationError), !Task.isCancelled else {
                     throw CancellationError()
                 }
                 let failure = error as? TorrentEngineClientError ?? .connectionFailed
+                if clock.now >= recoveryDeadline {
+                    throw TorrentEngineClientError.recoveryDeadlineExceeded
+                }
                 guard let delay = retryPolicy.delay(after: failure) else {
                     throw failure
                 }
-                try await Task.sleep(for: delay)
+                guard let wake = TorrentEngineConnectionRetryPolicy.retryWake(
+                    now: clock.now,
+                    deadline: recoveryDeadline,
+                    after: delay
+                ) else {
+                    throw TorrentEngineClientError.recoveryDeadlineExceeded
+                }
+                try await clock.sleep(until: wake)
             }
         }
     }
@@ -464,8 +507,11 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     package static func connect(
         enablePeerExchangePlugin: Bool,
         folderAuthorizations: [TorrentFolderAuthorization],
+        legacyStateDirectory: URL? = nil,
         transport: any TorrentEngineIPCTransport,
-        controllerID: UUID = UUID()
+        controllerID: UUID = UUID(),
+        requestTimeoutOverrides: [TorrentEngineIPCOperation: Duration] = [:],
+        connectionDeadline: ContinuousClock.Instant? = nil
     ) async throws -> TorrentXPCClient {
         try await establishConnection(
             controllerID: controllerID,
@@ -473,7 +519,9 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             state: TorrentXPCClientState(),
             enablePeerExchangePlugin: enablePeerExchangePlugin,
             folderAuthorizations: folderAuthorizations,
-            legacyStateDirectory: nil
+            legacyStateDirectory: legacyStateDirectory,
+            requestTimeoutOverrides: requestTimeoutOverrides,
+            connectionDeadline: connectionDeadline
         )
     }
 
@@ -483,12 +531,16 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         state: TorrentXPCClientState,
         enablePeerExchangePlugin: Bool,
         folderAuthorizations: [TorrentFolderAuthorization],
-        legacyStateDirectory: URL?
+        legacyStateDirectory: URL?,
+        requestTimeoutOverrides: [TorrentEngineIPCOperation: Duration],
+        connectionDeadline: ContinuousClock.Instant?
     ) async throws -> TorrentXPCClient {
         let client = TorrentXPCClient(
             controllerID: controllerID,
             transport: transport,
-            state: state
+            state: state,
+            requestTimeoutOverrides: requestTimeoutOverrides,
+            connectionDeadline: connectionDeadline
         )
         do {
             if let legacyStateDirectory {
@@ -498,6 +550,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                 enablePeerExchangePlugin: enablePeerExchangePlugin,
                 folderAuthorizations: folderAuthorizations
             )
+            try await client.finishConnectionEstablishment()
             return client
         } catch {
             let failure = error as? TorrentEngineClientError ?? .connectionFailed
@@ -508,6 +561,14 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             transport.cancel()
             throw error
         }
+    }
+
+    private func finishConnectionEstablishment() throws {
+        if let connectionDeadline,
+           ContinuousClock().now >= connectionDeadline {
+            throw TorrentEngineClientError.recoveryDeadlineExceeded
+        }
+        connectionDeadline = nil
     }
 
     package func shutdown() async {
@@ -561,13 +622,9 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                 }
             )
         } catch {
-            if Self.isDefiniteServiceRejection(error) {
+            if Self.isDefiniteUnsubmittedOrRejectedFailure(error) {
                 for grant in granted where grant.record.state == .provisional {
-                    try? await invokeUnit(
-                        .revokeFolderCapability,
-                        TorrentEngineIPCRevokeFolderRequest(capabilityID: grant.record.id)
-                    )
-                    capabilitiesByCanonicalPath.removeValue(forKey: grant.path)
+                    await revokeForMandatoryCleanup(capabilityID: grant.record.id)
                 }
             }
             throw error
@@ -678,8 +735,8 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             )
             return response.identifier
         } catch {
-            if folder.wasProvisional, Self.isDefiniteServiceRejection(error) {
-                try? await revoke(capabilityID: folder.capabilityID)
+            if folder.wasProvisional, Self.isDefiniteUnsubmittedOrRejectedFailure(error) {
+                await revokeForMandatoryCleanup(capabilityID: folder.capabilityID)
             }
             throw error
         }
@@ -719,8 +776,8 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             )
             return response.identifier
         } catch {
-            if folder.wasProvisional, Self.isDefiniteServiceRejection(error) {
-                try? await revoke(capabilityID: folder.capabilityID)
+            if folder.wasProvisional, Self.isDefiniteUnsubmittedOrRejectedFailure(error) {
+                await revokeForMandatoryCleanup(capabilityID: folder.capabilityID)
             }
             throw error
         }
@@ -841,6 +898,8 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                 trackerHostBatch: trackerHostBatch,
                 networkInterfaceSnapshot: response.networkInterfaceSnapshot
             )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             throw pollFailure(from: error)
         }
@@ -983,19 +1042,6 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     }
 
     private func migrateLegacyStateIfNeeded(from stateDirectory: URL) async throws {
-        let legacyDirectory: TorrentLegacyResumeDirectory
-        do {
-            guard let opened = try TorrentLegacyResumeDirectory.open(stateDirectory: stateDirectory) else {
-                return
-            }
-            legacyDirectory = opened
-        } catch {
-            throw TorrentEngineClientError.migrationFailed
-        }
-        guard !legacyDirectory.filenames.isEmpty else {
-            return
-        }
-
         let begin: TorrentEngineIPCStateMigrationBeginResponse
         do {
             (begin, _) = try await invokeBeforeHandshake(
@@ -1003,10 +1049,35 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                 TorrentEngineIPCEmpty()
             )
         } catch {
-            throw TorrentEngineClientError.migrationFailed
+            throw Self.migrationFailure(from: error)
         }
         guard !begin.alreadyComplete else {
             return
+        }
+
+        let legacyDirectory: TorrentLegacyResumeDirectory?
+        do {
+            legacyDirectory = try TorrentLegacyResumeDirectory.open(
+                stateDirectory: stateDirectory
+            )
+        } catch {
+            try? await invokeUnitBeforeHandshake(
+                .abortStateMigration,
+                TorrentEngineIPCEmpty()
+            )
+            throw TorrentEngineClientError.migrationFailed
+        }
+
+        guard let legacyDirectory, !legacyDirectory.filenames.isEmpty else {
+            do {
+                try await invokeUnitBeforeHandshake(
+                    .abortStateMigration,
+                    TorrentEngineIPCEmpty()
+                )
+                return
+            } catch {
+                throw Self.migrationFailure(from: error)
+            }
         }
 
         do {
@@ -1030,8 +1101,21 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                 .abortStateMigration,
                 TorrentEngineIPCEmpty()
             )
-            throw TorrentEngineClientError.migrationFailed
+            throw Self.migrationFailure(from: error)
         }
+    }
+
+    private static func migrationFailure(from error: any Error) -> any Error {
+        if error is CancellationError {
+            return CancellationError()
+        }
+        guard let clientError = error as? TorrentEngineClientError else {
+            return TorrentEngineClientError.migrationFailed
+        }
+        if case .serviceRejected = clientError {
+            return TorrentEngineClientError.migrationFailed
+        }
+        return clientError
     }
 
     private func pollWire(
@@ -1118,6 +1202,9 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             )
             try await closeDataset(descriptor.id)
             return values
+        } catch is CancellationError {
+            await closeDatasetAfterCancellation(descriptor.id)
+            throw CancellationError()
         } catch {
             let failure = responseFailure(from: error)
             if failure.isFatalTransportError {
@@ -1152,7 +1239,9 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             TorrentEngineIPCFolderGrant(bookmark: bookmarkData)
         )
         guard response.folder.resolvedPath == path else {
-            try? await revoke(capabilityID: response.folder.capabilityID)
+            await revokeForMandatoryCleanup(
+                capabilityID: response.folder.capabilityID
+            )
             throw TorrentEngineClientError.capabilityPathMismatch
         }
         return response.folder
@@ -1166,6 +1255,43 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         capabilitiesByCanonicalPath = capabilitiesByCanonicalPath.filter {
             $0.value.id != capabilityID
         }
+    }
+
+    /// Security cleanup belongs to the authenticated connection once the
+    /// triggering reply is known. Run it from an uncancelled task so an
+    /// observer disappearing cannot suppress the revoke between requests.
+    private func revokeForMandatoryCleanup(capabilityID: UUID) async {
+        let result = await Task.detached { [weak self] ()
+            -> Result<Void, TorrentEngineClientError> in
+            guard let self else {
+                return .failure(.connectionFailed)
+            }
+            do {
+                try await self.revoke(capabilityID: capabilityID)
+                return .success(())
+            } catch let error as TorrentEngineClientError {
+                return .failure(error)
+            } catch {
+                return .failure(.connectionFailed)
+            }
+        }.value
+        guard case .failure(let failure) = result else {
+            return
+        }
+        if failure.recoveryDisposition == .terminal {
+            terminalize(failure)
+        } else {
+            terminalize(.connectionFailed)
+        }
+    }
+
+    private func closeDatasetAfterCancellation(_ id: UUID) async {
+        await Task.detached { [weak self] in
+            guard let self else {
+                return
+            }
+            try? await self.closeDataset(id)
+        }.value
     }
 
     private func invokeUnit<Request: Encodable & Sendable>(
@@ -1305,7 +1431,13 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         expectedEpoch: UUID?,
         fileDescriptor: Int32? = nil
     ) async throws -> TorrentEngineIPCReply {
-        try await acquireRequestSlot()
+        let clock = ContinuousClock()
+        let requestTimeout = requestTimeoutOverrides[operation]
+            ?? operation.requestTimeout
+        let operationDeadline = clock.now.advanced(by: requestTimeout)
+        let deadline = connectionDeadline.map { min($0, operationDeadline) }
+            ?? operationDeadline
+        try await acquireRequestSlot(deadline: deadline)
         defer {
             releaseRequestSlot()
         }
@@ -1315,7 +1447,10 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         guard !Task.isCancelled else {
             // No sequence has been consumed and no wire request exists yet, so
             // cancellation here affects only this caller, not the controller.
-            throw TorrentEngineClientError.connectionCancelled
+            throw CancellationError()
+        }
+        guard clock.now < deadline else {
+            throw TorrentEngineClientError.requestExpiredBeforeSubmission
         }
         guard nextSequence != UInt64.max else {
             let error = TorrentEngineClientError.connectionCancelled
@@ -1330,21 +1465,31 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             operationID: UUID(),
             expectedEpoch: expectedEpoch
         )
-        nextSequence += 1
         do {
-            return try await transport.send(TorrentEngineIPCRequest(
-                header: header,
-                payload: payload,
-                fileDescriptor: fileDescriptor
-            ))
+            let reply = try await transport.send(
+                TorrentEngineIPCRequest(
+                    header: header,
+                    payload: payload,
+                    fileDescriptor: fileDescriptor
+                ),
+                deadline: deadline
+            )
+            nextSequence += 1
+            return reply
         } catch {
             let failure: TorrentEngineClientError
             if let clientError = error as? TorrentEngineClientError {
                 failure = clientError
-            } else if error is CancellationError || Task.isCancelled {
-                failure = .connectionCancelled
             } else {
                 failure = .connectionFailed
+            }
+            // Only this transport result guarantees that submission never
+            // happened. Every other reply or transport failure may have
+            // consumed the sequence, even when the controller is contained.
+            if case .requestExpiredBeforeSubmission = failure {
+                // Keep the reserved sequence for the next request.
+            } else {
+                nextSequence += 1
             }
             if failure.isFatalTransportError {
                 terminalize(failure)
@@ -1367,7 +1512,8 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         let waiters = requestWaiters
         requestWaiters.removeAll(keepingCapacity: false)
         for waiter in waiters {
-            waiter.continuation.resume(returning: false)
+            waiter.deadlineTask.cancel()
+            waiter.continuation.resume(returning: .unavailable)
         }
         state.cancel(
             message: message,
@@ -1380,9 +1526,23 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         error as? TorrentEngineClientError ?? .invalidReply
     }
 
-    private func acquireRequestSlot() async throws {
-        guard !Task.isCancelled, state.isAvailable else {
+    private enum RequestSlotAcquisition: Sendable {
+        case acquired
+        case unavailable
+        case deadlineExpired
+    }
+
+    private func acquireRequestSlot(
+        deadline: ContinuousClock.Instant
+    ) async throws {
+        guard state.isAvailable else {
             throw TorrentEngineClientError.connectionCancelled
+        }
+        guard !Task.isCancelled else {
+            throw CancellationError()
+        }
+        guard ContinuousClock().now < deadline else {
+            throw TorrentEngineClientError.requestExpiredBeforeSubmission
         }
         if !requestIsInFlight {
             requestIsInFlight = true
@@ -1393,14 +1553,28 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         }
 
         let waiterID = UUID()
-        let acquired = await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
+        let acquisition = await withTaskCancellationHandler {
+            await withCheckedContinuation {
+                (continuation: CheckedContinuation<RequestSlotAcquisition, Never>) in
                 guard !Task.isCancelled, state.isAvailable else {
-                    continuation.resume(returning: false)
+                    continuation.resume(returning: .unavailable)
                     return
+                }
+                guard ContinuousClock().now < deadline else {
+                    continuation.resume(returning: .deadlineExpired)
+                    return
+                }
+                let deadlineTask = Task.detached { [weak self] in
+                    do {
+                        try await ContinuousClock().sleep(until: deadline)
+                    } catch {
+                        return
+                    }
+                    await self?.expireRequestWaiter(waiterID)
                 }
                 requestWaiters.append(RequestWaiter(
                     id: waiterID,
+                    deadlineTask: deadlineTask,
                     continuation: continuation
                 ))
             }
@@ -1409,7 +1583,15 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                 await cancelRequestWaiter(waiterID)
             }
         }
-        guard acquired else {
+        switch acquisition {
+        case .acquired:
+            break
+        case .deadlineExpired:
+            throw TorrentEngineClientError.requestExpiredBeforeSubmission
+        case .unavailable:
+            if Task.isCancelled {
+                throw CancellationError()
+            }
             throw TorrentEngineClientError.connectionCancelled
         }
         guard state.isAvailable else {
@@ -1426,7 +1608,17 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             return
         }
         let waiter = requestWaiters.remove(at: index)
-        waiter.continuation.resume(returning: false)
+        waiter.deadlineTask.cancel()
+        waiter.continuation.resume(returning: .unavailable)
+    }
+
+    private func expireRequestWaiter(_ id: UUID) {
+        guard let index = requestWaiters.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let waiter = requestWaiters.remove(at: index)
+        waiter.deadlineTask.cancel()
+        waiter.continuation.resume(returning: .deadlineExpired)
     }
 
     private func releaseRequestSlot() {
@@ -1435,7 +1627,8 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             return
         }
         let waiter = requestWaiters.removeFirst()
-        waiter.continuation.resume(returning: true)
+        waiter.deadlineTask.cancel()
+        waiter.continuation.resume(returning: .acquired)
     }
 
     private static func canonicalPaths(_ paths: [String]) throws -> [String] {
@@ -1449,14 +1642,18 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         return unique.sorted()
     }
 
-    private static func isDefiniteServiceRejection(_ error: any Error) -> Bool {
+    private static func isDefiniteUnsubmittedOrRejectedFailure(
+        _ error: any Error
+    ) -> Bool {
         guard let clientError = error as? TorrentEngineClientError else {
             return false
         }
-        if case .serviceRejected = clientError {
+        switch clientError {
+        case .serviceRejected, .requestExpiredBeforeSubmission:
             return true
+        default:
+            return false
         }
-        return false
     }
 
     private static func canonicalAuthorizations(
@@ -1520,8 +1717,13 @@ extension TorrentEngineClientError {
             .replaceController
         case .invalidReply, .engineRestarted, .serviceRejected,
              .capabilityUnavailable, .capabilityPathMismatch,
-             .invalidBookmark, .migrationFailed, .requestQueueFull:
+             .invalidBookmark, .migrationFailed, .requestQueueFull,
+             .recoveryDeadlineExceeded:
             .terminal
+        case .requestExpiredBeforeSubmission:
+            .none
+        case .requestTimedOut:
+            .replaceController
         }
     }
 }

@@ -155,9 +155,18 @@ enum TorrentEngineClientResponseValidator {
         maximumItemCount: Int
     ) throws {
         guard descriptor.kind == expectedKind,
-              (0...maximumItemCount).contains(descriptor.itemCount),
-              (0...maximumItemCount).contains(descriptor.pageCount),
+              (0...maximumItemCount).contains(descriptor.itemCount) else {
+            throw TorrentEngineClientError.invalidReply
+        }
+        let minimumPageCount = descriptor.itemCount == 0
+            ? 0
+            : 1 + ((descriptor.itemCount - 1)
+                / TorrentEngineIPCLimits.maximumDatasetPageItemCount)
+        guard (0...TorrentEngineIPCLimits.maximumDatasetPageCount).contains(
+            descriptor.pageCount
+        ),
               (descriptor.itemCount == 0) == (descriptor.pageCount == 0),
+              descriptor.pageCount >= minimumPageCount,
               descriptor.pageCount <= descriptor.itemCount else {
             throw TorrentEngineClientError.invalidReply
         }

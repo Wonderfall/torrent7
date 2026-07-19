@@ -74,6 +74,65 @@ struct TorrentXPCClientSecurityTests {
         ))
     }
 
+    @Test("XPC reply completion is exactly once across reply and deadline races")
+    func xpcReplyCompletionIsExactlyOnce() async throws {
+        let header = TorrentEngineIPCHeader(
+            requestID: UUID(),
+            controllerID: UUID(),
+            sequence: 1,
+            operation: .poll,
+            operationID: UUID(),
+            expectedEpoch: epoch
+        )
+        let reply = TorrentEngineIPCReply(
+            header: header,
+            engineEpoch: epoch,
+            status: .success
+        )
+        let stream = AsyncStream<TorrentEngineXPCTransport.PendingReply>.makeStream(
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        let waiting = Task<TorrentEngineIPCReply, any Error> {
+            try await withCheckedThrowingContinuation { continuation in
+                stream.continuation.yield(
+                    TorrentEngineXPCTransport.PendingReply(continuation)
+                )
+                stream.continuation.finish()
+            }
+        }
+        var iterator = stream.stream.makeAsyncIterator()
+        let completion = try #require(await iterator.next())
+
+        #expect(completion.finish(.success(reply)))
+        #expect(!completion.finish(.failure(TorrentEngineClientError.invalidReply)))
+        #expect(try await waiting.value == reply)
+
+        let timeoutStream = AsyncStream<TorrentEngineXPCTransport.PendingReply>.makeStream(
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        let timingOut = Task<TorrentEngineIPCReply, any Error> {
+            try await withCheckedThrowingContinuation { continuation in
+                timeoutStream.continuation.yield(
+                    TorrentEngineXPCTransport.PendingReply(continuation)
+                )
+                timeoutStream.continuation.finish()
+            }
+        }
+        var timeoutIterator = timeoutStream.stream.makeAsyncIterator()
+        let timeoutCompletion = try #require(await timeoutIterator.next())
+        timeoutCompletion.installTimeoutTask(Task.detached {
+            try? await ContinuousClock().sleep(for: .milliseconds(5))
+            _ = timeoutCompletion.finish(.failure(
+                TorrentEngineClientError.requestTimedOut(outcomeUnknown: false)
+            ))
+        })
+
+        await #expect(throws: TorrentEngineClientError.self) {
+            try await timingOut.value
+        }
+        #expect(!timeoutCompletion.finish(.success(reply)))
+    }
+
     @Test("Empty preview data is rejected before transport")
     func emptyPreviewIsRejectedLocally() async throws {
         let epoch = epoch
@@ -492,6 +551,84 @@ struct TorrentXPCClientSecurityTests {
         #expect(!client.isAvailable)
     }
 
+    @Test("Cancellation cannot suppress revoke after a drained definite add rejection")
+    func cancelledDefiniteAddStillRevokes() async throws {
+        let path = testPath("cancelled-definite-add")
+        let epoch = epoch
+        let capabilityID = UUID()
+        let blocker = AsyncRequestBlocker()
+        let transport = ScriptedTorrentEngineTransport { request in
+            switch request.header.operation {
+            case .handshake:
+                return try successReply(
+                    TorrentEngineIPCHandshakeResponse(
+                        libtorrentVersion: "2.1.0",
+                        folders: []
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .grantFolderCapability:
+                return try successReply(
+                    TorrentEngineIPCGrantFolderResponse(
+                        folder: TorrentEngineIPCGrantedFolder(
+                            capabilityID: capabilityID,
+                            resolvedPath: path
+                        )
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .addMagnet:
+                await blocker.block()
+                throw TorrentEngineClientError.serviceRejected(
+                    "Rejected before commit"
+                )
+            case .revokeFolderCapability:
+                return try successReply(
+                    TorrentEngineIPCEmpty(),
+                    for: request,
+                    epoch: epoch
+                )
+            case .reannounce:
+                return try successReply(
+                    TorrentEngineIPCEmpty(),
+                    for: request,
+                    epoch: epoch
+                )
+            default:
+                throw TorrentEngineClientError.serviceRejected(
+                    "Unexpected operation"
+                )
+            }
+        }
+        let client = try await makeClient(transport: transport)
+        try await client.delegateFolderAuthorization(
+            authorization(path: path, byte: 9)
+        )
+        let add = Task {
+            try await addMagnet(client: client, savePath: path)
+        }
+        await blocker.waitUntilBlocked()
+
+        add.cancel()
+        await blocker.release()
+        await #expect(throws: TorrentEngineClientError.self) {
+            try await add.value
+        }
+
+        #expect(transport.operations == [
+            .handshake,
+            .grantFolderCapability,
+            .addMagnet,
+            .revokeFolderCapability,
+        ])
+        #expect(client.isAvailable)
+        #expect(!transport.isCancelled)
+        try await client.reannounce(id: torrentID)
+        #expect(transport.sequences == [1, 2, 3, 4, 5])
+    }
+
     @Test("A successful add response round trips its canonical identifier")
     func successfulAddResponseRoundTripsIdentifier() async throws {
         let path = testPath("successful-add")
@@ -847,6 +984,108 @@ struct TorrentXPCClientSecurityTests {
         #expect(finalState.didClose)
     }
 
+    @Test("Cancellation during paging closes the dataset without ending the controller")
+    func cancelledPagedPollClosesDataset() async throws {
+        let epoch = epoch
+        let datasetID = UUID()
+        let blocker = AsyncRequestBlocker()
+        let host = TorrentTrackerHostItem(
+            torrentID: torrentID,
+            host: "tracker.example"
+        )
+        let transport = ScriptedTorrentEngineTransport { request in
+            switch request.header.operation {
+            case .handshake:
+                return try successReply(
+                    TorrentEngineIPCHandshakeResponse(
+                        libtorrentVersion: "2.1.0",
+                        folders: []
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .poll:
+                return try successReply(
+                    TorrentEngineIPCPollResponse(
+                        dirtyMask: TorrentEngineDirtySet.trackerHosts.rawValue,
+                        alertErrors: [],
+                        networkStatus: .empty,
+                        bridgeHealth: .healthy,
+                        networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot(
+                            revision: 1,
+                            interfaces: []
+                        ),
+                        snapshotDataset: nil,
+                        trackerHostDataset: TorrentEngineIPCDatasetDescriptor(
+                            id: datasetID,
+                            kind: .trackerHosts,
+                            revision: 1,
+                            itemCount: 2,
+                            pageCount: 2
+                        )
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .readDataset:
+                let read: TorrentEngineIPCReadDatasetRequest = try decodeRequest(request)
+                #expect(read.page == 0)
+                await blocker.block()
+                return try successReply(
+                    TorrentEngineIPCDatasetPage(
+                        id: datasetID,
+                        kind: .trackerHosts,
+                        page: 0,
+                        encodedItems: try TorrentEngineIPCPropertyListCodec.encode(
+                            [host],
+                            maximumBytes: TorrentEngineIPCLimits.maximumDatasetPageBytes
+                        )
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .closeDataset, .reannounce:
+                return try successReply(
+                    TorrentEngineIPCEmpty(),
+                    for: request,
+                    epoch: epoch
+                )
+            default:
+                throw TorrentEngineClientError.serviceRejected(
+                    "Unexpected operation"
+                )
+            }
+        }
+        let client = try await makeClient(transport: transport)
+        let poll = Task {
+            try await client.poll(
+                since: nil,
+                sortedBy: .name,
+                direction: .ascending,
+                includeTrackerHosts: true
+            )
+        }
+        await blocker.waitUntilBlocked()
+
+        poll.cancel()
+        await blocker.release()
+        await #expect(throws: CancellationError.self) {
+            try await poll.value
+        }
+
+        #expect(transport.operations == [
+            .handshake,
+            .poll,
+            .readDataset,
+            .closeDataset,
+        ])
+        #expect(transport.sequences == [1, 2, 3, 4])
+        #expect(client.isAvailable)
+        #expect(!transport.isCancelled)
+        try await client.reannounce(id: torrentID)
+        #expect(transport.sequences == [1, 2, 3, 4, 5])
+    }
+
     @Test("Recovery classification distinguishes lifecycle loss from trust failures")
     func recoveryClassification() {
         #expect(
@@ -900,21 +1139,64 @@ struct TorrentXPCClientSecurityTests {
         }
     }
 
-    @Test("Typed service cleanup retries remain bounded to the cleanup horizon")
-    func serviceCleanupRetryHorizon() {
+    @Test("Typed service cleanup uses capped backoff under an absolute horizon")
+    func serviceCleanupRetryBackoff() {
         var policy = TorrentEngineConnectionRetryPolicy()
-        var delays = [Duration]()
-
-        while let delay = policy.delay(
-            after: .serviceTemporarilyUnavailable("Previous controller cleanup is still running.")
-        ) {
-            delays.append(delay)
+        let delays = (0 ..< 12).compactMap { _ in
+            policy.delay(
+                after: .serviceTemporarilyUnavailable(
+                    "Previous controller cleanup is still running."
+                )
+            )
         }
 
-        #expect(delays.count > 4)
-        #expect(delays.reduce(.zero, +) == .seconds(305))
+        #expect(TorrentEngineConnectionRetryPolicy.cleanupEpisodeRetryBudget == .seconds(305))
+        #expect(delays.prefix(6) == [
+            .milliseconds(250),
+            .milliseconds(500),
+            .seconds(1),
+            .seconds(2),
+            .seconds(4),
+            .seconds(5)
+        ])
+        #expect(delays.suffix(6).allSatisfy { $0 == .seconds(5) })
         #expect(delays.allSatisfy { $0 > .zero && $0 <= .seconds(5) })
-        #expect(policy.delay(after: .serviceTemporarilyUnavailable("busy")) == nil)
+    }
+
+    @Test("Recovery sleeps are clipped to one absolute monotonic deadline")
+    func recoverySleepIsClippedToAbsoluteDeadline() {
+        let clock = ContinuousClock()
+        let now = clock.now
+        let deadline = now.advanced(by: .seconds(2))
+
+        #expect(TorrentEngineConnectionRetryPolicy.retryWake(
+            now: now,
+            deadline: deadline,
+            after: .seconds(5)
+        ) == deadline)
+        #expect(TorrentEngineConnectionRetryPolicy.retryWake(
+            now: deadline,
+            deadline: deadline,
+            after: .milliseconds(1)
+        ) == nil)
+        #expect(TorrentEngineConnectionRetryPolicy.retryWake(
+            now: now,
+            deadline: nil,
+            after: .milliseconds(50)
+        ) == now.advanced(by: .milliseconds(50)))
+    }
+
+    @Test("Every IPC operation has a finite deadline and mutations report unknown outcomes")
+    func operationDeadlineClassification() {
+        for operation in TorrentEngineIPCOperation.allCases {
+            #expect(operation.requestTimeout > .zero)
+            #expect(operation.requestTimeout <= .seconds(120))
+        }
+        #expect(!TorrentEngineIPCOperation.poll.timeoutCanLeaveOutcomeUnknown)
+        #expect(!TorrentEngineIPCOperation.requestSources.timeoutCanLeaveOutcomeUnknown)
+        #expect(TorrentEngineIPCOperation.addMagnet.timeoutCanLeaveOutcomeUnknown)
+        #expect(TorrentEngineIPCOperation.applySettings.timeoutCanLeaveOutcomeUnknown)
+        #expect(TorrentEngineIPCOperation.remove.timeoutCanLeaveOutcomeUnknown)
     }
 
     @Test("Connection invalidation remains transient after typed cleanup begins")
@@ -944,20 +1226,18 @@ struct TorrentXPCClientSecurityTests {
         #expect(rejectionPolicy.delay(after: .invalidBookmark) == nil)
     }
 
-    @Test("Replacement startup survives generic failures for the bounded cleanup horizon")
-    func replacementCleanupRetryHorizon() {
+    @Test("Replacement startup keeps generic failures in capped cleanup backoff")
+    func replacementCleanupRetryBackoff() {
         var policy = TorrentEngineConnectionRetryPolicy(
             mode: .replacingTerminatedController
         )
-        var delays = [Duration]()
-
-        while let delay = policy.delay(after: .connectionFailed) {
-            delays.append(delay)
+        let delays = (0 ..< 12).compactMap { _ in
+            policy.delay(after: .connectionFailed)
         }
 
-        #expect(delays.reduce(.zero, +) == .seconds(305))
+        #expect(delays.count == 12)
         #expect(delays.allSatisfy { $0 > .zero && $0 <= .seconds(5) })
-        #expect(policy.delay(after: .connectionCancelled) == nil)
+        #expect(policy.delay(after: .connectionCancelled) == .seconds(5))
 
         var rejectionPolicy = TorrentEngineConnectionRetryPolicy(
             mode: .replacingTerminatedController
@@ -1183,7 +1463,7 @@ struct TorrentXPCClientSecurityTests {
         try await Task.sleep(for: .milliseconds(50))
         queued.cancel()
 
-        await #expect(throws: TorrentEngineClientError.self) {
+        await #expect(throws: CancellationError.self) {
             try await queued.value
         }
         #expect(transport.operations == [.handshake, .pause])
@@ -1195,6 +1475,104 @@ struct TorrentXPCClientSecurityTests {
         #expect(client.isAvailable)
         #expect(!transport.isCancelled)
         #expect(transport.operations == [.handshake, .pause, .reannounce])
+        #expect(transport.sequences == [1, 2, 3])
+    }
+
+    @Test("An in-flight request delivers its drained result after observer cancellation")
+    func inFlightCancellationDeliversDrainedResult() async throws {
+        let blocker = AsyncRequestBlocker()
+        let epoch = epoch
+        let transport = ScriptedTorrentEngineTransport { request in
+            switch request.header.operation {
+            case .handshake:
+                return try successReply(
+                    TorrentEngineIPCHandshakeResponse(
+                        libtorrentVersion: "2.1.0",
+                        folders: []
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .requestSources:
+                await blocker.block()
+                return try successReply(TorrentEngineIPCEmpty(), for: request, epoch: epoch)
+            case .reannounce:
+                return try successReply(TorrentEngineIPCEmpty(), for: request, epoch: epoch)
+            default:
+                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
+            }
+        }
+        let client = try await makeClient(transport: transport)
+        let observingTask = Task {
+            try await client.requestSources(id: torrentID)
+        }
+        await blocker.waitUntilBlocked()
+
+        observingTask.cancel()
+        try await Task.sleep(for: .milliseconds(25))
+        #expect(transport.operations == [.handshake, .requestSources])
+        #expect(client.isAvailable)
+        #expect(!transport.isCancelled)
+
+        await blocker.release()
+        try await observingTask.value
+        try await client.reannounce(id: torrentID)
+
+        #expect(client.isAvailable)
+        #expect(!transport.isCancelled)
+        #expect(transport.operations == [.handshake, .requestSources, .reannounce])
+        #expect(transport.sequences == [1, 2, 3])
+    }
+
+    @Test("An in-flight request delivers its drained rejection after observer cancellation")
+    func inFlightCancellationDeliversDrainedRejection() async throws {
+        let blocker = AsyncRequestBlocker()
+        let epoch = epoch
+        let transport = ScriptedTorrentEngineTransport { request in
+            switch request.header.operation {
+            case .handshake:
+                return try successReply(
+                    TorrentEngineIPCHandshakeResponse(
+                        libtorrentVersion: "2.1.0",
+                        folders: []
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .requestSources:
+                await blocker.block()
+                throw TorrentEngineClientError.serviceRejected("Known rejection")
+            case .reannounce:
+                return try successReply(TorrentEngineIPCEmpty(), for: request, epoch: epoch)
+            default:
+                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
+            }
+        }
+        let client = try await makeClient(transport: transport)
+        let observingTask = Task {
+            try await client.requestSources(id: torrentID)
+        }
+        await blocker.waitUntilBlocked()
+
+        observingTask.cancel()
+        await blocker.release()
+        do {
+            try await observingTask.value
+            Issue.record("Expected the drained service rejection")
+        } catch let error as TorrentEngineClientError {
+            guard case .serviceRejected(let message) = error else {
+                Issue.record("Expected a known service rejection, got \(error)")
+                return
+            }
+            #expect(message == "Known rejection")
+        } catch {
+            Issue.record("Expected a known service rejection, got \(error)")
+        }
+
+        try await client.reannounce(id: torrentID)
+        #expect(client.isAvailable)
+        #expect(!transport.isCancelled)
+        #expect(transport.operations == [.handshake, .requestSources, .reannounce])
         #expect(transport.sequences == [1, 2, 3])
     }
 
@@ -1369,7 +1747,10 @@ enum InvalidReplyKind: CaseIterable, Sendable {
         self.handler = handler
     }
 
-    func send(_ request: TorrentEngineIPCRequest) async throws -> TorrentEngineIPCReply {
+    func send(
+        _ request: TorrentEngineIPCRequest,
+        deadline: ContinuousClock.Instant
+    ) async throws -> TorrentEngineIPCReply {
         try state.withLock { state in
             guard !state.isCancelled else {
                 throw TorrentEngineClientError.connectionCancelled
@@ -1383,6 +1764,11 @@ enum InvalidReplyKind: CaseIterable, Sendable {
         }
         defer {
             state.withLock { $0.activeSends -= 1 }
+        }
+        guard ContinuousClock().now < deadline else {
+            throw TorrentEngineClientError.requestTimedOut(
+                outcomeUnknown: request.header.operation.timeoutCanLeaveOutcomeUnknown
+            )
         }
         return try await handler(request)
     }

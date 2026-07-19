@@ -135,6 +135,36 @@ struct TorrentEngineClientResponseValidatorTests {
             ),
             makePollResponse(
                 snapshot: snapshot,
+                snapshotDataset: TorrentEngineIPCDatasetDescriptor(
+                    id: UUID(),
+                    kind: .torrentSnapshots,
+                    revision: 1,
+                    itemCount: Int.min,
+                    pageCount: 1
+                )
+            ),
+            makePollResponse(
+                snapshot: snapshot,
+                snapshotDataset: TorrentEngineIPCDatasetDescriptor(
+                    id: UUID(),
+                    kind: .torrentSnapshots,
+                    revision: 1,
+                    itemCount: TorrentEngineIPCLimits.maximumDatasetPageCount + 1,
+                    pageCount: TorrentEngineIPCLimits.maximumDatasetPageCount + 1
+                )
+            ),
+            makePollResponse(
+                snapshot: snapshot,
+                snapshotDataset: TorrentEngineIPCDatasetDescriptor(
+                    id: UUID(),
+                    kind: .torrentSnapshots,
+                    revision: 1,
+                    itemCount: TorrentEngineIPCLimits.maximumDatasetPageItemCount + 1,
+                    pageCount: 1
+                )
+            ),
+            makePollResponse(
+                snapshot: snapshot,
                 snapshotDataset: validSnapshots,
                 trackerHostDataset: validHosts
             ),
@@ -145,6 +175,22 @@ struct TorrentEngineClientResponseValidatorTests {
                 try TorrentEngineClientResponseValidator.validate(response)
             }
         }
+    }
+
+    @Test("Poll dataset descriptors accept the strict page-count boundary")
+    func acceptsMaximumPollDatasetPageCount() throws {
+        try TorrentEngineClientResponseValidator.validate(
+            makePollResponse(
+                snapshot: TorrentNetworkInterfaceSnapshot(revision: 1, interfaces: []),
+                snapshotDataset: TorrentEngineIPCDatasetDescriptor(
+                    id: UUID(),
+                    kind: .torrentSnapshots,
+                    revision: 1,
+                    itemCount: TorrentEngineIPCLimits.maximumDatasetPageCount,
+                    pageCount: TorrentEngineIPCLimits.maximumDatasetPageCount
+                )
+            )
+        )
     }
 
     @Test("Service interface strings and VPN identity remain bounded and consistent")

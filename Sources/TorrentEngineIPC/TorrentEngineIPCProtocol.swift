@@ -14,6 +14,10 @@ package enum TorrentEngineIPCLimits {
     package static let maximumBookmarkAggregateBytes = 20 * 1_024 * 1_024
     package static let maximumDatasetPageBytes = 1 * 1_024 * 1_024
     package static let maximumDatasetPageItemCount = 256
+    // Dataset pages are fetched serially. Bound the number independently of
+    // item count so a hostile descriptor cannot amplify one poll into tens of
+    // thousands of XPC round trips.
+    package static let maximumDatasetPageCount = 256
     package static let maximumDatasetAggregateBytes = 128 * 1_024 * 1_024
     package static let maximumFileMetadataReplyBytes = 32 * 1_024 * 1_024
     // Folder replies remain generously bounded for bookmark and
