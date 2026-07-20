@@ -61,6 +61,10 @@ inline constexpr int32_t TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS = 3;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS = 4;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT = 5;
 inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 37;
+namespace torrent_bridge::internal {
+struct TTorrentClient;
+}
+using TTorrentClient = torrent_bridge::internal::TTorrentClient;
 extern "C" {
 #else
 #define TORRENT_BRIDGE_NOEXCEPT
@@ -120,7 +124,9 @@ enum {
 };
 #endif
 
+#ifndef __cplusplus
 typedef struct TTorrentClient TTorrentClient;
+#endif
 typedef void (*TTorrentWakeCallback)(void *context);
 
 typedef struct TTorrentSnapshot {

@@ -6,6 +6,8 @@
 #include <libtorrent/extensions/ut_pex.hpp>
 #include <libtorrent/pread_disk_io.hpp>
 
+namespace torrent_bridge::internal {
+
 namespace {
 
 constexpr bool is_ascii_alpha(unsigned char const character) noexcept
@@ -39,8 +41,6 @@ constexpr char ascii_lower(unsigned char const character) noexcept
         : static_cast<char>(character);
 }
 
-}
-
 #ifndef TORRENT_DISABLE_EXTENSIONS
 class TorrentPluginFactory final : public lt::plugin {
 public:
@@ -60,6 +60,8 @@ private:
     Factory factory_;
 };
 #endif
+
+} // namespace
 
 std::vector<std::shared_ptr<lt::plugin>> session_plugins(bool enable_peer_exchange_plugin)
 {
@@ -2773,3 +2775,5 @@ BridgeResult apply_file_priorities(
     params.file_priorities = std::move(priorities);
     return {};
 }
+
+} // namespace torrent_bridge::internal

@@ -15,6 +15,9 @@
 #include <system_error>
 #include <vector>
 
+// Bridge tests intentionally exercise the private C++ implementation surface.
+using namespace torrent_bridge::internal;
+
 namespace bridge_tests {
 
 class TemporaryDirectory {

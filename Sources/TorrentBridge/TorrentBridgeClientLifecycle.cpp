@@ -1,5 +1,7 @@
 #include "TorrentBridgeInternal.hpp"
 
+namespace torrent_bridge::internal {
+
 namespace {
 
 [[nodiscard]] std::uint64_t saturating_increment(std::uint64_t const value) noexcept
@@ -588,6 +590,8 @@ std::uint64_t TTorrentClient::allocate_resume_generation(TorrentIdentity *identi
     return allocate_resume_generation_locked(identity);
 }
 
+namespace {
+
 lt::resume_data_flags_t merged_resume_save_flags(lt::resume_data_flags_t existing,
                                                  lt::resume_data_flags_t requested) noexcept
 {
@@ -601,6 +605,8 @@ lt::resume_data_flags_t merged_resume_save_flags(lt::resume_data_flags_t existin
     }
     return merged;
 }
+
+} // namespace
 
 std::optional<std::uint64_t> TTorrentClient::begin_async_resume_save(TorrentIdentity *identity,
                                                                     lt::resume_data_flags_t flags)
@@ -681,3 +687,5 @@ void TTorrentClient::queue_alert_error_threadsafe(std::string message)
     }
     invoke_wake_callback(wake);
 }
+
+} // namespace torrent_bridge::internal

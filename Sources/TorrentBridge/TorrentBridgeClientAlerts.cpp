@@ -1,5 +1,7 @@
 #include "TorrentBridgeInternal.hpp"
 
+namespace torrent_bridge::internal {
+
 std::optional<PendingResumeRequest> TTorrentClient::release_async_resume_state_for_alert(lt::alert const *alert)
 {
     if (auto const *resume = lt::alert_cast<lt::save_resume_data_alert>(alert)) {
@@ -471,3 +473,5 @@ ResumeSaveResult TTorrentClient::clear_removal_tombstones(std::vector<std::strin
     forget_pending_tombstone_clear_locked(ids);
     return {};
 }
+
+} // namespace torrent_bridge::internal

@@ -1,5 +1,9 @@
 #include "TorrentBridgeInternal.hpp"
 
+namespace torrent_bridge::internal {
+
+namespace {
+
 constexpr int kUnlimitedTorrentCountLimit = (1 << 24) - 1;
 
 int normalized_torrent_count_limit(int limit)
@@ -209,6 +213,8 @@ bool move_queue_entry(std::vector<QueueOrderingEntry> &entries, TorrentIdentity 
     return true;
 }
 
+} // namespace
+
 std::vector<lt::torrent_handle> TTorrentClient::apply_queue_priority_order_locked()
 {
 #if defined(TORRENT_BRIDGE_TESTING)
@@ -305,6 +311,8 @@ void TTorrentClient::insert_added_queue_priority_order_locked(
     identity->queue_order_tracked = true;
     ++priority->count;
 }
+
+namespace {
 
 DirtyMask block_network_locked(TTorrentClient &client)
 {
@@ -1030,6 +1038,8 @@ SourcePolicyApplicationResult apply_peer_exchange_policy_locked(TTorrentClient &
     }
     return result;
 }
+
+} // namespace
 
 DirtyMask TTorrentClient::enforce_https_source_policy(lt::torrent_handle const &handle, TorrentIdentity *identity)
 {
@@ -1957,6 +1967,8 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
     return result;
 }
 
+namespace {
+
 TorrentLoadResult load_torrent_data_from_c_buffer(char const *torrent_data, int32_t torrent_data_size)
 {
     if (torrent_data == nullptr) {
@@ -2237,6 +2249,8 @@ int32_t add_torrent_file_data_with_priorities(
     return result;
 }
 
+} // namespace
+
 extern "C" int32_t TorrentClientAddTorrentFileData(
     TTorrentClient *client,
     const char *torrent_data,
@@ -2299,6 +2313,8 @@ extern "C" int32_t TorrentClientAddTorrentFileDataWithPriorities(
     );
 }
 
+namespace {
+
 template <typename LoadTorrent>
 int32_t preview_torrent_file_with_loader(
     TTorrentClient *client,
@@ -2347,6 +2363,8 @@ int32_t preview_torrent_file_with_loader(
         return {};
     });
 }
+
+} // namespace
 
 extern "C" int32_t TorrentClientPreviewTorrentFileData(
     TTorrentClient *client,
@@ -3441,3 +3459,5 @@ extern "C" int32_t TorrentClientTakeAlertError(
         return error_buffer.empty() ? 0 : 1;
     }
 }
+
+} // namespace torrent_bridge::internal

@@ -68,6 +68,8 @@
 #include <unistd.h>
 
 
+namespace torrent_bridge::internal {
+
 namespace fs = std::filesystem;
 namespace lt = libtorrent;
 
@@ -1919,8 +1921,6 @@ private:
     TTorrentClient &client_;
 };
 
-[[nodiscard]] DirtyMask block_network_locked(TTorrentClient &client);
-
 struct LockedChangePublisher {
     TTorrentClient &client;
     WakeCallbackInvocation &wake;
@@ -1947,5 +1947,7 @@ struct LockedChangePublisher {
         changes |= next_changes;
     }
 };
+
+} // namespace torrent_bridge::internal
 
 #endif

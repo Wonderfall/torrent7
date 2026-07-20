@@ -1,5 +1,7 @@
 #include "TorrentBridgeInternal.hpp"
 
+namespace torrent_bridge::internal {
+
 ResumeSaveResult TTorrentClient::remember_resume_write_failure_locked(PendingEncodedResumeWrite write, std::string message)
 {
     if (write.identity != nullptr && resume_write_is_installable_locked(write)) {
@@ -694,3 +696,5 @@ BridgeResult TTorrentClient::save_all_checked()
     }
     return {};
 }
+
+} // namespace torrent_bridge::internal

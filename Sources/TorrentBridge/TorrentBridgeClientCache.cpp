@@ -1,5 +1,7 @@
 #include "TorrentBridgeInternal.hpp"
 
+namespace torrent_bridge::internal {
+
 namespace {
 
 template <std::size_t Count>
@@ -2290,3 +2292,5 @@ void TTorrentClient::pause_session_for_persistence_fault()
     }
     return bridge_error(code, std::move(operation_error));
 }
+
+} // namespace torrent_bridge::internal

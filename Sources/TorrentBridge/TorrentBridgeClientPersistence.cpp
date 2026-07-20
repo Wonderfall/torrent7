@@ -2,6 +2,8 @@
 
 #include <dirent.h>
 
+namespace torrent_bridge::internal {
+
 namespace {
 
 using DirectoryNamesResult = std::expected<std::vector<std::string>, std::string>;
@@ -1415,3 +1417,5 @@ void TTorrentClient::load_resume_data()
     }
     static_cast<void>(apply_queue_priority_order_locked());
 }
+
+} // namespace torrent_bridge::internal

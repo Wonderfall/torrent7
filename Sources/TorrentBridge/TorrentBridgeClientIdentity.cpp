@@ -1,5 +1,7 @@
 #include "TorrentBridgeInternal.hpp"
 
+namespace torrent_bridge::internal {
+
 namespace {
 
 bool hashes_overlap_without_allocation(lt::info_hash_t const &left, lt::info_hash_t const &right) noexcept
@@ -520,3 +522,5 @@ bool TTorrentClient::resume_write_is_current(lt::info_hash_t const &hashes, Torr
     std::scoped_lock io_guard(resume_io_lock);
     return reconcile_current_for_write_locked(hashes, identity);
 }
+
+} // namespace torrent_bridge::internal
