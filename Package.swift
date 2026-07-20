@@ -143,7 +143,8 @@ let bridgeLinkerHardeningFlags = [
     "-Xlinker", "-dead_strip_dylibs"
 ]
 let appSwiftStrictnessFlags = [
-    "-strict-concurrency=complete"
+    "-strict-concurrency=complete",
+    "-warn-soft-deprecated"
 ]
 let appSwiftPointerAuthenticationFlags = [
     "-swift-ptrauth-mode",
