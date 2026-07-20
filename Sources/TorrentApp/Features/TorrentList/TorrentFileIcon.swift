@@ -54,13 +54,13 @@ private enum FileIconCache {
 @MainActor
 private enum TorrentFileIconProvider {
     static func icon(for row: TorrentRowSnapshot) -> NSImage {
-        let key = cacheKey(for: row)
+        let key = TorrentFileIconSource.resolve(for: row)
         return FileIconCache.icon(for: key.identifier) {
             makeIcon(for: key)
         }
     }
 
-    private static func makeIcon(for key: CacheKey) -> NSImage {
+    private static func makeIcon(for key: TorrentFileIconSource) -> NSImage {
         if case .existingItem(let path) = key {
             return NSWorkspace.shared.icon(forFile: path)
         }
@@ -74,8 +74,14 @@ private enum TorrentFileIconProvider {
 
         return NSWorkspace.shared.icon(for: .folder)
     }
+}
 
-    private static func cacheKey(for row: TorrentRowSnapshot) -> CacheKey {
+enum TorrentFileIconSource: Hashable {
+    case existingItem(String)
+    case fileExtension(String)
+    case folder
+
+    static func resolve(for row: TorrentRowSnapshot) -> Self {
         let saveURL = URL(fileURLWithPath: row.savePath, isDirectory: true)
             .standardizedFileURL
         let itemURL = saveURL.appendingPathComponent(row.name)
@@ -83,7 +89,7 @@ private enum TorrentFileIconProvider {
 
         let savePath = saveURL.path(percentEncoded: false)
         let itemPath = itemURL.path(percentEncoded: false)
-        let containedPrefix = savePath == "/" ? "/" : "\(savePath)/"
+        let containedPrefix = savePath.hasSuffix("/") ? savePath : "\(savePath)/"
         guard itemPath.hasPrefix(containedPrefix), itemPath != savePath else {
             return .folder
         }
@@ -99,20 +105,14 @@ private enum TorrentFileIconProvider {
         return .fileExtension(pathExtension.localizedLowercase)
     }
 
-    private enum CacheKey: Hashable {
-        case existingItem(String)
-        case fileExtension(String)
-        case folder
-
-        var identifier: String {
-            switch self {
-            case .existingItem(let path):
-                "item:\(path)"
-            case .fileExtension(let pathExtension):
-                "extension:\(pathExtension)"
-            case .folder:
-                "folder"
-            }
+    var identifier: String {
+        switch self {
+        case .existingItem(let path):
+            "item:\(path)"
+        case .fileExtension(let pathExtension):
+            "extension:\(pathExtension)"
+        case .folder:
+            "folder"
         }
     }
 }
