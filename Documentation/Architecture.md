@@ -463,7 +463,8 @@ build input.
 
 Both bundles use App Sandbox, hardened runtime, `restrict`, library validation,
 Enhanced Security version 2, hardened heap, dyld read-only, platform
-restrictions, and checked allocations. Their capabilities otherwise differ:
+restrictions, and checked allocations with pure-data enforcement. Their
+capabilities otherwise differ:
 
 | Property | GUI application | Engine helper extension |
 | --- | --- | --- |

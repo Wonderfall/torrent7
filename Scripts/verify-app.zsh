@@ -155,6 +155,10 @@ verify_binary_hardening() {
         "$label signature is missing the library validation flag"
     reject_match "com.apple.security.cs.disable-library-validation" "$entitlements_file" \
         "$label disables library validation"
+    [[ $(/usr/libexec/PlistBuddy -c \
+        "Print :com.apple.security.hardened-process.checked-allocations.enable-pure-data" \
+        "$entitlements_file") == "true" ]] \
+        || fail "$label does not enable pure-data checked allocations"
 }
 
 verify_distribution_signature() {

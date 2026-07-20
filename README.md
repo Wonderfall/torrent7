@@ -37,8 +37,9 @@ into Apple's pointer-authentication model, including PAC-enabled Swift, C, and
 C++ code where the toolchain supports it. It also opts into Apple's Enhanced
 Security entitlements, including hardened heap, dyld read-only, platform
 restrictions, and checked allocations for hardware memory tagging / MTE-class
-mitigation on supported systems. The app is designed around App Sandbox, static
-third-party linking, and a hardened native app bundle.
+mitigation, including pure-data allocations, on supported systems. The app is
+designed around App Sandbox, static third-party linking, and a hardened native
+app bundle.
 
 The goal is not to be the largest torrent client. The goal is to keep the common
 workflow fast and understandable: add a torrent or magnet link, choose where it
@@ -132,9 +133,10 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
   validation, and separately reviewed sandbox entitlements. Identified builds
   require valid matching Team IDs.
 - **Enhanced Security entitlements:** hardened process, hardened heap, dyld
-  read-only, platform restrictions, and checked allocations are enabled. The
-  soft-mode checked-allocation entitlement is intentionally not used, so memory
-  tag violations are treated as hard failures on systems that enforce them.
+  read-only, platform restrictions, and checked allocations with pure-data
+  enforcement are enabled. The soft-mode checked-allocation entitlement is
+  intentionally not used, so memory tag violations are treated as hard failures
+  on systems that enforce them.
 - **Compiler hardening:** arm64e builds use stack protection, PIE codegen, fortify,
   hidden visibility, pointer authentication, branch target identification,
   straight-line speculation hardening, jump-table hardening, typed allocation
