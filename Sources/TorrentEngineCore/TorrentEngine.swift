@@ -232,7 +232,7 @@ package enum TorrentAddError: LocalizedError, Sendable {
         }
 
         while hasPendingRemovalRequest {
-            await Self.waitForRemovalPollInterval()
+            await Self.waitForRemovalPollIntervalIgnoringCancellation()
         }
 
         if let runtimeFailure = runtimeFailureMessage.withLock({ $0 }),
@@ -548,7 +548,7 @@ package enum TorrentAddError: LocalizedError, Sendable {
 
             switch result.state {
             case Int32(TTORRENT_REMOVAL_PENDING):
-                await Self.waitForRemovalPollInterval()
+                await Self.waitForRemovalPollIntervalIgnoringCancellation()
                 guard !isShutdown,
                       unsafe client == self.client?.pointer else {
                     return Self.removedWithBoundedWarning(
@@ -647,7 +647,10 @@ package enum TorrentAddError: LocalizedError, Sendable {
         return result
     }
 
-    private nonisolated static func waitForRemovalPollInterval() async {
+    /// Terminal deletion tracking must remain rate-limited after its caller is canceled.
+    /// A detached child gives the sleep a fresh cancellation context; directly sleeping
+    /// here would throw immediately and turn the terminal-state loop into a hot poll.
+    private nonisolated static func waitForRemovalPollIntervalIgnoringCancellation() async {
         await Task.detached {
             try? await Task.sleep(for: .milliseconds(25))
         }.value

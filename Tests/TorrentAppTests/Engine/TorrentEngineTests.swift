@@ -377,9 +377,14 @@ struct TorrentEngineTests {
         while pollState.withLock({ $0.readCount == 0 }) {
             await Task.yield()
         }
+        let readCountAtCancellation = pollState.withLock { $0.readCount }
         removal.cancel()
         try await Task.sleep(for: .milliseconds(30))
         #expect(completed.withLock { !$0 })
+        #expect(
+            pollState.withLock { $0.readCount - readCountAtCancellation < 100 },
+            "Cancellation must not turn deletion tracking into a hot poll"
+        )
 
         do {
             try await engine.restart(
