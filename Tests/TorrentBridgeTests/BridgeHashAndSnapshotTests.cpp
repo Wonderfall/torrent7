@@ -219,6 +219,7 @@ TEST_CASE("snapshot_from_status copies sanitized ABI fields")
     CHECK(bridge_bool(snapshot.paused));
     CHECK(bridge_bool(snapshot.auto_managed));
     CHECK(bridge_bool(snapshot.has_metadata));
+    CHECK(snapshot.content_kind == TTORRENT_CONTENT_KIND_UNKNOWN);
 }
 
 TEST_CASE("snapshot_from_status maps torrent metadata facts when available")
@@ -256,6 +257,34 @@ TEST_CASE("snapshot_from_status maps torrent metadata facts when available")
     CHECK(snapshot.created_time == 12'345);
     CHECK(snapshot.completed_time == 67'890);
     CHECK(bridge_bool(snapshot.private_torrent));
+    CHECK(snapshot.content_kind == TTORRENT_CONTENT_KIND_SINGLE_FILE);
+}
+
+TEST_CASE("snapshot_from_status recognizes a one-file multi-file torrent as a directory")
+{
+    std::vector<lt::create_file_entry> files;
+    files.emplace_back("AlmaLinux-10.2-x86_64/image.iso", 1024);
+
+    lt::create_torrent creator(std::move(files), 16 * 1024, lt::create_torrent::v1_only);
+    creator.set_hash(lt::piece_index_t(0), bridge_tests::sha1_hash_from_seed(29U));
+
+    std::vector<char> const buffer = creator.generate_buf();
+    lt::add_torrent_params const params =
+        bridge_tests::load_torrent_params(buffer, "one-file multi-file torrent info");
+    std::shared_ptr<lt::torrent_info const> const info = params.ti;
+    REQUIRE(info);
+    REQUIRE(info->layout().num_files() == 1);
+    CHECK(info->layout().file_path(lt::file_index_t(0))
+          == "AlmaLinux-10.2-x86_64/image.iso");
+
+    lt::torrent_status status;
+    status.info_hashes = info->info_hashes();
+    status.torrent_file = info;
+    status.has_metadata = true;
+
+    TTorrentSnapshot const snapshot = snapshot_from_status(status);
+
+    CHECK(snapshot.content_kind == TTORRENT_CONTENT_KIND_DIRECTORY);
 }
 
 TEST_CASE("maximum snapshot batch copy benchmark is opt-in")

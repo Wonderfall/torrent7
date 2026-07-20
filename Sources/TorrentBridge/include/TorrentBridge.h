@@ -60,7 +60,10 @@ inline constexpr int32_t TTORRENT_SOURCE_POLICY_ENABLE_LSD = 2;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS = 3;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS = 4;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT = 5;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 37;
+inline constexpr uint8_t TTORRENT_CONTENT_KIND_UNKNOWN = 0;
+inline constexpr uint8_t TTORRENT_CONTENT_KIND_SINGLE_FILE = 1;
+inline constexpr uint8_t TTORRENT_CONTENT_KIND_DIRECTORY = 2;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 38;
 namespace torrent_bridge::internal {
 struct TTorrentClient;
 }
@@ -120,7 +123,10 @@ enum {
     TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS = 3,
     TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS = 4,
     TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT = 5,
-    TTORRENT_BRIDGE_ABI_VERSION = 37
+    TTORRENT_CONTENT_KIND_UNKNOWN = 0,
+    TTORRENT_CONTENT_KIND_SINGLE_FILE = 1,
+    TTORRENT_CONTENT_KIND_DIRECTORY = 2,
+    TTORRENT_BRIDGE_ABI_VERSION = 38
 };
 #endif
 
@@ -165,6 +171,7 @@ typedef struct TTorrentSnapshot {
     uint8_t finished;
     uint8_t has_metadata;
     uint8_t private_torrent;
+    uint8_t content_kind;
 } TTorrentSnapshot;
 
 typedef struct TTorrentTrackerSnapshot {

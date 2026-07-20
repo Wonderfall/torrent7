@@ -12,7 +12,7 @@
 
 namespace {
 
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 37U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 38U);
 static_assert(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT == 32);
 
 using ErrorBuffer = std::array<char, 512>;

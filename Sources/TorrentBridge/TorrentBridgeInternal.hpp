@@ -162,10 +162,13 @@ static_assert(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES
                   * (TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES + 1));
 static_assert(kMaxTorrentIdentityTokenCount > static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 37U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 38U);
 static_assert(TTORRENT_ADD_REJECTED == 0);
 static_assert(TTORRENT_ADD_COMMITTED == 1);
 static_assert(TTORRENT_ADD_OUTCOME_UNKNOWN == 2);
+static_assert(TTORRENT_CONTENT_KIND_UNKNOWN == 0U);
+static_assert(TTORRENT_CONTENT_KIND_SINGLE_FILE == 1U);
+static_assert(TTORRENT_CONTENT_KIND_DIRECTORY == 2U);
 #if defined(TORRENT_USE_ASSERTS) && TORRENT_USE_ASSERTS
 static_assert(sizeof(lt::add_torrent_params) == 776U);
 #else
@@ -234,6 +237,7 @@ static_assert(std::is_standard_layout_v<TTorrentAuthorizedSaveRoot>);
 static_assert(std::is_trivially_copyable_v<TTorrentAuthorizedSaveRoot>);
 static_assert(sizeof(TTorrentSnapshot) == 3360U);
 static_assert(alignof(TTorrentSnapshot) == 8U);
+static_assert(offsetof(TTorrentSnapshot, content_kind) == 3358U);
 static_assert(sizeof(TTorrentTrackerSnapshot) == 1560U);
 static_assert(alignof(TTorrentTrackerSnapshot) == 4U);
 static_assert(sizeof(TTorrentTrackerHostSnapshot) == 324U);

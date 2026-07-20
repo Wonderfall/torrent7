@@ -46,7 +46,8 @@ template <std::size_t Count>
         && lhs.seeding == rhs.seeding
         && lhs.finished == rhs.finished
         && lhs.has_metadata == rhs.has_metadata
-        && lhs.private_torrent == rhs.private_torrent;
+        && lhs.private_torrent == rhs.private_torrent
+        && lhs.content_kind == rhs.content_kind;
 }
 
 [[nodiscard]] bool tracker_snapshots_equal(

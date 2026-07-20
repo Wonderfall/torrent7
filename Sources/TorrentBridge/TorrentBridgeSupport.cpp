@@ -1384,6 +1384,38 @@ double download_progress(lt::torrent_status const &status)
     );
 }
 
+namespace {
+
+std::uint8_t content_kind_for_torrent_info(
+    std::shared_ptr<lt::torrent_info const> const &torrent_file
+) noexcept
+{
+    if (!torrent_file || !torrent_file->is_valid()) {
+        return TTORRENT_CONTENT_KIND_UNKNOWN;
+    }
+
+    try {
+        lt::file_storage const &layout = torrent_file->layout();
+        if (layout.num_files() <= 0) {
+            return TTORRENT_CONTENT_KIND_UNKNOWN;
+        }
+        if (layout.num_files() > 1) {
+            return TTORRENT_CONTENT_KIND_DIRECTORY;
+        }
+
+        // A v1 multi-file torrent can contain one file. Comparing the complete
+        // metainfo path with the root name preserves that distinction instead
+        // of guessing from file count or from a version-like name suffix.
+        return layout.file_path(lt::file_index_t(0)) == layout.name()
+            ? TTORRENT_CONTENT_KIND_SINGLE_FILE
+            : TTORRENT_CONTENT_KIND_DIRECTORY;
+    } catch (...) {
+        return TTORRENT_CONTENT_KIND_UNKNOWN;
+    }
+}
+
+} // namespace
+
 TTorrentSnapshot snapshot_from_status(
     lt::torrent_status const &status,
     TorrentIdentity const *identity
@@ -1396,6 +1428,7 @@ TTorrentSnapshot snapshot_from_status(
     copy_string(std::span{snapshot.save_path}, status.save_path);
     copy_string(std::span{snapshot.error}, status.errc ? status.errc.message() : std::string());
     std::shared_ptr<lt::torrent_info const> const torrent_file = status.torrent_file.lock();
+    snapshot.content_kind = content_kind_for_torrent_info(torrent_file);
     if (torrent_file && torrent_file->is_valid()) {
         snapshot.total_size = torrent_file->total_size();
         snapshot.private_torrent = bridge_bool(torrent_file->priv());

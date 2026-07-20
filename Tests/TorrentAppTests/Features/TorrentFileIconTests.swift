@@ -9,7 +9,8 @@ struct TorrentFileIconTests {
     func missingSingleFileUsesFilenameExtension() {
         let row = TorrentRowSnapshot(makeTorrent(
             name: "archlinux-2026.07.01-x86_64.iso",
-            savePath: "/Users/example/Downloads"
+            savePath: "/Users/example/Downloads",
+            contentKind: .singleFile
         ))
 
         #expect(TorrentFileIconSource.resolve(for: row) == .fileExtension("iso"))
@@ -24,18 +25,42 @@ struct TorrentFileIconTests {
             #expect(FileManager.default.createFile(atPath: itemURL.torrentFilePath, contents: Data()))
             let row = TorrentRowSnapshot(makeTorrent(
                 name: itemURL.lastPathComponent,
-                savePath: saveURL.torrentFilePath
+                savePath: saveURL.torrentFilePath,
+                contentKind: .singleFile
             ))
 
             #expect(TorrentFileIconSource.resolve(for: row) == .existingItem(itemURL.torrentFilePath))
         }
     }
 
+    @Test("Missing dotted multi-file torrent uses a folder icon")
+    func missingDottedDirectoryUsesFolderIcon() {
+        let row = TorrentRowSnapshot(makeTorrent(
+            name: "AlmaLinux-10.2-x86_64",
+            savePath: "/Users/example/Downloads",
+            contentKind: .directory
+        ))
+
+        #expect(TorrentFileIconSource.resolve(for: row) == .folder)
+    }
+
+    @Test("Missing extensionless single-file torrent uses a generic file icon")
+    func missingExtensionlessFileUsesGenericFileIcon() {
+        let row = TorrentRowSnapshot(makeTorrent(
+            name: "README",
+            savePath: "/Users/example/Downloads",
+            contentKind: .singleFile
+        ))
+
+        #expect(TorrentFileIconSource.resolve(for: row) == .genericFile)
+    }
+
     @Test("Traversal metadata cannot influence an icon outside the save path")
     func traversalFallsBackToFolder() {
         let row = TorrentRowSnapshot(makeTorrent(
             name: "../outside.iso",
-            savePath: "/Users/example/Downloads"
+            savePath: "/Users/example/Downloads",
+            contentKind: .singleFile
         ))
 
         #expect(TorrentFileIconSource.resolve(for: row) == .folder)

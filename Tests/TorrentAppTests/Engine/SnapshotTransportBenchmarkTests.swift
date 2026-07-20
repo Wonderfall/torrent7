@@ -182,6 +182,7 @@ private func makeBenchmarkSnapshots(count: Int) -> [TTorrentSnapshot] {
         snapshot.total_wanted = Int64(count)
         snapshot.added_time = Int64((index * 7_919) % count)
         snapshot.state = Int32(TTORRENT_BRIDGE_STATE_DOWNLOADING)
+        snapshot.content_kind = UInt8(TTORRENT_CONTENT_KIND_SINGLE_FILE)
         snapshot.has_metadata = 1
         snapshots.append(snapshot)
     }

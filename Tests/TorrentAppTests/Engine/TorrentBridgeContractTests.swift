@@ -6,7 +6,7 @@ import TorrentBridge
 struct TorrentBridgeContractTests {
     @Test("Pins bridge ABI version, limits, states, and dirty masks")
     func pinsBridgeConstants() {
-        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 37)
+        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 38)
         #expect(Int32(TTORRENT_BRIDGE_STATE_UNKNOWN) == -1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_CHECKING_FILES) == 1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_DOWNLOADING_METADATA) == 2)
@@ -56,12 +56,16 @@ struct TorrentBridgeContractTests {
         #expect(Int32(TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS) == 3)
         #expect(Int32(TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS) == 4)
         #expect(Int32(TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT) == 5)
+        #expect(UInt8(TTORRENT_CONTENT_KIND_UNKNOWN) == 0)
+        #expect(UInt8(TTORRENT_CONTENT_KIND_SINGLE_FILE) == 1)
+        #expect(UInt8(TTORRENT_CONTENT_KIND_DIRECTORY) == 2)
     }
 
     @Test("Pins Swift-imported C struct layout")
     func pinsSwiftImportedCStructLayout() {
         #expect(MemoryLayout<TTorrentSnapshot>.size == 3_360)
         #expect(MemoryLayout<TTorrentSnapshot>.alignment == 8)
+        #expect(MemoryLayout<TTorrentSnapshot>.offset(of: \TTorrentSnapshot.content_kind) == 3_358)
         #expect(MemoryLayout<TTorrentTrackerSnapshot>.size == 1_560)
         #expect(MemoryLayout<TTorrentTrackerSnapshot>.alignment == 4)
         #expect(MemoryLayout<TTorrentTrackerHostSnapshot>.size == 324)

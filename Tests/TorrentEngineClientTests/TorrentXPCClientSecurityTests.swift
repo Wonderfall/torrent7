@@ -2308,6 +2308,7 @@ struct TorrentXPCClientSecurityTests {
             autoManaged: false,
             seeding: false,
             finished: false,
+            contentKind: .singleFile,
             hasMetadata: true,
             privateTorrent: false
         )

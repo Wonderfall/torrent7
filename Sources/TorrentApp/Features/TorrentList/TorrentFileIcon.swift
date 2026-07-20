@@ -61,24 +61,26 @@ private enum TorrentFileIconProvider {
     }
 
     private static func makeIcon(for key: TorrentFileIconSource) -> NSImage {
-        if case .existingItem(let path) = key {
+        switch key {
+        case .existingItem(let path):
             return NSWorkspace.shared.icon(forFile: path)
-        }
-
-        if case .fileExtension(let pathExtension) = key {
+        case .fileExtension(let pathExtension):
             if let contentType = UTType(filenameExtension: pathExtension) {
                 return NSWorkspace.shared.icon(for: contentType)
             }
             return NSWorkspace.shared.icon(for: .data)
+        case .genericFile:
+            return NSWorkspace.shared.icon(for: .data)
+        case .folder:
+            return NSWorkspace.shared.icon(for: .folder)
         }
-
-        return NSWorkspace.shared.icon(for: .folder)
     }
 }
 
 enum TorrentFileIconSource: Hashable {
     case existingItem(String)
     case fileExtension(String)
+    case genericFile
     case folder
 
     static func resolve(for row: TorrentRowSnapshot) -> Self {
@@ -94,15 +96,23 @@ enum TorrentFileIconSource: Hashable {
             return .folder
         }
 
+        if row.contentKind == .directory {
+            return .folder
+        }
+
         if FileManager.default.fileExists(atPath: itemPath) {
             return .existingItem(itemPath)
         }
 
         let pathExtension = itemURL.pathExtension
-        guard !pathExtension.isEmpty else {
+        if !pathExtension.isEmpty {
+            return .fileExtension(pathExtension.localizedLowercase)
+        }
+        if row.contentKind == .singleFile {
+            return .genericFile
+        } else {
             return .folder
         }
-        return .fileExtension(pathExtension.localizedLowercase)
     }
 
     var identifier: String {
@@ -111,6 +121,8 @@ enum TorrentFileIconSource: Hashable {
             "item:\(path)"
         case .fileExtension(let pathExtension):
             "extension:\(pathExtension)"
+        case .genericFile:
+            "file"
         case .folder:
             "folder"
         }

@@ -8,6 +8,12 @@ extension TorrentState {
     }
 }
 
+extension TorrentContentKind {
+    init(bridgeValue: UInt8) {
+        self = Self(rawValue: bridgeValue) ?? .unknown
+    }
+}
+
 extension TorrentQueuePriority {
     init(bridgeValue: Int32) {
         switch bridgeValue {
@@ -115,6 +121,7 @@ extension TorrentItem {
             autoManaged: snapshot.auto_managed.bridgeBool,
             seeding: snapshot.seeding.bridgeBool,
             finished: snapshot.finished.bridgeBool,
+            contentKind: TorrentContentKind(bridgeValue: snapshot.content_kind),
             hasMetadata: snapshot.has_metadata.bridgeBool,
             privateTorrent: snapshot.private_torrent.bridgeBool
         )

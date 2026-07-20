@@ -36,6 +36,7 @@ func makeTorrent(
     autoManaged: Bool = false,
     seeding: Bool = false,
     finished: Bool = false,
+    contentKind: TorrentContentKind = .unknown,
     hasMetadata: Bool = true,
     privateTorrent: Bool = false
 ) -> TorrentItem {
@@ -73,6 +74,7 @@ func makeTorrent(
         autoManaged: autoManaged,
         seeding: seeding,
         finished: finished,
+        contentKind: contentKind,
         hasMetadata: hasMetadata,
         privateTorrent: privateTorrent
     )

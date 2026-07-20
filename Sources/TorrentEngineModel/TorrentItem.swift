@@ -1,5 +1,11 @@
 import Foundation
 
+package enum TorrentContentKind: UInt8, Codable, Hashable, Sendable {
+    case unknown = 0
+    case singleFile = 1
+    case directory = 2
+}
+
 package struct TorrentItem: Codable, Identifiable, Hashable, Sendable {
     package let id: String
     package let infoHash: String
@@ -34,6 +40,7 @@ package struct TorrentItem: Codable, Identifiable, Hashable, Sendable {
     package let autoManaged: Bool
     package let seeding: Bool
     package let finished: Bool
+    package let contentKind: TorrentContentKind
     package let hasMetadata: Bool
     package let privateTorrent: Bool
 
@@ -71,6 +78,7 @@ package struct TorrentItem: Codable, Identifiable, Hashable, Sendable {
         autoManaged: Bool,
         seeding: Bool,
         finished: Bool,
+        contentKind: TorrentContentKind,
         hasMetadata: Bool,
         privateTorrent: Bool
     ) {
@@ -107,6 +115,7 @@ package struct TorrentItem: Codable, Identifiable, Hashable, Sendable {
         self.autoManaged = autoManaged
         self.seeding = seeding
         self.finished = finished
+        self.contentKind = contentKind
         self.hasMetadata = hasMetadata
         self.privateTorrent = privateTorrent
     }
@@ -219,6 +228,7 @@ package struct TorrentRowSnapshot: Identifiable, Hashable, Sendable {
     package let autoManaged: Bool
     package let seeding: Bool
     package let finished: Bool
+    package let contentKind: TorrentContentKind
     package let hasMetadata: Bool
     package let active: Bool
 
@@ -233,6 +243,7 @@ package struct TorrentRowSnapshot: Identifiable, Hashable, Sendable {
         autoManaged = torrent.autoManaged
         seeding = torrent.seeding
         finished = torrent.finished
+        contentKind = torrent.contentKind
         hasMetadata = torrent.hasMetadata
         active = torrent.isActiveTransfer
     }

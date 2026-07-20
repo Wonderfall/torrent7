@@ -57,6 +57,7 @@ struct TorrentBridgeMappingTests {
         snapshot.auto_managed = true.bridgeFlag
         snapshot.seeding = false.bridgeFlag
         snapshot.finished = true.bridgeFlag
+        snapshot.content_kind = UInt8(TTORRENT_CONTENT_KIND_SINGLE_FILE)
         snapshot.has_metadata = true.bridgeFlag
         snapshot.private_torrent = true.bridgeFlag
 
@@ -74,10 +75,19 @@ struct TorrentBridgeMappingTests {
         #expect(item.state == .downloading)
         #expect(item.queued == false)
         #expect(item.finished == true)
+        #expect(item.contentKind == .singleFile)
         #expect(item.privateTorrent == true)
         #expect(item.knownPeerCount == 2)
         #expect(item.queuePosition == 4)
         #expect(item.queuePriority == .high)
+    }
+
+    @Test("Unknown native content kinds map fail-safe")
+    func unknownNativeContentKindMapsFailSafe() {
+        var snapshot = TTorrentSnapshot()
+        snapshot.content_kind = .max
+
+        #expect(TorrentItem(snapshot: snapshot).contentKind == .unknown)
     }
 
     @Test("Maps file snapshots and clamps progress")

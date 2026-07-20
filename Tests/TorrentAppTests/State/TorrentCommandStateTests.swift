@@ -97,6 +97,18 @@ struct TorrentCommandStateTests {
         #expect(state.totalUploadRate == 20)
     }
 
+    @Test("Content kind changes replace stable list rows")
+    func contentKindChangesReplaceStableRows() {
+        let state = TorrentListState()
+        state.update([makeTorrent(id: "alpha", contentKind: .unknown)])
+        let initialRows = state.rows
+
+        state.update([makeTorrent(id: "alpha", contentKind: .directory)])
+
+        #expect(state.rows != initialRows)
+        #expect(state.rows.first?.contentKind == .directory)
+    }
+
     @Test("List rows ignore rate-only inactive transfer changes")
     func listRowsIgnoreRateOnlyInactiveTransferChanges() {
         let state = TorrentListState()

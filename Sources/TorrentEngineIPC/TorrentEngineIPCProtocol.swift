@@ -2,7 +2,7 @@ import Foundation
 import TorrentEngineModel
 
 package enum TorrentEngineIPCProtocol {
-    package static let version: UInt64 = 5
+    package static let version: UInt64 = 6
 }
 
 package enum TorrentEngineIPCLimits {
