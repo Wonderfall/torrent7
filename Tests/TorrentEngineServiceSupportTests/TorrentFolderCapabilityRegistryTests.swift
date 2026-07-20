@@ -90,7 +90,7 @@ struct TorrentFolderCapabilityRegistryTests {
         let temporary = try TemporaryDirectory()
         let firstURL = try temporary.makeDirectory("First")
         let secondURL = try temporary.makeDirectory("Second")
-        let regularFileURL = temporary.url.appendingPathComponent("not-a-directory")
+        let regularFileURL = temporary.url.appending(path: "not-a-directory")
         try Data("file".utf8).write(to: regularFileURL)
 
         let firstBookmark = Data("first".utf8)
@@ -306,9 +306,9 @@ struct TorrentFolderCapabilityRegistryTests {
     func exactCanonicalDirectoryValidation() throws {
         let temporary = try TemporaryDirectory()
         let directoryURL = try temporary.makeDirectory("Directory")
-        let symlinkURL = temporary.url.appendingPathComponent("Alias", isDirectory: true)
+        let symlinkURL = temporary.url.appending(path: "Alias", directoryHint: .isDirectory)
         try FileManager.default.createSymbolicLink(at: symlinkURL, withDestinationURL: directoryURL)
-        let fileURL = temporary.url.appendingPathComponent("File")
+        let fileURL = temporary.url.appending(path: "File")
         try Data("file".utf8).write(to: fileURL)
 
         let directoryBookmark = Data("directory".utf8)
@@ -519,9 +519,9 @@ private final class TemporaryDirectory {
     let url: URL
 
     init() throws {
-        url = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "TorrentEngineServiceSupportTests-\(UUID().uuidString)",
-            isDirectory: true
+        url = FileManager.default.temporaryDirectory.appending(
+            path: "TorrentEngineServiceSupportTests-\(UUID().uuidString)",
+            directoryHint: .isDirectory
         )
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
     }
@@ -531,7 +531,7 @@ private final class TemporaryDirectory {
     }
 
     func makeDirectory(_ name: String) throws -> URL {
-        let child = url.appendingPathComponent(name, isDirectory: true)
+        let child = url.appending(path: name, directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: child, withIntermediateDirectories: false)
         return child
     }

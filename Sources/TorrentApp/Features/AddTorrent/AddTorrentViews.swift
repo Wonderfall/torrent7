@@ -338,7 +338,7 @@ struct AddTorrentConfirmationView: View {
     }
 
     private var downloadFolderText: String {
-        selectedDownloadFolder?.path ?? "Not set"
+        selectedDownloadFolder?.torrentFilePath ?? "Not set"
     }
 
     private var sourceSecuritySummary: TorrentSourceSecuritySummary? {

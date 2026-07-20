@@ -126,8 +126,8 @@ final class SecurityScopedFolder: DownloadFolderAccessing {
             throw TorrentStoreError.downloadFolderAccessDenied
         }
 
-        let probeURL = url.appendingPathComponent(".torrent-app-access-\(UUID().uuidString)", isDirectory: false)
-        guard FileManager.default.createFile(atPath: probeURL.path, contents: Data()) else {
+        let probeURL = url.appending(path: ".torrent-app-access-\(UUID().uuidString)", directoryHint: .notDirectory)
+        guard FileManager.default.createFile(atPath: probeURL.torrentFilePath, contents: Data()) else {
             throw TorrentStoreError.downloadFolderNotWritable
         }
         do {

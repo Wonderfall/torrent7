@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 private func fail(_ message: String) -> Never {
-    FileHandle.standardError.write(Data("\(message)\n".utf8))
+    try? FileHandle.standardError.write(contentsOf: Data("\(message)\n".utf8))
     Darwin.exit(1)
 }
 
@@ -16,7 +16,7 @@ guard CommandLine.arguments.count == 4 else {
 func propertyList(at path: String) -> [String: Any] {
     let data: Data
     do {
-        data = try Data(contentsOf: URL(fileURLWithPath: path))
+        data = try Data(contentsOf: URL(filePath: path))
     } catch {
         fail("Could not read property list at \(path): \(error.localizedDescription)")
     }

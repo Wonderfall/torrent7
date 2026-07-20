@@ -13,8 +13,8 @@ struct TorrentLegacyStateMigrationTests {
         let newStateURL = try temporary.makeDirectory("NewState")
         let resumeName = "v1:\(String(repeating: "a", count: 40)).fastresume"
         let tombstoneName = "removal-\(String(repeating: "b", count: 32)).fastresume.remove"
-        let resumeSource = oldStateURL.appendingPathComponent(resumeName)
-        let tombstoneSource = oldStateURL.appendingPathComponent(tombstoneName)
+        let resumeSource = oldStateURL.appending(path: resumeName)
+        let tombstoneSource = oldStateURL.appending(path: tombstoneName)
         let resumeBytes = Data("resume-state".utf8)
         let tombstoneBytes = Data("tombstone-state".utf8)
         try resumeBytes.write(to: resumeSource)
@@ -28,7 +28,7 @@ struct TorrentLegacyStateMigrationTests {
         )
         #expect(try coordinator.hasCompletedMigration() == false)
         let existingName = "v1:\(String(repeating: "c", count: 40)).fastresume"
-        let existingURL = coordinator.resumeDataURL.appendingPathComponent(existingName)
+        let existingURL = coordinator.resumeDataURL.appending(path: existingName)
         let existingBytes = Data("existing-state".utf8)
         try existingBytes.write(to: existingURL)
         let existingIdentity = try regularFileIdentity(existingURL)
@@ -54,8 +54,8 @@ struct TorrentLegacyStateMigrationTests {
         #expect(try coordinator.migration(migrationID: migration.id, scope: scope)?.stagedByteCount
             == resumeBytes.count + tombstoneBytes.count)
 
-        let markerURL = coordinator.resumeDataURL.appendingPathComponent(
-            ".legacy-migration-\(migration.id.uuidString.lowercased()).commit"
+        let markerURL = coordinator.resumeDataURL.appending(
+            path: ".legacy-migration-\(migration.id.uuidString.lowercased()).commit"
         )
         #expect(!FileManager.default.fileExists(atPath: markerURL.path(percentEncoded: false)))
 
@@ -64,16 +64,16 @@ struct TorrentLegacyStateMigrationTests {
         #expect(artifact.markerURL == markerURL)
         #expect(artifact.directoryURL == coordinator.resumeDataURL)
         #expect(FileManager.default.fileExists(atPath: markerURL.path(percentEncoded: false)))
-        #expect(try Data(contentsOf: artifact.directoryURL.appendingPathComponent(resumeName))
+        #expect(try Data(contentsOf: artifact.directoryURL.appending(path: resumeName))
             == resumeBytes)
-        #expect(try Data(contentsOf: artifact.directoryURL.appendingPathComponent(tombstoneName))
+        #expect(try Data(contentsOf: artifact.directoryURL.appending(path: tombstoneName))
             == tombstoneBytes)
         #expect(try Data(contentsOf: resumeSource) == resumeBytes)
         #expect(try Data(contentsOf: tombstoneSource) == tombstoneBytes)
-        #expect(try Data(contentsOf: coordinator.resumeDataURL.appendingPathComponent(existingName))
+        #expect(try Data(contentsOf: coordinator.resumeDataURL.appending(path: existingName))
             == existingBytes)
         #expect(try regularFileIdentity(
-            coordinator.resumeDataURL.appendingPathComponent(existingName)
+            coordinator.resumeDataURL.appending(path: existingName)
         ) == existingIdentity)
 
         let marker = try String(contentsOf: markerURL, encoding: .utf8)
@@ -93,8 +93,8 @@ struct TorrentLegacyStateMigrationTests {
             engineEpoch: UUID(),
             stateDirectoryURL: try temporary.makeDirectory("MalformedMarkerState")
         )
-        let markerURL = coordinator.resumeDataURL.appendingPathComponent(
-            ".legacy-migration-not-a-uuid.commit"
+        let markerURL = coordinator.resumeDataURL.appending(
+            path: ".legacy-migration-not-a-uuid.commit"
         )
         try Data("version=1\n".utf8).write(to: markerURL)
 
@@ -116,21 +116,21 @@ struct TorrentLegacyStateMigrationTests {
 
         let stagingID = UUID()
         let publicationID = UUID()
-        let stagingURL = migrationRootURL.appendingPathComponent(
-            "migration-\(stagingID.uuidString.lowercased()).staging",
-            isDirectory: true
+        let stagingURL = migrationRootURL.appending(
+            path: "migration-\(stagingID.uuidString.lowercased()).staging",
+            directoryHint: .isDirectory
         )
-        let publicationURL = migrationRootURL.appendingPathComponent(
-            "migration-\(publicationID.uuidString.lowercased()).publishing",
-            isDirectory: true
+        let publicationURL = migrationRootURL.appending(
+            path: "migration-\(publicationID.uuidString.lowercased()).publishing",
+            directoryHint: .isDirectory
         )
-        let nearMatchURL = migrationRootURL.appendingPathComponent(
-            "migration-\(UUID().uuidString.lowercased()).staging-backup",
-            isDirectory: true
+        let nearMatchURL = migrationRootURL.appending(
+            path: "migration-\(UUID().uuidString.lowercased()).staging-backup",
+            directoryHint: .isDirectory
         )
         for url in [stagingURL, publicationURL, nearMatchURL] {
             try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
-            try Data("crash-debris".utf8).write(to: url.appendingPathComponent("partial"))
+            try Data("crash-debris".utf8).write(to: url.appending(path: "partial"))
         }
 
         let recovered = try TorrentLegacyStateMigrationCoordinator(
@@ -155,9 +155,9 @@ struct TorrentLegacyStateMigrationTests {
         initial = nil
 
         let outsideURL = try temporary.makeDirectory("OutsideRecoveryTarget")
-        let linkURL = migrationRootURL.appendingPathComponent(
-            "migration-\(UUID().uuidString.lowercased()).staging",
-            isDirectory: true
+        let linkURL = migrationRootURL.appending(
+            path: "migration-\(UUID().uuidString.lowercased()).staging",
+            directoryHint: .isDirectory
         )
         try FileManager.default.createSymbolicLink(at: linkURL, withDestinationURL: outsideURL)
 
@@ -180,7 +180,7 @@ struct TorrentLegacyStateMigrationTests {
         let existingName = "v1:\(String(repeating: "9", count: 40)).fastresume"
         let importedBytes = Data("imported-after-swap".utf8)
         let existingBytes = Data("existing-before-swap".utf8)
-        let importedSourceURL = oldStateURL.appendingPathComponent("source")
+        let importedSourceURL = oldStateURL.appending(path: "source")
         try importedBytes.write(to: importedSourceURL)
 
         let failure = OneShotResumeDataSyncFailure()
@@ -196,7 +196,7 @@ struct TorrentLegacyStateMigrationTests {
         )
         let resumeDataURL = try #require(coordinator?.resumeDataURL)
         let migrationRootURL = try #require(coordinator?.migrationRootURL)
-        try existingBytes.write(to: resumeDataURL.appendingPathComponent(existingName))
+        try existingBytes.write(to: resumeDataURL.appending(path: existingName))
         let migration = try #require(coordinator).begin(scope: scope)
         try #require(coordinator).importFile(
             migrationID: migration.id,
@@ -205,23 +205,23 @@ struct TorrentLegacyStateMigrationTests {
             fileDescriptor: try openRegularFile(importedSourceURL).rawValue
         )
 
-        let stagingURL = migrationRootURL.appendingPathComponent(
-            "migration-\(migration.id.uuidString.lowercased()).staging",
-            isDirectory: true
+        let stagingURL = migrationRootURL.appending(
+            path: "migration-\(migration.id.uuidString.lowercased()).staging",
+            directoryHint: .isDirectory
         )
-        let publicationURL = migrationRootURL.appendingPathComponent(
-            "migration-\(migration.id.uuidString.lowercased()).publishing",
-            isDirectory: true
+        let publicationURL = migrationRootURL.appending(
+            path: "migration-\(migration.id.uuidString.lowercased()).publishing",
+            directoryHint: .isDirectory
         )
         expectMigrationError(.commitFailed) {
             _ = try #require(coordinator).commit(migrationID: migration.id, scope: scope)
         }
 
         #expect(try #require(coordinator).hasCompletedMigration())
-        #expect(try Data(contentsOf: resumeDataURL.appendingPathComponent(importedName)) == importedBytes)
-        #expect(try Data(contentsOf: resumeDataURL.appendingPathComponent(existingName)) == existingBytes)
-        #expect(try Data(contentsOf: stagingURL.appendingPathComponent(importedName)) == importedBytes)
-        #expect(try Data(contentsOf: publicationURL.appendingPathComponent(existingName)) == existingBytes)
+        #expect(try Data(contentsOf: resumeDataURL.appending(path: importedName)) == importedBytes)
+        #expect(try Data(contentsOf: resumeDataURL.appending(path: existingName)) == existingBytes)
+        #expect(try Data(contentsOf: stagingURL.appending(path: importedName)) == importedBytes)
+        #expect(try Data(contentsOf: publicationURL.appending(path: existingName)) == existingBytes)
 
         coordinator = nil
         let recovered = try TorrentLegacyStateMigrationCoordinator(
@@ -231,9 +231,9 @@ struct TorrentLegacyStateMigrationTests {
         #expect(try recovered.hasCompletedMigration())
         #expect(!FileManager.default.fileExists(atPath: stagingURL.path(percentEncoded: false)))
         #expect(!FileManager.default.fileExists(atPath: publicationURL.path(percentEncoded: false)))
-        #expect(try Data(contentsOf: recovered.resumeDataURL.appendingPathComponent(importedName))
+        #expect(try Data(contentsOf: recovered.resumeDataURL.appending(path: importedName))
             == importedBytes)
-        #expect(try Data(contentsOf: recovered.resumeDataURL.appendingPathComponent(existingName))
+        #expect(try Data(contentsOf: recovered.resumeDataURL.appending(path: existingName))
             == existingBytes)
         #expect(try Data(contentsOf: importedSourceURL) == importedBytes)
     }
@@ -252,13 +252,13 @@ struct TorrentLegacyStateMigrationTests {
 
         let collisionName = "v1:\(String(repeating: "d", count: 40)).fastresume"
         let otherName = "v1:\(String(repeating: "e", count: 40)).fastresume"
-        let destinationCollisionURL = coordinator.resumeDataURL.appendingPathComponent(collisionName)
+        let destinationCollisionURL = coordinator.resumeDataURL.appending(path: collisionName)
         let originalDestinationBytes = Data("new-engine-state".utf8)
         try originalDestinationBytes.write(to: destinationCollisionURL)
         let originalDestinationIdentity = try regularFileIdentity(destinationCollisionURL)
 
-        let oldCollisionURL = oldStateURL.appendingPathComponent("old-collision")
-        let oldOtherURL = oldStateURL.appendingPathComponent("old-other")
+        let oldCollisionURL = oldStateURL.appending(path: "old-collision")
+        let oldOtherURL = oldStateURL.appending(path: "old-other")
         try Data("legacy-collision".utf8).write(to: oldCollisionURL)
         try Data("legacy-other".utf8).write(to: oldOtherURL)
 
@@ -282,11 +282,11 @@ struct TorrentLegacyStateMigrationTests {
         #expect(try Data(contentsOf: destinationCollisionURL) == originalDestinationBytes)
         #expect(try regularFileIdentity(destinationCollisionURL) == originalDestinationIdentity)
         #expect(!FileManager.default.fileExists(atPath: coordinator.resumeDataURL
-            .appendingPathComponent(otherName)
+            .appending(path: otherName)
             .path(percentEncoded: false)))
         #expect(!FileManager.default.fileExists(atPath: coordinator.resumeDataURL
-            .appendingPathComponent(
-                ".legacy-migration-\(migration.id.uuidString.lowercased()).commit"
+            .appending(
+                path: ".legacy-migration-\(migration.id.uuidString.lowercased()).commit"
             )
             .path(percentEncoded: false)))
         #expect(try Data(contentsOf: oldCollisionURL) == Data("legacy-collision".utf8))
@@ -316,7 +316,7 @@ struct TorrentLegacyStateMigrationTests {
             "removal-\(String(repeating: "a", count: 31)).fastresume.remove",
             "v2:\(String(repeating: "a", count: 64)).fastresume.tmp",
         ] {
-            let sourceURL = temporary.url.appendingPathComponent(UUID().uuidString)
+            let sourceURL = temporary.url.appending(path: UUID().uuidString)
             try Data("state".utf8).write(to: sourceURL)
             let descriptor = try openRegularFile(sourceURL)
             expectMigrationError(.invalidFilename) {
@@ -353,7 +353,7 @@ struct TorrentLegacyStateMigrationTests {
         let migration = try coordinator.begin(scope: scope)
         let filename = "t:\(String(repeating: "a", count: 32)).fastresume"
 
-        let emptyURL = temporary.url.appendingPathComponent("empty")
+        let emptyURL = temporary.url.appending(path: "empty")
         try Data().write(to: emptyURL)
         let emptyDescriptor = try openRegularFile(emptyURL)
         expectMigrationError(.emptyFile) {
@@ -366,7 +366,7 @@ struct TorrentLegacyStateMigrationTests {
         }
         #expect(!descriptorStillReferences(emptyDescriptor.rawValue, url: emptyURL))
 
-        let oversizedURL = temporary.url.appendingPathComponent("oversized")
+        let oversizedURL = temporary.url.appending(path: "oversized")
         try Data(repeating: 7, count: 5).write(to: oversizedURL)
         let oversizedDescriptor = try openRegularFile(oversizedURL)
         expectMigrationError(.fileTooLarge(actual: 5, maximum: 4)) {
@@ -379,8 +379,8 @@ struct TorrentLegacyStateMigrationTests {
         }
         #expect(!descriptorStillReferences(oversizedDescriptor.rawValue, url: oversizedURL))
 
-        let targetURL = temporary.url.appendingPathComponent("target")
-        let symlinkURL = temporary.url.appendingPathComponent("symlink")
+        let targetURL = temporary.url.appending(path: "target")
+        let symlinkURL = temporary.url.appending(path: "symlink")
         try Data("ok".utf8).write(to: targetURL)
         try FileManager.default.createSymbolicLink(at: symlinkURL, withDestinationURL: targetURL)
         let symlinkDescriptor = try FileDescriptor.open(
@@ -398,7 +398,7 @@ struct TorrentLegacyStateMigrationTests {
         }
         #expect(!descriptorStillReferences(symlinkDescriptor.rawValue, url: symlinkURL))
 
-        let fifoURL = temporary.url.appendingPathComponent("fifo")
+        let fifoURL = temporary.url.appending(path: "fifo")
         let fifoStatus = unsafe fifoURL.path(percentEncoded: false).withCString { pointer in
             unsafe Darwin.mkfifo(pointer, 0o600)
         }
@@ -431,9 +431,9 @@ struct TorrentLegacyStateMigrationTests {
                 fileDescriptor: deviceDescriptor.rawValue
             )
         }
-        #expect(!descriptorStillReferences(deviceDescriptor.rawValue, url: URL(fileURLWithPath: "/dev/null")))
+        #expect(!descriptorStillReferences(deviceDescriptor.rawValue, url: URL(filePath: "/dev/null")))
 
-        let unlinkedURL = temporary.url.appendingPathComponent("unlinked")
+        let unlinkedURL = temporary.url.appending(path: "unlinked")
         try Data("ok".utf8).write(to: unlinkedURL)
         let unlinkedDescriptor = try openRegularFile(unlinkedURL)
         try FileManager.default.removeItem(at: unlinkedURL)
@@ -470,8 +470,8 @@ struct TorrentLegacyStateMigrationTests {
         let firstName = "v1:\(String(repeating: "1", count: 40)).fastresume"
         let secondName = "v1:\(String(repeating: "2", count: 40)).fastresume"
         let thirdName = "v1:\(String(repeating: "3", count: 40)).fastresume"
-        let firstURL = temporary.url.appendingPathComponent("first")
-        let secondURL = temporary.url.appendingPathComponent("second")
+        let firstURL = temporary.url.appending(path: "first")
+        let secondURL = temporary.url.appending(path: "second")
         try Data("abc".utf8).write(to: firstURL)
         try Data("def".utf8).write(to: secondURL)
 
@@ -491,7 +491,7 @@ struct TorrentLegacyStateMigrationTests {
             )
         }
         #expect(!descriptorStillReferences(secondDescriptor.rawValue, url: secondURL))
-        let oneByteURL = temporary.url.appendingPathComponent("one-byte")
+        let oneByteURL = temporary.url.appending(path: "one-byte")
         try Data("x".utf8).write(to: oneByteURL)
         try coordinator.importFile(
             migrationID: migration.id,
@@ -514,9 +514,9 @@ struct TorrentLegacyStateMigrationTests {
 
         let artifact = try coordinator.commit(migrationID: migration.id, scope: scope)
         #expect(artifact.fileCount == 2)
-        #expect(try Data(contentsOf: artifact.directoryURL.appendingPathComponent(firstName))
+        #expect(try Data(contentsOf: artifact.directoryURL.appending(path: firstName))
             == Data("abc".utf8))
-        #expect(try Data(contentsOf: artifact.directoryURL.appendingPathComponent(secondName))
+        #expect(try Data(contentsOf: artifact.directoryURL.appending(path: secondName))
             == Data("x".utf8))
     }
 
@@ -525,7 +525,7 @@ struct TorrentLegacyStateMigrationTests {
         let temporary = try MigrationTemporaryDirectory()
         let oldURL = try temporary.makeDirectory("Old")
         let stateURL = try temporary.makeDirectory("State")
-        let sourceURL = oldURL.appendingPathComponent("source")
+        let sourceURL = oldURL.appending(path: "source")
         try Data("legacy".utf8).write(to: sourceURL)
 
         let epoch = UUID()
@@ -544,8 +544,8 @@ struct TorrentLegacyStateMigrationTests {
             filename: filename,
             fileDescriptor: try openRegularFile(sourceURL).rawValue
         )
-        let abortedStagingURL = coordinator.migrationRootURL.appendingPathComponent(
-            "migration-\(aborted.id.uuidString.lowercased()).staging"
+        let abortedStagingURL = coordinator.migrationRootURL.appending(
+            path: "migration-\(aborted.id.uuidString.lowercased()).staging"
         )
         #expect(FileManager.default.fileExists(atPath: abortedStagingURL.path(percentEncoded: false)))
         try coordinator.abort(migrationID: aborted.id, scope: scope)
@@ -559,8 +559,8 @@ struct TorrentLegacyStateMigrationTests {
             filename: filename,
             fileDescriptor: try openRegularFile(sourceURL).rawValue
         )
-        let disconnectedStagingURL = coordinator.migrationRootURL.appendingPathComponent(
-            "migration-\(disconnected.id.uuidString.lowercased()).staging"
+        let disconnectedStagingURL = coordinator.migrationRootURL.appending(
+            path: "migration-\(disconnected.id.uuidString.lowercased()).staging"
         )
         coordinator.disconnect(scope: scope)
         #expect(!FileManager.default.fileExists(atPath: disconnectedStagingURL.path(percentEncoded: false)))
@@ -588,12 +588,12 @@ struct TorrentLegacyStateMigrationTests {
             stateDirectoryURL: try temporary.makeDirectory("State")
         )
         let oldMigration = try coordinator.begin(scope: oldScope)
-        let oldStagingURL = coordinator.migrationRootURL.appendingPathComponent(
-            "migration-\(oldMigration.id.uuidString.lowercased()).staging"
+        let oldStagingURL = coordinator.migrationRootURL.appending(
+            path: "migration-\(oldMigration.id.uuidString.lowercased()).staging"
         )
         let freshMigration = try coordinator.begin(scope: freshScope)
-        let freshStagingURL = coordinator.migrationRootURL.appendingPathComponent(
-            "migration-\(freshMigration.id.uuidString.lowercased()).staging"
+        let freshStagingURL = coordinator.migrationRootURL.appending(
+            path: "migration-\(freshMigration.id.uuidString.lowercased()).staging"
         )
 
         #expect(oldScope.controllerID == freshScope.controllerID)
@@ -655,9 +655,9 @@ private final class MigrationTemporaryDirectory {
     let url: URL
 
     init() throws {
-        url = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "TorrentLegacyStateMigrationTests-\(UUID().uuidString)",
-            isDirectory: true
+        url = FileManager.default.temporaryDirectory.appending(
+            path: "TorrentLegacyStateMigrationTests-\(UUID().uuidString)",
+            directoryHint: .isDirectory
         )
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
     }
@@ -667,7 +667,7 @@ private final class MigrationTemporaryDirectory {
     }
 
     func makeDirectory(_ name: String) throws -> URL {
-        let child = url.appendingPathComponent(name, isDirectory: true)
+        let child = url.appending(path: name, directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: child, withIntermediateDirectories: false)
         return child
     }

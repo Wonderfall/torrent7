@@ -2,6 +2,13 @@
 
 import CryptoKit
 import Foundation
+import System
+
+private extension URL {
+    var fileSystemPath: String {
+        FilePath(path(percentEncoded: false)).string
+    }
+}
 
 enum CheckFailure: Error, CustomStringConvertible {
     case message(String)
@@ -39,6 +46,7 @@ struct ProcessResult {
     let status: Int32
 }
 
+@MainActor
 final class DependencyChecker {
     private let buildDepsPath: URL
     private let libtorrentPatchSeriesPath: URL
@@ -54,13 +62,13 @@ final class DependencyChecker {
     private var failures: [String] = []
 
     init() throws {
-        let scriptPath = URL(fileURLWithPath: CommandLine.arguments[0])
+        let scriptPath = URL(filePath: CommandLine.arguments[0])
         let scriptDirectory = scriptPath.deletingLastPathComponent()
         let root = try Self.findRoot(startingAt: scriptDirectory)
 
-        self.buildDepsPath = root.appendingPathComponent("Scripts/build-deps.zsh")
-        self.libtorrentPatchSeriesPath = root.appendingPathComponent("Scripts/libtorrent-patch-series.sh")
-        self.opensslReleaseKeysPath = root.appendingPathComponent("Scripts/keys/openssl-release-pubkeys.asc")
+        self.buildDepsPath = root.appending(path: "Scripts/build-deps.zsh")
+        self.libtorrentPatchSeriesPath = root.appending(path: "Scripts/libtorrent-patch-series.sh")
+        self.opensslReleaseKeysPath = root.appending(path: "Scripts/keys/openssl-release-pubkeys.asc")
         self.summaryPath = try Self.summaryPath(from: Array(CommandLine.arguments.dropFirst()))
 
         if let override = ProcessInfo.processInfo.environment["DEPENDENCY_CHECK_NOW"] {
@@ -111,25 +119,25 @@ final class DependencyChecker {
         }
 
         if path.hasPrefix("/") {
-            return URL(fileURLWithPath: path)
+            return URL(filePath: path)
         }
 
-        return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent(path)
+        return URL(filePath: FileManager.default.currentDirectoryPath)
+            .appending(path: path)
     }
 
     private static func findRoot(startingAt directory: URL) throws -> URL {
         var current = directory
 
         while true {
-            let buildDeps = current.appendingPathComponent("Scripts/build-deps.zsh")
-            if FileManager.default.fileExists(atPath: buildDeps.path) {
+            let buildDeps = current.appending(path: "Scripts/build-deps.zsh")
+            if FileManager.default.fileExists(atPath: buildDeps.fileSystemPath) {
                 return current
             }
 
             let parent = current.deletingLastPathComponent()
-            if parent.path == current.path {
-                throw CheckFailure.message("Could not find repository root from \(directory.path)")
+            if parent.fileSystemPath == current.fileSystemPath {
+                throw CheckFailure.message("Could not find repository root from \(directory.fileSystemPath)")
             }
 
             current = parent
@@ -285,7 +293,7 @@ final class DependencyChecker {
 
         var request = URLRequest(url: url)
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        if url.host == "api.github.com" {
+        if url.host(percentEncoded: false) == "api.github.com" {
             request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
             request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
             if let githubToken {
@@ -326,7 +334,7 @@ final class DependencyChecker {
         guard let match = regex.firstMatch(in: contents, range: range),
               let valueRange = Range(match.range(at: 1), in: contents)
         else {
-            throw CheckFailure.message("Could not find \(name) default in \(buildDepsPath.path)")
+            throw CheckFailure.message("Could not find \(name) default in \(buildDepsPath.fileSystemPath)")
         }
 
         return String(contents[valueRange])
@@ -487,7 +495,7 @@ final class DependencyChecker {
         }
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
+        process.executableURL = URL(filePath: path)
         process.arguments = arguments
 
         let stdoutPipe = Pipe()
@@ -498,8 +506,10 @@ final class DependencyChecker {
         try process.run()
         process.waitUntilExit()
 
-        let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stdoutData = try stdoutPipe.fileHandleForReading.readToEnd() ?? Data()
+        let stderrData = try stderrPipe.fileHandleForReading.readToEnd() ?? Data()
+        let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+        let stderr = String(data: stderrData, encoding: .utf8) ?? ""
         return ProcessResult(stdout: stdout, stderr: stderr, status: process.terminationStatus)
     }
 
@@ -513,8 +523,8 @@ final class DependencyChecker {
             return
         }
 
-        guard FileManager.default.fileExists(atPath: opensslReleaseKeysPath.path) else {
-            throw CheckFailure.message("Missing OpenSSL release keyring: \(opensslReleaseKeysPath.path)")
+        guard FileManager.default.fileExists(atPath: opensslReleaseKeysPath.fileSystemPath) else {
+            throw CheckFailure.message("Missing OpenSSL release keyring: \(opensslReleaseKeysPath.fileSystemPath)")
         }
 
         let archiveURL = "https://github.com/openssl/openssl/releases/download/openssl-\(version)/openssl-\(version).tar.gz"
@@ -528,11 +538,11 @@ final class DependencyChecker {
         let signatureURL = "\(archiveURL).asc"
         let signatureData = try await fetchData(from: signatureURL)
 
-        let temporaryDirectory = URL(fileURLWithPath: "/tmp", isDirectory: true)
-            .appendingPathComponent("torrent7-openssl-\(UUID().uuidString)", isDirectory: true)
-        let gnupgHome = temporaryDirectory.appendingPathComponent("gnupg", isDirectory: true)
-        let archivePath = temporaryDirectory.appendingPathComponent("openssl-\(version).tar.gz")
-        let signaturePath = temporaryDirectory.appendingPathComponent("openssl-\(version).tar.gz.asc")
+        let temporaryDirectory = URL(filePath: "/tmp", directoryHint: .isDirectory)
+            .appending(path: "torrent7-openssl-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let gnupgHome = temporaryDirectory.appending(path: "gnupg", directoryHint: .isDirectory)
+        let archivePath = temporaryDirectory.appending(path: "openssl-\(version).tar.gz")
+        let signaturePath = temporaryDirectory.appending(path: "openssl-\(version).tar.gz.asc")
 
         try FileManager.default.createDirectory(at: gnupgHome, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         defer {
@@ -543,13 +553,13 @@ final class DependencyChecker {
         try signatureData.write(to: signaturePath, options: .atomic)
 
         let gpg = try gpgPath()
-        let importResult = try runProcess(gpg, ["--homedir", gnupgHome.path, "--batch", "--quiet", "--import", opensslReleaseKeysPath.path])
+        let importResult = try runProcess(gpg, ["--homedir", gnupgHome.fileSystemPath, "--batch", "--quiet", "--import", opensslReleaseKeysPath.fileSystemPath])
         guard importResult.status == 0 else {
             recordFailure("OpenSSL keyring import failed: \(importResult.stderr.trimmingCharacters(in: .whitespacesAndNewlines))")
             return
         }
 
-        let fingerprintResult = try runProcess(gpg, ["--homedir", gnupgHome.path, "--batch", "--with-colons", "--fingerprint", expectedFingerprint])
+        let fingerprintResult = try runProcess(gpg, ["--homedir", gnupgHome.fileSystemPath, "--batch", "--with-colons", "--fingerprint", expectedFingerprint])
         let keyFingerprint = fingerprintResult.stdout
             .split(separator: "\n")
             .first { $0.hasPrefix("fpr:") }?
@@ -564,10 +574,10 @@ final class DependencyChecker {
         }
 
         let verifyResult = try runProcess(gpg, [
-            "--homedir", gnupgHome.path,
+            "--homedir", gnupgHome.fileSystemPath,
             "--batch",
             "--status-fd", "1",
-            "--verify", signaturePath.path, archivePath.path
+            "--verify", signaturePath.fileSystemPath, archivePath.fileSystemPath
         ])
         guard verifyResult.status == 0 else {
             recordFailure("OpenSSL \(version) signature verification failed: \(verifyResult.stderr.trimmingCharacters(in: .whitespacesAndNewlines))")
@@ -592,13 +602,13 @@ final class DependencyChecker {
 
     private func checkLibtorrent() async throws {
         let pinnedTag = try buildDepDefault("LIBTORRENT_TAG")
-        let commitResult = try runProcess(libtorrentPatchSeriesPath.path, ["commit"])
+        let commitResult = try runProcess(libtorrentPatchSeriesPath.fileSystemPath, ["commit"])
         let pinnedCommit = commitResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         guard commitResult.status == 0,
               pinnedCommit.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil
         else {
             throw CheckFailure.message(
-                "Could not read the pinned libtorrent commit from \(libtorrentPatchSeriesPath.path): "
+                "Could not read the pinned libtorrent commit from \(libtorrentPatchSeriesPath.fileSystemPath): "
                     + commitResult.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             )
         }

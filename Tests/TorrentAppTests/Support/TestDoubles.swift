@@ -132,7 +132,7 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
         guard let url, let defaultURL else {
             return false
         }
-        return url.path == defaultURL.path
+        return url.torrentFilePath == defaultURL.torrentFilePath
     }
 
     @discardableResult
@@ -219,7 +219,7 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
     func lease(forSavePath path: String) throws -> DownloadFolderAccessLease {
         leaseCalls.append(path)
         let result = leaseResult ?? .success(DownloadFolderAccessLease(
-            access: FakeDownloadFolderAccess(url: URL(fileURLWithPath: path, isDirectory: true))
+            access: FakeDownloadFolderAccess(url: URL(filePath: path, directoryHint: .isDirectory))
         ))
         leaseResult = nil
         return try result.get()
@@ -271,7 +271,7 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
     }
 
     private static func accessKey(_ url: URL) -> String {
-        url.standardizedFileURL.resolvingSymlinksInPath().path
+        url.standardizedFileURL.resolvingSymlinksInPath().torrentFilePath
     }
 }
 
@@ -1101,14 +1101,14 @@ final class FakeDownloadFolderAccess: DownloadFolderAccessing {
     }
 
     func bookmarkData() throws -> Data {
-        Data(url.path.utf8)
+        Data(url.torrentFilePath.utf8)
     }
 
     func delegationBookmarkData() throws -> Data {
         if let delegationBookmarkError {
             throw delegationBookmarkError
         }
-        return Data("delegation:\(url.path)".utf8)
+        return Data("delegation:\(url.torrentFilePath)".utf8)
     }
 }
 
@@ -1137,7 +1137,7 @@ struct FakeDownloadFolderAccessProvider: DownloadFolderAccessProviding {
         guard let path = String(data: bookmark, encoding: .utf8), !path.isEmpty else {
             throw FakeBookmarkError()
         }
-        return FakeDownloadFolderAccess(url: URL(fileURLWithPath: path, isDirectory: true))
+        return FakeDownloadFolderAccess(url: URL(filePath: path, directoryHint: .isDirectory))
     }
 
     func clearDefaultBookmark(defaults: UserDefaults) {

@@ -126,9 +126,9 @@ private struct IntegrationFolder {
             throw IntegrationFailure.bookmarkScopeUnavailable
         }
 
-        let directory = selectedCanonicalURL.appendingPathComponent(
-            UUID().uuidString,
-            isDirectory: true
+        let directory = selectedCanonicalURL.appending(
+            path: UUID().uuidString,
+            directoryHint: .isDirectory
         )
         do {
             try fileManager.createDirectory(
@@ -175,7 +175,7 @@ private struct IntegrationFolder {
 
         // Bring the explicitly interactive merge gate to the foreground. The
         // user must still approve the exact folder in the system-owned panel.
-        NSApplication.shared.activate(ignoringOtherApps: true)
+        NSApplication.shared.activate()
         return try await withCheckedThrowingContinuation { continuation in
             panel.begin { response in
                 guard response == .OK, let selectedURL = panel.urls.first else {
@@ -448,16 +448,16 @@ private enum TorrentEngineXPCIntegrationHost {
             in: .userDomainMask,
             appropriateFor: nil,
             create: true
-        ).appendingPathComponent(
-            recoveryMarkerDirectoryName,
-            isDirectory: true
+        ).appending(
+            path: recoveryMarkerDirectoryName,
+            directoryHint: .isDirectory
         )
         try fileManager.createDirectory(
             at: markerDirectory,
             withIntermediateDirectories: true
         )
-        let readyMarker = markerDirectory.appendingPathComponent("ready")
-        let killedMarker = markerDirectory.appendingPathComponent("killed")
+        let readyMarker = markerDirectory.appending(path: "ready")
+        let killedMarker = markerDirectory.appending(path: "killed")
         try? fileManager.removeItem(at: readyMarker)
         try? fileManager.removeItem(at: killedMarker)
         guard fileManager.createFile(

@@ -82,9 +82,9 @@ enum TorrentFileIconSource: Hashable {
     case folder
 
     static func resolve(for row: TorrentRowSnapshot) -> Self {
-        let saveURL = URL(fileURLWithPath: row.savePath, isDirectory: true)
+        let saveURL = URL(filePath: row.savePath, directoryHint: .isDirectory)
             .standardizedFileURL
-        let itemURL = saveURL.appendingPathComponent(row.name)
+        let itemURL = saveURL.appending(path: row.name)
             .standardizedFileURL
 
         let savePath = saveURL.path(percentEncoded: false)

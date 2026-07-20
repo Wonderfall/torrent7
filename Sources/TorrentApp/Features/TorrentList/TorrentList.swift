@@ -63,7 +63,7 @@ struct TorrentList: View {
                         }
                     }
                 }
-                .coordinateSpace(name: Self.selectionCoordinateSpace)
+                .coordinateSpace(.named(Self.selectionCoordinateSpace))
                 .overlay {
                     ZStack {
                         RightClickSelectionMonitor(cardFrames: cardFrames, select: selectForContextMenu)
@@ -200,8 +200,12 @@ struct TorrentList: View {
                 }
             )
                 .padding(12)
-                .background(cardBackground(isSelected: isSelected))
-                .overlay(cardBorder(isSelected: isSelected))
+                .background {
+                    cardBackground(isSelected: isSelected)
+                }
+                .overlay {
+                    cardBorder(isSelected: isSelected)
+                }
                 .contentShape(cardShape)
                 .onTapGesture {
                     handleCardClick(row)

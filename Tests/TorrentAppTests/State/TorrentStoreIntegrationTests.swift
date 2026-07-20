@@ -419,9 +419,9 @@ struct TorrentStoreIntegrationTests {
 
         #expect(accepted)
         let authorization = await harness.engine.delegatedFolderAuthorizations.first
-        #expect(authorization?.path == folder.path)
-        #expect(authorization?.bookmarkData == Data("delegation:\(folder.path)".utf8))
-        #expect(authorization?.bookmarkData != Data(folder.path.utf8))
+        #expect(authorization?.path == folder.torrentFilePath)
+        #expect(authorization?.bookmarkData == Data("delegation:\(folder.torrentFilePath)".utf8))
+        #expect(authorization?.bookmarkData != Data(folder.torrentFilePath.utf8))
     }
 
     @Test("A successful prepared add reconciles authority without waiting for a snapshot")
@@ -442,7 +442,7 @@ struct TorrentStoreIntegrationTests {
 
         #expect(accepted)
         #expect(await harness.engine.reconciledFolderAuthorizationSnapshots == [[
-            expectedFolderAuthorization(for: folder.path),
+            expectedFolderAuthorization(for: folder.torrentFilePath),
         ]])
     }
 
@@ -474,7 +474,7 @@ struct TorrentStoreIntegrationTests {
 
         #expect(accepted)
         #expect(await harness.engine.reconciledFolderAuthorizationSnapshots == [[
-            expectedFolderAuthorization(for: folder.path),
+            expectedFolderAuthorization(for: folder.torrentFilePath),
         ]])
     }
 
@@ -491,7 +491,7 @@ struct TorrentStoreIntegrationTests {
         await harness.engine.waitForSuspendedSnapshotBatchCall()
         await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
             revision: 2,
-            torrents: [makeTorrent(id: "alpha", savePath: folder.path)]
+            torrents: [makeTorrent(id: "alpha", savePath: folder.torrentFilePath)]
         ))
         await harness.engine.suspendNextFolderReconciliation()
 
@@ -505,11 +505,11 @@ struct TorrentStoreIntegrationTests {
         await staleRefresh.value
 
         #expect(accepted)
-        #expect(harness.accessStore.capabilitySnapshot.paths == [folder.path])
+        #expect(harness.accessStore.capabilitySnapshot.paths == [folder.torrentFilePath])
 
         await harness.engine.resumeSuspendedFolderReconciliations()
         await harness.store.saveAll()
-        #expect(harness.accessStore.capabilitySnapshot.paths == [folder.path])
+        #expect(harness.accessStore.capabilitySnapshot.paths == [folder.torrentFilePath])
     }
 
     @Test("A poll captured before restart cannot mutate the restarted engine state")
@@ -558,8 +558,8 @@ struct TorrentStoreIntegrationTests {
         await harness.store.saveAll()
 
         #expect(await harness.engine.reconciledFolderAuthorizationSnapshots == [
-            [expectedFolderAuthorization(for: firstFolder.path)],
-            [expectedFolderAuthorization(for: secondFolder.path)],
+            [expectedFolderAuthorization(for: firstFolder.torrentFilePath)],
+            [expectedFolderAuthorization(for: secondFolder.torrentFilePath)],
         ])
     }
 
@@ -594,8 +594,8 @@ struct TorrentStoreIntegrationTests {
         await harness.store.saveAll()
 
         #expect(await harness.engine.reconciledFolderAuthorizationSnapshots == [
-            [expectedFolderAuthorization(for: firstFolder.path)],
-            [expectedFolderAuthorization(for: secondFolder.path)],
+            [expectedFolderAuthorization(for: firstFolder.torrentFilePath)],
+            [expectedFolderAuthorization(for: secondFolder.torrentFilePath)],
         ])
     }
 
@@ -612,7 +612,7 @@ struct TorrentStoreIntegrationTests {
 
         #expect(harness.accessStore.clearDefaultCalls.count == 1)
         #expect(await harness.engine.reconciledFolderAuthorizationSnapshots == [
-            [expectedFolderAuthorization(for: folder.path)],
+            [expectedFolderAuthorization(for: folder.torrentFilePath)],
             [],
         ])
     }
@@ -1029,7 +1029,7 @@ struct TorrentStoreIntegrationTests {
         let harness = makeStoreHarness()
         let torrent = makeTorrent(id: "alpha", savePath: "/Downloads")
         var access: FakeDownloadFolderAccess? = FakeDownloadFolderAccess(
-            url: URL(fileURLWithPath: torrent.savePath, isDirectory: true)
+            url: URL(filePath: torrent.savePath, directoryHint: .isDirectory)
         )
         weak let weakAccess = access
         harness.accessStore.leaseResult = .success(DownloadFolderAccessLease(access: try #require(access)))
@@ -1057,7 +1057,7 @@ struct TorrentStoreIntegrationTests {
         let harness = makeStoreHarness()
         let torrent = makeTorrent(id: "alpha", savePath: "/Downloads", finished: true)
         var access: FakeDownloadFolderAccess? = FakeDownloadFolderAccess(
-            url: URL(fileURLWithPath: torrent.savePath, isDirectory: true)
+            url: URL(filePath: torrent.savePath, directoryHint: .isDirectory)
         )
         weak let weakAccess = access
         harness.accessStore.leaseResult = .success(DownloadFolderAccessLease(access: try #require(access)))

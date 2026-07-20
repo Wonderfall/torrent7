@@ -10,12 +10,12 @@ struct TorrentFileLocationServiceTests {
             let saveURL = root.appending(path: "downloads", directoryHint: .isDirectory)
             try FileManager.default.createDirectory(at: saveURL, withIntermediateDirectories: true)
             let itemURL = saveURL.appending(path: "Ubuntu.iso")
-            #expect(FileManager.default.createFile(atPath: itemURL.path, contents: Data()))
+            #expect(FileManager.default.createFile(atPath: itemURL.torrentFilePath, contents: Data()))
 
             let service = TorrentFileLocationService()
-            let torrent = makeTorrent(name: "Ubuntu.iso", savePath: saveURL.path)
+            let torrent = makeTorrent(name: "Ubuntu.iso", savePath: saveURL.torrentFilePath)
 
-            #expect(service.revealURL(for: torrent)?.path == itemURL.path)
+            #expect(service.revealURL(for: torrent)?.torrentFilePath == itemURL.torrentFilePath)
         }
     }
 
@@ -26,9 +26,9 @@ struct TorrentFileLocationServiceTests {
             try FileManager.default.createDirectory(at: saveURL, withIntermediateDirectories: true)
 
             let service = TorrentFileLocationService()
-            let torrent = makeTorrent(name: "Missing.iso", savePath: saveURL.path)
+            let torrent = makeTorrent(name: "Missing.iso", savePath: saveURL.torrentFilePath)
 
-            #expect(service.revealURL(for: torrent)?.path == saveURL.path)
+            #expect(service.revealURL(for: torrent)?.torrentFilePath == saveURL.torrentFilePath)
         }
     }
 
@@ -40,9 +40,9 @@ struct TorrentFileLocationServiceTests {
             try FileManager.default.createDirectory(at: parentURL, withIntermediateDirectories: true)
 
             let service = TorrentFileLocationService()
-            let torrent = makeTorrent(savePath: saveURL.path)
+            let torrent = makeTorrent(savePath: saveURL.torrentFilePath)
 
-            #expect(service.revealURL(for: torrent, filePath: "folder/missing/video.mkv")?.path == parentURL.path)
+            #expect(service.revealURL(for: torrent, filePath: "folder/missing/video.mkv")?.torrentFilePath == parentURL.torrentFilePath)
         }
     }
 
@@ -53,9 +53,9 @@ struct TorrentFileLocationServiceTests {
             try FileManager.default.createDirectory(at: saveURL, withIntermediateDirectories: true)
 
             let service = TorrentFileLocationService()
-            let torrent = makeTorrent(name: "../outside.iso", savePath: saveURL.path)
+            let torrent = makeTorrent(name: "../outside.iso", savePath: saveURL.torrentFilePath)
 
-            #expect(service.revealURL(for: torrent)?.path == saveURL.path)
+            #expect(service.revealURL(for: torrent)?.torrentFilePath == saveURL.torrentFilePath)
             #expect(service.revealURL(for: torrent, filePath: "../outside.iso") == nil)
         }
     }
@@ -73,9 +73,9 @@ struct TorrentFileLocationServiceTests {
             )
 
             let service = TorrentFileLocationService()
-            let torrent = makeTorrent(name: "escape/secret.txt", savePath: saveURL.path)
+            let torrent = makeTorrent(name: "escape/secret.txt", savePath: saveURL.torrentFilePath)
 
-            #expect(service.revealURL(for: torrent)?.path == saveURL.path)
+            #expect(service.revealURL(for: torrent)?.torrentFilePath == saveURL.torrentFilePath)
             #expect(service.revealURL(for: torrent, filePath: "escape/secret.txt") == nil)
         }
     }

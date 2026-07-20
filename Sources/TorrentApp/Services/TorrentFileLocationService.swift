@@ -8,21 +8,21 @@ protocol TorrentFileLocationServicing: AnyObject {
 
 final class TorrentFileLocationService: TorrentFileLocationServicing {
     func revealURL(for torrent: TorrentItem) -> URL? {
-        let saveURL = URL(fileURLWithPath: torrent.savePath, isDirectory: true)
+        let saveURL = URL(filePath: torrent.savePath, directoryHint: .isDirectory)
             .standardizedFileURL
             .resolvingSymlinksInPath()
         let itemURL = saveURL
-            .appendingPathComponent(torrent.name)
+            .appending(path: torrent.name)
             .standardizedFileURL
             .resolvingSymlinksInPath()
         var isDirectory = ObjCBool(false)
 
         if isURLStrictlyContained(itemURL, in: saveURL),
-           unsafe FileManager.default.fileExists(atPath: itemURL.path, isDirectory: &isDirectory) {
+           unsafe FileManager.default.fileExists(atPath: itemURL.torrentFilePath, isDirectory: &isDirectory) {
             return itemURL
         }
 
-        guard unsafe FileManager.default.fileExists(atPath: saveURL.path, isDirectory: &isDirectory) else {
+        guard unsafe FileManager.default.fileExists(atPath: saveURL.torrentFilePath, isDirectory: &isDirectory) else {
             return nil
         }
 
@@ -30,11 +30,11 @@ final class TorrentFileLocationService: TorrentFileLocationServicing {
     }
 
     func revealURL(for torrent: TorrentItem, filePath: String) -> URL? {
-        let saveURL = URL(fileURLWithPath: torrent.savePath, isDirectory: true)
+        let saveURL = URL(filePath: torrent.savePath, directoryHint: .isDirectory)
             .standardizedFileURL
             .resolvingSymlinksInPath()
         let itemURL = saveURL
-            .appendingPathComponent(filePath)
+            .appending(path: filePath)
             .standardizedFileURL
             .resolvingSymlinksInPath()
 
@@ -43,19 +43,19 @@ final class TorrentFileLocationService: TorrentFileLocationServicing {
         }
 
         var isDirectory = ObjCBool(false)
-        if unsafe FileManager.default.fileExists(atPath: itemURL.path, isDirectory: &isDirectory) {
+        if unsafe FileManager.default.fileExists(atPath: itemURL.torrentFilePath, isDirectory: &isDirectory) {
             return itemURL
         }
 
         var parentURL = itemURL.deletingLastPathComponent()
             .standardizedFileURL
             .resolvingSymlinksInPath()
-        guard parentURL.path == saveURL.path || isURLStrictlyContained(parentURL, in: saveURL) else {
+        guard parentURL.torrentFilePath == saveURL.torrentFilePath || isURLStrictlyContained(parentURL, in: saveURL) else {
             return nil
         }
 
         while isURLStrictlyContained(parentURL, in: saveURL) {
-            if unsafe FileManager.default.fileExists(atPath: parentURL.path, isDirectory: &isDirectory),
+            if unsafe FileManager.default.fileExists(atPath: parentURL.torrentFilePath, isDirectory: &isDirectory),
                isDirectory.boolValue {
                 return parentURL
             }
@@ -63,13 +63,13 @@ final class TorrentFileLocationService: TorrentFileLocationServicing {
             let nextParentURL = parentURL.deletingLastPathComponent()
                 .standardizedFileURL
                 .resolvingSymlinksInPath()
-            guard nextParentURL.path != parentURL.path else {
+            guard nextParentURL.torrentFilePath != parentURL.torrentFilePath else {
                 break
             }
             parentURL = nextParentURL
         }
 
-        guard unsafe FileManager.default.fileExists(atPath: saveURL.path, isDirectory: &isDirectory),
+        guard unsafe FileManager.default.fileExists(atPath: saveURL.torrentFilePath, isDirectory: &isDirectory),
               isDirectory.boolValue else {
             return nil
         }
@@ -78,8 +78,8 @@ final class TorrentFileLocationService: TorrentFileLocationServicing {
     }
 
     private func isURLStrictlyContained(_ url: URL, in directory: URL) -> Bool {
-        let path = url.path
-        let directoryPath = directory.path
+        let path = url.torrentFilePath
+        let directoryPath = directory.torrentFilePath
         let directoryPrefix = directoryPath.hasSuffix("/") ? directoryPath : "\(directoryPath)/"
         return path != directoryPath && path.hasPrefix(directoryPrefix)
     }

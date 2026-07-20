@@ -8,7 +8,7 @@ struct PreparedDownloadFolder {
     let bookmarkData: Data?
 
     init(access: DownloadFolderAccessing, defaultURL: URL?, bookmarkData: Data?) {
-        path = access.url.path
+        path = access.url.torrentFilePath
         self.defaultURL = defaultURL
         lease = DownloadFolderAccessLease(access: access)
         self.bookmarkData = bookmarkData
@@ -49,17 +49,17 @@ struct DownloadFolderCapabilitySnapshot {
 
         func append(_ access: DownloadFolderAccessing) {
             guard paths.count < Self.maximumPathCount,
-                  seenPaths.insert(access.url.path).inserted else {
+                  seenPaths.insert(access.url.torrentFilePath).inserted else {
                 return
             }
-            paths.append(access.url.path)
+            paths.append(access.url.torrentFilePath)
             accesses.append(access)
         }
 
         if let defaultAccess {
             append(defaultAccess)
         }
-        for access in additionalAccesses.sorted(by: { $0.url.path < $1.url.path }) {
+        for access in additionalAccesses.sorted(by: { $0.url.torrentFilePath < $1.url.torrentFilePath }) {
             append(access)
         }
 
@@ -245,7 +245,7 @@ final class DownloadFolderAccessStore: DownloadFolderAccessStoring {
             throw TorrentStoreError.downloadFolderAccessDenied
         }
 
-        let key = Self.accessKey(URL(fileURLWithPath: path, isDirectory: true))
+        let key = Self.accessKey(URL(filePath: path, directoryHint: .isDirectory))
         let access: DownloadFolderAccessing?
         if let defaultAccess, Self.accessKey(defaultAccess.url) == key {
             access = defaultAccess
@@ -263,7 +263,7 @@ final class DownloadFolderAccessStore: DownloadFolderAccessStoring {
         let previousIdentity = capabilityIdentity
         defer { advanceCapabilityRevision(ifChangedFrom: previousIdentity) }
         var activeKeys = Set(activeTorrents.map { torrent in
-            Self.accessKey(URL(fileURLWithPath: torrent.savePath, isDirectory: true))
+            Self.accessKey(URL(filePath: torrent.savePath, directoryHint: .isDirectory))
         })
         if let defaultURL {
             activeKeys.remove(Self.accessKey(defaultURL))
@@ -302,7 +302,7 @@ final class DownloadFolderAccessStore: DownloadFolderAccessStoring {
     }
 
     private static func accessKey(_ url: URL) -> String {
-        url.standardizedFileURL.resolvingSymlinksInPath().path
+        url.standardizedFileURL.resolvingSymlinksInPath().torrentFilePath
     }
 
     private func validateProjectedDefault(
@@ -312,7 +312,7 @@ final class DownloadFolderAccessStore: DownloadFolderAccessStoring {
         var projectedAdditionalAccesses = additionalAccesses
         let projectedDefaultKey = Self.accessKey(projectedDefaultAccess.url)
         let activeKeys = Set(activeTorrents.map { torrent in
-            Self.accessKey(URL(fileURLWithPath: torrent.savePath, isDirectory: true))
+            Self.accessKey(URL(filePath: torrent.savePath, directoryHint: .isDirectory))
         })
 
         if let defaultAccess {
@@ -336,9 +336,9 @@ final class DownloadFolderAccessStore: DownloadFolderAccessStoring {
         defaultAccess: DownloadFolderAccessing?,
         additionalAccesses: [String: DownloadFolderAccessing]
     ) throws {
-        var paths = Set(additionalAccesses.values.map { $0.url.path })
+        var paths = Set(additionalAccesses.values.map { $0.url.torrentFilePath })
         if let defaultAccess {
-            paths.insert(defaultAccess.url.path)
+            paths.insert(defaultAccess.url.torrentFilePath)
         }
         guard paths.count <= DownloadFolderCapabilitySnapshot.maximumPathCount else {
             throw TorrentStoreError.tooManyAuthorizedDownloadFolders
@@ -356,7 +356,7 @@ final class DownloadFolderAccessStore: DownloadFolderAccessStoring {
 
         let key = Self.accessKey(url)
         let isUsedByActiveTorrent = activeTorrents.contains { torrent in
-            Self.accessKey(URL(fileURLWithPath: torrent.savePath, isDirectory: true)) == key
+            Self.accessKey(URL(filePath: torrent.savePath, directoryHint: .isDirectory)) == key
         }
         guard isUsedByActiveTorrent else {
             return
@@ -409,8 +409,8 @@ final class DownloadFolderAccessStore: DownloadFolderAccessStoring {
         let maximumAdditionalAccessCount = DownloadFolderCapabilitySnapshot.maximumPathCount - (defaultAccess == nil ? 0 : 1)
         let retainedKeys = Set(additionalAccesses
             .sorted { lhs, rhs in
-                let lhsPath = lhs.value.url.path
-                let rhsPath = rhs.value.url.path
+                let lhsPath = lhs.value.url.torrentFilePath
+                let rhsPath = rhs.value.url.torrentFilePath
                 return lhsPath == rhsPath ? lhs.key < rhs.key : lhsPath < rhsPath
             }
             .prefix(maximumAdditionalAccessCount)

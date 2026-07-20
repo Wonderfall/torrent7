@@ -112,35 +112,25 @@ private struct TorrentInfoView: View {
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            generalTab
-                .tag(TorrentInfoTab.general)
-                .tabItem {
-                    Label("General", systemImage: "info.circle")
-                }
+            Tab("General", systemImage: "info.circle", value: .general) {
+                generalTab
+            }
 
-            sourcesTab
-                .tag(TorrentInfoTab.sources)
-                .tabItem {
-                    Label("Sources", systemImage: "globe")
-                }
+            Tab("Sources", systemImage: "globe", value: .sources) {
+                sourcesTab
+            }
 
-            filesTab
-                .tag(TorrentInfoTab.files)
-                .tabItem {
-                    Label("Files", systemImage: "doc")
-                }
+            Tab("Files", systemImage: "doc", value: .files) {
+                filesTab
+            }
 
-            piecesTab
-                .tag(TorrentInfoTab.pieces)
-                .tabItem {
-                    Label("Pieces", systemImage: "square.grid.3x3")
-                }
+            Tab("Pieces", systemImage: "square.grid.3x3", value: .pieces) {
+                piecesTab
+            }
 
-            optionsTab
-                .tag(TorrentInfoTab.options)
-                .tabItem {
-                    Label("Options", systemImage: "slider.horizontal.3")
-                }
+            Tab("Options", systemImage: "slider.horizontal.3", value: .options) {
+                optionsTab
+            }
         }
         .scenePadding()
         .task(id: sourcesRefreshID) {

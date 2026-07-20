@@ -160,24 +160,33 @@ struct ContentView: View {
         .onOpenURL { url in
             handleOpenedURL(url)
         }
-        .dropDestination(for: URL.self, action: { urls, _ in
-            let torrentURLs = urls.filter { $0.pathExtension.caseInsensitiveCompare("torrent") == .orderedSame }
-            guard !torrentURLs.isEmpty else {
-                return false
+        .dropDestination(for: URL.self) { urls, _ in
+            let torrentURLs = urls.filter {
+                $0.pathExtension.caseInsensitiveCompare("torrent") == .orderedSame
             }
-            queueTorrentFiles(torrentURLs)
-            return true
-        }, isTargeted: { isTargeted in
-            if isTargeted {
+            if !torrentURLs.isEmpty {
+                queueTorrentFiles(torrentURLs)
+            }
+        }
+        .onDropSessionUpdated { session in
+            switch session.phase {
+            case .entering:
                 guard !didPlayDropHoverHaptic else {
                     return
                 }
                 didPlayDropHoverHaptic = true
                 NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .default)
-            } else {
+
+            case .exiting, .ended, .dataTransferCompleted:
+                didPlayDropHoverHaptic = false
+
+            case .active:
+                break
+
+            @unknown default:
                 didPlayDropHoverHaptic = false
             }
-        })
+        }
     }
 
     private var errorBinding: Binding<Bool> {

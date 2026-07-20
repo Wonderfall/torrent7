@@ -584,7 +584,7 @@ final class TorrentStore {
         allowNonHTTPSWebSeeds: Bool = false,
         allowPreMetadataDHT: Bool = false
     ) -> Bool {
-        guard let savePath = explicitSavePath ?? downloadFolder?.path else {
+        guard let savePath = explicitSavePath ?? downloadFolder?.torrentFilePath else {
             setLastError("Choose a download folder first.", source: .userAction)
             return false
         }
@@ -750,7 +750,7 @@ final class TorrentStore {
         allowNonHTTPSTrackers: Bool = false,
         allowNonHTTPSWebSeeds: Bool = false
     ) -> Bool {
-        guard let savePath = explicitSavePath ?? downloadFolder?.path else {
+        guard let savePath = explicitSavePath ?? downloadFolder?.torrentFilePath else {
             setLastError("Choose a download folder first.", source: .userAction)
             return false
         }
@@ -1117,7 +1117,7 @@ final class TorrentStore {
             .filter { ids.contains($0.id) }
             .compactMap(fileLocationService.revealURL(for:))
             .reduce(into: [URL]()) { urls, url in
-                if !urls.contains(where: { $0.path == url.path }) {
+                if !urls.contains(where: { $0.torrentFilePath == url.torrentFilePath }) {
                     urls.append(url)
                 }
             }
@@ -2712,7 +2712,7 @@ final class TorrentStore {
             appropriateFor: nil,
             create: true
         )
-        let directory = base.appendingPathComponent("TorrentApp", isDirectory: true)
+        let directory = base.appending(path: "TorrentApp", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
     }

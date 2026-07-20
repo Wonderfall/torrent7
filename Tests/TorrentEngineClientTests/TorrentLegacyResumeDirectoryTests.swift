@@ -30,7 +30,7 @@ struct TorrentLegacyResumeDirectoryTests {
         let tombstone = "removal-\(String(repeating: "d", count: 32)).fastresume.remove"
         for filename in [v2, "arbitrary.fastresume", tombstone, token, v1] {
             try Data("state".utf8).write(
-                to: temporary.resumeDataURL.appendingPathComponent(filename)
+                to: temporary.resumeDataURL.appending(path: filename)
             )
         }
 
@@ -43,7 +43,7 @@ struct TorrentLegacyResumeDirectoryTests {
     @Test("Directory and file symlinks fail closed")
     func symlinksFailClosed() throws {
         let temporary = try ClientMigrationTemporaryDirectory()
-        let target = temporary.url.appendingPathComponent("Target", isDirectory: true)
+        let target = temporary.url.appending(path: "Target", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
         try FileManager.default.createSymbolicLink(
             at: temporary.resumeDataURL,
@@ -60,10 +60,10 @@ struct TorrentLegacyResumeDirectoryTests {
             attributes: [.posixPermissions: 0o700]
         )
         let name = "v1:\(String(repeating: "e", count: 40)).fastresume"
-        let source = temporary.url.appendingPathComponent("source")
+        let source = temporary.url.appending(path: "source")
         try Data("state".utf8).write(to: source)
         try FileManager.default.createSymbolicLink(
-            at: temporary.resumeDataURL.appendingPathComponent(name),
+            at: temporary.resumeDataURL.appending(path: name),
             withDestinationURL: source
         )
         let directory = try #require(
@@ -80,7 +80,7 @@ struct TorrentLegacyResumeDirectoryTests {
         let temporary = try ClientMigrationTemporaryDirectory(withResumeData: true)
         let name = "t:\(String(repeating: "f", count: 32)).fastresume"
         try Data("resume".utf8).write(
-            to: temporary.resumeDataURL.appendingPathComponent(name)
+            to: temporary.resumeDataURL.appending(path: name)
         )
         let directory = try #require(
             try TorrentLegacyResumeDirectory.open(stateDirectory: temporary.url)
@@ -100,13 +100,13 @@ private final class ClientMigrationTemporaryDirectory {
     let url: URL
 
     var resumeDataURL: URL {
-        url.appendingPathComponent("ResumeData", isDirectory: true)
+        url.appending(path: "ResumeData", directoryHint: .isDirectory)
     }
 
     init(withResumeData: Bool = false) throws {
-        url = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "TorrentEngineClientTests-\(UUID().uuidString)",
-            isDirectory: true
+        url = FileManager.default.temporaryDirectory.appending(
+            path: "TorrentEngineClientTests-\(UUID().uuidString)",
+            directoryHint: .isDirectory
         )
         try FileManager.default.createDirectory(
             at: url,

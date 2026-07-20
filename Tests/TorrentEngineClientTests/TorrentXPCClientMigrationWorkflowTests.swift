@@ -83,9 +83,9 @@ struct TorrentXPCClientMigrationWorkflowTests {
     @Test("Missing and empty legacy sources abort an incomplete migration before handshake")
     func missingAndEmptySourcesAbortBeforeHandshake() async throws {
         let temporary = try MigrationWorkflowTemporaryDirectory()
-        let missingSource = temporary.url.appendingPathComponent(
-            "Missing",
-            isDirectory: true
+        let missingSource = temporary.url.appending(
+            path: "Missing",
+            directoryHint: .isDirectory
         )
         let emptySource = try temporary.makeStateDirectory(
             named: "Empty",
@@ -374,9 +374,9 @@ private final class MigrationWorkflowTemporaryDirectory {
     let url: URL
 
     init() throws {
-        url = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "TorrentEngineMigrationWorkflowTests-\(UUID().uuidString)",
-            isDirectory: true
+        url = FileManager.default.temporaryDirectory.appending(
+            path: "TorrentEngineMigrationWorkflowTests-\(UUID().uuidString)",
+            directoryHint: .isDirectory
         )
         try FileManager.default.createDirectory(
             at: url,
@@ -393,7 +393,7 @@ private final class MigrationWorkflowTemporaryDirectory {
         named name: String,
         withResumeData: Bool
     ) throws -> URL {
-        let state = url.appendingPathComponent(name, isDirectory: true)
+        let state = url.appending(path: name, directoryHint: .isDirectory)
         try FileManager.default.createDirectory(
             at: state,
             withIntermediateDirectories: false,
@@ -401,7 +401,7 @@ private final class MigrationWorkflowTemporaryDirectory {
         )
         if withResumeData {
             try FileManager.default.createDirectory(
-                at: state.appendingPathComponent("ResumeData", isDirectory: true),
+                at: state.appending(path: "ResumeData", directoryHint: .isDirectory),
                 withIntermediateDirectories: false,
                 attributes: [.posixPermissions: 0o700]
             )
@@ -414,7 +414,7 @@ private final class MigrationWorkflowTemporaryDirectory {
             named: "\(name)-Target",
             withResumeData: false
         )
-        let link = url.appendingPathComponent("\(name)-Link", isDirectory: false)
+        let link = url.appending(path: "\(name)-Link", directoryHint: .notDirectory)
         try FileManager.default.createSymbolicLink(
             at: link,
             withDestinationURL: target
@@ -429,8 +429,8 @@ private final class MigrationWorkflowTemporaryDirectory {
     ) throws {
         try Data(contents.utf8).write(
             to: stateDirectory
-                .appendingPathComponent("ResumeData", isDirectory: true)
-                .appendingPathComponent(filename, isDirectory: false)
+                .appending(path: "ResumeData", directoryHint: .isDirectory)
+                .appending(path: filename, directoryHint: .notDirectory)
         )
     }
 }

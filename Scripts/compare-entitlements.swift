@@ -18,7 +18,7 @@ enum ComparisonError: Error, CustomStringConvertible {
 }
 
 func loadDictionary(at path: String) throws -> [String: Any] {
-    let data = try Data(contentsOf: URL(fileURLWithPath: path))
+    let data = try Data(contentsOf: URL(filePath: path))
     let propertyList = try PropertyListSerialization.propertyList(from: data, options: [], format: nil)
     guard let dictionary = propertyList as? [String: Any] else {
         throw ComparisonError.invalidRoot(path)
@@ -106,11 +106,11 @@ do {
     compare(expected: expected, actual: actual, path: "entitlements", differences: &differences)
     guard differences.isEmpty else {
         for difference in differences {
-            FileHandle.standardError.write(Data("\(difference)\n".utf8))
+            try? FileHandle.standardError.write(contentsOf: Data("\(difference)\n".utf8))
         }
         exit(1)
     }
 } catch {
-    FileHandle.standardError.write(Data("\(error)\n".utf8))
+    try? FileHandle.standardError.write(contentsOf: Data("\(error)\n".utf8))
     exit(1)
 }

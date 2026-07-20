@@ -1422,7 +1422,7 @@ package enum TorrentAddError: LocalizedError, Sendable {
             authorizedSaveRoots
         )
 
-        let path = stateDirectory.path
+        let path = stateDirectory.torrentFilePath
         let encoded = try encodeAuthorizedSaveRoots(authorizedSaveRoots)
         var errorBuffer = Array<CChar>(repeating: 0, count: 1024)
         let created = unsafe withExtendedLifetime(encoded.retainedRoots) {

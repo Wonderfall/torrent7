@@ -19,7 +19,9 @@ struct TorrentApp: App {
                 .onAppear {
                     appDelegate.store = store
                 }
-                .background(WindowMenuRegistrationView())
+                .background {
+                    WindowMenuRegistrationView()
+                }
         }
         .defaultSize(width: 920, height: 620)
         .windowStyle(.hiddenTitleBar)

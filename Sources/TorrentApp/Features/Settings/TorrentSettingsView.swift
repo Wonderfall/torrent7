@@ -29,35 +29,25 @@ struct TorrentSettingsView: View {
     var body: some View {
         VStack(spacing: 0) {
             TabView(selection: $state.selectedTab) {
-                generalSettings
-                    .tag(TorrentSettingsTab.general)
-                    .tabItem {
-                        Label("General", systemImage: "slider.horizontal.3")
-                    }
+                Tab("General", systemImage: "slider.horizontal.3", value: .general) {
+                    generalSettings
+                }
 
-                interfaceSettings
-                    .tag(TorrentSettingsTab.interface)
-                    .tabItem {
-                        Label("Interface", systemImage: "macwindow")
-                    }
+                Tab("Interface", systemImage: "macwindow", value: .interface) {
+                    interfaceSettings
+                }
 
-                transfersSettings
-                    .tag(TorrentSettingsTab.transfers)
-                    .tabItem {
-                        Label("Transfers", systemImage: "arrow.up.arrow.down")
-                    }
+                Tab("Transfers", systemImage: "arrow.up.arrow.down", value: .transfers) {
+                    transfersSettings
+                }
 
-                discoverySettings
-                    .tag(TorrentSettingsTab.discovery)
-                    .tabItem {
-                        Label("Discovery", systemImage: "dot.radiowaves.left.and.right")
-                    }
+                Tab("Discovery", systemImage: "dot.radiowaves.left.and.right", value: .discovery) {
+                    discoverySettings
+                }
 
-                networkSettings
-                    .tag(TorrentSettingsTab.network)
-                    .tabItem {
-                        Label("Network", systemImage: "network")
-                    }
+                Tab("Network", systemImage: "network", value: .network) {
+                    networkSettings
+                }
             }
             .scenePadding()
 
@@ -966,7 +956,7 @@ struct TorrentSettingsView: View {
     }
 
     private var downloadFolderText: String {
-        state.downloadFolder?.path ?? "Not set"
+        state.downloadFolder?.torrentFilePath ?? "Not set"
     }
 
     private var settingsErrorBinding: Binding<Bool> {
@@ -1051,6 +1041,6 @@ struct TorrentSettingsView: View {
     }
 
     private func normalizedAppPath(_ url: URL) -> String {
-        url.standardizedFileURL.resolvingSymlinksInPath().path
+        url.standardizedFileURL.resolvingSymlinksInPath().torrentFilePath
     }
 }

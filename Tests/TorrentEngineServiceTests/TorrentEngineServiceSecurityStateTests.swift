@@ -770,9 +770,9 @@ private final class ServiceTemporaryDirectory {
     let url: URL
 
     init() throws {
-        url = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "TorrentEngineServiceTests-\(UUID().uuidString)",
-            isDirectory: true
+        url = FileManager.default.temporaryDirectory.appending(
+            path: "TorrentEngineServiceTests-\(UUID().uuidString)",
+            directoryHint: .isDirectory
         )
         try FileManager.default.createDirectory(
             at: url,

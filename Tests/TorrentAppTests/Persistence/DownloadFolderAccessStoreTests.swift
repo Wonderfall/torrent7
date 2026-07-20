@@ -11,11 +11,11 @@ struct DownloadFolderAccessStoreTests {
             try withTemporaryDirectory { root in
                 let alpha = root.appending(path: "alpha", directoryHint: .isDirectory)
                 let beta = root.appending(path: "beta", directoryHint: .isDirectory)
-                defaults.set(Data(beta.path.utf8), forKey: SecurityScopedFolder.defaultsKey)
+                defaults.set(Data(beta.torrentFilePath.utf8), forKey: SecurityScopedFolder.defaultsKey)
                 defaults.set(
                     [
-                        "beta": Data(beta.path.utf8),
-                        "alpha": Data(alpha.path.utf8)
+                        "beta": Data(beta.torrentFilePath.utf8),
+                        "alpha": Data(alpha.torrentFilePath.utf8)
                     ],
                     forKey: TorrentBookmarkKeys.additionalDownloadFolders
                 )
@@ -26,7 +26,7 @@ struct DownloadFolderAccessStoreTests {
 
                 _ = try store.restoreDefault()
 
-                #expect(store.capabilitySnapshot.paths == [beta.path, alpha.path])
+                #expect(store.capabilitySnapshot.paths == [beta.torrentFilePath, alpha.torrentFilePath])
             }
         }
     }
@@ -52,7 +52,7 @@ struct DownloadFolderAccessStoreTests {
         )
 
         #expect(snapshot.paths.count == maximumPathCount)
-        #expect(snapshot.paths.first == defaultAccess.url.path)
+        #expect(snapshot.paths.first == defaultAccess.url.torrentFilePath)
         #expect(snapshot.paths[1] == "/Downloads/additional-00000")
         #expect(snapshot.paths.last == "/Downloads/additional-\(zeroPaddedIndex(maximumPathCount - 2))")
         #expect(!snapshot.paths.contains(
@@ -74,9 +74,9 @@ struct DownloadFolderAccessStoreTests {
                 }
                 var bookmarks = [String: Data](minimumCapacity: maximumPathCount)
                 for url in additionalURLs {
-                    bookmarks[accessKey(url)] = Data(url.path.utf8)
+                    bookmarks[accessKey(url)] = Data(url.torrentFilePath.utf8)
                 }
-                defaults.set(Data(oldDefault.path.utf8), forKey: SecurityScopedFolder.defaultsKey)
+                defaults.set(Data(oldDefault.torrentFilePath.utf8), forKey: SecurityScopedFolder.defaultsKey)
                 defaults.set(bookmarks, forKey: TorrentBookmarkKeys.additionalDownloadFolders)
 
                 let store = DownloadFolderAccessStore(
@@ -90,7 +90,7 @@ struct DownloadFolderAccessStoreTests {
                 #expect(restoredBookmarks[accessKey(additionalURLs[0])] != nil)
                 #expect(restoredBookmarks[accessKey(additionalURLs[maximumPathCount - 1])] == nil)
                 #expect(store.capabilitySnapshot.paths.count == maximumPathCount)
-                #expect(store.capabilitySnapshot.paths.first == oldDefault.path)
+                #expect(store.capabilitySnapshot.paths.first == oldDefault.torrentFilePath)
 
                 let newAdditional = root.appending(path: "new-additional", directoryHint: .isDirectory)
                 do {
@@ -104,7 +104,7 @@ struct DownloadFolderAccessStoreTests {
                     #expect(isTooManyAuthorizedDownloadFolders(error))
                 }
                 #expect(additionalBookmarks(in: defaults) == restoredBookmarks)
-                #expect(defaults.data(forKey: SecurityScopedFolder.defaultsKey) == Data(oldDefault.path.utf8))
+                #expect(defaults.data(forKey: SecurityScopedFolder.defaultsKey) == Data(oldDefault.torrentFilePath.utf8))
 
                 var activeTorrents = restoredBookmarks.values.compactMap { bookmark -> TorrentItem? in
                     guard let path = String(data: bookmark, encoding: .utf8) else {
@@ -112,7 +112,7 @@ struct DownloadFolderAccessStoreTests {
                     }
                     return makeTorrent(savePath: path)
                 }
-                activeTorrents.append(makeTorrent(savePath: oldDefault.path))
+                activeTorrents.append(makeTorrent(savePath: oldDefault.torrentFilePath))
                 let newDefault = root.appending(path: "new-default", directoryHint: .isDirectory)
                 do {
                     _ = try store.setDefault(newDefault, activeTorrents: activeTorrents)
@@ -121,8 +121,8 @@ struct DownloadFolderAccessStoreTests {
                     #expect(isTooManyAuthorizedDownloadFolders(error))
                 }
 
-                #expect(store.defaultURL?.path == oldDefault.path)
-                #expect(defaults.data(forKey: SecurityScopedFolder.defaultsKey) == Data(oldDefault.path.utf8))
+                #expect(store.defaultURL?.torrentFilePath == oldDefault.torrentFilePath)
+                #expect(defaults.data(forKey: SecurityScopedFolder.defaultsKey) == Data(oldDefault.torrentFilePath.utf8))
                 #expect(additionalBookmarks(in: defaults) == restoredBookmarks)
             }
         }
@@ -140,12 +140,12 @@ struct DownloadFolderAccessStoreTests {
                 let other = root.appending(path: "other", directoryHint: .isDirectory)
                 _ = try store.setDefault(downloads, activeTorrents: [])
 
-                _ = try store.lease(forSavePath: downloads.path)
+                _ = try store.lease(forSavePath: downloads.torrentFilePath)
                 #expect(throws: TorrentStoreError.self) {
-                    try store.lease(forSavePath: downloads.appending(path: "child").path)
+                    try store.lease(forSavePath: downloads.appending(path: "child").torrentFilePath)
                 }
                 #expect(throws: TorrentStoreError.self) {
-                    try store.lease(forSavePath: other.path)
+                    try store.lease(forSavePath: other.torrentFilePath)
                 }
                 #expect(throws: TorrentStoreError.self) {
                     try store.lease(forSavePath: "relative")
@@ -190,15 +190,15 @@ struct DownloadFolderAccessStoreTests {
 
                 let prepared = try store.prepareForAdd(folder, setsDefault: false, activeTorrents: [])
 
-                #expect(prepared.path == folder.path)
+                #expect(prepared.path == folder.torrentFilePath)
                 #expect(prepared.defaultURL == nil)
                 #expect(additionalBookmarks(in: defaults).isEmpty)
 
                 store.commitPreparedForAdd(prepared, activeTorrents: [])
-                #expect(additionalBookmarks(in: defaults)[accessKey(folder)] == Data(folder.path.utf8))
+                #expect(additionalBookmarks(in: defaults)[accessKey(folder)] == Data(folder.torrentFilePath.utf8))
 
-                store.prune(activeTorrents: [makeTorrent(savePath: folder.path)])
-                #expect(additionalBookmarks(in: defaults)[accessKey(folder)] == Data(folder.path.utf8))
+                store.prune(activeTorrents: [makeTorrent(savePath: folder.torrentFilePath)])
+                #expect(additionalBookmarks(in: defaults)[accessKey(folder)] == Data(folder.torrentFilePath.utf8))
 
                 store.prune(activeTorrents: [])
                 #expect(additionalBookmarks(in: defaults).isEmpty)
@@ -223,9 +223,9 @@ struct DownloadFolderAccessStoreTests {
 
                 let committedDefault = store.commitPreparedForAdd(prepared, activeTorrents: [])
 
-                #expect(committedDefault?.path == folder.path)
-                #expect(store.defaultURL?.path == folder.path)
-                #expect(defaults.data(forKey: SecurityScopedFolder.defaultsKey) == Data(folder.path.utf8))
+                #expect(committedDefault?.torrentFilePath == folder.torrentFilePath)
+                #expect(store.defaultURL?.torrentFilePath == folder.torrentFilePath)
+                #expect(defaults.data(forKey: SecurityScopedFolder.defaultsKey) == Data(folder.torrentFilePath.utf8))
             }
         }
     }
@@ -239,11 +239,11 @@ struct DownloadFolderAccessStoreTests {
                 let newDefault = root.appending(path: "new", directoryHint: .isDirectory)
 
                 try store.setDefault(oldDefault, activeTorrents: [])
-                try store.setDefault(newDefault, activeTorrents: [makeTorrent(savePath: oldDefault.path)])
+                try store.setDefault(newDefault, activeTorrents: [makeTorrent(savePath: oldDefault.torrentFilePath)])
 
-                #expect(store.defaultURL?.path == newDefault.path)
-                #expect(defaults.data(forKey: SecurityScopedFolder.defaultsKey) == Data(newDefault.path.utf8))
-                #expect(additionalBookmarks(in: defaults)[accessKey(oldDefault)] == Data(oldDefault.path.utf8))
+                #expect(store.defaultURL?.torrentFilePath == newDefault.torrentFilePath)
+                #expect(defaults.data(forKey: SecurityScopedFolder.defaultsKey) == Data(newDefault.torrentFilePath.utf8))
+                #expect(additionalBookmarks(in: defaults)[accessKey(oldDefault)] == Data(oldDefault.torrentFilePath.utf8))
                 #expect(additionalBookmarks(in: defaults)[accessKey(newDefault)] == nil)
 
                 store.prune(activeTorrents: [])
@@ -261,7 +261,7 @@ struct DownloadFolderAccessStoreTests {
                 defaults.set(
                     [
                         "stale-key": invalidData,
-                        accessKey(validFolder): Data(validFolder.path.utf8)
+                        accessKey(validFolder): Data(validFolder.torrentFilePath.utf8)
                     ],
                     forKey: TorrentBookmarkKeys.additionalDownloadFolders
                 )
@@ -271,7 +271,7 @@ struct DownloadFolderAccessStoreTests {
                     accessProvider: FakeDownloadFolderAccessProvider(rejectedBookmarkData: [invalidData])
                 )
 
-                #expect(additionalBookmarks(in: defaults) == [accessKey(validFolder): Data(validFolder.path.utf8)])
+                #expect(additionalBookmarks(in: defaults) == [accessKey(validFolder): Data(validFolder.torrentFilePath.utf8)])
             }
         }
     }
@@ -284,11 +284,11 @@ struct DownloadFolderAccessStoreTests {
                 let defaultFolder = root.appending(path: "default", directoryHint: .isDirectory)
                 try store.setDefault(defaultFolder, activeTorrents: [])
 
-                store.clearDefault(activeTorrents: [makeTorrent(savePath: defaultFolder.path)])
+                store.clearDefault(activeTorrents: [makeTorrent(savePath: defaultFolder.torrentFilePath)])
 
                 #expect(store.defaultURL == nil)
                 #expect(defaults.data(forKey: SecurityScopedFolder.defaultsKey) == nil)
-                #expect(additionalBookmarks(in: defaults)[accessKey(defaultFolder)] == Data(defaultFolder.path.utf8))
+                #expect(additionalBookmarks(in: defaults)[accessKey(defaultFolder)] == Data(defaultFolder.torrentFilePath.utf8))
             }
         }
     }
@@ -299,7 +299,7 @@ private func additionalBookmarks(in defaults: UserDefaults) -> [String: Data] {
 }
 
 private func accessKey(_ url: URL) -> String {
-    url.standardizedFileURL.resolvingSymlinksInPath().path
+    url.standardizedFileURL.resolvingSymlinksInPath().torrentFilePath
 }
 
 private func zeroPaddedIndex(_ index: Int) -> String {
@@ -344,7 +344,7 @@ private struct TrackingDownloadFolderAccessProvider: DownloadFolderAccessProvidi
         guard let path = String(data: bookmark, encoding: .utf8), !path.isEmpty else {
             throw FakeBookmarkError()
         }
-        let access = FakeDownloadFolderAccess(url: URL(fileURLWithPath: path, isDirectory: true))
+        let access = FakeDownloadFolderAccess(url: URL(filePath: path, directoryHint: .isDirectory))
         tracker.access = access
         return access
     }

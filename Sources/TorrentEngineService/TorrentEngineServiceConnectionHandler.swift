@@ -370,8 +370,8 @@ package enum TorrentEngineExtensionConfiguration {
         }
 
         let requested = applicationSupport
-            .appendingPathComponent("Torrent7", isDirectory: true)
-            .appendingPathComponent("EngineState", isDirectory: true)
+            .appending(path: "Torrent7", directoryHint: .isDirectory)
+            .appending(path: "EngineState", directoryHint: .isDirectory)
             .standardizedFileURL
         do {
             try fileManager.createDirectory(

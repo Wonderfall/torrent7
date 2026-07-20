@@ -22,13 +22,13 @@ struct TorrentEngineTests {
         }
 
         let root = try TorrentAuthorizedSaveRoot(
-            canonicalPath: downloadDirectory.path,
+            canonicalPath: downloadDirectory.torrentFilePath,
             borrowingDirectoryDescriptor: descriptor.value,
             device: descriptor.device,
             inode: descriptor.inode,
             retaining: TestAuthorizedSaveRootLifetimeAnchor()
         )
-        #expect(root.canonicalPath == downloadDirectory.path)
+        #expect(root.canonicalPath == downloadDirectory.torrentFilePath)
         #expect(root.device == descriptor.device)
         #expect(root.inode == descriptor.inode)
         let hasDuplicatedDescriptor = unsafe (
@@ -46,7 +46,7 @@ struct TorrentEngineTests {
         }
         #expect(throws: TorrentEngineError.self) {
             try TorrentAuthorizedSaveRoot(
-                canonicalPath: downloadDirectory.path,
+                canonicalPath: downloadDirectory.torrentFilePath,
                 borrowingDirectoryDescriptor: descriptor.value,
                 device: descriptor.device,
                 inode: descriptor.inode &+ 1,
@@ -113,7 +113,7 @@ struct TorrentEngineTests {
             authorizedSaveRoots: [try authorizedSaveRoot(at: freshDirectory)]
         )
 
-        #expect(snapshots.withLock { $0 } == [[initialDirectory.path], [freshDirectory.path]])
+        #expect(snapshots.withLock { $0 } == [[initialDirectory.torrentFilePath], [freshDirectory.torrentFilePath]])
     }
 
     @Test("Startup failure engine reports unavailable and empty read models")
@@ -247,7 +247,7 @@ struct TorrentEngineTests {
         )
         let id = try await engine.addMagnet(
             "magnet:?xt=urn:btih:\(String(repeating: "6", count: 40))",
-            savePath: downloadDirectory.path
+            savePath: downloadDirectory.torrentFilePath
         )
 
         try await engine.requestSources(id: id)
@@ -365,7 +365,7 @@ struct TorrentEngineTests {
         )
         let id = try await engine.addMagnet(
             "magnet:?xt=urn:btih:\(String(repeating: "8", count: 40))",
-            savePath: downloadDirectory.path
+            savePath: downloadDirectory.torrentFilePath
         )
         let removal = Task {
             defer {
@@ -417,7 +417,7 @@ struct TorrentEngineTests {
         )
         let id = try await engine.addMagnet(
             "magnet:?xt=urn:btih:\(String(repeating: "9", count: 40))",
-            savePath: downloadDirectory.path
+            savePath: downloadDirectory.torrentFilePath
         )
         let removal = Task {
             try await engine.remove(id: id, deleteFiles: true)
@@ -456,10 +456,10 @@ struct TorrentEngineTests {
 
         let secondRoot = try authorizedSaveRoot(at: secondDirectory)
         try await engine.replaceAuthorizedSaveRoots([secondRoot])
-        await expectUnauthorizedSavePath(engine: engine, path: firstDirectory.path, hashCharacter: "a")
+        await expectUnauthorizedSavePath(engine: engine, path: firstDirectory.torrentFilePath, hashCharacter: "a")
         _ = try await engine.addMagnet(
             "magnet:?xt=urn:btih:\(String(repeating: "b", count: 40))",
-            savePath: secondDirectory.path
+            savePath: secondDirectory.torrentFilePath
         )
 
         do {
@@ -470,11 +470,11 @@ struct TorrentEngineTests {
         }
         _ = try await engine.addMagnet(
             "magnet:?xt=urn:btih:\(String(repeating: "c", count: 40))",
-            savePath: secondDirectory.path
+            savePath: secondDirectory.torrentFilePath
         )
 
         try await engine.replaceAuthorizedSaveRoots([])
-        await expectUnauthorizedSavePath(engine: engine, path: secondDirectory.path, hashCharacter: "d")
+        await expectUnauthorizedSavePath(engine: engine, path: secondDirectory.torrentFilePath, hashCharacter: "d")
     }
 
     @Test("Native add failures distinguish rejection from an unknown commit status")
@@ -494,7 +494,7 @@ struct TorrentEngineTests {
         do {
             _ = try await engine.addMagnet(
                 "magnet:?xt=urn:btih:\(String(repeating: "e", count: 40))",
-                savePath: stateDirectory.path
+                savePath: stateDirectory.torrentFilePath
             )
             Issue.record("Expected the unauthorized add to be rejected")
         } catch let error as TorrentAddError {
@@ -508,19 +508,19 @@ struct TorrentEngineTests {
         let resumeDirectory = stateDirectory.appending(path: "ResumeData", directoryHint: .isDirectory)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o500],
-            ofItemAtPath: resumeDirectory.path
+            ofItemAtPath: resumeDirectory.torrentFilePath
         )
         defer {
             try? FileManager.default.setAttributes(
                 [.posixPermissions: 0o700],
-                ofItemAtPath: resumeDirectory.path
+                ofItemAtPath: resumeDirectory.torrentFilePath
             )
         }
 
         do {
             _ = try await engine.addMagnet(
                 "magnet:?xt=urn:btih:\(String(repeating: "f", count: 40))",
-                savePath: downloadDirectory.path
+                savePath: downloadDirectory.torrentFilePath
             )
             Issue.record("Expected the add with unpersistable state to fail")
         } catch let error as TorrentAddError {
@@ -626,7 +626,7 @@ private func verifyRemovalTrackingFault(_ fault: RemovalTrackingFault) async thr
     let hashCharacter = String(fault.rawValue + 7)
     let id = try await engine.addMagnet(
         "magnet:?xt=urn:btih:\(String(repeating: hashCharacter, count: 40))",
-        savePath: downloadDirectory.path
+        savePath: downloadDirectory.torrentFilePath
     )
 
     let outcome = try await engine.remove(id: id, deleteFiles: true)
@@ -658,7 +658,7 @@ private func verifyRemovalTrackingFault(_ fault: RemovalTrackingFault) async thr
 private func assertStateDirectoryCanBeReopened(_ stateDirectory: URL) throws {
     var errorBuffer = Array<CChar>(repeating: 0, count: 1_024)
     let created = unsafe errorBuffer.withUnsafeMutableBufferPointer { error in
-        unsafe stateDirectory.path.withCString { path in
+        unsafe stateDirectory.torrentFilePath.withCString { path in
             unsafe TorrentClientCreateWithError(
                 path,
                 1,
@@ -720,7 +720,7 @@ private struct TestDirectoryDescriptor {
 }
 
 private func openDirectory(_ directory: URL) throws -> TestDirectoryDescriptor {
-    let descriptor = unsafe directory.path.withCString {
+    let descriptor = unsafe directory.torrentFilePath.withCString {
         unsafe Darwin.open($0, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
     }
     guard descriptor >= 0 else {
@@ -747,7 +747,7 @@ private func authorizedSaveRoot(
         Darwin.close(descriptor.value)
     }
     return try TorrentAuthorizedSaveRoot(
-        canonicalPath: directory.path,
+        canonicalPath: directory.torrentFilePath,
         borrowingDirectoryDescriptor: descriptor.value,
         device: descriptor.device,
         inode: descriptor.inode,

@@ -346,7 +346,7 @@ struct TorrentBridgeContractTests {
     @Test("Creates, blocks, queries, saves, and destroys an empty client")
     func createsBlocksQueriesSavesAndDestroysEmptyClient() throws {
         try withTemporaryDirectory { stateDirectory in
-            let result = emptyClientSmokeResult(statePath: stateDirectory.path)
+            let result = emptyClientSmokeResult(statePath: stateDirectory.torrentFilePath)
 
             #expect(result.didCreate, Comment(rawValue: result.creationError))
             #expect(result.blockNetworkCode == 0, Comment(rawValue: result.blockNetworkError))

@@ -21,13 +21,13 @@ struct TorrentFileIconTests {
             let saveURL = root.appending(path: "downloads", directoryHint: .isDirectory)
             try FileManager.default.createDirectory(at: saveURL, withIntermediateDirectories: true)
             let itemURL = saveURL.appending(path: "archlinux.iso")
-            #expect(FileManager.default.createFile(atPath: itemURL.path, contents: Data()))
+            #expect(FileManager.default.createFile(atPath: itemURL.torrentFilePath, contents: Data()))
             let row = TorrentRowSnapshot(makeTorrent(
                 name: itemURL.lastPathComponent,
-                savePath: saveURL.path
+                savePath: saveURL.torrentFilePath
             ))
 
-            #expect(TorrentFileIconSource.resolve(for: row) == .existingItem(itemURL.path))
+            #expect(TorrentFileIconSource.resolve(for: row) == .existingItem(itemURL.torrentFilePath))
         }
     }
 

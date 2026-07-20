@@ -112,12 +112,12 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
             let stateDirectory = try Self.prepareOwnedDirectory(stateDirectoryURL)
             self.stateDirectoryURL = stateDirectory
             resumeDataURL = try Self.prepareOwnedDirectory(
-                stateDirectory.appendingPathComponent("ResumeData", isDirectory: true)
+                stateDirectory.appending(path: "ResumeData", directoryHint: .isDirectory)
             )
             migrationRootURL = try Self.prepareOwnedDirectory(
-                stateDirectory.appendingPathComponent(
-                    "LegacyStateMigrations",
-                    isDirectory: true
+                stateDirectory.appending(
+                    path: "LegacyStateMigrations",
+                    directoryHint: .isDirectory
                 )
             )
             try Self.recoverInterruptedArtifacts(
@@ -144,9 +144,9 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
             }
 
             let id = makeMigrationID()
-            let stagingURL = migrationRootURL.appendingPathComponent(
-                Self.stagingDirectoryName(id: id),
-                isDirectory: true
+            let stagingURL = migrationRootURL.appending(
+                path: Self.stagingDirectoryName(id: id),
+                directoryHint: .isDirectory
             )
             do {
                 try FileManager.default.createDirectory(
@@ -254,9 +254,9 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
                 )
             }
 
-            let destinationURL = session.directoryURL.appendingPathComponent(
-                filename,
-                isDirectory: false
+            let destinationURL = session.directoryURL.appending(
+                path: filename,
+                directoryHint: .notDirectory
             )
             try Self.copyVerifiedSource(
                 source,
@@ -301,9 +301,9 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
                 )
             }
 
-            let publicationURL = migrationRootURL.appendingPathComponent(
-                Self.publicationDirectoryName(id: migrationID),
-                isDirectory: true
+            let publicationURL = migrationRootURL.appending(
+                path: Self.publicationDirectoryName(id: migrationID),
+                directoryHint: .isDirectory
             )
             try? FileManager.default.removeItem(at: publicationURL)
             do {
@@ -355,8 +355,8 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
                 }
 
                 let markerName = Self.commitMarkerName(id: migrationID)
-                let publicationMarkerURL = publicationURL.appendingPathComponent(markerName)
-                let finalMarkerURL = resumeDataURL.appendingPathComponent(markerName)
+                let publicationMarkerURL = publicationURL.appending(path: markerName)
+                let finalMarkerURL = resumeDataURL.appending(path: markerName)
                 let artifact = TorrentLegacyStateMigrationCommit(
                     migrationID: migrationID,
                     directoryURL: resumeDataURL,
@@ -412,9 +412,9 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
             }
             sessionsByID.removeValue(forKey: migrationID)
             try? FileManager.default.removeItem(at: session.directoryURL)
-            try? FileManager.default.removeItem(at: migrationRootURL.appendingPathComponent(
-                Self.publicationDirectoryName(id: migrationID),
-                isDirectory: true
+            try? FileManager.default.removeItem(at: migrationRootURL.appending(
+                path: Self.publicationDirectoryName(id: migrationID),
+                directoryHint: .isDirectory
             ))
         }
     }
@@ -430,9 +430,9 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
                     continue
                 }
                 try? FileManager.default.removeItem(at: session.directoryURL)
-                try? FileManager.default.removeItem(at: migrationRootURL.appendingPathComponent(
-                    Self.publicationDirectoryName(id: session.id),
-                    isDirectory: true
+                try? FileManager.default.removeItem(at: migrationRootURL.appending(
+                    path: Self.publicationDirectoryName(id: session.id),
+                    directoryHint: .isDirectory
                 ))
             }
             sessionsByID = sessionsByID.filter {
@@ -479,7 +479,7 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
         to destinationDirectoryURL: URL
     ) throws -> Int {
         let kind = try TorrentLegacyStateFilename.classify(filename)
-        let sourceURL = sourceDirectoryURL.appendingPathComponent(filename, isDirectory: false)
+        let sourceURL = sourceDirectoryURL.appending(path: filename, directoryHint: .notDirectory)
         let source: FileDescriptor
         do {
             source = try FileDescriptor.open(
@@ -501,7 +501,7 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
         try Self.copyVerifiedSource(
             source,
             metadata: metadata,
-            to: destinationDirectoryURL.appendingPathComponent(filename, isDirectory: false)
+            to: destinationDirectoryURL.appending(path: filename, directoryHint: .notDirectory)
         )
         return metadata.byteCount
     }
@@ -512,7 +512,7 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
         to destinationDirectoryURL: URL
     ) throws -> Int {
         let kind = try TorrentLegacyStateFilename.classify(filename)
-        let sourceURL = sourceDirectoryURL.appendingPathComponent(filename, isDirectory: false)
+        let sourceURL = sourceDirectoryURL.appending(path: filename, directoryHint: .notDirectory)
         let source: FileDescriptor
         do {
             source = try FileDescriptor.open(
@@ -531,9 +531,9 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
             descriptor: source,
             maximumBytes: maximumBytes(for: kind)
         )
-        let destinationURL = destinationDirectoryURL.appendingPathComponent(
-            filename,
-            isDirectory: false
+        let destinationURL = destinationDirectoryURL.appending(
+            path: filename,
+            directoryHint: .notDirectory
         )
         do {
             try FileManager.default.linkItem(at: sourceURL, to: destinationURL)
@@ -573,9 +573,9 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
                 continue
             }
             let paths = [
-                migrationRootURL.appendingPathComponent(Self.stagingDirectoryName(id: candidate)),
-                migrationRootURL.appendingPathComponent(Self.publicationDirectoryName(id: candidate)),
-                resumeDataURL.appendingPathComponent(Self.commitMarkerName(id: candidate)),
+                migrationRootURL.appending(path: Self.stagingDirectoryName(id: candidate)),
+                migrationRootURL.appending(path: Self.publicationDirectoryName(id: candidate)),
+                resumeDataURL.appending(path: Self.commitMarkerName(id: candidate)),
             ]
             if paths.allSatisfy({
                 !FileManager.default.fileExists(atPath: $0.path(percentEncoded: false))
@@ -592,9 +592,9 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
                     continue
                 }
                 try? FileManager.default.removeItem(at: session.directoryURL)
-                try? FileManager.default.removeItem(at: migrationRootURL.appendingPathComponent(
-                    Self.publicationDirectoryName(id: session.id),
-                    isDirectory: true
+                try? FileManager.default.removeItem(at: migrationRootURL.appending(
+                    path: Self.publicationDirectoryName(id: session.id),
+                    directoryHint: .isDirectory
                 ))
             }
             sessionsByID.removeAll()
@@ -617,9 +617,9 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
             throw TorrentLegacyStateMigrationError.commitFailed
         }
 
-        let publicationURL = migrationRootURL.appendingPathComponent(
-            Self.publicationDirectoryName(id: session.id),
-            isDirectory: true
+        let publicationURL = migrationRootURL.appending(
+            path: Self.publicationDirectoryName(id: session.id),
+            directoryHint: .isDirectory
         )
         try? FileManager.default.removeItem(at: publicationURL)
         try? FileManager.default.removeItem(at: session.directoryURL)
@@ -650,9 +650,9 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
             // whether the exchange happened or not. Therefore both staging and
             // publishing names are disposable, but only after validating the exact
             // UUID name and an owned, no-follow directory leaf.
-            let expectedURL = migrationRootURL.appendingPathComponent(
-                filename,
-                isDirectory: true
+            let expectedURL = migrationRootURL.appending(
+                path: filename,
+                directoryHint: .isDirectory
             ).standardizedFileURL
             guard child.standardizedFileURL == expectedURL else {
                 throw TorrentLegacyStateMigrationError.destinationStateInvalid
@@ -912,9 +912,9 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
         filenames: Set<String>,
         markerURL: URL
     ) throws {
-        let temporaryURL = markerURL.deletingLastPathComponent().appendingPathComponent(
-            ".\(markerURL.lastPathComponent).tmp-\(UUID().uuidString.lowercased())",
-            isDirectory: false
+        let temporaryURL = markerURL.deletingLastPathComponent().appending(
+            path: ".\(markerURL.lastPathComponent).tmp-\(UUID().uuidString.lowercased())",
+            directoryHint: .notDirectory
         )
         let sortedFilenames = filenames.sorted()
         var marker = "version=1\n"
