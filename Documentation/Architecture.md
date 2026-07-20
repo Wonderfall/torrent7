@@ -153,7 +153,8 @@ The following are protocol invariants:
   the request-only descriptor field;
 - request IDs and operation IDs are replay checked;
 - post-handshake operations must name the current engine epoch;
-- client requests are serialized, and helper work is serialized per peer;
+- client requests are serialized, complete paged poll pipelines are serialized
+  through dataset closure, and helper work is serialized per peer;
 - every request owns an operation-specific monotonic deadline; a missing reply
   terminalizes that controller, and a timed-out mutation is reported as
   commit-unknown and is never replayed automatically;
@@ -228,11 +229,17 @@ to stay under the one-MiB page limit. A descriptor may name at most 256 pages
 and must claim at least the number implied by its item count, preventing a
 hostile helper from amplifying one poll into tens of thousands of serial calls.
 Datasets are owned by the controller, expire after 30 seconds, are limited to
-four open datasets, and share a 128-MiB encoded storage budget. The GUI verifies
-descriptor kind, revision metadata, page order, page identity, aggregate bytes,
-final item count, item uniqueness, string and numeric bounds, canonical paths,
-and save-path authorization. It closes a dataset after successful assembly or
-a recoverable failure.
+four open datasets, and share a 128-MiB encoded storage budget. The GUI admits
+only one complete `poll -> page reads -> dataset closes` pipeline per
+controller, preventing overlapping refresh sources from reserving multiple
+dataset pairs. It verifies descriptor kind, revision metadata, page order, page
+identity, aggregate bytes, final item count, item uniqueness, string and numeric
+bounds, canonical paths, and save-path authorization. Successful polls close
+each dataset after assembly. Cancellation and recoverable failures close every
+descriptor returned by that poll from uncancelled cleanup; an unconfirmed close
+forces controller replacement so disconnect cleanup clears the helper budget.
+Fatal reply or semantic validation failures disconnect immediately without
+sending further requests over the untrusted session.
 
 Paging does not expose partially mutable application state. The GUI publishes a
 new torrent or tracker-host array only after every page has decoded and the

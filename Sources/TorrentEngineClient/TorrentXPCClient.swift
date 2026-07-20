@@ -403,6 +403,16 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         let continuation: CheckedContinuation<RequestSlotAcquisition, Never>
     }
     private var requestWaiters = [RequestWaiter]()
+    private struct PollPipelineWaiter {
+        let id: UUID
+        let continuation: CheckedContinuation<PollPipelineSlotAcquisition, Never>
+    }
+    private var pollPipelineIsInFlight = false
+    private var pollPipelineWaiters = [PollPipelineWaiter]()
+
+    package var pendingPollPipelineAcquisitionCount: Int {
+        pollPipelineWaiters.count
+    }
 
     package nonisolated var startupFailureMessage: String? {
         state.failure
@@ -580,11 +590,10 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         }
         capabilitiesByCanonicalPath.removeAll(keepingCapacity: false)
         engineEpoch = nil
-        state.cancel(
+        terminalize(
             message: "The isolated torrent engine connection ended safely.",
             recoveryDisposition: .terminal
         )
-        transport.cancel()
     }
 
     package func terminateConnection(
@@ -870,23 +879,43 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         includeTrackerHosts: Bool
     ) async throws -> TorrentEnginePollResult {
         do {
+            try await acquirePollPipelineSlot()
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw pollFailure(from: error)
+        }
+        defer {
+            releasePollPipelineSlot()
+        }
+
+        var ownedDatasetIDs = [UUID]()
+        do {
             let response = try await pollWire(
                 since: revision,
                 sortedBy: sortOrder,
                 direction: direction,
                 includeTrackerHosts: includeTrackerHosts
             )
+            ownedDatasetIDs = [
+                response.snapshotDataset?.id,
+                response.trackerHostDataset?.id,
+            ].compactMap { $0 }
             var snapshotBatch: TorrentSnapshotBatch?
             var trackerHostBatch: TorrentTrackerHostBatch?
             if let descriptor = response.snapshotDataset {
-                let torrents: [TorrentItem] = try await loadDataset(descriptor)
+                let torrents: [TorrentItem] = try await loadDatasetContents(descriptor)
+                try await closeDataset(descriptor.id)
+                ownedDatasetIDs.removeAll { $0 == descriptor.id }
                 snapshotBatch = TorrentSnapshotBatch(
                     revision: descriptor.revision,
                     torrents: torrents
                 )
             }
             if let descriptor = response.trackerHostDataset {
-                let hosts: [TorrentTrackerHostItem] = try await loadDataset(descriptor)
+                let hosts: [TorrentTrackerHostItem] = try await loadDatasetContents(descriptor)
+                try await closeDataset(descriptor.id)
+                ownedDatasetIDs.removeAll { $0 == descriptor.id }
                 trackerHostBatch = TorrentTrackerHostBatch(
                     revision: descriptor.revision,
                     hosts: hosts
@@ -902,9 +931,19 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                 networkInterfaceSnapshot: response.networkInterfaceSnapshot
             )
         } catch is CancellationError {
+            await closeDatasetsForMandatoryPollCleanup(ownedDatasetIDs)
             throw CancellationError()
         } catch {
-            throw pollFailure(from: error)
+            let failure = responseFailure(from: error)
+            if failure.isFatalTransportError {
+                // Do not continue using a connection after malformed or
+                // otherwise untrusted helper data. Disconnect cleanup owns
+                // any remaining service-side datasets in this case.
+                terminalize(failure)
+                throw failure
+            }
+            await closeDatasetsForMandatoryPollCleanup(ownedDatasetIDs)
+            throw pollFailure(from: failure)
         }
     }
 
@@ -1157,66 +1196,52 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         latestNetworkInterfaceSnapshot = snapshot
     }
 
-    private func loadDataset<Value: Codable & Sendable>(
+    private func loadDatasetContents<Value: Codable & Sendable>(
         _ descriptor: TorrentEngineIPCDatasetDescriptor
     ) async throws -> [Value] {
-        do {
-            var values = [Value]()
-            values.reserveCapacity(descriptor.itemCount)
-            var encodedByteCount = 0
-            for pageIndex in 0..<descriptor.pageCount {
-                let page: TorrentEngineIPCDatasetPage = try await invoke(
-                    .readDataset,
-                    TorrentEngineIPCReadDatasetRequest(id: descriptor.id, page: pageIndex)
-                )
-                guard page.id == descriptor.id,
-                      page.kind == descriptor.kind,
-                      page.page == pageIndex,
-                      page.encodedItems.count
-                        <= TorrentEngineIPCLimits.maximumDatasetAggregateBytes - encodedByteCount else {
-                    throw TorrentEngineClientError.invalidReply
-                }
-                encodedByteCount += page.encodedItems.count
-                let pageValues = try TorrentEngineIPCPropertyListCodec.decode(
-                    [Value].self,
-                    from: page.encodedItems,
-                    maximumBytes: TorrentEngineIPCLimits.maximumDatasetPageBytes,
-                    decodingLimits: .init(
-                        maximumContainerElementCount:
-                            TorrentEngineIPCLimits.maximumDatasetPageItemCount,
-                        maximumCollectionReferenceCount: 128 * 1_024
-                    )
-                )
-                guard !pageValues.isEmpty else {
-                    throw TorrentEngineClientError.invalidReply
-                }
-                values.append(contentsOf: pageValues)
-                guard values.count <= descriptor.itemCount else {
-                    throw TorrentEngineClientError.invalidReply
-                }
-            }
-            guard values.count == descriptor.itemCount else {
+        var values = [Value]()
+        values.reserveCapacity(descriptor.itemCount)
+        var encodedByteCount = 0
+        for pageIndex in 0..<descriptor.pageCount {
+            let page: TorrentEngineIPCDatasetPage = try await invoke(
+                .readDataset,
+                TorrentEngineIPCReadDatasetRequest(id: descriptor.id, page: pageIndex)
+            )
+            guard page.id == descriptor.id,
+                  page.kind == descriptor.kind,
+                  page.page == pageIndex,
+                  page.encodedItems.count
+                    <= TorrentEngineIPCLimits.maximumDatasetAggregateBytes - encodedByteCount else {
                 throw TorrentEngineClientError.invalidReply
             }
-            try TorrentEngineClientResponseValidator.validateDataset(
-                values,
-                kind: descriptor.kind,
-                authorizedSavePaths: Set(capabilitiesByCanonicalPath.keys)
+            encodedByteCount += page.encodedItems.count
+            let pageValues = try TorrentEngineIPCPropertyListCodec.decode(
+                [Value].self,
+                from: page.encodedItems,
+                maximumBytes: TorrentEngineIPCLimits.maximumDatasetPageBytes,
+                decodingLimits: .init(
+                    maximumContainerElementCount:
+                        TorrentEngineIPCLimits.maximumDatasetPageItemCount,
+                    maximumCollectionReferenceCount: 128 * 1_024
+                )
             )
-            try await closeDataset(descriptor.id)
-            return values
-        } catch is CancellationError {
-            await closeDatasetAfterCancellation(descriptor.id)
-            throw CancellationError()
-        } catch {
-            let failure = responseFailure(from: error)
-            if failure.isFatalTransportError {
-                terminalize(failure)
-            } else {
-                try? await closeDataset(descriptor.id)
+            guard !pageValues.isEmpty else {
+                throw TorrentEngineClientError.invalidReply
             }
-            throw failure
+            values.append(contentsOf: pageValues)
+            guard values.count <= descriptor.itemCount else {
+                throw TorrentEngineClientError.invalidReply
+            }
         }
+        guard values.count == descriptor.itemCount else {
+            throw TorrentEngineClientError.invalidReply
+        }
+        try TorrentEngineClientResponseValidator.validateDataset(
+            values,
+            kind: descriptor.kind,
+            authorizedSavePaths: Set(capabilitiesByCanonicalPath.keys)
+        )
+        return values
     }
 
     private func closeDataset(_ id: UUID) async throws {
@@ -1288,13 +1313,33 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         }
     }
 
-    private func closeDatasetAfterCancellation(_ id: UUID) async {
-        await Task.detached { [weak self] in
+    private func closeDatasetsForMandatoryPollCleanup(_ ids: [UUID]) async {
+        guard !ids.isEmpty else {
+            return
+        }
+        let cleanupSucceeded = await Task.detached { [weak self, ids] in
             guard let self else {
-                return
+                return false
             }
-            try? await self.closeDataset(id)
+            var succeeded = true
+            for id in ids {
+                do {
+                    try await self.closeDataset(id)
+                } catch {
+                    succeeded = false
+                }
+            }
+            return succeeded
         }.value
+        guard cleanupSucceeded else {
+            // A failed close leaves the helper's dataset budget uncertain.
+            // Replacing the controller invokes disconnect cleanup before a
+            // later poll can allocate another dataset.
+            if state.isAvailable {
+                terminalize(.connectionFailed)
+            }
+            return
+        }
     }
 
     private func invokeUnit<Request: Encodable & Sendable>(
@@ -1518,6 +1563,11 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             waiter.deadlineTask.cancel()
             waiter.continuation.resume(returning: .unavailable)
         }
+        let pollWaiters = pollPipelineWaiters
+        pollPipelineWaiters.removeAll(keepingCapacity: false)
+        for waiter in pollWaiters {
+            waiter.continuation.resume(returning: .unavailable)
+        }
         state.cancel(
             message: message,
             recoveryDisposition: recoveryDisposition
@@ -1631,6 +1681,77 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         }
         let waiter = requestWaiters.removeFirst()
         waiter.deadlineTask.cancel()
+        waiter.continuation.resume(returning: .acquired)
+    }
+
+    private enum PollPipelineSlotAcquisition: Sendable {
+        case acquired
+        case unavailable
+    }
+
+    private func acquirePollPipelineSlot() async throws {
+        guard state.isAvailable else {
+            throw TorrentEngineClientError.connectionCancelled
+        }
+        guard !Task.isCancelled else {
+            throw CancellationError()
+        }
+        if !pollPipelineIsInFlight {
+            pollPipelineIsInFlight = true
+            return
+        }
+        guard pollPipelineWaiters.count < Self.maximumQueuedRequestCount else {
+            throw TorrentEngineClientError.requestQueueFull
+        }
+
+        let waiterID = UUID()
+        let acquisition = await withTaskCancellationHandler {
+            await withCheckedContinuation {
+                (continuation: CheckedContinuation<PollPipelineSlotAcquisition, Never>) in
+                guard !Task.isCancelled, state.isAvailable else {
+                    continuation.resume(returning: .unavailable)
+                    return
+                }
+                pollPipelineWaiters.append(PollPipelineWaiter(
+                    id: waiterID,
+                    continuation: continuation
+                ))
+            }
+        } onCancel: { [self] in
+            Task {
+                await cancelPollPipelineWaiter(waiterID)
+            }
+        }
+        guard acquisition == .acquired else {
+            if Task.isCancelled {
+                throw CancellationError()
+            }
+            throw TorrentEngineClientError.connectionCancelled
+        }
+        guard state.isAvailable, !Task.isCancelled else {
+            releasePollPipelineSlot()
+            if Task.isCancelled {
+                throw CancellationError()
+            }
+            throw TorrentEngineClientError.connectionCancelled
+        }
+    }
+
+    private func cancelPollPipelineWaiter(_ id: UUID) {
+        guard let index = pollPipelineWaiters.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let waiter = pollPipelineWaiters.remove(at: index)
+        waiter.continuation.resume(returning: .unavailable)
+    }
+
+    private func releasePollPipelineSlot() {
+        precondition(pollPipelineIsInFlight)
+        guard !pollPipelineWaiters.isEmpty else {
+            pollPipelineIsInFlight = false
+            return
+        }
+        let waiter = pollPipelineWaiters.removeFirst()
         waiter.continuation.resume(returning: .acquired)
     }
 

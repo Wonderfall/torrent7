@@ -984,6 +984,593 @@ struct TorrentXPCClientSecurityTests {
         #expect(finalState.didClose)
     }
 
+    @Test("Concurrent polls serialize complete dataset pipelines")
+    func concurrentPollsSerializeDatasetPipelines() async throws {
+        struct DatasetBudgetState: Sendable {
+            var pollCount = 0
+            var openIDs = Set<UUID>()
+            var maximumOpenCount = 0
+        }
+
+        let epoch = epoch
+        let firstPollBlocker = AsyncRequestBlocker()
+        let datasetIDs = (0..<3).map { _ in (UUID(), UUID()) }
+        let budget = Mutex(DatasetBudgetState())
+        let transport = ScriptedTorrentEngineTransport { request in
+            switch request.header.operation {
+            case .handshake:
+                return try successReply(
+                    TorrentEngineIPCHandshakeResponse(
+                        libtorrentVersion: "2.1.0",
+                        folders: []
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .poll:
+                let pollIndex = try budget.withLock { state in
+                    guard state.pollCount < datasetIDs.count else {
+                        throw TorrentEngineClientError.serviceRejected(
+                            "Unexpected extra poll"
+                        )
+                    }
+                    let index = state.pollCount
+                    state.pollCount += 1
+                    state.openIDs.insert(datasetIDs[index].0)
+                    state.openIDs.insert(datasetIDs[index].1)
+                    state.maximumOpenCount = max(
+                        state.maximumOpenCount,
+                        state.openIDs.count
+                    )
+                    guard state.openIDs.count
+                            <= TorrentEngineIPCLimits.maximumOpenDatasets else {
+                        throw TorrentEngineClientError.serviceRejected(
+                            "Too many torrent engine datasets are open."
+                        )
+                    }
+                    return index
+                }
+                if pollIndex == 0 {
+                    await firstPollBlocker.block()
+                }
+                return try successReply(
+                    TorrentEngineIPCPollResponse(
+                        dirtyMask: 0,
+                        alertErrors: [],
+                        networkStatus: .empty,
+                        bridgeHealth: .healthy,
+                        networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot(
+                            revision: 1,
+                            interfaces: []
+                        ),
+                        snapshotDataset: TorrentEngineIPCDatasetDescriptor(
+                            id: datasetIDs[pollIndex].0,
+                            kind: .torrentSnapshots,
+                            revision: UInt64(pollIndex + 1),
+                            itemCount: 0,
+                            pageCount: 0
+                        ),
+                        trackerHostDataset: TorrentEngineIPCDatasetDescriptor(
+                            id: datasetIDs[pollIndex].1,
+                            kind: .trackerHosts,
+                            revision: UInt64(pollIndex + 1),
+                            itemCount: 0,
+                            pageCount: 0
+                        )
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .closeDataset:
+                let close: TorrentEngineIPCCloseDatasetRequest = try decodeRequest(request)
+                let wasOpen = budget.withLock { state in
+                    state.openIDs.remove(close.id) != nil
+                }
+                #expect(wasOpen)
+                return try successReply(
+                    TorrentEngineIPCEmpty(),
+                    for: request,
+                    epoch: epoch
+                )
+            default:
+                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
+            }
+        }
+        let client = try await makeClient(transport: transport)
+        let first = Task {
+            try await client.poll(
+                since: nil,
+                sortedBy: .name,
+                direction: .ascending,
+                includeTrackerHosts: true
+            )
+        }
+        await firstPollBlocker.waitUntilBlocked()
+        let second = Task {
+            try await client.poll(
+                since: nil,
+                sortedBy: .name,
+                direction: .ascending,
+                includeTrackerHosts: true
+            )
+        }
+        let third = Task {
+            try await client.poll(
+                since: nil,
+                sortedBy: .name,
+                direction: .ascending,
+                includeTrackerHosts: true
+            )
+        }
+
+        await waitForPendingPolls(2, client: client)
+        #expect(transport.operations == [.handshake, .poll])
+        await firstPollBlocker.release()
+        _ = try await (first.value, second.value, third.value)
+
+        #expect(client.isAvailable)
+        #expect(budget.withLock(\.openIDs).isEmpty)
+        #expect(budget.withLock(\.maximumOpenCount) == 2)
+        #expect(transport.operations == [
+            .handshake,
+            .poll, .closeDataset, .closeDataset,
+            .poll, .closeDataset, .closeDataset,
+            .poll, .closeDataset, .closeDataset,
+        ])
+    }
+
+    @Test("Cancelling a queued poll releases its pipeline waiter")
+    func cancelledQueuedPollReleasesPipelineWaiter() async throws {
+        let epoch = epoch
+        let firstPollBlocker = AsyncRequestBlocker()
+        let pollCount = Mutex(0)
+        let transport = ScriptedTorrentEngineTransport { request in
+            switch request.header.operation {
+            case .handshake:
+                return try successReply(
+                    TorrentEngineIPCHandshakeResponse(
+                        libtorrentVersion: "2.1.0",
+                        folders: []
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .poll:
+                let index = pollCount.withLock { count in
+                    defer { count += 1 }
+                    return count
+                }
+                if index == 0 {
+                    await firstPollBlocker.block()
+                }
+                return try successReply(
+                    TorrentEngineIPCPollResponse(
+                        dirtyMask: 0,
+                        alertErrors: [],
+                        networkStatus: .empty,
+                        bridgeHealth: .healthy,
+                        networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot(
+                            revision: UInt64(index + 1),
+                            interfaces: []
+                        ),
+                        snapshotDataset: nil,
+                        trackerHostDataset: nil
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            default:
+                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
+            }
+        }
+        let client = try await makeClient(transport: transport)
+        let first = Task {
+            try await client.poll(
+                since: nil,
+                sortedBy: .name,
+                direction: .ascending,
+                includeTrackerHosts: false
+            )
+        }
+        await firstPollBlocker.waitUntilBlocked()
+        let cancelled = Task {
+            try await client.poll(
+                since: nil,
+                sortedBy: .name,
+                direction: .ascending,
+                includeTrackerHosts: false
+            )
+        }
+        await waitForPendingPolls(1, client: client)
+
+        cancelled.cancel()
+        await waitForPendingPolls(0, client: client)
+        await #expect(throws: CancellationError.self) {
+            try await cancelled.value
+        }
+
+        await firstPollBlocker.release()
+        _ = try await first.value
+        _ = try await client.poll(
+            since: nil,
+            sortedBy: .name,
+            direction: .ascending,
+            includeTrackerHosts: false
+        )
+
+        #expect(client.isAvailable)
+        #expect(transport.operations == [.handshake, .poll, .poll])
+    }
+
+    @Test("Fatal dataset replies terminate and wake queued polls")
+    func fatalDatasetReplyTerminatesAndWakesQueuedPolls() async throws {
+        let epoch = epoch
+        let datasetID = UUID()
+        let pageBlocker = AsyncRequestBlocker()
+        let transport = ScriptedTorrentEngineTransport { request in
+            switch request.header.operation {
+            case .handshake:
+                return try successReply(
+                    TorrentEngineIPCHandshakeResponse(
+                        libtorrentVersion: "2.1.0",
+                        folders: []
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .poll:
+                return try successReply(
+                    TorrentEngineIPCPollResponse(
+                        dirtyMask: 0,
+                        alertErrors: [],
+                        networkStatus: .empty,
+                        bridgeHealth: .healthy,
+                        networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot(
+                            revision: 1,
+                            interfaces: []
+                        ),
+                        snapshotDataset: nil,
+                        trackerHostDataset: TorrentEngineIPCDatasetDescriptor(
+                            id: datasetID,
+                            kind: .trackerHosts,
+                            revision: 1,
+                            itemCount: 1,
+                            pageCount: 1
+                        )
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .readDataset:
+                await pageBlocker.block()
+                return try successReply(
+                    TorrentEngineIPCDatasetPage(
+                        id: UUID(),
+                        kind: .trackerHosts,
+                        page: 0,
+                        encodedItems: Data([0])
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            default:
+                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
+            }
+        }
+        let client = try await makeClient(transport: transport)
+        let active = Task {
+            try await client.poll(
+                since: nil,
+                sortedBy: .name,
+                direction: .ascending,
+                includeTrackerHosts: true
+            )
+        }
+        await pageBlocker.waitUntilBlocked()
+        let queued = Task {
+            try await client.poll(
+                since: nil,
+                sortedBy: .name,
+                direction: .ascending,
+                includeTrackerHosts: true
+            )
+        }
+        await waitForPendingPolls(1, client: client)
+
+        await pageBlocker.release()
+        await #expect(throws: TorrentEngineClientError.self) {
+            try await active.value
+        }
+        await #expect(throws: TorrentEngineClientError.self) {
+            try await queued.value
+        }
+
+        #expect(!client.isAvailable)
+        #expect(client.recoveryDisposition == .terminal)
+        #expect(await client.pendingPollPipelineAcquisitionCount == 0)
+        #expect(transport.operations == [.handshake, .poll, .readDataset])
+    }
+
+    @Test("Failed dataset cleanup replaces the controller")
+    func failedDatasetCleanupReplacesController() async throws {
+        let epoch = epoch
+        let snapshotID = UUID()
+        let trackerHostID = UUID()
+        let closeAttempts = Mutex([UUID]())
+        let transport = ScriptedTorrentEngineTransport { request in
+            switch request.header.operation {
+            case .handshake:
+                return try successReply(
+                    TorrentEngineIPCHandshakeResponse(
+                        libtorrentVersion: "2.1.0",
+                        folders: []
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .poll:
+                return try successReply(
+                    TorrentEngineIPCPollResponse(
+                        dirtyMask: 0,
+                        alertErrors: [],
+                        networkStatus: .empty,
+                        bridgeHealth: .healthy,
+                        networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot(
+                            revision: 1,
+                            interfaces: []
+                        ),
+                        snapshotDataset: TorrentEngineIPCDatasetDescriptor(
+                            id: snapshotID,
+                            kind: .torrentSnapshots,
+                            revision: 1,
+                            itemCount: 0,
+                            pageCount: 0
+                        ),
+                        trackerHostDataset: TorrentEngineIPCDatasetDescriptor(
+                            id: trackerHostID,
+                            kind: .trackerHosts,
+                            revision: 1,
+                            itemCount: 0,
+                            pageCount: 0
+                        )
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .closeDataset:
+                let close: TorrentEngineIPCCloseDatasetRequest = try decodeRequest(request)
+                closeAttempts.withLock { $0.append(close.id) }
+                if close.id == snapshotID {
+                    throw TorrentEngineClientError.serviceTemporarilyUnavailable(
+                        "Dataset cleanup interrupted for testing"
+                    )
+                }
+                return try successReply(
+                    TorrentEngineIPCEmpty(),
+                    for: request,
+                    epoch: epoch
+                )
+            default:
+                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
+            }
+        }
+        let client = try await makeClient(transport: transport)
+
+        await #expect(throws: TorrentEngineClientError.self) {
+            try await client.poll(
+                since: nil,
+                sortedBy: .name,
+                direction: .ascending,
+                includeTrackerHosts: true
+            )
+        }
+
+        #expect(closeAttempts.withLock { $0 } == [
+            snapshotID,
+            snapshotID,
+            trackerHostID,
+        ])
+        #expect(!client.isAvailable)
+        #expect(client.recoveryDisposition == .replaceController)
+        #expect(transport.isCancelled)
+    }
+
+    @Test("Cancellation closes every dataset returned by a poll")
+    func cancelledPollClosesEveryOwnedDataset() async throws {
+        let epoch = epoch
+        let snapshotID = UUID()
+        let trackerHostID = UUID()
+        let capabilityID = UUID()
+        let blocker = AsyncRequestBlocker()
+        let closedIDs = Mutex([UUID]())
+        let savePath = testPath("cancelled-dataset-poll")
+        let torrent = makeDatasetTorrent(savePath: savePath)
+        let transport = ScriptedTorrentEngineTransport { request in
+            switch request.header.operation {
+            case .handshake:
+                return try successReply(
+                    TorrentEngineIPCHandshakeResponse(
+                        libtorrentVersion: "2.1.0",
+                        folders: [TorrentEngineIPCGrantedFolder(
+                            capabilityID: capabilityID,
+                            resolvedPath: savePath
+                        )]
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .poll:
+                return try successReply(
+                    TorrentEngineIPCPollResponse(
+                        dirtyMask: 0,
+                        alertErrors: [],
+                        networkStatus: .empty,
+                        bridgeHealth: .healthy,
+                        networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot(
+                            revision: 1,
+                            interfaces: []
+                        ),
+                        snapshotDataset: TorrentEngineIPCDatasetDescriptor(
+                            id: snapshotID,
+                            kind: .torrentSnapshots,
+                            revision: 1,
+                            itemCount: 1,
+                            pageCount: 1
+                        ),
+                        trackerHostDataset: TorrentEngineIPCDatasetDescriptor(
+                            id: trackerHostID,
+                            kind: .trackerHosts,
+                            revision: 1,
+                            itemCount: 1,
+                            pageCount: 1
+                        )
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .readDataset:
+                let read: TorrentEngineIPCReadDatasetRequest = try decodeRequest(request)
+                #expect(read.id == snapshotID)
+                #expect(read.page == 0)
+                await blocker.block()
+                return try successReply(
+                    TorrentEngineIPCDatasetPage(
+                        id: snapshotID,
+                        kind: .torrentSnapshots,
+                        page: 0,
+                        encodedItems: try TorrentEngineIPCPropertyListCodec.encode(
+                            [torrent],
+                            maximumBytes: TorrentEngineIPCLimits.maximumDatasetPageBytes
+                        )
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .closeDataset:
+                let close: TorrentEngineIPCCloseDatasetRequest = try decodeRequest(request)
+                closedIDs.withLock { $0.append(close.id) }
+                return try successReply(
+                    TorrentEngineIPCEmpty(),
+                    for: request,
+                    epoch: epoch
+                )
+            case .reannounce:
+                return try successReply(
+                    TorrentEngineIPCEmpty(),
+                    for: request,
+                    epoch: epoch
+                )
+            default:
+                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
+            }
+        }
+        let client = try await makeClient(
+            transport: transport,
+            authorizations: [authorization(path: savePath, byte: 1)]
+        )
+        let poll = Task {
+            try await client.poll(
+                since: nil,
+                sortedBy: .name,
+                direction: .ascending,
+                includeTrackerHosts: true
+            )
+        }
+        await blocker.waitUntilBlocked()
+
+        poll.cancel()
+        await blocker.release()
+        await #expect(throws: CancellationError.self) {
+            try await poll.value
+        }
+
+        #expect(closedIDs.withLock { Set($0) } == [snapshotID, trackerHostID])
+        #expect(client.isAvailable)
+        try await client.reannounce(id: torrentID)
+    }
+
+    @Test("Dataset read failure closes every sibling dataset")
+    func datasetReadFailureClosesEveryOwnedDataset() async throws {
+        let epoch = epoch
+        let snapshotID = UUID()
+        let trackerHostID = UUID()
+        let closedIDs = Mutex([UUID]())
+        let transport = ScriptedTorrentEngineTransport { request in
+            switch request.header.operation {
+            case .handshake:
+                return try successReply(
+                    TorrentEngineIPCHandshakeResponse(
+                        libtorrentVersion: "2.1.0",
+                        folders: []
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .poll:
+                return try successReply(
+                    TorrentEngineIPCPollResponse(
+                        dirtyMask: 0,
+                        alertErrors: [],
+                        networkStatus: .empty,
+                        bridgeHealth: .healthy,
+                        networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot(
+                            revision: 1,
+                            interfaces: []
+                        ),
+                        snapshotDataset: TorrentEngineIPCDatasetDescriptor(
+                            id: snapshotID,
+                            kind: .torrentSnapshots,
+                            revision: 1,
+                            itemCount: 1,
+                            pageCount: 1
+                        ),
+                        trackerHostDataset: TorrentEngineIPCDatasetDescriptor(
+                            id: trackerHostID,
+                            kind: .trackerHosts,
+                            revision: 1,
+                            itemCount: 1,
+                            pageCount: 1
+                        )
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .readDataset:
+                throw TorrentEngineClientError.requestExpiredBeforeSubmission
+            case .closeDataset:
+                let close: TorrentEngineIPCCloseDatasetRequest = try decodeRequest(request)
+                closedIDs.withLock { $0.append(close.id) }
+                return try successReply(
+                    TorrentEngineIPCEmpty(),
+                    for: request,
+                    epoch: epoch
+                )
+            case .reannounce:
+                return try successReply(
+                    TorrentEngineIPCEmpty(),
+                    for: request,
+                    epoch: epoch
+                )
+            default:
+                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
+            }
+        }
+        let client = try await makeClient(transport: transport)
+
+        await #expect(throws: TorrentEngineClientError.self) {
+            try await client.poll(
+                since: nil,
+                sortedBy: .name,
+                direction: .ascending,
+                includeTrackerHosts: true
+            )
+        }
+
+        #expect(closedIDs.withLock { Set($0) } == [snapshotID, trackerHostID])
+        #expect(client.isAvailable)
+        try await client.reannounce(id: torrentID)
+    }
+
     @Test("Cancellation during paging closes the dataset without ending the controller")
     func cancelledPagedPollClosesDataset() async throws {
         let epoch = epoch
@@ -1661,6 +2248,19 @@ struct TorrentXPCClientSecurityTests {
         )
     }
 
+    private func waitForPendingPolls(
+        _ expectedCount: Int,
+        client: TorrentXPCClient
+    ) async {
+        for _ in 0..<1_000 {
+            if await client.pendingPollPipelineAcquisitionCount == expectedCount {
+                return
+            }
+            await Task.yield()
+        }
+        Issue.record("Timed out waiting for queued poll-pipeline acquisitions")
+    }
+
     private func authorization(path: String, byte: UInt8) -> TorrentFolderAuthorization {
         TorrentFolderAuthorization(path: path, bookmarkData: Data([byte]))
     }
@@ -1671,6 +2271,46 @@ struct TorrentXPCClientSecurityTests {
             .appending(path: "TorrentXPCClientSecurityTests-\(component)", directoryHint: .isDirectory)
             .standardizedFileURL
             .path(percentEncoded: false)
+    }
+
+    private func makeDatasetTorrent(savePath: String) -> TorrentItem {
+        TorrentItem(
+            id: torrentID,
+            infoHash: "v1:\(String(repeating: "b", count: 40))",
+            name: "Dataset Torrent",
+            savePath: savePath,
+            error: "",
+            comment: "",
+            progress: 0,
+            totalDone: 0,
+            totalWanted: 100,
+            totalSize: 100,
+            totalUpload: 0,
+            totalDownload: 0,
+            totalPayloadUpload: 0,
+            totalPayloadDownload: 0,
+            allTimeUpload: 0,
+            allTimeDownload: 0,
+            addedTime: 0,
+            createdTime: 0,
+            completedTime: 0,
+            downloadRate: 0,
+            uploadRate: 0,
+            downloadPayloadRate: 0,
+            uploadPayloadRate: 0,
+            peers: 0,
+            knownPeers: 0,
+            seeds: 0,
+            state: .unknown,
+            queuePosition: -1,
+            queuePriority: .normal,
+            paused: false,
+            autoManaged: false,
+            seeding: false,
+            finished: false,
+            hasMetadata: true,
+            privateTorrent: false
+        )
     }
 
     private func addMagnet(
