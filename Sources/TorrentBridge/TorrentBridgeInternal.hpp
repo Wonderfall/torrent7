@@ -29,7 +29,6 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
-#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstddef>

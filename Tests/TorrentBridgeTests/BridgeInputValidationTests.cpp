@@ -516,6 +516,10 @@ TEST_CASE("network binding trims input and classifies valid binding forms")
     CHECK(name.kind == NetworkBindingKind::name);
     CHECK(name.value == "en0");
 
+    NetworkBinding const ascii_whitespace = network_binding("\t\n\v\f\ren0 \t");
+    CHECK(ascii_whitespace.kind == NetworkBindingKind::name);
+    CHECK(ascii_whitespace.value == "en0");
+
     NetworkBinding const ipv4 = network_binding("192.0.2.10");
     CHECK(ipv4.kind == NetworkBindingKind::ipv4);
     CHECK(ipv4.value == "192.0.2.10");
@@ -529,6 +533,7 @@ TEST_CASE("network binding rejects ambiguous or unsafe input")
 {
     CHECK_THROWS_AS(static_cast<void>(network_binding("en0,utun0")), std::invalid_argument);
     CHECK_THROWS_AS(static_cast<void>(network_binding("en0 utun0")), std::invalid_argument);
+    CHECK_THROWS_AS(static_cast<void>(network_binding("en0\x7futun0")), std::invalid_argument);
     CHECK_THROWS_AS(static_cast<void>(network_binding("[2001:db8::1]")), std::invalid_argument);
     CHECK_THROWS_AS(static_cast<void>(network_binding("2001:db8:::1")), std::invalid_argument);
 }

@@ -34,6 +34,16 @@ constexpr bool is_ascii_unreserved(unsigned char const character) noexcept
         || character == '-' || character == '.' || character == '_' || character == '~';
 }
 
+constexpr bool is_ascii_space(unsigned char const character) noexcept
+{
+    return character == ' ' || (character >= '\t' && character <= '\r');
+}
+
+constexpr bool is_ascii_control(unsigned char const character) noexcept
+{
+    return character < 0x20U || character == 0x7fU;
+}
+
 constexpr char ascii_lower(unsigned char const character) noexcept
 {
     return character >= 'A' && character <= 'Z'
@@ -101,7 +111,7 @@ bool is_continuation_byte(unsigned char value) noexcept
 
 bool is_c_string_control_byte(unsigned char value) noexcept
 {
-    return value < 0x20U || value == 0x7fU;
+    return is_ascii_control(value);
 }
 
 unsigned char byte_at(std::string_view source, std::size_t offset) noexcept
@@ -2196,11 +2206,11 @@ AuthorizedSavePathListResult parse_authorized_save_path_list_blob(
 std::string trimmed(std::string_view value)
 {
     auto const first = std::ranges::find_if_not(value, [](unsigned char character) {
-        return std::isspace(character) != 0;
+        return is_ascii_space(character);
     });
     auto const reversed = std::views::reverse(value);
     auto const last = std::ranges::find_if_not(reversed, [](unsigned char character) {
-        return std::isspace(character) != 0;
+        return is_ascii_space(character);
     }).base();
 
     if (first >= last) {
@@ -2213,7 +2223,7 @@ std::string trimmed(std::string_view value)
 bool contains_invalid_interface_character(std::string_view value)
 {
     return std::ranges::any_of(value, [](unsigned char character) {
-        return character == ',' || std::iscntrl(character) != 0 || std::isspace(character) != 0;
+        return character == ',' || is_ascii_control(character) || is_ascii_space(character);
     });
 }
 
