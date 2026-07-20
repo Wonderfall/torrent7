@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import Synchronization
 import System
 
 package struct TorrentLegacyStateMigrationLimits: Equatable, Sendable {
@@ -88,7 +89,11 @@ package struct TorrentLegacyStateMigrationCommit: Equatable, Sendable {
 /// Imports only bytes supplied through owned descriptors. It never traverses or
 /// mutates the legacy state tree, so a failed or successful migration leaves the
 /// old installation available for rollback.
-package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable {
+package final class TorrentLegacyStateMigrationCoordinator: Sendable {
+    private struct State: Sendable {
+        var sessionsByID = [UUID: TorrentLegacyStateMigrationSession]()
+    }
+
     package let engineEpoch: UUID
     package let stateDirectoryURL: URL
     package let resumeDataURL: URL
@@ -96,8 +101,7 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
 
     private let limits: TorrentLegacyStateMigrationLimits
     private let fileOperations: TorrentLegacyStateMigrationFileOperations
-    private let lock = NSLock()
-    private var sessionsByID = [UUID: TorrentLegacyStateMigrationSession]()
+    private let state = Mutex(State())
 
     package init(
         engineEpoch: UUID,
@@ -135,15 +139,15 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
 
     package func begin(scope: TorrentEngineServiceScope) throws -> TorrentLegacyStateMigration {
         try validate(scope: scope)
-        return try lock.withLock {
+        return try state.withLock { state in
             try requireConnectedController(scope: scope)
-            guard sessionsByID.count < limits.maximumConcurrentMigrationCount else {
+            guard state.sessionsByID.count < limits.maximumConcurrentMigrationCount else {
                 throw TorrentLegacyStateMigrationError.tooManyConcurrentMigrations(
                     maximum: limits.maximumConcurrentMigrationCount
                 )
             }
 
-            let id = makeMigrationID()
+            let id = makeMigrationID(in: state)
             let stagingURL = migrationRootURL.appending(
                 path: Self.stagingDirectoryName(id: id),
                 directoryHint: .isDirectory
@@ -168,7 +172,7 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
                 filenames: [],
                 byteCount: 0
             )
-            sessionsByID[id] = session
+            state.sessionsByID[id] = session
             return session.snapshot
         }
     }
@@ -177,7 +181,7 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
     /// the live ResumeData directory. This makes the one-time import idempotent
     /// across service launches without trusting controller-side preferences.
     package func hasCompletedMigration() throws -> Bool {
-        try lock.withLock {
+        try state.withLock { _ in
             do {
                 _ = try Self.verifyOwnedDirectory(resumeDataURL)
                 let children = try FileManager.default.contentsOfDirectory(
@@ -227,9 +231,13 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
         }
         let kind = try TorrentLegacyStateFilename.classify(filename)
 
-        try lock.withLock {
+        try state.withLock { state in
             try requireConnectedController(scope: scope)
-            guard var session = session(migrationID: migrationID, scope: scope) else {
+            guard var session = session(
+                migrationID: migrationID,
+                scope: scope,
+                in: state
+            ) else {
                 throw TorrentLegacyStateMigrationError.unknownMigration
             }
             guard case .staging = session.state else {
@@ -265,7 +273,7 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
             )
             session.filenames.insert(filename)
             session.byteCount += metadata.byteCount
-            sessionsByID[migrationID] = session
+            state.sessionsByID[migrationID] = session
         }
     }
 
@@ -274,9 +282,13 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
         scope: TorrentEngineServiceScope
     ) throws -> TorrentLegacyStateMigrationCommit {
         try validate(scope: scope)
-        return try lock.withLock {
+        return try state.withLock { state in
             try requireConnectedController(scope: scope)
-            guard var session = session(migrationID: migrationID, scope: scope) else {
+            guard var session = session(
+                migrationID: migrationID,
+                scope: scope,
+                in: state
+            ) else {
                 throw TorrentLegacyStateMigrationError.unknownMigration
             }
 
@@ -381,7 +393,7 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
                 // The exchange publishes the complete marker and all verified files
                 // together. Record it before any cleanup or durability operation.
                 session.state = .committed(artifact)
-                sessionsByID[migrationID] = session
+                state.sessionsByID[migrationID] = session
                 try finishCommittedMigration(session: session)
                 return artifact
             } catch let error as TorrentLegacyStateMigrationError {
@@ -402,15 +414,19 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
         scope: TorrentEngineServiceScope
     ) throws {
         try validate(scope: scope)
-        try lock.withLock {
+        try state.withLock { state in
             try requireConnectedController(scope: scope)
-            guard let session = session(migrationID: migrationID, scope: scope) else {
+            guard let session = session(
+                migrationID: migrationID,
+                scope: scope,
+                in: state
+            ) else {
                 throw TorrentLegacyStateMigrationError.unknownMigration
             }
             if case .committed = session.state {
                 throw TorrentLegacyStateMigrationError.migrationAlreadyCommitted
             }
-            sessionsByID.removeValue(forKey: migrationID)
+            state.sessionsByID.removeValue(forKey: migrationID)
             try? FileManager.default.removeItem(at: session.directoryURL)
             try? FileManager.default.removeItem(at: migrationRootURL.appending(
                 path: Self.publicationDirectoryName(id: migrationID),
@@ -421,8 +437,8 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
 
     package func disconnect(scope: TorrentEngineServiceScope) {
         scope.invalidate()
-        lock.withLock {
-            let sessions = sessionsByID.values.filter {
+        state.withLock { state in
+            let sessions = state.sessionsByID.values.filter {
                 $0.scope == scope
             }
             for session in sessions {
@@ -435,7 +451,7 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
                     directoryHint: .isDirectory
                 ))
             }
-            sessionsByID = sessionsByID.filter {
+            state.sessionsByID = state.sessionsByID.filter {
                 $0.value.scope != scope
             }
         }
@@ -446,9 +462,13 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
         scope: TorrentEngineServiceScope
     ) throws -> TorrentLegacyStateMigration? {
         try validate(scope: scope)
-        return try lock.withLock {
+        return try state.withLock { state in
             try requireConnectedController(scope: scope)
-            return session(migrationID: migrationID, scope: scope)?.snapshot
+            return session(
+                migrationID: migrationID,
+                scope: scope,
+                in: state
+            )?.snapshot
         }
     }
 
@@ -558,18 +578,19 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
 
     private func session(
         migrationID: UUID,
-        scope: TorrentEngineServiceScope
+        scope: TorrentEngineServiceScope,
+        in state: State
     ) -> TorrentLegacyStateMigrationSession? {
-        guard let session = sessionsByID[migrationID], session.scope == scope else {
+        guard let session = state.sessionsByID[migrationID], session.scope == scope else {
             return nil
         }
         return session
     }
 
-    private func makeMigrationID() -> UUID {
+    private func makeMigrationID(in state: State) -> UUID {
         while true {
             let candidate = UUID()
-            guard sessionsByID[candidate] == nil else {
+            guard state.sessionsByID[candidate] == nil else {
                 continue
             }
             let paths = [
@@ -586,8 +607,8 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
     }
 
     private func cleanupEveryUncommittedSession() {
-        lock.withLock {
-            for session in sessionsByID.values {
+        state.withLock { state in
+            for session in state.sessionsByID.values {
                 if case .committed = session.state {
                     continue
                 }
@@ -597,7 +618,7 @@ package final class TorrentLegacyStateMigrationCoordinator: @unchecked Sendable 
                     directoryHint: .isDirectory
                 ))
             }
-            sessionsByID.removeAll()
+            state.sessionsByID.removeAll()
         }
     }
 
@@ -1167,12 +1188,12 @@ private struct TorrentLegacyStateDirectoryIdentity: Equatable {
     let inode: ino_t
 }
 
-private enum TorrentLegacyStateMigrationSessionState {
+private enum TorrentLegacyStateMigrationSessionState: Sendable {
     case staging
     case committed(TorrentLegacyStateMigrationCommit)
 }
 
-private struct TorrentLegacyStateMigrationSession {
+private struct TorrentLegacyStateMigrationSession: Sendable {
     let id: UUID
     let scope: TorrentEngineServiceScope
     var directoryURL: URL

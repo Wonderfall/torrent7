@@ -1,6 +1,7 @@
 import Darwin
 import ExtensionFoundation
 import Foundation
+import Synchronization
 import TorrentEngineIPC
 import XPC
 
@@ -85,8 +86,8 @@ struct TorrentEngineServiceAdmissionSnapshot: Equatable, Sendable {
     let fileDescriptorCount: Int
 }
 
-@safe final class TorrentEngineServiceSessionHandle: @unchecked Sendable {
-    private enum Destination {
+@safe final class TorrentEngineServiceSessionHandle: Sendable {
+    private enum Destination: Sendable {
         case session(
             XPCSession,
             localCancellationHandler: @Sendable () -> Void
@@ -136,8 +137,8 @@ struct TorrentEngineServiceAdmissionSnapshot: Equatable, Sendable {
     }
 }
 
-@safe final class TorrentEngineServiceAdmissionBudget: @unchecked Sendable {
-    private struct State {
+@safe final class TorrentEngineServiceAdmissionBudget: Sendable {
+    private struct State: Sendable {
         var peerCount = 0
         var requestCount = 0
         var payloadByteCount = 0
@@ -145,15 +146,14 @@ struct TorrentEngineServiceAdmissionSnapshot: Equatable, Sendable {
     }
 
     private let limits: TorrentEngineServiceAdmissionLimits
-    private let lock = NSLock()
-    private var state = State()
+    private let state = Mutex(State())
 
     init(limits: TorrentEngineServiceAdmissionLimits = .standard) {
         self.limits = limits
     }
 
     func acquirePeer() -> TorrentEngineServicePeerAdmission? {
-        let acquired = lock.withLock {
+        let acquired = state.withLock { state in
             guard state.peerCount < limits.maximumPeerCount else {
                 return false
             }
@@ -171,7 +171,7 @@ struct TorrentEngineServiceAdmissionSnapshot: Equatable, Sendable {
             return nil
         }
         let fileDescriptorCount = hasFileDescriptor ? 1 : 0
-        let acquired = lock.withLock {
+        let acquired = state.withLock { state in
             guard state.requestCount < limits.maximumRequestCount,
                   payloadByteCount <= limits.maximumPayloadByteCount - state.payloadByteCount,
                   fileDescriptorCount <= limits.maximumFileDescriptorCount
@@ -194,14 +194,14 @@ struct TorrentEngineServiceAdmissionSnapshot: Equatable, Sendable {
     }
 
     fileprivate func releasePeer() {
-        lock.withLock {
+        state.withLock { state in
             precondition(state.peerCount > 0)
             state.peerCount -= 1
         }
     }
 
     fileprivate func releaseRequest(payloadByteCount: Int, fileDescriptorCount: Int) {
-        lock.withLock {
+        state.withLock { state in
             precondition(state.requestCount > 0)
             precondition(state.payloadByteCount >= payloadByteCount)
             precondition(state.fileDescriptorCount >= fileDescriptorCount)
@@ -212,7 +212,7 @@ struct TorrentEngineServiceAdmissionSnapshot: Equatable, Sendable {
     }
 
     func snapshot() -> TorrentEngineServiceAdmissionSnapshot {
-        lock.withLock {
+        state.withLock { state in
             TorrentEngineServiceAdmissionSnapshot(
                 peerCount: state.peerCount,
                 requestCount: state.requestCount,
@@ -223,17 +223,16 @@ struct TorrentEngineServiceAdmissionSnapshot: Equatable, Sendable {
     }
 }
 
-@safe final class TorrentEngineServicePeerAdmission: @unchecked Sendable {
+@safe final class TorrentEngineServicePeerAdmission: Sendable {
     private let budget: TorrentEngineServiceAdmissionBudget
-    private let lock = NSLock()
-    private var isReleased = false
+    private let isReleased = Mutex(false)
 
     init(budget: TorrentEngineServiceAdmissionBudget) {
         self.budget = budget
     }
 
     func release() {
-        let shouldRelease = lock.withLock {
+        let shouldRelease = isReleased.withLock { isReleased in
             guard !isReleased else {
                 return false
             }
@@ -250,13 +249,12 @@ struct TorrentEngineServiceAdmissionSnapshot: Equatable, Sendable {
     }
 }
 
-@safe final class TorrentEngineServiceRequestAdmission: @unchecked Sendable {
+@safe final class TorrentEngineServiceRequestAdmission: Sendable {
     let payloadByteCount: Int
     let fileDescriptorCount: Int
 
     private let budget: TorrentEngineServiceAdmissionBudget
-    private let lock = NSLock()
-    private var isReleased = false
+    private let isReleased = Mutex(false)
 
     init(
         budget: TorrentEngineServiceAdmissionBudget,
@@ -269,7 +267,7 @@ struct TorrentEngineServiceAdmissionSnapshot: Equatable, Sendable {
     }
 
     func release() {
-        let shouldRelease = lock.withLock {
+        let shouldRelease = isReleased.withLock { isReleased in
             guard !isReleased else {
                 return false
             }
@@ -408,7 +406,7 @@ package enum TorrentEngineExtensionConfiguration {
     }
 }
 
-@safe private final class TorrentEngineServicePeer: XPCPeerHandler, @unchecked Sendable {
+@safe private final class TorrentEngineServicePeer: XPCPeerHandler, Sendable {
     typealias Input = XPCDictionary
     typealias Output = XPCDictionary
     private static let maximumQueuedRequestCount = 8
@@ -416,21 +414,24 @@ package enum TorrentEngineExtensionConfiguration {
     private static let maximumQueuedFileDescriptorCount = 1
     private static let transientReplyGracePeriod: Duration = .seconds(1)
 
+    private struct State: Sendable {
+        var session: XPCSession?
+        var isCancelled = false
+        var isRetiringAfterReply = false
+        var tailTask: Task<Void, Never>?
+        var retirementTask: Task<Void, Never>?
+        var queuedRequestCount = 0
+        var queuedPayloadByteCount = 0
+        var queuedFileDescriptorCount = 0
+    }
+
     private let runtime: TorrentEngineServiceRuntime
     private let admissionBudget: TorrentEngineServiceAdmissionBudget
     private let peerAdmission: TorrentEngineServicePeerAdmission
     private let containmentWatchdog: TorrentEngineServiceContainmentWatchdog
     private let cleanupWatchdog: TorrentEngineServiceContainmentWatchdog
     private let token = UUID()
-    private let lock = NSLock()
-    private var session: XPCSession?
-    private var isCancelled = false
-    private var isRetiringAfterReply = false
-    private var tailTask: Task<Void, Never>?
-    private var retirementTask: Task<Void, Never>?
-    private var queuedRequestCount = 0
-    private var queuedPayloadByteCount = 0
-    private var queuedFileDescriptorCount = 0
+    private let state = Mutex(State())
 
     init(
         runtime: TorrentEngineServiceRuntime,
@@ -447,11 +448,11 @@ package enum TorrentEngineExtensionConfiguration {
     }
 
     func bind(session: XPCSession) {
-        let shouldCancel = lock.withLock {
-            guard !isCancelled else {
+        let shouldCancel = state.withLock { state in
+            guard !state.isCancelled else {
                 return true
             }
-            self.session = session
+            state.session = session
             return false
         }
         if shouldCancel {
@@ -486,7 +487,7 @@ package enum TorrentEngineExtensionConfiguration {
         } catch {
             // No trustworthy header exists for a correlated failure reply. XPC
             // owns the original message objects and releases any contained FD.
-            if let session = lock.withLock({ session }) {
+            if let session = state.withLock({ $0.session }) {
                 reject(session: session, reason: "Malformed torrent engine request")
             } else {
                 cancel()
@@ -497,16 +498,18 @@ package enum TorrentEngineExtensionConfiguration {
         var requestAdmission: TorrentEngineServiceRequestAdmission?
         var peerSession: XPCSession?
         var sessionToCancel: XPCSession?
-        lock.withLock {
-            guard !isCancelled, !isRetiringAfterReply, let session else {
+        state.withLock { state in
+            guard !state.isCancelled,
+                  !state.isRetiringAfterReply,
+                  let session = state.session else {
                 return
             }
             let fileDescriptorCount = metadata.hasFileDescriptor ? 1 : 0
-            guard queuedRequestCount < Self.maximumQueuedRequestCount,
+            guard state.queuedRequestCount < Self.maximumQueuedRequestCount,
                   metadata.payloadByteCount <= Self.maximumQueuedPayloadBytes
-                    - queuedPayloadByteCount,
+                    - state.queuedPayloadByteCount,
                   fileDescriptorCount <= Self.maximumQueuedFileDescriptorCount
-                    - queuedFileDescriptorCount,
+                    - state.queuedFileDescriptorCount,
                   let admission = admissionBudget.acquireRequest(
                     payloadByteCount: metadata.payloadByteCount,
                     hasFileDescriptor: metadata.hasFileDescriptor
@@ -514,9 +517,9 @@ package enum TorrentEngineExtensionConfiguration {
                 sessionToCancel = session
                 return
             }
-            queuedRequestCount += 1
-            queuedPayloadByteCount += admission.payloadByteCount
-            queuedFileDescriptorCount += admission.fileDescriptorCount
+            state.queuedRequestCount += 1
+            state.queuedPayloadByteCount += admission.payloadByteCount
+            state.queuedFileDescriptorCount += admission.fileDescriptorCount
             requestAdmission = admission
             peerSession = session
         }
@@ -546,12 +549,12 @@ package enum TorrentEngineExtensionConfiguration {
 
         let pendingReply = TorrentEnginePendingReply(message: message)
         var wasScheduled = false
-        lock.withLock {
-            guard !isCancelled, session != nil else {
+        state.withLock { state in
+            guard !state.isCancelled, state.session != nil else {
                 return
             }
-            let predecessor = tailTask
-            tailTask = Task { [weak self, runtime, token] in
+            let predecessor = state.tailTask
+            state.tailTask = Task { [weak self, runtime, token] in
                 await predecessor?.value
                 defer {
                     self?.requestDidFinish(requestAdmission)
@@ -602,23 +605,23 @@ package enum TorrentEngineExtensionConfiguration {
 
     func cancel() {
         // Publish containment before publishing cancellation. A request can
-        // observe isCancelled as soon as the peer lock is released and must
+        // observe isCancelled as soon as the peer state mutex is released and must
         // never enter native disconnect work without an armed deadline.
         let containmentToken = containmentWatchdog.arm()
         let cancellation: (
             shouldNotify: Bool,
             tailTask: Task<Void, Never>?,
             retirementTask: Task<Void, Never>?
-        ) = lock.withLock {
-            guard !isCancelled else {
+        ) = state.withLock { state in
+            guard !state.isCancelled else {
                 return (false, nil, nil)
             }
-            isCancelled = true
-            session = nil
-            let tailTask = self.tailTask
-            self.tailTask = nil
-            let retirementTask = self.retirementTask
-            self.retirementTask = nil
+            state.isCancelled = true
+            state.session = nil
+            let tailTask = state.tailTask
+            state.tailTask = nil
+            let retirementTask = state.retirementTask
+            state.retirementTask = nil
             return (true, tailTask, retirementTask)
         }
 
@@ -646,21 +649,21 @@ package enum TorrentEngineExtensionConfiguration {
     }
 
     private var peerIsCancelled: Bool {
-        lock.withLock { isCancelled || isRetiringAfterReply }
+        state.withLock { $0.isCancelled || $0.isRetiringAfterReply }
     }
 
     private func retireAfterReply() {
-        let retiringSession = lock.withLock { () -> XPCSession? in
-            guard !isCancelled,
-                  !isRetiringAfterReply,
-                  retirementTask == nil,
-                  let session else {
+        let retiringSession = state.withLock { state -> XPCSession? in
+            guard !state.isCancelled,
+                  !state.isRetiringAfterReply,
+                  state.retirementTask == nil,
+                  let session = state.session else {
                 return nil
             }
             // Latch terminal state before the current request completes. Any
             // queued successor drains without entering the runtime, and no new
             // request can be admitted during the reply delivery window.
-            isRetiringAfterReply = true
+            state.isRetiringAfterReply = true
             return session
         }
         guard let retiringSession else {
@@ -678,13 +681,13 @@ package enum TorrentEngineExtensionConfiguration {
                 reason: "Torrent engine transient reply grace period elapsed"
             )
         }
-        let installed = lock.withLock {
-            guard !isCancelled,
-                  isRetiringAfterReply,
-                  retirementTask == nil else {
+        let installed = state.withLock { state in
+            guard !state.isCancelled,
+                  state.isRetiringAfterReply,
+                  state.retirementTask == nil else {
                 return false
             }
-            retirementTask = task
+            state.retirementTask = task
             return true
         }
         if !installed {
@@ -700,18 +703,20 @@ package enum TorrentEngineExtensionConfiguration {
     private func requestDidFinish(
         _ admission: TorrentEngineServiceRequestAdmission
     ) {
-        lock.withLock {
-            precondition(queuedRequestCount > 0)
-            precondition(queuedPayloadByteCount >= admission.payloadByteCount)
-            precondition(queuedFileDescriptorCount >= admission.fileDescriptorCount)
-            queuedRequestCount -= 1
-            queuedPayloadByteCount -= admission.payloadByteCount
-            queuedFileDescriptorCount -= admission.fileDescriptorCount
+        state.withLock { state in
+            precondition(state.queuedRequestCount > 0)
+            precondition(state.queuedPayloadByteCount >= admission.payloadByteCount)
+            precondition(state.queuedFileDescriptorCount >= admission.fileDescriptorCount)
+            state.queuedRequestCount -= 1
+            state.queuedPayloadByteCount -= admission.payloadByteCount
+            state.queuedFileDescriptorCount -= admission.fileDescriptorCount
         }
         admission.release()
     }
 }
 
+/// XPCDictionary lacks Sendable conformance. The destination is immutable, and
+/// `didReply` transfers it to exactly one synchronous sender.
 @safe final class TorrentEnginePendingReply: @unchecked Sendable {
     private enum Destination {
         case message(XPCDictionary)
@@ -719,8 +724,7 @@ package enum TorrentEngineExtensionConfiguration {
     }
 
     private let destination: Destination
-    private let lock = NSLock()
-    private var didReply = false
+    private let didReply = Mutex(false)
 
     init(message: XPCDictionary) {
         destination = .message(message)
@@ -744,7 +748,7 @@ package enum TorrentEngineExtensionConfiguration {
     }
 
     func send(_ reply: XPCDictionary, status: TorrentEngineIPCReplyStatus) {
-        let shouldReply = lock.withLock {
+        let shouldReply = didReply.withLock { didReply in
             guard !didReply else {
                 return false
             }
