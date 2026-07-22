@@ -79,6 +79,8 @@ typeset -a compiler_args=(
     -fPIE
     -ftrivial-auto-var-init=zero
     -fno-delete-null-pointer-checks
+    -fno-strict-overflow
+    -fno-strict-aliasing
     -fzero-call-used-regs=used-gpr
     -fvisibility=hidden
     -fvisibility-inlines-hidden

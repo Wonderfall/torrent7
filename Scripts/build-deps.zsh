@@ -213,12 +213,14 @@ typeset -r BRANCH_TARGET_IDENTIFICATION_FLAG="-fbranch-target-identification"
 typeset -r SLS_HARDENING_FLAG="-mharden-sls=all"
 typeset -r ZERO_CALL_USED_REGS_FLAG="-fzero-call-used-regs=used-gpr"
 typeset -r RETAIN_NULL_POINTER_CHECKS_FLAG="-fno-delete-null-pointer-checks"
+typeset -r NO_STRICT_OVERFLOW_FLAG="-fno-strict-overflow"
+typeset -r NO_STRICT_ALIASING_FLAG="-fno-strict-aliasing"
 typeset LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE
 typeset -r DIAGNOSTIC_SANITIZER_FLAGS="-g -fno-omit-frame-pointer -fsanitize=address,undefined,local-bounds -fsanitize-address-use-after-scope -fno-sanitize-recover=undefined,local-bounds"
 if [[ "$ENABLE_DIAGNOSTICS" == "1" ]]; then
     LIBCPP_HARDENING_MODE="_LIBCPP_HARDENING_MODE_DEBUG"
 fi
-typeset -r HARDENED_COMMON_FLAGS="-Wno-poison-system-directories -Wformat -Wformat-security -Werror=format-security -fstack-protector-strong -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -fPIE -ftrivial-auto-var-init=zero $RETAIN_NULL_POINTER_CHECKS_FLAG -fvisibility=hidden -faarch64-jump-table-hardening $STRICT_FLEX_ARRAYS_FLAG $BRANCH_TARGET_IDENTIFICATION_FLAG $SLS_HARDENING_FLAG $ZERO_CALL_USED_REGS_FLAG $PTRAUTH_C_FLAGS"
+typeset -r HARDENED_COMMON_FLAGS="-Wno-poison-system-directories -Wformat -Wformat-security -Werror=format-security -fstack-protector-strong -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -fPIE -ftrivial-auto-var-init=zero $RETAIN_NULL_POINTER_CHECKS_FLAG $NO_STRICT_OVERFLOW_FLAG $NO_STRICT_ALIASING_FLAG -fvisibility=hidden -faarch64-jump-table-hardening $STRICT_FLEX_ARRAYS_FLAG $BRANCH_TARGET_IDENTIFICATION_FLAG $SLS_HARDENING_FLAG $ZERO_CALL_USED_REGS_FLAG $PTRAUTH_C_FLAGS"
 typeset -r HARDENED_C_FLAGS="$HARDENED_COMMON_FLAGS $TYPED_ALLOCATOR_C_FLAGS"
 typeset -r OPENSSL_HARDENED_CXX_FLAGS="$HARDENED_COMMON_FLAGS $PTRAUTH_CXX_FLAGS $TYPED_ALLOCATOR_CXX_FLAGS -D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE -fvisibility-inlines-hidden"
 typeset -r HARDENED_CXX_FLAGS="$HARDENED_COMMON_FLAGS $PTRAUTH_CXX_FLAGS $TYPED_ALLOCATOR_CXX_FLAGS -D_LIBCPP_HARDENING_MODE=$LIBCPP_HARDENING_MODE -fvisibility-inlines-hidden"
