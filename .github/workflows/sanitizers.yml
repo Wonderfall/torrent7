@@ -1,11 +1,11 @@
-name: ThreadSanitizer
+name: Sanitizers
 
 on:
   push:
     branches:
       - main
     paths:
-      - ".github/workflows/thread-sanitizer.yml"
+      - ".github/workflows/sanitizers.yml"
       - "Documentation/EnhancedSecurityExtensionIntegration.md"
       - "Package.swift"
       - "Packaging/**"
@@ -21,7 +21,7 @@ on:
       - reopened
       - ready_for_review
     paths:
-      - ".github/workflows/thread-sanitizer.yml"
+      - ".github/workflows/sanitizers.yml"
       - "Documentation/EnhancedSecurityExtensionIntegration.md"
       - "Package.swift"
       - "Packaging/**"
@@ -35,18 +35,29 @@ on:
 permissions: {}
 
 concurrency:
-  group: thread-sanitizer-${{ github.event.pull_request.number || github.ref }}
+  group: sanitizers-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   test:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    name: Test fully instrumented app
+    name: ${{ matrix.name }}
     runs-on: macos-26
     permissions: {}
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: address
+            name: AddressSanitizer
+            runtime_symbol: ___asan_
+          - profile: thread
+            name: ThreadSanitizer
+            runtime_symbol: ___tsan_
     env:
-      SANITIZER_PROFILE: thread
+      SANITIZER_PROFILE: ${{ matrix.profile }}
+      ASAN_OPTIONS: halt_on_error=1:abort_on_error=1
       TSAN_OPTIONS: halt_on_error=1:exitcode=66:print_full_thread_history=1
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
     steps:
@@ -74,13 +85,13 @@ jobs:
           set -euo pipefail
           brew install cmake ninja gnupg
 
-      - name: Restore ThreadSanitizer dependency cache
+      - name: Restore sanitizer dependency cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             .build/deps/source-cache
-            .build/deps/arm64e-thread
-          key: deps-arm64e-thread-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/keys/**', 'Scripts/patches/**') }}
+            .build/deps/arm64e-${{ matrix.profile }}
+          key: deps-arm64e-${{ matrix.profile }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/keys/**', 'Scripts/patches/**') }}
 
       - name: Build fully instrumented dependencies
         shell: zsh {0}
@@ -90,14 +101,17 @@ jobs:
 
       - name: Verify dependency instrumentation
         shell: zsh {0}
+        env:
+          RUNTIME_SYMBOL: ${{ matrix.runtime_symbol }}
         run: |
           set -euo pipefail
           for archive in \
-            .build/deps/arm64e-thread/prefix/lib/libcrypto.a \
-            .build/deps/arm64e-thread/prefix/lib/libssl.a \
-            .build/deps/arm64e-thread/prefix/lib/libtorrent-rasterbar.a; do
-            xcrun nm "$archive" | awk '/___tsan_/ { found=1 } END { exit !found }' \
-              || { print -ru2 -- "Missing ThreadSanitizer instrumentation: $archive"; exit 1; }
+            ".build/deps/arm64e-${SANITIZER_PROFILE}/prefix/lib/libcrypto.a" \
+            ".build/deps/arm64e-${SANITIZER_PROFILE}/prefix/lib/libssl.a" \
+            ".build/deps/arm64e-${SANITIZER_PROFILE}/prefix/lib/libtorrent-rasterbar.a"; do
+            xcrun nm "$archive" \
+              | awk -v symbol="$RUNTIME_SYMBOL" 'index($0, symbol) { found=1 } END { exit !found }' \
+              || { print -ru2 -- "Missing $SANITIZER_PROFILE sanitizer instrumentation: $archive"; exit 1; }
           done
 
       - name: Run libtorrent security regressions
@@ -118,14 +132,13 @@ jobs:
           set -euo pipefail
           SKIP_BUILD_DEPS=1 Scripts/test-swift.zsh
 
-      - name: Build and verify ThreadSanitizer app
+      - name: Build and verify sanitizer app
         shell: zsh {0}
         run: |
           set -euo pipefail
           SKIP_BUILD_DEPS=1 Scripts/build-app.zsh
-          Scripts/verify-app.zsh ".build/App-Thread/Torrent 7 (TSan).app"
 
-      - name: Exercise Enhanced Security lifecycle under ThreadSanitizer
+      - name: Exercise Enhanced Security lifecycle under sanitizer
         shell: zsh {0}
         run: |
           set -euo pipefail

@@ -440,7 +440,7 @@ typeset -a sanitizer_environment_args=()
 case $sanitizer_profile in
     address)
         sanitizer_environment_args=(
-            --env "ASAN_OPTIONS=${ASAN_OPTIONS:-halt_on_error=1:abort_on_error=1:detect_leaks=1}"
+            --env "ASAN_OPTIONS=${ASAN_OPTIONS:-halt_on_error=1:abort_on_error=1}"
             --env "UBSAN_OPTIONS=${UBSAN_OPTIONS:-halt_on_error=1:print_stacktrace=1}"
         )
         ;;

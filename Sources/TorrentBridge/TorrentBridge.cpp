@@ -1,5 +1,15 @@
 #include "TorrentBridgeInternal.hpp"
 
+#if __has_feature(address_sanitizer)
+extern "C" __attribute__((visibility("default"), used, retain))
+char const *__asan_default_options() noexcept
+{
+    // Enhanced Security helpers are launched by the system and may not inherit
+    // the test runner's environment. Make every helper-side violation fail the lane.
+    return "halt_on_error=1:abort_on_error=1";
+}
+#endif
+
 #if __has_feature(thread_sanitizer)
 extern "C" __attribute__((visibility("default"), used, retain))
 char const *__tsan_default_options() noexcept

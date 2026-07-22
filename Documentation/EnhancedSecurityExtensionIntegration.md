@@ -110,6 +110,6 @@ SANITIZER_PROFILE=thread SKIP_BUILD_DEPS=1 \
 ```
 
 The sanitizer runtime is verified in both the host and helper before launch.
-TSan uses fail-fast options without suppressions; the Bridge also embeds those
-defaults because the system-launched Enhanced Security helper is not guaranteed
-to inherit the runner's environment.
+ASan and TSan use fail-fast options without suppressions; the Bridge also embeds
+the active profile's defaults because the system-launched Enhanced Security
+helper is not guaranteed to inherit the runner's environment.
