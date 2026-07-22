@@ -93,9 +93,9 @@ typeset -a compiler_args=(
     -fptrauth-intrinsics
     -fptrauth-vtable-pointer-address-discrimination
     -fptrauth-vtable-pointer-type-discrimination
-    -fsanitize=undefined,local-bounds
-    -fsanitize-trap=undefined,local-bounds
-    -fno-sanitize-recover=undefined,local-bounds
+    -fsanitize=undefined,local-bounds,unsigned-integer-overflow,implicit-conversion
+    -fsanitize-trap=undefined,local-bounds,unsigned-integer-overflow,implicit-conversion
+    -fno-sanitize-recover=undefined,local-bounds,unsigned-integer-overflow,implicit-conversion
     -D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE
     -DBOOST_ASIO_ENABLE_CANCELIO
     -DBOOST_ASIO_NO_DEPRECATED

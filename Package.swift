@@ -77,8 +77,11 @@ let bridgeTypedAllocatorFlags = [
 ]
 // The undefined group already covers null, alignment, object-size,
 // pointer-overflow, shift, integer-divide-by-zero, and array-bounds.
-// local-bounds is intentionally outside Clang's undefined group.
-let trapOnlyUBSanSanitizers = "undefined,local-bounds"
+// local-bounds is intentionally outside Clang's undefined group. The
+// remaining checks reject defined-but-suspicious unsigned overflow and
+// lossy implicit integer conversions in the bridge surface we control.
+let trapOnlyUBSanSanitizers =
+    "undefined,local-bounds,unsigned-integer-overflow,implicit-conversion"
 let trapOnlyUBSanFlags = [
     "-fsanitize=\(trapOnlyUBSanSanitizers)",
     "-fsanitize-trap=\(trapOnlyUBSanSanitizers)",
