@@ -40,10 +40,10 @@ let bridgeLanguageAndRuntimeFlags = [
     "-std=c++23",
     "-fexceptions"
 ]
-let bridgeFortifyFlags = [
-    "-U_FORTIFY_SOURCE",
-    "-D_FORTIFY_SOURCE=3"
-]
+// Keep fortify out of diagnostics so it cannot obscure ASan reports.
+let bridgeFortifyFlags = enableDiagnostics
+    ? ["-U_FORTIFY_SOURCE"]
+    : ["-U_FORTIFY_SOURCE", "-D_FORTIFY_SOURCE=3"]
 let bridgeCompilerHardeningFlags = [
     "-fstack-protector-strong",
     "-fPIE",
