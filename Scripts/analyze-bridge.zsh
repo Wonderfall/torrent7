@@ -71,6 +71,16 @@ typeset -a compiler_args=(
     -Wsizeof-array-div
     -Wsizeof-pointer-div
     -Wreturn-stack-address
+    -Wpointer-arith
+    -Wpragma-pack
+    -Wpragma-pack-suspicious-include
+    -Wunreachable-code-loop-increment
+    -Wnon-virtual-dtor
+    -Wdangling
+    -Wnull-dereference
+    -Wcast-align
+    -Wcast-qual
+    -Wundef
     -Wunsafe-buffer-usage
     -Werror
     -fstack-protector-strong

@@ -33,6 +33,16 @@ let bridgeWarnings: [CXXSetting] = [
     .enableWarning("sizeof-array-div"),
     .enableWarning("sizeof-pointer-div"),
     .enableWarning("return-stack-address"),
+    .enableWarning("pointer-arith"),
+    .enableWarning("pragma-pack"),
+    .enableWarning("pragma-pack-suspicious-include"),
+    .enableWarning("unreachable-code-loop-increment"),
+    .enableWarning("non-virtual-dtor"),
+    .enableWarning("dangling"),
+    .enableWarning("null-dereference"),
+    .enableWarning("cast-align"),
+    .enableWarning("cast-qual"),
+    .enableWarning("undef"),
     .enableWarning("unsafe-buffer-usage")
 ]
 
