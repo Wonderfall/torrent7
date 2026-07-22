@@ -1258,6 +1258,8 @@ struct TTorrentClient {
     std::vector<std::unique_ptr<TorrentIdentity>> retiring_torrent_identities;
     std::unordered_set<std::string> canonical_ids_in_use;
     std::atomic<std::size_t> identity_reclamation_blockers = 0;
+    // Protected by resume_io_lock. Code that also needs client state acquires
+    // lock before resume_io_lock.
     std::unordered_map<std::string, TorrentIdentity *> active_identity_by_id;
     std::unordered_map<std::string, TorrentIdentity *> removing_identity_by_id;
     std::unordered_map<std::string, lt::torrent_handle> handle_by_id;

@@ -23,6 +23,32 @@ struct QueueOrderingEntry {
     int rank = kUnsetQueueRank;
 };
 
+struct ActiveTorrentEntry {
+    lt::torrent_handle handle;
+    TorrentIdentity *identity = nullptr;
+};
+
+std::vector<ActiveTorrentEntry> active_torrent_entries(TTorrentClient const &client)
+{
+    std::vector<ActiveTorrentEntry> entries;
+    std::set<TorrentIdentity *> seen;
+    std::scoped_lock io_guard(client.resume_io_lock);
+    entries.reserve(client.active_identity_by_id.size());
+    for (auto const &[id, identity] : client.active_identity_by_id) {
+        if (identity == nullptr || !seen.insert(identity).second) {
+            continue;
+        }
+        auto const handle = client.handle_by_id.find(id);
+        if (handle != client.handle_by_id.end()) {
+            entries.push_back(ActiveTorrentEntry{
+                .handle = handle->second,
+                .identity = identity,
+            });
+        }
+    }
+    return entries;
+}
+
 int queue_priority_sort_rank(int32_t priority)
 {
     switch (priority) {
@@ -52,10 +78,19 @@ std::optional<int> queue_position_value(lt::torrent_handle const &handle) noexce
 
 std::vector<QueueOrderingEntry> queue_ordering_entries(TTorrentClient const &client)
 {
+    std::vector<lt::torrent_handle> handles;
+    {
+        std::scoped_lock io_guard(client.resume_io_lock);
+        handles.reserve(client.handle_by_id.size());
+        for (auto const &[id, handle] : client.handle_by_id) {
+            static_cast<void>(id);
+            handles.push_back(handle);
+        }
+    }
+
     std::vector<QueueOrderingEntry> entries;
     std::set<TorrentIdentity *> seen;
-    for (auto const &[id, handle] : client.handle_by_id) {
-        static_cast<void>(id);
+    for (lt::torrent_handle const &handle : handles) {
         TorrentIdentity *identity = identity_from_handle(handle);
         if (identity == nullptr || !seen.insert(identity).second) {
             continue;
@@ -760,22 +795,9 @@ SourcePolicyApplicationResult apply_dht_policy_locked(TTorrentClient &client, bo
 {
     client.dht_enabled_by_default = use_dht_by_default;
     SourcePolicyApplicationResult result;
-    std::set<TorrentIdentity *> visited;
-    for (auto const &entry : client.active_identity_by_id) {
-        TorrentIdentity *identity = entry.second;
-        if (identity == nullptr) {
-            continue;
-        }
-
-        auto handle_iterator = client.handle_by_id.find(entry.first);
-        if (handle_iterator == client.handle_by_id.end()) {
-            continue;
-        }
-        if (!visited.insert(identity).second) {
-            continue;
-        }
-
-        lt::torrent_handle &handle = handle_iterator->second;
+    for (ActiveTorrentEntry const &entry : active_torrent_entries(client)) {
+        TorrentIdentity *identity = entry.identity;
+        lt::torrent_handle const &handle = entry.handle;
         bool changed = false;
         if (identity->dht_locked_by_source) {
             changed = identity->dht_enabled_by_user || identity->dht_disabled_by_user;
@@ -852,22 +874,9 @@ SourcePolicyApplicationResult apply_lsd_policy_locked(TTorrentClient &client, bo
 {
     client.lsd_enabled_by_default = use_lsd_by_default;
     SourcePolicyApplicationResult result;
-    std::set<TorrentIdentity *> visited;
-    for (auto const &entry : client.active_identity_by_id) {
-        TorrentIdentity *identity = entry.second;
-        if (identity == nullptr) {
-            continue;
-        }
-
-        auto handle_iterator = client.handle_by_id.find(entry.first);
-        if (handle_iterator == client.handle_by_id.end()) {
-            continue;
-        }
-        if (!visited.insert(identity).second) {
-            continue;
-        }
-
-        lt::torrent_handle &handle = handle_iterator->second;
+    for (ActiveTorrentEntry const &entry : active_torrent_entries(client)) {
+        TorrentIdentity *identity = entry.identity;
+        lt::torrent_handle const &handle = entry.handle;
         bool changed = false;
         if (identity->lsd_locked_by_source) {
             changed = identity->lsd_enabled_by_user || identity->lsd_disabled_by_user;
@@ -936,22 +945,9 @@ SourcePolicyApplicationResult apply_peer_exchange_policy_locked(TTorrentClient &
 {
     client.peer_exchange_enabled_by_default = use_peer_exchange_by_default;
     SourcePolicyApplicationResult result;
-    std::set<TorrentIdentity *> visited;
-    for (auto const &entry : client.active_identity_by_id) {
-        TorrentIdentity *identity = entry.second;
-        if (identity == nullptr) {
-            continue;
-        }
-
-        auto handle_iterator = client.handle_by_id.find(entry.first);
-        if (handle_iterator == client.handle_by_id.end()) {
-            continue;
-        }
-        if (!visited.insert(identity).second) {
-            continue;
-        }
-
-        lt::torrent_handle &handle = handle_iterator->second;
+    for (ActiveTorrentEntry const &entry : active_torrent_entries(client)) {
+        TorrentIdentity *identity = entry.identity;
+        lt::torrent_handle const &handle = entry.handle;
         bool changed = false;
         if (identity->peer_exchange_locked_by_source) {
             changed = identity->peer_exchange_enabled_by_user || identity->peer_exchange_disabled_by_user;
@@ -1465,20 +1461,9 @@ DirtyMask TTorrentClient::set_source_policy_field(
 DirtyMask TTorrentClient::apply_https_source_policy_locked()
 {
     DirtyMask changes = 0;
-    std::set<TorrentIdentity *> visited;
-    for (auto const &entry : active_identity_by_id) {
-        TorrentIdentity *identity = entry.second;
-        if (identity == nullptr || !visited.insert(identity).second) {
-            continue;
-        }
-
-        auto const handle_iterator = handle_by_id.find(entry.first);
-        if (handle_iterator == handle_by_id.end()) {
-            continue;
-        }
-
-        changes |= restore_metadata_source_policy(handle_iterator->second, identity);
-        changes |= enforce_https_source_policy(handle_iterator->second, identity);
+    for (ActiveTorrentEntry const &entry : active_torrent_entries(*this)) {
+        changes |= restore_metadata_source_policy(entry.handle, entry.identity);
+        changes |= enforce_https_source_policy(entry.handle, entry.identity);
     }
     return changes;
 }

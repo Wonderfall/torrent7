@@ -62,6 +62,24 @@ void counting_wake_callback(void *context)
     return fs::exists(path, ignored);
 }
 
+[[nodiscard]] TorrentIdentity *mapped_active_identity(TTorrentClient const &client, std::string const &id)
+{
+    std::scoped_lock io_guard(client.resume_io_lock);
+    return client.active_identity_by_id.at(id);
+}
+
+[[nodiscard]] bool has_mapped_active_identity(TTorrentClient const &client, std::string const &id)
+{
+    std::scoped_lock io_guard(client.resume_io_lock);
+    return client.active_identity_by_id.contains(id);
+}
+
+[[nodiscard]] lt::torrent_handle mapped_torrent_handle(TTorrentClient const &client, std::string const &id)
+{
+    std::scoped_lock io_guard(client.resume_io_lock);
+    return client.handle_by_id.at(id);
+}
+
 template <typename Predicate>
 [[nodiscard]] bool eventually(Predicate &&predicate)
 {
@@ -1474,8 +1492,8 @@ TEST_CASE("conflict removals retain admission authority until their exact remove
     REQUIRE_FALSE(duplicate_ids.empty());
     client.mark_active(duplicate_hashes, survivor, survivor_identity);
     for (std::string const &id : duplicate_ids) {
-        REQUIRE(client.active_identity_by_id.at(id) == survivor_identity);
-        REQUIRE(identity_from_handle(client.handle_by_id.at(id)) == survivor_identity);
+        REQUIRE(mapped_active_identity(client, id) == survivor_identity);
+        REQUIRE(identity_from_handle(mapped_torrent_handle(client, id)) == survivor_identity);
     }
 
     client.torrent_identities.reserve(
@@ -1499,12 +1517,15 @@ TEST_CASE("conflict removals retain admission authority until their exact remove
     CHECK(client.unidentified_removing_identities.contains(duplicate_identity));
     CHECK(client.accepts_removed_alert(duplicate_hashes, duplicate_identity));
     for (std::string const &id : duplicate_ids) {
-        CHECK(client.active_identity_by_id.at(id) == survivor_identity);
-        CHECK(identity_from_handle(client.handle_by_id.at(id)) == survivor_identity);
+        CHECK(mapped_active_identity(client, id) == survivor_identity);
+        CHECK(identity_from_handle(mapped_torrent_handle(client, id)) == survivor_identity);
     }
 
-    for (std::string const &id : duplicate_ids) {
-        client.active_identity_by_id.erase(id);
+    {
+        std::scoped_lock io_guard(client.resume_io_lock);
+        for (std::string const &id : duplicate_ids) {
+            client.active_identity_by_id.erase(id);
+        }
     }
     std::string const duplicate_canonical_id = duplicate_identity->canonical_id;
     client.finalize_removed(duplicate_hashes, duplicate_identity);
@@ -1516,8 +1537,8 @@ TEST_CASE("conflict removals retain admission authority until their exact remove
     CHECK_FALSE(client.unidentified_removing_identities.contains(duplicate_identity));
     CHECK(identity_from_client_data(duplicate_userdata) == nullptr);
     for (std::string const &id : duplicate_ids) {
-        CHECK_FALSE(client.active_identity_by_id.contains(id));
-        CHECK(identity_from_handle(client.handle_by_id.at(id)) == survivor_identity);
+        CHECK_FALSE(has_mapped_active_identity(client, id));
+        CHECK(identity_from_handle(mapped_torrent_handle(client, id)) == survivor_identity);
     }
 }
 
@@ -2503,11 +2524,11 @@ TEST_CASE("queue moves normalize and persist app-owned queue ranks")
     );
     reloaded.set_session_shutdown_asynchronous(false);
     TorrentIdentity *reloaded_third =
-        identity_from_handle(reloaded.handle_by_id.at(primary_hash_key(third_info->info_hashes())));
+        identity_from_handle(mapped_torrent_handle(reloaded, primary_hash_key(third_info->info_hashes())));
     TorrentIdentity *reloaded_first =
-        identity_from_handle(reloaded.handle_by_id.at(primary_hash_key(first_info->info_hashes())));
+        identity_from_handle(mapped_torrent_handle(reloaded, primary_hash_key(first_info->info_hashes())));
     TorrentIdentity *reloaded_second =
-        identity_from_handle(reloaded.handle_by_id.at(primary_hash_key(second_info->info_hashes())));
+        identity_from_handle(mapped_torrent_handle(reloaded, primary_hash_key(second_info->info_hashes())));
     REQUIRE(reloaded_third != nullptr);
     REQUIRE(reloaded_first != nullptr);
     REQUIRE(reloaded_second != nullptr);
@@ -2977,7 +2998,11 @@ TEST_CASE("global LSD and PEX default changes request resume persistence")
     lt::torrent_handle handle = add_metadata_torrent(client, *info, temporary_directory.path(), identity);
     REQUIRE(identity != nullptr);
 
-    std::uint64_t const generation_before_settings = identity->resume_save.next_generation;
+    std::uint64_t generation_before_settings = 0;
+    {
+        std::scoped_lock io_guard(client.resume_io_lock);
+        generation_before_settings = identity->resume_save.next_generation;
+    }
 
     TTorrentSessionSettings settings{};
     settings.required_network_interface = "";
@@ -3002,7 +3027,12 @@ TEST_CASE("global LSD and PEX default changes request resume persistence")
     CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex));
     CHECK(client.lsd_disabled_by_app.contains(identity));
     CHECK(client.peer_exchange_disabled_by_app.contains(identity));
-    CHECK(identity->resume_save.next_generation > generation_before_settings);
+    bool resume_save_requested = false;
+    {
+        std::scoped_lock io_guard(client.resume_io_lock);
+        resume_save_requested = identity->resume_save.next_generation > generation_before_settings;
+    }
+    CHECK(resume_save_requested);
 }
 
 TEST_CASE("per-torrent DHT policy does not override disabled DHT node")
@@ -3998,7 +4028,7 @@ TEST_CASE("magnet torrents gate payload files and untrusted discovery until meta
     ) == 0);
     CHECK(is_canonical_torrent_id(added_id));
 
-    lt::torrent_handle handle = client.handle_by_id.at(bridge_tests::v1_id('2'));
+    lt::torrent_handle handle = mapped_torrent_handle(client, bridge_tests::v1_id('2'));
     TorrentIdentity *identity = identity_from_handle(handle);
     REQUIRE(identity != nullptr);
     CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
@@ -4041,7 +4071,7 @@ TEST_CASE("trackerless magnet can explicitly allow DHT before metadata validatio
             static_cast<int32_t>(sizeof(error))
         ) == 0);
 
-        lt::torrent_handle handle = client.handle_by_id.at(bridge_tests::v1_id('6'));
+        lt::torrent_handle handle = mapped_torrent_handle(client, bridge_tests::v1_id('6'));
         TorrentIdentity *identity = identity_from_handle(handle);
         REQUIRE(identity != nullptr);
         CHECK_FALSE(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
@@ -4061,7 +4091,7 @@ TEST_CASE("trackerless magnet can explicitly allow DHT before metadata validatio
         AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
     );
     reloaded.set_session_shutdown_asynchronous(false);
-    lt::torrent_handle handle = reloaded.handle_by_id.at(bridge_tests::v1_id('6'));
+    lt::torrent_handle handle = mapped_torrent_handle(reloaded, bridge_tests::v1_id('6'));
     TorrentIdentity *identity = identity_from_handle(handle);
     REQUIRE(identity != nullptr);
     CHECK_FALSE(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
@@ -4101,7 +4131,7 @@ TEST_CASE("pending magnet DHT revocation is durable before the setter returns")
         static_cast<int32_t>(sizeof(error))
     ) == 0);
 
-    lt::torrent_handle handle = client.handle_by_id.at(bridge_tests::v1_id('7'));
+    lt::torrent_handle handle = mapped_torrent_handle(client, bridge_tests::v1_id('7'));
     TorrentIdentity *identity = identity_from_handle(handle);
     REQUIRE(identity != nullptr);
     REQUIRE(identity->allow_pre_metadata_dht);
@@ -4139,7 +4169,7 @@ TEST_CASE("pending magnet DHT revocation is durable before the setter returns")
         AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
     );
     restarted.set_session_shutdown_asynchronous(false);
-    lt::torrent_handle restarted_handle = restarted.handle_by_id.at(resume_id);
+    lt::torrent_handle restarted_handle = mapped_torrent_handle(restarted, resume_id);
     TorrentIdentity *restarted_identity = identity_from_handle(restarted_handle);
     REQUIRE(restarted_identity != nullptr);
     CHECK(restarted.metadata_validation_pending.contains(restarted_identity));
@@ -4494,7 +4524,7 @@ TEST_CASE("metadata validation gate survives resume reload")
         AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
     );
     reloaded.set_session_shutdown_asynchronous(false);
-    lt::torrent_handle handle = reloaded.handle_by_id.at(bridge_tests::v1_id('3'));
+    lt::torrent_handle handle = mapped_torrent_handle(reloaded, bridge_tests::v1_id('3'));
     TorrentIdentity *identity = identity_from_handle(handle);
     REQUIRE(identity != nullptr);
     CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
@@ -4540,7 +4570,7 @@ TEST_CASE("pending resume discovery guards do not become source locks")
         AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
     );
     reloaded.set_session_shutdown_asynchronous(false);
-    lt::torrent_handle handle = reloaded.handle_by_id.at(resume_id);
+    lt::torrent_handle handle = mapped_torrent_handle(reloaded, resume_id);
     TorrentIdentity *identity = identity_from_handle(handle);
     REQUIRE(identity != nullptr);
 
@@ -4601,7 +4631,7 @@ TEST_CASE("app-default DHT changes do not bypass pending metadata consent after 
             static_cast<int32_t>(sizeof(error))
         ) == 0);
 
-        lt::torrent_handle handle = client.handle_by_id.at(bridge_tests::v1_id('4'));
+        lt::torrent_handle handle = mapped_torrent_handle(client, bridge_tests::v1_id('4'));
         TorrentIdentity *identity = identity_from_handle(handle);
         REQUIRE(identity != nullptr);
         CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
@@ -4614,7 +4644,7 @@ TEST_CASE("app-default DHT changes do not bypass pending metadata consent after 
         AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
     );
     reloaded.set_session_shutdown_asynchronous(false);
-    lt::torrent_handle handle = reloaded.handle_by_id.at(bridge_tests::v1_id('4'));
+    lt::torrent_handle handle = mapped_torrent_handle(reloaded, bridge_tests::v1_id('4'));
     TorrentIdentity *identity = identity_from_handle(handle);
     REQUIRE(identity != nullptr);
     CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));

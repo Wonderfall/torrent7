@@ -1738,15 +1738,18 @@ void TTorrentClient::validate_pending_metadata(DirtyMask &changes)
 {
     std::vector<lt::torrent_handle> candidates;
     std::set<TorrentIdentity const *> visited;
-    for (auto const &[id, identity] : active_identity_by_id) {
-        if (identity == nullptr
-            || !metadata_validation_pending.contains(identity)
-            || !visited.insert(identity).second) {
-            continue;
-        }
-        auto const handle = handle_by_id.find(id);
-        if (handle != handle_by_id.end()) {
-            candidates.push_back(handle->second);
+    {
+        std::scoped_lock io_guard(resume_io_lock);
+        for (auto const &[id, identity] : active_identity_by_id) {
+            if (identity == nullptr
+                || !metadata_validation_pending.contains(identity)
+                || !visited.insert(identity).second) {
+                continue;
+            }
+            auto const handle = handle_by_id.find(id);
+            if (handle != handle_by_id.end()) {
+                candidates.push_back(handle->second);
+            }
         }
     }
 
