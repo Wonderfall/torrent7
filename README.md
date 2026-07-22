@@ -349,6 +349,12 @@ Build a ThreadSanitizer diagnostics app:
 SANITIZER_PROFILE=thread Scripts/build-app.zsh
 ```
 
+Build and verify the regular, AddressSanitizer, and ThreadSanitizer apps:
+
+```sh
+Scripts/build-all-apps.zsh
+```
+
 Sanitizer profiles use separate dependency and Swift build directories, disable
 fortify, enable libc++ debug hardening, and apply the selected primary sanitizer
 to OpenSSL, libtorrent, and the Bridge. Libtorrent and the Bridge additionally
