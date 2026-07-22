@@ -14,6 +14,8 @@ let libcppHardeningMode = enableDiagnostics ? "_LIBCPP_HARDENING_MODE_DEBUG" : "
 let bridgeWarnings: [CXXSetting] = [
     .enableWarning("all"),
     .enableWarning("extra"),
+    .enableWarning("conversion"),
+    .enableWarning("implicit-fallthrough"),
     .enableWarning("shadow"),
     .enableWarning("empty-body"),
     .enableWarning("builtin-memcpy-chk-size"),

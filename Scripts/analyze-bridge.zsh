@@ -57,6 +57,8 @@ typeset -a compiler_args=(
     -fexceptions
     -Wall
     -Wextra
+    -Wconversion
+    -Wimplicit-fallthrough
     -Wshadow
     -Wempty-body
     -Wbuiltin-memcpy-chk-size

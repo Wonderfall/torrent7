@@ -1630,7 +1630,8 @@ std::optional<std::string> normalized_tracker_host(std::string const &url)
 
     if (!port.empty()) {
         unsigned int value = 0U;
-        for (unsigned char const character : port) {
+        for (char const byte : port) {
+            auto const character = static_cast<unsigned char>(byte);
             if (!is_ascii_digit(character)) {
                 return std::nullopt;
             }
