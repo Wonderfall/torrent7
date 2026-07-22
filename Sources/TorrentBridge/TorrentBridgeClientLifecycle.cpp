@@ -202,7 +202,7 @@ void TTorrentClient::set_wake_callback(TTorrentWakeCallback callback, void *cont
 
     WakeCallbackInvocation wake;
     {
-        std::unique_lock guard(lock);
+        std::scoped_lock guard(lock);
         if (wake_callback != nullptr) {
             throw std::logic_error("Wake callback is already installed.");
         }
@@ -220,11 +220,11 @@ void TTorrentClient::set_wake_callback(TTorrentWakeCallback callback, void *cont
 void TTorrentClient::clear_wake_callback() noexcept
 {
     try {
-        std::unique_lock guard(lock);
+        AnalyzedUniqueLock guard(lock);
         wake_callback = nullptr;
         wake_callback_context = nullptr;
         wake_pending = false;
-        wake_callback_quiesced.wait(guard, [this] {
+        wake_callback_quiesced.wait(guard.native(), [this]() TORRENT_BRIDGE_REQUIRES(lock) {
             return wake_callbacks_in_flight == 0;
         });
     } catch (...) {

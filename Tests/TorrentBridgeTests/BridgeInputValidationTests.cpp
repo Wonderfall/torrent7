@@ -284,7 +284,7 @@ TEST_CASE("runtime authorized path replacement is bounded and atomic")
         error.data(),
         static_cast<int32_t>(error.size())
     ) == 0);
-    CHECK(client.authorized_save_roots.contains(normalized));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.authorized_save_roots.contains(normalized)));
 
     std::vector<std::uint8_t> missing_terminator{'/', 'D'};
     CHECK(TorrentClientReplaceAuthorizedSavePaths(
@@ -299,7 +299,7 @@ TEST_CASE("runtime authorized path replacement is bounded and atomic")
         static_cast<int32_t>(error.size())
     ) != 0);
     CHECK(std::string(error.data()) == "The authorized save path list is not NUL terminated.");
-    CHECK(client.authorized_save_roots.contains(normalized));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.authorized_save_roots.contains(normalized)));
 
     std::uint8_t byte = 0U;
     CHECK(TorrentClientReplaceAuthorizedSavePaths(
@@ -314,7 +314,7 @@ TEST_CASE("runtime authorized path replacement is bounded and atomic")
         static_cast<int32_t>(error.size())
     ) != 0);
     CHECK(std::string(error.data()) == "The authorized save path list has an invalid size.");
-    CHECK(client.authorized_save_roots.contains(normalized));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.authorized_save_roots.contains(normalized)));
 
     REQUIRE(TorrentClientReplaceAuthorizedSavePaths(
         &client,
@@ -327,7 +327,7 @@ TEST_CASE("runtime authorized path replacement is bounded and atomic")
         error.data(),
         static_cast<int32_t>(error.size())
     ) == 0);
-    CHECK(client.authorized_save_roots.empty());
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.authorized_save_roots.empty()));
     CHECK(authorized_root.lifetime_probe().retain_count.load() == 1);
     CHECK(authorized_root.lifetime_probe().release_count.load() == 1);
 }
@@ -363,8 +363,9 @@ TEST_CASE("authorized save roots duplicate authority and reject root identity re
     ) == 0);
     accepted_root.close_borrowed_descriptor();
     lt::error_code duplicate_error;
-    int const duplicate = client.authorized_save_roots.at(accepted_directory.string())->duplicate(
-        duplicate_error
+    int const duplicate = BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.authorized_save_roots.at(accepted_directory.string())->duplicate(duplicate_error)
     );
     CHECK_FALSE(duplicate_error);
     REQUIRE(duplicate >= 0);
@@ -385,7 +386,10 @@ TEST_CASE("authorized save roots duplicate authority and reject root identity re
         error.data(),
         static_cast<int32_t>(error.size())
     ) != 0);
-    CHECK(client.authorized_save_roots.contains(accepted_directory.string()));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.authorized_save_roots.contains(accepted_directory.string())
+    ));
 
     REQUIRE(fs::remove_all(candidate_directory) > 0U);
     REQUIRE(::symlink(replacement_directory.c_str(), candidate_directory.c_str()) == 0);
@@ -400,7 +404,10 @@ TEST_CASE("authorized save roots duplicate authority and reject root identity re
         error.data(),
         static_cast<int32_t>(error.size())
     ) != 0);
-    CHECK(client.authorized_save_roots.contains(accepted_directory.string()));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.authorized_save_roots.contains(accepted_directory.string())
+    ));
     REQUIRE(fs::remove(candidate_directory));
 
     REQUIRE(TorrentClientReplaceAuthorizedSavePaths(

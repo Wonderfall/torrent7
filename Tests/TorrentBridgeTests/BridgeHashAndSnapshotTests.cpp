@@ -306,7 +306,7 @@ TEST_CASE("maximum snapshot batch copy benchmark is opt-in")
 
     TTorrentSnapshot seed{};
     seed.total_done = 42;
-    client.snapshot_cache.assign(maximum_snapshot_count, seed);
+    BRIDGE_WITH_CLIENT_LOCK(client, client.snapshot_cache.assign(maximum_snapshot_count, seed));
     std::vector<TTorrentSnapshot> output(maximum_snapshot_count);
 
     std::uint64_t revision = 0U;

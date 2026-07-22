@@ -796,22 +796,27 @@ TEST_CASE("pre-accept exceptions release unpublished torrent identity admission 
     client.set_session_shutdown_asynchronous(false);
     client.stop_alert_worker();
 
-    std::size_t const initial_identity_count = client.torrent_identities.size();
-    std::size_t const initial_token_count = client.identity_tokens.size();
+    std::size_t const initial_identity_count = BRIDGE_WITH_RESUME_IO_LOCK(
+        client,
+        client.torrent_identities.size()
+    );
+    std::size_t const initial_token_count = BRIDGE_WITH_RESUME_IO_LOCK(client, client.identity_tokens.size());
     lt::add_torrent_params params;
 
     try {
+        std::scoped_lock guard(client.lock);
         TorrentIdentity *identity = client.attach_identity(params);
         UnpublishedIdentityGuard identity_guard(client, identity);
-        CHECK(client.torrent_identities.size() == initial_identity_count + 1U);
-        CHECK(client.identity_tokens.size() == initial_token_count + 1U);
+        CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.torrent_identities.size())
+              == initial_identity_count + 1U);
+        CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.identity_tokens.size()) == initial_token_count + 1U);
         throw std::runtime_error("forced pre-accept failure");
     } catch (std::runtime_error const &error) {
         CHECK(std::string_view(error.what()) == "forced pre-accept failure");
     }
 
-    CHECK(client.torrent_identities.size() == initial_identity_count);
-    CHECK(client.identity_tokens.size() == initial_token_count);
+    CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.torrent_identities.size()) == initial_identity_count);
+    CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.identity_tokens.size()) == initial_token_count);
 }
 
 TEST_CASE("post-accept add failures remain unknown after a durable removal request")
@@ -938,7 +943,7 @@ TEST_CASE("removal tombstone overlap lookups use the validated in-memory index")
     client.set_session_shutdown_asynchronous(false);
     client.stop_alert_worker();
 
-    REQUIRE(client.removal_tombstone_directory_scan_count == 1U);
+    REQUIRE(BRIDGE_WITH_RESUME_IO_LOCK(client, client.removal_tombstone_directory_scan_count) == 1U);
     std::string const first = bridge_tests::v1_id('1');
     std::string const second = bridge_tests::canonical_id('2');
     std::string const unrelated = bridge_tests::v2_id('3');
@@ -959,13 +964,13 @@ TEST_CASE("removal tombstone overlap lookups use the validated in-memory index")
         REQUIRE(missed.has_value());
         CHECK(missed->empty());
     }
-    CHECK(client.removal_tombstone_directory_scan_count == 1U);
+    CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.removal_tombstone_directory_scan_count) == 1U);
 
     REQUIRE(client.clear_removal_tombstones({first, second}).has_value());
     ResumeIDListResult const cleared = client.tombstone_ids_overlapping({first});
     REQUIRE(cleared.has_value());
     CHECK(cleared->empty());
-    CHECK(client.removal_tombstone_directory_scan_count == 1U);
+    CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.removal_tombstone_directory_scan_count) == 1U);
 }
 
 TEST_CASE("removal tombstone index changes only after durable filesystem outcomes")
@@ -982,14 +987,17 @@ TEST_CASE("removal tombstone index changes only after durable filesystem outcome
     BridgeResult const failed_commit = client.persist_removal_tombstones({id});
     REQUIRE(::fchmod(client.resume_directory_descriptor.get(), kOwnerReadWriteExecute) == 0);
     REQUIRE_FALSE(failed_commit.has_value());
-    REQUIRE(client.removal_tombstones_by_filename.empty());
+    REQUIRE(BRIDGE_WITH_RESUME_IO_LOCK(client, client.removal_tombstones_by_filename.empty()));
     ResumeIDListResult const absent_after_failed_commit = client.tombstone_ids_overlapping({id});
     REQUIRE(absent_after_failed_commit.has_value());
     REQUIRE(absent_after_failed_commit->empty());
 
     REQUIRE(client.persist_removal_tombstones({id}).has_value());
-    REQUIRE(client.removal_tombstones_by_filename.size() == 1U);
-    std::string const filename = client.removal_tombstones_by_filename.begin()->first;
+    REQUIRE(BRIDGE_WITH_RESUME_IO_LOCK(client, client.removal_tombstones_by_filename.size()) == 1U);
+    std::string const filename = BRIDGE_WITH_RESUME_IO_LOCK(
+        client,
+        client.removal_tombstones_by_filename.begin()->first
+    );
     fs::path const marker = client.resume_directory / filename;
     REQUIRE(fs::remove(marker));
     REQUIRE(fs::create_directory(marker));
@@ -1002,7 +1010,7 @@ TEST_CASE("removal tombstone index changes only after durable filesystem outcome
 
     REQUIRE(fs::remove(marker));
     REQUIRE(client.clear_removal_tombstones({id}).has_value());
-    CHECK(client.removal_tombstones_by_filename.empty());
+    CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.removal_tombstones_by_filename.empty()));
     ResumeIDListResult const absent_after_clear = client.tombstone_ids_overlapping({id});
     REQUIRE(absent_after_clear.has_value());
     CHECK(absent_after_clear->empty());
@@ -1276,20 +1284,21 @@ TEST_CASE("retired torrent identities release active state behind stable userdat
     CHECK(identity_from_client_data(userdata) == identity);
 
     {
+        std::scoped_lock guard(client.lock);
         std::scoped_lock io_guard(client.resume_io_lock);
         client.retire_identity_if_unreferenced_locked(identity);
     }
 
-    CHECK(client.torrent_identities.empty());
-    CHECK(client.retiring_torrent_identities.size() == 1U);
+    CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.torrent_identities.empty()));
+    CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.retiring_torrent_identities.size()) == 1U);
     CHECK(identity_from_client_data(userdata) == nullptr);
     {
         [[maybe_unused]] IdentityReclamationBlock reclamation_block(client);
         client.reclaim_retired_identities();
-        CHECK(client.retiring_torrent_identities.size() == 1U);
+        CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.retiring_torrent_identities.size()) == 1U);
     }
-    CHECK(client.retiring_torrent_identities.empty());
-    CHECK(client.identity_tokens.size() == 1U);
+    CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.retiring_torrent_identities.empty()));
+    CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.identity_tokens.size()) == 1U);
     CHECK(token->active_identity.load(std::memory_order_acquire) == nullptr);
 }
 
@@ -1301,12 +1310,21 @@ TEST_CASE("torrent identity creation enforces the snapshot admission limit")
     client.set_session_shutdown_asynchronous(false);
     client.stop_alert_worker();
 
-    client.torrent_identities.reserve(static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
+    BRIDGE_WITH_RESUME_IO_LOCK(
+        client,
+        client.torrent_identities.reserve(static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT))
+    );
     for (int32_t index = 0; index < TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT; ++index) {
-        client.torrent_identities.push_back(std::make_unique<TorrentIdentity>());
+        BRIDGE_WITH_RESUME_IO_LOCK(
+            client,
+            client.torrent_identities.push_back(std::make_unique<TorrentIdentity>())
+        );
     }
 
-    BridgeResult const admission = client.ensure_torrent_admission_available(7);
+    BridgeResult const admission = BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.ensure_torrent_admission_available(7)
+    );
     REQUIRE_FALSE(admission);
     CHECK(admission.error().code == 7);
     CHECK(admission.error().message == "The torrent limit has been reached.");
@@ -1324,7 +1342,7 @@ TEST_CASE("torrent identity creation enforces the snapshot admission limit")
     DirtyMask changes = 0;
     static_cast<void>(client.take_changes(&changes));
     CHECK((changes & TTORRENT_DIRTY_ERRORS) != 0U);
-    client.torrent_identities.clear();
+    BRIDGE_WITH_RESUME_IO_LOCK(client, client.torrent_identities.clear());
 }
 
 TEST_CASE("resume restore drains synchronous add alerts before the queue can overflow")
@@ -1355,7 +1373,7 @@ TEST_CASE("resume restore drains synchronous add alerts before the queue can ove
     }
     client.load_resume_data();
 
-    CHECK(client.torrent_identities.size() == kRestoreCount);
+    CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.torrent_identities.size()) == kRestoreCount);
     std::array<char, 512> alert_error{};
     CHECK_FALSE(client.take_alert_error(std::span{alert_error}));
 }
@@ -1405,8 +1423,8 @@ TEST_CASE("live magnet bursts opportunistically drain synchronous add alerts")
     }
     client.pump_alerts();
 
-    CHECK(client.snapshot_cache.size() == kAddCount);
-    CHECK(client.synchronous_adds_since_alert_drain == 0U);
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.snapshot_cache.size()) == kAddCount);
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.synchronous_adds_since_alert_drain) == 0U);
     CHECK_FALSE(client.take_alert_error(std::span{error}));
 }
 
@@ -1417,8 +1435,10 @@ TEST_CASE("uncertain session identity authority blocks future torrent admission"
     client.set_session_shutdown_asynchronous(false);
     client.stop_alert_worker();
 
-    client.session_identity_authority_faulted = true;
-    BridgeResult const admission = client.ensure_torrent_admission_available(6);
+    BridgeResult const admission = BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        (client.session_identity_authority_faulted = true, client.ensure_torrent_admission_available(6))
+    );
 
     REQUIRE_FALSE(admission.has_value());
     CHECK(admission.error().code == 6);
@@ -1440,24 +1460,25 @@ TEST_CASE("canonical torrent identity reservations are indexed and released")
     REQUIRE(second != nullptr);
     CHECK(first->canonical_id == requested_id);
     CHECK(second->canonical_id != requested_id);
-    CHECK(client.canonical_ids_in_use.size() == 2U);
-    CHECK(client.canonical_ids_in_use.contains(first->canonical_id));
-    CHECK(client.canonical_ids_in_use.contains(second->canonical_id));
+    CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.canonical_ids_in_use.size()) == 2U);
+    CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.canonical_ids_in_use.contains(first->canonical_id)));
+    CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.canonical_ids_in_use.contains(second->canonical_id)));
 
     std::string const generated_id = second->canonical_id;
-    client.discard_unpublished_identity(second);
-    CHECK_FALSE(client.canonical_ids_in_use.contains(generated_id));
+    BRIDGE_WITH_CLIENT_LOCK(client, client.discard_unpublished_identity(second));
+    CHECK_FALSE(BRIDGE_WITH_RESUME_IO_LOCK(client, client.canonical_ids_in_use.contains(generated_id)));
 
     {
+        std::scoped_lock guard(client.lock);
         std::scoped_lock io_guard(client.resume_io_lock);
         client.retire_identity_if_unreferenced_locked(first);
     }
-    CHECK_FALSE(client.canonical_ids_in_use.contains(requested_id));
+    CHECK_FALSE(BRIDGE_WITH_RESUME_IO_LOCK(client, client.canonical_ids_in_use.contains(requested_id)));
 
     TorrentIdentity *replacement = client.make_identity(requested_id);
     REQUIRE(replacement != nullptr);
     CHECK(replacement->canonical_id == requested_id);
-    CHECK(client.canonical_ids_in_use.contains(requested_id));
+    CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.canonical_ids_in_use.contains(requested_id)));
 }
 
 TEST_CASE("conflict removals retain admission authority until their exact removed alert")
@@ -1496,25 +1517,40 @@ TEST_CASE("conflict removals retain admission authority until their exact remove
         REQUIRE(identity_from_handle(mapped_torrent_handle(client, id)) == survivor_identity);
     }
 
-    client.torrent_identities.reserve(
-        static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT)
-    );
-    while (client.torrent_identities.size()
-           < static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT)) {
-        client.torrent_identities.push_back(std::make_unique<TorrentIdentity>());
+    {
+        std::scoped_lock io_guard(client.resume_io_lock);
+        client.torrent_identities.reserve(
+            static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT)
+        );
+        while (client.torrent_identities.size()
+               < static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT)) {
+            client.torrent_identities.push_back(std::make_unique<TorrentIdentity>());
+        }
     }
-    REQUIRE_FALSE(client.ensure_torrent_admission_available(9).has_value());
+    REQUIRE_FALSE(BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.ensure_torrent_admission_available(9).has_value()
+    ));
 
     TorrentIdentityToken *const duplicate_token = duplicate_identity->token;
     lt::client_data_t const duplicate_userdata(duplicate_token);
     REQUIRE(identity_from_client_data(duplicate_userdata) == duplicate_identity);
     client.session.remove_torrent(duplicate);
-    client.mark_conflict_remove_requested(duplicate_hashes, duplicate_identity);
+    BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.mark_conflict_remove_requested(duplicate_hashes, duplicate_identity)
+    );
 
-    CHECK(client.torrent_identities.size()
+    CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.torrent_identities.size())
           == static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
-    CHECK(client.canonical_ids_in_use.contains(duplicate_identity->canonical_id));
-    CHECK(client.unidentified_removing_identities.contains(duplicate_identity));
+    CHECK(BRIDGE_WITH_RESUME_IO_LOCK(
+        client,
+        client.canonical_ids_in_use.contains(duplicate_identity->canonical_id)
+    ));
+    CHECK(BRIDGE_WITH_RESUME_IO_LOCK(
+        client,
+        client.unidentified_removing_identities.contains(duplicate_identity)
+    ));
     CHECK(client.accepts_removed_alert(duplicate_hashes, duplicate_identity));
     for (std::string const &id : duplicate_ids) {
         CHECK(mapped_active_identity(client, id) == survivor_identity);
@@ -1528,13 +1564,19 @@ TEST_CASE("conflict removals retain admission authority until their exact remove
         }
     }
     std::string const duplicate_canonical_id = duplicate_identity->canonical_id;
-    client.finalize_removed(duplicate_hashes, duplicate_identity);
+    BRIDGE_WITH_CLIENT_LOCK(client, client.finalize_removed(duplicate_hashes, duplicate_identity));
 
-    CHECK(client.torrent_identities.size()
+    CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.torrent_identities.size())
           == static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT) - 1U);
-    CHECK(client.ensure_torrent_admission_available(9).has_value());
-    CHECK_FALSE(client.canonical_ids_in_use.contains(duplicate_canonical_id));
-    CHECK_FALSE(client.unidentified_removing_identities.contains(duplicate_identity));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.ensure_torrent_admission_available(9).has_value()));
+    CHECK_FALSE(BRIDGE_WITH_RESUME_IO_LOCK(
+        client,
+        client.canonical_ids_in_use.contains(duplicate_canonical_id)
+    ));
+    CHECK_FALSE(BRIDGE_WITH_RESUME_IO_LOCK(
+        client,
+        client.unidentified_removing_identities.contains(duplicate_identity)
+    ));
     CHECK(identity_from_client_data(duplicate_userdata) == nullptr);
     for (std::string const &id : duplicate_ids) {
         CHECK_FALSE(has_mapped_active_identity(client, id));
@@ -1553,16 +1595,20 @@ TEST_CASE("session lifetime identity token budget bounds add and remove churn")
     for (std::size_t index = 0; index < kMaxTorrentIdentityTokenCount; ++index) {
         TorrentIdentity *identity = client.make_identity(reusable_id);
         {
+            std::scoped_lock guard(client.lock);
             std::scoped_lock io_guard(client.resume_io_lock);
             client.retire_identity_if_unreferenced_locked(identity);
         }
         client.reclaim_retired_identities();
     }
 
-    CHECK(client.torrent_identities.empty());
-    CHECK(client.retiring_torrent_identities.empty());
-    CHECK(client.identity_tokens.size() == kMaxTorrentIdentityTokenCount);
-    BridgeResult const admission = client.ensure_torrent_admission_available(8);
+    CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.torrent_identities.empty()));
+    CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.retiring_torrent_identities.empty()));
+    CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.identity_tokens.size()) == kMaxTorrentIdentityTokenCount);
+    BridgeResult const admission = BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.ensure_torrent_admission_available(8)
+    );
     REQUIRE_FALSE(admission);
     CHECK(admission.error().code == 8);
     CHECK(admission.error().message
@@ -1612,20 +1658,24 @@ TEST_CASE("resume metadata refreshes identity and cached snapshot")
 
     TTorrentSnapshot snapshot{};
     copy_string(std::span{snapshot.id}, cache_id);
-    client.snapshot_indices.emplace(cache_id, 0U);
-    client.snapshot_cache.push_back(snapshot);
+    BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        (client.snapshot_indices.emplace(cache_id, 0U), client.snapshot_cache.push_back(snapshot))
+    );
 
     lt::add_torrent_params params;
     params.comment = "Metadata from resume data";
     params.creation_date = 12'345;
 
-    CHECK(client.cache_resume_metadata(identity, params) == TTORRENT_DIRTY_TORRENTS);
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.cache_resume_metadata(identity, params))
+          == TTORRENT_DIRTY_TORRENTS);
     CHECK(identity->comment == "Metadata from resume data");
     CHECK(identity->creation_date == 12'345);
-    REQUIRE(client.snapshot_cache.size() == 1U);
-    CHECK(std::string(client.snapshot_cache.front().comment) == "Metadata from resume data");
-    CHECK(client.snapshot_cache.front().created_time == 12'345);
-    CHECK(client.cache_resume_metadata(identity, params) == 0U);
+    REQUIRE(BRIDGE_WITH_CLIENT_LOCK(client, client.snapshot_cache.size()) == 1U);
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, std::string(client.snapshot_cache.front().comment))
+          == "Metadata from resume data");
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.snapshot_cache.front().created_time) == 12'345);
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.cache_resume_metadata(identity, params)) == 0U);
 }
 
 TEST_CASE("resume persistence rejects unsafe serialized file renames")
@@ -1974,7 +2024,7 @@ TEST_CASE("tracker host materialization caps rows and backfills its deterministi
     bridge_tests::TemporaryDirectory temporary_directory;
     TTorrentClient client((temporary_directory.path() / "State").string());
     client.set_session_shutdown_asynchronous(false);
-    CHECK(client.tracker_host_cache.capacity() == 0U);
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.tracker_host_cache.capacity()) == 0U);
 
     constexpr std::size_t torrent_count = 11U;
     std::vector<lt::torrent_handle> handles;
@@ -2395,9 +2445,9 @@ TEST_CASE("disabled peer exchange plugin gates per-torrent PEX policy")
     ) == 0);
     CHECK_FALSE(bridge_bool(policy.enable_peer_exchange));
     CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex));
-    CHECK(client.peer_exchange_disabled_by_app.contains(identity));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.peer_exchange_disabled_by_app.contains(identity)));
 
-    client.peer_exchange_plugin_enabled = true;
+    BRIDGE_WITH_CLIENT_LOCK(client, client.peer_exchange_plugin_enabled = true);
     REQUIRE(TorrentClientApplySettings(
         &client,
         &settings,
@@ -2405,7 +2455,10 @@ TEST_CASE("disabled peer exchange plugin gates per-torrent PEX policy")
         static_cast<int32_t>(sizeof(error))
     ) == 0);
     CHECK_FALSE(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex));
-    CHECK_FALSE(client.peer_exchange_disabled_by_app.contains(identity));
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.peer_exchange_disabled_by_app.contains(identity)
+    ));
 }
 
 TEST_CASE("per-torrent options copy and set bandwidth limits")
@@ -2493,7 +2546,10 @@ TEST_CASE("queue moves normalize and persist app-owned queue ranks")
         first_identity->queue_rank = 0;
         second_identity->queue_rank = 1;
         third_identity->queue_rank = 2;
-        static_cast<void>(client.apply_queue_priority_order_locked());
+        BRIDGE_WITH_CLIENT_LOCK(
+            client,
+            static_cast<void>(client.apply_queue_priority_order_locked())
+        );
         BridgeResult const saved = client.save_all_checked();
         REQUIRE(static_cast<bool>(saved));
 
@@ -2543,7 +2599,10 @@ TEST_CASE("new torrents are inserted into priority order without rebuilding the 
     TTorrentClient client((temporary_directory.path() / "State").string());
     client.set_session_shutdown_asynchronous(false);
     client.stop_alert_worker();
-    std::size_t const initial_rebuild_count = client.queue_order_rebuild_count;
+    std::size_t const initial_rebuild_count = BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.queue_order_rebuild_count
+    );
 
     auto normal_info = make_queue_torrent_info(31U);
     auto low_info = make_queue_torrent_info(32U);
@@ -2561,7 +2620,10 @@ TEST_CASE("new torrents are inserted into priority order without rebuilding the 
         normal_identity
     );
     REQUIRE(normal_identity != nullptr);
-    client.insert_added_queue_priority_order_locked(normal, normal_identity);
+    BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.insert_added_queue_priority_order_locked(normal, normal_identity)
+    );
 
     lt::torrent_handle low = add_metadata_torrent(
         client,
@@ -2571,7 +2633,10 @@ TEST_CASE("new torrents are inserted into priority order without rebuilding the 
     );
     REQUIRE(low_identity != nullptr);
     low_identity->queue_priority = TTORRENT_QUEUE_PRIORITY_LOW;
-    client.insert_added_queue_priority_order_locked(low, low_identity);
+    BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.insert_added_queue_priority_order_locked(low, low_identity)
+    );
 
     lt::torrent_handle high = add_metadata_torrent(
         client,
@@ -2581,7 +2646,10 @@ TEST_CASE("new torrents are inserted into priority order without rebuilding the 
     );
     REQUIRE(high_identity != nullptr);
     high_identity->queue_priority = TTORRENT_QUEUE_PRIORITY_HIGH;
-    client.insert_added_queue_priority_order_locked(high, high_identity);
+    BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.insert_added_queue_priority_order_locked(high, high_identity)
+    );
 
     lt::torrent_handle second_normal = add_metadata_torrent(
         client,
@@ -2590,12 +2658,15 @@ TEST_CASE("new torrents are inserted into priority order without rebuilding the 
         second_normal_identity
     );
     REQUIRE(second_normal_identity != nullptr);
-    client.insert_added_queue_priority_order_locked(second_normal, second_normal_identity);
+    BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.insert_added_queue_priority_order_locked(second_normal, second_normal_identity)
+    );
 
-    REQUIRE(client.queue_order_index.valid);
-    CHECK(client.queue_order_index.high.count == 1U);
-    CHECK(client.queue_order_index.normal.count == 2U);
-    CHECK(client.queue_order_index.low.count == 1U);
+    REQUIRE(BRIDGE_WITH_CLIENT_LOCK(client, client.queue_order_index.valid));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.queue_order_index.high.count) == 1U);
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.queue_order_index.normal.count) == 2U);
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.queue_order_index.low.count) == 1U);
     CHECK(static_cast<int>(high.queue_position()) == 0);
     CHECK(static_cast<int>(normal.queue_position()) == 1);
     CHECK(static_cast<int>(second_normal.queue_position()) == 2);
@@ -2604,7 +2675,7 @@ TEST_CASE("new torrents are inserted into priority order without rebuilding the 
     CHECK(normal_identity->queue_rank == 0);
     CHECK(second_normal_identity->queue_rank == 1);
     CHECK(low_identity->queue_rank == 0);
-    CHECK(client.queue_order_rebuild_count == initial_rebuild_count);
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.queue_order_rebuild_count) == initial_rebuild_count);
 }
 
 TEST_CASE("an add repairs a divergent queue index only after publishing its handle mapping")
@@ -2623,15 +2694,17 @@ TEST_CASE("an add repairs a divergent queue index only after publishing its hand
         first_identity
     );
     REQUIRE(first_identity != nullptr);
-    static_cast<void>(client.apply_queue_priority_order_locked());
-    REQUIRE(client.queue_order_index.valid);
-    REQUIRE(client.queue_order_index.total_count() == 1U);
+    BRIDGE_WITH_CLIENT_LOCK(client, static_cast<void>(client.apply_queue_priority_order_locked()));
+    REQUIRE(BRIDGE_WITH_CLIENT_LOCK(client, client.queue_order_index.valid));
+    REQUIRE(BRIDGE_WITH_CLIENT_LOCK(client, client.queue_order_index.total_count()) == 1U);
 
     // Model a detected divergence without changing libtorrent. The pre-map
     // insertion attempt must only invalidate; rebuilding here would omit the
     // newly accepted handle because mark_active has not published it yet.
-    client.queue_order_index.normal.count = 0U;
-    client.queue_order_index.normal.next_rank = 0;
+    BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        (client.queue_order_index.normal.count = 0U, client.queue_order_index.normal.next_rank = 0)
+    );
 
     lt::add_torrent_params params;
     params.ti = std::make_shared<lt::torrent_info>(*make_queue_torrent_info(108U));
@@ -2643,18 +2716,21 @@ TEST_CASE("an add repairs a divergent queue index only after publishing its hand
     lt::torrent_handle second = client.session.add_torrent(std::move(params), add_error);
     REQUIRE_FALSE(add_error);
 
-    client.insert_added_queue_priority_order_locked(second, second_identity);
-    CHECK_FALSE(client.queue_order_index.valid);
+    BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.insert_added_queue_priority_order_locked(second, second_identity)
+    );
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(client, client.queue_order_index.valid));
     CHECK_FALSE(second_identity->queue_order_tracked);
 
     client.mark_active(second, second_identity);
-    if (!client.queue_order_index.valid) {
-        static_cast<void>(client.apply_queue_priority_order_locked());
+    if (!BRIDGE_WITH_CLIENT_LOCK(client, client.queue_order_index.valid)) {
+        BRIDGE_WITH_CLIENT_LOCK(client, static_cast<void>(client.apply_queue_priority_order_locked()));
     }
 
-    REQUIRE(client.queue_order_index.valid);
-    CHECK(client.queue_order_index.total_count() == 2U);
-    CHECK(client.queue_order_index.normal.count == 2U);
+    REQUIRE(BRIDGE_WITH_CLIENT_LOCK(client, client.queue_order_index.valid));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.queue_order_index.total_count()) == 2U);
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.queue_order_index.normal.count) == 2U);
     CHECK(first_identity->queue_order_tracked);
     CHECK(second_identity->queue_order_tracked);
     CHECK(static_cast<int>(first.queue_position()) == 0);
@@ -2677,8 +2753,8 @@ TEST_CASE("fallible queue rebuilds invalidate the fast index before mutating que
         identity
     );
     REQUIRE(identity != nullptr);
-    static_cast<void>(client.apply_queue_priority_order_locked());
-    REQUIRE(client.queue_order_index.valid);
+    BRIDGE_WITH_CLIENT_LOCK(client, static_cast<void>(client.apply_queue_priority_order_locked()));
+    REQUIRE(BRIDGE_WITH_CLIENT_LOCK(client, client.queue_order_index.valid));
 
     std::array<char, 512> error{};
     TTorrentOptions options{};
@@ -2690,7 +2766,7 @@ TEST_CASE("fallible queue rebuilds invalidate the fast index before mutating que
         static_cast<int32_t>(error.size())
     ) == 0);
     options.queue_priority = TTORRENT_QUEUE_PRIORITY_HIGH;
-    client.fail_next_queue_order_rebuild_before_collection = true;
+    BRIDGE_WITH_CLIENT_LOCK(client, client.fail_next_queue_order_rebuild_before_collection = true);
     CHECK(TorrentClientSetTorrentOptions(
         &client,
         identity->canonical_id.c_str(),
@@ -2699,28 +2775,28 @@ TEST_CASE("fallible queue rebuilds invalidate the fast index before mutating que
         static_cast<int32_t>(error.size())
     ) != 0);
     CHECK(identity->queue_priority == TTORRENT_QUEUE_PRIORITY_HIGH);
-    CHECK_FALSE(client.queue_order_index.valid);
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(client, client.queue_order_index.valid));
 
-    static_cast<void>(client.apply_queue_priority_order_locked());
-    REQUIRE(client.queue_order_index.valid);
+    BRIDGE_WITH_CLIENT_LOCK(client, static_cast<void>(client.apply_queue_priority_order_locked()));
+    REQUIRE(BRIDGE_WITH_CLIENT_LOCK(client, client.queue_order_index.valid));
     REQUIRE(TorrentClientPause(
         &client,
         identity->canonical_id.c_str(),
         error.data(),
         static_cast<int32_t>(error.size())
     ) == 0);
-    CHECK_FALSE(client.queue_order_index.valid);
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(client, client.queue_order_index.valid));
 
-    static_cast<void>(client.apply_queue_priority_order_locked());
-    REQUIRE(client.queue_order_index.valid);
-    client.fail_next_queue_order_rebuild_before_collection = true;
+    BRIDGE_WITH_CLIENT_LOCK(client, static_cast<void>(client.apply_queue_priority_order_locked()));
+    REQUIRE(BRIDGE_WITH_CLIENT_LOCK(client, client.queue_order_index.valid));
+    BRIDGE_WITH_CLIENT_LOCK(client, client.fail_next_queue_order_rebuild_before_collection = true);
     CHECK(TorrentClientResume(
         &client,
         identity->canonical_id.c_str(),
         error.data(),
         static_cast<int32_t>(error.size())
     ) != 0);
-    CHECK_FALSE(client.queue_order_index.valid);
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(client, client.queue_order_index.valid));
     CHECK(handle.is_valid());
 }
 
@@ -2751,9 +2827,9 @@ TEST_CASE("definite duplicate add rejection preserves the valid queue index")
         identity
     ));
     REQUIRE(identity != nullptr);
-    static_cast<void>(client.apply_queue_priority_order_locked());
-    REQUIRE(client.queue_order_index.valid);
-    std::size_t const rebuild_count = client.queue_order_rebuild_count;
+    BRIDGE_WITH_CLIENT_LOCK(client, static_cast<void>(client.apply_queue_priority_order_locked()));
+    REQUIRE(BRIDGE_WITH_CLIENT_LOCK(client, client.queue_order_index.valid));
+    std::size_t const rebuild_count = BRIDGE_WITH_CLIENT_LOCK(client, client.queue_order_rebuild_count);
 
     TTorrentAddOptions const add_options = default_add_options();
     std::array<char, TTORRENT_ID_CAPACITY> added_id{};
@@ -2774,10 +2850,10 @@ TEST_CASE("definite duplicate add rejection preserves the valid queue index")
 
     CHECK(add_outcome == TTORRENT_ADD_REJECTED);
     CHECK(added_id.front() == '\0');
-    CHECK(client.queue_order_index.valid);
-    CHECK(client.queue_order_index.total_count() == 1U);
-    CHECK(client.queue_order_rebuild_count == rebuild_count);
-    CHECK(client.torrent_identities.size() == 1U);
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.queue_order_index.valid));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.queue_order_index.total_count()) == 1U);
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.queue_order_rebuild_count) == rebuild_count);
+    CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.torrent_identities.size()) == 1U);
 }
 
 TEST_CASE("per-torrent source policy can override DHT PEX and LSD defaults")
@@ -2810,9 +2886,9 @@ TEST_CASE("per-torrent source policy can override DHT PEX and LSD defaults")
     CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
     CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex));
     CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_lsd));
-    CHECK(client.dht_disabled_by_app.contains(identity));
-    CHECK(client.peer_exchange_disabled_by_app.contains(identity));
-    CHECK(client.lsd_disabled_by_app.contains(identity));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.dht_disabled_by_app.contains(identity)));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.peer_exchange_disabled_by_app.contains(identity)));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.lsd_disabled_by_app.contains(identity)));
 
     TTorrentSourcePolicy policy{};
     REQUIRE(TorrentClientCopySourcePolicy(
@@ -2848,9 +2924,9 @@ TEST_CASE("per-torrent source policy can override DHT PEX and LSD defaults")
     CHECK_FALSE(identity->dht_disabled_by_user);
     CHECK_FALSE(identity->peer_exchange_disabled_by_user);
     CHECK_FALSE(identity->lsd_disabled_by_user);
-    CHECK_FALSE(client.dht_disabled_by_app.contains(identity));
-    CHECK_FALSE(client.peer_exchange_disabled_by_app.contains(identity));
-    CHECK_FALSE(client.lsd_disabled_by_app.contains(identity));
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(client, client.dht_disabled_by_app.contains(identity)));
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(client, client.peer_exchange_disabled_by_app.contains(identity)));
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(client, client.lsd_disabled_by_app.contains(identity)));
 
     REQUIRE(TorrentClientApplySettings(
         &client,
@@ -2915,7 +2991,7 @@ TEST_CASE("blocked settings fail closed before persistent source policy changes"
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
-    REQUIRE_FALSE(client.requested_network_blocked);
+    REQUIRE_FALSE(BRIDGE_WITH_CLIENT_LOCK(client, client.requested_network_blocked));
 
     BridgeResult const fault = client.fault_persistence(2, "Synthetic persistence fault.");
     REQUIRE_FALSE(fault);
@@ -2932,16 +3008,16 @@ TEST_CASE("blocked settings fail closed before persistent source policy changes"
     ) == 2);
 
     CHECK(bridge_tests::string_from_c_buffer(error) == "Synthetic persistence fault.");
-    CHECK(client.requested_network_blocked);
-    CHECK(client.dht_enabled_by_default);
-    CHECK(client.lsd_enabled_by_default);
-    CHECK(client.peer_exchange_enabled_by_default);
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.requested_network_blocked));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.dht_enabled_by_default));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.lsd_enabled_by_default));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.peer_exchange_enabled_by_default));
     CHECK_FALSE(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
     CHECK_FALSE(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_lsd));
     CHECK_FALSE(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex));
-    CHECK_FALSE(client.dht_disabled_by_app.contains(identity));
-    CHECK_FALSE(client.lsd_disabled_by_app.contains(identity));
-    CHECK_FALSE(client.peer_exchange_disabled_by_app.contains(identity));
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(client, client.dht_disabled_by_app.contains(identity)));
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(client, client.lsd_disabled_by_app.contains(identity)));
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(client, client.peer_exchange_disabled_by_app.contains(identity)));
 }
 
 TEST_CASE("settings validation rejects invalid ports before source policy mutation")
@@ -2976,15 +3052,15 @@ TEST_CASE("settings validation rejects invalid ports before source policy mutati
     ) == 2);
 
     CHECK(bridge_tests::string_from_c_buffer(error) == "Incoming port must be 0 or between 1024 and 65535.");
-    CHECK(client.dht_enabled_by_default);
-    CHECK(client.lsd_enabled_by_default);
-    CHECK(client.peer_exchange_enabled_by_default);
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.dht_enabled_by_default));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.lsd_enabled_by_default));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.peer_exchange_enabled_by_default));
     CHECK_FALSE(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
     CHECK_FALSE(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_lsd));
     CHECK_FALSE(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex));
-    CHECK_FALSE(client.dht_disabled_by_app.contains(identity));
-    CHECK_FALSE(client.lsd_disabled_by_app.contains(identity));
-    CHECK_FALSE(client.peer_exchange_disabled_by_app.contains(identity));
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(client, client.dht_disabled_by_app.contains(identity)));
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(client, client.lsd_disabled_by_app.contains(identity)));
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(client, client.peer_exchange_disabled_by_app.contains(identity)));
 }
 
 TEST_CASE("global LSD and PEX default changes request resume persistence")
@@ -3025,8 +3101,8 @@ TEST_CASE("global LSD and PEX default changes request resume persistence")
 
     CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_lsd));
     CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex));
-    CHECK(client.lsd_disabled_by_app.contains(identity));
-    CHECK(client.peer_exchange_disabled_by_app.contains(identity));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.lsd_disabled_by_app.contains(identity)));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.peer_exchange_disabled_by_app.contains(identity)));
     bool resume_save_requested = false;
     {
         std::scoped_lock io_guard(client.resume_io_lock);
@@ -3167,7 +3243,7 @@ TEST_CASE("enabling the DHT node preserves default DHT-off torrent policy")
         static_cast<int32_t>(sizeof(error))
     ) == 0);
     REQUIRE(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
-    REQUIRE(client.dht_disabled_by_app.contains(identity));
+    REQUIRE(BRIDGE_WITH_CLIENT_LOCK(client, client.dht_disabled_by_app.contains(identity)));
     CHECK_FALSE(client.session.is_dht_running());
 
     settings.enable_dht = bridge_bool(true);
@@ -3182,7 +3258,7 @@ TEST_CASE("enabling the DHT node preserves default DHT-off torrent policy")
         return client.session.is_dht_running();
     }));
     CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
-    CHECK(client.dht_disabled_by_app.contains(identity));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.dht_disabled_by_app.contains(identity)));
     CHECK(eventually([&] {
         return !handle.status().announcing_to_dht;
     }));
@@ -3572,7 +3648,7 @@ TEST_CASE("source policy rejects metadata-only fields after metadata is availabl
     REQUIRE(identity != nullptr);
     REQUIRE(handle.is_valid());
 
-    REQUIRE_FALSE(client.metadata_validation_pending.contains(identity));
+    REQUIRE_FALSE(BRIDGE_WITH_CLIENT_LOCK(client, client.metadata_validation_pending.contains(identity)));
     char error[512]{};
     CHECK(set_source_policy_field(
         client,
@@ -3981,13 +4057,18 @@ TEST_CASE("source policy restore does not reinsert blocked HTTPS-only sources")
     REQUIRE_FALSE(add_error);
     client.mark_active(handle, identity);
 
-    client.require_https_trackers = true;
-    client.require_https_web_seeds = true;
+    BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        (client.require_https_trackers = true, client.require_https_web_seeds = true)
+    );
 
     REQUIRE(handle.trackers().size() == 1U);
     CHECK(handle.url_seeds().size() == 1U);
 
-    static_cast<void>(client.restore_metadata_source_policy(handle, identity));
+    BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        static_cast<void>(client.restore_metadata_source_policy(handle, identity))
+    );
 
     REQUIRE(handle.trackers().size() == 1U);
     CHECK(handle.trackers().front().url == "https://secure-tracker.example/announce");
@@ -4035,8 +4116,11 @@ TEST_CASE("magnet torrents gate payload files and untrusted discovery until meta
     CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex));
     CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_lsd));
     CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::block_non_global_peers));
-    CHECK(client.metadata_validation_pending.contains(identity));
-    CHECK_FALSE(client.peer_exchange_disabled_by_app.contains(identity));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.metadata_validation_pending.contains(identity)));
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.peer_exchange_disabled_by_app.contains(identity)
+    ));
 }
 
 TEST_CASE("trackerless magnet can explicitly allow DHT before metadata validation")
@@ -4079,8 +4163,11 @@ TEST_CASE("trackerless magnet can explicitly allow DHT before metadata validatio
         CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_lsd));
         CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::block_non_global_peers));
         CHECK(identity->allow_pre_metadata_dht);
-        CHECK(client.metadata_validation_pending.contains(identity));
-        TTorrentSourcePolicy const policy = client.source_policy(handle, identity);
+        CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.metadata_validation_pending.contains(identity)));
+        TTorrentSourcePolicy const policy = BRIDGE_WITH_CLIENT_LOCK(
+            client,
+            client.source_policy(handle, identity)
+        );
         CHECK(bridge_bool(policy.metadata_validation_pending));
         CHECK(bridge_bool(policy.allow_pre_metadata_dht));
     }
@@ -4097,7 +4184,7 @@ TEST_CASE("trackerless magnet can explicitly allow DHT before metadata validatio
     CHECK_FALSE(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
     CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::block_non_global_peers));
     CHECK(identity->allow_pre_metadata_dht);
-    CHECK(reloaded.metadata_validation_pending.contains(identity));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(reloaded, reloaded.metadata_validation_pending.contains(identity)));
 }
 
 TEST_CASE("pending magnet DHT revocation is durable before the setter returns")
@@ -4172,7 +4259,10 @@ TEST_CASE("pending magnet DHT revocation is durable before the setter returns")
     lt::torrent_handle restarted_handle = mapped_torrent_handle(restarted, resume_id);
     TorrentIdentity *restarted_identity = identity_from_handle(restarted_handle);
     REQUIRE(restarted_identity != nullptr);
-    CHECK(restarted.metadata_validation_pending.contains(restarted_identity));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(
+        restarted,
+        restarted.metadata_validation_pending.contains(restarted_identity)
+    ));
     CHECK_FALSE(restarted_identity->allow_pre_metadata_dht);
     CHECK(static_cast<bool>(restarted_handle.flags() & lt::torrent_flags::disable_dht));
 }
@@ -4351,16 +4441,25 @@ TEST_CASE("a completed payload deletion remains tracked until its result is coll
 
     std::shared_ptr<lt::torrent_info const> const first_info = make_queue_torrent_info(43U);
     std::shared_ptr<lt::torrent_info const> const second_info = make_queue_torrent_info(44U);
-    std::uint64_t const first_token = client.begin_delete_request(first_info->info_hashes());
-    client.complete_delete_request(first_info->info_hashes(), TTORRENT_REMOVAL_SUCCEEDED);
+    std::uint64_t const first_token = BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.begin_delete_request(first_info->info_hashes())
+    );
+    BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.complete_delete_request(first_info->info_hashes(), TTORRENT_REMOVAL_SUCCEEDED)
+    );
 
     std::bitset<lt::abi_alert_count> dropped_alerts;
     dropped_alerts.set(lt::torrent_deleted_alert::alert_type);
     lt::aux::stack_allocator allocator;
     lt::alerts_dropped_alert const dropped_alert(allocator, dropped_alerts);
-    CHECK(client.fail_dropped_delete_request(dropped_alert) == 0U);
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.fail_dropped_delete_request(dropped_alert)) == 0U);
 
-    CHECK_THROWS(client.begin_delete_request(second_info->info_hashes()));
+    CHECK_THROWS(BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.begin_delete_request(second_info->info_hashes())
+    ));
 
     TTorrentRemovalResult result{};
     std::array<char, 512> error{};
@@ -4371,7 +4470,10 @@ TEST_CASE("a completed payload deletion remains tracked until its result is coll
         error.data(),
         static_cast<int32_t>(error.size())
     ) != 0);
-    CHECK_THROWS(client.begin_delete_request(second_info->info_hashes()));
+    CHECK_THROWS(BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.begin_delete_request(second_info->info_hashes())
+    ));
 
     REQUIRE(TorrentClientTakeRemovalResult(
         &client,
@@ -4382,13 +4484,19 @@ TEST_CASE("a completed payload deletion remains tracked until its result is coll
     ) == 0);
     CHECK(result.state == TTORRENT_REMOVAL_SUCCEEDED);
 
-    std::uint64_t const second_token = client.begin_delete_request(second_info->info_hashes());
+    std::uint64_t const second_token = BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.begin_delete_request(second_info->info_hashes())
+    );
     CHECK(second_token != 0);
-    client.abandon_removal_request(second_token);
-    std::uint64_t const third_token = client.begin_delete_request(first_info->info_hashes());
+    BRIDGE_WITH_CLIENT_LOCK(client, client.abandon_removal_request(second_token));
+    std::uint64_t const third_token = BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.begin_delete_request(first_info->info_hashes())
+    );
     CHECK(third_token != 0);
-    client.abandon_removal_request(third_token);
-    CHECK_FALSE(client.removal_request.has_value());
+    BRIDGE_WITH_CLIENT_LOCK(client, client.abandon_removal_request(third_token));
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(client, client.removal_request.has_value()));
 }
 
 TEST_CASE("a dropped terminal deletion alert fails the request and completes cleanup")
@@ -4400,15 +4508,19 @@ TEST_CASE("a dropped terminal deletion alert fails the request and completes cle
 
     std::shared_ptr<lt::torrent_info const> const info = make_torrent_info(false);
     std::string const resume_id = primary_hash_key(info->info_hashes());
-    std::uint64_t const request_token = client.begin_delete_request(info->info_hashes());
+    std::uint64_t const request_token = BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.begin_delete_request(info->info_hashes())
+    );
     client.remember_pending_delete(info->info_hashes(), {resume_id});
 
     std::bitset<lt::abi_alert_count> dropped_alerts;
     dropped_alerts.set(lt::torrent_deleted_alert::alert_type);
     lt::aux::stack_allocator allocator;
     lt::alerts_dropped_alert const alert(allocator, dropped_alerts);
-    CHECK((client.fail_dropped_delete_request(alert) & TTORRENT_DIRTY_ERRORS) != 0U);
-    CHECK(client.awaiting_delete_resume_ids_by_id.empty());
+    CHECK((BRIDGE_WITH_CLIENT_LOCK(client, client.fail_dropped_delete_request(alert))
+           & TTORRENT_DIRTY_ERRORS) != 0U);
+    CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.awaiting_delete_resume_ids_by_id.empty()));
 
     TTorrentRemovalResult result{};
     std::array<char, 512> error{};
@@ -4530,8 +4642,11 @@ TEST_CASE("metadata validation gate survives resume reload")
     CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
     CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex));
     CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_lsd));
-    CHECK(reloaded.metadata_validation_pending.contains(identity));
-    CHECK_FALSE(reloaded.peer_exchange_disabled_by_app.contains(identity));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(reloaded, reloaded.metadata_validation_pending.contains(identity)));
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(
+        reloaded,
+        reloaded.peer_exchange_disabled_by_app.contains(identity)
+    ));
 }
 
 TEST_CASE("pending resume discovery guards do not become source locks")
@@ -4574,7 +4689,7 @@ TEST_CASE("pending resume discovery guards do not become source locks")
     TorrentIdentity *identity = identity_from_handle(handle);
     REQUIRE(identity != nullptr);
 
-    CHECK(reloaded.metadata_validation_pending.contains(identity));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(reloaded, reloaded.metadata_validation_pending.contains(identity)));
     CHECK_FALSE(identity->dht_locked_by_source);
     CHECK_FALSE(identity->peer_exchange_locked_by_source);
     CHECK_FALSE(identity->lsd_locked_by_source);
@@ -4635,7 +4750,7 @@ TEST_CASE("app-default DHT changes do not bypass pending metadata consent after 
         TorrentIdentity *identity = identity_from_handle(handle);
         REQUIRE(identity != nullptr);
         CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
-        CHECK(client.dht_disabled_by_app.contains(identity));
+        CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.dht_disabled_by_app.contains(identity)));
     }
 
     TTorrentClient reloaded(
@@ -4648,7 +4763,7 @@ TEST_CASE("app-default DHT changes do not bypass pending metadata consent after 
     TorrentIdentity *identity = identity_from_handle(handle);
     REQUIRE(identity != nullptr);
     CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
-    CHECK(reloaded.dht_disabled_by_app.contains(identity));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(reloaded, reloaded.dht_disabled_by_app.contains(identity)));
 
     TTorrentSessionSettings settings{};
     settings.required_network_interface = "";
@@ -4666,7 +4781,7 @@ TEST_CASE("app-default DHT changes do not bypass pending metadata consent after 
         static_cast<int32_t>(sizeof(error))
     ) == 0);
     CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
-    CHECK_FALSE(reloaded.dht_disabled_by_app.contains(identity));
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(reloaded, reloaded.dht_disabled_by_app.contains(identity)));
     CHECK_FALSE(identity->allow_pre_metadata_dht);
 }
 
@@ -4691,8 +4806,11 @@ TEST_CASE("metadata resolution owns peer exchange pending policy")
     public_handle.set_flags(lt::torrent_flags::disable_pex);
     public_handle.set_flags(lt::torrent_flags::disable_lsd);
     public_handle.set_flags(lt::torrent_flags::block_non_global_peers);
-    client.metadata_validation_pending.insert(public_identity);
-    REQUIRE(client.validate_or_remove_loaded_metadata(public_handle, changes));
+    REQUIRE(BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        (client.metadata_validation_pending.insert(public_identity),
+         client.validate_or_remove_loaded_metadata(public_handle, changes))
+    ));
     REQUIRE(eventually([&public_handle] {
         std::vector<lt::download_priority_t> const priorities = public_handle.get_file_priorities();
         return priorities.size() == 1U && priorities.front() == lt::low_priority;
@@ -4702,7 +4820,10 @@ TEST_CASE("metadata resolution owns peer exchange pending policy")
     CHECK_FALSE(static_cast<bool>(public_handle.flags() & lt::torrent_flags::disable_pex));
     CHECK_FALSE(static_cast<bool>(public_handle.flags() & lt::torrent_flags::disable_lsd));
     CHECK_FALSE(static_cast<bool>(public_handle.flags() & lt::torrent_flags::block_non_global_peers));
-    CHECK_FALSE(client.metadata_validation_pending.contains(public_identity));
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.metadata_validation_pending.contains(public_identity)
+    ));
 
     public_identity->dht_locked_by_source = true;
     public_identity->peer_exchange_locked_by_source = true;
@@ -4710,34 +4831,58 @@ TEST_CASE("metadata resolution owns peer exchange pending policy")
     public_handle.set_flags(lt::torrent_flags::disable_dht);
     public_handle.set_flags(lt::torrent_flags::disable_pex);
     public_handle.set_flags(lt::torrent_flags::disable_lsd);
-    client.metadata_validation_pending.insert(public_identity);
-    REQUIRE(client.validate_or_remove_loaded_metadata(public_handle, changes));
+    REQUIRE(BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        (client.metadata_validation_pending.insert(public_identity),
+         client.validate_or_remove_loaded_metadata(public_handle, changes))
+    ));
     CHECK(static_cast<bool>(public_handle.flags() & lt::torrent_flags::disable_dht));
     CHECK(static_cast<bool>(public_handle.flags() & lt::torrent_flags::disable_pex));
     CHECK(static_cast<bool>(public_handle.flags() & lt::torrent_flags::disable_lsd));
-    CHECK_FALSE(client.metadata_validation_pending.contains(public_identity));
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.metadata_validation_pending.contains(public_identity)
+    ));
 
     public_identity->dht_locked_by_source = false;
     public_identity->peer_exchange_locked_by_source = false;
     public_identity->lsd_locked_by_source = false;
     public_handle.set_flags(lt::torrent_flags::disable_pex);
-    client.metadata_validation_pending.insert(public_identity);
-    client.peer_exchange_disabled_by_app.insert(public_identity);
-    REQUIRE(client.validate_or_remove_loaded_metadata(public_handle, changes));
+    REQUIRE(BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        (client.metadata_validation_pending.insert(public_identity),
+         client.peer_exchange_disabled_by_app.insert(public_identity),
+         client.validate_or_remove_loaded_metadata(public_handle, changes))
+    ));
     CHECK(static_cast<bool>(public_handle.flags() & lt::torrent_flags::disable_pex));
-    CHECK_FALSE(client.metadata_validation_pending.contains(public_identity));
-    CHECK(client.peer_exchange_disabled_by_app.contains(public_identity));
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.metadata_validation_pending.contains(public_identity)
+    ));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.peer_exchange_disabled_by_app.contains(public_identity)
+    ));
 
     auto private_info = make_torrent_info(true);
     TorrentIdentity *private_identity = nullptr;
     lt::torrent_handle private_handle = add_metadata_torrent(client, *private_info, temporary_directory.path(), private_identity);
     REQUIRE(private_identity != nullptr);
 
-    client.metadata_validation_pending.insert(private_identity);
-    REQUIRE(client.validate_or_remove_loaded_metadata(private_handle, changes));
+    REQUIRE(BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        (client.metadata_validation_pending.insert(private_identity),
+         client.validate_or_remove_loaded_metadata(private_handle, changes))
+    ));
     CHECK(static_cast<bool>(private_handle.flags() & lt::torrent_flags::disable_pex));
-    CHECK_FALSE(client.metadata_validation_pending.contains(private_identity));
-    CHECK_FALSE(client.peer_exchange_disabled_by_app.contains(private_identity));
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.metadata_validation_pending.contains(private_identity)
+    ));
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.peer_exchange_disabled_by_app.contains(private_identity)
+    ));
 
     TTorrentSessionSettings settings{};
     settings.required_network_interface = "";
@@ -4752,11 +4897,20 @@ TEST_CASE("metadata resolution owns peer exchange pending policy")
     ) == 0);
     CHECK(static_cast<bool>(private_handle.flags() & lt::torrent_flags::disable_pex));
 
-    client.peer_exchange_disabled_by_app.insert(private_identity);
-    client.metadata_validation_pending.insert(private_identity);
-    REQUIRE(client.validate_or_remove_loaded_metadata(private_handle, changes));
-    CHECK_FALSE(client.peer_exchange_disabled_by_app.contains(private_identity));
-    CHECK_FALSE(client.metadata_validation_pending.contains(private_identity));
+    REQUIRE(BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        (client.peer_exchange_disabled_by_app.insert(private_identity),
+         client.metadata_validation_pending.insert(private_identity),
+         client.validate_or_remove_loaded_metadata(private_handle, changes))
+    ));
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.peer_exchange_disabled_by_app.contains(private_identity)
+    ));
+    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.metadata_validation_pending.contains(private_identity)
+    ));
 }
 
 TEST_CASE("resume cleanups for a write merge pending and explicit IDs by generation")

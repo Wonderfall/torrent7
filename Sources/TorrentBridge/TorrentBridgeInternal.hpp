@@ -66,11 +66,41 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#define TORRENT_BRIDGE_GUARDED_BY(mutex) __attribute__((guarded_by(mutex)))
+#define TORRENT_BRIDGE_REQUIRES(...) __attribute__((requires_capability(__VA_ARGS__)))
+#define TORRENT_BRIDGE_ACQUIRED_AFTER(...) __attribute__((acquired_after(__VA_ARGS__)))
+#define TORRENT_BRIDGE_SCOPED_CAPABILITY __attribute__((scoped_lockable))
+#define TORRENT_BRIDGE_ACQUIRE(...) __attribute__((acquire_capability(__VA_ARGS__)))
+#define TORRENT_BRIDGE_RELEASE(...) __attribute__((release_capability(__VA_ARGS__)))
+#define TORRENT_BRIDGE_NO_THREAD_SAFETY_ANALYSIS __attribute__((no_thread_safety_analysis))
 
 namespace torrent_bridge::internal {
 
 namespace fs = std::filesystem;
 namespace lt = libtorrent;
+
+// libc++ annotates mutex, lock_guard, and the single-mutex scoped_lock, but not
+// unique_lock. This adapter preserves unique_lock's condition-variable API
+// while making its ownership visible to Clang's thread-safety analysis.
+class TORRENT_BRIDGE_SCOPED_CAPABILITY AnalyzedUniqueLock {
+public:
+    explicit AnalyzedUniqueLock(std::mutex &mutex) TORRENT_BRIDGE_ACQUIRE(mutex)
+        : lock_(mutex)
+    {
+    }
+
+    ~AnalyzedUniqueLock() TORRENT_BRIDGE_RELEASE() = default;
+
+    AnalyzedUniqueLock(AnalyzedUniqueLock const &) = delete;
+    AnalyzedUniqueLock &operator=(AnalyzedUniqueLock const &) = delete;
+    AnalyzedUniqueLock(AnalyzedUniqueLock &&) = delete;
+    AnalyzedUniqueLock &operator=(AnalyzedUniqueLock &&) = delete;
+
+    [[nodiscard]] std::unique_lock<std::mutex> &native() noexcept { return lock_; }
+
+private:
+    std::unique_lock<std::mutex> lock_;
+};
 
 constexpr std::string_view kResumeExtension = ".fastresume";
 constexpr std::string_view kTempExtension = ".tmp";
@@ -1242,107 +1272,107 @@ struct TTorrentClient {
     void set_session_shutdown_asynchronous(bool value) noexcept;
 
     std::mutex authorized_root_replacement_lock;
-    std::mutex lock;
+    std::mutex lock TORRENT_BRIDGE_ACQUIRED_AFTER(authorized_root_replacement_lock);
+    std::mutex resume_capture_lock TORRENT_BRIDGE_ACQUIRED_AFTER(lock);
+    mutable std::mutex resume_io_lock TORRENT_BRIDGE_ACQUIRED_AFTER(resume_capture_lock);
     fs::path state_directory;
     fs::path resume_directory;
-    AuthorizedSaveRootMap authorized_save_roots;
-    AuthorizedSaveRootWeakList authorized_save_root_lifetimes;
+    AuthorizedSaveRootMap authorized_save_roots TORRENT_BRIDGE_GUARDED_BY(lock);
+    AuthorizedSaveRootWeakList authorized_save_root_lifetimes TORRENT_BRIDGE_GUARDED_BY(lock);
     UniqueFileDescriptor state_directory_descriptor;
     UniqueFileDescriptor resume_directory_descriptor;
     UniqueFileDescriptor state_lock;
-    mutable std::mutex resume_io_lock;
-    std::mutex resume_capture_lock;
-    std::uint64_t next_identity_generation = 1;
-    std::vector<std::unique_ptr<TorrentIdentityToken>> identity_tokens;
-    std::vector<std::unique_ptr<TorrentIdentity>> torrent_identities;
-    std::vector<std::unique_ptr<TorrentIdentity>> retiring_torrent_identities;
-    std::unordered_set<std::string> canonical_ids_in_use;
+    std::uint64_t next_identity_generation TORRENT_BRIDGE_GUARDED_BY(resume_io_lock) = 1;
+    std::vector<std::unique_ptr<TorrentIdentityToken>> identity_tokens TORRENT_BRIDGE_GUARDED_BY(resume_io_lock);
+    std::vector<std::unique_ptr<TorrentIdentity>> torrent_identities TORRENT_BRIDGE_GUARDED_BY(resume_io_lock);
+    std::vector<std::unique_ptr<TorrentIdentity>> retiring_torrent_identities TORRENT_BRIDGE_GUARDED_BY(resume_io_lock);
+    std::unordered_set<std::string> canonical_ids_in_use TORRENT_BRIDGE_GUARDED_BY(resume_io_lock);
     std::atomic<std::size_t> identity_reclamation_blockers = 0;
     // Protected by resume_io_lock. Code that also needs client state acquires
     // lock before resume_io_lock.
-    std::unordered_map<std::string, TorrentIdentity *> active_identity_by_id;
-    std::unordered_map<std::string, TorrentIdentity *> removing_identity_by_id;
-    std::unordered_map<std::string, lt::torrent_handle> handle_by_id;
-    QueueOrderIndex queue_order_index;
+    std::unordered_map<std::string, TorrentIdentity *> active_identity_by_id TORRENT_BRIDGE_GUARDED_BY(resume_io_lock);
+    std::unordered_map<std::string, TorrentIdentity *> removing_identity_by_id TORRENT_BRIDGE_GUARDED_BY(resume_io_lock);
+    std::unordered_map<std::string, lt::torrent_handle> handle_by_id TORRENT_BRIDGE_GUARDED_BY(resume_io_lock);
+    QueueOrderIndex queue_order_index TORRENT_BRIDGE_GUARDED_BY(lock);
 #if defined(TORRENT_BRIDGE_TESTING)
-    std::size_t queue_order_rebuild_count = 0;
+    std::size_t queue_order_rebuild_count TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
 #endif
-    std::set<TorrentIdentity *> dht_disabled_by_app;
-    std::set<TorrentIdentity *> peer_exchange_disabled_by_app;
-    std::set<TorrentIdentity const *> metadata_validation_pending;
-    std::set<TorrentIdentity *> lsd_disabled_by_app;
-    std::unordered_map<std::string, std::vector<std::string>> awaiting_delete_resume_ids_by_id;
-    std::unordered_map<std::string, std::vector<std::string>> pending_resume_cleanup_ids_by_id;
-    std::unordered_map<std::string, std::vector<std::string>> terminal_delete_cleanup_ids_by_id;
-    std::unordered_map<std::string, std::vector<std::string>> pending_tombstone_clear_ids_by_id;
-    RemovalTombstoneEntryMap removal_tombstones_by_filename;
-    RemovalTombstoneIDIndex removal_tombstones_by_id;
-    std::size_t removal_tombstone_id_membership_count = 0;
+    std::set<TorrentIdentity *> dht_disabled_by_app TORRENT_BRIDGE_GUARDED_BY(lock);
+    std::set<TorrentIdentity *> peer_exchange_disabled_by_app TORRENT_BRIDGE_GUARDED_BY(lock);
+    std::set<TorrentIdentity const *> metadata_validation_pending TORRENT_BRIDGE_GUARDED_BY(lock);
+    std::set<TorrentIdentity *> lsd_disabled_by_app TORRENT_BRIDGE_GUARDED_BY(lock);
+    std::unordered_map<std::string, std::vector<std::string>> awaiting_delete_resume_ids_by_id TORRENT_BRIDGE_GUARDED_BY(resume_io_lock);
+    std::unordered_map<std::string, std::vector<std::string>> pending_resume_cleanup_ids_by_id TORRENT_BRIDGE_GUARDED_BY(resume_io_lock);
+    std::unordered_map<std::string, std::vector<std::string>> terminal_delete_cleanup_ids_by_id TORRENT_BRIDGE_GUARDED_BY(resume_io_lock);
+    std::unordered_map<std::string, std::vector<std::string>> pending_tombstone_clear_ids_by_id TORRENT_BRIDGE_GUARDED_BY(resume_io_lock);
+    RemovalTombstoneEntryMap removal_tombstones_by_filename TORRENT_BRIDGE_GUARDED_BY(resume_io_lock);
+    RemovalTombstoneIDIndex removal_tombstones_by_id TORRENT_BRIDGE_GUARDED_BY(resume_io_lock);
+    std::size_t removal_tombstone_id_membership_count TORRENT_BRIDGE_GUARDED_BY(resume_io_lock) = 0;
 #if defined(TORRENT_BRIDGE_TESTING)
-    std::size_t removal_tombstone_directory_scan_count = 0;
+    std::size_t removal_tombstone_directory_scan_count TORRENT_BRIDGE_GUARDED_BY(resume_io_lock) = 0;
 #endif
-    std::set<TorrentIdentity *> unidentified_removing_identities;
-    std::string persistence_fault_message;
+    std::set<TorrentIdentity *> unidentified_removing_identities TORRENT_BRIDGE_GUARDED_BY(resume_io_lock);
+    std::string persistence_fault_message TORRENT_BRIDGE_GUARDED_BY(resume_io_lock);
     DeferredSessionProxy deferred_session_shutdown;
     lt::session session;
     std::jthread alert_thread;
-    std::vector<TTorrentSnapshot> snapshot_cache;
-    std::unordered_map<std::string, std::size_t> snapshot_indices;
-    std::uint64_t snapshot_revision = 0;
-    std::vector<TTorrentTrackerHostSnapshot> tracker_host_cache;
-    std::unordered_map<std::string, TrackerHostCacheEntry> tracker_hosts_by_id;
-    std::uint64_t tracker_host_revision = 0;
-    std::unordered_map<std::string, TrackerCacheEntry> tracker_cache;
-    std::uint64_t tracker_revision = 0;
-    std::unordered_map<std::string, WebSeedCacheEntry> web_seed_cache;
-    std::uint64_t web_seed_revision = 0;
-    std::unordered_map<std::string, PeerSourceCacheEntry> peer_source_cache;
-    std::uint64_t peer_source_revision = 0;
-    std::unordered_map<std::string, FileCacheEntry> file_cache;
-    std::uint64_t file_revision = 0;
-    std::unordered_map<std::string, PieceMapCacheEntry> piece_map_cache;
-    std::uint64_t piece_map_revision = 0;
-    std::size_t detail_cache_payload_bytes = 0;
-    std::uint64_t next_detail_cache_access_sequence = 1;
-    std::uint64_t next_removal_request_token = 1;
-    std::optional<RemovalRequestEntry> removal_request;
-    std::uint64_t requested_network_revision = 0;
-    std::uint64_t submitted_network_revision = 0;
+    std::vector<TTorrentSnapshot> snapshot_cache TORRENT_BRIDGE_GUARDED_BY(lock);
+    std::unordered_map<std::string, std::size_t> snapshot_indices TORRENT_BRIDGE_GUARDED_BY(lock);
+    std::uint64_t snapshot_revision TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
+    std::vector<TTorrentTrackerHostSnapshot> tracker_host_cache TORRENT_BRIDGE_GUARDED_BY(lock);
+    std::unordered_map<std::string, TrackerHostCacheEntry> tracker_hosts_by_id TORRENT_BRIDGE_GUARDED_BY(lock);
+    std::uint64_t tracker_host_revision TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
+    std::unordered_map<std::string, TrackerCacheEntry> tracker_cache TORRENT_BRIDGE_GUARDED_BY(lock);
+    std::uint64_t tracker_revision TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
+    std::unordered_map<std::string, WebSeedCacheEntry> web_seed_cache TORRENT_BRIDGE_GUARDED_BY(lock);
+    std::uint64_t web_seed_revision TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
+    std::unordered_map<std::string, PeerSourceCacheEntry> peer_source_cache TORRENT_BRIDGE_GUARDED_BY(lock);
+    std::uint64_t peer_source_revision TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
+    std::unordered_map<std::string, FileCacheEntry> file_cache TORRENT_BRIDGE_GUARDED_BY(lock);
+    std::uint64_t file_revision TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
+    std::unordered_map<std::string, PieceMapCacheEntry> piece_map_cache TORRENT_BRIDGE_GUARDED_BY(lock);
+    std::uint64_t piece_map_revision TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
+    std::size_t detail_cache_payload_bytes TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
+    std::uint64_t next_detail_cache_access_sequence TORRENT_BRIDGE_GUARDED_BY(lock) = 1;
+    std::uint64_t next_removal_request_token TORRENT_BRIDGE_GUARDED_BY(lock) = 1;
+    std::optional<RemovalRequestEntry> removal_request TORRENT_BRIDGE_GUARDED_BY(lock);
+    std::uint64_t requested_network_revision TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
+    std::uint64_t submitted_network_revision TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
 #if defined(TORRENT_BRIDGE_TESTING)
-    bool fail_next_queue_order_rebuild_before_collection = false;
+    bool fail_next_queue_order_rebuild_before_collection TORRENT_BRIDGE_GUARDED_BY(lock) = false;
 #endif
-    bool session_identity_authority_faulted = false;
-    bool persistence_faulted = false;
-    bool rebuilding_snapshot_cache = false;
-    bool requested_network_blocked = true;
-    bool dht_node_enabled = true;
-    bool dht_enabled_by_default = true;
-    bool lsd_service_enabled = false;
-    bool lsd_enabled_by_default = true;
-    bool peer_exchange_plugin_enabled = true;
-    bool peer_exchange_enabled_by_default = true;
-    bool require_https_trackers = false;
-    bool require_https_web_seeds = false;
-    bool has_listener = false;
-    int32_t listen_port = 0;
-    std::string listen_endpoint;
-    std::string last_network_error;
-    TTorrentBridgeHealth bridge_health{};
-    std::vector<std::string> pending_alert_errors;
-    std::size_t synchronous_adds_since_alert_drain = 0U;
-    std::uint64_t publication_epoch = 0;
-    DirtyMask pending_changes = 0;
-    TTorrentWakeCallback wake_callback = nullptr;
-    void *wake_callback_context = nullptr;
-    int32_t wake_callbacks_in_flight = 0;
-    bool wake_pending = false;
-    std::condition_variable wake_callback_quiesced;
+    bool session_identity_authority_faulted TORRENT_BRIDGE_GUARDED_BY(lock) = false;
+    bool persistence_faulted TORRENT_BRIDGE_GUARDED_BY(resume_io_lock) = false;
+    bool rebuilding_snapshot_cache TORRENT_BRIDGE_GUARDED_BY(lock) = false;
+    bool requested_network_blocked TORRENT_BRIDGE_GUARDED_BY(lock) = true;
+    bool dht_node_enabled TORRENT_BRIDGE_GUARDED_BY(lock) = true;
+    bool dht_enabled_by_default TORRENT_BRIDGE_GUARDED_BY(lock) = true;
+    bool lsd_service_enabled TORRENT_BRIDGE_GUARDED_BY(lock) = false;
+    bool lsd_enabled_by_default TORRENT_BRIDGE_GUARDED_BY(lock) = true;
+    bool peer_exchange_plugin_enabled TORRENT_BRIDGE_GUARDED_BY(lock) = true;
+    bool peer_exchange_enabled_by_default TORRENT_BRIDGE_GUARDED_BY(lock) = true;
+    bool require_https_trackers TORRENT_BRIDGE_GUARDED_BY(lock) = false;
+    bool require_https_web_seeds TORRENT_BRIDGE_GUARDED_BY(lock) = false;
+    bool has_listener TORRENT_BRIDGE_GUARDED_BY(lock) = false;
+    int32_t listen_port TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
+    std::string listen_endpoint TORRENT_BRIDGE_GUARDED_BY(lock);
+    std::string last_network_error TORRENT_BRIDGE_GUARDED_BY(lock);
+    TTorrentBridgeHealth bridge_health TORRENT_BRIDGE_GUARDED_BY(lock){};
+    std::vector<std::string> pending_alert_errors TORRENT_BRIDGE_GUARDED_BY(lock);
+    std::size_t synchronous_adds_since_alert_drain TORRENT_BRIDGE_GUARDED_BY(lock) = 0U;
+    std::uint64_t publication_epoch TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
+    DirtyMask pending_changes TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
+    TTorrentWakeCallback wake_callback TORRENT_BRIDGE_GUARDED_BY(lock) = nullptr;
+    void *wake_callback_context TORRENT_BRIDGE_GUARDED_BY(lock) = nullptr;
+    int32_t wake_callbacks_in_flight TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
+    bool wake_pending TORRENT_BRIDGE_GUARDED_BY(lock) = false;
+    std::condition_variable wake_callback_quiesced TORRENT_BRIDGE_GUARDED_BY(lock);
 
     void start_alert_worker();
 
     void stop_alert_worker() noexcept;
 
-    void record_synchronous_add_alert_locked() noexcept;
+    void record_synchronous_add_alert_locked() noexcept TORRENT_BRIDGE_REQUIRES(lock);
 
     void drain_synchronous_add_alerts_if_needed() noexcept;
 
@@ -1358,25 +1388,29 @@ struct TTorrentClient {
 
     [[nodiscard]] std::uint64_t take_changes(DirtyMask *changes_out) noexcept;
 
-    [[nodiscard]] WakeCallbackInvocation publish_changes_locked(DirtyMask changes) noexcept;
+    [[nodiscard]] WakeCallbackInvocation publish_changes_locked(DirtyMask changes) noexcept
+        TORRENT_BRIDGE_REQUIRES(lock);
 
     void complete_wake_callback() noexcept;
 
     void invoke_wake_callback(WakeCallbackInvocation wake) noexcept;
 
-    [[nodiscard]] std::string reserve_canonical_torrent_id_locked(std::string canonical_id);
+    [[nodiscard]] std::string reserve_canonical_torrent_id_locked(std::string canonical_id)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
     TorrentIdentity *make_identity(std::string canonical_id = {});
 
     TorrentIdentity *attach_identity(lt::add_torrent_params &params, std::string canonical_id = {});
 
-    [[nodiscard]] BridgeResult ensure_torrent_admission_available(int32_t code) const;
+    [[nodiscard]] BridgeResult ensure_torrent_admission_available(int32_t code) const
+        TORRENT_BRIDGE_REQUIRES(lock);
 
-    void untrack_queue_identity_locked(TorrentIdentity *identity) noexcept;
+    void untrack_queue_identity_locked(TorrentIdentity *identity) noexcept TORRENT_BRIDGE_REQUIRES(lock);
 
-    void invalidate_queue_order_index_locked() noexcept;
+    void invalidate_queue_order_index_locked() noexcept TORRENT_BRIDGE_REQUIRES(lock);
 
-    std::uint64_t allocate_resume_generation_locked(TorrentIdentity *identity);
+    std::uint64_t allocate_resume_generation_locked(TorrentIdentity *identity)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
     std::uint64_t allocate_resume_generation(TorrentIdentity *identity);
 
@@ -1391,19 +1425,22 @@ struct TTorrentClient {
 
     void queue_alert_error_threadsafe(std::string message);
 
-    [[nodiscard]] bool resume_write_is_installable_locked(PendingEncodedResumeWrite const &write) const;
+    [[nodiscard]] bool resume_write_is_installable_locked(PendingEncodedResumeWrite const &write) const
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
     std::vector<PendingEncodedResumeWrite> claim_resume_retries();
 
     std::vector<std::string> retry_resume_cleanups(bool reports_errors);
 
-    void discard_pending_resume_saves_locked(TorrentIdentity *identity) noexcept;
+    void discard_pending_resume_saves_locked(TorrentIdentity *identity) noexcept
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
-    void discard_unpublished_identity(TorrentIdentity *identity) noexcept;
+    void discard_unpublished_identity(TorrentIdentity *identity) noexcept TORRENT_BRIDGE_REQUIRES(lock);
 
     void append_cleanup_ids_locked(std::vector<PendingResumeCleanup> &destination, PendingResumeCleanup cleanup);
 
-    void remember_pending_cleanups_locked(TorrentIdentity *identity, std::vector<PendingResumeCleanup> cleanups);
+    void remember_pending_cleanups_locked(TorrentIdentity *identity, std::vector<PendingResumeCleanup> cleanups)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
     void remember_pending_cleanups(TorrentIdentity *identity, std::vector<PendingResumeCleanup> cleanups);
 
@@ -1412,12 +1449,15 @@ struct TTorrentClient {
                        std::vector<PendingResumeCleanup> const &explicit_cleanups = {});
 
     void remove_cleanup_ids_locked(std::vector<PendingResumeCleanup> &target,
-                                   std::vector<PendingResumeCleanup> const &completed);
+                                   std::vector<PendingResumeCleanup> const &completed)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
     void mark_resume_cleanups_completed_locked(TorrentIdentity *identity,
-                                               std::vector<PendingResumeCleanup> const &cleanups);
+                                               std::vector<PendingResumeCleanup> const &cleanups)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
-    void remember_resume_cleanup_failure_locked(TorrentIdentity *identity, std::vector<PendingResumeCleanup> cleanups);
+    void remember_resume_cleanup_failure_locked(TorrentIdentity *identity, std::vector<PendingResumeCleanup> cleanups)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
     std::vector<std::string> removal_ids_for_identity(lt::info_hash_t const &hashes, std::string_view requested_id,
                                                       TorrentIdentity *identity);
@@ -1426,11 +1466,13 @@ struct TTorrentClient {
 
     void remember_pending_delete(lt::info_hash_t const &hashes, std::vector<std::string> const &resume_ids);
 
-    void remember_pending_resume_cleanup_locked(std::vector<std::string> const &ids);
+    void remember_pending_resume_cleanup_locked(std::vector<std::string> const &ids)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
     void remember_pending_resume_cleanup(std::vector<std::string> const &ids);
 
-    void forget_pending_resume_cleanup_locked(std::vector<std::string> const &ids);
+    void forget_pending_resume_cleanup_locked(std::vector<std::string> const &ids)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
     std::vector<std::vector<std::string>> pending_resume_cleanup_id_groups();
 
@@ -1438,9 +1480,11 @@ struct TTorrentClient {
 
     std::vector<std::string> retry_pending_resume_cleanups(bool reports_errors);
 
-    void remember_pending_tombstone_clear_locked(std::vector<std::string> const &ids);
+    void remember_pending_tombstone_clear_locked(std::vector<std::string> const &ids)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
-    void forget_pending_tombstone_clear_locked(std::vector<std::string> const &ids);
+    void forget_pending_tombstone_clear_locked(std::vector<std::string> const &ids)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
     std::vector<std::vector<std::string>> pending_tombstone_clear_id_groups();
 
@@ -1454,180 +1498,213 @@ struct TTorrentClient {
 
     ResumeSaveResult complete_pending_delete_cleanup(std::vector<std::string> const &resume_ids);
 
-    [[nodiscard]] DirtyMask complete_pending_delete(lt::info_hash_t const &hashes, std::string const &failure_message);
+    [[nodiscard]] DirtyMask complete_pending_delete(lt::info_hash_t const &hashes, std::string const &failure_message)
+        TORRENT_BRIDGE_REQUIRES(lock);
 
     std::vector<std::string> retry_pending_delete_cleanups(bool reports_errors);
 
-    bool remove_resume_file_locked(std::string_view filename);
+    bool remove_resume_file_locked(std::string_view filename) TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
-    ResumeRemoveResult remove_resume_file_checked_locked(std::string_view filename);
+    ResumeRemoveResult remove_resume_file_checked_locked(std::string_view filename)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
     void sync_resume_directory_quietly();
 
-    ResumeRemoveResult remove_resume_temp_files_for_id_checked_locked(std::string const &id);
+    ResumeRemoveResult remove_resume_temp_files_for_id_checked_locked(std::string const &id)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
-    ResumeRemoveResult remove_resume_files_for_id_checked_locked(std::string const &id);
+    ResumeRemoveResult remove_resume_files_for_id_checked_locked(std::string const &id)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
-    TombstoneEntriesResult scan_removal_tombstone_entries_locked(RemovalTombstoneIndexLimits limits);
+    TombstoneEntriesResult scan_removal_tombstone_entries_locked(RemovalTombstoneIndexLimits limits)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
-    ResumeSaveResult load_removal_tombstone_index_locked(RemovalTombstoneIndexLimits limits);
+    ResumeSaveResult load_removal_tombstone_index_locked(RemovalTombstoneIndexLimits limits)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
-    void unindex_removal_tombstone_locked(RemovalTombstoneEntry const *entry) noexcept;
+    void unindex_removal_tombstone_locked(RemovalTombstoneEntry const *entry) noexcept
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
-    TombstoneEntriesResult removal_tombstone_entries_locked();
+    TombstoneEntriesResult removal_tombstone_entries_locked() TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
-    TombstoneIDResult removal_tombstone_ids_locked();
+    TombstoneIDResult removal_tombstone_ids_locked() TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
-    ResumeIDListResult tombstone_ids_overlapping_locked(std::vector<std::string> const &ids);
+    ResumeIDListResult tombstone_ids_overlapping_locked(std::vector<std::string> const &ids)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
     TombstoneCommitResult persist_removal_tombstones_locked(std::vector<std::string> const &ids,
                                                             RemovalTombstoneState state, bool delete_files,
-                                                            bool delete_partfile);
+                                                            bool delete_partfile)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
-    ResumeSaveResult clear_removal_tombstones_locked(std::vector<std::string> const &ids);
+    ResumeSaveResult clear_removal_tombstones_locked(std::vector<std::string> const &ids)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
-    ResumeSaveResult complete_pending_removals();
+    ResumeSaveResult complete_pending_removals() TORRENT_BRIDGE_REQUIRES(lock);
 
     void remove_orphan_resume_temp_files();
 
-    void load_resume_data();
+    // Called only while the client is being constructed, before the alert
+    // worker or any external caller can observe the object.
+    void load_resume_data() TORRENT_BRIDGE_NO_THREAD_SAFETY_ANALYSIS;
 
-    [[nodiscard]] DirtyMask rebuild_snapshot_cache();
+    [[nodiscard]] DirtyMask rebuild_snapshot_cache() TORRENT_BRIDGE_REQUIRES(lock);
 
     [[nodiscard]] DirtyMask mark_snapshot_cache_changed() noexcept;
 
     void request_snapshot_update();
 
-    void request_snapshot_update_locked();
+    void request_snapshot_update_locked() TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] DirtyMask cache_snapshot(lt::torrent_status const &status);
+    [[nodiscard]] DirtyMask cache_snapshot(lt::torrent_status const &status) TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] DirtyMask cache_snapshot(lt::torrent_handle const &handle);
+    [[nodiscard]] DirtyMask cache_snapshot(lt::torrent_handle const &handle) TORRENT_BRIDGE_REQUIRES(lock);
 
     [[nodiscard]] DirtyMask cache_resume_metadata(
         TorrentIdentity *identity,
         lt::add_torrent_params const &params
-    );
+    ) TORRENT_BRIDGE_REQUIRES(lock);
 
-    std::vector<lt::torrent_handle> apply_queue_priority_order_locked();
+    std::vector<lt::torrent_handle> apply_queue_priority_order_locked() TORRENT_BRIDGE_REQUIRES(lock);
 
     void insert_added_queue_priority_order_locked(
         lt::torrent_handle const &handle,
         TorrentIdentity *identity
-    );
+    ) TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] DirtyMask update_snapshot_cache(std::vector<lt::torrent_status> const &statuses);
+    [[nodiscard]] DirtyMask update_snapshot_cache(std::vector<lt::torrent_status> const &statuses)
+        TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] DirtyMask remove_snapshot(std::string_view id);
+    [[nodiscard]] DirtyMask remove_snapshot(std::string_view id) TORRENT_BRIDGE_REQUIRES(lock);
 
     [[nodiscard]] DirtyMask mark_tracker_host_cache_changed() noexcept;
 
-    [[nodiscard]] DirtyMask rebuild_tracker_host_cache_locked();
+    [[nodiscard]] DirtyMask rebuild_tracker_host_cache_locked() TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] DirtyMask refresh_tracker_host_cache_locked();
+    [[nodiscard]] DirtyMask refresh_tracker_host_cache_locked() TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] DirtyMask cache_tracker_hosts(std::string const &id, std::vector<lt::announce_entry> const &trackers);
+    [[nodiscard]] DirtyMask cache_tracker_hosts(std::string const &id, std::vector<lt::announce_entry> const &trackers)
+        TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] DirtyMask cache_tracker_hosts(lt::torrent_handle const &handle, std::string const &id);
+    [[nodiscard]] DirtyMask cache_tracker_hosts(lt::torrent_handle const &handle, std::string const &id)
+        TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] DirtyMask remove_tracker_hosts(std::string_view id);
+    [[nodiscard]] DirtyMask remove_tracker_hosts(std::string_view id) TORRENT_BRIDGE_REQUIRES(lock);
 
     [[nodiscard]] DirtyMask mark_tracker_cache_changed() noexcept;
 
-    [[nodiscard]] DirtyMask remove_trackers(std::string_view id);
+    [[nodiscard]] DirtyMask remove_trackers(std::string_view id) TORRENT_BRIDGE_REQUIRES(lock);
 
     [[nodiscard]] DirtyMask mark_web_seed_cache_changed() noexcept;
 
-    [[nodiscard]] DirtyMask remove_web_seeds(std::string_view id);
+    [[nodiscard]] DirtyMask remove_web_seeds(std::string_view id) TORRENT_BRIDGE_REQUIRES(lock);
 
-    void remove_peer_sources(std::string_view id);
+    void remove_peer_sources(std::string_view id) TORRENT_BRIDGE_REQUIRES(lock);
 
     [[nodiscard]] DirtyMask mark_file_cache_changed() noexcept;
 
-    [[nodiscard]] DirtyMask remove_files(std::string_view id);
+    [[nodiscard]] DirtyMask remove_files(std::string_view id) TORRENT_BRIDGE_REQUIRES(lock);
 
     [[nodiscard]] DirtyMask mark_piece_map_cache_changed() noexcept;
 
-    [[nodiscard]] DirtyMask remove_piece_map(std::string_view id);
+    [[nodiscard]] DirtyMask remove_piece_map(std::string_view id) TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] DirtyMask invalidate_detail_caches_locked();
+    [[nodiscard]] DirtyMask invalidate_detail_caches_locked() TORRENT_BRIDGE_REQUIRES(lock);
 
-    void touch_detail_cache_entry(std::uint64_t &last_access_sequence) noexcept;
+    void touch_detail_cache_entry(std::uint64_t &last_access_sequence) noexcept TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] std::size_t detail_cache_entry_count_locked() const noexcept;
+    [[nodiscard]] std::size_t detail_cache_entry_count_locked() const noexcept TORRENT_BRIDGE_REQUIRES(lock);
 
     [[nodiscard]] bool admit_detail_cache_entry_locked(
         DetailCacheKind kind,
         std::string const &id,
         std::size_t previous_payload_bytes,
         std::size_t next_payload_bytes
-    );
+    ) TORRENT_BRIDGE_REQUIRES(lock);
 
-    void evict_detail_cache_entry_locked(DetailCacheKind kind, std::string const &id) noexcept;
+    void evict_detail_cache_entry_locked(DetailCacheKind kind, std::string const &id) noexcept
+        TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] DirtyMask cache_trackers(lt::torrent_handle const &handle, std::vector<lt::announce_entry> const &trackers);
+    [[nodiscard]] DirtyMask cache_trackers(lt::torrent_handle const &handle, std::vector<lt::announce_entry> const &trackers)
+        TORRENT_BRIDGE_REQUIRES(lock);
 
-    std::optional<std::string> cache_id_for_handle(lt::torrent_handle const &handle);
+    std::optional<std::string> cache_id_for_handle(lt::torrent_handle const &handle)
+        TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] BridgeResult cache_web_seeds(lt::torrent_handle const &handle, DirtyMask &changes);
+    [[nodiscard]] BridgeResult cache_web_seeds(lt::torrent_handle const &handle, DirtyMask &changes)
+        TORRENT_BRIDGE_REQUIRES(lock);
 
     [[nodiscard]] DirtyMask cache_web_seeds(
         std::string_view id,
         std::set<std::string> const &url_seeds
-    );
+    ) TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] BridgeResult cache_file_metadata(lt::torrent_handle const &handle, DirtyMask &changes);
+    [[nodiscard]] BridgeResult cache_file_metadata(lt::torrent_handle const &handle, DirtyMask &changes)
+        TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] DirtyMask cache_file_progress(lt::torrent_handle const &handle, lt::aux::vector<std::int64_t, lt::file_index_t> const &progress);
+    [[nodiscard]] DirtyMask cache_file_progress(lt::torrent_handle const &handle, lt::aux::vector<std::int64_t, lt::file_index_t> const &progress)
+        TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] DirtyMask cache_piece_map(lt::torrent_status const &status);
+    [[nodiscard]] DirtyMask cache_piece_map(lt::torrent_status const &status) TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] DirtyMask cache_web_seed_activity(lt::torrent_handle const &handle, std::vector<lt::peer_info> const &peers);
+    [[nodiscard]] DirtyMask cache_web_seed_activity(lt::torrent_handle const &handle, std::vector<lt::peer_info> const &peers)
+        TORRENT_BRIDGE_REQUIRES(lock);
 
-    void cache_peer_sources(lt::torrent_handle const &handle, std::vector<lt::peer_info> const &peers);
+    void cache_peer_sources(lt::torrent_handle const &handle, std::vector<lt::peer_info> const &peers)
+        TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] BridgeResult request_sources(std::string const &id, DirtyMask &changes);
+    [[nodiscard]] BridgeResult request_sources(std::string const &id, DirtyMask &changes)
+        TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] DirtyMask remove_torrent_with_invalid_metadata(lt::torrent_handle const &handle, std::string const &reason);
+    [[nodiscard]] DirtyMask remove_torrent_with_invalid_metadata(lt::torrent_handle const &handle, std::string const &reason)
+        TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] DirtyMask apply_https_source_policy_locked();
+    [[nodiscard]] DirtyMask apply_https_source_policy_locked() TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] DirtyMask enforce_https_source_policy(lt::torrent_handle const &handle, TorrentIdentity *identity);
+    [[nodiscard]] DirtyMask enforce_https_source_policy(lt::torrent_handle const &handle, TorrentIdentity *identity)
+        TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] DirtyMask restore_metadata_source_policy(lt::torrent_handle const &handle, TorrentIdentity const *identity);
+    [[nodiscard]] DirtyMask restore_metadata_source_policy(lt::torrent_handle const &handle, TorrentIdentity const *identity)
+        TORRENT_BRIDGE_REQUIRES(lock);
 
     [[nodiscard]] DirtyMask clear_peer_cache_if_restricted(
         lt::torrent_handle handle,
         TorrentIdentity *identity
-    );
+    ) TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] bool requires_https_trackers(TorrentIdentity const *identity) const noexcept;
+    [[nodiscard]] bool requires_https_trackers(TorrentIdentity const *identity) const noexcept
+        TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] bool requires_https_web_seeds(TorrentIdentity const *identity) const noexcept;
+    [[nodiscard]] bool requires_https_web_seeds(TorrentIdentity const *identity) const noexcept
+        TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] TTorrentSourcePolicy source_policy(lt::torrent_handle const &handle, TorrentIdentity const *identity) const;
+    [[nodiscard]] TTorrentSourcePolicy source_policy(lt::torrent_handle const &handle, TorrentIdentity const *identity) const
+        TORRENT_BRIDGE_REQUIRES(lock);
 
     [[nodiscard]] DirtyMask set_source_policy_field(
         lt::torrent_handle const &handle,
         TorrentIdentity *identity,
         int32_t field,
         bool enabled
-    );
+    ) TORRENT_BRIDGE_REQUIRES(lock);
 
     static bool conflict_participant_is_preferred(TorrentIdentity const *candidate, TorrentIdentity const *other) noexcept;
 
     [[nodiscard]] DirtyMask resolve_torrent_conflict(
         lt::torrent_conflict_alert const &conflict,
         std::vector<PendingResumeHandle> &forced_resume_handles
-    );
+    ) TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] BridgeResult validate_or_remove_loaded_metadata(lt::torrent_handle const &handle, DirtyMask &changes);
+    [[nodiscard]] BridgeResult validate_or_remove_loaded_metadata(lt::torrent_handle const &handle, DirtyMask &changes)
+        TORRENT_BRIDGE_REQUIRES(lock);
 
-    void validate_pending_metadata(DirtyMask &changes);
+    void validate_pending_metadata(DirtyMask &changes) TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] BridgeResult request_files(std::string const &id, DirtyMask &changes);
+    [[nodiscard]] BridgeResult request_files(std::string const &id, DirtyMask &changes)
+        TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] BridgeResult request_piece_map(std::string const &id, DirtyMask &changes);
+    [[nodiscard]] BridgeResult request_piece_map(std::string const &id, DirtyMask &changes)
+        TORRENT_BRIDGE_REQUIRES(lock);
 
     int32_t copy_trackers(
         std::string const &id,
@@ -1674,7 +1751,8 @@ struct TTorrentClient {
         std::uint8_t *resident_out
     );
 
-    [[nodiscard]] DirtyMask remove_snapshot(lt::info_hash_t const &hashes, std::string_view requested_id);
+    [[nodiscard]] DirtyMask remove_snapshot(lt::info_hash_t const &hashes, std::string_view requested_id)
+        TORRENT_BRIDGE_REQUIRES(lock);
 
     int32_t copy_snapshots(std::span<TTorrentSnapshot> output, std::uint64_t *revision_out, int32_t *required_count_out);
 
@@ -1684,37 +1762,40 @@ struct TTorrentClient {
         int32_t *required_count_out
     );
 
-    [[nodiscard]] DirtyMask queue_alert_error(std::string message);
+    [[nodiscard]] DirtyMask queue_alert_error(std::string message) TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] DirtyMask record_listen_failed(lt::listen_failed_alert const &alert);
+    [[nodiscard]] DirtyMask record_listen_failed(lt::listen_failed_alert const &alert) TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] DirtyMask record_listen_succeeded(lt::listen_succeeded_alert const &alert);
+    [[nodiscard]] DirtyMask record_listen_succeeded(lt::listen_succeeded_alert const &alert) TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] DirtyMask record_network_requested(bool blocked);
+    [[nodiscard]] DirtyMask record_network_requested(bool blocked) TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] DirtyMask record_network_blocked();
+    [[nodiscard]] DirtyMask record_network_blocked() TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] TTorrentNetworkStatus network_status() const;
+    [[nodiscard]] TTorrentNetworkStatus network_status() const TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] TTorrentBridgeHealth health_status() const noexcept;
+    [[nodiscard]] TTorrentBridgeHealth health_status() const noexcept TORRENT_BRIDGE_REQUIRES(lock);
 
     bool take_alert_error(std::span<char> output);
 
     [[nodiscard]] BridgeResult ensure_persistence_available(int32_t code) const;
 
-    [[nodiscard]] BridgeResult ensure_persistence_available_locked(int32_t code) const;
+    [[nodiscard]] BridgeResult ensure_persistence_available_locked(int32_t code) const
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
     [[nodiscard]] bool persistence_is_faulted() const;
 
-    [[nodiscard]] bool persistence_is_faulted_locked() const noexcept;
+    [[nodiscard]] bool persistence_is_faulted_locked() const noexcept TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
-    [[nodiscard]] BridgeResult fault_persistence_locked(int32_t code, std::string message);
+    [[nodiscard]] BridgeResult fault_persistence_locked(int32_t code, std::string message)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
     void pause_session_for_persistence_fault();
 
     [[nodiscard]] BridgeResult fault_persistence(int32_t code, std::string message);
 
-    [[nodiscard]] BridgeResult fault_persistence_and_pause_locked(int32_t code, std::string message);
+    [[nodiscard]] BridgeResult fault_persistence_and_pause_locked(int32_t code, std::string message)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
     [[nodiscard]] BridgeResult cancel_tombstoned_operation_or_fault(
         std::vector<std::string> const &ids,
@@ -1722,17 +1803,21 @@ struct TTorrentClient {
         std::string operation_error
     );
 
-    bool identity_is_referenced_locked(TorrentIdentity const *identity) const;
+    bool identity_is_referenced_locked(TorrentIdentity const *identity) const
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
-    void retire_identity_if_unreferenced_locked(TorrentIdentity *identity);
+    void retire_identity_if_unreferenced_locked(TorrentIdentity *identity)
+        TORRENT_BRIDGE_REQUIRES(lock, resume_io_lock);
 
     void reclaim_retired_identities() noexcept;
 
-    TorrentIdentityState reconcile_identity_for_hashes_locked(std::vector<std::string> const &ids, TorrentIdentity *identity);
+    TorrentIdentityState reconcile_identity_for_hashes_locked(std::vector<std::string> const &ids, TorrentIdentity *identity)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
     TorrentIdentityState identity_state_for_status(std::vector<std::string> const &ids, TorrentIdentity *identity);
 
-    bool reconcile_current_for_write_locked(lt::info_hash_t const &hashes, TorrentIdentity *identity);
+    bool reconcile_current_for_write_locked(lt::info_hash_t const &hashes, TorrentIdentity *identity)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
     void mark_active(lt::torrent_handle const &handle, TorrentIdentity *identity);
 
@@ -1740,13 +1825,13 @@ struct TTorrentClient {
 
     void remember_canonical_handle(lt::torrent_handle const &handle, TorrentIdentity *identity);
 
-    void mark_unidentified_remove_requested(TorrentIdentity *identity);
+    void mark_unidentified_remove_requested(TorrentIdentity *identity) TORRENT_BRIDGE_REQUIRES(lock);
 
     [[nodiscard]] bool rollback_added_torrent_without_hashes(
         lt::torrent_handle const &handle,
         TorrentIdentity *identity,
         DirtyMask &changes
-    );
+    ) TORRENT_BRIDGE_REQUIRES(lock);
 
     [[nodiscard]] bool rollback_added_torrent(
         lt::torrent_handle const &handle,
@@ -1755,48 +1840,58 @@ struct TTorrentClient {
         std::vector<std::string> const &resume_ids,
         bool publish_tombstone,
         DirtyMask &changes
-    );
+    ) TORRENT_BRIDGE_REQUIRES(lock);
 
-    void mark_remove_requested(lt::info_hash_t const &hashes, std::string_view requested_id, TorrentIdentity *identity);
+    void mark_remove_requested(lt::info_hash_t const &hashes, std::string_view requested_id, TorrentIdentity *identity)
+        TORRENT_BRIDGE_REQUIRES(lock);
 
-    void mark_conflict_remove_requested(lt::info_hash_t const &hashes, TorrentIdentity *identity);
+    void mark_conflict_remove_requested(lt::info_hash_t const &hashes, TorrentIdentity *identity)
+        TORRENT_BRIDGE_REQUIRES(lock);
 
     bool accepts_removed_alert(lt::info_hash_t const &hashes, TorrentIdentity *identity);
 
-    void finalize_removed(lt::info_hash_t const &hashes, TorrentIdentity *identity);
+    void finalize_removed(lt::info_hash_t const &hashes, TorrentIdentity *identity) TORRENT_BRIDGE_REQUIRES(lock);
 
-    std::uint64_t begin_delete_request(lt::info_hash_t const &hashes);
+    std::uint64_t begin_delete_request(lt::info_hash_t const &hashes) TORRENT_BRIDGE_REQUIRES(lock);
 
-    void abandon_removal_request(std::uint64_t request_token) noexcept;
+    void abandon_removal_request(std::uint64_t request_token) noexcept TORRENT_BRIDGE_REQUIRES(lock);
 
     void complete_delete_request(
         lt::info_hash_t const &hashes,
         int32_t terminal_state,
         std::string_view error = {}
-    ) noexcept;
+    ) noexcept TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] DirtyMask fail_dropped_delete_request(lt::alerts_dropped_alert const &alert);
+    [[nodiscard]] DirtyMask fail_dropped_delete_request(lt::alerts_dropped_alert const &alert)
+        TORRENT_BRIDGE_REQUIRES(lock);
 
     [[nodiscard]] BridgeResult take_removal_result(
         std::uint64_t request_token,
         TTorrentRemovalResult *result
-    );
+    ) TORRENT_BRIDGE_REQUIRES(lock);
 
     bool resume_write_is_current(lt::info_hash_t const &hashes, TorrentIdentity *identity);
 
-    ResumePolicySnapshot resume_policy_snapshot_locked(TorrentIdentity *identity) const;
+    ResumePolicySnapshot resume_policy_snapshot_locked(TorrentIdentity *identity) const
+        TORRENT_BRIDGE_REQUIRES(lock);
 
-    ResumeSaveResult remember_resume_write_failure_locked(PendingEncodedResumeWrite write, std::string message);
+    ResumeSaveResult remember_resume_write_failure_locked(PendingEncodedResumeWrite write, std::string message)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
-    void mark_resume_write_installed_locked(PendingEncodedResumeWrite const &write);
+    void mark_resume_write_installed_locked(PendingEncodedResumeWrite const &write)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
-    void mark_resume_write_committed_locked(PendingEncodedResumeWrite const &write);
+    void mark_resume_write_committed_locked(PendingEncodedResumeWrite const &write)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
-    [[nodiscard]] bool resume_cleanups_are_eligible_locked(PendingEncodedResumeWrite const &write) const;
+    [[nodiscard]] bool resume_cleanups_are_eligible_locked(PendingEncodedResumeWrite const &write) const
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
-    ResumeSaveResult perform_resume_cleanups_locked(std::vector<PendingResumeCleanup> const &cleanups);
+    ResumeSaveResult perform_resume_cleanups_locked(std::vector<PendingResumeCleanup> const &cleanups)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
-    ResumeSaveResult complete_resume_cleanups_locked(PendingEncodedResumeWrite const &write);
+    ResumeSaveResult complete_resume_cleanups_locked(PendingEncodedResumeWrite const &write)
+        TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
     ResumeSaveResult commit_encoded_resume_data_checked(PendingEncodedResumeWrite write);
 
@@ -1807,12 +1902,12 @@ struct TTorrentClient {
     ResumeSaveResult write_resume_data(PendingResumeWrite const &write);
 
     ResumeSaveResult save_added_torrent_resume_data(lt::add_torrent_params params, lt::info_hash_t const &hashes,
-                                                    TorrentIdentity *identity);
+                                                    TorrentIdentity *identity) TORRENT_BRIDGE_REQUIRES(lock);
 
     ResumeSaveResult save_source_policy_resume_data(
         lt::torrent_handle const &handle,
         TorrentIdentity *identity
-    );
+    ) TORRENT_BRIDGE_REQUIRES(lock);
 
     ResumeSaveResult remove_obsolete_tombstoned_resume_data_for_readd(std::vector<std::string> const &resume_ids);
 
@@ -1827,9 +1922,9 @@ struct TTorrentClient {
 
     void request_periodic_resume_saves();
 
-    std::vector<PendingResumeHandle> collect_resume_handles();
+    std::vector<PendingResumeHandle> collect_resume_handles() TORRENT_BRIDGE_REQUIRES(lock);
 
-    ResumeHandleReport collect_resume_handles_report();
+    ResumeHandleReport collect_resume_handles_report() TORRENT_BRIDGE_REQUIRES(lock);
 
     std::vector<PendingResumeWrite> collect_resume_data(
         std::span<PendingResumeHandle const> handles,

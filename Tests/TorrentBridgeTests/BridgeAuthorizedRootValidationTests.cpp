@@ -322,7 +322,7 @@ TEST_CASE("ABI 37 authorized roots enforce pointer count and callback contracts"
         bridge_tests::release_authorized_save_root,
         error
     ) == 0);
-    CHECK(client.authorized_save_roots.empty());
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.authorized_save_roots.empty()));
     CHECK(root.lifetime_probe().retain_count.load() == 0);
     CHECK(root.lifetime_probe().release_count.load() == 0);
 }
@@ -358,7 +358,7 @@ TEST_CASE("ABI 37 authorized roots reject invalid descriptors contexts and ident
         check_error(error, "An authorized save root does not match its directory capability.");
         CHECK(root.lifetime_probe().retain_count.load() == retains_before + 1);
         CHECK(root.lifetime_probe().release_count.load() == releases_before + 1);
-        CHECK(client.authorized_save_roots.empty());
+        CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.authorized_save_roots.empty()));
     };
 
     TTorrentAuthorizedSaveRoot wrong_device = valid_record;
@@ -428,7 +428,7 @@ TEST_CASE("ABI 37 authorized roots reject duplicate normalized paths and identit
         error
     ) != 0);
     check_error(error, "The authorized save root list contains a duplicate.");
-    CHECK(client.authorized_save_roots.empty());
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.authorized_save_roots.empty()));
     CHECK(first_root.lifetime_probe().retain_count.load() == 1);
     CHECK(first_root.lifetime_probe().release_count.load() == 1);
     CHECK(second_root.lifetime_probe().retain_count.load() == 0);
@@ -456,7 +456,7 @@ TEST_CASE("ABI 37 authorized roots reject duplicate normalized paths and identit
         error
     ) != 0);
     check_error(error, "The authorized save root list contains a duplicate.");
-    CHECK(client.authorized_save_roots.empty());
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.authorized_save_roots.empty()));
     CHECK(identity_root.lifetime_probe().retain_count.load() == 1);
     CHECK(identity_root.lifetime_probe().release_count.load() == 1);
 }
@@ -490,7 +490,7 @@ TEST_CASE("ABI 37 authorized roots require path and record ordering to agree")
         error
     ) != 0);
     check_error(error, "An authorized save root does not match its directory capability.");
-    CHECK(client.authorized_save_roots.empty());
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.authorized_save_roots.empty()));
     CHECK(first_root.lifetime_probe().retain_count.load() == 0);
     CHECK(first_root.lifetime_probe().release_count.load() == 0);
     CHECK(second_root.lifetime_probe().retain_count.load() == 1);
@@ -516,7 +516,10 @@ TEST_CASE("ABI 37 second-record failures clean up and preserve replacement atomi
     TTorrentAuthorizedSaveRoot existing_record = existing_root.record();
     std::vector<std::uint8_t> const existing_blob = authorized_path_blob({existing_path.string()});
     REQUIRE(replace_authorized_roots(client, existing_blob, &existing_record, 1, error) == 0);
-    auto *const retained_existing_root = client.authorized_save_roots.at(existing_path.string()).get();
+    auto *const retained_existing_root = BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.authorized_save_roots.at(existing_path.string()).get()
+    );
 
     TTorrentAuthorizedSaveRoot second_record = second_root.record();
     ++second_record.inode;
@@ -545,8 +548,11 @@ TEST_CASE("ABI 37 second-record failures clean up and preserve replacement atomi
         error
     ) != 0);
     check_error(error, "An authorized save root does not match its directory capability.");
-    REQUIRE(client.authorized_save_roots.size() == 1U);
-    CHECK(client.authorized_save_roots.at(existing_path.string()).get() == retained_existing_root);
+    REQUIRE(BRIDGE_WITH_CLIENT_LOCK(client, client.authorized_save_roots.size()) == 1U);
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.authorized_save_roots.at(existing_path.string()).get()
+    ) == retained_existing_root);
     CHECK(existing_root.lifetime_probe().retain_count.load() == 1);
     CHECK(existing_root.lifetime_probe().release_count.load() == 0);
     CHECK(first_root.lifetime_probe().retain_count.load() == 1);
@@ -601,15 +607,20 @@ TEST_CASE("ABI 37 same-root reuse balances callbacks without accumulating descri
     ErrorBuffer error{};
 
     REQUIRE(replace_authorized_roots(client, blob, &record, 1, error) == 0);
-    std::shared_ptr<lt::aux::storage_root> retained_authority =
-        client.authorized_save_roots.at(root_path.string());
+    std::shared_ptr<lt::aux::storage_root> retained_authority = BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.authorized_save_roots.at(root_path.string())
+    );
     auto *const retained_root = retained_authority.get();
     int const stable_descriptor_count = descriptors_matching_identity(record.device, record.inode);
     REQUIRE(stable_descriptor_count >= 2);
 
     for (int replacement = 0; replacement < replacement_count; ++replacement) {
         REQUIRE(replace_authorized_roots(client, blob, &record, 1, error) == 0);
-        CHECK(client.authorized_save_roots.at(root_path.string()).get() == retained_root);
+        CHECK(BRIDGE_WITH_CLIENT_LOCK(
+            client,
+            client.authorized_save_roots.at(root_path.string()).get()
+        ) == retained_root);
         CHECK(descriptors_matching_identity(record.device, record.inode)
               == stable_descriptor_count);
     }
@@ -617,14 +628,17 @@ TEST_CASE("ABI 37 same-root reuse balances callbacks without accumulating descri
     CHECK(root.lifetime_probe().release_count.load() == replacement_count);
 
     clear_authorized_roots(client, error);
-    CHECK(client.authorized_save_roots.empty());
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.authorized_save_roots.empty()));
     CHECK(root.lifetime_probe().release_count.load() == replacement_count);
     CHECK(descriptors_matching_identity(record.device, record.inode)
           == stable_descriptor_count);
 
     REQUIRE(replace_authorized_roots(client, blob, &record, 1, error) == 0);
-    CHECK(client.authorized_save_roots.at(root_path.string()).get() == retained_root);
-    CHECK(client.authorized_save_root_lifetimes.size() == 1U);
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.authorized_save_roots.at(root_path.string()).get()
+    ) == retained_root);
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.authorized_save_root_lifetimes.size()) == 1U);
     CHECK(root.lifetime_probe().retain_count.load() == replacement_count + 2);
     CHECK(root.lifetime_probe().release_count.load() == replacement_count + 1);
     CHECK(descriptors_matching_identity(record.device, record.inode)
@@ -653,15 +667,19 @@ TEST_CASE("ABI 37 root reuse never crosses lifetime contexts")
     ErrorBuffer error{};
 
     REQUIRE(replace_authorized_roots(client, blob, &first_record, 1, error) == 0);
-    std::shared_ptr<lt::aux::storage_root> first_active_root =
-        client.authorized_save_roots.at(root_path.string());
+    std::shared_ptr<lt::aux::storage_root> first_active_root = BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.authorized_save_roots.at(root_path.string())
+    );
     REQUIRE(replace_authorized_roots(client, blob, &second_record, 1, error) == 0);
 
-    std::shared_ptr<lt::aux::storage_root> second_root =
-        client.authorized_save_roots.at(root_path.string());
+    std::shared_ptr<lt::aux::storage_root> second_root = BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.authorized_save_roots.at(root_path.string())
+    );
     CHECK(second_root.get() != first_active_root.get());
     CHECK(second_root->lifetime_context() != first_active_root->lifetime_context());
-    CHECK(client.authorized_save_root_lifetimes.size() == 2U);
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.authorized_save_root_lifetimes.size()) == 2U);
     CHECK(first_capability.lifetime_probe().retain_count.load() == 1);
     CHECK(first_capability.lifetime_probe().release_count.load() == 0);
     CHECK(second_capability.lifetime_probe().retain_count.load() == 1);
@@ -698,9 +716,13 @@ TEST_CASE("ABI 37 live root budget includes authorities retained after allowlist
         )->path().string()});
         TTorrentAuthorizedSaveRoot record = roots.at(static_cast<std::size_t>(index))->record();
         REQUIRE(replace_authorized_roots(client, blob, &record, 1, error) == 0);
-        simulated_active_storage_roots.push_back(client.authorized_save_roots.begin()->second);
+        simulated_active_storage_roots.push_back(BRIDGE_WITH_CLIENT_LOCK(
+            client,
+            client.authorized_save_roots.begin()->second
+        ));
     }
-    REQUIRE(client.authorized_save_root_lifetimes.size() == static_cast<std::size_t>(root_limit));
+    REQUIRE(BRIDGE_WITH_CLIENT_LOCK(client, client.authorized_save_root_lifetimes.size())
+            == static_cast<std::size_t>(root_limit));
 
     bridge_tests::AuthorizedSaveRoot &extra_root = *roots.back();
     std::vector<std::uint8_t> const extra_blob = authorized_path_blob({extra_root.path().string()});
@@ -708,15 +730,19 @@ TEST_CASE("ABI 37 live root budget includes authorities retained after allowlist
     CHECK(replace_authorized_roots(client, extra_blob, &extra_record, 1, error)
           == TTORRENT_ERROR_AUTHORIZED_SAVE_ROOT_CAPACITY);
     check_error(error, "Too many authorized save roots remain in use.");
-    CHECK(client.authorized_save_roots.begin()->first
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.authorized_save_roots.begin()->first)
           == roots.at(static_cast<std::size_t>(root_limit - 1))->path().string());
     CHECK(extra_root.lifetime_probe().retain_count.load() == 0);
     CHECK(extra_root.lifetime_probe().release_count.load() == 0);
 
     simulated_active_storage_roots.front().reset();
     REQUIRE(replace_authorized_roots(client, extra_blob, &extra_record, 1, error) == 0);
-    CHECK(client.authorized_save_roots.contains(extra_root.path().string()));
-    CHECK(client.authorized_save_root_lifetimes.size() == static_cast<std::size_t>(root_limit));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.authorized_save_roots.contains(extra_root.path().string())
+    ));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.authorized_save_root_lifetimes.size())
+          == static_cast<std::size_t>(root_limit));
 
     clear_authorized_roots(client, error);
     simulated_active_storage_roots.clear();
@@ -755,7 +781,7 @@ TEST_CASE("ABI 37 authorized root limit accepts 32 and rejects 33 atomically")
         static_cast<int32_t>(records.size()),
         error
     ) == 0);
-    REQUIRE(client.authorized_save_roots.size()
+    REQUIRE(BRIDGE_WITH_CLIENT_LOCK(client, client.authorized_save_roots.size())
             == static_cast<std::size_t>(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT));
     for (auto const &root : roots) {
         CHECK(root->lifetime_probe().retain_count.load() == 1);
@@ -774,7 +800,7 @@ TEST_CASE("ABI 37 authorized root limit accepts 32 and rejects 33 atomically")
         error
     ) != 0);
     check_error(error, "The authorized save root list has an invalid count.");
-    CHECK(client.authorized_save_roots.size()
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.authorized_save_roots.size())
           == static_cast<std::size_t>(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT));
 
     std::vector<std::string> over_limit_paths = paths;
@@ -788,7 +814,7 @@ TEST_CASE("ABI 37 authorized root limit accepts 32 and rejects 33 atomically")
         error
     ) != 0);
     check_error(error, "The authorized save path list contains too many paths.");
-    CHECK(client.authorized_save_roots.size()
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.authorized_save_roots.size())
           == static_cast<std::size_t>(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT));
     for (auto const &root : roots) {
         CHECK(root->lifetime_probe().retain_count.load() == 1);
@@ -809,8 +835,11 @@ TEST_CASE("ABI 37 authorized root limit accepts 32 and rejects 33 atomically")
         1,
         error
     ) == 0);
-    CHECK(client.authorized_save_roots.size() == 1U);
-    CHECK(client.authorized_save_roots.contains(replacement_path.string()));
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.authorized_save_roots.size()) == 1U);
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        client.authorized_save_roots.contains(replacement_path.string())
+    ));
     for (auto const &root : roots) {
         CHECK(root->lifetime_probe().retain_count.load() == 1);
         CHECK(root->lifetime_probe().release_count.load() == 1);

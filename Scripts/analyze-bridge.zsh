@@ -81,6 +81,7 @@ typeset -a compiler_args=(
     -Wcast-align
     -Wcast-qual
     -Wundef
+    -Wthread-safety
     -Wunsafe-buffer-usage
     -Werror
     -fstack-protector-strong

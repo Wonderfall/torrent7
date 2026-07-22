@@ -310,7 +310,7 @@ bool TTorrentClient::admit_detail_cache_entry_locked(
         return false;
     }
 
-    auto const projected_payload = [&]() noexcept {
+    auto const projected_payload = [&]() TORRENT_BRIDGE_REQUIRES(lock) noexcept {
         return detail_cache_payload_bytes - previous_payload_bytes + next_payload_bytes;
     };
     while (projected_payload() > kDetailCachePayloadBudgetBytes
@@ -621,7 +621,7 @@ DirtyMask TTorrentClient::refresh_tracker_host_cache_locked()
         completed_snapshot_count = index + 1U;
     }
 
-    std::erase_if(tracker_hosts_by_id, [&](auto const &entry) {
+    std::erase_if(tracker_hosts_by_id, [&](auto const &entry) TORRENT_BRIDGE_REQUIRES(lock) {
         auto const snapshot = snapshot_indices.find(entry.first);
         if (snapshot == snapshot_indices.end()) {
             return true;

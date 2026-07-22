@@ -18,6 +18,19 @@
 // Bridge tests intentionally exercise the private C++ implementation surface.
 using namespace torrent_bridge::internal;
 
+// White-box state inspection must obey the same locking contract as production
+// code. The lambda's deduced return type copies values out instead of allowing a
+// guarded reference to escape after the lock is released.
+#define BRIDGE_WITH_CLIENT_LOCK(client, expression) ([&]() { \
+    std::scoped_lock bridge_test_client_guard((client).lock); \
+    return (expression); \
+}())
+
+#define BRIDGE_WITH_RESUME_IO_LOCK(client, expression) ([&]() { \
+    std::scoped_lock bridge_test_resume_io_guard((client).resume_io_lock); \
+    return (expression); \
+}())
+
 namespace bridge_tests {
 
 class TemporaryDirectory {

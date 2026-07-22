@@ -97,15 +97,13 @@ std::optional<int> queue_position_value(lt::torrent_handle const &handle) noexce
 }
 
 std::vector<QueueOrderingEntry> queue_ordering_entries(TTorrentClient const &client)
+    TORRENT_BRIDGE_REQUIRES(client.lock, client.resume_io_lock)
 {
     std::vector<lt::torrent_handle> handles;
-    {
-        std::scoped_lock io_guard(client.resume_io_lock);
-        handles.reserve(client.handle_by_id.size());
-        for (auto const &[id, handle] : client.handle_by_id) {
-            static_cast<void>(id);
-            handles.push_back(handle);
-        }
+    handles.reserve(client.handle_by_id.size());
+    for (auto const &[id, handle] : client.handle_by_id) {
+        static_cast<void>(id);
+        handles.push_back(handle);
     }
 
     std::vector<QueueOrderingEntry> entries;
@@ -165,7 +163,7 @@ bool contains_handle_identity(std::span<lt::torrent_handle const> handles, lt::t
 }
 
 void save_and_publish_policy_handles(TTorrentClient &client, std::span<lt::torrent_handle const> handles,
-                                     LockedChangePublisher &publisher)
+                                     LockedChangePublisher &publisher) TORRENT_BRIDGE_REQUIRES(client.lock)
 {
     for (lt::torrent_handle const &handle : handles) {
         client.request_save(handle, kPolicyResumeSaveFlags);
@@ -272,6 +270,7 @@ bool move_queue_entry(std::vector<QueueOrderingEntry> &entries, TorrentIdentity 
 
 std::vector<lt::torrent_handle> TTorrentClient::apply_queue_priority_order_locked()
 {
+    std::scoped_lock io_guard(resume_io_lock);
 #if defined(TORRENT_BRIDGE_TESTING)
     ++queue_order_rebuild_count;
     if (fail_next_queue_order_rebuild_before_collection) {
@@ -369,7 +368,7 @@ void TTorrentClient::insert_added_queue_priority_order_locked(
 
 namespace {
 
-DirtyMask block_network_locked(TTorrentClient &client)
+DirtyMask block_network_locked(TTorrentClient &client) TORRENT_BRIDGE_REQUIRES(client.lock)
 {
     client.session.pause();
 
@@ -417,7 +416,7 @@ using AuthorizedSaveRootLookupResult =
 AuthorizedSaveRootLookupResult require_authorized_save_path(
     TTorrentClient const &client,
     std::string const &normalized_save_path
-)
+) TORRENT_BRIDGE_REQUIRES(client.lock)
 {
     auto const root = client.authorized_save_roots.find(normalized_save_path);
     if (root == client.authorized_save_roots.end() || !root->second) {
@@ -432,7 +431,7 @@ AuthorizedSaveRootLookupResult require_authorized_save_path(
 BridgeResult prepare_authorized_root_lifetime_replacement(
     TTorrentClient &client,
     AuthorizedSaveRootMap const &replacement
-)
+) TORRENT_BRIDGE_REQUIRES(client.lock)
 {
     std::set<lt::aux::storage_root const *> current_roots;
     for (auto const &[path, root] : client.authorized_save_roots) {
@@ -812,6 +811,7 @@ void request_policy_saves(TTorrentClient &client, std::vector<lt::torrent_handle
 }
 
 SourcePolicyApplicationResult apply_dht_policy_locked(TTorrentClient &client, bool use_dht_by_default)
+    TORRENT_BRIDGE_REQUIRES(client.lock)
 {
     client.dht_enabled_by_default = use_dht_by_default;
     SourcePolicyApplicationResult result;
@@ -891,6 +891,7 @@ SourcePolicyApplicationResult apply_dht_policy_locked(TTorrentClient &client, bo
 }
 
 SourcePolicyApplicationResult apply_lsd_policy_locked(TTorrentClient &client, bool use_lsd_by_default)
+    TORRENT_BRIDGE_REQUIRES(client.lock)
 {
     client.lsd_enabled_by_default = use_lsd_by_default;
     SourcePolicyApplicationResult result;
@@ -962,6 +963,7 @@ SourcePolicyApplicationResult apply_lsd_policy_locked(TTorrentClient &client, bo
 }
 
 SourcePolicyApplicationResult apply_peer_exchange_policy_locked(TTorrentClient &client, bool use_peer_exchange_by_default)
+    TORRENT_BRIDGE_REQUIRES(client.lock)
 {
     client.peer_exchange_enabled_by_default = use_peer_exchange_by_default;
     SourcePolicyApplicationResult result;
@@ -2694,7 +2696,11 @@ extern "C" int32_t TorrentClientMoveTorrentInQueue(
             return bridge_error(2, "Torrent identity not found.");
         }
 
-        std::vector<QueueOrderingEntry> entries = queue_ordering_entries(*client);
+        std::vector<QueueOrderingEntry> entries;
+        {
+            std::scoped_lock io_guard(client->resume_io_lock);
+            entries = queue_ordering_entries(*client);
+        }
         if (move_queue_entry(entries, identity, move)) {
             bool positions_applied = false;
             std::vector<lt::torrent_handle> queue_handles_to_save = apply_queue_order(
