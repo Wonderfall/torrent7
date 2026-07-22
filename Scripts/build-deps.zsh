@@ -34,11 +34,15 @@ typeset -r SOURCE_CACHE_DIR=${SOURCE_CACHE_DIR:-$DEFAULT_SOURCE_CACHE_DIR}
 typeset -r SOURCE_CACHE_SEED_DIR=${SOURCE_CACHE_SEED_DIR:-}
 typeset -r ARCHIVE_CACHE_DIR="$SOURCE_CACHE_DIR/archives"
 typeset -r GIT_CACHE_DIR="$SOURCE_CACHE_DIR/git"
-typeset -r ENABLE_DIAGNOSTICS=${SANITIZER_DIAGNOSTICS:-0}
+typeset -r SANITIZER_PROFILE=${SANITIZER_PROFILE:-}
+case "$SANITIZER_PROFILE" in
+    ""|address|thread) ;;
+    *) fail "SANITIZER_PROFILE must be address or thread" ;;
+esac
 typeset DEPS_PROFILE=$TARGET_ARCH
 typeset LIBTORRENT_CMAKE_BUILD_TYPE=Release
-if [[ "$ENABLE_DIAGNOSTICS" == "1" ]]; then
-    DEPS_PROFILE="$TARGET_ARCH-diagnostics"
+if [[ -n "$SANITIZER_PROFILE" ]]; then
+    DEPS_PROFILE="$TARGET_ARCH-$SANITIZER_PROFILE"
     LIBTORRENT_CMAKE_BUILD_TYPE="Debug"
 fi
 typeset -r DEPS_DIR=${DEPS_DIR:-$DEFAULT_DEPS_DIR/$DEPS_PROFILE}
@@ -216,25 +220,36 @@ typeset -r RETAIN_NULL_POINTER_CHECKS_FLAG="-fno-delete-null-pointer-checks"
 typeset -r NO_STRICT_OVERFLOW_FLAG="-fno-strict-overflow"
 typeset -r NO_STRICT_ALIASING_FLAG="-fno-strict-aliasing"
 typeset LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE
-# Keep fortify out of the diagnostics profile so it cannot obscure ASan reports.
+# Keep fortify out of sanitizer profiles so it cannot obscure reports.
 typeset FORTIFY_FLAGS="-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3"
-typeset -r DIAGNOSTIC_SANITIZER_FLAGS="-g -fno-omit-frame-pointer -fsanitize=address,undefined,local-bounds -fsanitize-address-use-after-scope -fno-sanitize-recover=undefined,local-bounds"
-if [[ "$ENABLE_DIAGNOSTICS" == "1" ]]; then
+typeset OPENSSL_SANITIZER_FLAGS=
+typeset LIBTORRENT_SANITIZER_FLAGS=
+case "$SANITIZER_PROFILE" in
+    address)
+        OPENSSL_SANITIZER_FLAGS="-g -fno-omit-frame-pointer -fsanitize=address -fsanitize-address-use-after-scope"
+        LIBTORRENT_SANITIZER_FLAGS="-g -fno-omit-frame-pointer -fsanitize=address,undefined,local-bounds -fsanitize-address-use-after-scope -fno-sanitize-recover=undefined,local-bounds"
+        ;;
+    thread)
+        OPENSSL_SANITIZER_FLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=thread"
+        LIBTORRENT_SANITIZER_FLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=thread,undefined,local-bounds -fno-sanitize-recover=undefined,local-bounds"
+        ;;
+esac
+if [[ -n "$SANITIZER_PROFILE" ]]; then
     LIBCPP_HARDENING_MODE="_LIBCPP_HARDENING_MODE_DEBUG"
     FORTIFY_FLAGS="-U_FORTIFY_SOURCE"
 fi
 typeset -r HARDENED_COMMON_FLAGS="-Wno-poison-system-directories -Wformat -Wformat-security -Werror=format-security -fstack-protector-strong $FORTIFY_FLAGS -fPIE -ftrivial-auto-var-init=zero $RETAIN_NULL_POINTER_CHECKS_FLAG $NO_STRICT_OVERFLOW_FLAG $NO_STRICT_ALIASING_FLAG -fvisibility=hidden -faarch64-jump-table-hardening $STRICT_FLEX_ARRAYS_FLAG $BRANCH_TARGET_IDENTIFICATION_FLAG $SLS_HARDENING_FLAG $ZERO_CALL_USED_REGS_FLAG $PTRAUTH_C_FLAGS"
 typeset -r HARDENED_C_FLAGS="$HARDENED_COMMON_FLAGS $TYPED_ALLOCATOR_C_FLAGS"
-typeset -r OPENSSL_HARDENED_CXX_FLAGS="$HARDENED_COMMON_FLAGS $PTRAUTH_CXX_FLAGS $TYPED_ALLOCATOR_CXX_FLAGS -D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE -fvisibility-inlines-hidden"
+typeset -r OPENSSL_HARDENED_CXX_FLAGS="$HARDENED_COMMON_FLAGS $PTRAUTH_CXX_FLAGS $TYPED_ALLOCATOR_CXX_FLAGS -D_LIBCPP_HARDENING_MODE=$LIBCPP_HARDENING_MODE -fvisibility-inlines-hidden"
 typeset -r HARDENED_CXX_FLAGS="$HARDENED_COMMON_FLAGS $PTRAUTH_CXX_FLAGS $TYPED_ALLOCATOR_CXX_FLAGS -D_LIBCPP_HARDENING_MODE=$LIBCPP_HARDENING_MODE -fvisibility-inlines-hidden"
-typeset -r OPENSSL_CFLAGS="$HARDENED_C_FLAGS -isysroot $SDK_PATH -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
-typeset -r OPENSSL_CXXFLAGS="$OPENSSL_HARDENED_CXX_FLAGS -isysroot $SDK_PATH -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
-typeset LIBTORRENT_C_FLAGS=$HARDENED_C_FLAGS
-typeset LIBTORRENT_CXX_FLAGS=$HARDENED_CXX_FLAGS
-if [[ "$ENABLE_DIAGNOSTICS" == "1" ]]; then
-    LIBTORRENT_C_FLAGS="$LIBTORRENT_C_FLAGS $DIAGNOSTIC_SANITIZER_FLAGS"
-    LIBTORRENT_CXX_FLAGS="$LIBTORRENT_CXX_FLAGS $DIAGNOSTIC_SANITIZER_FLAGS"
-fi
+# OpenSSL 3.5.7 extends one-element trailing arrays with larger allocations in
+# its property parser. Clang's extra local-bounds group rejects that upstream
+# representation, so OpenSSL keeps the primary sanitizer while libtorrent and
+# the owned Bridge also use UBSan and local-bounds.
+typeset -r OPENSSL_CFLAGS="$HARDENED_C_FLAGS $OPENSSL_SANITIZER_FLAGS -isysroot $SDK_PATH -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
+typeset -r OPENSSL_CXXFLAGS="$OPENSSL_HARDENED_CXX_FLAGS $OPENSSL_SANITIZER_FLAGS -isysroot $SDK_PATH -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
+typeset LIBTORRENT_C_FLAGS="$HARDENED_C_FLAGS $LIBTORRENT_SANITIZER_FLAGS"
+typeset LIBTORRENT_CXX_FLAGS="$HARDENED_CXX_FLAGS $LIBTORRENT_SANITIZER_FLAGS"
 LIBTORRENT_C_FLAGS="$LIBTORRENT_C_FLAGS $LIBTORRENT_EXTRA_DEFINES"
 LIBTORRENT_CXX_FLAGS="$LIBTORRENT_CXX_FLAGS $LIBTORRENT_EXTRA_DEFINES $LIBTORRENT_UPSTREAM_WARNING_FLAGS"
 
@@ -359,7 +374,8 @@ seed_archive_from_existing_profiles() {
     candidates+=(
         "$DEPS_DIR/src/$basename"
         "$DEFAULT_DEPS_DIR/$TARGET_ARCH/src/$basename"
-        "$DEFAULT_DEPS_DIR/$TARGET_ARCH-diagnostics/src/$basename"
+        "$DEFAULT_DEPS_DIR/$TARGET_ARCH-address/src/$basename"
+        "$DEFAULT_DEPS_DIR/$TARGET_ARCH-thread/src/$basename"
     )
 
     for candidate in "${candidates[@]}"; do
@@ -391,7 +407,8 @@ seed_openssl_signature_from_existing_profiles() {
     candidates+=(
         "$DEPS_DIR/src/$basename"
         "$DEFAULT_DEPS_DIR/$TARGET_ARCH/src/$basename"
-        "$DEFAULT_DEPS_DIR/$TARGET_ARCH-diagnostics/src/$basename"
+        "$DEFAULT_DEPS_DIR/$TARGET_ARCH-address/src/$basename"
+        "$DEFAULT_DEPS_DIR/$TARGET_ARCH-thread/src/$basename"
     )
 
     for candidate in "${candidates[@]}"; do
@@ -505,7 +522,7 @@ openssl-release-keys-sha256=$(file_sha256 "$OPENSSL_RELEASE_KEYS")
 target-arch=$TARGET_ARCH
 target-triple=$TARGET_TRIPLE
 deployment-target=$MACOSX_DEPLOYMENT_TARGET
-diagnostics=$ENABLE_DIAGNOSTICS
+sanitizer-profile=${SANITIZER_PROFILE:-none}
 sdk=$SDK_PATH
 configure-target=$OPENSSL_CONFIGURE_TARGET
 configure-options=$(openssl_configure_options_text)
@@ -544,7 +561,7 @@ $("$LIBTORRENT_PATCH_HELPER" manifest "$LIBTORRENT_SOURCE_DIR")
 target-arch=$TARGET_ARCH
 target-triple=$TARGET_TRIPLE
 deployment-target=$MACOSX_DEPLOYMENT_TARGET
-diagnostics=$ENABLE_DIAGNOSTICS
+sanitizer-profile=${SANITIZER_PROFILE:-none}
 cmake-build-type=$LIBTORRENT_CMAKE_BUILD_TYPE
 sdk=$SDK_PATH
 compiler-c=$LIBTORRENT_CC

@@ -3,21 +3,30 @@ emulate -L zsh
 setopt err_exit no_unset pipe_fail
 
 typeset -r root_dir=${0:A:h:h}
-typeset -r enable_diagnostics=${SANITIZER_DIAGNOSTICS:-0}
+typeset -r sanitizer_profile=${SANITIZER_PROFILE:-}
+case $sanitizer_profile in
+    ""|address|thread) ;;
+    *) print -ru2 -- "SANITIZER_PROFILE must be address or thread"; exit 2 ;;
+esac
+typeset -r enable_diagnostics=$(( ${#sanitizer_profile} > 0 ))
 typeset -r signing_mode=${APP_SIGNING_MODE:-development}
 typeset configuration
-if [[ $enable_diagnostics == "1" && ${+CONFIGURATION} == 0 ]]; then
+if (( enable_diagnostics )) && (( ${+CONFIGURATION} == 0 )); then
     configuration="debug"
 else
     configuration=${CONFIGURATION:-release}
 fi
 typeset -r build_dir="$root_dir/.build"
-typeset -r swift_build_dir=${SWIFT_BUILD_DIR:-$build_dir}
+typeset default_swift_build_dir=$build_dir
+if (( enable_diagnostics )); then
+    default_swift_build_dir="$build_dir/swift-app-$sanitizer_profile"
+fi
+typeset -r swift_build_dir=${SWIFT_BUILD_DIR:-$default_swift_build_dir}
 typeset app_output_dir=${APP_OUTPUT_DIR:-$build_dir/App}
 typeset app_bundle_name="Torrent 7"
-if [[ $enable_diagnostics == "1" ]]; then
+if (( enable_diagnostics )); then
     if [[ -z ${APP_OUTPUT_DIR:-} ]]; then
-        app_output_dir="$build_dir/App-Diagnostics"
+        app_output_dir="$build_dir/App-${(C)sanitizer_profile}"
     fi
     app_bundle_name="Torrent 7 (debug)"
 fi
@@ -30,7 +39,7 @@ typeset engine_extension_product=TorrentEngineExtension
 typeset engine_extension_bundle_id=app.torrent7.engine
 typeset engine_extension_info_plist="$root_dir/Packaging/TorrentEngineExtension-Info.plist"
 typeset extension_point_source="$root_dir/Packaging/TorrentApp.appexpt"
-if [[ $enable_diagnostics == "1" ]]; then
+if (( enable_diagnostics )); then
     engine_extension_product=TorrentEngineDebugExtension
     engine_extension_bundle_id=app.torrent7.debug.engine
     engine_extension_info_plist="$root_dir/Packaging/Debug/TorrentEngineExtension-Info.plist"
@@ -79,7 +88,7 @@ case "$signing_mode" in
         fi
         ;;
     distribution)
-        [[ $enable_diagnostics == "0" ]] \
+        (( ! enable_diagnostics )) \
             || fail "Distribution builds cannot enable sanitizer diagnostics"
         [[ $configuration == "release" ]] \
             || fail "Distribution builds require CONFIGURATION=release"
@@ -101,9 +110,8 @@ cd -- "$root_dir"
 export CC="$(/usr/bin/xcrun --find clang)"
 export CXX="$(/usr/bin/xcrun --find clang++)"
 
-if [[ $enable_diagnostics == "1" ]]; then
-    export SANITIZER_DIAGNOSTICS=1
-    export DEPS_DIR="${DEPS_DIR:-$build_dir/deps/arm64e-diagnostics}"
+if (( enable_diagnostics )); then
+    export DEPS_DIR="${DEPS_DIR:-$build_dir/deps/arm64e-$sanitizer_profile}"
     export DEPS_PREFIX="${DEPS_PREFIX:-$DEPS_DIR/prefix}"
 fi
 
@@ -115,9 +123,10 @@ typeset -a swift_build_args=(
     --configuration "$configuration"
     --triple arm64e-apple-macosx26.0
 )
-if [[ $enable_diagnostics == "1" ]]; then
-    swift_build_args+=(--sanitize address --sanitize undefined)
-fi
+case $sanitizer_profile in
+    address) swift_build_args+=(--sanitize address --sanitize undefined) ;;
+    thread) swift_build_args+=(--sanitize thread --sanitize undefined) ;;
+esac
 
 /usr/bin/swift build \
     --scratch-path "$swift_build_dir" \
@@ -156,7 +165,7 @@ if [[ $sign_identity == "-" ]]; then
         -c "Add :Torrent7AllowAdHocXPCPeer bool true" \
         "$engine_extension_contents_dir/Info.plist"
 fi
-if [[ $enable_diagnostics == "1" ]]; then
+if (( enable_diagnostics )); then
     /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier app.torrent7.debug" "$contents_dir/Info.plist"
     /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Torrent 7 (debug)" "$contents_dir/Info.plist"
     /usr/libexec/PlistBuddy -c "Set :CFBundleName Torrent 7 (debug)" "$contents_dir/Info.plist"

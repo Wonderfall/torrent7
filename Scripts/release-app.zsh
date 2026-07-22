@@ -73,7 +73,6 @@ typeset -a build_environment=(
     "DEVELOPER_DIR=$selected_developer_dir"
     "APP_SIGNING_MODE=distribution"
     "CONFIGURATION=release"
-    "SANITIZER_DIAGNOSTICS=0"
     "SKIP_BUILD_DEPS=0"
     "TARGET_ARCH=arm64e"
     "MACOSX_DEPLOYMENT_TARGET=26.0"

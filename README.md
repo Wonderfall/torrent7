@@ -325,16 +325,29 @@ The probe does not use wall-clock assertions; review gates are documented in
 brew install llvm
 ```
 
-Build a sanitizer diagnostics app:
+Run the Bridge with AddressSanitizer and UndefinedBehaviorSanitizer reporting:
 
 ```sh
-SANITIZER_DIAGNOSTICS=1 Scripts/build-app.zsh
+SANITIZER_PROFILE=address Scripts/test-bridge.zsh
 ```
 
-Diagnostics builds use a separate dependency prefix, ASan/UBSan reporting
-instrumentation for libtorrent and the bridge, and a separate app identity:
+Run the Bridge with ThreadSanitizer and UndefinedBehaviorSanitizer reporting:
+
+```sh
+SANITIZER_PROFILE=thread Scripts/test-bridge.zsh
+```
+
+Build an AddressSanitizer diagnostics app:
+
+```sh
+SANITIZER_PROFILE=address Scripts/build-app.zsh
+```
+
+Sanitizer profiles use separate dependency and Swift build directories, disable
+fortify, enable libc++ debug hardening, and instrument OpenSSL, libtorrent, and
+the Bridge. The current AddressSanitizer app is written to:
 
 ```text
-.build/App-Diagnostics/Torrent 7 (debug).app
+.build/App-Address/Torrent 7 (debug).app
 app.torrent7.debug
 ```

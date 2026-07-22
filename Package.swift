@@ -4,8 +4,13 @@ import PackageDescription
 
 let environment = Context.environment
 let packageRoot = Context.packageDirectory
-let enableDiagnostics = environment["SANITIZER_DIAGNOSTICS"] == "1"
-let defaultDepsProfile = enableDiagnostics ? "arm64e-diagnostics" : "arm64e"
+let sanitizerProfile = environment["SANITIZER_PROFILE"].flatMap { $0.isEmpty ? nil : $0 }
+let supportedSanitizerProfiles = ["address", "thread"]
+if let sanitizerProfile, !supportedSanitizerProfiles.contains(sanitizerProfile) {
+    fatalError("SANITIZER_PROFILE must be address or thread")
+}
+let enableDiagnostics = sanitizerProfile != nil
+let defaultDepsProfile = sanitizerProfile.map { "arm64e-\($0)" } ?? "arm64e"
 let depsPrefix = environment["DEPS_PREFIX"] ?? "\(packageRoot)/.build/deps/\(defaultDepsProfile)/prefix"
 let boostPrefix = environment["BOOST_PREFIX"] ?? depsPrefix
 let opensslPrefix = environment["OPENSSL_PREFIX"] ?? depsPrefix
@@ -40,7 +45,7 @@ let bridgeLanguageAndRuntimeFlags = [
     "-std=c++23",
     "-fexceptions"
 ]
-// Keep fortify out of diagnostics so it cannot obscure ASan reports.
+// Keep fortify out of sanitizer profiles so it cannot obscure reports.
 let bridgeFortifyFlags = enableDiagnostics
     ? ["-U_FORTIFY_SOURCE"]
     : ["-U_FORTIFY_SOURCE", "-D_FORTIFY_SOURCE=3"]
@@ -92,14 +97,29 @@ let trapOnlyUBSanFlags = [
     "-fsanitize-trap=\(trapOnlyUBSanSanitizers)",
     "-fno-sanitize-recover=\(trapOnlyUBSanSanitizers)"
 ]
-let diagnosticSanitizerFlags = [
+let addressSanitizerFlags = [
     "-g",
     "-fno-omit-frame-pointer",
     "-fsanitize=address,undefined,local-bounds",
     "-fsanitize-address-use-after-scope",
     "-fno-sanitize-recover=undefined,local-bounds"
 ]
-let bridgeSanitizerFlags = enableDiagnostics ? diagnosticSanitizerFlags : trapOnlyUBSanFlags
+let threadSanitizerFlags = [
+    "-g",
+    "-O1",
+    "-fno-omit-frame-pointer",
+    "-fsanitize=thread,undefined,local-bounds",
+    "-fno-sanitize-recover=undefined,local-bounds"
+]
+let bridgeSanitizerFlags: [String]
+switch sanitizerProfile {
+case "address":
+    bridgeSanitizerFlags = addressSanitizerFlags
+case "thread":
+    bridgeSanitizerFlags = threadSanitizerFlags
+default:
+    bridgeSanitizerFlags = trapOnlyUBSanFlags
+}
 let bridgeCompilerFlags = bridgeSystemIncludeFlags
     + bridgeLanguageAndRuntimeFlags
     + bridgeFortifyFlags
@@ -137,7 +157,7 @@ let bridgeDefines: [CXXSetting] = [
     .define("OPENSSL_NO_TLS1_1"),
     .define("OPENSSL_NO_DTLS1")
 ] + (enableDiagnostics ? [
-    // The diagnostics dependency uses libtorrent's CMake Debug configuration,
+    // Sanitizer dependencies use libtorrent's CMake Debug configuration,
     // whose public assertion mode changes internal C++ object layouts.
     .define("TORRENT_USE_ASSERTS", to: "1")
 ] : [])

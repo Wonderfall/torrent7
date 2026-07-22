@@ -9,9 +9,14 @@ fail() {
 
 typeset -r root_dir=${0:A:h:h}
 typeset -r target_arch=${TARGET_ARCH:-arm64e}
+typeset -r sanitizer_profile=${SANITIZER_PROFILE:-}
+case $sanitizer_profile in
+    ""|address|thread) ;;
+    *) fail "SANITIZER_PROFILE must be address or thread" ;;
+esac
 typeset deps_profile=$target_arch
-if [[ ${SANITIZER_DIAGNOSTICS:-0} == "1" ]]; then
-    deps_profile+="-diagnostics"
+if [[ -n $sanitizer_profile ]]; then
+    deps_profile+="-$sanitizer_profile"
 fi
 typeset -r deps_dir=${DEPS_DIR:-$root_dir/.build/deps/$deps_profile}
 typeset -r source_dir="$deps_dir/src/libtorrent"

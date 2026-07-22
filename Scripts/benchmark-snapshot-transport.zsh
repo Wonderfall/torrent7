@@ -4,8 +4,8 @@ setopt err_exit no_unset pipe_fail
 
 typeset -r root_dir=${0:A:h:h}
 
-if [[ ${SANITIZER_DIAGNOSTICS:-0} == "1" ]]; then
-    print -u2 -- "Snapshot transport timings must use the hardened release build, not sanitizer diagnostics."
+if [[ -n ${SANITIZER_PROFILE:-} ]]; then
+    print -u2 -- "Snapshot transport timings must use the hardened release build, not a sanitizer profile."
     exit 2
 fi
 

@@ -44,8 +44,8 @@ fail() {
     exit 1
 }
 
-if [[ ${SANITIZER_DIAGNOSTICS:-0} == "1" ]]; then
-    fail "Enhanced Security extension timings require the hardened release build, not sanitizer diagnostics."
+if [[ -n ${SANITIZER_PROFILE:-} ]]; then
+    fail "Enhanced Security extension timings require the hardened release build, not a sanitizer profile."
 fi
 
 case $# in

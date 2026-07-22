@@ -4,11 +4,12 @@ setopt err_exit no_unset pipe_fail
 
 typeset -r root_dir=${0:A:h:h}
 typeset -r configuration=${CONFIGURATION:-debug}
-typeset -r enable_diagnostics=${SANITIZER_DIAGNOSTICS:-0}
-typeset scratch_profile=default
-if [[ $enable_diagnostics == "1" ]]; then
-    scratch_profile=diagnostics
-fi
+typeset -r sanitizer_profile=${SANITIZER_PROFILE:-}
+case $sanitizer_profile in
+    ""|address|thread) ;;
+    *) print -ru2 -- "SANITIZER_PROFILE must be address or thread"; exit 2 ;;
+esac
+typeset -r scratch_profile=${sanitizer_profile:-default}
 typeset -r scratch_path=${SWIFT_TEST_SCRATCH_PATH:-"$root_dir/.build/swift-test-$scratch_profile"}
 
 cd -- "$root_dir"
@@ -21,8 +22,9 @@ typeset -a swift_test_args=(
     --configuration "$configuration"
     --triple arm64e-apple-macosx26.0
 )
-if [[ $enable_diagnostics == "1" ]]; then
-    swift_test_args+=(--sanitize address --sanitize undefined)
-fi
+case $sanitizer_profile in
+    address) swift_test_args+=(--sanitize address --sanitize undefined) ;;
+    thread) swift_test_args+=(--sanitize thread --sanitize undefined) ;;
+esac
 
 swift test "${swift_test_args[@]}" "$@"
