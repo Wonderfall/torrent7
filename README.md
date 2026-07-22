@@ -343,11 +343,26 @@ Build an AddressSanitizer diagnostics app:
 SANITIZER_PROFILE=address Scripts/build-app.zsh
 ```
 
+Build a ThreadSanitizer diagnostics app:
+
+```sh
+SANITIZER_PROFILE=thread Scripts/build-app.zsh
+```
+
 Sanitizer profiles use separate dependency and Swift build directories, disable
-fortify, enable libc++ debug hardening, and instrument OpenSSL, libtorrent, and
-the Bridge. The current AddressSanitizer app is written to:
+fortify, enable libc++ debug hardening, and apply the selected primary sanitizer
+to OpenSSL, libtorrent, and the Bridge. Libtorrent and the Bridge additionally
+retain the supported undefined-behavior checks. The apps have distinct bundle
+identities and can coexist with production and each other:
 
 ```text
-.build/App-Address/Torrent 7 (debug).app
-app.torrent7.debug
+.build/App-Address/Torrent 7 (ASan).app   app.torrent7.asan
+.build/App-Thread/Torrent 7 (TSan).app   app.torrent7.tsan
+```
+
+Run the correctness-only Enhanced Security lifecycle under ThreadSanitizer:
+
+```sh
+SANITIZER_PROFILE=thread SKIP_BUILD_DEPS=1 \
+  Scripts/test-enhanced-security-extension.zsh --automated
 ```

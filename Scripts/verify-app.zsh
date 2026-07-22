@@ -178,7 +178,23 @@ verify_distribution_signature() {
 
 verify_mach_o_load_commands() {
     local -r binary=$1
-    local -r allows_diagnostic_runtime=$2
+    local -r expected_sanitizer=$2
+    local expected_runtime=
+    case $expected_sanitizer in
+        none)
+            ;;
+        address)
+            expected_runtime=@rpath/libclang_rt.asan_osx_dynamic.dylib
+            ;;
+        thread)
+            expected_runtime=@rpath/libclang_rt.tsan_osx_dynamic.dylib
+            ;;
+        *)
+            fail "Internal error: unexpected sanitizer profile $expected_sanitizer"
+            ;;
+    esac
+    local saw_expected_runtime=false
+    local saw_diagnostic_rpath=false
     local dependencies load_command_output load_command_name load_path line
     dependencies=$(/usr/bin/otool -L "$binary")
     print -r -- "$dependencies"
@@ -222,8 +238,9 @@ verify_mach_o_load_commands() {
                 @loader_path|@executable_path)
                     ;;
                 /Applications/Xcode*.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/*/lib/darwin)
-                    [[ $mode == "development" && $allows_diagnostic_runtime == true ]] \
+                    [[ $mode == "development" && $expected_sanitizer != none ]] \
                         || fail "Diagnostic Xcode runtime path is forbidden in $binary"
+                    saw_diagnostic_rpath=true
                     ;;
                 *)
                     fail "Found unexpected LC_RPATH in $binary: $load_path"
@@ -235,14 +252,26 @@ verify_mach_o_load_commands() {
             /System/Library/*|/usr/lib/*)
                 ;;
             @rpath/libclang_rt.asan_osx_dynamic.dylib)
-                [[ $mode == "development" && $allows_diagnostic_runtime == true ]] \
-                    || fail "Diagnostic sanitizer runtime is forbidden in $binary"
+                [[ $mode == "development" && $expected_runtime == "$load_path" ]] \
+                    || fail "Unexpected AddressSanitizer runtime in $binary"
+                saw_expected_runtime=true
+                ;;
+            @rpath/libclang_rt.tsan_osx_dynamic.dylib)
+                [[ $mode == "development" && $expected_runtime == "$load_path" ]] \
+                    || fail "Unexpected ThreadSanitizer runtime in $binary"
+                saw_expected_runtime=true
                 ;;
             *)
                 fail "Found non-system Mach-O load command in $binary: $load_path"
                 ;;
         esac
     done
+    if [[ $expected_sanitizer != none ]]; then
+        [[ $saw_expected_runtime == true ]] \
+            || fail "$binary is missing its required $expected_sanitizer sanitizer runtime"
+        [[ $saw_diagnostic_rpath == true ]] \
+            || fail "$binary is missing the Xcode sanitizer runtime search path"
+    fi
 }
 
 [[ -f "$info_plist" && ! -L "$info_plist" ]] \
@@ -255,6 +284,7 @@ typeset expected_engine_bundle_id
 typeset expected_extension_point_identifier
 typeset expected_engine_info_plist
 typeset expected_extension_point
+typeset expected_sanitizer=none
 case "$app_bundle_id" in
     app.torrent7)
         expected_engine_bundle_id=app.torrent7.engine
@@ -262,13 +292,23 @@ case "$app_bundle_id" in
         expected_engine_info_plist="$root_dir/Packaging/TorrentEngineExtension-Info.plist"
         expected_extension_point="$root_dir/Packaging/TorrentApp.appexpt"
         ;;
-    app.torrent7.debug)
+    app.torrent7.asan)
         [[ $mode == "development" ]] \
-            || fail "Distribution verification does not allow the debug bundle identifier"
-        expected_engine_bundle_id=app.torrent7.debug.engine
-        expected_extension_point_identifier=app.torrent7.debug.torrent-engine
-        expected_engine_info_plist="$root_dir/Packaging/Debug/TorrentEngineExtension-Info.plist"
-        expected_extension_point="$root_dir/Packaging/Debug/TorrentApp.appexpt"
+            || fail "Distribution verification does not allow the ASan bundle identifier"
+        expected_engine_bundle_id=app.torrent7.asan.engine
+        expected_extension_point_identifier=app.torrent7.asan.torrent-engine
+        expected_engine_info_plist="$root_dir/Packaging/Address/TorrentEngineExtension-Info.plist"
+        expected_extension_point="$root_dir/Packaging/Address/TorrentApp.appexpt"
+        expected_sanitizer=address
+        ;;
+    app.torrent7.tsan)
+        [[ $mode == "development" ]] \
+            || fail "Distribution verification does not allow the TSan bundle identifier"
+        expected_engine_bundle_id=app.torrent7.tsan.engine
+        expected_extension_point_identifier=app.torrent7.tsan.torrent-engine
+        expected_engine_info_plist="$root_dir/Packaging/Thread/TorrentEngineExtension-Info.plist"
+        expected_extension_point="$root_dir/Packaging/Thread/TorrentApp.appexpt"
+        expected_sanitizer=thread
         ;;
     *)
         fail "Unexpected app bundle identifier: $app_bundle_id"
@@ -568,9 +608,5 @@ done
 [[ $found_app_executable == true && $found_engine_executable == true ]] \
     || fail "App bundle Mach-O inventory is missing an expected executable"
 
-typeset allows_diagnostic_runtime=false
-if [[ $app_bundle_id == "app.torrent7.debug" ]]; then
-    allows_diagnostic_runtime=true
-fi
-verify_mach_o_load_commands "$executable" "$allows_diagnostic_runtime"
-verify_mach_o_load_commands "$engine_extension_executable" "$allows_diagnostic_runtime"
+verify_mach_o_load_commands "$executable" "$expected_sanitizer"
+verify_mach_o_load_commands "$engine_extension_executable" "$expected_sanitizer"

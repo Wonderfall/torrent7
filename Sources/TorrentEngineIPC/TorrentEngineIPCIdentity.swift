@@ -19,9 +19,13 @@ package enum TorrentEngineIPCIdentity {
         appIdentifier: "app.torrent7",
         serviceIdentifier: "app.torrent7.engine"
     )
-    package static let debug = TorrentEngineIPCIdentityPair(
-        appIdentifier: "app.torrent7.debug",
-        serviceIdentifier: "app.torrent7.debug.engine"
+    package static let addressDiagnostics = TorrentEngineIPCIdentityPair(
+        appIdentifier: "app.torrent7.asan",
+        serviceIdentifier: "app.torrent7.asan.engine"
+    )
+    package static let threadDiagnostics = TorrentEngineIPCIdentityPair(
+        appIdentifier: "app.torrent7.tsan",
+        serviceIdentifier: "app.torrent7.tsan.engine"
     )
     // This pair exists only for the separately assembled ad-hoc integration
     // bundle. Production packaging never embeds either integration binary.
@@ -29,16 +33,30 @@ package enum TorrentEngineIPCIdentity {
         appIdentifier: "app.torrent7.integration",
         serviceIdentifier: "app.torrent7.integration.engine"
     )
+    package static let addressIntegration = TorrentEngineIPCIdentityPair(
+        appIdentifier: "app.torrent7.integration.asan",
+        serviceIdentifier: "app.torrent7.integration.asan.engine"
+    )
+    package static let threadIntegration = TorrentEngineIPCIdentityPair(
+        appIdentifier: "app.torrent7.integration.tsan",
+        serviceIdentifier: "app.torrent7.integration.tsan.engine"
+    )
     package static let reducedAssuranceInfoKey = "Torrent7AllowAdHocXPCPeer"
 
     package static func pair(appIdentifier: String?) -> TorrentEngineIPCIdentityPair? {
         switch appIdentifier {
         case release.appIdentifier:
             release
-        case debug.appIdentifier:
-            debug
+        case addressDiagnostics.appIdentifier:
+            addressDiagnostics
+        case threadDiagnostics.appIdentifier:
+            threadDiagnostics
         case integration.appIdentifier:
             integration
+        case addressIntegration.appIdentifier:
+            addressIntegration
+        case threadIntegration.appIdentifier:
+            threadIntegration
         default:
             nil
         }
@@ -48,10 +66,16 @@ package enum TorrentEngineIPCIdentity {
         switch serviceIdentifier {
         case release.serviceIdentifier:
             release
-        case debug.serviceIdentifier:
-            debug
+        case addressDiagnostics.serviceIdentifier:
+            addressDiagnostics
+        case threadDiagnostics.serviceIdentifier:
+            threadDiagnostics
         case integration.serviceIdentifier:
             integration
+        case addressIntegration.serviceIdentifier:
+            addressIntegration
+        case threadIntegration.serviceIdentifier:
+            threadIntegration
         default:
             nil
         }

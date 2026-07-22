@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EXVersion</key>
+	<integer>2</integer>
+	<key>app.torrent7.tsan.torrent-engine</key>
+	<dict>
+		<key>EXExtensionPointName</key>
+		<string>torrent-engine</string>
+		<key>EXPresentsUserInterface</key>
+		<false/>
+		<key>EXRequiresEnhancedSecurity</key>
+		<true/>
+		<key>_EXScopeRestriction</key>
+		<string>application</string>
+	</dict>
+</dict>
+</plist>

@@ -185,6 +185,20 @@ let engineExtensionLinkerFlags = [
     "-Xlinker", "-e",
     "-Xlinker", "_NSExtensionMain"
 ]
+let diagnosticsExtensionIdentityFlags: [SwiftSetting]
+let integrationExtensionIdentityFlags: [SwiftSetting]
+switch sanitizerProfile {
+case "address":
+    diagnosticsExtensionIdentityFlags = [.define("TORRENT_ADDRESS_SANITIZER")]
+    integrationExtensionIdentityFlags = [.define("TORRENT_ADDRESS_SANITIZER")]
+case "thread":
+    diagnosticsExtensionIdentityFlags = [.define("TORRENT_THREAD_SANITIZER")]
+    integrationExtensionIdentityFlags = [.define("TORRENT_THREAD_SANITIZER")]
+default:
+    // The diagnostics product is never packaged without a sanitizer profile.
+    diagnosticsExtensionIdentityFlags = [.define("TORRENT_ADDRESS_SANITIZER")]
+    integrationExtensionIdentityFlags = []
+}
 
 let package = Package(
     name: "Torrent7",
@@ -195,8 +209,8 @@ let package = Package(
         .executable(name: "Torrent7", targets: ["TorrentApp"]),
         .executable(name: "TorrentEngineExtension", targets: ["TorrentEngineExtension"]),
         .executable(
-            name: "TorrentEngineDebugExtension",
-            targets: ["TorrentEngineDebugExtension"]
+            name: "TorrentEngineDiagnosticsExtension",
+            targets: ["TorrentEngineDiagnosticsExtension"]
         ),
         .executable(
             name: "TorrentEngineIntegrationExtension",
@@ -308,14 +322,14 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "TorrentEngineDebugExtension",
+            name: "TorrentEngineDiagnosticsExtension",
             dependencies: ["TorrentEngineService"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(engineExtensionSwiftFlags)
-            ],
+            ] + diagnosticsExtensionIdentityFlags,
             linkerSettings: [
                 .unsafeFlags(engineExtensionLinkerFlags)
             ]
@@ -328,7 +342,7 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(engineExtensionSwiftFlags)
-            ],
+            ] + integrationExtensionIdentityFlags,
             linkerSettings: [
                 .unsafeFlags(engineExtensionLinkerFlags)
             ]

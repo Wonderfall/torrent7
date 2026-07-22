@@ -4,49 +4,46 @@ setopt err_exit no_unset pipe_fail
 
 typeset -r root_dir=${0:A:h:h}
 typeset -r build_dir="$root_dir/.build"
-typeset -r swift_build_dir=${SWIFT_BUILD_DIR:-$build_dir}
-typeset -r output_dir=${ENHANCED_SECURITY_OUTPUT_DIR:-$build_dir/EnhancedSecurityExtensionIntegration}
-typeset -r configuration=release
-typeset -r host_bundle_id=app.torrent7.integration
-typeset -r engine_bundle_id=app.torrent7.integration.engine
-typeset -r extension_point_identifier=app.torrent7.integration.torrent-engine
-typeset -r host_app="$output_dir/TorrentEngineXPCIntegration.app"
-typeset -r host_contents="$host_app/Contents"
-typeset -r host_executable="$host_contents/MacOS/TorrentEngineXPCIntegrationHost"
-typeset -r engine_extension="$host_contents/PlugIns/$engine_bundle_id.appex"
-typeset -r engine_contents="$engine_extension/Contents"
-typeset -r engine_executable="$engine_contents/MacOS/TorrentEngineExtension"
-typeset -r extension_point="$host_contents/Extensions/TorrentEngineXPCIntegrationHost.appexpt"
-typeset -r host_info="$root_dir/Packaging/Integration/TorrentEngineXPCIntegrationHost-Info.plist"
-typeset -r engine_info="$root_dir/Packaging/Integration/TorrentEngineExtension-Info.plist"
-typeset -r extension_point_source="$root_dir/Packaging/Integration/TorrentEngineXPCIntegrationHost.appexpt"
-typeset -r host_entitlements="$root_dir/Packaging/Torrent7.entitlements"
-typeset -r engine_entitlements="$root_dir/Packaging/Torrent7Engine.entitlements"
-typeset -r launch_services_register=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
-typeset -r sign_options=runtime,restrict,library
+typeset -r sanitizer_profile=${SANITIZER_PROFILE:-}
 typeset torrent_count=${ENHANCED_SECURITY_TORRENT_COUNT:-512}
 typeset timeout_seconds=${ENHANCED_SECURITY_TIMEOUT_SECONDS:-600}
-typeset -r host_output="$output_dir/host-output.log"
-typeset -r host_stderr="$output_dir/host-stderr.log"
-typeset -r memory_output="$output_dir/memory.log"
-typeset -r recovery_output="$output_dir/recovery.log"
-typeset -r timeout_marker="$output_dir/timeout.marker"
-typeset -r powerbox_root="$output_dir/PowerboxRoot"
-typeset -r user_temp_dir=${TMPDIR:-/tmp}
-typeset -r invocation_lock="${user_temp_dir%/}/$host_bundle_id.test-enhanced-security.lock"
-typeset -r recovery_marker_dir="$HOME/Library/Containers/$host_bundle_id/Data/Library/Application Support/Torrent7EnhancedSecurityIntegration"
-typeset -r recovery_ready_marker="$recovery_marker_dir/ready"
-typeset -r recovery_killed_marker="$recovery_marker_dir/killed"
 typeset mode=interactive
+typeset recovery_spawn_attempts=1000
 
 fail() {
     print -ru2 -- "$1"
     exit 1
 }
 
-if [[ -n ${SANITIZER_PROFILE:-} ]]; then
-    fail "Enhanced Security extension timings require the hardened release build, not a sanitizer profile."
-fi
+verify_sanitizer_runtime() {
+    local -r binary=$1
+    local -r dependencies=$(/usr/bin/otool -L "$binary")
+    local has_address=false
+    local has_thread=false
+    [[ $dependencies == *"@rpath/libclang_rt.asan_osx_dynamic.dylib"* ]] \
+        && has_address=true
+    [[ $dependencies == *"@rpath/libclang_rt.tsan_osx_dynamic.dylib"* ]] \
+        && has_thread=true
+    case $sanitizer_profile in
+        "")
+            [[ $has_address == false && $has_thread == false ]] \
+                || fail "Production integration binary unexpectedly loads a sanitizer: $binary"
+            ;;
+        address)
+            [[ $has_address == true && $has_thread == false ]] \
+                || fail "Integration binary does not load exactly AddressSanitizer: $binary"
+            ;;
+        thread)
+            [[ $has_address == false && $has_thread == true ]] \
+                || fail "Integration binary does not load exactly ThreadSanitizer: $binary"
+            ;;
+    esac
+}
+
+case $sanitizer_profile in
+    ""|address|thread) ;;
+    *) fail "SANITIZER_PROFILE must be address or thread" ;;
+esac
 
 case $# in
     0)
@@ -74,6 +71,70 @@ case $# in
         fail "Usage: Scripts/test-enhanced-security-extension.zsh [--automated|--build-only|--maximum]"
         ;;
 esac
+
+if [[ -n $sanitizer_profile && $mode != automated && $mode != build-only ]]; then
+    fail "Sanitizer Enhanced Security runs are correctness-only; use --automated or --build-only"
+fi
+
+typeset configuration=release
+typeset default_swift_build_dir=$build_dir
+typeset default_output_dir="$build_dir/EnhancedSecurityExtensionIntegration"
+typeset host_bundle_id=app.torrent7.integration
+typeset engine_bundle_id=app.torrent7.integration.engine
+typeset extension_point_identifier=app.torrent7.integration.torrent-engine
+typeset integration_packaging_dir="$root_dir/Packaging/Integration"
+case $sanitizer_profile in
+    address)
+        configuration=debug
+        default_swift_build_dir="$build_dir/swift-enhanced-security-address"
+        default_output_dir="$build_dir/EnhancedSecurityExtensionIntegration-Address"
+        host_bundle_id=app.torrent7.integration.asan
+        engine_bundle_id=app.torrent7.integration.asan.engine
+        extension_point_identifier=app.torrent7.integration.asan.torrent-engine
+        integration_packaging_dir="$root_dir/Packaging/Integration/Address"
+        timeout_seconds=${ENHANCED_SECURITY_TIMEOUT_SECONDS:-1200}
+        recovery_spawn_attempts=30000
+        ;;
+    thread)
+        configuration=debug
+        default_swift_build_dir="$build_dir/swift-enhanced-security-thread"
+        default_output_dir="$build_dir/EnhancedSecurityExtensionIntegration-Thread"
+        host_bundle_id=app.torrent7.integration.tsan
+        engine_bundle_id=app.torrent7.integration.tsan.engine
+        extension_point_identifier=app.torrent7.integration.tsan.torrent-engine
+        integration_packaging_dir="$root_dir/Packaging/Integration/Thread"
+        timeout_seconds=${ENHANCED_SECURITY_TIMEOUT_SECONDS:-1200}
+        recovery_spawn_attempts=30000
+        ;;
+esac
+
+typeset -r swift_build_dir=${SWIFT_BUILD_DIR:-$default_swift_build_dir}
+typeset -r output_dir=${ENHANCED_SECURITY_OUTPUT_DIR:-$default_output_dir}
+typeset -r host_app="$output_dir/TorrentEngineXPCIntegration.app"
+typeset -r host_contents="$host_app/Contents"
+typeset -r host_executable="$host_contents/MacOS/TorrentEngineXPCIntegrationHost"
+typeset -r engine_extension="$host_contents/PlugIns/$engine_bundle_id.appex"
+typeset -r engine_contents="$engine_extension/Contents"
+typeset -r engine_executable="$engine_contents/MacOS/TorrentEngineExtension"
+typeset -r extension_point="$host_contents/Extensions/TorrentEngineXPCIntegrationHost.appexpt"
+typeset -r host_info="$integration_packaging_dir/TorrentEngineXPCIntegrationHost-Info.plist"
+typeset -r engine_info="$integration_packaging_dir/TorrentEngineExtension-Info.plist"
+typeset -r extension_point_source="$integration_packaging_dir/TorrentEngineXPCIntegrationHost.appexpt"
+typeset -r host_entitlements="$root_dir/Packaging/Torrent7.entitlements"
+typeset -r engine_entitlements="$root_dir/Packaging/Torrent7Engine.entitlements"
+typeset -r launch_services_register=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+typeset -r sign_options=runtime,restrict,library
+typeset -r host_output="$output_dir/host-output.log"
+typeset -r host_stderr="$output_dir/host-stderr.log"
+typeset -r memory_output="$output_dir/memory.log"
+typeset -r recovery_output="$output_dir/recovery.log"
+typeset -r timeout_marker="$output_dir/timeout.marker"
+typeset -r powerbox_root="$output_dir/PowerboxRoot"
+typeset -r user_temp_dir=${TMPDIR:-/tmp}
+typeset -r invocation_lock="${user_temp_dir%/}/$host_bundle_id.test-enhanced-security.lock"
+typeset -r recovery_marker_dir="$HOME/Library/Containers/$host_bundle_id/Data/Library/Application Support/Torrent7EnhancedSecurityIntegration"
+typeset -r recovery_ready_marker="$recovery_marker_dir/ready"
+typeset -r recovery_killed_marker="$recovery_marker_dir/killed"
 
 [[ $torrent_count == <-> ]] || fail "ENHANCED_SECURITY_TORRENT_COUNT must be an integer"
 if [[ $mode == automated ]]; then
@@ -279,6 +340,10 @@ typeset -a swift_build_args=(
     --configuration "$configuration"
     --triple arm64e-apple-macosx26.0
 )
+case $sanitizer_profile in
+    address) swift_build_args+=(--sanitize address --sanitize undefined) ;;
+    thread) swift_build_args+=(--sanitize thread --sanitize undefined) ;;
+esac
 /usr/bin/swift build "${swift_build_args[@]}" --product TorrentEngineXPCIntegrationHost
 /usr/bin/swift build "${swift_build_args[@]}" --product TorrentEngineIntegrationExtension
 
@@ -296,6 +361,8 @@ fi
 /bin/cp \
     "$swift_build_dir/arm64e-apple-macosx/$configuration/TorrentEngineIntegrationExtension" \
     "$engine_executable"
+verify_sanitizer_runtime "$host_executable"
+verify_sanitizer_runtime "$engine_executable"
 /bin/cp "$host_info" "$host_contents/Info.plist"
 /bin/cp "$engine_info" "$engine_contents/Info.plist"
 /bin/cp "$extension_point_source" "$extension_point"
@@ -351,7 +418,7 @@ else
     )
 fi
 
-print -- "Enhanced Security extension integration (ad-hoc release bundle; ContinuousClock timings)"
+print -- "Enhanced Security extension integration (ad-hoc $configuration bundle; correctness gate)"
 print -- "machine_model=$(sysctl -n hw.model)"
 print -- "physical_memory_bytes=$(sysctl -n hw.memsize)"
 print -- "system_version=$(sw_vers -productVersion)"
@@ -369,11 +436,27 @@ fi
     "$memory_output" \
     "$recovery_output" \
     "$timeout_marker"
+typeset -a sanitizer_environment_args=()
+case $sanitizer_profile in
+    address)
+        sanitizer_environment_args=(
+            --env "ASAN_OPTIONS=${ASAN_OPTIONS:-halt_on_error=1:abort_on_error=1:detect_leaks=1}"
+            --env "UBSAN_OPTIONS=${UBSAN_OPTIONS:-halt_on_error=1:print_stacktrace=1}"
+        )
+        ;;
+    thread)
+        sanitizer_environment_args=(
+            --env "TSAN_OPTIONS=${TSAN_OPTIONS:-halt_on_error=1:exitcode=66:print_full_thread_history=1}"
+            --env "UBSAN_OPTIONS=${UBSAN_OPTIONS:-halt_on_error=1:print_stacktrace=1}"
+        )
+        ;;
+esac
 /usr/bin/open \
     -n \
     -W \
     --stdout "$host_output" \
     --stderr "$host_stderr" \
+    "${sanitizer_environment_args[@]}" \
     "$host_app" \
     --args \
     "${host_arguments[@]}" &
@@ -397,7 +480,7 @@ done
 if [[ $mode == automated ]]; then
     (
         typeset marker_attempt
-        for marker_attempt in {1..1000}; do
+        for (( marker_attempt = 1; marker_attempt <= recovery_spawn_attempts; marker_attempt++ )); do
             [[ -f "$recovery_ready_marker" ]] && break
             pid_matches_exact_executable "$host_pid" "$host_executable" || exit 10
             sleep 0.02
@@ -419,7 +502,7 @@ if [[ $mode == automated ]]; then
 
         typeset new_engine_pid=0
         typeset -a new_engine_pids=()
-        for marker_attempt in {1..1000}; do
+        for (( marker_attempt = 1; marker_attempt <= recovery_spawn_attempts; marker_attempt++ )); do
             new_engine_pids=(${(f)"$(exact_process_pids "$engine_executable")"})
             if (( ${#new_engine_pids[@]} == 1 \
                 && new_engine_pids[1] != old_engine_pid )); then

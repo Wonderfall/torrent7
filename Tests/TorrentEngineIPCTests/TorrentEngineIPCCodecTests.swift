@@ -347,10 +347,17 @@ struct TorrentEngineIPCEnvelopeTests {
                 )
         )
         #expect(
-            TorrentEngineIPCIdentity.pair(serviceIdentifier: "app.torrent7.debug.engine")
+            TorrentEngineIPCIdentity.pair(serviceIdentifier: "app.torrent7.asan.engine")
                 == .init(
-                    appIdentifier: "app.torrent7.debug",
-                    serviceIdentifier: "app.torrent7.debug.engine"
+                    appIdentifier: "app.torrent7.asan",
+                    serviceIdentifier: "app.torrent7.asan.engine"
+                )
+        )
+        #expect(
+            TorrentEngineIPCIdentity.pair(appIdentifier: "app.torrent7.tsan")
+                == .init(
+                    appIdentifier: "app.torrent7.tsan",
+                    serviceIdentifier: "app.torrent7.tsan.engine"
                 )
         )
         #expect(
@@ -358,6 +365,21 @@ struct TorrentEngineIPCEnvelopeTests {
                 == .init(
                     appIdentifier: "app.torrent7.integration",
                     serviceIdentifier: "app.torrent7.integration.engine"
+                )
+        )
+        #expect(
+            TorrentEngineIPCIdentity.pair(
+                serviceIdentifier: "app.torrent7.integration.asan.engine"
+            ) == .init(
+                appIdentifier: "app.torrent7.integration.asan",
+                serviceIdentifier: "app.torrent7.integration.asan.engine"
+            )
+        )
+        #expect(
+            TorrentEngineIPCIdentity.pair(appIdentifier: "app.torrent7.integration.tsan")
+                == .init(
+                    appIdentifier: "app.torrent7.integration.tsan",
+                    serviceIdentifier: "app.torrent7.integration.tsan.engine"
                 )
         )
         #expect(TorrentEngineIPCIdentity.pair(appIdentifier: nil) == nil)
@@ -379,12 +401,24 @@ struct TorrentEngineIPCEnvelopeTests {
                 == "app.torrent7.torrent-engine"
         )
         #expect(
-            TorrentEngineIPCIdentity.debug.extensionPointIdentifier
-                == "app.torrent7.debug.torrent-engine"
+            TorrentEngineIPCIdentity.addressDiagnostics.extensionPointIdentifier
+                == "app.torrent7.asan.torrent-engine"
+        )
+        #expect(
+            TorrentEngineIPCIdentity.threadDiagnostics.extensionPointIdentifier
+                == "app.torrent7.tsan.torrent-engine"
         )
         #expect(
             TorrentEngineIPCIdentity.integration.extensionPointIdentifier
                 == "app.torrent7.integration.torrent-engine"
+        )
+        #expect(
+            TorrentEngineIPCIdentity.addressIntegration.extensionPointIdentifier
+                == "app.torrent7.integration.asan.torrent-engine"
+        )
+        #expect(
+            TorrentEngineIPCIdentity.threadIntegration.extensionPointIdentifier
+                == "app.torrent7.integration.tsan.torrent-engine"
         )
     }
 

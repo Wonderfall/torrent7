@@ -1,0 +1,132 @@
+name: ThreadSanitizer
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/thread-sanitizer.yml"
+      - "Documentation/EnhancedSecurityExtensionIntegration.md"
+      - "Package.swift"
+      - "Packaging/**"
+      - "Scripts/**"
+      - "Sources/**"
+      - "Tests/**"
+      - "ThirdParty/doctest/**"
+      - "Tools/XPCIntegrationHost/**"
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    paths:
+      - ".github/workflows/thread-sanitizer.yml"
+      - "Documentation/EnhancedSecurityExtensionIntegration.md"
+      - "Package.swift"
+      - "Packaging/**"
+      - "Scripts/**"
+      - "Sources/**"
+      - "Tests/**"
+      - "ThirdParty/doctest/**"
+      - "Tools/XPCIntegrationHost/**"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: thread-sanitizer-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    name: Test fully instrumented app
+    runs-on: macos-26
+    permissions: {}
+    timeout-minutes: 90
+    env:
+      SANITIZER_PROFILE: thread
+      TSAN_OPTIONS: halt_on_error=1:exitcode=66:print_full_thread_history=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - name: Check out repository
+        shell: zsh {0}
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            checkout_ref="refs/pull/${PR_NUMBER}/merge"
+          else
+            checkout_ref="$GITHUB_REF"
+          fi
+
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin "$checkout_ref"
+          git checkout --detach FETCH_HEAD
+
+      - name: Install build tools
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          brew install cmake ninja gnupg
+
+      - name: Restore ThreadSanitizer dependency cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .build/deps/source-cache
+            .build/deps/arm64e-thread
+          key: deps-arm64e-thread-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/keys/**', 'Scripts/patches/**') }}
+
+      - name: Build fully instrumented dependencies
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          Scripts/build-deps.zsh
+
+      - name: Verify dependency instrumentation
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          for archive in \
+            .build/deps/arm64e-thread/prefix/lib/libcrypto.a \
+            .build/deps/arm64e-thread/prefix/lib/libssl.a \
+            .build/deps/arm64e-thread/prefix/lib/libtorrent-rasterbar.a; do
+            xcrun nm "$archive" | awk '/___tsan_/ { found=1 } END { exit !found }' \
+              || { print -ru2 -- "Missing ThreadSanitizer instrumentation: $archive"; exit 1; }
+          done
+
+      - name: Run libtorrent security regressions
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          SKIP_BUILD_DEPS=1 Scripts/test-libtorrent-security.zsh
+
+      - name: Run Bridge tests
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          SKIP_BUILD_DEPS=1 Scripts/test-bridge.zsh
+
+      - name: Run Swift tests
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          SKIP_BUILD_DEPS=1 Scripts/test-swift.zsh
+
+      - name: Build and verify ThreadSanitizer app
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          SKIP_BUILD_DEPS=1 Scripts/build-app.zsh
+          Scripts/verify-app.zsh ".build/App-Thread/Torrent 7 (TSan).app"
+
+      - name: Exercise Enhanced Security lifecycle under ThreadSanitizer
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          SKIP_BUILD_DEPS=1 Scripts/test-enhanced-security-extension.zsh --automated

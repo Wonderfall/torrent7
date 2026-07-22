@@ -24,27 +24,42 @@ fi
 typeset -r swift_build_dir=${SWIFT_BUILD_DIR:-$default_swift_build_dir}
 typeset app_output_dir=${APP_OUTPUT_DIR:-$build_dir/App}
 typeset app_bundle_name="Torrent 7"
-if (( enable_diagnostics )); then
-    if [[ -z ${APP_OUTPUT_DIR:-} ]]; then
-        app_output_dir="$build_dir/App-${(C)sanitizer_profile}"
-    fi
-    app_bundle_name="Torrent 7 (debug)"
-fi
+typeset app_bundle_id=app.torrent7
+typeset app_display_name="Torrent 7"
+typeset app_url_identifier=app.torrent7.magnet
+typeset engine_extension_product=TorrentEngineExtension
+typeset engine_extension_bundle_id=app.torrent7.engine
+typeset engine_extension_info_plist="$root_dir/Packaging/TorrentEngineExtension-Info.plist"
+typeset extension_point_source="$root_dir/Packaging/TorrentApp.appexpt"
+case $sanitizer_profile in
+    address)
+        [[ -n ${APP_OUTPUT_DIR:-} ]] || app_output_dir="$build_dir/App-Address"
+        app_bundle_name="Torrent 7 (ASan)"
+        app_bundle_id=app.torrent7.asan
+        app_display_name="Torrent 7 (ASan)"
+        app_url_identifier=app.torrent7.asan.magnet
+        engine_extension_product=TorrentEngineDiagnosticsExtension
+        engine_extension_bundle_id=app.torrent7.asan.engine
+        engine_extension_info_plist="$root_dir/Packaging/Address/TorrentEngineExtension-Info.plist"
+        extension_point_source="$root_dir/Packaging/Address/TorrentApp.appexpt"
+        ;;
+    thread)
+        [[ -n ${APP_OUTPUT_DIR:-} ]] || app_output_dir="$build_dir/App-Thread"
+        app_bundle_name="Torrent 7 (TSan)"
+        app_bundle_id=app.torrent7.tsan
+        app_display_name="Torrent 7 (TSan)"
+        app_url_identifier=app.torrent7.tsan.magnet
+        engine_extension_product=TorrentEngineDiagnosticsExtension
+        engine_extension_bundle_id=app.torrent7.tsan.engine
+        engine_extension_info_plist="$root_dir/Packaging/Thread/TorrentEngineExtension-Info.plist"
+        extension_point_source="$root_dir/Packaging/Thread/TorrentApp.appexpt"
+        ;;
+esac
 typeset -r app_dir="$app_output_dir/$app_bundle_name.app"
 typeset -r contents_dir="$app_dir/Contents"
 typeset -r macos_dir="$contents_dir/MacOS"
 typeset -r resources_dir="$contents_dir/Resources"
 typeset -r executable="$macos_dir/Torrent 7"
-typeset engine_extension_product=TorrentEngineExtension
-typeset engine_extension_bundle_id=app.torrent7.engine
-typeset engine_extension_info_plist="$root_dir/Packaging/TorrentEngineExtension-Info.plist"
-typeset extension_point_source="$root_dir/Packaging/TorrentApp.appexpt"
-if (( enable_diagnostics )); then
-    engine_extension_product=TorrentEngineDebugExtension
-    engine_extension_bundle_id=app.torrent7.debug.engine
-    engine_extension_info_plist="$root_dir/Packaging/Debug/TorrentEngineExtension-Info.plist"
-    extension_point_source="$root_dir/Packaging/Debug/TorrentApp.appexpt"
-fi
 typeset -r plugins_dir="$contents_dir/PlugIns"
 typeset -r engine_extension_dir="$plugins_dir/$engine_extension_bundle_id.appex"
 typeset -r engine_extension_contents_dir="$engine_extension_dir/Contents"
@@ -166,10 +181,10 @@ if [[ $sign_identity == "-" ]]; then
         "$engine_extension_contents_dir/Info.plist"
 fi
 if (( enable_diagnostics )); then
-    /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier app.torrent7.debug" "$contents_dir/Info.plist"
-    /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Torrent 7 (debug)" "$contents_dir/Info.plist"
-    /usr/libexec/PlistBuddy -c "Set :CFBundleName Torrent 7 (debug)" "$contents_dir/Info.plist"
-    /usr/libexec/PlistBuddy -c "Set :CFBundleURLTypes:0:CFBundleURLName app.torrent7.debug.magnet" "$contents_dir/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $app_bundle_id" "$contents_dir/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $app_display_name" "$contents_dir/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleName $app_display_name" "$contents_dir/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleURLTypes:0:CFBundleURLName $app_url_identifier" "$contents_dir/Info.plist"
 fi
 cp "$document_icon" "$resources_dir/Torrent7Document.icns"
 cp "$third_party_notices" "$resources_dir/ThirdPartyNotices.txt"

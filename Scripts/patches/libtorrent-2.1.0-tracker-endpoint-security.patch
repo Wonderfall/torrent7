@@ -614,6 +614,10 @@ index 9ead66df7b693ad5fe49941e1aa770d98ef1b3f9..c509d0cee242333d583c91ffcbe5241d
  
  #ifndef TORRENT_DISABLE_LOGGING
  	bool should_log() const override { return false; }
+@@ -64,2 +92,2 @@ struct tracker_manager_handler
+-	bool is_single_thread() const override { return false; }
++	bool is_single_thread() const override { return true; }
+ 	bool has_peer(aux::peer_connection const*) const override { return false; }
 @@ -70,7 +98,56 @@ struct tracker_manager_handler
  	io_context m_io_context;
  	counters m_stats_counters;
@@ -718,9 +722,7 @@ index 9ead66df7b693ad5fe49941e1aa770d98ef1b3f9..c509d0cee242333d583c91ffcbe5241d
  TORRENT_TEST(empty_and_num_requests)
  {
  	io_context ios;
-@@ -221,3 +322,344 @@ TORRENT_TEST(protocol_dispatch_is_case_insensitive)
- #endif
- #endif
+@@ -226 +327,342 @@ TORRENT_TEST(protocol_dispatch_is_case_insensitive)
  }
 +
 +TORRENT_TEST(http_tracker_blocks_non_global_resolved_endpoint)

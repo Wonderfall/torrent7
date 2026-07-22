@@ -1,5 +1,15 @@
 #include "TorrentBridgeInternal.hpp"
 
+#if __has_feature(thread_sanitizer)
+extern "C" __attribute__((visibility("default"), used, retain))
+char const *__tsan_default_options() noexcept
+{
+    // Enhanced Security helpers are launched by the system and may not inherit
+    // the test runner's environment. Make every helper-side race fail the lane.
+    return "halt_on_error=1:exitcode=66:print_full_thread_history=1";
+}
+#endif
+
 namespace torrent_bridge::internal {
 
 namespace {

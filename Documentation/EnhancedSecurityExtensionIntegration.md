@@ -9,6 +9,14 @@ boundary. The fixture uses the release entitlement files with isolated
 preserves sandbox and entitlement fidelity for this local gate; it does not
 exercise production identified-peer signing.
 
+The automated lifecycle also supports `SANITIZER_PROFILE=address` and
+`SANITIZER_PROFILE=thread`. These correctness-only variants use separate build
+directories plus `app.torrent7.integration.asan` or
+`app.torrent7.integration.tsan` identities, so their registrations and sandbox
+containers cannot collide with the release fixture. They require `--automated`
+or `--build-only`; interactive timing and maximum-dataset runs remain release
+only.
+
 The fixture has the same structural security properties as production:
 
 - one helper under `Contents/PlugIns/*.appex`;
@@ -92,3 +100,16 @@ This mode needs no Powerbox interaction and does not add torrents. Its purpose
 is the signed Enhanced Security process lifecycle, recovery path, network
 observation, and negative folder-authorization boundary. The practical and
 maximum modes provide positive delegation and transport measurements.
+
+To run the same lifecycle with the fully instrumented ThreadSanitizer dependency
+profile:
+
+```sh
+SANITIZER_PROFILE=thread SKIP_BUILD_DEPS=1 \
+  Scripts/test-enhanced-security-extension.zsh --automated
+```
+
+The sanitizer runtime is verified in both the host and helper before launch.
+TSan uses fail-fast options without suppressions; the Bridge also embeds those
+defaults because the system-launched Enhanced Security helper is not guaranteed
+to inherit the runner's environment.

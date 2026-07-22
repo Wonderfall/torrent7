@@ -1286,7 +1286,7 @@ index 08a62decc..9ead66df7 100644
  
  	tracker_manager_handler(io_context& ios, aux::session_settings& sett)
  		: m_host_resolver(ios)
-@@ -176,3 +180,44 @@ TORRENT_TEST(empty_and_num_requests)
+@@ -176,3 +180,47 @@ TORRENT_TEST(empty_and_num_requests)
  #endif
  	}
  }
@@ -1330,6 +1330,9 @@ index 08a62decc..9ead66df7 100644
 +	TEST_EQUAL(h.m_tracker_manager.num_requests(), 3);
 +#endif
 +#endif
++
++	h.m_tracker_manager.abort_all_requests(true);
++	ios.run();
 +}
 diff --git a/test/test_torrent.cpp b/test/test_torrent.cpp
 index a2ce92974..a8f9ceb2f 100644
