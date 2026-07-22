@@ -49,6 +49,7 @@ let bridgeCompilerHardeningFlags = [
     "-fPIE",
     "-fapplication-extension",
     "-ftrivial-auto-var-init=zero",
+    "-fno-delete-null-pointer-checks",
     "-fzero-call-used-regs=used-gpr",
     "-fstrict-flex-arrays=3",
     "-fbranch-target-identification",

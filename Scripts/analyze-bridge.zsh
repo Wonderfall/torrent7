@@ -78,6 +78,7 @@ typeset -a compiler_args=(
     -D_FORTIFY_SOURCE=3
     -fPIE
     -ftrivial-auto-var-init=zero
+    -fno-delete-null-pointer-checks
     -fzero-call-used-regs=used-gpr
     -fvisibility=hidden
     -fvisibility-inlines-hidden
