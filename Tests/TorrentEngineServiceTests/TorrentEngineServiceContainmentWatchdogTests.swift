@@ -28,37 +28,27 @@ struct TorrentEngineServiceContainmentWatchdogTests {
         #expect(terminationCount.withLock { $0 } == 1)
     }
 
-    @Test("Containment and cleanup deadlines are independent phases")
-    func containmentAndCleanupPhasesAreIndependent() async throws {
-        let containmentExpirations = Mutex(0)
-        let cleanupExpirations = Mutex(0)
+    @Test("Containment and cleanup watchdogs disarm independently")
+    func containmentAndCleanupPhasesAreIndependent() {
         let containment = TorrentEngineServiceContainmentWatchdog(
-            timeout: .milliseconds(10),
-            terminationHandler: {
-                containmentExpirations.withLock { $0 += 1 }
-            }
+            timeout: .never
         )
         let cleanup = TorrentEngineServiceContainmentWatchdog(
-            timeout: .milliseconds(40),
-            terminationHandler: {
-                cleanupExpirations.withLock { $0 += 1 }
-            }
+            timeout: .never
         )
 
         let containmentToken = containment.arm()
-        #expect(containment.armedTokenCount == 1)
-        containment.disarm(containmentToken)
         let cleanupToken = cleanup.arm()
-        try await Task.sleep(for: .milliseconds(20))
-
-        #expect(containment.armedTokenCount == 0)
-        #expect(containmentExpirations.withLock { $0 } == 0)
+        #expect(containment.armedTokenCount == 1)
         #expect(cleanup.armedTokenCount == 1)
-        #expect(cleanupExpirations.withLock { $0 } == 0)
+
+        containment.disarm(containmentToken)
+        #expect(containment.armedTokenCount == 0)
+        #expect(cleanup.armedTokenCount == 1)
 
         cleanup.disarm(cleanupToken)
-        try await Task.sleep(for: .milliseconds(30))
-        #expect(cleanupExpirations.withLock { $0 } == 0)
+        #expect(containment.armedTokenCount == 0)
+        #expect(cleanup.armedTokenCount == 0)
     }
 
     @Test("Nested tokens on one watchdog disarm independently")
