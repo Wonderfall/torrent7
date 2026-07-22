@@ -66,7 +66,6 @@ let bridgeCompilerHardeningFlags = [
     "-fapplication-extension",
     "-ftrivial-auto-var-init=zero",
     "-fno-delete-null-pointer-checks",
-    "-fno-strict-overflow",
     "-fno-strict-aliasing",
     "-fzero-call-used-regs=used-gpr",
     "-fstrict-flex-arrays=3",

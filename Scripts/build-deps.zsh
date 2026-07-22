@@ -222,6 +222,7 @@ typeset -r NO_STRICT_ALIASING_FLAG="-fno-strict-aliasing"
 typeset LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE
 # Keep fortify out of sanitizer profiles so it cannot obscure reports.
 typeset FORTIFY_FLAGS="-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3"
+typeset STRICT_OVERFLOW_FLAGS="$NO_STRICT_OVERFLOW_FLAG"
 typeset OPENSSL_SANITIZER_FLAGS=
 typeset LIBTORRENT_SANITIZER_FLAGS=
 case "$SANITIZER_PROFILE" in
@@ -237,8 +238,12 @@ esac
 if [[ -n "$SANITIZER_PROFILE" ]]; then
     LIBCPP_HARDENING_MODE="_LIBCPP_HARDENING_MODE_DEBUG"
     FORTIFY_FLAGS="-U_FORTIFY_SOURCE"
+    # Preserve undefined signed overflow so UBSan can diagnose it. OpenSSL's
+    # diagnostic builds follow the same profile even though their upstream
+    # sanitizer subset currently excludes UBSan.
+    STRICT_OVERFLOW_FLAGS=
 fi
-typeset -r HARDENED_COMMON_FLAGS="-Wno-poison-system-directories -Wformat -Wformat-security -Werror=format-security -fstack-protector-strong $FORTIFY_FLAGS -fPIE -ftrivial-auto-var-init=zero $RETAIN_NULL_POINTER_CHECKS_FLAG $NO_STRICT_OVERFLOW_FLAG $NO_STRICT_ALIASING_FLAG -fvisibility=hidden -faarch64-jump-table-hardening $STRICT_FLEX_ARRAYS_FLAG $BRANCH_TARGET_IDENTIFICATION_FLAG $SLS_HARDENING_FLAG $ZERO_CALL_USED_REGS_FLAG $PTRAUTH_C_FLAGS"
+typeset -r HARDENED_COMMON_FLAGS="-Wno-poison-system-directories -Wformat -Wformat-security -Werror=format-security -fstack-protector-strong $FORTIFY_FLAGS -fPIE -ftrivial-auto-var-init=zero $RETAIN_NULL_POINTER_CHECKS_FLAG $STRICT_OVERFLOW_FLAGS $NO_STRICT_ALIASING_FLAG -fvisibility=hidden -faarch64-jump-table-hardening $STRICT_FLEX_ARRAYS_FLAG $BRANCH_TARGET_IDENTIFICATION_FLAG $SLS_HARDENING_FLAG $ZERO_CALL_USED_REGS_FLAG $PTRAUTH_C_FLAGS"
 typeset -r HARDENED_C_FLAGS="$HARDENED_COMMON_FLAGS $TYPED_ALLOCATOR_C_FLAGS"
 typeset -r OPENSSL_HARDENED_CXX_FLAGS="$HARDENED_COMMON_FLAGS $PTRAUTH_CXX_FLAGS $TYPED_ALLOCATOR_CXX_FLAGS -D_LIBCPP_HARDENING_MODE=$LIBCPP_HARDENING_MODE -fvisibility-inlines-hidden"
 typeset -r HARDENED_CXX_FLAGS="$HARDENED_COMMON_FLAGS $PTRAUTH_CXX_FLAGS $TYPED_ALLOCATOR_CXX_FLAGS -D_LIBCPP_HARDENING_MODE=$LIBCPP_HARDENING_MODE -fvisibility-inlines-hidden"
