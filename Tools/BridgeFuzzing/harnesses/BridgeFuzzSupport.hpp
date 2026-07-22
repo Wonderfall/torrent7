@@ -341,6 +341,32 @@ public:
         return save_path_.c_str();
     }
 
+    [[nodiscard]] TTorrentAuthorizedSaveRoot authorized_save_root_record() noexcept
+    {
+        return authorized_save_root_->record();
+    }
+
+    void restore_authorized_save_path()
+    {
+        std::vector<std::uint8_t> authorized_save_paths(save_path_.begin(), save_path_.end());
+        authorized_save_paths.push_back(0U);
+        TTorrentAuthorizedSaveRoot native_root = authorized_save_root_->record();
+        ErrorBuffer error;
+        if (TorrentClientReplaceAuthorizedSavePaths(
+                client_,
+                authorized_save_paths.data(),
+                static_cast<int32_t>(authorized_save_paths.size()),
+                &native_root,
+                1,
+                retain_authorized_save_root,
+                release_authorized_save_root,
+                error.data(),
+                error.capacity()
+            ) != 0) {
+            std::abort();
+        }
+    }
+
     [[nodiscard]] std::optional<std::uint64_t> &tracked_removal_token() noexcept
     {
         return tracked_removal_token_;
@@ -389,6 +415,10 @@ inline void exercise_change_copy(TTorrentClient *client)
     TTorrentNetworkStatus status{};
     static_cast<void>(TorrentClientCopyNetworkStatus(client, nullptr));
     static_cast<void>(TorrentClientCopyNetworkStatus(client, &status));
+
+    TTorrentBridgeHealth health{};
+    static_cast<void>(TorrentClientCopyHealth(client, nullptr));
+    static_cast<void>(TorrentClientCopyHealth(client, &health));
 }
 
 inline void exercise_snapshot_copy(TTorrentClient *client)

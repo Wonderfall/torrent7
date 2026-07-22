@@ -69,8 +69,10 @@ cxx_flags=(
     -Wformat-security
     -Werror=format-security
     -fstack-protector-strong
+    # Fuzz targets always use ASan; keep fortify from obscuring its reports.
     -U_FORTIFY_SOURCE
-    -D_FORTIFY_SOURCE=3
+    -fno-delete-null-pointer-checks
+    -fno-strict-aliasing
     -fstrict-flex-arrays=3
     -ftrivial-auto-var-init=zero
     -fvisibility=hidden

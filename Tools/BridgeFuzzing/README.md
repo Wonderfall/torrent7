@@ -18,11 +18,12 @@ tooling self-contained.
 - `bridge_torrent_file`: passes mutated `.torrent` bytes to
   `TorrentClientAddTorrentFileData`.
 - `bridge_resume_startup`: creates a temporary state directory with mutated
-  `.fastresume` bytes, then creates and destroys a bridge client.
+  `.fastresume` bytes, then exercises blocking and bounded asynchronous client
+  destruction.
 - `bridge_session_api`: runs short mutated operation sequences across add,
   preview, file priorities, settings, snapshots, detail batches, torrent
   options, queue movement, piece maps, wake/change, pause/resume/remove, save,
-  network, and alert APIs.
+  network, health, authorized-root replacement, and alert APIs.
 
 All harness runtime state is written to temporary directories and removed on
 normal exit. Network access is blocked or disabled by the bridge settings used

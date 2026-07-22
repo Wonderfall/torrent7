@@ -217,8 +217,10 @@ base_flags=(
     -g
     -fno-omit-frame-pointer
     -fstack-protector-strong
+    # Fuzz dependencies always use sanitizers; keep fortify out of this profile.
     -U_FORTIFY_SOURCE
-    -D_FORTIFY_SOURCE=3
+    -fno-delete-null-pointer-checks
+    -fno-strict-aliasing
     -fstrict-flex-arrays=3
     -ftrivial-auto-var-init=zero
     -fvisibility=hidden
