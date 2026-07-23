@@ -29,6 +29,7 @@ typeset app_display_name="Torrent 7"
 typeset app_url_identifier=app.torrent7.magnet
 typeset engine_extension_product=TorrentEngineExtension
 typeset engine_extension_bundle_id=app.torrent7.engine
+typeset -r app_info_plist="$root_dir/Packaging/Info.plist"
 typeset engine_extension_info_plist="$root_dir/Packaging/TorrentEngineExtension-Info.plist"
 typeset extension_point_source="$root_dir/Packaging/TorrentApp.appexpt"
 case $sanitizer_profile in
@@ -122,6 +123,15 @@ esac
 
 cd -- "$root_dir"
 
+typeset -r app_marketing_version=$(
+    /usr/bin/plutil -extract CFBundleShortVersionString raw -expect string -o - \
+        "$app_info_plist"
+)
+typeset -r app_build_version=$(
+    /usr/bin/plutil -extract CFBundleVersion raw -expect string -o - \
+        "$app_info_plist"
+)
+
 export CC="$(/usr/bin/xcrun --find clang)"
 export CXX="$(/usr/bin/xcrun --find clang++)"
 
@@ -163,12 +173,20 @@ cp "$swift_build_dir/arm64e-apple-macosx/$configuration/Torrent7" "$executable"
 cp \
     "$swift_build_dir/arm64e-apple-macosx/$configuration/$engine_extension_product" \
     "$engine_extension_executable"
-cp "$root_dir/Packaging/Info.plist" "$contents_dir/Info.plist"
+cp "$app_info_plist" "$contents_dir/Info.plist"
 cp "$engine_extension_info_plist" "$engine_extension_contents_dir/Info.plist"
 cp "$extension_point_source" "$extension_point"
+/usr/bin/plutil -insert CFBundleShortVersionString \
+    -string "$app_marketing_version" \
+    "$engine_extension_contents_dir/Info.plist"
+/usr/bin/plutil -insert CFBundleVersion \
+    -string "$app_build_version" \
+    "$engine_extension_contents_dir/Info.plist"
 /usr/bin/plutil -lint \
+    "$app_info_plist" \
     "$engine_extension_info_plist" \
     "$extension_point_source" \
+    "$contents_dir/Info.plist" \
     "$engine_extension_contents_dir/Info.plist" \
     "$extension_point" \
     >/dev/null
