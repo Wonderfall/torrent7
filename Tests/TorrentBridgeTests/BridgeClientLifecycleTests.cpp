@@ -2221,12 +2221,18 @@ TEST_CASE("tracker host updates retain unrelated cached rows")
     );
     REQUIRE(first_identity != nullptr);
     REQUIRE(second_identity != nullptr);
-    first_handle.replace_trackers({lt::announce_entry{"https://first.example/announce"}});
-    second_handle.replace_trackers({lt::announce_entry{"https://second-old.example/announce"}});
 
     std::scoped_lock guard(client.lock);
     static_cast<void>(client.cache_snapshot(first_handle));
     static_cast<void>(client.cache_snapshot(second_handle));
+    static_cast<void>(client.cache_tracker_hosts(
+        first_identity->canonical_id,
+        {lt::announce_entry{"https://first.example/announce"}}
+    ));
+    static_cast<void>(client.cache_tracker_hosts(
+        second_identity->canonical_id,
+        {lt::announce_entry{"https://second-old.example/announce"}}
+    ));
     {
         std::scoped_lock io_guard(client.resume_io_lock);
         client.handle_by_id.insert_or_assign(first_identity->canonical_id, lt::torrent_handle{});
