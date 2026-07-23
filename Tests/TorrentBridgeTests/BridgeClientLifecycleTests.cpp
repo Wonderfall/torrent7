@@ -441,6 +441,23 @@ void check_replaced_resume_root_remains_confined(bool const replace_with_symlink
     return add_metadata_torrent(client, std::move(params), save_path, identity);
 }
 
+[[nodiscard]] lt::torrent_handle add_metadata_torrent_with_trackers(
+    TTorrentClient &client,
+    lt::torrent_info const &info,
+    fs::path const &save_path,
+    TorrentIdentity *&identity,
+    std::span<lt::announce_entry const> trackers
+)
+{
+    lt::add_torrent_params params;
+    params.ti = std::make_shared<lt::torrent_info>(info);
+    params.trackers.reserve(trackers.size());
+    for (lt::announce_entry const &tracker : trackers) {
+        params.trackers.push_back(tracker.url);
+    }
+    return add_metadata_torrent(client, std::move(params), save_path, identity);
+}
+
 [[nodiscard]] bool eventually_take_removal_result(
     TTorrentClient &client,
     std::uint64_t request_token,
@@ -2027,24 +2044,13 @@ TEST_CASE("tracker host materialization caps rows and backfills its deterministi
     CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.tracker_host_cache.capacity()) == 0U);
 
     constexpr std::size_t torrent_count = 11U;
-    std::vector<lt::torrent_handle> handles;
     std::vector<TorrentIdentity *> identities;
-    handles.reserve(torrent_count);
     identities.reserve(torrent_count);
 
     for (std::size_t torrent = 0; torrent < torrent_count; ++torrent) {
         std::shared_ptr<lt::torrent_info const> const info = make_queue_torrent_info(
             static_cast<unsigned char>(60U + torrent)
         );
-        TorrentIdentity *identity = nullptr;
-        lt::torrent_handle handle = add_metadata_torrent(
-            client,
-            *info,
-            temporary_directory.path(),
-            identity
-        );
-        REQUIRE(identity != nullptr);
-
         std::vector<lt::announce_entry> trackers;
         trackers.reserve(static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT));
         for (int32_t tracker = 0; tracker < TTORRENT_MAX_TRACKER_COUNT; ++tracker) {
@@ -2053,12 +2059,20 @@ TEST_CASE("tracker host materialization caps rows and backfills its deterministi
                 + ".example/announce"
             );
         }
-        handle.replace_trackers(trackers);
+
+        TorrentIdentity *identity = nullptr;
+        lt::torrent_handle handle = add_metadata_torrent_with_trackers(
+            client,
+            *info,
+            temporary_directory.path(),
+            identity,
+            trackers
+        );
+        REQUIRE(identity != nullptr);
         {
             std::scoped_lock guard(client.lock);
             static_cast<void>(client.cache_snapshot(handle));
         }
-        handles.push_back(handle);
         identities.push_back(identity);
     }
 
@@ -2073,7 +2087,6 @@ TEST_CASE("tracker host materialization caps rows and backfills its deterministi
         }));
     }
 
-    handles.front().replace_trackers({});
     DirtyMask host_changes = 0;
     {
         std::scoped_lock guard(client.lock);
@@ -2102,31 +2115,31 @@ TEST_CASE("unchanged tracker details do not rebuild the aggregate host cache")
 
     std::shared_ptr<lt::torrent_info const> const first_info = make_queue_torrent_info(90U);
     std::shared_ptr<lt::torrent_info const> const second_info = make_queue_torrent_info(91U);
-    TorrentIdentity *first_identity = nullptr;
-    TorrentIdentity *second_identity = nullptr;
-    lt::torrent_handle first_handle = add_metadata_torrent(
-        client,
-        *first_info,
-        temporary_directory.path(),
-        first_identity
-    );
-    lt::torrent_handle second_handle = add_metadata_torrent(
-        client,
-        *second_info,
-        temporary_directory.path(),
-        second_identity
-    );
-    REQUIRE(first_identity != nullptr);
-    REQUIRE(second_identity != nullptr);
-
     std::vector<lt::announce_entry> const first_trackers{
         lt::announce_entry{"https://first.example/announce"},
     };
     std::vector<lt::announce_entry> const original_second_trackers{
         lt::announce_entry{"https://second-old.example/announce"},
     };
-    first_handle.replace_trackers(first_trackers);
-    second_handle.replace_trackers(original_second_trackers);
+    TorrentIdentity *first_identity = nullptr;
+    TorrentIdentity *second_identity = nullptr;
+    lt::torrent_handle first_handle = add_metadata_torrent_with_trackers(
+        client,
+        *first_info,
+        temporary_directory.path(),
+        first_identity,
+        first_trackers
+    );
+    lt::torrent_handle second_handle = add_metadata_torrent_with_trackers(
+        client,
+        *second_info,
+        temporary_directory.path(),
+        second_identity,
+        original_second_trackers
+    );
+    REQUIRE(first_identity != nullptr);
+    REQUIRE(second_identity != nullptr);
+
     {
         std::scoped_lock guard(client.lock);
         static_cast<void>(client.cache_snapshot(first_handle));
@@ -2162,24 +2175,30 @@ TEST_CASE("adding tracker hosts retains cached rows without querying earlier tor
 
     std::shared_ptr<lt::torrent_info const> const first_info = make_queue_torrent_info(92U);
     std::shared_ptr<lt::torrent_info const> const second_info = make_queue_torrent_info(93U);
+    std::vector<lt::announce_entry> const first_trackers{
+        lt::announce_entry{"https://first.example/announce"},
+    };
+    std::vector<lt::announce_entry> const second_trackers{
+        lt::announce_entry{"https://second.example/announce"},
+    };
     TorrentIdentity *first_identity = nullptr;
     TorrentIdentity *second_identity = nullptr;
-    lt::torrent_handle first_handle = add_metadata_torrent(
+    lt::torrent_handle first_handle = add_metadata_torrent_with_trackers(
         client,
         *first_info,
         temporary_directory.path(),
-        first_identity
+        first_identity,
+        first_trackers
     );
-    lt::torrent_handle second_handle = add_metadata_torrent(
+    lt::torrent_handle second_handle = add_metadata_torrent_with_trackers(
         client,
         *second_info,
         temporary_directory.path(),
-        second_identity
+        second_identity,
+        second_trackers
     );
     REQUIRE(first_identity != nullptr);
     REQUIRE(second_identity != nullptr);
-    first_handle.replace_trackers({lt::announce_entry{"https://first.example/announce"}});
-    second_handle.replace_trackers({lt::announce_entry{"https://second.example/announce"}});
 
     std::scoped_lock guard(client.lock);
     static_cast<void>(client.cache_snapshot(first_handle));
@@ -2260,16 +2279,17 @@ TEST_CASE("tracker host removal reorders retained rows without querying the move
     std::array<lt::torrent_handle, 3> handles;
     for (std::size_t index = 0; index < handles.size(); ++index) {
         std::shared_ptr<lt::torrent_info const> const info = make_queue_torrent_info(seeds.at(index));
-        handles.at(index) = add_metadata_torrent(
+        std::array<lt::announce_entry, 1> const trackers{
+            lt::announce_entry{"https://" + hosts.at(index) + "/announce"},
+        };
+        handles.at(index) = add_metadata_torrent_with_trackers(
             client,
             *info,
             temporary_directory.path(),
-            identities.at(index)
+            identities.at(index),
+            trackers
         );
         REQUIRE(identities.at(index) != nullptr);
-        handles.at(index).replace_trackers({
-            lt::announce_entry{"https://" + hosts.at(index) + "/announce"},
-        });
     }
 
     std::scoped_lock guard(client.lock);
@@ -2298,30 +2318,30 @@ TEST_CASE("tracker host refresh retries an unavailable handle without caching an
 
     std::shared_ptr<lt::torrent_info const> const first_info = make_queue_torrent_info(103U);
     std::shared_ptr<lt::torrent_info const> const second_info = make_queue_torrent_info(104U);
-    TorrentIdentity *first_identity = nullptr;
-    TorrentIdentity *second_identity = nullptr;
-    lt::torrent_handle first_handle = add_metadata_torrent(
-        client,
-        *first_info,
-        temporary_directory.path(),
-        first_identity
-    );
-    lt::torrent_handle second_handle = add_metadata_torrent(
-        client,
-        *second_info,
-        temporary_directory.path(),
-        second_identity
-    );
-    REQUIRE(first_identity != nullptr);
-    REQUIRE(second_identity != nullptr);
     std::vector<lt::announce_entry> const first_trackers{
         lt::announce_entry{"https://first.example/announce"},
     };
     std::vector<lt::announce_entry> const second_trackers{
         lt::announce_entry{"https://second.example/announce"},
     };
-    first_handle.replace_trackers(first_trackers);
-    second_handle.replace_trackers(second_trackers);
+    TorrentIdentity *first_identity = nullptr;
+    TorrentIdentity *second_identity = nullptr;
+    lt::torrent_handle first_handle = add_metadata_torrent_with_trackers(
+        client,
+        *first_info,
+        temporary_directory.path(),
+        first_identity,
+        first_trackers
+    );
+    lt::torrent_handle second_handle = add_metadata_torrent_with_trackers(
+        client,
+        *second_info,
+        temporary_directory.path(),
+        second_identity,
+        second_trackers
+    );
+    REQUIRE(first_identity != nullptr);
+    REQUIRE(second_identity != nullptr);
 
     std::scoped_lock guard(client.lock);
     static_cast<void>(client.cache_snapshot(first_handle));
