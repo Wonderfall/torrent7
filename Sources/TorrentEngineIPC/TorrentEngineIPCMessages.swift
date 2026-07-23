@@ -396,19 +396,3 @@ package struct TorrentEngineIPCSetFilePriorityRequest: Codable, Equatable, Senda
         self.priority = priority
     }
 }
-
-package struct TorrentEngineIPCStateMigrationBeginResponse: Codable, Equatable, Sendable {
-    package let alreadyComplete: Bool
-
-    package init(alreadyComplete: Bool) {
-        self.alreadyComplete = alreadyComplete
-    }
-}
-
-package struct TorrentEngineIPCStateMigrationFileRequest: Codable, Equatable, Sendable {
-    package let name: String
-
-    package init(name: String) {
-        self.name = name
-    }
-}

@@ -74,7 +74,6 @@ struct TorrentEngineIPCEnvelopeTests {
         #expect(metadata.header == request.header)
         #expect(metadata.hasPayload)
         #expect(metadata.payloadByteCount == 4)
-        #expect(!metadata.hasFileDescriptor)
         #expect(try TorrentEngineIPCEnvelopeCodec.decodeRequest(
             dictionary,
             metadata: metadata,
@@ -95,8 +94,7 @@ struct TorrentEngineIPCEnvelopeTests {
         let metadata = TorrentEngineIPCRequestMetadata(
             header: request.header,
             hasPayload: true,
-            payloadByteCount: 3,
-            hasFileDescriptor: false
+            payloadByteCount: 3
         )
 
         expectIPCError(.requestMetadataMismatch) {
@@ -115,30 +113,6 @@ struct TorrentEngineIPCEnvelopeTests {
 
         expectIPCError(.unexpectedField("ambientAuthority")) {
             try TorrentEngineIPCEnvelopeCodec.decodeRequest(
-                dictionary,
-                maximumPayloadBytes: 64
-            )
-        }
-    }
-
-    @Test("Replies reject request-only file descriptors")
-    func replyFileDescriptorIsRejected() throws {
-        let pipe = Pipe()
-        let reply = TorrentEngineIPCReply(
-            header: makeHeader(),
-            engineEpoch: UUID(),
-            status: .success,
-            payload: Data()
-        )
-        var dictionary = try TorrentEngineIPCEnvelopeCodec.encode(
-            reply,
-            maximumPayloadBytes: 64
-        )
-        dictionary[TorrentEngineIPCField.fileDescriptor] = try TorrentEngineIPCXPCValues
-            .boxedFileDescriptor(pipe.fileHandleForReading.fileDescriptor)
-
-        expectIPCError(.unexpectedField(TorrentEngineIPCField.fileDescriptor)) {
-            try TorrentEngineIPCEnvelopeCodec.decodeReply(
                 dictionary,
                 maximumPayloadBytes: 64
             )
@@ -318,19 +292,17 @@ struct TorrentEngineIPCEnvelopeTests {
         }
     }
 
-    @Test("Stable dataset, migration, and hint operation numbers")
+    @Test("Stable dataset and hint operation numbers")
     func stableOperationNumbers() {
-        #expect(TorrentEngineIPCProtocol.version == 6)
+        #expect(TorrentEngineIPCProtocol.version == 7)
         #expect(TorrentEngineIPCOperation.replaceFolderCapabilities.rawValue == 7)
         #expect(TorrentEngineIPCOperation(rawValue: 10) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 41) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 50) == nil)
         #expect(TorrentEngineIPCOperation.readDataset.rawValue == 51)
         #expect(TorrentEngineIPCOperation.closeDataset.rawValue == 52)
-        #expect(TorrentEngineIPCOperation.beginStateMigration.rawValue == 60)
-        #expect(TorrentEngineIPCOperation.importStateMigrationFile.rawValue == 61)
-        #expect(TorrentEngineIPCOperation.commitStateMigration.rawValue == 62)
-        #expect(TorrentEngineIPCOperation.abortStateMigration.rawValue == 63)
+        #expect(TorrentEngineIPCOperation(rawValue: 60) == nil)
+        #expect(TorrentEngineIPCOperation(rawValue: 63) == nil)
         #expect(TorrentEngineIPCOperation.changeHint.rawValue == 100)
         #expect(TorrentEngineIPCFailureCode.operationRejected.rawValue == 1)
         #expect(TorrentEngineIPCFailureCode.controllerBusy.rawValue == 2)
@@ -633,59 +605,6 @@ struct TorrentEngineIPCPropertyListTests {
             snapshotDataset: nil,
             trackerHostDataset: nil
         )
-    }
-}
-
-@Suite("Torrent engine IPC file descriptors")
-struct TorrentEngineIPCFileDescriptorTests {
-    @Test("Descriptors are boxed and duplicated")
-    func fileDescriptorRoundTrip() throws {
-        let pipe = Pipe()
-        let request = TorrentEngineIPCRequest(
-            header: makeHeader(),
-            fileDescriptor: pipe.fileHandleForWriting.fileDescriptor
-        )
-        let dictionary = try TorrentEngineIPCEnvelopeCodec.encode(
-            request,
-            maximumPayloadBytes: 0
-        )
-        let metadata = try TorrentEngineIPCEnvelopeCodec.inspectRequest(dictionary)
-        #expect(metadata.payloadByteCount == 0)
-        #expect(metadata.hasFileDescriptor)
-        let decoded = try TorrentEngineIPCEnvelopeCodec.decodeRequest(
-            dictionary,
-            maximumPayloadBytes: 0
-        )
-
-        let duplicated = try #require(decoded.fileDescriptor)
-        let duplicatedHandle = FileHandle(
-            fileDescriptor: duplicated,
-            closeOnDealloc: true
-        )
-        let sent = Data("bounded descriptor".utf8)
-        try duplicatedHandle.write(contentsOf: sent)
-        try duplicatedHandle.close()
-
-        let received = try pipe.fileHandleForReading.read(upToCount: sent.count)
-        #expect(received == sent)
-    }
-
-    @Test("Invalid and wrong-type descriptors are rejected")
-    func invalidFileDescriptors() {
-        expectIPCError(.invalidFileDescriptor) {
-            try TorrentEngineIPCXPCValues.boxedFileDescriptor(-1)
-        }
-
-        var dictionary = XPCDictionary()
-        dictionary[TorrentEngineIPCField.fileDescriptor] = "not a descriptor"
-        expectIPCError(
-            .wrongFieldType(
-                field: TorrentEngineIPCField.fileDescriptor,
-                expected: "file descriptor"
-            )
-        ) {
-            try TorrentEngineIPCXPCValues.duplicateFileDescriptor(from: dictionary)
-        }
     }
 }
 

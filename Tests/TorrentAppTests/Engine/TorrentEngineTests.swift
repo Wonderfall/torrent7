@@ -98,7 +98,10 @@ struct TorrentEngineTests {
         try FileManager.default.createDirectory(at: freshDirectory, withIntermediateDirectories: true)
         let snapshots = Mutex([[String]]())
         TorrentEngine.clientCreationPreflight.withLock { preflight in
-            preflight = { _, _, authorizedSaveRoots in
+            preflight = { createdStateDirectory, _, authorizedSaveRoots in
+                guard createdStateDirectory == stateDirectory else {
+                    return
+                }
                 snapshots.withLock { $0.append(authorizedSaveRoots.map(\.canonicalPath)) }
             }
         }

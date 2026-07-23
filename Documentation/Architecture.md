@@ -39,7 +39,7 @@ The two important boundaries are different:
 
 | Boundary | Trusted fact | Still treated as untrusted |
 | --- | --- | --- |
-| GUI to engine helper | In identified builds, XPC authenticates the exact app signing identifier from the same Team ID | Every envelope, payload, sequence, capability reference, and file descriptor |
+| GUI to engine helper | In identified builds, XPC authenticates the exact app signing identifier from the same Team ID | Every envelope, payload, sequence, and capability reference |
 | Engine helper to GUI | In identified builds, XPC authenticates the exact helper signing identifier from the same Team ID | Every decoded value, count, path, identifier, revision, and dataset page |
 | Swift helper to C++ | The bridge owns one libtorrent client and exposes pinned C layouts | Native output lengths, strings, status codes, and all external protocol input |
 | GUI bookmark store to helper | The GUI currently holds user-approved access | Bookmark bytes, the resolved path, filesystem identity, lifetime, and controller ownership |
@@ -72,9 +72,9 @@ still runs in the GUI. It produces a real address-space and sandbox boundary:
   native session before shutdown completes.
 
 The extension point is application-scoped, UI-less, and requires Enhanced
-Security. The helper accepts one active controller. XPC peer,
-request, queued-byte, and file-descriptor admission budgets bound work before a
-request reaches the engine actor.
+Security. The helper accepts one active controller. XPC peer, request, and
+queued-byte admission budgets bound work before a request reaches the engine
+actor.
 
 ### Let ExtensionFoundation own helper process lifecycle
 
@@ -149,8 +149,7 @@ The following are protocol invariants:
   results are wrapped in explicit response messages because Foundation rejects
   scalar property-list roots;
 - unknown, missing, duplicate, mistyped, or unexpected envelope fields fail;
-- only a legacy-state import request may carry a file descriptor; replies reject
-  the request-only descriptor field;
+- request and reply envelopes carry no file descriptors;
 - request IDs and operation IDs are replay checked;
 - post-handshake operations must name the current engine epoch;
 - client requests are serialized, complete paged poll pipelines are serialized
@@ -345,36 +344,16 @@ reported rather than silently deleted.
 
 ### Make the helper the sole owner of torrent-engine state
 
-New resume data, removal tombstones, and migration markers live under an
-owner-only `Torrent7/EngineState` directory in the helper's Application Support
-container. Native persistence keeps its existing atomic writes, directory
-durability barriers, generation checks, rollback behavior, and owner-only file
-permissions.
+Resume data and removal tombstones live under an owner-only
+`Torrent7/EngineState` directory in the helper's Application Support container.
+Native persistence keeps its existing atomic writes, directory durability
+barriers, generation checks, rollback behavior, and owner-only file permissions.
+The GUI neither opens nor transfers engine persistence files.
 
-The legacy in-process engine stored resume state in the GUI container. The
-helper cannot and should not gain general path access to that container, so the
-one-time migration is descriptor based and occurs before the engine handshake:
-
-- the GUI asks the helper for its authoritative completion state before opening
-  or enumerating the obsolete source tree, so a completed migration no longer
-  depends on legacy permissions or contents;
-- the GUI opens only the exact legacy state directory and allowlisted resume or
-  tombstone filenames with no-follow descriptor operations;
-- owner, directory, regular-file, link, count, filename, per-file, and aggregate
-  bounds are checked;
-- XPC transfers one owned read-only descriptor per allowlisted file;
-- the helper copies verified bytes into an owner-only staging directory;
-- an atomic directory exchange publishes the complete set with a validated
-  commit marker;
-- pre- and post-swap directory synchronization makes publication durable;
-- startup removes only exact UUID-scoped staging/publication debris after
-  verifying it is an owned directory;
-- the legacy source tree is never traversed by the helper and is never mutated,
-  so it remains available for rollback.
-
-The commit marker makes the import idempotent across launches. A migration
-failure aborts engine startup instead of falling back to an in-process engine or
-partially importing state.
+Future state-format upgrades belong in the helper that owns this directory.
+They must validate the existing state before native use and publish any
+replacement atomically and durably; they must not grant the helper access to GUI
+container state or add a general file-transfer channel to XPC.
 
 ### Keep network authority inside the engine helper and fail closed
 
@@ -538,8 +517,8 @@ the explicit ASan runtime and its Xcode RPATH. `LC_DYLD_ENVIRONMENT` is forbidde
 - Resume restoration requires a currently authorized canonical save path.
 - Resume and removal state is helper-owned, atomic, owner-only, and durable.
   Unauthorized or temporarily unreadable valid entries are preserved.
-- Legacy migration accepts only allowlisted owner files through owned
-  descriptors, commits atomically, and never mutates the legacy tree.
+- Future engine-state format upgrades remain local to the helper-owned state
+  directory and preserve atomicity, durability, and fail-closed validation.
 - Native networking starts blocked. Only the independent helper authority may
   unblock a constrained binding, and every relevant interface change or
   controller disconnect blocks it again.
@@ -556,7 +535,7 @@ the explicit ASan runtime and its Xcode RPATH. `LC_DYLD_ENVIRONMENT` is forbidde
 - Detail-cache eviction may cause another refresh; it cannot change torrent
   truth or create an unbounded allocation.
 
-## Completed migration and ongoing gates
+## Completed architecture and ongoing gates
 
 | Area | Current state | Ongoing gate |
 | --- | --- | --- |
@@ -566,21 +545,21 @@ the explicit ASan runtime and its Xcode RPATH. `LC_DYLD_ENVIRONMENT` is forbidde
 | C++ bridge placement | Completed inside the helper only | Bridge static analysis, strict warnings, lifecycle tests, and native symbol audit |
 | Snapshot transport | Immutable revision model retained; main and tracker-host XPC transport is paged and capped at 256 pages | Dataset validation, native snapshot benchmark, and real extension lifecycle/timing/RSS test before changing limits |
 | Folder authority | Persistent GUI bookmarks plus transient helper capabilities completed | Bookmark, transaction, replacement, disconnect, and restoration tests |
-| State ownership and migration | Helper-owned persistence and one-time atomic descriptor migration completed | Persistence, crash-recovery, durability-failure, and migration tests |
+| State ownership | Helper-owned persistence completed; the GUI does not inspect or transfer engine state | Persistence, crash-recovery, and durability-failure tests |
 | Network authority | Independent helper monitor and generation lease completed | Binding-race, monitor-change, disconnect, and libtorrent network-security tests |
 | Packaging split | Separate entitlements, signing, quarantine, and code inventory completed | Production and sanitizer app builds plus verifier; distribution notarization and Gatekeeper |
 | Dependency confinement | Ordered pinned patch series completed | Patch provenance and focused security suite for every dependency or toolchain change |
 
-Capability and migration ownership uses a server-minted per-connection
-generation with a shared one-way invalidation token. Disconnect invalidates the
-token before its first suspension, so stale pins, migrations, leases, and
-prepared replacements fail immediately. Final cleanup still retains the exact
-generation until native teardown can safely release its descriptors and security
-scopes. No disconnected-UUID tombstone set remains, and a fresh connection may
-reuse the same wire controller UUID without reviving old authority.
+Capability ownership uses a server-minted per-connection generation with a
+shared one-way invalidation token. Disconnect invalidates the token before its
+first suspension, so stale pins, leases, and prepared replacements fail
+immediately. Final cleanup still retains the exact generation until native
+teardown can safely release its descriptors and security scopes. No
+disconnected-UUID tombstone set remains, and a fresh connection may reuse the
+same wire controller UUID without reviving old authority.
 
-The Enhanced Security extension migration is the production architecture, not
-a compatibility path. The helper keeps the existing `app.torrent7.engine`
+The Enhanced Security extension is the production architecture, not a
+compatibility path. The helper keeps the existing `app.torrent7.engine`
 identifier so its sandbox container and durable engine state remain continuous.
 Future transport or performance work may change encoding and batching within the
 published bounds, but it must preserve the process split, snapshot semantics,

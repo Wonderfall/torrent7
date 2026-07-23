@@ -53,29 +53,24 @@ struct TorrentEngineServiceAdmissionLimits: Equatable, Sendable {
     static let standard = TorrentEngineServiceAdmissionLimits(
         maximumPeerCount: 4,
         maximumRequestCount: 16,
-        maximumPayloadByteCount: TorrentEngineIPCLimits.maximumPayloadBytes + 8 * 1_024 * 1_024,
-        maximumFileDescriptorCount: 4
+        maximumPayloadByteCount: TorrentEngineIPCLimits.maximumPayloadBytes + 8 * 1_024 * 1_024
     )
 
     let maximumPeerCount: Int
     let maximumRequestCount: Int
     let maximumPayloadByteCount: Int
-    let maximumFileDescriptorCount: Int
 
     init(
         maximumPeerCount: Int,
         maximumRequestCount: Int,
-        maximumPayloadByteCount: Int,
-        maximumFileDescriptorCount: Int
+        maximumPayloadByteCount: Int
     ) {
         precondition(maximumPeerCount >= 0)
         precondition(maximumRequestCount >= 0)
         precondition(maximumPayloadByteCount >= 0)
-        precondition(maximumFileDescriptorCount >= 0)
         self.maximumPeerCount = maximumPeerCount
         self.maximumRequestCount = maximumRequestCount
         self.maximumPayloadByteCount = maximumPayloadByteCount
-        self.maximumFileDescriptorCount = maximumFileDescriptorCount
     }
 }
 
@@ -83,7 +78,6 @@ struct TorrentEngineServiceAdmissionSnapshot: Equatable, Sendable {
     let peerCount: Int
     let requestCount: Int
     let payloadByteCount: Int
-    let fileDescriptorCount: Int
 }
 
 @safe final class TorrentEngineServiceSessionHandle: Sendable {
@@ -142,7 +136,6 @@ struct TorrentEngineServiceAdmissionSnapshot: Equatable, Sendable {
         var peerCount = 0
         var requestCount = 0
         var payloadByteCount = 0
-        var fileDescriptorCount = 0
     }
 
     private let limits: TorrentEngineServiceAdmissionLimits
@@ -163,24 +156,18 @@ struct TorrentEngineServiceAdmissionSnapshot: Equatable, Sendable {
         return acquired ? TorrentEngineServicePeerAdmission(budget: self) : nil
     }
 
-    func acquireRequest(
-        payloadByteCount: Int,
-        hasFileDescriptor: Bool
-    ) -> TorrentEngineServiceRequestAdmission? {
+    func acquireRequest(payloadByteCount: Int) -> TorrentEngineServiceRequestAdmission? {
         guard payloadByteCount >= 0 else {
             return nil
         }
-        let fileDescriptorCount = hasFileDescriptor ? 1 : 0
         let acquired = state.withLock { state in
             guard state.requestCount < limits.maximumRequestCount,
-                  payloadByteCount <= limits.maximumPayloadByteCount - state.payloadByteCount,
-                  fileDescriptorCount <= limits.maximumFileDescriptorCount
-                    - state.fileDescriptorCount else {
+                  payloadByteCount <= limits.maximumPayloadByteCount
+                    - state.payloadByteCount else {
                 return false
             }
             state.requestCount += 1
             state.payloadByteCount += payloadByteCount
-            state.fileDescriptorCount += fileDescriptorCount
             return true
         }
         guard acquired else {
@@ -188,8 +175,7 @@ struct TorrentEngineServiceAdmissionSnapshot: Equatable, Sendable {
         }
         return TorrentEngineServiceRequestAdmission(
             budget: self,
-            payloadByteCount: payloadByteCount,
-            fileDescriptorCount: fileDescriptorCount
+            payloadByteCount: payloadByteCount
         )
     }
 
@@ -200,14 +186,12 @@ struct TorrentEngineServiceAdmissionSnapshot: Equatable, Sendable {
         }
     }
 
-    fileprivate func releaseRequest(payloadByteCount: Int, fileDescriptorCount: Int) {
+    fileprivate func releaseRequest(payloadByteCount: Int) {
         state.withLock { state in
             precondition(state.requestCount > 0)
             precondition(state.payloadByteCount >= payloadByteCount)
-            precondition(state.fileDescriptorCount >= fileDescriptorCount)
             state.requestCount -= 1
             state.payloadByteCount -= payloadByteCount
-            state.fileDescriptorCount -= fileDescriptorCount
         }
     }
 
@@ -216,8 +200,7 @@ struct TorrentEngineServiceAdmissionSnapshot: Equatable, Sendable {
             TorrentEngineServiceAdmissionSnapshot(
                 peerCount: state.peerCount,
                 requestCount: state.requestCount,
-                payloadByteCount: state.payloadByteCount,
-                fileDescriptorCount: state.fileDescriptorCount
+                payloadByteCount: state.payloadByteCount
             )
         }
     }
@@ -251,19 +234,16 @@ struct TorrentEngineServiceAdmissionSnapshot: Equatable, Sendable {
 
 @safe final class TorrentEngineServiceRequestAdmission: Sendable {
     let payloadByteCount: Int
-    let fileDescriptorCount: Int
 
     private let budget: TorrentEngineServiceAdmissionBudget
     private let isReleased = Mutex(false)
 
     init(
         budget: TorrentEngineServiceAdmissionBudget,
-        payloadByteCount: Int,
-        fileDescriptorCount: Int
+        payloadByteCount: Int
     ) {
         self.budget = budget
         self.payloadByteCount = payloadByteCount
-        self.fileDescriptorCount = fileDescriptorCount
     }
 
     func release() {
@@ -275,10 +255,7 @@ struct TorrentEngineServiceAdmissionSnapshot: Equatable, Sendable {
             return true
         }
         if shouldRelease {
-            budget.releaseRequest(
-                payloadByteCount: payloadByteCount,
-                fileDescriptorCount: fileDescriptorCount
-            )
+            budget.releaseRequest(payloadByteCount: payloadByteCount)
         }
     }
 
@@ -315,7 +292,7 @@ package enum TorrentEngineExtensionConfiguration {
         let cleanupWatchdog = TorrentEngineServiceContainmentWatchdog(
             timeout: .seconds(300)
         )
-        let runtime = try TorrentEngineServiceRuntime(
+        let runtime = TorrentEngineServiceRuntime(
             stateDirectory: stateDirectory,
             containmentWatchdog: containmentWatchdog,
             cleanupWatchdog: cleanupWatchdog
@@ -411,7 +388,6 @@ package enum TorrentEngineExtensionConfiguration {
     typealias Output = XPCDictionary
     private static let maximumQueuedRequestCount = 8
     private static let maximumQueuedPayloadBytes = TorrentEngineIPCLimits.maximumPayloadBytes
-    private static let maximumQueuedFileDescriptorCount = 1
     private static let transientReplyGracePeriod: Duration = .seconds(1)
 
     private struct State: Sendable {
@@ -422,7 +398,6 @@ package enum TorrentEngineExtensionConfiguration {
         var retirementTask: Task<Void, Never>?
         var queuedRequestCount = 0
         var queuedPayloadByteCount = 0
-        var queuedFileDescriptorCount = 0
     }
 
     private let runtime: TorrentEngineServiceRuntime
@@ -480,10 +455,6 @@ package enum TorrentEngineExtensionConfiguration {
                     maximum: metadata.header.operation.maximumRequestPayloadBytes
                 )
             }
-            let expectsFileDescriptor = metadata.header.operation == .importStateMigrationFile
-            guard metadata.hasFileDescriptor == expectsFileDescriptor else {
-                throw TorrentEngineIPCError.invalidFileDescriptor
-            }
         } catch {
             // No trustworthy header exists for a correlated failure reply. XPC
             // owns the original message objects and releases any contained FD.
@@ -504,22 +475,17 @@ package enum TorrentEngineExtensionConfiguration {
                   let session = state.session else {
                 return
             }
-            let fileDescriptorCount = metadata.hasFileDescriptor ? 1 : 0
             guard state.queuedRequestCount < Self.maximumQueuedRequestCount,
                   metadata.payloadByteCount <= Self.maximumQueuedPayloadBytes
                     - state.queuedPayloadByteCount,
-                  fileDescriptorCount <= Self.maximumQueuedFileDescriptorCount
-                    - state.queuedFileDescriptorCount,
                   let admission = admissionBudget.acquireRequest(
-                    payloadByteCount: metadata.payloadByteCount,
-                    hasFileDescriptor: metadata.hasFileDescriptor
+                    payloadByteCount: metadata.payloadByteCount
                   ) else {
                 sessionToCancel = session
                 return
             }
             state.queuedRequestCount += 1
             state.queuedPayloadByteCount += admission.payloadByteCount
-            state.queuedFileDescriptorCount += admission.fileDescriptorCount
             requestAdmission = admission
             peerSession = session
         }
@@ -560,9 +526,6 @@ package enum TorrentEngineExtensionConfiguration {
                     self?.requestDidFinish(requestAdmission)
                 }
                 guard let self, !self.peerIsCancelled else {
-                    if let descriptor = request.fileDescriptor {
-                        Darwin.close(descriptor)
-                    }
                     return
                 }
                 let disposition = await runtime.handle(
@@ -595,9 +558,6 @@ package enum TorrentEngineExtensionConfiguration {
         }
 
         guard wasScheduled else {
-            if let descriptor = request.fileDescriptor {
-                Darwin.close(descriptor)
-            }
             requestDidFinish(requestAdmission)
             return
         }
@@ -706,10 +666,8 @@ package enum TorrentEngineExtensionConfiguration {
         state.withLock { state in
             precondition(state.queuedRequestCount > 0)
             precondition(state.queuedPayloadByteCount >= admission.payloadByteCount)
-            precondition(state.queuedFileDescriptorCount >= admission.fileDescriptorCount)
             state.queuedRequestCount -= 1
             state.queuedPayloadByteCount -= admission.payloadByteCount
-            state.queuedFileDescriptorCount -= admission.fileDescriptorCount
         }
         admission.release()
     }

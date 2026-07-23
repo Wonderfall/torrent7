@@ -20,8 +20,6 @@ private enum TorrentEngineServiceRuntimeError: LocalizedError {
     case serviceShuttingDown
     case invalidPayload
     case payloadTooLarge
-    case unexpectedFileDescriptor
-    case missingFileDescriptor
     case invalidFolderGrant
     case invalidFolderCapability
     case folderAuthorizationInUse
@@ -34,8 +32,6 @@ private enum TorrentEngineServiceRuntimeError: LocalizedError {
     case datasetStorageLimitExceeded
     case unknownDataset
     case invalidDatasetPage
-    case stateMigrationUnavailable
-    case stateMigrationAlreadyActive
     case networkBindingRejected(TorrentNetworkBindingBlockReason)
 
     var errorDescription: String? {
@@ -64,10 +60,6 @@ private enum TorrentEngineServiceRuntimeError: LocalizedError {
             "The torrent engine request payload is invalid."
         case .payloadTooLarge:
             "The torrent engine request payload exceeds its operation limit."
-        case .unexpectedFileDescriptor:
-            "This torrent engine operation does not accept a file descriptor."
-        case .missingFileDescriptor:
-            "The state migration file descriptor is missing."
         case .invalidFolderGrant:
             "The download folder authorization request is invalid."
         case .invalidFolderCapability:
@@ -92,10 +84,6 @@ private enum TorrentEngineServiceRuntimeError: LocalizedError {
             "The torrent engine dataset is unavailable or expired."
         case .invalidDatasetPage:
             "The requested torrent engine dataset page is invalid."
-        case .stateMigrationUnavailable:
-            "The legacy torrent state migration is unavailable."
-        case .stateMigrationAlreadyActive:
-            "A legacy torrent state migration is already active."
         case .networkBindingRejected(let reason):
             reason.userMessage
         }
@@ -121,7 +109,6 @@ struct TorrentEngineServiceRuntimeDiagnostics: Equatable, Sendable {
     let hasActiveControllerGeneration: Bool
     let hasActiveSession: Bool
     let hasEngine: Bool
-    let hasActiveMigration: Bool
     let transactionIsActive: Bool
     let isShuttingDown: Bool
 }
@@ -145,7 +132,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
     private let engineEpoch = UUID()
     private let stateDirectory: URL
     private let capabilityRegistry: TorrentFolderCapabilityRegistry
-    private let migrationCoordinator: TorrentLegacyStateMigrationCoordinator
     private let transactionBegin: @Sendable () -> Void
     private let transactionEnd: @Sendable () -> Void
     private let containmentWatchdog: TorrentEngineServiceContainmentWatchdog
@@ -167,7 +153,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
     private var networkAuthority: TorrentNetworkBindingAuthority?
     private var networkAuthorityID: UUID?
     private var networkAuthorityStartIsPending = false
-    private var activeMigrationID: UUID?
     private var datasetsByID = [UUID: TorrentEngineServiceDataset]()
     private var transactionIsActive = false
     private var isShuttingDown = false
@@ -181,17 +166,13 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         ),
         transactionBegin: @escaping @Sendable () -> Void = { xpc_transaction_begin() },
         transactionEnd: @escaping @Sendable () -> Void = { xpc_transaction_end() }
-    ) throws {
+    ) {
         self.stateDirectory = stateDirectory
         self.containmentWatchdog = containmentWatchdog
         self.cleanupWatchdog = cleanupWatchdog
         self.transactionBegin = transactionBegin
         self.transactionEnd = transactionEnd
         capabilityRegistry = TorrentFolderCapabilityRegistry(engineEpoch: engineEpoch)
-        migrationCoordinator = try TorrentLegacyStateMigrationCoordinator(
-            engineEpoch: engineEpoch,
-            stateDirectoryURL: stateDirectory
-        )
     }
 
     func diagnostics() -> TorrentEngineServiceRuntimeDiagnostics {
@@ -201,7 +182,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             hasActiveControllerGeneration: activeControllerScope?.isActive == true,
             hasActiveSession: activeSession != nil,
             hasEngine: engine != nil,
-            hasActiveMigration: activeMigrationID != nil,
             transactionIsActive: transactionIsActive,
             isShuttingDown: isShuttingDown
         )
@@ -216,13 +196,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
     ) async -> TorrentEngineServiceRequestDisposition {
         var shouldEndTransactionAfterReply = false
         var didRecordRequest = false
-        var ownedFileDescriptor = request.fileDescriptor
-        defer {
-            if let ownedFileDescriptor {
-                Darwin.close(ownedFileDescriptor)
-            }
-        }
-
         guard !peerIsCancelled() else {
             return .terminatePeer
         }
@@ -282,23 +255,8 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             )
             didRecordRequest = true
 
-            let transferredFileDescriptor: Int32?
-            if request.header.operation == .importStateMigrationFile {
-                guard let descriptor = ownedFileDescriptor else {
-                    throw TorrentEngineServiceRuntimeError.missingFileDescriptor
-                }
-                transferredFileDescriptor = descriptor
-                ownedFileDescriptor = nil
-            } else {
-                guard ownedFileDescriptor == nil else {
-                    throw TorrentEngineServiceRuntimeError.unexpectedFileDescriptor
-                }
-                transferredFileDescriptor = nil
-            }
-
             let payload = try await dispatch(
                 request,
-                fileDescriptor: transferredFileDescriptor,
                 controllerLease: controllerLease
             )
             if request.header.operation == .shutdown {
@@ -342,10 +300,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
                 return .terminatePeer
             }
             var shouldTerminatePeerAfterReply = !didRecordRequest
-            if (request.header.operation == .handshake
-                    || request.header.operation == .beginStateMigration),
-               engine == nil,
-               activeMigrationID == nil {
+            if request.header.operation == .handshake, engine == nil {
                 shouldEndTransactionAfterReply = await releaseFailedInitialController(
                     peerToken: peerToken,
                     endsTransaction: false
@@ -466,8 +421,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
                 throw TorrentEngineServiceRuntimeError.invalidSequence
             }
         } else {
-            guard header.operation == .handshake
-                    || header.operation == .beginStateMigration else {
+            guard header.operation == .handshake else {
                 throw TorrentEngineServiceRuntimeError.handshakeRequired
             }
             guard header.sequence == 1,
@@ -485,8 +439,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         }
 
         switch header.operation {
-        case .handshake, .beginStateMigration, .importStateMigrationFile,
-             .commitStateMigration, .abortStateMigration:
+        case .handshake:
             guard engine == nil else {
                 throw TorrentEngineServiceRuntimeError.handshakeAlreadyCompleted
             }
@@ -546,7 +499,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
 
     private func dispatch(
         _ request: TorrentEngineIPCRequest,
-        fileDescriptor: Int32?,
         controllerLease: TorrentEngineControllerLease
     ) async throws -> Data {
         let operation = request.header.operation
@@ -772,26 +724,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             try closeDataset(value.id, controllerID: scope.controllerID)
             return try encode(TorrentEngineIPCEmpty(), for: operation)
 
-        case .beginStateMigration:
-            _ = try decode(TorrentEngineIPCEmpty.self, from: request)
-            return try beginMigration(scope: scope, operation: operation)
-        case .importStateMigrationFile:
-            guard let fileDescriptor else {
-                throw TorrentEngineServiceRuntimeError.missingFileDescriptor
-            }
-            return try importMigrationFile(
-                request,
-                fileDescriptor: fileDescriptor,
-                scope: scope,
-                operation: operation
-            )
-        case .commitStateMigration:
-            _ = try decode(TorrentEngineIPCEmpty.self, from: request)
-            return try commitMigration(scope: scope, operation: operation)
-        case .abortStateMigration:
-            _ = try decode(TorrentEngineIPCEmpty.self, from: request)
-            return try abortMigration(scope: scope, operation: operation)
-
         case .changeHint:
             throw TorrentEngineServiceRuntimeError.unsupportedOperation
         }
@@ -805,9 +737,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
     ) async throws -> Data {
         guard engine == nil else {
             throw TorrentEngineServiceRuntimeError.handshakeAlreadyCompleted
-        }
-        guard activeMigrationID == nil else {
-            throw TorrentEngineServiceRuntimeError.stateMigrationAlreadyActive
         }
         let replacement: TorrentFolderCapabilityReplacement
         do {
@@ -1595,80 +1524,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         datasetsByID = datasetsByID.filter { now < $0.value.expiresAt }
     }
 
-    private func beginMigration(
-        scope: TorrentEngineServiceScope,
-        operation: TorrentEngineIPCOperation
-    ) throws -> Data {
-        guard activeMigrationID == nil else {
-            throw TorrentEngineServiceRuntimeError.stateMigrationAlreadyActive
-        }
-        if try migrationCoordinator.hasCompletedMigration() {
-            return try encode(
-                TorrentEngineIPCStateMigrationBeginResponse(alreadyComplete: true),
-                for: operation
-            )
-        }
-        let migration = try migrationCoordinator.begin(scope: scope)
-        activeMigrationID = migration.id
-        return try encode(
-            TorrentEngineIPCStateMigrationBeginResponse(alreadyComplete: false),
-            for: operation
-        )
-    }
-
-    private func importMigrationFile(
-        _ request: TorrentEngineIPCRequest,
-        fileDescriptor: Int32,
-        scope: TorrentEngineServiceScope,
-        operation: TorrentEngineIPCOperation
-    ) throws -> Data {
-        var descriptorIsOwned = true
-        defer {
-            if descriptorIsOwned {
-                Darwin.close(fileDescriptor)
-            }
-        }
-        guard let activeMigrationID else {
-            throw TorrentEngineServiceRuntimeError.stateMigrationUnavailable
-        }
-        let value = try decode(TorrentEngineIPCStateMigrationFileRequest.self, from: request)
-        descriptorIsOwned = false
-        try migrationCoordinator.importFile(
-            migrationID: activeMigrationID,
-            scope: scope,
-            filename: value.name,
-            fileDescriptor: fileDescriptor
-        )
-        return try encode(TorrentEngineIPCEmpty(), for: operation)
-    }
-
-    private func commitMigration(
-        scope: TorrentEngineServiceScope,
-        operation: TorrentEngineIPCOperation
-    ) throws -> Data {
-        guard let activeMigrationID else {
-            throw TorrentEngineServiceRuntimeError.stateMigrationUnavailable
-        }
-        _ = try migrationCoordinator.commit(
-            migrationID: activeMigrationID,
-            scope: scope
-        )
-        self.activeMigrationID = nil
-        return try encode(TorrentEngineIPCEmpty(), for: operation)
-    }
-
-    private func abortMigration(
-        scope: TorrentEngineServiceScope,
-        operation: TorrentEngineIPCOperation
-    ) throws -> Data {
-        guard let activeMigrationID else {
-            throw TorrentEngineServiceRuntimeError.stateMigrationUnavailable
-        }
-        try migrationCoordinator.abort(migrationID: activeMigrationID, scope: scope)
-        self.activeMigrationID = nil
-        return try encode(TorrentEngineIPCEmpty(), for: operation)
-    }
-
     private func authorizedPin(
         _ capabilityID: UUID,
         scope: TorrentEngineServiceScope
@@ -2054,8 +1909,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         }
         self.engine = nil
         datasetsByID.removeAll()
-        activeMigrationID = nil
-        migrationCoordinator.disconnect(scope: scope)
         capabilityRegistry.disconnect(scope: scope)
 
         activePeerToken = nil

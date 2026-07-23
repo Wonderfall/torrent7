@@ -58,7 +58,7 @@ around the C++23 bridge; it is no longer part of the GUI process.
 Library rows remain immutable revisioned snapshots. High-cardinality library
 and tracker-host snapshots cross XPC as bounded, short-lived paged datasets;
 detail data remains demand-driven and revisioned. The rationale, trust
-boundaries, state migration, and non-negotiable security invariants are
+boundaries, state ownership, and non-negotiable security invariants are
 documented in [Architecture and Security Decisions](Documentation/Architecture.md).
 
 ## Features
@@ -170,11 +170,9 @@ and balances the delegated scope, holds a verified directory descriptor, and
 invalidates the capability when the controller disconnects.
 
 Resume data and removal tombstones live in the helper's container and are
-written with owner-only permissions and durability barriers. A one-time,
-descriptor-based migration copies allowlisted legacy files into helper-owned
-state without granting the helper path access to the GUI container or mutating
-the legacy tree. Both executable bundles enable file quarantine, including the
-helper that creates downloaded payloads.
+written with owner-only permissions and durability barriers. Both executable
+bundles enable file quarantine, including the helper that creates downloaded
+payloads.
 
 ## Dependencies
 

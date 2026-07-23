@@ -6,7 +6,7 @@ import XPC
 @testable import TorrentEngineService
 @testable import TorrentEngineServiceSupport
 
-@Suite("Torrent engine extension security state")
+@Suite("Torrent engine extension security state", .serialized)
 struct TorrentEngineServiceSecurityStateTests {
     @Test("Only commit-ambiguous or post-commit add failures require containment")
     func addFailureContainmentClassification() {
@@ -110,21 +110,21 @@ struct TorrentEngineServiceSecurityStateTests {
     @Test("A busy contender receives its typed reply before bounded retirement")
     func busyContenderReceivesReply() async throws {
         let temporary = try ServiceTemporaryDirectory()
-        let runtime = try TorrentEngineServiceRuntime(
+        let runtime = TorrentEngineServiceRuntime(
             stateDirectory: temporary.url,
             transactionBegin: {},
             transactionEnd: {}
         )
         let activePeer = UUID()
         _ = await runtime.handle(
-            try beginMigrationRequest(),
+            try handshakeRequest(),
             from: activePeer,
             session: TorrentEngineServiceSessionHandle(),
             peerIsCancelled: { false },
             pendingReply: TorrentEnginePendingReply { _ in }
         )
         let contenderCancellations = Mutex(0)
-        let contenderRequest = try beginMigrationRequest()
+        let contenderRequest = try handshakeRequest()
         let replies = Mutex([TorrentEngineIPCReply]())
 
         let disposition = await runtime.handle(
@@ -149,7 +149,7 @@ struct TorrentEngineServiceSecurityStateTests {
         #expect(replies.withLock { $0.map(\.status) } == [.failure])
         #expect(replies.withLock { $0.map(\.failureCode) } == [.controllerBusy])
         #expect(contenderCancellations.withLock { $0 } == 0)
-        #expect(await runtime.diagnostics() == .activeMigration)
+        #expect(await runtime.diagnostics() == .activeEngine)
 
         await runtime.beginDisconnect(peerToken: activePeer)
         await runtime.finishDisconnect(peerToken: activePeer)
@@ -158,14 +158,14 @@ struct TorrentEngineServiceSecurityStateTests {
     @Test("A shutting-down contender receives its typed reply before bounded retirement")
     func shuttingDownContenderReceivesReply() async throws {
         let temporary = try ServiceTemporaryDirectory()
-        let runtime = try TorrentEngineServiceRuntime(
+        let runtime = TorrentEngineServiceRuntime(
             stateDirectory: temporary.url,
             transactionBegin: {},
             transactionEnd: {}
         )
         let activePeer = UUID()
         _ = await runtime.handle(
-            try beginMigrationRequest(),
+            try handshakeRequest(),
             from: activePeer,
             session: TorrentEngineServiceSessionHandle(),
             peerIsCancelled: { false },
@@ -173,7 +173,7 @@ struct TorrentEngineServiceSecurityStateTests {
         )
         await runtime.beginDisconnect(peerToken: activePeer)
         let contenderCancellations = Mutex(0)
-        let contenderRequest = try beginMigrationRequest()
+        let contenderRequest = try handshakeRequest()
         let replies = Mutex([TorrentEngineIPCReply]())
 
         let disposition = await runtime.handle(
@@ -198,7 +198,7 @@ struct TorrentEngineServiceSecurityStateTests {
         #expect(replies.withLock { $0.map(\.status) } == [.failure])
         #expect(replies.withLock { $0.map(\.failureCode) } == [.serviceShuttingDown])
         #expect(contenderCancellations.withLock { $0 } == 0)
-        #expect(await runtime.diagnostics() == .disconnectingMigration)
+        #expect(await runtime.diagnostics() == .disconnectingEngine)
 
         await runtime.finishDisconnect(peerToken: activePeer)
     }
@@ -208,37 +208,28 @@ struct TorrentEngineServiceSecurityStateTests {
         let budget = TorrentEngineServiceAdmissionBudget(limits: .init(
             maximumPeerCount: 2,
             maximumRequestCount: 2,
-            maximumPayloadByteCount: 10,
-            maximumFileDescriptorCount: 1
+            maximumPayloadByteCount: 10
         ))
 
         let firstPeer = try #require(budget.acquirePeer())
         let secondPeer = try #require(budget.acquirePeer())
         #expect(budget.acquirePeer() == nil)
 
-        let firstRequest = try #require(budget.acquireRequest(
-            payloadByteCount: 6,
-            hasFileDescriptor: false
-        ))
-        #expect(budget.acquireRequest(payloadByteCount: 5, hasFileDescriptor: false) == nil)
-        #expect(budget.acquireRequest(payloadByteCount: -1, hasFileDescriptor: false) == nil)
+        let firstRequest = try #require(budget.acquireRequest(payloadByteCount: 6))
+        #expect(budget.acquireRequest(payloadByteCount: 5) == nil)
+        #expect(budget.acquireRequest(payloadByteCount: -1) == nil)
         #expect(budget.snapshot() == TorrentEngineServiceAdmissionSnapshot(
             peerCount: 2,
             requestCount: 1,
-            payloadByteCount: 6,
-            fileDescriptorCount: 0
+            payloadByteCount: 6
         ))
 
-        let secondRequest = try #require(budget.acquireRequest(
-            payloadByteCount: 4,
-            hasFileDescriptor: true
-        ))
-        #expect(budget.acquireRequest(payloadByteCount: 0, hasFileDescriptor: false) == nil)
+        let secondRequest = try #require(budget.acquireRequest(payloadByteCount: 4))
+        #expect(budget.acquireRequest(payloadByteCount: 0) == nil)
         #expect(budget.snapshot() == TorrentEngineServiceAdmissionSnapshot(
             peerCount: 2,
             requestCount: 2,
-            payloadByteCount: 10,
-            fileDescriptorCount: 1
+            payloadByteCount: 10
         ))
 
         firstPeer.release()
@@ -248,8 +239,7 @@ struct TorrentEngineServiceSecurityStateTests {
         #expect(budget.snapshot() == TorrentEngineServiceAdmissionSnapshot(
             peerCount: 1,
             requestCount: 1,
-            payloadByteCount: 4,
-            fileDescriptorCount: 1
+            payloadByteCount: 4
         ))
 
         secondRequest.release()
@@ -263,8 +253,7 @@ struct TorrentEngineServiceSecurityStateTests {
         let budget = TorrentEngineServiceAdmissionBudget(limits: .init(
             maximumPeerCount: 1,
             maximumRequestCount: maximumRequestCount,
-            maximumPayloadByteCount: maximumRequestCount * 3,
-            maximumFileDescriptorCount: maximumRequestCount
+            maximumPayloadByteCount: maximumRequestCount * 3
         ))
         let peer = try #require(budget.acquirePeer())
 
@@ -274,7 +263,7 @@ struct TorrentEngineServiceSecurityStateTests {
         ) { group in
             for _ in 0..<64 {
                 group.addTask {
-                    budget.acquireRequest(payloadByteCount: 3, hasFileDescriptor: true)
+                    budget.acquireRequest(payloadByteCount: 3)
                 }
             }
             var acquired = [TorrentEngineServiceRequestAdmission]()
@@ -290,8 +279,7 @@ struct TorrentEngineServiceSecurityStateTests {
         #expect(budget.snapshot() == TorrentEngineServiceAdmissionSnapshot(
             peerCount: 1,
             requestCount: maximumRequestCount,
-            payloadByteCount: maximumRequestCount * 3,
-            fileDescriptorCount: maximumRequestCount
+            payloadByteCount: maximumRequestCount * 3
         ))
 
         await withTaskGroup(of: Void.self) { group in
@@ -316,7 +304,7 @@ struct TorrentEngineServiceSecurityStateTests {
     func disconnectCleanupOrdering() async throws {
         let temporary = try ServiceTemporaryDirectory()
         let lifecycle = LifecycleRecorder()
-        let runtime = try TorrentEngineServiceRuntime(
+        let runtime = TorrentEngineServiceRuntime(
             stateDirectory: temporary.url,
             transactionBegin: { lifecycle.begin() },
             transactionEnd: { lifecycle.end() }
@@ -324,7 +312,7 @@ struct TorrentEngineServiceSecurityStateTests {
         let peerToken = UUID()
 
         let disposition = await runtime.handle(
-            try beginMigrationRequest(),
+            try handshakeRequest(),
             from: peerToken,
             session: TorrentEngineServiceSessionHandle(),
             peerIsCancelled: { false },
@@ -334,11 +322,11 @@ struct TorrentEngineServiceSecurityStateTests {
         #expect(disposition == .continuePeer)
         #expect(lifecycle.events == [.begin, .reply(.success)])
         #expect(lifecycle.snapshot == .init(beginCount: 1, endCount: 0))
-        #expect(await runtime.diagnostics() == .activeMigration)
+        #expect(await runtime.diagnostics() == .activeEngine)
 
         await runtime.beginDisconnect(peerToken: peerToken)
 
-        #expect(await runtime.diagnostics() == .disconnectingMigration)
+        #expect(await runtime.diagnostics() == .disconnectingEngine)
         #expect(lifecycle.events == [.begin, .reply(.success)])
         #expect(lifecycle.snapshot == .init(beginCount: 1, endCount: 0))
 
@@ -353,7 +341,7 @@ struct TorrentEngineServiceSecurityStateTests {
     func reconnectWithSameWireControllerID() async throws {
         let temporary = try ServiceTemporaryDirectory()
         let lifecycle = LifecycleRecorder()
-        let runtime = try TorrentEngineServiceRuntime(
+        let runtime = TorrentEngineServiceRuntime(
             stateDirectory: temporary.url,
             transactionBegin: { lifecycle.begin() },
             transactionEnd: { lifecycle.end() }
@@ -362,14 +350,14 @@ struct TorrentEngineServiceSecurityStateTests {
         let firstPeerToken = UUID()
 
         let firstDisposition = await runtime.handle(
-            try beginMigrationRequest(controllerID: controllerID),
+            try handshakeRequest(controllerID: controllerID),
             from: firstPeerToken,
             session: TorrentEngineServiceSessionHandle(),
             peerIsCancelled: { false },
             pendingReply: TorrentEnginePendingReply { lifecycle.reply(status: $0) }
         )
         #expect(firstDisposition == .continuePeer)
-        #expect(await runtime.diagnostics() == .activeMigration)
+        #expect(await runtime.diagnostics() == .activeEngine)
 
         await runtime.beginDisconnect(peerToken: firstPeerToken)
         await runtime.finishDisconnect(peerToken: firstPeerToken)
@@ -377,7 +365,7 @@ struct TorrentEngineServiceSecurityStateTests {
 
         let secondPeerToken = UUID()
         let secondDisposition = await runtime.handle(
-            try beginMigrationRequest(controllerID: controllerID),
+            try handshakeRequest(controllerID: controllerID),
             from: secondPeerToken,
             session: TorrentEngineServiceSessionHandle(),
             peerIsCancelled: { false },
@@ -385,7 +373,7 @@ struct TorrentEngineServiceSecurityStateTests {
         )
 
         #expect(secondDisposition == .continuePeer)
-        #expect(await runtime.diagnostics() == .activeMigration)
+        #expect(await runtime.diagnostics() == .activeEngine)
 
         await runtime.beginDisconnect(peerToken: secondPeerToken)
         await runtime.finishDisconnect(peerToken: secondPeerToken)
@@ -397,7 +385,7 @@ struct TorrentEngineServiceSecurityStateTests {
     func stoppedInterfaceMonitorReleasesControllerAfterContainment() async throws {
         let temporary = try ServiceTemporaryDirectory()
         let lifecycle = LifecycleRecorder()
-        let runtime = try TorrentEngineServiceRuntime(
+        let runtime = TorrentEngineServiceRuntime(
             stateDirectory: temporary.url,
             transactionBegin: { lifecycle.begin() },
             transactionEnd: { lifecycle.end() }
@@ -405,7 +393,7 @@ struct TorrentEngineServiceSecurityStateTests {
         let peerToken = UUID()
 
         _ = await runtime.handle(
-            try beginMigrationRequest(),
+            try handshakeRequest(),
             from: peerToken,
             session: TorrentEngineServiceSessionHandle(
                 cancelObserver: { _ in lifecycle.cancel() }
@@ -428,7 +416,7 @@ struct TorrentEngineServiceSecurityStateTests {
             .containNetwork,
             .cancel,
         ])
-        #expect(await runtime.diagnostics() == .disconnectingMigration)
+        #expect(await runtime.diagnostics() == .disconnectingEngine)
 
         await runtime.finishDisconnect(peerToken: peerToken)
         #expect(await runtime.diagnostics() == .inactive)
@@ -439,7 +427,7 @@ struct TorrentEngineServiceSecurityStateTests {
     func notReadyInterfaceMonitorReleasesControllerAfterContainment() async throws {
         let temporary = try ServiceTemporaryDirectory()
         let lifecycle = LifecycleRecorder()
-        let runtime = try TorrentEngineServiceRuntime(
+        let runtime = TorrentEngineServiceRuntime(
             stateDirectory: temporary.url,
             transactionBegin: { lifecycle.begin() },
             transactionEnd: { lifecycle.end() }
@@ -447,7 +435,7 @@ struct TorrentEngineServiceSecurityStateTests {
         let peerToken = UUID()
 
         _ = await runtime.handle(
-            try beginMigrationRequest(),
+            try handshakeRequest(),
             from: peerToken,
             session: TorrentEngineServiceSessionHandle(
                 cancelObserver: { _ in lifecycle.cancel() }
@@ -464,7 +452,7 @@ struct TorrentEngineServiceSecurityStateTests {
         }
 
         #expect(lifecycle.events.suffix(2) == [.containNetwork, .cancel])
-        #expect(await runtime.diagnostics() == .disconnectingMigration)
+        #expect(await runtime.diagnostics() == .disconnectingEngine)
 
         await runtime.finishDisconnect(peerToken: peerToken)
     }
@@ -473,7 +461,7 @@ struct TorrentEngineServiceSecurityStateTests {
     func initialNotReadyBlockPreservesStartingController() async throws {
         let temporary = try ServiceTemporaryDirectory()
         let lifecycle = LifecycleRecorder()
-        let runtime = try TorrentEngineServiceRuntime(
+        let runtime = TorrentEngineServiceRuntime(
             stateDirectory: temporary.url,
             transactionBegin: { lifecycle.begin() },
             transactionEnd: { lifecycle.end() }
@@ -481,7 +469,7 @@ struct TorrentEngineServiceSecurityStateTests {
         let peerToken = UUID()
 
         _ = await runtime.handle(
-            try beginMigrationRequest(),
+            try handshakeRequest(),
             from: peerToken,
             session: TorrentEngineServiceSessionHandle(
                 cancelObserver: { _ in lifecycle.cancel() }
@@ -499,7 +487,7 @@ struct TorrentEngineServiceSecurityStateTests {
         }
 
         #expect(lifecycle.events.last == .containNetwork)
-        #expect(await runtime.diagnostics() == .activeMigration)
+        #expect(await runtime.diagnostics() == .activeEngine)
 
         await runtime.beginDisconnect(peerToken: peerToken)
         await runtime.finishDisconnect(peerToken: peerToken)
@@ -509,7 +497,7 @@ struct TorrentEngineServiceSecurityStateTests {
     func staleMonitorCallbackDoesNotReleaseNewerController() async throws {
         let temporary = try ServiceTemporaryDirectory()
         let lifecycle = LifecycleRecorder()
-        let runtime = try TorrentEngineServiceRuntime(
+        let runtime = TorrentEngineServiceRuntime(
             stateDirectory: temporary.url,
             transactionBegin: { lifecycle.begin() },
             transactionEnd: { lifecycle.end() }
@@ -517,7 +505,7 @@ struct TorrentEngineServiceSecurityStateTests {
         let peerToken = UUID()
 
         _ = await runtime.handle(
-            try beginMigrationRequest(),
+            try handshakeRequest(),
             from: peerToken,
             session: TorrentEngineServiceSessionHandle(
                 cancelObserver: { _ in lifecycle.cancel() }
@@ -535,7 +523,7 @@ struct TorrentEngineServiceSecurityStateTests {
         }
 
         #expect(lifecycle.events.last == .containNetwork)
-        #expect(await runtime.diagnostics() == .activeMigration)
+        #expect(await runtime.diagnostics() == .activeEngine)
 
         await runtime.beginDisconnect(peerToken: peerToken)
         await runtime.finishDisconnect(peerToken: peerToken)
@@ -545,7 +533,7 @@ struct TorrentEngineServiceSecurityStateTests {
     func failedInitialRequestCleanupOrdering() async throws {
         let temporary = try ServiceTemporaryDirectory()
         let lifecycle = LifecycleRecorder()
-        let runtime = try TorrentEngineServiceRuntime(
+        let runtime = TorrentEngineServiceRuntime(
             stateDirectory: temporary.url,
             transactionBegin: { lifecycle.begin() },
             transactionEnd: { lifecycle.end() }
@@ -571,7 +559,7 @@ struct TorrentEngineServiceSecurityStateTests {
     func invalidSequenceTerminalizesPeer() async throws {
         let temporary = try ServiceTemporaryDirectory()
         let lifecycle = LifecycleRecorder()
-        let runtime = try TorrentEngineServiceRuntime(
+        let runtime = TorrentEngineServiceRuntime(
             stateDirectory: temporary.url,
             transactionBegin: { lifecycle.begin() },
             transactionEnd: { lifecycle.end() }
@@ -583,14 +571,14 @@ struct TorrentEngineServiceSecurityStateTests {
         )
 
         let initialDisposition = await runtime.handle(
-            try beginMigrationRequest(controllerID: controllerID),
+            try handshakeRequest(controllerID: controllerID),
             from: peerToken,
             session: session,
             peerIsCancelled: { false },
             pendingReply: TorrentEnginePendingReply { lifecycle.reply(status: $0) }
         )
         let rejectedDisposition = await runtime.handle(
-            try beginMigrationRequest(controllerID: controllerID, sequence: 3),
+            try handshakeRequest(controllerID: controllerID, sequence: 3),
             from: peerToken,
             session: session,
             peerIsCancelled: { false },
@@ -635,30 +623,27 @@ private extension TorrentEngineServiceAdmissionSnapshot {
     static let zero = TorrentEngineServiceAdmissionSnapshot(
         peerCount: 0,
         requestCount: 0,
-        payloadByteCount: 0,
-        fileDescriptorCount: 0
+        payloadByteCount: 0
     )
 }
 
 private extension TorrentEngineServiceRuntimeDiagnostics {
-    static let activeMigration = TorrentEngineServiceRuntimeDiagnostics(
+    static let activeEngine = TorrentEngineServiceRuntimeDiagnostics(
         hasActivePeer: true,
         hasActiveController: true,
         hasActiveControllerGeneration: true,
         hasActiveSession: true,
-        hasEngine: false,
-        hasActiveMigration: true,
+        hasEngine: true,
         transactionIsActive: true,
         isShuttingDown: false
     )
 
-    static let disconnectingMigration = TorrentEngineServiceRuntimeDiagnostics(
+    static let disconnectingEngine = TorrentEngineServiceRuntimeDiagnostics(
         hasActivePeer: true,
         hasActiveController: true,
         hasActiveControllerGeneration: false,
         hasActiveSession: true,
-        hasEngine: false,
-        hasActiveMigration: true,
+        hasEngine: true,
         transactionIsActive: true,
         isShuttingDown: true
     )
@@ -669,17 +654,16 @@ private extension TorrentEngineServiceRuntimeDiagnostics {
         hasActiveControllerGeneration: false,
         hasActiveSession: false,
         hasEngine: false,
-        hasActiveMigration: false,
         transactionIsActive: false,
         isShuttingDown: false
     )
 }
 
-private func beginMigrationRequest(
+private func handshakeRequest(
     controllerID: UUID = UUID(),
     sequence: UInt64 = 1
 ) throws -> TorrentEngineIPCRequest {
-    let operation = TorrentEngineIPCOperation.beginStateMigration
+    let operation = TorrentEngineIPCOperation.handshake
     return TorrentEngineIPCRequest(
         header: TorrentEngineIPCHeader(
             requestID: UUID(),
@@ -690,7 +674,10 @@ private func beginMigrationRequest(
             expectedEpoch: nil
         ),
         payload: try TorrentEngineIPCPropertyListCodec.encode(
-            TorrentEngineIPCEmpty(),
+            TorrentEngineIPCHandshakeRequest(
+                enablePeerExchangePlugin: false,
+                folders: []
+            ),
             maximumBytes: operation.maximumRequestPayloadBytes
         )
     )

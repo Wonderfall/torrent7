@@ -13,7 +13,6 @@ package enum TorrentEngineClientError: LocalizedError, Sendable {
     case capabilityUnavailable
     case capabilityPathMismatch
     case invalidBookmark
-    case migrationFailed
     case requestQueueFull
     case requestExpiredBeforeSubmission
     case requestTimedOut(outcomeUnknown: Bool)
@@ -39,8 +38,6 @@ package enum TorrentEngineClientError: LocalizedError, Sendable {
             "The isolated torrent engine resolved the download folder differently. Choose it again."
         case .invalidBookmark:
             "The download folder authorization could not be delegated safely."
-        case .migrationFailed:
-            "The previous torrent engine state could not be migrated safely."
         case .requestQueueFull:
             "Too many torrent engine requests are waiting. Try again."
         case .requestExpiredBeforeSubmission:
@@ -383,7 +380,6 @@ package protocol TorrentEngineIPCTransport: Sendable {
         metadata.header.controllerID == controllerID
             && metadata.header.operation == .changeHint
             && !metadata.hasPayload
-            && !metadata.hasFileDescriptor
     }
 
     package static func validateDecodedReply(
@@ -425,7 +421,7 @@ extension TorrentEngineClientError {
             true
         case .serviceRejected, .serviceTemporarilyUnavailable,
              .capabilityUnavailable, .capabilityPathMismatch,
-             .invalidBookmark, .migrationFailed, .requestQueueFull,
+             .invalidBookmark, .requestQueueFull,
              .requestExpiredBeforeSubmission:
             false
         case .requestTimedOut:
@@ -439,9 +435,7 @@ extension TorrentEngineIPCOperation {
         switch self {
         case .handshake, .restart:
             .seconds(120)
-        case .shutdown, .remove, .saveAll,
-             .beginStateMigration, .importStateMigrationFile,
-             .commitStateMigration, .abortStateMigration:
+        case .shutdown, .remove, .saveAll:
             .seconds(60)
         case .poll, .previewTorrentFile, .addMagnet, .addTorrentFile,
              .applySettings, .blockNetwork:

@@ -1582,10 +1582,8 @@ final class TorrentStore {
         let capabilitySnapshot = downloadFolderAccessStore.capabilitySnapshot
         let authorizedSavePaths = capabilitySnapshot.paths
         let folderAuthorizations: [TorrentFolderAuthorization]
-        let legacyStateDirectory: URL?
         do {
             folderAuthorizations = try capabilitySnapshot.engineAuthorizations()
-            legacyStateDirectory = startupFactory == nil ? try Self.makeStateDirectory() : nil
         } catch {
             isEngineStarting = false
             engineStartupFailed = !engine.isAvailable
@@ -1637,7 +1635,7 @@ final class TorrentStore {
                 return
             }
             let creationTask = Task.detached(priority: .userInitiated) {
-                [authorizedSavePaths, folderAuthorizations, legacyStateDirectory, connectionRetryMode] () -> TorrentStoreEngineStartupOutcome in
+                [authorizedSavePaths, folderAuthorizations, connectionRetryMode] () -> TorrentStoreEngineStartupOutcome in
                 guard !Task.isCancelled else {
                     return .cancelled
                 }
@@ -1649,7 +1647,6 @@ final class TorrentStore {
                         engine = try await TorrentXPCClient.connect(
                             enablePeerExchangePlugin: enablePeerExchangePlugin,
                             folderAuthorizations: folderAuthorizations,
-                            legacyStateDirectory: legacyStateDirectory,
                             retryMode: connectionRetryMode
                         )
                     }
@@ -2703,18 +2700,6 @@ final class TorrentStore {
             ?? networkInterfaces.first { $0.isLikelyVPN }?.name
             ?? networkInterfaces.first?.name
             ?? ""
-    }
-
-    private nonisolated static func makeStateDirectory() throws -> URL {
-        let base = try FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
-        let directory = base.appending(path: "TorrentApp", directoryHint: .isDirectory)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory
     }
 
     private nonisolated static func engineStartupErrorMessage(_ error: Error) -> String {

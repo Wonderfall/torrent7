@@ -14,25 +14,21 @@ package enum TorrentEngineIPCField {
     package static let failureCode = "failureCode"
     package static let errorMessage = "error"
     package static let payload = "payload"
-    package static let fileDescriptor = "fileDescriptor"
 }
 
 package struct TorrentEngineIPCRequestMetadata: Equatable, Sendable {
     package let header: TorrentEngineIPCHeader
     package let hasPayload: Bool
     package let payloadByteCount: Int
-    package let hasFileDescriptor: Bool
 
     package init(
         header: TorrentEngineIPCHeader,
         hasPayload: Bool,
-        payloadByteCount: Int,
-        hasFileDescriptor: Bool
+        payloadByteCount: Int
     ) {
         self.header = header
         self.hasPayload = hasPayload
         self.payloadByteCount = payloadByteCount
-        self.hasFileDescriptor = hasFileDescriptor
     }
 }
 
@@ -48,9 +44,7 @@ package enum TorrentEngineIPCEnvelopeCodec {
         TorrentEngineIPCField.payload,
     ]
 
-    private static let requestFields = commonFields.union([
-        TorrentEngineIPCField.fileDescriptor,
-    ])
+    private static let requestFields = commonFields
     private static let replyFields = commonFields.union([
         TorrentEngineIPCField.engineEpoch,
         TorrentEngineIPCField.status,
@@ -70,10 +64,6 @@ package enum TorrentEngineIPCEnvelopeCodec {
             request.payload,
             into: &dictionary,
             maximumBytes: maximumPayloadBytes
-        )
-        try TorrentEngineIPCXPCValues.insertFileDescriptor(
-            request.fileDescriptor,
-            into: &dictionary
         )
         return dictionary
     }
@@ -98,7 +88,7 @@ package enum TorrentEngineIPCEnvelopeCodec {
     }
 
     /// Validates the request envelope and reads only fixed-size header fields and
-    /// XPC object metadata. The payload is not copied and an FD is not duplicated.
+    /// XPC object metadata. The payload is not copied.
     package static func inspectRequest(
         _ dictionary: XPCDictionary
     ) throws -> TorrentEngineIPCRequestMetadata {
@@ -107,14 +97,10 @@ package enum TorrentEngineIPCEnvelopeCodec {
         let payloadByteCount = try TorrentEngineIPCXPCValues.payloadByteCount(
             in: dictionary
         )
-        let hasFileDescriptor = try TorrentEngineIPCXPCValues.hasFileDescriptor(
-            in: dictionary
-        )
         return TorrentEngineIPCRequestMetadata(
             header: header,
             hasPayload: dictionary.keys.contains(TorrentEngineIPCField.payload),
-            payloadByteCount: payloadByteCount,
-            hasFileDescriptor: hasFileDescriptor
+            payloadByteCount: payloadByteCount
         )
     }
 
@@ -138,13 +124,9 @@ package enum TorrentEngineIPCEnvelopeCodec {
             from: dictionary,
             maximumBytes: maximumPayloadBytes
         )
-        let fileDescriptor = try TorrentEngineIPCXPCValues.duplicateFileDescriptor(
-            from: dictionary
-        )
         return TorrentEngineIPCRequest(
             header: metadata.header,
-            payload: payload,
-            fileDescriptor: fileDescriptor
+            payload: payload
         )
     }
 
@@ -414,58 +396,6 @@ package enum TorrentEngineIPCXPCValues {
             throw TorrentEngineIPCError.wrongFieldType(field: field, expected: "data")
         }
         return xpc_data_get_length(object)
-    }
-
-    package static func hasFileDescriptor(
-        in dictionary: XPCDictionary,
-        field: String = TorrentEngineIPCField.fileDescriptor
-    ) throws -> Bool {
-        guard dictionary.keys.contains(field) else {
-            return false
-        }
-        guard unsafe dictionary[field, as: XPC_TYPE_FD] != nil else {
-            throw TorrentEngineIPCError.wrongFieldType(field: field, expected: "file descriptor")
-        }
-        return true
-    }
-
-    package static func boxedFileDescriptor(_ fileDescriptor: Int32) throws -> xpc_object_t {
-        guard fileDescriptor >= 0 else {
-            throw TorrentEngineIPCError.invalidFileDescriptor
-        }
-        guard let object = xpc_fd_create(fileDescriptor) else {
-            throw TorrentEngineIPCError.fileDescriptorBoxingFailed
-        }
-        return object
-    }
-
-    package static func insertFileDescriptor(
-        _ fileDescriptor: Int32?,
-        into dictionary: inout XPCDictionary,
-        field: String = TorrentEngineIPCField.fileDescriptor
-    ) throws {
-        guard let fileDescriptor else {
-            return
-        }
-        dictionary[field] = try boxedFileDescriptor(fileDescriptor)
-    }
-
-    /// Returns a duplicated descriptor owned by the caller, or `nil` when absent.
-    package static func duplicateFileDescriptor(
-        from dictionary: XPCDictionary,
-        field: String = TorrentEngineIPCField.fileDescriptor
-    ) throws -> Int32? {
-        guard dictionary.keys.contains(field) else {
-            return nil
-        }
-        guard let object = unsafe dictionary[field, as: XPC_TYPE_FD] else {
-            throw TorrentEngineIPCError.wrongFieldType(field: field, expected: "file descriptor")
-        }
-        let duplicated = xpc_fd_dup(object)
-        guard duplicated >= 0 else {
-            throw TorrentEngineIPCError.fileDescriptorDuplicationFailed
-        }
-        return duplicated
     }
 
     package static func insertPayload(

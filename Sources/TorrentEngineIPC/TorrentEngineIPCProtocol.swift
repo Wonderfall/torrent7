@@ -2,7 +2,7 @@ import Foundation
 import TorrentEngineModel
 
 package enum TorrentEngineIPCProtocol {
-    package static let version: UInt64 = 6
+    package static let version: UInt64 = 7
 }
 
 package enum TorrentEngineIPCLimits {
@@ -26,7 +26,6 @@ package enum TorrentEngineIPCLimits {
     package static let maximumFolderCapabilityReplyBytes = 32 * 1_024 * 1_024
     package static let maximumOpenDatasets = 4
     package static let maximumAlertErrorsPerPoll = 16
-    package static let maximumStateMigrationFileCount = 20_000
 }
 
 package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
@@ -71,11 +70,6 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
     case readDataset = 51
     case closeDataset = 52
 
-    case beginStateMigration = 60
-    case importStateMigrationFile = 61
-    case commitStateMigration = 62
-    case abortStateMigration = 63
-
     case changeHint = 100
 
     package var maximumRequestPayloadBytes: Int {
@@ -89,9 +83,7 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
             TorrentEngineIPCLimits.maximumPayloadBytes
         case .previewTorrentFile:
             TorrentInputLimits.maxTorrentFileBytes
-        case .poll, .readDataset, .closeDataset,
-             .beginStateMigration, .importStateMigrationFile,
-             .commitStateMigration, .abortStateMigration, .changeHint:
+        case .poll, .readDataset, .closeDataset, .changeHint:
             64 * 1_024
         default:
             2 * 1_024 * 1_024
@@ -190,20 +182,16 @@ package struct TorrentEngineIPCHeader: Equatable, Sendable {
     }
 }
 
-/// The receiver owns `fileDescriptor` and must close it exactly once.
 package struct TorrentEngineIPCRequest: Equatable, Sendable {
     package let header: TorrentEngineIPCHeader
     package let payload: Data?
-    package let fileDescriptor: Int32?
 
     package init(
         header: TorrentEngineIPCHeader,
-        payload: Data? = nil,
-        fileDescriptor: Int32? = nil
+        payload: Data? = nil
     ) {
         self.header = header
         self.payload = payload
-        self.fileDescriptor = fileDescriptor
     }
 }
 
@@ -253,9 +241,6 @@ package enum TorrentEngineIPCError: Error, Equatable, Sendable {
     case missingErrorMessage
     case unexpectedFailureCode
     case missingFailureCode
-    case invalidFileDescriptor
-    case fileDescriptorBoxingFailed
-    case fileDescriptorDuplicationFailed
     case requestMetadataMismatch
     case propertyListEncodingFailed
     case propertyListDecodingFailed

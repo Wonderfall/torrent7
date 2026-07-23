@@ -26,8 +26,7 @@ struct TorrentXPCClientSecurityTests {
             TorrentEngineIPCRequestMetadata(
                 header: header,
                 hasPayload: false,
-                payloadByteCount: 0,
-                hasFileDescriptor: false
+                payloadByteCount: 0
             ),
             controllerID: controllerID
         ))
@@ -35,8 +34,7 @@ struct TorrentXPCClientSecurityTests {
             TorrentEngineIPCRequestMetadata(
                 header: header,
                 hasPayload: true,
-                payloadByteCount: 0,
-                hasFileDescriptor: false
+                payloadByteCount: 0
             ),
             controllerID: controllerID
         ))
@@ -44,17 +42,7 @@ struct TorrentXPCClientSecurityTests {
             TorrentEngineIPCRequestMetadata(
                 header: header,
                 hasPayload: false,
-                payloadByteCount: 0,
-                hasFileDescriptor: true
-            ),
-            controllerID: controllerID
-        ))
-        #expect(!TorrentEngineXPCTransport.validateHint(
-            TorrentEngineIPCRequestMetadata(
-                header: header,
-                hasPayload: false,
-                payloadByteCount: 0,
-                hasFileDescriptor: false
+                payloadByteCount: 0
             ),
             controllerID: UUID()
         ))

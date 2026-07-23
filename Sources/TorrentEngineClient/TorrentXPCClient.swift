@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 import Synchronization
 import TorrentEngineIPC
@@ -164,216 +163,6 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     }
 }
 
-@safe package final class TorrentLegacyResumeDirectory: @unchecked Sendable {
-    package let filenames: [String]
-    private let directoryFileDescriptor: Int32
-
-    private init(directoryFileDescriptor: Int32, filenames: [String]) {
-        self.directoryFileDescriptor = directoryFileDescriptor
-        self.filenames = filenames
-    }
-
-    deinit {
-        Darwin.close(directoryFileDescriptor)
-    }
-
-    package static func open(stateDirectory: URL) throws -> TorrentLegacyResumeDirectory? {
-        guard stateDirectory.isFileURL else {
-            throw TorrentEngineClientError.migrationFailed
-        }
-        var statePathMetadata = stat()
-        let statePathStatus = unsafe stateDirectory.path(percentEncoded: false).withCString {
-            unsafe Darwin.lstat($0, &statePathMetadata)
-        }
-        if statePathStatus != 0 {
-            guard errno == ENOENT else {
-                throw TorrentEngineClientError.migrationFailed
-            }
-            return nil
-        }
-        guard (statePathMetadata.st_mode & S_IFMT) == S_IFDIR,
-              statePathMetadata.st_uid == geteuid(),
-              (statePathMetadata.st_mode & 0o022) == 0 else {
-            throw TorrentEngineClientError.migrationFailed
-        }
-
-        let stateDescriptor = unsafe stateDirectory.path(percentEncoded: false).withCString {
-            unsafe Darwin.open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        }
-        guard stateDescriptor >= 0 else {
-            throw TorrentEngineClientError.migrationFailed
-        }
-        defer {
-            Darwin.close(stateDescriptor)
-        }
-
-        var stateDescriptorMetadata = stat()
-        guard unsafe Darwin.fstat(stateDescriptor, &stateDescriptorMetadata) == 0,
-              stateDescriptorMetadata.st_dev == statePathMetadata.st_dev,
-              stateDescriptorMetadata.st_ino == statePathMetadata.st_ino else {
-            throw TorrentEngineClientError.migrationFailed
-        }
-
-        var resumePathMetadata = stat()
-        let resumePathStatus = unsafe "ResumeData".withCString {
-            unsafe Darwin.fstatat(
-                stateDescriptor,
-                $0,
-                &resumePathMetadata,
-                AT_SYMLINK_NOFOLLOW
-            )
-        }
-        if resumePathStatus != 0 {
-            guard errno == ENOENT else {
-                throw TorrentEngineClientError.migrationFailed
-            }
-            return nil
-        }
-        guard (resumePathMetadata.st_mode & S_IFMT) == S_IFDIR,
-              resumePathMetadata.st_uid == geteuid(),
-              (resumePathMetadata.st_mode & 0o022) == 0 else {
-            throw TorrentEngineClientError.migrationFailed
-        }
-
-        let descriptor = unsafe "ResumeData".withCString {
-            unsafe Darwin.openat(
-                stateDescriptor,
-                $0,
-                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
-            )
-        }
-        guard descriptor >= 0 else {
-            throw TorrentEngineClientError.migrationFailed
-        }
-        var descriptorIsOwned = true
-        defer {
-            if descriptorIsOwned {
-                Darwin.close(descriptor)
-            }
-        }
-
-        var descriptorMetadata = stat()
-        guard unsafe Darwin.fstat(descriptor, &descriptorMetadata) == 0,
-              descriptorMetadata.st_dev == resumePathMetadata.st_dev,
-              descriptorMetadata.st_ino == resumePathMetadata.st_ino else {
-            throw TorrentEngineClientError.migrationFailed
-        }
-
-        let enumerationDescriptor = Darwin.dup(descriptor)
-        guard enumerationDescriptor >= 0,
-              let directory = unsafe Darwin.fdopendir(enumerationDescriptor) else {
-            if enumerationDescriptor >= 0 {
-                Darwin.close(enumerationDescriptor)
-            }
-            throw TorrentEngineClientError.migrationFailed
-        }
-        defer {
-            unsafe Darwin.closedir(directory)
-        }
-
-        var filenames = [String]()
-        while true {
-            errno = 0
-            guard let entry = unsafe Darwin.readdir(directory) else {
-                guard errno == 0 else {
-                    throw TorrentEngineClientError.migrationFailed
-                }
-                break
-            }
-            let filename = unsafe withUnsafePointer(to: entry.pointee.d_name) { pointer in
-                unsafe pointer.withMemoryRebound(
-                    to: CChar.self,
-                    capacity: Int(MAXNAMLEN) + 1
-                ) {
-                    unsafe String(cString: $0)
-                }
-            }
-            guard filename != ".", filename != ".." else {
-                continue
-            }
-            guard isAllowlisted(filename: filename) else {
-                continue
-            }
-            guard filenames.count < TorrentEngineIPCLimits.maximumStateMigrationFileCount else {
-                throw TorrentEngineClientError.migrationFailed
-            }
-            filenames.append(filename)
-        }
-        filenames.sort()
-        guard Set(filenames).count == filenames.count else {
-            throw TorrentEngineClientError.migrationFailed
-        }
-
-        descriptorIsOwned = false
-        return TorrentLegacyResumeDirectory(
-            directoryFileDescriptor: descriptor,
-            filenames: filenames
-        )
-    }
-
-    package func openFile(named filename: String) throws -> Int32 {
-        guard Self.isAllowlisted(filename: filename) else {
-            throw TorrentEngineClientError.migrationFailed
-        }
-        let descriptor = unsafe filename.withCString {
-            unsafe Darwin.openat(
-                directoryFileDescriptor,
-                $0,
-                O_RDONLY | O_NOFOLLOW | O_CLOEXEC
-            )
-        }
-        guard descriptor >= 0 else {
-            throw TorrentEngineClientError.migrationFailed
-        }
-        var metadata = stat()
-        guard unsafe Darwin.fstat(descriptor, &metadata) == 0,
-              (metadata.st_mode & S_IFMT) == S_IFREG,
-              metadata.st_uid == geteuid(),
-              metadata.st_nlink > 0,
-              metadata.st_size > 0 else {
-            Darwin.close(descriptor)
-            throw TorrentEngineClientError.migrationFailed
-        }
-        return descriptor
-    }
-
-    private static func isAllowlisted(filename: String) -> Bool {
-        guard !filename.isEmpty,
-              filename.utf8.count <= 96,
-              !filename.contains("/"),
-              !filename.contains("\0") else {
-            return false
-        }
-        if filename.hasPrefix("removal-"), filename.hasSuffix(".fastresume.remove") {
-            let value = filename
-                .dropFirst("removal-".count)
-                .dropLast(".fastresume.remove".count)
-            return isLowercaseHex(value, count: 32)
-        }
-        guard filename.hasSuffix(".fastresume") else {
-            return false
-        }
-        let identifier = filename.dropLast(".fastresume".count)
-        if identifier.hasPrefix("t:") {
-            return isLowercaseHex(identifier.dropFirst(2), count: 32)
-        }
-        if identifier.hasPrefix("v1:") {
-            return isLowercaseHex(identifier.dropFirst(3), count: 40)
-        }
-        if identifier.hasPrefix("v2:") {
-            return isLowercaseHex(identifier.dropFirst(3), count: 64)
-        }
-        return false
-    }
-
-    private static func isLowercaseHex<S: StringProtocol>(_ value: S, count: Int) -> Bool {
-        value.utf8.count == count && value.utf8.allSatisfy {
-            ($0 >= Character("0").asciiValue! && $0 <= Character("9").asciiValue!)
-                || ($0 >= Character("a").asciiValue! && $0 <= Character("f").asciiValue!)
-        }
-    }
-}
-
 @safe package actor TorrentXPCClient: TorrentEngineServicing {
     private static let maximumQueuedRequestCount = 128
 
@@ -447,14 +236,13 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     package static func connect(
         enablePeerExchangePlugin: Bool,
         folderAuthorizations: [TorrentFolderAuthorization],
-        legacyStateDirectory: URL? = nil,
         retryMode: TorrentEngineConnectionRetryMode = .initial
     ) async throws -> TorrentXPCClient {
         let configuration = try TorrentEngineXPCIdentity.configuration()
         var retryPolicy = TorrentEngineConnectionRetryPolicy(mode: retryMode)
         let clock = ContinuousClock()
         // One connect call owns one wall-clock horizon. This includes the
-        // first transport attempt, migration/bootstrap requests, processing,
+        // first transport attempt, bootstrap requests, processing,
         // and every retry sleep; a late first busy reply cannot restart it.
         let recoveryDeadline = clock.now.advanced(
             by: TorrentEngineConnectionRetryPolicy.cleanupEpisodeRetryBudget
@@ -486,7 +274,6 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                     state: state,
                     enablePeerExchangePlugin: enablePeerExchangePlugin,
                     folderAuthorizations: folderAuthorizations,
-                    legacyStateDirectory: legacyStateDirectory,
                     requestTimeoutOverrides: [:],
                     connectionDeadline: recoveryDeadline
                 )
@@ -520,7 +307,6 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     package static func connect(
         enablePeerExchangePlugin: Bool,
         folderAuthorizations: [TorrentFolderAuthorization],
-        legacyStateDirectory: URL? = nil,
         transport: any TorrentEngineIPCTransport,
         controllerID: UUID = UUID(),
         requestTimeoutOverrides: [TorrentEngineIPCOperation: Duration] = [:],
@@ -532,7 +318,6 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             state: TorrentXPCClientState(),
             enablePeerExchangePlugin: enablePeerExchangePlugin,
             folderAuthorizations: folderAuthorizations,
-            legacyStateDirectory: legacyStateDirectory,
             requestTimeoutOverrides: requestTimeoutOverrides,
             connectionDeadline: connectionDeadline
         )
@@ -544,7 +329,6 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         state: TorrentXPCClientState,
         enablePeerExchangePlugin: Bool,
         folderAuthorizations: [TorrentFolderAuthorization],
-        legacyStateDirectory: URL?,
         requestTimeoutOverrides: [TorrentEngineIPCOperation: Duration],
         connectionDeadline: ContinuousClock.Instant?
     ) async throws -> TorrentXPCClient {
@@ -556,9 +340,6 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             connectionDeadline: connectionDeadline
         )
         do {
-            if let legacyStateDirectory {
-                try await client.migrateLegacyStateIfNeeded(from: legacyStateDirectory)
-            }
             try await client.bootstrap(
                 enablePeerExchangePlugin: enablePeerExchangePlugin,
                 folderAuthorizations: folderAuthorizations
@@ -1083,83 +864,6 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         state.setLibtorrentVersion(response.libtorrentVersion)
     }
 
-    private func migrateLegacyStateIfNeeded(from stateDirectory: URL) async throws {
-        let begin: TorrentEngineIPCStateMigrationBeginResponse
-        do {
-            (begin, _) = try await invokeBeforeHandshake(
-                .beginStateMigration,
-                TorrentEngineIPCEmpty()
-            )
-        } catch {
-            throw Self.migrationFailure(from: error)
-        }
-        guard !begin.alreadyComplete else {
-            return
-        }
-
-        let legacyDirectory: TorrentLegacyResumeDirectory?
-        do {
-            legacyDirectory = try TorrentLegacyResumeDirectory.open(
-                stateDirectory: stateDirectory
-            )
-        } catch {
-            try? await invokeUnitBeforeHandshake(
-                .abortStateMigration,
-                TorrentEngineIPCEmpty()
-            )
-            throw TorrentEngineClientError.migrationFailed
-        }
-
-        guard let legacyDirectory, !legacyDirectory.filenames.isEmpty else {
-            do {
-                try await invokeUnitBeforeHandshake(
-                    .abortStateMigration,
-                    TorrentEngineIPCEmpty()
-                )
-                return
-            } catch {
-                throw Self.migrationFailure(from: error)
-            }
-        }
-
-        do {
-            for filename in legacyDirectory.filenames {
-                let descriptor = try legacyDirectory.openFile(named: filename)
-                defer {
-                    Darwin.close(descriptor)
-                }
-                try await invokeUnitBeforeHandshake(
-                    .importStateMigrationFile,
-                    TorrentEngineIPCStateMigrationFileRequest(name: filename),
-                    fileDescriptor: descriptor
-                )
-            }
-            try await invokeUnitBeforeHandshake(
-                .commitStateMigration,
-                TorrentEngineIPCEmpty()
-            )
-        } catch {
-            try? await invokeUnitBeforeHandshake(
-                .abortStateMigration,
-                TorrentEngineIPCEmpty()
-            )
-            throw Self.migrationFailure(from: error)
-        }
-    }
-
-    private static func migrationFailure(from error: any Error) -> any Error {
-        if error is CancellationError {
-            return CancellationError()
-        }
-        guard let clientError = error as? TorrentEngineClientError else {
-            return TorrentEngineClientError.migrationFailed
-        }
-        if case .serviceRejected = clientError {
-            return TorrentEngineClientError.migrationFailed
-        }
-        return clientError
-    }
-
     private func pollWire(
         since revision: UInt64?,
         sortedBy sortOrder: TorrentSortOrder,
@@ -1430,24 +1134,6 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         return (response, reply.engineEpoch)
     }
 
-    private func invokeUnitBeforeHandshake<Request: Encodable & Sendable>(
-        _ operation: TorrentEngineIPCOperation,
-        _ request: Request,
-        fileDescriptor: Int32? = nil
-    ) async throws {
-        let payload = try TorrentEngineIPCPropertyListCodec.encode(
-            request,
-            maximumBytes: operation.maximumRequestPayloadBytes
-        )
-        let reply = try await send(
-            operation: operation,
-            payload: payload,
-            expectedEpoch: nil,
-            fileDescriptor: fileDescriptor
-        )
-        let _: TorrentEngineIPCEmpty = try decodeValidatedResponse(reply, for: operation)
-    }
-
     private func decodeValidatedResponse<Response: Decodable & Sendable>(
         _ reply: TorrentEngineIPCReply,
         for operation: TorrentEngineIPCOperation
@@ -1476,8 +1162,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     private func send(
         operation: TorrentEngineIPCOperation,
         payload: Data?,
-        expectedEpoch: UUID?,
-        fileDescriptor: Int32? = nil
+        expectedEpoch: UUID?
     ) async throws -> TorrentEngineIPCReply {
         let clock = ContinuousClock()
         let requestTimeout = requestTimeoutOverrides[operation]
@@ -1517,8 +1202,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             let reply = try await transport.send(
                 TorrentEngineIPCRequest(
                     header: header,
-                    payload: payload,
-                    fileDescriptor: fileDescriptor
+                    payload: payload
                 ),
                 deadline: deadline
             )
@@ -1841,7 +1525,7 @@ extension TorrentEngineClientError {
             .replaceController
         case .invalidReply, .engineRestarted, .serviceRejected,
              .capabilityUnavailable, .capabilityPathMismatch,
-             .invalidBookmark, .migrationFailed, .requestQueueFull,
+             .invalidBookmark, .requestQueueFull,
              .recoveryDeadlineExceeded:
             .terminal
         case .requestExpiredBeforeSubmission:
