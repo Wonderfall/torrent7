@@ -197,7 +197,6 @@ verify_mach_o_load_commands() {
     local saw_diagnostic_rpath=false
     local dependencies load_command_output load_command_name load_path line
     dependencies=$(/usr/bin/otool -L "$binary")
-    print -r -- "$dependencies"
     load_command_output=$(
         /usr/bin/otool -l "$binary" | /usr/bin/awk '
             $1 == "cmd" {
@@ -422,8 +421,6 @@ fi
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$app_dir"
 /usr/bin/codesign --display --verbose=4 "$app_dir" >"$app_signature_output" 2>&1
 /usr/bin/codesign --display --verbose=4 "$engine_extension_dir" >"$engine_signature_output" 2>&1
-/bin/cat "$app_signature_output"
-/bin/cat "$engine_signature_output"
 
 typeset app_allows_ad_hoc_peer=false
 typeset engine_allows_ad_hoc_peer=false
@@ -466,8 +463,6 @@ fi
     >"$app_entitlements_output" 2>/dev/null
 /usr/bin/codesign --display --xml --entitlements - "$engine_extension_dir" \
     >"$engine_entitlements_output" 2>/dev/null
-/bin/cat "$app_entitlements_output"
-/bin/cat "$engine_entitlements_output"
 /usr/bin/plutil -lint "$app_entitlements_output" >/dev/null
 /usr/bin/plutil -lint "$engine_entitlements_output" >/dev/null
 /usr/bin/xcrun swift "$root_dir/Scripts/compare-entitlements.swift" \
@@ -490,8 +485,6 @@ reject_match "com\\.apple\\.security\\.files\\.(bookmarks|user-selected)" "$engi
 
 /usr/bin/xcrun lipo -info "$executable" >"$app_arch_output"
 /usr/bin/xcrun lipo -info "$engine_extension_executable" >"$engine_arch_output"
-/bin/cat "$app_arch_output"
-/bin/cat "$engine_arch_output"
 /usr/bin/xcrun otool -tvV "$executable" >"$app_text_output"
 /usr/bin/xcrun otool -tvV "$engine_extension_executable" >"$engine_text_output"
 /usr/bin/xcrun nm -m "$executable" >"$app_symbol_output"
