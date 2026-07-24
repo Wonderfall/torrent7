@@ -368,9 +368,55 @@ void TTorrentClient::insert_added_queue_priority_order_locked(
 
 namespace {
 
-DirtyMask block_network_locked(TTorrentClient &client) TORRENT_BRIDGE_REQUIRES(client.lock)
+struct NativeNetworkStateExpectation {
+    std::string_view listen_interfaces;
+    std::string_view outgoing_interfaces;
+    bool enable_upnp;
+    bool enable_natpmp;
+    bool enable_dht;
+    bool enable_lsd;
+    bool enable_outgoing_tcp;
+    bool enable_incoming_tcp;
+    bool enable_outgoing_utp;
+    bool enable_incoming_utp;
+    bool dht_privacy_lookups;
+    bool session_paused;
+};
+
+BridgeResult acknowledge_network_state_locked(
+    TTorrentClient &client,
+    NativeNetworkStateExpectation const &expected,
+    std::string_view failure_message
+) TORRENT_BRIDGE_REQUIRES(client.lock)
 {
-    client.session.pause();
+    // get_settings() and is_paused() are synchronous libtorrent-context calls.
+    // They cannot complete until the settings and pause/resume operations queued
+    // before them have run on the session's single network executor.
+    lt::settings_pack const current = client.session.get_settings();
+    bool const session_paused = client.session.is_paused();
+    if (current.get_str(lt::settings_pack::listen_interfaces) != expected.listen_interfaces
+        || current.get_str(lt::settings_pack::outgoing_interfaces) != expected.outgoing_interfaces
+        || current.get_bool(lt::settings_pack::enable_upnp) != expected.enable_upnp
+        || current.get_bool(lt::settings_pack::enable_natpmp) != expected.enable_natpmp
+        || current.get_bool(lt::settings_pack::enable_dht) != expected.enable_dht
+        || current.get_bool(lt::settings_pack::enable_lsd) != expected.enable_lsd
+        || current.get_bool(lt::settings_pack::enable_outgoing_tcp) != expected.enable_outgoing_tcp
+        || current.get_bool(lt::settings_pack::enable_incoming_tcp) != expected.enable_incoming_tcp
+        || current.get_bool(lt::settings_pack::enable_outgoing_utp) != expected.enable_outgoing_utp
+        || current.get_bool(lt::settings_pack::enable_incoming_utp) != expected.enable_incoming_utp
+        || current.get_bool(lt::settings_pack::dht_privacy_lookups) != expected.dht_privacy_lookups
+        || session_paused != expected.session_paused) {
+        return bridge_error(2, std::string(failure_message));
+    }
+    return {};
+}
+
+BridgeResult block_network_locked(
+    TTorrentClient &client,
+    DirtyMask &changes
+) TORRENT_BRIDGE_REQUIRES(client.lock)
+{
+    changes = 0U;
 
     lt::settings_pack settings;
     settings.set_str(lt::settings_pack::listen_interfaces, "");
@@ -383,12 +429,35 @@ DirtyMask block_network_locked(TTorrentClient &client) TORRENT_BRIDGE_REQUIRES(c
     settings.set_bool(lt::settings_pack::enable_incoming_tcp, false);
     settings.set_bool(lt::settings_pack::enable_outgoing_utp, false);
     settings.set_bool(lt::settings_pack::enable_incoming_utp, false);
+    settings.set_bool(lt::settings_pack::dht_privacy_lookups, false);
     client.session.apply_settings(std::move(settings));
-
     client.session.pause();
-    DirtyMask changes = client.record_network_blocked();
+
+    BridgeResult const acknowledged = acknowledge_network_state_locked(
+        client,
+        NativeNetworkStateExpectation{
+            .listen_interfaces = "",
+            .outgoing_interfaces = "",
+            .enable_upnp = false,
+            .enable_natpmp = false,
+            .enable_dht = false,
+            .enable_lsd = false,
+            .enable_outgoing_tcp = false,
+            .enable_incoming_tcp = false,
+            .enable_outgoing_utp = false,
+            .enable_incoming_utp = false,
+            .dht_privacy_lookups = false,
+            .session_paused = true,
+        },
+        "Native network containment could not be confirmed."
+    );
+    if (!acknowledged) {
+        return acknowledged;
+    }
+
+    changes = client.record_network_blocked();
     client.request_snapshot_update_locked();
-    return changes;
+    return {};
 }
 
 using NormalizedLiveSavePathResult = std::expected<std::string, BridgeError>;
@@ -3281,7 +3350,15 @@ extern "C" int32_t TorrentClientApplySettings(TTorrentClient *client, TTorrentSe
         std::scoped_lock guard(client->lock);
         LockedChangePublisher publisher(*client, wake);
         if (network_blocked) {
-            publisher.add(block_network_locked(*client));
+            DirtyMask containment_changes = 0U;
+            BridgeResult const containment = block_network_locked(
+                *client,
+                containment_changes
+            );
+            if (!containment) {
+                return containment;
+            }
+            publisher.add(containment_changes);
         }
 
         BridgeResult const persistence = client->ensure_persistence_available(2);
@@ -3290,9 +3367,8 @@ extern "C" int32_t TorrentClientApplySettings(TTorrentClient *client, TTorrentSe
         }
 
         bool const should_resume_session = client->requested_network_blocked && !network_blocked;
-        if (network_blocked) {
-            client->session.pause();
-        }
+        bool const expected_session_paused = network_blocked
+            || (!should_resume_session && client->session.is_paused());
         client->dht_node_enabled = enable_dht;
         SourcePolicyApplicationResult source_policy_application;
         add_policy_result(source_policy_application, apply_dht_policy_locked(*client, use_dht_by_default));
@@ -3340,12 +3416,38 @@ extern "C" int32_t TorrentClientApplySettings(TTorrentClient *client, TTorrentSe
 
         if (network_blocked) {
             client->session.pause();
+        } else if (should_resume_session) {
+            client->session.resume();
+        }
+
+        BridgeResult const acknowledged = acknowledge_network_state_locked(
+            *client,
+            NativeNetworkStateExpectation{
+                .listen_interfaces = listen_interface_settings,
+                .outgoing_interfaces = outgoing_interface_settings,
+                .enable_upnp = !network_blocked && enable_port_forwarding,
+                .enable_natpmp = !network_blocked && enable_port_forwarding,
+                .enable_dht = !network_blocked && enable_dht,
+                .enable_lsd = !network_blocked && enable_lsd,
+                .enable_outgoing_tcp = !network_blocked,
+                .enable_incoming_tcp = !network_blocked && accept_incoming_connections,
+                .enable_outgoing_utp = !network_blocked,
+                .enable_incoming_utp = !network_blocked && accept_incoming_connections,
+                .dht_privacy_lookups = !network_blocked && enable_dht,
+                .session_paused = expected_session_paused,
+            },
+            network_blocked
+                ? "Native network containment could not be confirmed."
+                : "Native network binding could not be confirmed."
+        );
+        if (!acknowledged) {
+            return acknowledged;
+        }
+
+        if (network_blocked) {
             publisher.add(client->record_network_blocked());
         } else {
             publisher.add(client->record_network_requested(false));
-            if (should_resume_session) {
-                client->session.resume();
-            }
         }
         client->request_snapshot_update_locked();
         return {};
@@ -3370,7 +3472,12 @@ extern "C" int32_t TorrentClientBlockNetwork(
 
         std::scoped_lock guard(client->lock);
         LockedChangePublisher publisher(*client, wake);
-        publisher.add(block_network_locked(*client));
+        DirtyMask changes = 0U;
+        BridgeResult const containment = block_network_locked(*client, changes);
+        if (!containment) {
+            return containment;
+        }
+        publisher.add(changes);
         return {};
     });
     if (client != nullptr) {

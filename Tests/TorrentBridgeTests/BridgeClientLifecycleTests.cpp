@@ -1,7 +1,9 @@
 #include "BridgeTestSupport.hpp"
 
+#include <boost/asio/post.hpp>
 #include <doctest.h>
 
+#include <libtorrent/aux_/session_impl.hpp>
 #include <libtorrent/aux_/stack_allocator.hpp>
 #include <libtorrent/create_torrent.hpp>
 
@@ -11,6 +13,7 @@
 #include <cstdint>
 #include <ctime>
 #include <filesystem>
+#include <future>
 #include <initializer_list>
 #include <memory>
 #include <stdexcept>
@@ -44,6 +47,80 @@ void counting_wake_callback(void *context)
 {
     auto *count = static_cast<std::atomic_uint64_t *>(context);
     count->fetch_add(1U, std::memory_order_relaxed);
+}
+
+class SessionExecutorGate {
+public:
+    explicit SessionExecutorGate(TTorrentClient &client)
+        : state_(std::make_shared<State>())
+    {
+        auto const session = client.session.native_handle();
+        REQUIRE(session != nullptr);
+        boost::asio::post(session->get_context(), [state = state_] {
+            std::unique_lock guard(state->lock);
+            state->entered = true;
+            state->changed.notify_all();
+            state->changed.wait(guard, [state] {
+                return state->released;
+            });
+        });
+
+        std::unique_lock guard(state_->lock);
+        bool const entered = state_->changed.wait_for(
+            guard,
+            std::chrono::seconds(2),
+            [this] {
+                return state_->entered;
+            }
+        );
+        if (!entered) {
+            state_->released = true;
+            guard.unlock();
+            state_->changed.notify_all();
+        }
+        REQUIRE(entered);
+    }
+
+    SessionExecutorGate(SessionExecutorGate const &) = delete;
+    SessionExecutorGate &operator=(SessionExecutorGate const &) = delete;
+    SessionExecutorGate(SessionExecutorGate &&) = delete;
+    SessionExecutorGate &operator=(SessionExecutorGate &&) = delete;
+
+    ~SessionExecutorGate()
+    {
+        release();
+    }
+
+    void release()
+    {
+        {
+            std::scoped_lock guard(state_->lock);
+            state_->released = true;
+        }
+        state_->changed.notify_all();
+    }
+
+private:
+    struct State {
+        std::mutex lock;
+        std::condition_variable changed;
+        bool entered = false;
+        bool released = false;
+    };
+
+    std::shared_ptr<State> state_;
+};
+
+[[nodiscard]] TTorrentSessionSettings unblocked_session_settings()
+{
+    TTorrentSessionSettings settings{};
+    settings.required_network_interface = "";
+    settings.network_blocked = bridge_bool(false);
+    settings.use_pex_by_default = bridge_bool(true);
+    settings.active_downloads = 3;
+    settings.active_seeds = 5;
+    settings.active_limit = 500;
+    return settings;
 }
 
 [[nodiscard]] bool has_owner_directory_permissions(fs::path const &path)
@@ -3326,6 +3403,88 @@ TEST_CASE("ordinary settings apply does not resume an already unblocked session"
         static_cast<int32_t>(sizeof(error))
     ) == 0);
     CHECK(client.session.is_paused());
+}
+
+TEST_CASE("forced network block waits for libtorrent executor acknowledgement")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+
+    TTorrentSessionSettings settings = unblocked_session_settings();
+    std::array<char, 512> error{};
+    REQUIRE(TorrentClientApplySettings(
+        &client,
+        &settings,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == 0);
+    REQUIRE_FALSE(client.session.is_paused());
+
+    SessionExecutorGate executor_gate(client);
+    std::promise<int32_t> result_promise;
+    std::future<int32_t> result = result_promise.get_future();
+    std::jthread transition([&] {
+        result_promise.set_value(TorrentClientBlockNetwork(
+            &client,
+            error.data(),
+            static_cast<int32_t>(error.size())
+        ));
+    });
+
+    CHECK(result.wait_for(std::chrono::milliseconds(100)) == std::future_status::timeout);
+    executor_gate.release();
+    transition.join();
+
+    REQUIRE(result.get() == 0);
+    lt::settings_pack const current = client.session.get_settings();
+    CHECK(current.get_str(lt::settings_pack::listen_interfaces).empty());
+    CHECK(current.get_str(lt::settings_pack::outgoing_interfaces).empty());
+    CHECK_FALSE(current.get_bool(lt::settings_pack::enable_upnp));
+    CHECK_FALSE(current.get_bool(lt::settings_pack::enable_natpmp));
+    CHECK_FALSE(current.get_bool(lt::settings_pack::enable_dht));
+    CHECK_FALSE(current.get_bool(lt::settings_pack::enable_lsd));
+    CHECK_FALSE(current.get_bool(lt::settings_pack::enable_outgoing_tcp));
+    CHECK_FALSE(current.get_bool(lt::settings_pack::enable_incoming_tcp));
+    CHECK_FALSE(current.get_bool(lt::settings_pack::enable_outgoing_utp));
+    CHECK_FALSE(current.get_bool(lt::settings_pack::enable_incoming_utp));
+    CHECK_FALSE(current.get_bool(lt::settings_pack::dht_privacy_lookups));
+    CHECK(client.session.is_paused());
+}
+
+TEST_CASE("network unblock waits for libtorrent executor acknowledgement")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+
+    TTorrentSessionSettings settings = unblocked_session_settings();
+    std::array<char, 512> error{};
+    SessionExecutorGate executor_gate(client);
+    std::promise<int32_t> result_promise;
+    std::future<int32_t> result = result_promise.get_future();
+    std::jthread transition([&] {
+        result_promise.set_value(TorrentClientApplySettings(
+            &client,
+            &settings,
+            error.data(),
+            static_cast<int32_t>(error.size())
+        ));
+    });
+
+    CHECK(result.wait_for(std::chrono::milliseconds(100)) == std::future_status::timeout);
+    executor_gate.release();
+    transition.join();
+
+    REQUIRE(result.get() == 0);
+    lt::settings_pack const current = client.session.get_settings();
+    CHECK(current.get_str(lt::settings_pack::listen_interfaces) == "0.0.0.0:0,[::]:0");
+    CHECK(current.get_str(lt::settings_pack::outgoing_interfaces).empty());
+    CHECK(current.get_bool(lt::settings_pack::enable_outgoing_tcp));
+    CHECK_FALSE(current.get_bool(lt::settings_pack::enable_incoming_tcp));
+    CHECK(current.get_bool(lt::settings_pack::enable_outgoing_utp));
+    CHECK_FALSE(current.get_bool(lt::settings_pack::enable_incoming_utp));
+    CHECK_FALSE(client.session.is_paused());
 }
 
 TEST_CASE("privacy-sensitive tracker settings are explicit")
