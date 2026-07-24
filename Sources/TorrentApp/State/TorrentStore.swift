@@ -16,6 +16,11 @@ private enum TorrentStoreErrorSource {
 
 private typealias TorrentStoreUserOperation = @MainActor @Sendable (TorrentStore) async -> Void
 
+private struct TorrentStorePendingUserOperation {
+    let id: UUID?
+    let perform: TorrentStoreUserOperation
+}
+
 private struct TorrentStorePendingSettingsApplication {
     var settings: TorrentSettings
     var networkBinding: AppliedNetworkBinding
@@ -25,7 +30,82 @@ private struct TorrentStorePendingSettingsApplication {
 
 private enum TorrentStorePendingOperation {
     case applySettings(TorrentStorePendingSettingsApplication)
-    case user(TorrentStoreUserOperation)
+    case user(TorrentStorePendingUserOperation)
+}
+
+@MainActor
+private final class TorrentStoreQueuedOperationState<Result: Sendable> {
+    private enum State {
+        case idle
+        case pending(CheckedContinuation<Result, any Error>)
+        case running(CheckedContinuation<Result, any Error>)
+        case completed
+    }
+
+    private var state = State.idle
+
+    func install(_ continuation: CheckedContinuation<Result, any Error>) {
+        switch state {
+        case .idle:
+            state = .pending(continuation)
+        case .completed:
+            continuation.resume(throwing: CancellationError())
+        case .pending, .running:
+            preconditionFailure("A queued operation continuation can only be installed once")
+        }
+    }
+
+    func begin() -> Bool {
+        switch state {
+        case .pending(let continuation):
+            state = .running(continuation)
+            return true
+        case .completed:
+            return false
+        case .idle, .running:
+            preconditionFailure("A queued operation can only begin from the pending state")
+        }
+    }
+
+    func resume(returning result: Result) {
+        finish(with: .success(result))
+    }
+
+    func resume(throwing error: any Error) {
+        finish(with: .failure(error))
+    }
+
+    func cancel() {
+        switch state {
+        case .idle:
+            state = .completed
+        case .pending(let continuation), .running(let continuation):
+            state = .completed
+            continuation.resume(throwing: CancellationError())
+        case .completed:
+            break
+        }
+    }
+
+    private func finish(with result: Swift.Result<Result, any Error>) {
+        let continuation: CheckedContinuation<Result, any Error>
+        switch state {
+        case .pending(let pendingContinuation), .running(let pendingContinuation):
+            continuation = pendingContinuation
+            state = .completed
+        case .completed:
+            return
+        case .idle:
+            preconditionFailure("A queued operation cannot finish before installing its continuation")
+        }
+
+        switch result {
+        case .success(let value):
+            continuation.resume(returning: value)
+        case .failure(let error):
+            continuation.resume(throwing: error)
+        }
+    }
 }
 
 private enum TorrentStoreEngineStartupOutcome: Sendable {
@@ -560,6 +640,7 @@ final class TorrentStore {
     }
 
     func previewTorrentFile(_ url: URL) async throws -> TorrentFilePreview {
+        try Task.checkCancellation()
         let didAccess = url.startAccessingSecurityScopedResource()
         defer {
             if didAccess {
@@ -567,10 +648,18 @@ final class TorrentStore {
             }
         }
 
-        let torrentData = try await Task.detached(priority: .userInitiated) {
+        let readTask = Task.detached(priority: .userInitiated) {
             try Self.readTorrentFile(url)
-        }.value
-        return try await engine.previewTorrentFile(data: torrentData)
+        }
+        let torrentData = try await withTaskCancellationHandler {
+            try await readTask.value
+        } onCancel: {
+            readTask.cancel()
+        }
+        try Task.checkCancellation()
+        let preview = try await engine.previewTorrentFile(data: torrentData)
+        try Task.checkCancellation()
+        return preview
     }
 
     @discardableResult
@@ -1711,16 +1800,19 @@ final class TorrentStore {
     private func startInitialEngineSync(afterLeadingOperation: Bool = false) {
         precondition(!isEngineStarting)
         precondition(pendingOperations.count < Self.maximumPendingOperationCount)
-        let operation = TorrentStorePendingOperation.user { store in
-            await store.refreshFromEngine(notifiesCompletions: false)
-            guard store.engine.isAvailable, !store.engineReplacementRequested else {
-                return
+        let operation = TorrentStorePendingOperation.user(TorrentStorePendingUserOperation(
+            id: nil,
+            perform: { store in
+                await store.refreshFromEngine(notifiesCompletions: false)
+                guard store.engine.isAvailable, !store.engineReplacementRequested else {
+                    return
+                }
+                store.prioritizeCurrentSettingsApplication(
+                    refreshes: true,
+                    notifiesCompletions: false
+                )
             }
-            store.prioritizeCurrentSettingsApplication(
-                refreshes: true,
-                notifiesCompletions: false
-            )
-        }
+        ))
         // A replacement may have queued user work waiting. Its authoritative
         // interface snapshot and current settings must be established before
         // any engine work can reach the fresh controller. A reset requested
@@ -1928,6 +2020,7 @@ final class TorrentStore {
 
     @discardableResult
     private func scheduleUserOperation(
+        id: UUID? = nil,
         _ operation: @escaping @MainActor @Sendable (TorrentStore) async -> Void
     ) -> Bool {
         guard !isEngineStarting else {
@@ -1945,7 +2038,10 @@ final class TorrentStore {
             return false
         }
 
-        pendingOperations.append(.user(operation))
+        pendingOperations.append(.user(TorrentStorePendingUserOperation(
+            id: id,
+            perform: operation
+        )))
         startOperationDrainIfNeeded()
         return true
     }
@@ -1953,21 +2049,54 @@ final class TorrentStore {
     private func performQueuedUserOperation<Result: Sendable>(
         _ operation: @escaping @Sendable (any TorrentEngineServicing) async throws -> Result
     ) async throws -> Result {
+        try Task.checkCancellation()
         guard !isEngineStarting else {
             throw TorrentStoreError.engineStarting
         }
-        return try await withCheckedThrowingContinuation(isolation: MainActor.shared) { continuation in
-            let accepted = scheduleUserOperation { store in
-                do {
-                    continuation.resume(returning: try await operation(store.engine))
-                } catch {
-                    continuation.resume(throwing: error)
+
+        let operationID = UUID()
+        let state = TorrentStoreQueuedOperationState<Result>()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation(
+                isolation: MainActor.shared
+            ) { continuation in
+                state.install(continuation)
+                guard !Task.isCancelled else {
+                    state.cancel()
+                    return
+                }
+                let accepted = scheduleUserOperation(id: operationID) { store in
+                    guard state.begin() else {
+                        return
+                    }
+                    do {
+                        state.resume(returning: try await operation(store.engine))
+                    } catch {
+                        state.resume(throwing: error)
+                    }
+                }
+                if !accepted {
+                    state.resume(throwing: TorrentStoreError.tooManyPendingOperations)
                 }
             }
-            if !accepted {
-                continuation.resume(throwing: TorrentStoreError.tooManyPendingOperations)
+        } onCancel: {
+            Task { @MainActor [weak self, state] in
+                self?.removePendingUserOperation(id: operationID)
+                state.cancel()
             }
         }
+    }
+
+    private func removePendingUserOperation(id: UUID) {
+        guard let index = pendingOperations.firstIndex(where: { operation in
+            guard case .user(let userOperation) = operation else {
+                return false
+            }
+            return userOperation.id == id
+        }) else {
+            return
+        }
+        pendingOperations.remove(at: index)
     }
 
     private func startOperationDrainIfNeeded() {
@@ -2029,7 +2158,7 @@ final class TorrentStore {
                 await refreshFromEngine(notifiesCompletions: application.notifiesCompletions)
             }
         case .user(let operation):
-            await operation(self)
+            await operation.perform(self)
         }
     }
 
@@ -2708,6 +2837,7 @@ final class TorrentStore {
     }
 
     private nonisolated static func readTorrentFile(_ url: URL) throws -> Data {
+        try Task.checkCancellation()
         let descriptor = try openTorrentFileDescriptor(url)
         defer {
             try? descriptor.close()
@@ -2715,9 +2845,19 @@ final class TorrentStore {
 
         let fileSize = try validatedTorrentFileSize(descriptor: descriptor)
         let handle = FileHandle(fileDescriptor: descriptor.rawValue, closeOnDealloc: false)
-        guard let data = try handle.read(upToCount: fileSize) else {
-            throw TorrentStoreError.unreadableTorrentFile
+        let maximumChunkSize = 1 * 1_024 * 1_024
+        var data = Data()
+        data.reserveCapacity(fileSize)
+        while data.count < fileSize {
+            try Task.checkCancellation()
+            let remaining = fileSize - data.count
+            guard let chunk = try handle.read(upToCount: min(maximumChunkSize, remaining)),
+                  !chunk.isEmpty else {
+                throw TorrentStoreError.unreadableTorrentFile
+            }
+            data.append(chunk)
         }
+        try Task.checkCancellation()
         guard data.count == fileSize else {
             throw TorrentStoreError.unreadableTorrentFile
         }

@@ -361,6 +361,8 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     )]()
     private(set) var operations = [FakeTorrentEngineOperation]()
     private(set) var previewedTorrentFiles = [Data]()
+    private var previewSuspensionCount = 0
+    private var previewContinuations = [CheckedContinuation<Void, Never>]()
     private(set) var delegatedFolderAuthorizations = [TorrentFolderAuthorization]()
     private(set) var reconciledFolderAuthorizationSnapshots = [[TorrentFolderAuthorization]]()
     private var folderReconciliationSuspensionCount = 0
@@ -542,6 +544,24 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func setNextSaveAllError(_ error: Error?) {
         nextSaveAllError = error
+    }
+
+    func suspendNextTorrentPreview() {
+        previewSuspensionCount += 1
+    }
+
+    func waitForSuspendedTorrentPreview() async {
+        while previewContinuations.isEmpty {
+            await Task.yield()
+        }
+    }
+
+    func resumeSuspendedTorrentPreviews() {
+        let continuations = previewContinuations
+        previewContinuations.removeAll()
+        for continuation in continuations {
+            continuation.resume()
+        }
     }
 
     func setRecoveryDisposition(_ disposition: TorrentEngineRecoveryDisposition) {
@@ -820,6 +840,12 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func previewTorrentFile(data: Data) async throws -> TorrentFilePreview {
         previewedTorrentFiles.append(data)
+        if previewSuspensionCount > 0 {
+            previewSuspensionCount -= 1
+            await withCheckedContinuation { continuation in
+                previewContinuations.append(continuation)
+            }
+        }
         return TorrentFilePreview(name: "Preview", id: "preview", totalSize: 0, sourceSecuritySummary: .empty, files: [], torrentData: data)
     }
 

@@ -167,7 +167,7 @@ struct AddTorrentConfirmationView: View {
             selectedDownloadFolder = store.downloadFolder
         }
         .task(id: draft.id) {
-            await loadPreview()
+            await loadPreview(for: draft.id)
         }
         .onChange(of: selectedDownloadFolder) { _, _ in
             if isSetDefaultToggleDisabled {
@@ -465,8 +465,11 @@ struct AddTorrentConfirmationView: View {
     }
 
     @MainActor
-    private func loadPreview() async {
+    private func loadPreview(for draftID: TorrentAddDraft.ID) async {
         guard let fileURL = draft.fileURL else {
+            return
+        }
+        guard draft.id == draftID, !Task.isCancelled else {
             return
         }
 
@@ -478,12 +481,23 @@ struct AddTorrentConfirmationView: View {
 
         do {
             let loadedPreview = try await store.previewTorrentFile(fileURL)
+            guard draft.id == draftID, !Task.isCancelled else {
+                return
+            }
             preview = loadedPreview
             filePriorities = Dictionary(uniqueKeysWithValues: loadedPreview.visibleFiles.map { file in
                 (file.index, TorrentFilePriority.normal)
             })
+        } catch is CancellationError {
+            return
         } catch {
+            guard draft.id == draftID, !Task.isCancelled else {
+                return
+            }
             previewError = error.localizedDescription
+        }
+        guard draft.id == draftID, !Task.isCancelled else {
+            return
         }
         isLoadingPreview = false
     }

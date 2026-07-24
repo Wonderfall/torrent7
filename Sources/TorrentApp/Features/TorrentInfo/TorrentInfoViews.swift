@@ -10,6 +10,7 @@ struct TorrentInfoWindow: View {
         Group {
             if let torrent {
                 TorrentInfoView(torrent: torrent, tabRequest: store.torrentInfoTabRequest(for: torrent.id))
+                    .id(torrent.id)
             } else {
                 ContentUnavailableView("Torrent Unavailable", systemImage: "info.circle")
             }
@@ -91,6 +92,13 @@ private struct TorrentInfoView: View {
     @State private var sourcePolicy: TorrentSourcePolicy?
     @State private var sourcePolicyMutationGeneration: UInt64 = 0
     @State private var sourcePolicyMutationTask: Task<Void, Never>?
+    @State private var torrentOptionsMutationGeneration: UInt64 = 0
+    @State private var torrentOptionsMutationTask: Task<Void, Never>?
+    @State private var filePriorityMutationGenerations = [Int32: UInt64]()
+    @State private var filePriorityMutationTasks = [Int32: Task<Void, Never>]()
+    @State private var pendingFilePriorities = [Int32: TorrentFilePriority]()
+    @State private var confirmedFilePriorities = [Int32: TorrentFilePriority]()
+    @State private var queueMoveGeneration: UInt64 = 0
     @State private var torrentOptions: TorrentOptions?
     @State private var files = [TorrentFileItem]()
     @State private var pieceMap = TorrentPieceMap.empty
@@ -109,6 +117,10 @@ private struct TorrentInfoView: View {
     @State private var showsAllTrackers = false
     @State private var showsAllWebSeeds = false
     @State private var showsAllFiles = false
+    @State private var sourcesRefreshToken: UUID?
+    @State private var optionsRefreshToken: UUID?
+    @State private var filesRefreshToken: UUID?
+    @State private var pieceMapRefreshToken: UUID?
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -134,28 +146,44 @@ private struct TorrentInfoView: View {
         }
         .scenePadding()
         .task(id: sourcesRefreshID) {
+            let token = UUID()
+            sourcesRefreshToken = token
             guard selectedTab == .sources else {
                 return
             }
-            await refreshSources()
+            await refreshSources(token: token, torrentID: torrent.id)
         }
         .task(id: optionsRefreshID) {
+            let token = UUID()
+            optionsRefreshToken = token
             guard selectedTab == .options else {
                 return
             }
-            await refreshOptions()
+            await refreshOptions(token: token, torrentID: torrent.id)
         }
         .task(id: filesRefreshID) {
+            let token = UUID()
+            filesRefreshToken = token
             guard selectedTab == .files else {
                 return
             }
-            await refreshFiles()
+            await refreshFiles(
+                token: token,
+                torrentID: torrent.id,
+                hasMetadata: torrent.hasMetadata
+            )
         }
         .task(id: pieceMapRefreshID) {
+            let token = UUID()
+            pieceMapRefreshToken = token
             guard selectedTab == .pieces else {
                 return
             }
-            await refreshPieceMap()
+            await refreshPieceMap(
+                token: token,
+                torrentID: torrent.id,
+                hasMetadata: torrent.hasMetadata
+            )
         }
         .onAppear {
             if let tabRequest {
@@ -166,6 +194,19 @@ private struct TorrentInfoView: View {
             if let request {
                 selectedTab = request.tab
             }
+        }
+        .onDisappear {
+            sourcePolicyMutationTask?.cancel()
+            torrentOptionsMutationTask?.cancel()
+            for task in filePriorityMutationTasks.values {
+                task.cancel()
+            }
+            filePriorityMutationTasks.removeAll()
+            pendingFilePriorities.removeAll()
+            sourcesRefreshToken = nil
+            optionsRefreshToken = nil
+            filesRefreshToken = nil
+            pieceMapRefreshToken = nil
         }
     }
 
@@ -792,9 +833,7 @@ private struct TorrentInfoView: View {
             }
             updatedOptions[keyPath: keyPath] = isEnabled ? defaultValue : 0
             torrentOptions = updatedOptions
-            Task {
-                await setTorrentOptions(updatedOptions)
-            }
+            scheduleTorrentOptionsMutation(updatedOptions)
         }
     }
 
@@ -808,9 +847,7 @@ private struct TorrentInfoView: View {
             updatedOptions[keyPath: keyPath] = newValue
             updatedOptions = updatedOptions.normalized
             torrentOptions = updatedOptions
-            Task {
-                await setTorrentOptions(updatedOptions)
-            }
+            scheduleTorrentOptionsMutation(updatedOptions)
         }
     }
 
@@ -823,33 +860,74 @@ private struct TorrentInfoView: View {
             }
             updatedOptions.queuePriority = newValue
             torrentOptions = updatedOptions
-            Task {
-                await setTorrentOptions(updatedOptions)
-            }
+            scheduleTorrentOptionsMutation(updatedOptions)
+        }
+    }
+
+    @MainActor
+    private func scheduleTorrentOptionsMutation(_ options: TorrentOptions) {
+        torrentOptionsMutationGeneration &+= 1
+        let generation = torrentOptionsMutationGeneration
+        let torrentID = torrent.id
+        torrentOptionsMutationTask?.cancel()
+        torrentOptionsMutationTask = Task { @MainActor in
+            await setTorrentOptions(
+                options,
+                torrentID: torrentID,
+                mutationGeneration: generation
+            )
         }
     }
 
     private func moveTorrentInQueue(_ move: TorrentQueueMove) {
+        queueMoveGeneration &+= 1
+        let generation = queueMoveGeneration
+        let torrentID = torrent.id
         Task { @MainActor in
             do {
-                try await store.moveTorrentInQueue(for: torrent.id, move: move)
+                try await store.moveTorrentInQueue(for: torrentID, move: move)
+                guard generation == queueMoveGeneration else {
+                    return
+                }
                 optionsError = nil
             } catch {
+                guard generation == queueMoveGeneration else {
+                    return
+                }
                 optionsError = error.localizedDescription
             }
         }
     }
 
     @MainActor
-    private func setTorrentOptions(_ options: TorrentOptions) async {
+    private func setTorrentOptions(
+        _ options: TorrentOptions,
+        torrentID: TorrentItem.ID,
+        mutationGeneration: UInt64
+    ) async {
         do {
-            try await store.setTorrentOptions(for: torrent.id, options: options)
-            torrentOptions = try await store.torrentOptions(for: torrent.id)
+            try await store.setTorrentOptions(for: torrentID, options: options)
+            guard isCurrentOptionsMutation(mutationGeneration) else {
+                return
+            }
+            let confirmedOptions = try await store.torrentOptions(for: torrentID)
+            guard isCurrentOptionsMutation(mutationGeneration) else {
+                return
+            }
+            torrentOptions = confirmedOptions
             optionsLoaded = true
             optionsError = nil
         } catch {
-            optionsError = error.localizedDescription
-            torrentOptions = try? await store.torrentOptions(for: torrent.id)
+            guard isCurrentOptionsMutation(mutationGeneration) else {
+                return
+            }
+            let errorMessage = error.localizedDescription
+            let confirmedOptions = try? await store.torrentOptions(for: torrentID)
+            guard isCurrentOptionsMutation(mutationGeneration) else {
+                return
+            }
+            optionsError = errorMessage
+            torrentOptions = confirmedOptions
         }
     }
 
@@ -858,36 +936,93 @@ private struct TorrentInfoView: View {
             return
         }
 
-        let previousFile = file
         if let index = files.firstIndex(where: { $0.id == file.id }) {
             files[index] = file.withPriority(priority)
         }
 
-        Task {
+        let generation = filePriorityMutationGenerations[file.index, default: 0] &+ 1
+        filePriorityMutationGenerations[file.index] = generation
+        pendingFilePriorities[file.index] = priority
+        filePriorityMutationTasks[file.index]?.cancel()
+        let torrentID = torrent.id
+        filePriorityMutationTasks[file.index] = Task { @MainActor in
             do {
-                try await store.setFilePriority(for: torrent.id, fileIndex: file.index, priority: priority)
+                try await store.setFilePriority(
+                    for: torrentID,
+                    fileIndex: file.index,
+                    priority: priority
+                )
+                guard isCurrentFilePriorityMutation(
+                    generation,
+                    fileIndex: file.index
+                ) else {
+                    return
+                }
+                confirmedFilePriorities[file.index] = priority
+                pendingFilePriorities.removeValue(forKey: file.index)
                 fileError = nil
             } catch {
-                if let index = files.firstIndex(where: { $0.id == previousFile.id }) {
-                    files[index] = previousFile
+                let errorMessage = error.localizedDescription
+                guard isCurrentFilePriorityMutation(
+                    generation,
+                    fileIndex: file.index
+                ) else {
+                    return
                 }
-                fileError = error.localizedDescription
+                let authoritativeBatch = await store.fileBatch(
+                    for: torrentID,
+                    since: nil
+                )
+                guard isCurrentFilePriorityMutation(
+                    generation,
+                    fileIndex: file.index
+                ) else {
+                    return
+                }
+                pendingFilePriorities.removeValue(forKey: file.index)
+                if let authoritativeBatch {
+                    applyFileBatch(authoritativeBatch)
+                } else if let confirmedPriority = confirmedFilePriorities[file.index],
+                          let index = files.firstIndex(where: { $0.index == file.index }) {
+                    files[index] = files[index].withPriority(confirmedPriority)
+                }
+                fileError = errorMessage
+            }
+            if filePriorityMutationGenerations[file.index] == generation {
+                filePriorityMutationTasks.removeValue(forKey: file.index)
             }
         }
     }
 
     @MainActor
-    private func refreshOptions() async {
+    private func refreshOptions(
+        token: UUID,
+        torrentID: TorrentItem.ID
+    ) async {
+        guard isCurrentOptionsRefresh(token) else {
+            return
+        }
         torrentOptions = nil
         sourcePolicy = nil
         optionsLoaded = false
         optionsError = nil
 
         do {
-            torrentOptions = try await store.torrentOptions(for: torrent.id)
-            sourcePolicy = try await store.sourcePolicy(for: torrent.id)
+            let loadedOptions = try await store.torrentOptions(for: torrentID)
+            guard isCurrentOptionsRefresh(token) else {
+                return
+            }
+            let loadedSourcePolicy = try await store.sourcePolicy(for: torrentID)
+            guard isCurrentOptionsRefresh(token) else {
+                return
+            }
+            torrentOptions = loadedOptions
+            sourcePolicy = loadedSourcePolicy
             optionsLoaded = true
         } catch {
+            guard isCurrentOptionsRefresh(token) else {
+                return
+            }
             optionsError = error.localizedDescription
             optionsLoaded = true
         }
@@ -958,11 +1093,16 @@ private struct TorrentInfoView: View {
         sourcePolicyMutationGeneration &+= 1
         let mutationGeneration = sourcePolicyMutationGeneration
         let previousMutation = sourcePolicyMutationTask
-        sourcePolicyMutationTask = Task {
+        let torrentID = torrent.id
+        sourcePolicyMutationTask = Task { @MainActor in
             await previousMutation?.value
+            guard isCurrentSourcePolicyMutation(mutationGeneration) else {
+                return
+            }
             await setSourcePolicy(
                 field: field,
                 enabled: newValue,
+                torrentID: torrentID,
                 mutationGeneration: mutationGeneration
             )
         }
@@ -1023,22 +1163,39 @@ private struct TorrentInfoView: View {
     private func setSourcePolicy(
         field: TorrentSourcePolicyField,
         enabled: Bool,
+        torrentID: TorrentItem.ID,
         mutationGeneration: UInt64
     ) async {
         do {
-            try await store.setSourcePolicy(for: torrent.id, field: field, enabled: enabled)
-            guard mutationGeneration == sourcePolicyMutationGeneration else {
+            try await store.setSourcePolicy(for: torrentID, field: field, enabled: enabled)
+            guard isCurrentSourcePolicyMutation(mutationGeneration) else {
                 return
             }
-            let confirmedPolicy = try await store.sourcePolicy(for: torrent.id)
-            guard mutationGeneration == sourcePolicyMutationGeneration else {
+            let confirmedPolicy = try await store.sourcePolicy(for: torrentID)
+            guard isCurrentSourcePolicyMutation(mutationGeneration) else {
                 return
             }
             sourcePolicy = confirmedPolicy
-            try? await store.requestSources(for: torrent.id)
-            let trackerBatch = await store.trackerBatch(for: torrent.id, since: nil)
-            let webSeedBatch = await store.webSeedBatch(for: torrent.id, since: nil)
-            let peerSources = await store.peerSources(for: torrent.id)
+            try? await store.requestSources(for: torrentID)
+            guard isCurrentSourcePolicyMutation(mutationGeneration) else {
+                return
+            }
+            let trackerBatch = await store.trackerBatch(for: torrentID, since: nil)
+            guard isCurrentSourcePolicyMutation(mutationGeneration) else {
+                return
+            }
+            let webSeedBatch = await store.webSeedBatch(for: torrentID, since: nil)
+            guard isCurrentSourcePolicyMutation(mutationGeneration) else {
+                return
+            }
+            let peerSources = await store.peerSources(for: torrentID)
+            guard isCurrentSourcePolicyMutation(mutationGeneration) else {
+                return
+            }
+            let refreshedWebSeedActivity = await store.webSeedActivity(for: torrentID)
+            guard isCurrentSourcePolicyMutation(mutationGeneration) else {
+                return
+            }
             if let trackerBatch {
                 trackerRevision = trackerBatch.revision
                 trackers = trackerBatch.trackers
@@ -1047,8 +1204,8 @@ private struct TorrentInfoView: View {
                 webSeedRevision = webSeedBatch.revision
                 webSeeds = webSeedBatch.webSeeds
             }
-            if let webSeedActivity = await store.webSeedActivity(for: torrent.id) {
-                self.webSeedActivity = webSeedActivity
+            if let refreshedWebSeedActivity {
+                webSeedActivity = refreshedWebSeedActivity
             }
             if let peerSources {
                 self.peerSources = peerSources
@@ -1057,21 +1214,28 @@ private struct TorrentInfoView: View {
             sourceError = nil
             optionsError = nil
         } catch {
-            guard mutationGeneration == sourcePolicyMutationGeneration else {
+            guard isCurrentSourcePolicyMutation(mutationGeneration) else {
                 return
             }
-            let confirmedPolicy = try? await store.sourcePolicy(for: torrent.id)
-            guard mutationGeneration == sourcePolicyMutationGeneration else {
+            let errorMessage = error.localizedDescription
+            let confirmedPolicy = try? await store.sourcePolicy(for: torrentID)
+            guard isCurrentSourcePolicyMutation(mutationGeneration) else {
                 return
             }
-            sourceError = error.localizedDescription
-            optionsError = error.localizedDescription
+            sourceError = errorMessage
+            optionsError = errorMessage
             sourcePolicy = confirmedPolicy
         }
     }
 
     @MainActor
-    private func refreshSources() async {
+    private func refreshSources(
+        token: UUID,
+        torrentID: TorrentItem.ID
+    ) async {
+        guard isCurrentSourcesRefresh(token) else {
+            return
+        }
         trackers = []
         webSeeds = []
         webSeedActivity = .empty
@@ -1084,24 +1248,79 @@ private struct TorrentInfoView: View {
         showsAllTrackers = false
         showsAllWebSeeds = false
 
-        while !Task.isCancelled {
+        while isCurrentSourcesRefresh(token) {
+            let mutationGeneration = sourcePolicyMutationGeneration
+            let loadedSourcePolicy: TorrentSourcePolicy
             do {
-                sourcePolicy = try await store.sourcePolicy(for: torrent.id)
-                try await store.requestSources(for: torrent.id)
+                loadedSourcePolicy = try await store.sourcePolicy(for: torrentID)
+                guard isCurrentSourcesRefresh(token) else {
+                    return
+                }
+                guard mutationGeneration == sourcePolicyMutationGeneration else {
+                    continue
+                }
+                try await store.requestSources(for: torrentID)
+                guard isCurrentSourcesRefresh(token) else {
+                    return
+                }
+                guard mutationGeneration == sourcePolicyMutationGeneration else {
+                    continue
+                }
             } catch {
+                guard isCurrentSourcesRefresh(token) else {
+                    return
+                }
+                guard mutationGeneration == sourcePolicyMutationGeneration else {
+                    continue
+                }
                 sourceError = error.localizedDescription
                 sourcesLoaded = true
                 return
             }
 
             try? await Task.sleep(for: .milliseconds(350))
-            guard !Task.isCancelled else {
+            guard isCurrentSourcesRefresh(token) else {
                 return
             }
-            let trackerBatch = await store.trackerBatch(for: torrent.id, since: trackerRevision)
-            let webSeedBatch = await store.webSeedBatch(for: torrent.id, since: webSeedRevision)
-            let webSeedActivity = await store.webSeedActivity(for: torrent.id)
-            let peerSources = await store.peerSources(for: torrent.id)
+            guard mutationGeneration == sourcePolicyMutationGeneration else {
+                continue
+            }
+            let trackerBatch = await store.trackerBatch(
+                for: torrentID,
+                since: trackerRevision
+            )
+            guard isCurrentSourcesRefresh(token) else {
+                return
+            }
+            guard mutationGeneration == sourcePolicyMutationGeneration else {
+                continue
+            }
+            let webSeedBatch = await store.webSeedBatch(
+                for: torrentID,
+                since: webSeedRevision
+            )
+            guard isCurrentSourcesRefresh(token) else {
+                return
+            }
+            guard mutationGeneration == sourcePolicyMutationGeneration else {
+                continue
+            }
+            let refreshedWebSeedActivity = await store.webSeedActivity(for: torrentID)
+            guard isCurrentSourcesRefresh(token) else {
+                return
+            }
+            guard mutationGeneration == sourcePolicyMutationGeneration else {
+                continue
+            }
+            let refreshedPeerSources = await store.peerSources(for: torrentID)
+            guard isCurrentSourcesRefresh(token) else {
+                return
+            }
+            guard mutationGeneration == sourcePolicyMutationGeneration else {
+                continue
+            }
+
+            sourcePolicy = loadedSourcePolicy
             if let trackerBatch {
                 trackerRevision = trackerBatch.revision
                 trackers = trackerBatch.trackers
@@ -1110,94 +1329,196 @@ private struct TorrentInfoView: View {
                 webSeedRevision = webSeedBatch.revision
                 webSeeds = webSeedBatch.webSeeds
             }
-            if let webSeedActivity, self.webSeedActivity != webSeedActivity {
-                self.webSeedActivity = webSeedActivity
+            if let refreshedWebSeedActivity,
+               webSeedActivity != refreshedWebSeedActivity {
+                webSeedActivity = refreshedWebSeedActivity
             }
-            if let peerSources, self.peerSources != peerSources {
-                self.peerSources = peerSources
+            if let refreshedPeerSources,
+               peerSources != refreshedPeerSources {
+                peerSources = refreshedPeerSources
             }
             sourcesLoaded = true
+            sourceError = nil
 
             try? await Task.sleep(for: .seconds(3))
-            guard !Task.isCancelled else {
+            guard isCurrentSourcesRefresh(token) else {
                 return
             }
         }
     }
 
     @MainActor
-    private func refreshFiles() async {
+    private func refreshFiles(
+        token: UUID,
+        torrentID: TorrentItem.ID,
+        hasMetadata: Bool
+    ) async {
+        guard isCurrentFilesRefresh(token) else {
+            return
+        }
         files = []
         fileRevision = nil
         filesLoaded = false
         fileError = nil
         showsAllFiles = false
 
-        while !Task.isCancelled {
-            guard torrent.hasMetadata else {
+        while isCurrentFilesRefresh(token) {
+            guard hasMetadata else {
                 filesLoaded = true
                 try? await Task.sleep(for: .seconds(2))
+                guard isCurrentFilesRefresh(token) else {
+                    return
+                }
                 continue
             }
 
             do {
-                try await store.requestFiles(for: torrent.id)
+                try await store.requestFiles(for: torrentID)
+                guard isCurrentFilesRefresh(token) else {
+                    return
+                }
             } catch {
+                guard isCurrentFilesRefresh(token) else {
+                    return
+                }
                 fileError = error.localizedDescription
                 filesLoaded = true
                 return
             }
 
             try? await Task.sleep(for: .milliseconds(350))
-            guard !Task.isCancelled else {
+            guard isCurrentFilesRefresh(token) else {
                 return
             }
-            if let fileBatch = await store.fileBatch(for: torrent.id, since: fileRevision) {
-                fileRevision = fileBatch.revision
-                files = fileBatch.files
-                filesLoaded = true
+            let fileBatch = await store.fileBatch(
+                for: torrentID,
+                since: fileRevision
+            )
+            guard isCurrentFilesRefresh(token) else {
+                return
+            }
+            if let fileBatch {
+                applyFileBatch(fileBatch)
+                fileError = nil
             }
 
             try? await Task.sleep(for: .seconds(2))
-            guard !Task.isCancelled else {
+            guard isCurrentFilesRefresh(token) else {
                 return
             }
         }
     }
 
     @MainActor
-    private func refreshPieceMap() async {
+    private func applyFileBatch(_ batch: TorrentFileBatch) {
+        fileRevision = batch.revision
+        confirmedFilePriorities = Dictionary(uniqueKeysWithValues: batch.files.map {
+            ($0.index, $0.priority)
+        })
+        files = batch.files.map { file in
+            guard let pendingPriority = pendingFilePriorities[file.index] else {
+                return file
+            }
+            return file.withPriority(pendingPriority)
+        }
+        filesLoaded = true
+    }
+
+    @MainActor
+    private func refreshPieceMap(
+        token: UUID,
+        torrentID: TorrentItem.ID,
+        hasMetadata: Bool
+    ) async {
+        guard isCurrentPieceMapRefresh(token) else {
+            return
+        }
         pieceMap = .empty
         pieceMapRevision = nil
         pieceMapLoaded = false
         pieceMapError = nil
 
-        while !Task.isCancelled {
-            guard torrent.hasMetadata else {
+        while isCurrentPieceMapRefresh(token) {
+            guard hasMetadata else {
                 pieceMapLoaded = true
                 try? await Task.sleep(for: .seconds(2))
+                guard isCurrentPieceMapRefresh(token) else {
+                    return
+                }
                 continue
             }
 
             do {
-                try await store.requestPieceMap(for: torrent.id)
+                try await store.requestPieceMap(for: torrentID)
+                guard isCurrentPieceMapRefresh(token) else {
+                    return
+                }
             } catch {
+                guard isCurrentPieceMapRefresh(token) else {
+                    return
+                }
                 pieceMapError = error.localizedDescription
                 pieceMapLoaded = true
                 return
             }
 
-            if let pieceMapBatch = await store.pieceMapBatch(for: torrent.id, since: pieceMapRevision) {
+            let pieceMapBatch = await store.pieceMapBatch(
+                for: torrentID,
+                since: pieceMapRevision
+            )
+            guard isCurrentPieceMapRefresh(token) else {
+                return
+            }
+            if let pieceMapBatch {
                 pieceMapRevision = pieceMapBatch.revision
                 pieceMap = pieceMapBatch.pieceMap
                 pieceMapLoaded = true
+                pieceMapError = nil
             }
 
             try? await Task.sleep(for: .seconds(1))
-            guard !Task.isCancelled else {
+            guard isCurrentPieceMapRefresh(token) else {
                 return
             }
         }
+    }
+
+    @MainActor
+    private func isCurrentSourcePolicyMutation(_ generation: UInt64) -> Bool {
+        !Task.isCancelled && generation == sourcePolicyMutationGeneration
+    }
+
+    @MainActor
+    private func isCurrentOptionsMutation(_ generation: UInt64) -> Bool {
+        !Task.isCancelled && generation == torrentOptionsMutationGeneration
+    }
+
+    @MainActor
+    private func isCurrentFilePriorityMutation(
+        _ generation: UInt64,
+        fileIndex: Int32
+    ) -> Bool {
+        !Task.isCancelled && filePriorityMutationGenerations[fileIndex] == generation
+    }
+
+    @MainActor
+    private func isCurrentSourcesRefresh(_ token: UUID) -> Bool {
+        !Task.isCancelled && sourcesRefreshToken == token
+    }
+
+    @MainActor
+    private func isCurrentOptionsRefresh(_ token: UUID) -> Bool {
+        !Task.isCancelled && optionsRefreshToken == token
+    }
+
+    @MainActor
+    private func isCurrentFilesRefresh(_ token: UUID) -> Bool {
+        !Task.isCancelled && filesRefreshToken == token
+    }
+
+    @MainActor
+    private func isCurrentPieceMapRefresh(_ token: UUID) -> Bool {
+        !Task.isCancelled && pieceMapRefreshToken == token
     }
 }
 
