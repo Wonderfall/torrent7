@@ -178,6 +178,12 @@ final class TorrentStore {
     private var refreshTask: Task<Void, Never>?
     private var wakeRefreshTask: Task<Void, Never>?
     @ObservationIgnored
+    private var activeRefreshTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var activeRefreshID: UUID?
+    @ObservationIgnored
+    private var pendingRefreshNotifiesCompletions: Bool?
+    @ObservationIgnored
     private var engineStartupTask: Task<Void, Never>?
     @ObservationIgnored
     private var operationDrainTask: Task<Void, Never>?
@@ -204,8 +210,7 @@ final class TorrentStore {
     private var isEngineRestarting = false
     private var engineReplacementRequested = false
     private var isFolderCapabilityTransactionInProgress = false
-    private var folderAuthorizationLaneIsHeld = false
-    private var folderAuthorizationLaneWaiters = [CheckedContinuation<Void, Never>]()
+    private let folderAuthorizationLane = TorrentStoreAuthorizationLane()
     private var restoreDefaultsOperationIsPending = false
     private var engineStartupFailed = false
     private var engineAuthorizedFolderState: TorrentStoreEngineAuthorizationState?
@@ -324,6 +329,7 @@ final class TorrentStore {
         engineStartupTask?.cancel()
         refreshTask?.cancel()
         wakeRefreshTask?.cancel()
+        activeRefreshTask?.cancel()
         operationDrainTask?.cancel()
         immediateNetworkBlockTask?.cancel()
     }
@@ -749,9 +755,17 @@ final class TorrentStore {
             var didAddTorrent = false
             var didAttemptFolderDelegation = false
             var preparedFolder: PreparedDownloadFolder?
-            var ownsFolderCapabilityTransaction = prepareFolder != nil
-            if ownsFolderCapabilityTransaction {
-                await store.beginFolderCapabilityTransaction()
+            var ownsFolderCapabilityTransaction = false
+            if prepareFolder != nil {
+                do {
+                    try await store.beginFolderCapabilityTransaction()
+                    ownsFolderCapabilityTransaction = true
+                } catch is CancellationError {
+                    return
+                } catch {
+                    store.setLastError(error.localizedDescription, source: .userAction)
+                    return
+                }
             }
             defer {
                 if ownsFolderCapabilityTransaction {
@@ -914,9 +928,17 @@ final class TorrentStore {
             var didAddTorrent = false
             var didAttemptFolderDelegation = false
             var preparedFolder: PreparedDownloadFolder?
-            var ownsFolderCapabilityTransaction = prepareFolder != nil
-            if ownsFolderCapabilityTransaction {
-                await store.beginFolderCapabilityTransaction()
+            var ownsFolderCapabilityTransaction = false
+            if prepareFolder != nil {
+                do {
+                    try await store.beginFolderCapabilityTransaction()
+                    ownsFolderCapabilityTransaction = true
+                } catch is CancellationError {
+                    return
+                } catch {
+                    store.setLastError(error.localizedDescription, source: .userAction)
+                    return
+                }
             }
             let didAccess = url.startAccessingSecurityScopedResource()
             defer {
@@ -1438,9 +1460,7 @@ final class TorrentStore {
     }
 
     func refresh(notifiesCompletions: Bool = true) {
-        Task { @MainActor [weak self] in
-            await self?.refreshFromEngine(notifiesCompletions: notifiesCompletions)
-        }
+        scheduleRefresh(notifiesCompletions: notifiesCompletions)
     }
 
     func refreshNow(notifiesCompletions: Bool = true) async {
@@ -1448,7 +1468,58 @@ final class TorrentStore {
     }
 
     private func refreshFromEngine(notifiesCompletions: Bool = true) async {
+        guard let task = scheduleRefresh(notifiesCompletions: notifiesCompletions) else {
+            return
+        }
+        await task.value
+    }
+
+    @discardableResult
+    private func scheduleRefresh(
+        notifiesCompletions: Bool
+    ) -> Task<Void, Never>? {
         guard !isEngineStarting, !isEngineRestarting else {
+            return nil
+        }
+        if let activeRefreshTask {
+            pendingRefreshNotifiesCompletions =
+                (pendingRefreshNotifiesCompletions ?? false) || notifiesCompletions
+            return activeRefreshTask
+        }
+
+        let refreshID = UUID()
+        activeRefreshID = refreshID
+        let task = Task { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
+            var currentNotifiesCompletions = notifiesCompletions
+            while !Task.isCancelled {
+                await self.performRefreshFromEngine(
+                    notifiesCompletions: currentNotifiesCompletions
+                )
+                guard !Task.isCancelled,
+                      self.activeRefreshID == refreshID,
+                      let pendingNotifiesCompletions =
+                          self.pendingRefreshNotifiesCompletions else {
+                    break
+                }
+                self.pendingRefreshNotifiesCompletions = nil
+                currentNotifiesCompletions = pendingNotifiesCompletions
+            }
+            guard self.activeRefreshID == refreshID else {
+                return
+            }
+            self.activeRefreshTask = nil
+            self.activeRefreshID = nil
+            self.pendingRefreshNotifiesCompletions = nil
+        }
+        activeRefreshTask = task
+        return task
+    }
+
+    private func performRefreshFromEngine(notifiesCompletions: Bool) async {
+        guard !isEngineStarting, !isEngineRestarting, !Task.isCancelled else {
             return
         }
         let lifecycleGeneration = engineLifecycleGeneration
@@ -1690,10 +1761,12 @@ final class TorrentStore {
         let previousEngine = engine
         let previousRefreshTask = refreshTask
         let previousWakeRefreshTask = wakeRefreshTask
+        let previousActiveRefreshTask = activeRefreshTask
         refreshTask?.cancel()
         wakeRefreshTask?.cancel()
         refreshTask = nil
         wakeRefreshTask = nil
+        cancelActiveRefresh()
         appliedNetworkBinding = nil
         lastNetworkInterfaceRevision = nil
         settingsState.networkInterfacesAreAuthoritative = false
@@ -1710,6 +1783,7 @@ final class TorrentStore {
                 await previousEngine.shutdown()
                 await previousRefreshTask?.value
                 await previousWakeRefreshTask?.value
+                await previousActiveRefreshTask?.value
             case .replacesTerminatedController:
                 // The disconnected controller is already fail-closed. Do not
                 // let a cancellation-insensitive stale poll prevent recovery;
@@ -2268,17 +2342,19 @@ final class TorrentStore {
     }
 
     private func restartEngine(enablePeerExchangePlugin: Bool) async throws {
-        await acquireFolderAuthorizationLane()
+        try await folderAuthorizationLane.acquire()
         defer {
-            releaseFolderAuthorizationLane()
+            folderAuthorizationLane.release()
         }
         precondition(!isFolderCapabilityTransactionInProgress)
         let restartedEngine = engine
         let previousLifecycleGeneration = engineLifecycleGeneration
         let previousRefreshTask = refreshTask
         let previousWakeRefreshTask = wakeRefreshTask
+        let previousActiveRefreshTask = activeRefreshTask
         refreshTask = nil
         wakeRefreshTask = nil
+        cancelActiveRefresh()
         isEngineRestarting = true
         let networkWasConfirmedBlocked = networkIsConfirmedBlocked
         advanceEngineLifecycleGeneration()
@@ -2315,6 +2391,7 @@ final class TorrentStore {
         previousWakeRefreshTask?.cancel()
         await previousRefreshTask?.value
         await previousWakeRefreshTask?.value
+        await previousActiveRefreshTask?.value
         // Exact reconciliation owns bookmark delegation. A restart reuses its
         // confirmed capability IDs and must not individually regenerate or
         // incrementally grant persistent GUI authorization material.
@@ -2403,11 +2480,11 @@ final class TorrentStore {
         ownsFolderAuthorizationLane: Bool = false
     ) async throws {
         if !ownsFolderAuthorizationLane {
-            await acquireFolderAuthorizationLane()
+            try await folderAuthorizationLane.acquire()
         }
         defer {
             if !ownsFolderAuthorizationLane {
-                releaseFolderAuthorizationLane()
+                folderAuthorizationLane.release()
             }
         }
         guard duringRestart || !isEngineRestarting,
@@ -2459,28 +2536,8 @@ final class TorrentStore {
         }
     }
 
-    private func acquireFolderAuthorizationLane() async {
-        guard folderAuthorizationLaneIsHeld else {
-            folderAuthorizationLaneIsHeld = true
-            return
-        }
-        await withCheckedContinuation { continuation in
-            folderAuthorizationLaneWaiters.append(continuation)
-        }
-    }
-
-    private func releaseFolderAuthorizationLane() {
-        precondition(folderAuthorizationLaneIsHeld)
-        guard !folderAuthorizationLaneWaiters.isEmpty else {
-            folderAuthorizationLaneIsHeld = false
-            return
-        }
-        let continuation = folderAuthorizationLaneWaiters.removeFirst()
-        continuation.resume()
-    }
-
-    private func beginFolderCapabilityTransaction() async {
-        await acquireFolderAuthorizationLane()
+    private func beginFolderCapabilityTransaction() async throws {
+        try await folderAuthorizationLane.acquire()
         precondition(!isFolderCapabilityTransactionInProgress)
         isFolderCapabilityTransactionInProgress = true
         advanceEngineMutationGeneration()
@@ -2490,7 +2547,7 @@ final class TorrentStore {
         precondition(isFolderCapabilityTransactionInProgress)
         advanceEngineMutationGeneration()
         isFolderCapabilityTransactionInProgress = false
-        releaseFolderAuthorizationLane()
+        folderAuthorizationLane.release()
     }
 
     private func containFolderAuthorizationFailure(
@@ -2530,6 +2587,13 @@ final class TorrentStore {
         pendingTrackerHostRefresh = true
         engineAuthorizedFolderState = nil
         confirmedNetworkBlockLifecycleGeneration = nil
+    }
+
+    private func cancelActiveRefresh() {
+        activeRefreshTask?.cancel()
+        activeRefreshTask = nil
+        activeRefreshID = nil
+        pendingRefreshNotifiesCompletions = nil
     }
 
     private func advanceEngineMutationGeneration() {
@@ -2777,6 +2841,7 @@ final class TorrentStore {
         wakeRefreshTask?.cancel()
         refreshTask = nil
         wakeRefreshTask = nil
+        cancelActiveRefresh()
         bridgeHealth = .unavailable
         networkStatus = .empty
         confirmedNetworkBlockLifecycleGeneration = nil

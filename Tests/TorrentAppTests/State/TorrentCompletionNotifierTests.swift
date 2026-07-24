@@ -61,7 +61,7 @@ struct TorrentCompletionNotifierTests {
             settings: settings,
             isEnabled: true
         )
-        await Task.yield()
+        await waitForNotifications(notifications, count: 2)
 
         #expect(history.completedIDs == ["alpha", "beta"])
         #expect(dock.completionBadgeUpdates == [1, 2])
@@ -116,7 +116,8 @@ struct TorrentCompletionNotifierTests {
             settings: TorrentSettings(),
             isEnabled: true
         )
-        await Task.yield()
+        await waitForNotifications(notifications, count: 1)
+        await waitForBadgeClears(notifications, count: 1)
 
         #expect(dock.completionBadgeUpdates == [0])
         #expect(await notifications.clearBadgeCount == 1)
@@ -159,6 +160,15 @@ struct TorrentCompletionNotifierTests {
     private func waitForNotifications(_ notifications: RecordingNotificationService, count: Int) async {
         for _ in 0..<20 {
             if await notifications.notifications.count >= count {
+                return
+            }
+            await Task.yield()
+        }
+    }
+
+    private func waitForBadgeClears(_ notifications: RecordingNotificationService, count: Int) async {
+        for _ in 0..<20 {
+            if await notifications.clearBadgeCount >= count {
                 return
             }
             await Task.yield()

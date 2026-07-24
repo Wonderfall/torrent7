@@ -16,12 +16,21 @@ struct SharedApplicationActivationProvider: ApplicationActivationProviding {
 
 @MainActor
 final class TorrentCompletionNotifier {
+    private struct PendingNotification: Sendable {
+        let torrentName: String?
+        let playsSound: Bool
+    }
+
     private let history: TorrentCompletionHistoryStoring
     private let notificationService: any TorrentNotificationServicing
     private let dockTileService: TorrentDockTileServicing
     private let activationProvider: ApplicationActivationProviding
     private var baselineRefreshesRemaining = 2
     private var badgeCount = 0
+    private var pendingNotifications = [PendingNotification]()
+    private var notificationDrainTask: Task<Void, Never>?
+    private var notificationDrainID: UUID?
+    private var badgeTask: Task<Void, Never>?
 
     init(
         history: TorrentCompletionHistoryStoring = TorrentCompletionHistoryStore(),
@@ -33,6 +42,11 @@ final class TorrentCompletionNotifier {
         self.notificationService = notificationService
         self.dockTileService = dockTileService
         self.activationProvider = activationProvider
+    }
+
+    isolated deinit {
+        notificationDrainTask?.cancel()
+        badgeTask?.cancel()
     }
 
     func configure() {
@@ -47,7 +61,11 @@ final class TorrentCompletionNotifier {
         badgeCount = 0
         dockTileService.updateCompletionBadge(count: 0)
         let notificationService = notificationService
-        Task {
+        badgeTask?.cancel()
+        badgeTask = Task {
+            guard !Task.isCancelled else {
+                return
+            }
             await notificationService.clearBadge()
         }
     }
@@ -94,12 +112,54 @@ final class TorrentCompletionNotifier {
                 badgeCount += 1
                 dockTileService.updateCompletionBadge(count: badgeCount)
             }
-            let notificationService = notificationService
             let torrentName = settings.completionNotificationNamesEnabled ? torrent.name : nil
             let playsSound = settings.completionNotificationSoundEnabled
-            Task {
-                await notificationService.notifyDownloadFinished(torrentName: torrentName, playsSound: playsSound)
+            pendingNotifications.append(PendingNotification(
+                torrentName: torrentName,
+                playsSound: playsSound
+            ))
+        }
+        startNotificationDrainIfNeeded()
+    }
+
+    private func startNotificationDrainIfNeeded() {
+        guard notificationDrainTask == nil else {
+            return
+        }
+        let drainID = UUID()
+        let notificationService = notificationService
+        notificationDrainID = drainID
+        notificationDrainTask = Task { @MainActor [weak self, notificationService] in
+            while !Task.isCancelled {
+                guard let batch = self?.takePendingNotificationBatch(drainID: drainID) else {
+                    return
+                }
+                for notification in batch {
+                    guard !Task.isCancelled else {
+                        return
+                    }
+                    await notificationService.notifyDownloadFinished(
+                        torrentName: notification.torrentName,
+                        playsSound: notification.playsSound
+                    )
+                }
             }
         }
+    }
+
+    private func takePendingNotificationBatch(
+        drainID: UUID
+    ) -> [PendingNotification]? {
+        guard notificationDrainID == drainID else {
+            return nil
+        }
+        guard !pendingNotifications.isEmpty else {
+            notificationDrainTask = nil
+            notificationDrainID = nil
+            return nil
+        }
+        let batch = pendingNotifications
+        pendingNotifications.removeAll(keepingCapacity: true)
+        return batch
     }
 }

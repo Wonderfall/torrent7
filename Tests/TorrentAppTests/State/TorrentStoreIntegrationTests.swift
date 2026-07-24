@@ -348,8 +348,8 @@ struct TorrentStoreIntegrationTests {
         #expect(harness.store.trackerHosts(for: "beta").isEmpty)
     }
 
-    @Test("Stale refresh does not drop tracker host updates")
-    func staleRefreshDoesNotDropTrackerHostUpdates() async {
+    @Test("Overlapping refresh requests coalesce into one trailing poll")
+    func overlappingRefreshRequestsCoalesceIntoTrailingPoll() async {
         let harness = makeStoreHarness()
         await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
             revision: 1,
@@ -369,18 +369,23 @@ struct TorrentStoreIntegrationTests {
         await harness.engine.setDirtyMask(UInt32(TTORRENT_DIRTY_TRACKER_HOSTS))
         await harness.engine.suspendNextTrackerHostBatchCall()
 
-        let staleRefresh = Task { @MainActor in
+        let activeRefresh = Task { @MainActor in
             await harness.store.refreshNow()
         }
         await harness.engine.waitForSuspendedTrackerHostBatchCall()
 
-        await harness.store.refreshNow()
-        #expect(harness.store.trackerHosts(for: "alpha") == ["new.example.org"])
+        await harness.engine.setTrackerHostBatch(TorrentTrackerHostBatch(
+            revision: 3,
+            hosts: [TorrentTrackerHostItem(torrentID: "alpha", host: "latest.example.org")]
+        ))
+        await harness.engine.setDirtyMask(UInt32(TTORRENT_DIRTY_TRACKER_HOSTS))
+        harness.store.refresh()
 
         await harness.engine.resumeSuspendedTrackerHostBatchCalls()
-        await staleRefresh.value
+        await activeRefresh.value
 
-        #expect(harness.store.trackerHosts(for: "alpha") == ["new.example.org"])
+        #expect(harness.store.trackerHosts(for: "alpha") == ["latest.example.org"])
+        #expect(await harness.engine.snapshotRequests.count == 3)
     }
 
     @Test("Add magnet delegates to engine and refreshes afterward")
