@@ -243,9 +243,26 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         }
 
         do {
-            if let payload = request.payload,
-               payload.count > request.header.operation.maximumRequestPayloadBytes {
+            let payloadByteCount = request.payload?.count ?? 0
+            let attachmentByteCount = request.attachment?.count ?? 0
+            guard attachmentByteCount <= TorrentEngineIPCLimits.maximumPayloadBytes,
+                  payloadByteCount
+                    <= TorrentEngineIPCLimits.maximumPayloadBytes - attachmentByteCount else {
                 throw TorrentEngineServiceRuntimeError.payloadTooLarge
+            }
+            if let payload = request.payload {
+                guard request.header.operation.maximumRequestPayloadBytes > 0,
+                      payload.count
+                        <= request.header.operation.maximumRequestPayloadBytes else {
+                    throw TorrentEngineServiceRuntimeError.payloadTooLarge
+                }
+            }
+            if let attachment = request.attachment {
+                guard request.header.operation.maximumRequestAttachmentBytes > 0,
+                      attachment.count
+                        <= request.header.operation.maximumRequestAttachmentBytes else {
+                    throw TorrentEngineServiceRuntimeError.payloadTooLarge
+                }
             }
 
             let controllerLease = try validateAndRecord(
@@ -555,7 +572,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             )
 
         case .previewTorrentFile:
-            guard let value = request.payload else {
+            guard let value = request.attachment else {
                 throw TorrentEngineServiceRuntimeError.invalidPayload
             }
             try Self.validateTorrentData(value)
@@ -574,8 +591,12 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             )
         case .addTorrentFile:
             let value = try decode(TorrentEngineIPCAddTorrentFileRequest.self, from: request)
+            guard let torrentData = request.attachment else {
+                throw TorrentEngineServiceRuntimeError.invalidPayload
+            }
             let identifier = try await handleAddTorrentFile(
                 value,
+                torrentData: torrentData,
                 scope: scope,
                 controllerLease: controllerLease
             )
@@ -1049,10 +1070,11 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
 
     private func handleAddTorrentFile(
         _ request: TorrentEngineIPCAddTorrentFileRequest,
+        torrentData: Data,
         scope: TorrentEngineServiceScope,
         controllerLease: TorrentEngineControllerLease
     ) async throws -> String {
-        try Self.validateTorrentData(request.torrentData)
+        try Self.validateTorrentData(torrentData)
         let priorities = try Self.validatedFilePriorities(request.filePriorities)
         let pin = try authorizedPin(request.folderCapabilityID, scope: scope)
         let wasProvisional = try capabilityRegistry.capability(
@@ -1063,7 +1085,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         do {
             let addingEngine = try requireEngine()
             let identifier = try await addingEngine.addTorrentFile(
-                data: request.torrentData,
+                data: torrentData,
                 savePath: pin.canonicalPath,
                 filePriorities: priorities,
                 startsPaused: request.startsPaused,
@@ -1399,9 +1421,10 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         ownerControllerID: UUID
     ) throws -> TorrentEngineServiceDataset {
         let encoded = try Self.paginateDataset(items) { pageItems in
-            try TorrentEngineIPCPropertyListCodec.encode(
+            try TorrentEngineIPCJSONCodec.encode(
                 pageItems,
-                maximumBytes: TorrentEngineIPCLimits.maximumDatasetPageBytes
+                maximumBytes: TorrentEngineIPCLimits.maximumDatasetPageBytes,
+                limits: TorrentEngineIPCLimits.datasetPageJSONLimits
             )
         }
 
@@ -1640,11 +1663,11 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             throw TorrentEngineServiceRuntimeError.invalidPayload
         }
         do {
-            return try TorrentEngineIPCPropertyListCodec.decode(
+            return try TorrentEngineIPCJSONCodec.decode(
                 type,
                 from: payload,
                 maximumBytes: request.header.operation.maximumRequestPayloadBytes,
-                decodingLimits: request.header.operation.propertyListDecodingLimits
+                limits: request.header.operation.requestJSONLimits
             )
         } catch {
             throw TorrentEngineServiceRuntimeError.invalidPayload
@@ -1655,9 +1678,10 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         _ value: Value,
         for operation: TorrentEngineIPCOperation
     ) throws -> Data {
-        try TorrentEngineIPCPropertyListCodec.encode(
+        try TorrentEngineIPCJSONCodec.encode(
             value,
-            maximumBytes: operation.maximumReplyPayloadBytes
+            maximumBytes: operation.maximumReplyPayloadBytes,
+            limits: operation.replyJSONLimits
         )
     }
 

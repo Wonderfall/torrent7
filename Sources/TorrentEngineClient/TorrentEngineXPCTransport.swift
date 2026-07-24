@@ -279,7 +279,9 @@ package protocol TorrentEngineIPCTransport: Sendable {
         do {
             dictionary = try TorrentEngineIPCEnvelopeCodec.encode(
                 request,
-                maximumPayloadBytes: request.header.operation.maximumRequestPayloadBytes
+                maximumPayloadBytes: request.header.operation.maximumRequestPayloadBytes,
+                maximumAttachmentBytes:
+                    request.header.operation.maximumRequestAttachmentBytes
             )
         } catch {
             throw TorrentEngineClientError.connectionFailed
@@ -380,6 +382,8 @@ package protocol TorrentEngineIPCTransport: Sendable {
         metadata.header.controllerID == controllerID
             && metadata.header.operation == .changeHint
             && !metadata.hasPayload
+            && !metadata.hasAttachment
+            && metadata.totalByteCount == 0
     }
 
     package static func validateDecodedReply(

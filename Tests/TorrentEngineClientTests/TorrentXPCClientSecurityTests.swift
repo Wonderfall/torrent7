@@ -26,7 +26,10 @@ struct TorrentXPCClientSecurityTests {
             TorrentEngineIPCRequestMetadata(
                 header: header,
                 hasPayload: false,
-                payloadByteCount: 0
+                payloadByteCount: 0,
+                hasAttachment: false,
+                attachmentByteCount: 0,
+                totalByteCount: 0
             ),
             controllerID: controllerID
         ))
@@ -34,7 +37,10 @@ struct TorrentXPCClientSecurityTests {
             TorrentEngineIPCRequestMetadata(
                 header: header,
                 hasPayload: true,
-                payloadByteCount: 0
+                payloadByteCount: 0,
+                hasAttachment: false,
+                attachmentByteCount: 0,
+                totalByteCount: 0
             ),
             controllerID: controllerID
         ))
@@ -42,14 +48,17 @@ struct TorrentXPCClientSecurityTests {
             TorrentEngineIPCRequestMetadata(
                 header: header,
                 hasPayload: false,
-                payloadByteCount: 0
+                payloadByteCount: 0,
+                hasAttachment: false,
+                attachmentByteCount: 0,
+                totalByteCount: 0
             ),
             controllerID: UUID()
         ))
 
         let encodedEmptyPayload = try TorrentEngineIPCEnvelopeCodec.encode(
             TorrentEngineIPCRequest(header: header, payload: Data()),
-            maximumPayloadBytes: 0
+            maximumPayloadBytes: 1
         )
         let inspectedEmptyPayload = try TorrentEngineIPCEnvelopeCodec.inspectRequest(
             encodedEmptyPayload
@@ -161,7 +170,8 @@ struct TorrentXPCClientSecurityTests {
                     epoch: epoch
                 )
             case .previewTorrentFile:
-                #expect(request.payload == input)
+                #expect(request.payload == nil)
+                #expect(request.attachment == input)
                 return try successReply(
                     TorrentEngineIPCFilePreviewResponse(TorrentFilePreview(
                         name: "Preview",
@@ -623,7 +633,7 @@ struct TorrentXPCClientSecurityTests {
         let epoch = epoch
         let torrentID = torrentID
         let transport = provisionalAddTransport(path: path, epoch: epoch) { request in
-            try successReply(
+            return try successReply(
                 TorrentEngineIPCAddedTorrentResponse(identifier: torrentID),
                 for: request,
                 epoch: epoch
@@ -645,8 +655,14 @@ struct TorrentXPCClientSecurityTests {
         let path = testPath("successful-file-add")
         let epoch = epoch
         let torrentID = torrentID
+        let torrentData = Data("d4:infod4:name4:testee".utf8)
         let transport = provisionalAddTransport(path: path, epoch: epoch) { request in
-            try successReply(
+            #expect(request.attachment == torrentData)
+            let metadata: TorrentEngineIPCAddTorrentFileRequest = try decodeRequest(request)
+            #expect(metadata.filePriorities == [
+                TorrentEngineIPCFilePriorityEntry(index: 0, priority: .normal),
+            ])
+            return try successReply(
                 TorrentEngineIPCAddedTorrentResponse(identifier: torrentID),
                 for: request,
                 epoch: epoch
@@ -656,7 +672,7 @@ struct TorrentXPCClientSecurityTests {
         try await client.delegateFolderAuthorization(authorization(path: path, byte: 1))
 
         let identifier = try await client.addTorrentFile(
-            data: Data("d4:infod4:name4:testee".utf8),
+            data: torrentData,
             savePath: path,
             filePriorities: [0: .normal],
             startsPaused: false,
@@ -929,9 +945,10 @@ struct TorrentXPCClientSecurityTests {
                 #expect(read.id == datasetID)
                 #expect(read.page == 0)
                 state.withLock { $0.didRead = true }
-                let encodedHosts = try TorrentEngineIPCPropertyListCodec.encode(
+                let encodedHosts = try TorrentEngineIPCJSONCodec.encode(
                     [host],
-                    maximumBytes: TorrentEngineIPCLimits.maximumDatasetPageBytes
+                    maximumBytes: TorrentEngineIPCLimits.maximumDatasetPageBytes,
+                    limits: TorrentEngineIPCLimits.datasetPageJSONLimits
                 )
                 return try successReply(
                     TorrentEngineIPCDatasetPage(
@@ -1426,9 +1443,10 @@ struct TorrentXPCClientSecurityTests {
                         id: snapshotID,
                         kind: .torrentSnapshots,
                         page: 0,
-                        encodedItems: try TorrentEngineIPCPropertyListCodec.encode(
+                        encodedItems: try TorrentEngineIPCJSONCodec.encode(
                             [torrent],
-                            maximumBytes: TorrentEngineIPCLimits.maximumDatasetPageBytes
+                            maximumBytes: TorrentEngineIPCLimits.maximumDatasetPageBytes,
+                            limits: TorrentEngineIPCLimits.datasetPageJSONLimits
                         )
                     ),
                     for: request,
@@ -1611,9 +1629,10 @@ struct TorrentXPCClientSecurityTests {
                         id: datasetID,
                         kind: .trackerHosts,
                         page: 0,
-                        encodedItems: try TorrentEngineIPCPropertyListCodec.encode(
+                        encodedItems: try TorrentEngineIPCJSONCodec.encode(
                             [host],
-                            maximumBytes: TorrentEngineIPCLimits.maximumDatasetPageBytes
+                            maximumBytes: TorrentEngineIPCLimits.maximumDatasetPageBytes,
+                            limits: TorrentEngineIPCLimits.datasetPageJSONLimits
                         )
                     ),
                     for: request,
@@ -2468,9 +2487,10 @@ private func successReply<Value: Encodable & Sendable>(
         header: request.header,
         engineEpoch: epoch,
         status: .success,
-        payload: try TorrentEngineIPCPropertyListCodec.encode(
+        payload: try TorrentEngineIPCJSONCodec.encode(
             value,
-            maximumBytes: request.header.operation.maximumReplyPayloadBytes
+            maximumBytes: request.header.operation.maximumReplyPayloadBytes,
+            limits: request.header.operation.replyJSONLimits
         )
     )
 }
@@ -2481,9 +2501,10 @@ private func decodeRequest<Value: Decodable & Sendable>(
     guard let payload = request.payload else {
         throw TorrentXPCClientTestError.missingPayload
     }
-    return try TorrentEngineIPCPropertyListCodec.decode(
+    return try TorrentEngineIPCJSONCodec.decode(
         from: payload,
-        maximumBytes: request.header.operation.maximumRequestPayloadBytes
+        maximumBytes: request.header.operation.maximumRequestPayloadBytes,
+        limits: request.header.operation.requestJSONLimits
     )
 }
 

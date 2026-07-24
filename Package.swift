@@ -230,7 +230,12 @@ let package = Package(
             name: "TorrentEngineXPCIntegrationHost",
             targets: ["TorrentEngineXPCIntegrationHost"]
         ),
-        .executable(name: "TorrentBridgeTests", targets: ["TorrentBridgeTests"])
+        .executable(name: "TorrentBridgeTests", targets: ["TorrentBridgeTests"]),
+        .library(
+            name: "TorrentEngineIPCFuzzSupport",
+            type: .dynamic,
+            targets: ["TorrentEngineIPCFuzzSupport"]
+        )
     ],
     targets: [
         .target(
@@ -438,6 +443,16 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
+            ]
+        ),
+        .target(
+            name: "TorrentEngineIPCFuzzSupport",
+            dependencies: ["TorrentEngineIPC"],
+            path: "Tools/IPCFuzzing/Support",
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .treatAllWarnings(as: .error),
+                .unsafeFlags(appSwiftStrictnessFlags)
             ]
         ),
         .executableTarget(

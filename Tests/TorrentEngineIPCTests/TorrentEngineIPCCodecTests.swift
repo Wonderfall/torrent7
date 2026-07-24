@@ -4,6 +4,8 @@ import TorrentEngineModel
 import XPC
 @testable import TorrentEngineIPC
 
+private let testJSONLimits = TorrentEngineIPCLimits.maximumJSONLimits
+
 @Suite("Torrent engine IPC envelopes")
 struct TorrentEngineIPCEnvelopeTests {
     @Test("Request and reply envelopes round trip")
@@ -11,15 +13,18 @@ struct TorrentEngineIPCEnvelopeTests {
         let header = makeHeader()
         let request = TorrentEngineIPCRequest(
             header: header,
-            payload: Data([0, 1, 2, 255])
+            payload: Data([0, 1, 2, 255]),
+            attachment: Data([9, 8, 7])
         )
         let requestDictionary = try TorrentEngineIPCEnvelopeCodec.encode(
             request,
-            maximumPayloadBytes: 64
+            maximumPayloadBytes: 64,
+            maximumAttachmentBytes: 64
         )
         let decodedRequest = try TorrentEngineIPCEnvelopeCodec.decodeRequest(
             requestDictionary,
-            maximumPayloadBytes: 64
+            maximumPayloadBytes: 64,
+            maximumAttachmentBytes: 64
         )
         #expect(decodedRequest == request)
 
@@ -45,39 +50,54 @@ struct TorrentEngineIPCEnvelopeTests {
     @Test("Payload storage is copied")
     func payloadIsCopied() throws {
         var source = Data([1, 2, 3])
-        let request = TorrentEngineIPCRequest(header: makeHeader(), payload: source)
+        var attachment = Data([4, 5])
+        let request = TorrentEngineIPCRequest(
+            header: makeHeader(),
+            payload: source,
+            attachment: attachment
+        )
         let dictionary = try TorrentEngineIPCEnvelopeCodec.encode(
             request,
-            maximumPayloadBytes: 3
+            maximumPayloadBytes: 3,
+            maximumAttachmentBytes: 2
         )
         source[0] = 9
+        attachment[0] = 9
 
         let decoded = try TorrentEngineIPCEnvelopeCodec.decodeRequest(
             dictionary,
-            maximumPayloadBytes: 3
+            maximumPayloadBytes: 3,
+            maximumAttachmentBytes: 2
         )
         #expect(decoded.payload == Data([1, 2, 3]))
+        #expect(decoded.attachment == Data([4, 5]))
     }
 
     @Test("Request inspection reports resource cost before decoding")
     func requestInspection() throws {
         let request = TorrentEngineIPCRequest(
             header: makeHeader(),
-            payload: Data([1, 2, 3, 4])
+            payload: Data([1, 2, 3, 4]),
+            attachment: Data([5, 6])
         )
         let dictionary = try TorrentEngineIPCEnvelopeCodec.encode(
             request,
-            maximumPayloadBytes: 4
+            maximumPayloadBytes: 4,
+            maximumAttachmentBytes: 2
         )
 
         let metadata = try TorrentEngineIPCEnvelopeCodec.inspectRequest(dictionary)
         #expect(metadata.header == request.header)
         #expect(metadata.hasPayload)
         #expect(metadata.payloadByteCount == 4)
+        #expect(metadata.hasAttachment)
+        #expect(metadata.attachmentByteCount == 2)
+        #expect(metadata.totalByteCount == 6)
         #expect(try TorrentEngineIPCEnvelopeCodec.decodeRequest(
             dictionary,
             metadata: metadata,
-            maximumPayloadBytes: 4
+            maximumPayloadBytes: 4,
+            maximumAttachmentBytes: 2
         ) == request)
     }
 
@@ -94,7 +114,10 @@ struct TorrentEngineIPCEnvelopeTests {
         let metadata = TorrentEngineIPCRequestMetadata(
             header: request.header,
             hasPayload: true,
-            payloadByteCount: 3
+            payloadByteCount: 3,
+            hasAttachment: false,
+            attachmentByteCount: 0,
+            totalByteCount: 3
         )
 
         expectIPCError(.requestMetadataMismatch) {
@@ -228,6 +251,69 @@ struct TorrentEngineIPCEnvelopeTests {
         }
     }
 
+    @Test("Raw attachments have independent bounds")
+    func attachmentBounds() throws {
+        let request = TorrentEngineIPCRequest(
+            header: makeHeader(),
+            attachment: Data(repeating: 7, count: 5)
+        )
+        expectIPCError(.payloadTooLarge(actual: 5, maximum: 4)) {
+            try TorrentEngineIPCEnvelopeCodec.encode(
+                request,
+                maximumPayloadBytes: 0,
+                maximumAttachmentBytes: 4
+            )
+        }
+
+        let dictionary = try TorrentEngineIPCEnvelopeCodec.encode(
+            request,
+            maximumPayloadBytes: 0,
+            maximumAttachmentBytes: 5
+        )
+        expectIPCError(.payloadTooLarge(actual: 5, maximum: 4)) {
+            try TorrentEngineIPCEnvelopeCodec.decodeRequest(
+                dictionary,
+                maximumPayloadBytes: 0,
+                maximumAttachmentBytes: 4
+            )
+        }
+        expectIPCError(.unexpectedField(TorrentEngineIPCField.attachment)) {
+            try TorrentEngineIPCEnvelopeCodec.encode(
+                TorrentEngineIPCRequest(
+                    header: makeHeader(),
+                    attachment: Data()
+                ),
+                maximumPayloadBytes: 0
+            )
+        }
+    }
+
+    @Test("Replies cannot carry raw attachments")
+    func replyAttachmentsAreRejected() throws {
+        let reply = TorrentEngineIPCReply(
+            header: makeHeader(),
+            engineEpoch: UUID(),
+            status: .success
+        )
+        var dictionary = try TorrentEngineIPCEnvelopeCodec.encode(
+            reply,
+            maximumPayloadBytes: 0
+        )
+        try TorrentEngineIPCXPCValues.insertPayload(
+            Data([1]),
+            into: &dictionary,
+            maximumBytes: 1,
+            field: TorrentEngineIPCField.attachment
+        )
+
+        expectIPCError(.unexpectedField(TorrentEngineIPCField.attachment)) {
+            try TorrentEngineIPCEnvelopeCodec.decodeReply(
+                dictionary,
+                maximumPayloadBytes: 0
+            )
+        }
+    }
+
     @Test("Failure errors are bounded UTF-8 and status-consistent")
     func errorBoundsAndStatus() throws {
         let oversized = String(
@@ -294,7 +380,7 @@ struct TorrentEngineIPCEnvelopeTests {
 
     @Test("Stable dataset and hint operation numbers")
     func stableOperationNumbers() {
-        #expect(TorrentEngineIPCProtocol.version == 7)
+        #expect(TorrentEngineIPCProtocol.version == 8)
         #expect(TorrentEngineIPCOperation.replaceFolderCapabilities.rawValue == 7)
         #expect(TorrentEngineIPCOperation(rawValue: 10) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 41) == nil)
@@ -307,6 +393,213 @@ struct TorrentEngineIPCEnvelopeTests {
         #expect(TorrentEngineIPCFailureCode.operationRejected.rawValue == 1)
         #expect(TorrentEngineIPCFailureCode.controllerBusy.rawValue == 2)
         #expect(TorrentEngineIPCFailureCode.serviceShuttingDown.rawValue == 3)
+    }
+
+    @Test("JSON and raw attachment limits remain independently bounded")
+    func JSONAndAttachmentLimits() {
+        #expect(TorrentEngineIPCOperation.previewTorrentFile.maximumRequestPayloadBytes == 0)
+        #expect(
+            TorrentEngineIPCOperation.previewTorrentFile.maximumRequestAttachmentBytes
+                == TorrentInputLimits.maxTorrentFileBytes
+        )
+        #expect(
+            TorrentEngineIPCOperation.addTorrentFile.maximumRequestPayloadBytes
+                + TorrentEngineIPCOperation.addTorrentFile.maximumRequestAttachmentBytes
+                <= TorrentEngineIPCLimits.maximumPayloadBytes
+        )
+        #expect(
+            TorrentEngineIPCOperation.handshake.maximumRequestPayloadBytes
+                >= ((TorrentEngineIPCLimits.maximumBookmarkAggregateBytes + 2) / 3) * 4
+        )
+        #expect(
+            TorrentEngineIPCOperation.readDataset.maximumReplyPayloadBytes
+                >= ((TorrentEngineIPCLimits.maximumDatasetPageBytes + 2) / 3) * 4
+        )
+    }
+
+    @Test("Maximum file-priority metadata fits its JSON allocation profile")
+    func maximumFilePriorityMetadataFits() throws {
+        let request = TorrentEngineIPCAddTorrentFileRequest(
+            folderCapabilityID: UUID(),
+            filePriorities: (0..<TorrentEngineLimits.maximumFileCount).map {
+                TorrentEngineIPCFilePriorityEntry(index: Int32($0), priority: .normal)
+            },
+            startsPaused: false,
+            queuePriority: .normal,
+            enablePeerExchange: false,
+            allowNonHTTPSTrackers: false,
+            allowNonHTTPSWebSeeds: false
+        )
+
+        _ = try TorrentEngineIPCJSONCodec.encode(
+            request,
+            maximumBytes:
+                TorrentEngineIPCOperation.addTorrentFile.maximumRequestPayloadBytes,
+            limits: TorrentEngineIPCOperation.addTorrentFile.requestJSONLimits
+        )
+    }
+
+    @Test("Maximum escaped file reply fits its recalibrated JSON limits")
+    func maximumFileReplyFits() throws {
+        let maximumEscapedPath = String(repeating: "\\\"", count: 511) + "\\"
+        let batch = TorrentFileBatch(
+            revision: .max,
+            files: (0..<TorrentEngineLimits.maximumFileCount).map {
+                TorrentFileItem(
+                    path: maximumEscapedPath,
+                    size: .max,
+                    downloaded: .max,
+                    progress: 1,
+                    index: Int32($0),
+                    priority: .high,
+                    isPadFile: false
+                )
+            }
+        )
+
+        let encoded = try TorrentEngineIPCJSONCodec.encode(
+            batch,
+            maximumBytes: TorrentEngineIPCOperation.fileBatch.maximumReplyPayloadBytes,
+            limits: TorrentEngineIPCOperation.fileBatch.replyJSONLimits
+        )
+        #expect(encoded.count > 32 * 1_024 * 1_024)
+        #expect(encoded.count <= TorrentEngineIPCLimits.maximumFileMetadataReplyBytes)
+    }
+
+    @Test("Maximum aggregate bookmarks fit without slash expansion")
+    func maximumAggregateBookmarksFit() throws {
+        let bookmarkByteCount =
+            TorrentEngineIPCLimits.maximumBookmarkAggregateBytes
+                / TorrentEngineLimits.maximumAuthorizedSavePathCount
+        let bookmark = Data(repeating: 0xFF, count: bookmarkByteCount)
+        let request = TorrentEngineIPCHandshakeRequest(
+            enablePeerExchangePlugin: true,
+            folders: Array(
+                repeating: TorrentEngineIPCFolderGrant(bookmark: bookmark),
+                count: TorrentEngineLimits.maximumAuthorizedSavePathCount
+            )
+        )
+
+        let encoded = try TorrentEngineIPCJSONCodec.encode(
+            request,
+            maximumBytes: TorrentEngineIPCOperation.handshake.maximumRequestPayloadBytes,
+            limits: TorrentEngineIPCOperation.handshake.requestJSONLimits
+        )
+
+        #expect(!String(decoding: encoded, as: UTF8.self).contains(#"\/"#))
+        #expect(encoded.count <= TorrentEngineIPCOperation.handshake.maximumRequestPayloadBytes)
+    }
+
+    @Test("Maximum encoded dataset page fits its outer JSON envelope")
+    func maximumDatasetPageEnvelopeFits() throws {
+        let page = TorrentEngineIPCDatasetPage(
+            id: UUID(),
+            kind: .torrentSnapshots,
+            page: TorrentEngineIPCLimits.maximumDatasetPageCount - 1,
+            encodedItems: Data(
+                repeating: 0xFF,
+                count: TorrentEngineIPCLimits.maximumDatasetPageBytes
+            )
+        )
+
+        let encoded = try TorrentEngineIPCJSONCodec.encode(
+            page,
+            maximumBytes: TorrentEngineIPCOperation.readDataset.maximumReplyPayloadBytes,
+            limits: TorrentEngineIPCOperation.readDataset.replyJSONLimits
+        )
+
+        #expect(encoded.count <= TorrentEngineIPCOperation.readDataset.maximumReplyPayloadBytes)
+    }
+
+    @Test("Maximum tracker and web-seed replies fit their JSON-specific limits")
+    func maximumSourceRepliesFit() throws {
+        let escapedURL = String(repeating: #"\"#, count: 1_023)
+        let escapedMessage = String(repeating: #"\"#, count: 511)
+
+        do {
+            let response = TorrentEngineIPCOptionalValue(
+                TorrentTrackerBatch(
+                    revision: .max,
+                    trackers: Array(
+                        repeating: TorrentTrackerItem(
+                            url: escapedURL,
+                            message: escapedMessage,
+                            tier: Int32.max - 1,
+                            failCount: .max,
+                            scrapeSeeders: .max,
+                            scrapeLeechers: .max,
+                            scrapeDownloaded: .max,
+                            updating: true,
+                            verified: true,
+                            hasError: true,
+                            enabled: true
+                        ),
+                        count: TorrentEngineLimits.maximumTrackerCount
+                    )
+                )
+            )
+            _ = try TorrentEngineIPCJSONCodec.encode(
+                response,
+                maximumBytes:
+                    TorrentEngineIPCOperation.trackerBatch.maximumReplyPayloadBytes,
+                limits: TorrentEngineIPCOperation.trackerBatch.replyJSONLimits
+            )
+        }
+
+        do {
+            let response = TorrentEngineIPCOptionalValue(
+                TorrentWebSeedBatch(
+                    revision: .max,
+                    webSeeds: Array(
+                        repeating: TorrentWebSeedItem(url: escapedURL),
+                        count: TorrentEngineLimits.maximumWebSeedCount
+                    )
+                )
+            )
+            _ = try TorrentEngineIPCJSONCodec.encode(
+                response,
+                maximumBytes:
+                    TorrentEngineIPCOperation.webSeedBatch.maximumReplyPayloadBytes,
+                limits: TorrentEngineIPCOperation.webSeedBatch.replyJSONLimits
+            )
+        }
+    }
+
+    @Test("Maximum piece map uses one bounded bit-packed JSON string")
+    func maximumPieceMapIsBitPacked() throws {
+        let pieceCount = TorrentEngineLimits.maximumPieceMapCount
+        let pieces = (0..<pieceCount).map { UInt8($0 & 1) }
+        let response = TorrentEngineIPCOptionalValue(
+            TorrentPieceMapBatch(
+                revision: .max,
+                pieceMap: TorrentPieceMap(
+                    totalPieces: pieceCount,
+                    completedPieces: pieceCount / 2,
+                    availablePieces: pieceCount,
+                    isMapAvailable: true,
+                    isMapTruncated: false,
+                    pieces: pieces
+                )
+            )
+        )
+
+        let encoded = try TorrentEngineIPCJSONCodec.encode(
+            response,
+            maximumBytes: TorrentEngineIPCOperation.pieceMapBatch.maximumReplyPayloadBytes,
+            limits: TorrentEngineIPCOperation.pieceMapBatch.replyJSONLimits
+        )
+        let text = String(decoding: encoded, as: UTF8.self)
+        #expect(text.contains(#""pieces":""#))
+        #expect(!text.contains(#""pieces":["#))
+        #expect(encoded.count < 512 * 1_024)
+
+        let decoded = try TorrentEngineIPCJSONCodec.decode(
+            TorrentEngineIPCOptionalValue<TorrentPieceMapBatch>.self,
+            from: encoded,
+            maximumBytes: TorrentEngineIPCOperation.pieceMapBatch.maximumReplyPayloadBytes,
+            limits: TorrentEngineIPCOperation.pieceMapBatch.replyJSONLimits
+        )
+        #expect(decoded.value?.pieceMap == response.value?.pieceMap)
     }
 
     @Test("XPC bundle identities require an exact packaged pair")
@@ -402,63 +695,158 @@ struct TorrentEngineIPCEnvelopeTests {
     }
 }
 
-@Suite("Torrent engine IPC property-list payloads")
-struct TorrentEngineIPCPropertyListTests {
+@Suite("Torrent engine IPC JSON payloads")
+struct TorrentEngineIPCJSONTests {
     private struct ExamplePayload: Codable, Equatable, Sendable {
         let name: String
         let values: [Int]
     }
 
-    @Test("Binary property-list payloads round trip")
-    func propertyListRoundTrip() throws {
-        let value = ExamplePayload(name: "snapshot", values: [1, 2, 3])
-        let data = try TorrentEngineIPCPropertyListCodec.encode(
-            value,
-            maximumBytes: 4_096
-        )
-        #expect(data.starts(with: Data("bplist00".utf8)))
+    private struct BinaryPayload: Codable, Equatable, Sendable {
+        let bytes: Data
+    }
 
-        let decoded = try TorrentEngineIPCPropertyListCodec.decode(
+    private struct RevisionPayload: Codable, Equatable, Sendable {
+        let revision: UInt64
+    }
+
+    private indirect enum RandomJSONValue: Codable, Equatable, Sendable {
+        case string(String)
+        case integer(Int)
+        case boolean(Bool)
+        case array([RandomJSONValue])
+        case object([String: RandomJSONValue])
+    }
+
+    private struct DeterministicGenerator {
+        private var state: UInt64 = 0x7A11_C0DE_8259
+
+        mutating func value(depth: Int = 0) -> RandomJSONValue {
+            let kind = depth >= 4 ? Int(next() % 3) : Int(next() % 5)
+            switch kind {
+            case 0:
+                return .string(string(maximumFragmentCount: 24))
+            case 1:
+                return .integer(Int(truncatingIfNeeded: next()))
+            case 2:
+                return .boolean(next() & 1 == 0)
+            case 3:
+                var values = [RandomJSONValue]()
+                for _ in 0..<Int(next() % 5) {
+                    values.append(value(depth: depth + 1))
+                }
+                return .array(values)
+            default:
+                var values = [String: RandomJSONValue]()
+                for index in 0..<Int(next() % 5) {
+                    values["key-\(index)-\(string(maximumFragmentCount: 4))"] =
+                        value(depth: depth + 1)
+                }
+                return .object(values)
+            }
+        }
+
+        private mutating func string(maximumFragmentCount: Int) -> String {
+            let fragments = [
+                "a", "\"", "\\", "/", "[", "]", "{", "}", "\n", "\t",
+                "\u{1}", "日本語", "🧲",
+            ]
+            var result = ""
+            for _ in 0..<Int(next() % UInt64(maximumFragmentCount + 1)) {
+                result += fragments[Int(next() % UInt64(fragments.count))]
+            }
+            return result
+        }
+
+        private mutating func next() -> UInt64 {
+            state = state &* 6_364_136_223_846_793_005 &+ 1
+            return state
+        }
+    }
+
+    private struct RejectIfDecoded: Decodable, Sendable {
+        private struct UnexpectedDecode: Error {}
+
+        init(from decoder: Decoder) throws {
+            _ = decoder
+            Issue.record("JSONDecoder ran before the preflight rejected the payload")
+            throw UnexpectedDecode()
+        }
+    }
+
+    @Test("JSON payloads round trip")
+    func JSONRoundTrip() throws {
+        let value = ExamplePayload(name: "snapshot – 日本語 🧲", values: [1, 2, 3])
+        let data = try TorrentEngineIPCJSONCodec.encode(
+            value,
+            maximumBytes: 4_096,
+            limits: testJSONLimits
+        )
+        #expect(data.first == UInt8(ascii: "{"))
+
+        let decoded = try TorrentEngineIPCJSONCodec.decode(
             ExamplePayload.self,
             from: data,
-            maximumBytes: 4_096
+            maximumBytes: 4_096,
+            limits: testJSONLimits
         )
         #expect(decoded == value)
     }
 
-    @Test("Add responses use a property-list container instead of a scalar root")
+    @Test("JSON preserves the full unsigned revision range")
+    func UInt64RoundTrip() throws {
+        let value = RevisionPayload(revision: .max)
+        let data = try TorrentEngineIPCJSONCodec.encode(
+            value,
+            maximumBytes: 4_096,
+            limits: testJSONLimits
+        )
+
+        #expect(try TorrentEngineIPCJSONCodec.decode(
+            RevisionPayload.self,
+            from: data,
+            maximumBytes: 4_096,
+            limits: testJSONLimits
+        ) == value)
+    }
+
+    @Test("Add responses use a JSON container instead of a scalar root")
     func addedTorrentResponseRoundTrip() throws {
         let value = TorrentEngineIPCAddedTorrentResponse(
             identifier: "t:\(String(repeating: "a", count: 32))"
         )
-        let data = try TorrentEngineIPCPropertyListCodec.encode(
+        let data = try TorrentEngineIPCJSONCodec.encode(
             value,
-            maximumBytes: 4_096
+            maximumBytes: 4_096,
+            limits: testJSONLimits
         )
 
-        let decoded = try TorrentEngineIPCPropertyListCodec.decode(
+        let decoded = try TorrentEngineIPCJSONCodec.decode(
             TorrentEngineIPCAddedTorrentResponse.self,
             from: data,
-            maximumBytes: 4_096
+            maximumBytes: 4_096,
+            limits: testJSONLimits
         )
         #expect(decoded == value)
     }
 
-    @Test("Removal responses keep both outcomes inside a property-list container")
+    @Test("Removal responses keep both outcomes inside a JSON container")
     func removalResponseRoundTrips() throws {
         for outcome in [
             TorrentRemovalOutcome.removed,
             TorrentRemovalOutcome.removedWithWarning("Files were retained safely."),
         ] {
             let value = TorrentEngineIPCRemovalResponse(outcome: outcome)
-            let data = try TorrentEngineIPCPropertyListCodec.encode(
+            let data = try TorrentEngineIPCJSONCodec.encode(
                 value,
-                maximumBytes: 4_096
+                maximumBytes: 4_096,
+                limits: testJSONLimits
             )
-            let decoded = try TorrentEngineIPCPropertyListCodec.decode(
+            let decoded = try TorrentEngineIPCJSONCodec.decode(
                 TorrentEngineIPCRemovalResponse.self,
                 from: data,
-                maximumBytes: 4_096
+                maximumBytes: 4_096,
+                limits: testJSONLimits
             )
             #expect(decoded == value)
         }
@@ -467,121 +855,349 @@ struct TorrentEngineIPCPropertyListTests {
     @Test("Poll responses carry the required bounded interface snapshot")
     func pollResponseRoundTrip() throws {
         let response = pollResponse(interfaceCount: 1)
-        let data = try TorrentEngineIPCPropertyListCodec.encode(
+        let data = try TorrentEngineIPCJSONCodec.encode(
             response,
-            maximumBytes: TorrentEngineIPCOperation.poll.maximumReplyPayloadBytes
+            maximumBytes: TorrentEngineIPCOperation.poll.maximumReplyPayloadBytes,
+            limits: TorrentEngineIPCOperation.poll.replyJSONLimits
         )
-        let decoded = try TorrentEngineIPCPropertyListCodec.decode(
+        let decoded = try TorrentEngineIPCJSONCodec.decode(
             TorrentEngineIPCPollResponse.self,
             from: data,
             maximumBytes: TorrentEngineIPCOperation.poll.maximumReplyPayloadBytes,
-            decodingLimits: TorrentEngineIPCOperation.poll.propertyListDecodingLimits
+            limits: TorrentEngineIPCOperation.poll.replyJSONLimits
         )
 
         #expect(decoded.networkInterfaceSnapshot == response.networkInterfaceSnapshot)
     }
 
-    @Test("Poll decoding rejects interface collection amplification")
-    func pollInterfaceCollectionAmplification() throws {
-        let maximum = TorrentEngineLimits.maximumNetworkInterfaceCount
-        let accepted = pollResponse(interfaceCount: maximum)
-        let acceptedData = try TorrentEngineIPCPropertyListCodec.encode(
-            accepted,
-            maximumBytes: TorrentEngineIPCOperation.poll.maximumReplyPayloadBytes
+    @Test("Maximum escaped poll response fits its recalibrated byte profile")
+    func maximumPollResponseFits() throws {
+        let escapedFingerprint = String(
+            repeating: "\"",
+            count: TorrentEngineLimits.maximumNetworkInterfaceFingerprintBytes
         )
-        _ = try TorrentEngineIPCPropertyListCodec.decode(
-            TorrentEngineIPCPollResponse.self,
-            from: acceptedData,
-            maximumBytes: TorrentEngineIPCOperation.poll.maximumReplyPayloadBytes,
-            decodingLimits: TorrentEngineIPCOperation.poll.propertyListDecodingLimits
+        let escapedDisplayName = String(
+            repeating: "\"",
+            count: TorrentEngineLimits.maximumNetworkInterfaceDisplayNameBytes
+        )
+        let escapedServiceID = String(
+            repeating: "\"",
+            count: TorrentEngineLimits.maximumVPNServiceIDBytes
+        )
+        let escapedServiceName = String(
+            repeating: "\"",
+            count: TorrentEngineLimits.maximumVPNServiceNameBytes
+        )
+        let response = TorrentEngineIPCPollResponse(
+            dirtyMask: .max,
+            alertErrors: Array(
+                repeating: String(
+                    repeating: "\"",
+                    count: TorrentEngineIPCLimits.maximumErrorBytes
+                ),
+                count: TorrentEngineIPCLimits.maximumAlertErrorsPerPoll
+            ),
+            networkStatus: TorrentNetworkStatus(
+                requestedRevision: .max,
+                submittedRevision: .max,
+                listenPort: 65_535,
+                networkBlocked: false,
+                hasListener: true,
+                endpoint: String(repeating: "\"", count: 255),
+                lastError: String(repeating: "\"", count: 511)
+            ),
+            bridgeHealth: TorrentBridgeHealth(
+                isAvailable: true,
+                totalAlertWorkerFailures: .max,
+                consecutiveAlertWorkerFailures: .max,
+                isAlertWorkerDegraded: true,
+                lastAlertWorkerError: String(repeating: "\"", count: 511)
+            ),
+            networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot(
+                revision: .max,
+                interfaces: (0..<TorrentEngineLimits.maximumNetworkInterfaceCount).map {
+                    NetworkInterfaceOption(
+                        name: "en\($0)",
+                        displayName: escapedDisplayName,
+                        fingerprint: escapedFingerprint,
+                        vpnServiceID: escapedServiceID,
+                        vpnServiceName: escapedServiceName,
+                        isLikelyVPN: true
+                    )
+                }
+            ),
+            snapshotDataset: TorrentEngineIPCDatasetDescriptor(
+                id: UUID(),
+                kind: .torrentSnapshots,
+                revision: .max,
+                itemCount: TorrentEngineLimits.maximumTorrentSnapshotCount,
+                pageCount: TorrentEngineIPCLimits.maximumDatasetPageCount
+            ),
+            trackerHostDataset: TorrentEngineIPCDatasetDescriptor(
+                id: UUID(),
+                kind: .trackerHosts,
+                revision: .max,
+                itemCount: TorrentEngineLimits.maximumTrackerHostRowCount,
+                pageCount: TorrentEngineIPCLimits.maximumDatasetPageCount
+            )
         )
 
-        let oversized = pollResponse(interfaceCount: maximum + 1)
-        let oversizedData = try TorrentEngineIPCPropertyListCodec.encode(
-            oversized,
-            maximumBytes: TorrentEngineIPCOperation.poll.maximumReplyPayloadBytes
+        let encoded = try TorrentEngineIPCJSONCodec.encode(
+            response,
+            maximumBytes: TorrentEngineIPCOperation.poll.maximumReplyPayloadBytes,
+            limits: TorrentEngineIPCOperation.poll.replyJSONLimits
         )
-        expectIPCError(.propertyListDecodingFailed) {
-            try TorrentEngineIPCPropertyListCodec.decode(
-                TorrentEngineIPCPollResponse.self,
-                from: oversizedData,
-                maximumBytes: TorrentEngineIPCOperation.poll.maximumReplyPayloadBytes,
-                decodingLimits: TorrentEngineIPCOperation.poll.propertyListDecodingLimits
-            )
-        }
-        expectIPCError(.propertyListDecodingFailed) {
-            try TorrentEngineIPCPropertyListCodec.decode(
-                TorrentNetworkInterfaceSnapshot.self,
-                from: try TorrentEngineIPCPropertyListCodec.encode(
-                    oversized.networkInterfaceSnapshot,
-                    maximumBytes: TorrentEngineIPCOperation.poll.maximumReplyPayloadBytes
-                ),
-                maximumBytes: TorrentEngineIPCOperation.poll.maximumReplyPayloadBytes
-            )
-        }
+
+        #expect(encoded.count > 2 * 1_024 * 1_024)
+        #expect(encoded.count <= TorrentEngineIPCOperation.poll.maximumReplyPayloadBytes)
+    }
+
+    @Test("Container syntax inside strings does not affect depth scanning")
+    func containerSyntaxInsideStrings() throws {
+        let value = ExamplePayload(
+            name: #"literal [{\"nested\":[]}] and \\ escaped text"#,
+            values: [1, 2, 3]
+        )
+        let data = try TorrentEngineIPCJSONCodec.encode(
+            value,
+            maximumBytes: 4_096,
+            limits: testJSONLimits
+        )
+
+        #expect(try TorrentEngineIPCJSONCodec.decode(
+            ExamplePayload.self,
+            from: data,
+            maximumBytes: 4_096,
+            limits: testJSONLimits
+        ) == value)
     }
 
     @Test("Bare scalar roots are rejected so wire messages must use containers")
     func scalarRootsAreRejected() {
-        expectIPCError(.propertyListEncodingFailed) {
-            try TorrentEngineIPCPropertyListCodec.encode(
+        expectIPCError(.jsonEncodingFailed) {
+            try TorrentEngineIPCJSONCodec.encode(
                 "not-a-wire-message",
-                maximumBytes: 4_096
+                maximumBytes: 4_096,
+                limits: testJSONLimits
             )
         }
     }
 
-    @Test("Property-list calls enforce their own limits")
-    func propertyListBounds() throws {
+    @Test("JSON calls enforce their own limits")
+    func JSONBounds() throws {
         let value = ExamplePayload(name: "snapshot", values: [1, 2, 3])
-        let data = try TorrentEngineIPCPropertyListCodec.encode(
+        let data = try TorrentEngineIPCJSONCodec.encode(
             value,
-            maximumBytes: 4_096
+            maximumBytes: 4_096,
+            limits: testJSONLimits
         )
 
         expectIPCError(.payloadTooLarge(actual: data.count, maximum: data.count - 1)) {
-            try TorrentEngineIPCPropertyListCodec.encode(
+            try TorrentEngineIPCJSONCodec.encode(
                 value,
-                maximumBytes: data.count - 1
+                maximumBytes: data.count - 1,
+                limits: testJSONLimits
             )
         }
         expectIPCError(.payloadTooLarge(actual: data.count, maximum: data.count - 1)) {
-            try TorrentEngineIPCPropertyListCodec.decode(
+            try TorrentEngineIPCJSONCodec.decode(
                 ExamplePayload.self,
                 from: data,
-                maximumBytes: data.count - 1
+                maximumBytes: data.count - 1,
+                limits: testJSONLimits
             )
         }
-        expectIPCError(.propertyListDecodingFailed) {
-            try TorrentEngineIPCPropertyListCodec.decode(
+        expectIPCError(.jsonDecodingFailed) {
+            try TorrentEngineIPCJSONCodec.decode(
                 ExamplePayload.self,
                 from: Data([0, 1, 2]),
-                maximumBytes: 3
+                maximumBytes: 3,
+                limits: testJSONLimits
             )
         }
     }
 
-    @Test("Binary property-list collection amplification is rejected before decoding")
-    func propertyListCollectionAmplification() throws {
-        let amplified = Array(repeating: 0, count: 500_000)
-        let data = try TorrentEngineIPCPropertyListCodec.encode(
-            amplified,
-            maximumBytes: 1 * 1_024 * 1_024
+    @Test("Repeated JSON values consume repeated wire bytes")
+    func repeatedValuesConsumeWireBytes() throws {
+        let value = String(repeating: "x", count: 200_000)
+        let data = try TorrentEngineIPCJSONCodec.encode(
+            [value, value],
+            maximumBytes: 1 * 1_024 * 1_024,
+            limits: testJSONLimits
         )
 
-        expectIPCError(.propertyListDecodingFailed) {
-            try TorrentEngineIPCPropertyListCodec.decode(
-                [Int].self,
-                from: data,
-                maximumBytes: 1 * 1_024 * 1_024,
-                decodingLimits: .init(
-                    maximumContainerElementCount: 256,
-                    maximumCollectionReferenceCount: 128 * 1_024
-                )
+        #expect(data.count >= value.utf8.count * 2)
+        #expect(try TorrentEngineIPCJSONCodec.decode(
+            [String].self,
+            from: data,
+            maximumBytes: 1 * 1_024 * 1_024,
+            limits: testJSONLimits
+        ) == [value, value])
+    }
+
+    @Test("Value-node-dense JSON is rejected before decoding")
+    func valueNodeCountIsBounded() throws {
+        let limits = TorrentEngineIPCJSONLimits(
+            maximumNestingDepth: 8,
+            maximumValueNodeCount: 4,
+            maximumStringByteCount: 64,
+            maximumPrimitiveByteCount: 16
+        )
+        let accepted = Data("[0,0,0]".utf8)
+        #expect(try TorrentEngineIPCJSONCodec.decode(
+            [Int].self,
+            from: accepted,
+            maximumBytes: accepted.count,
+            limits: limits
+        ) == [0, 0, 0])
+
+        let rejected = Data("[{},{},{},{}]".utf8)
+        expectIPCError(.jsonDecodingFailed) {
+            try TorrentEngineIPCJSONCodec.decode(
+                RejectIfDecoded.self,
+                from: rejected,
+                maximumBytes: rejected.count,
+                limits: limits
             )
         }
     }
 
+    @Test("Individual JSON string and primitive wire lengths are bounded")
+    func individualValueLengthsAreBounded() throws {
+        let limits = TorrentEngineIPCJSONLimits(
+            maximumNestingDepth: 8,
+            maximumValueNodeCount: 16,
+            maximumStringByteCount: 4,
+            maximumPrimitiveByteCount: 4
+        )
+        let acceptedString = Data(#"["abcd"]"#.utf8)
+        #expect(try TorrentEngineIPCJSONCodec.decode(
+            [String].self,
+            from: acceptedString,
+            maximumBytes: acceptedString.count,
+            limits: limits
+        ) == ["abcd"])
+
+        let rejectedString = Data(#"["abcde"]"#.utf8)
+        expectIPCError(.jsonDecodingFailed) {
+            try TorrentEngineIPCJSONCodec.decode(
+                RejectIfDecoded.self,
+                from: rejectedString,
+                maximumBytes: rejectedString.count,
+                limits: limits
+            )
+        }
+
+        let acceptedPrimitive = Data("[1234]".utf8)
+        #expect(try TorrentEngineIPCJSONCodec.decode(
+            [Int].self,
+            from: acceptedPrimitive,
+            maximumBytes: acceptedPrimitive.count,
+            limits: limits
+        ) == [1_234])
+
+        let rejectedPrimitive = Data("[12345]".utf8)
+        expectIPCError(.jsonDecodingFailed) {
+            try TorrentEngineIPCJSONCodec.decode(
+                RejectIfDecoded.self,
+                from: rejectedPrimitive,
+                maximumBytes: rejectedPrimitive.count,
+                limits: limits
+            )
+        }
+    }
+
+    @Test("Randomized JSONEncoder containers always pass the preflight")
+    func randomizedEncoderOutputPassesPreflight() throws {
+        var generator = DeterministicGenerator()
+        for _ in 0..<1_024 {
+            let value = generator.value()
+            let data = try TorrentEngineIPCJSONCodec.encode(
+                value,
+                maximumBytes: 64 * 1_024,
+                limits: testJSONLimits
+            )
+            #expect(try TorrentEngineIPCJSONCodec.decode(
+                RandomJSONValue.self,
+                from: data,
+                maximumBytes: 64 * 1_024,
+                limits: testJSONLimits
+            ) == value)
+        }
+    }
+
+    @Test("Base64 data does not receive optional slash escaping")
+    func base64SlashesAreNotEscaped() throws {
+        let value = BinaryPayload(bytes: Data(repeating: 0xFF, count: 3))
+        let data = try TorrentEngineIPCJSONCodec.encode(
+            value,
+            maximumBytes: 4_096,
+            limits: testJSONLimits
+        )
+        let text = String(decoding: data, as: UTF8.self)
+
+        #expect(text.contains(#""bytes":"////""#))
+        #expect(!text.contains(#"\/"#))
+        #expect(try TorrentEngineIPCJSONCodec.decode(
+            BinaryPayload.self,
+            from: data,
+            maximumBytes: 4_096,
+            limits: testJSONLimits
+        ) == value)
+    }
+
+    @Test("Mismatched JSON containers are rejected before decoding")
+    func mismatchedContainers() {
+        let data = Data(#"{"values":[1,2}}"#.utf8)
+
+        expectIPCError(.jsonDecodingFailed) {
+            try TorrentEngineIPCJSONCodec.decode(
+                RejectIfDecoded.self,
+                from: data,
+                maximumBytes: data.count,
+                limits: testJSONLimits
+            )
+        }
+    }
+
+    @Test("Trailing JSON values are rejected before decoding")
+    func trailingValue() {
+        let data = Data(#"{} []"#.utf8)
+
+        expectIPCError(.jsonDecodingFailed) {
+            try TorrentEngineIPCJSONCodec.decode(
+                RejectIfDecoded.self,
+                from: data,
+                maximumBytes: data.count,
+                limits: testJSONLimits
+            )
+        }
+    }
+
+    @Test("JSON depth accepts the exact boundary and rejects the next container")
+    func JSONDepth() throws {
+        let acceptedText = String(repeating: "[", count: 32)
+            + "0"
+            + String(repeating: "]", count: 32)
+        try TorrentEngineIPCJSONCodec.preflightForFuzzing(
+            Data(acceptedText.utf8),
+            limits: testJSONLimits
+        )
+
+        let rejectedText = String(repeating: "[", count: 33)
+            + "0"
+            + String(repeating: "]", count: 33)
+        let rejected = Data(rejectedText.utf8)
+
+        expectIPCError(.jsonDecodingFailed) {
+            try TorrentEngineIPCJSONCodec.decode(
+                RejectIfDecoded.self,
+                from: rejected,
+                maximumBytes: rejected.count,
+                limits: testJSONLimits
+            )
+        }
+    }
 
     private func pollResponse(interfaceCount: Int) -> TorrentEngineIPCPollResponse {
         TorrentEngineIPCPollResponse(

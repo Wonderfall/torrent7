@@ -7,6 +7,9 @@ engineering, but are not part of the shipped app product.
 the fuzz harnesses own their scripts, corpora, fuzz-only dependencies, and
 generated artifacts without changing app targets or production build settings.
 
+`IPCFuzzing/` contains the coverage-guided libFuzzer target for the production
+bounded-JSON preflight at the XPC trust boundary.
+
 `XPCIntegrationHost/` contains the executable harness packaged by
 `Scripts/test-enhanced-security-extension.zsh` to exercise the Enhanced Security
 extension through its real ExtensionFoundation and XPC boundary. The script is

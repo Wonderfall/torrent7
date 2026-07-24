@@ -553,7 +553,6 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             let response: TorrentEngineIPCAddedTorrentResponse = try await invoke(
                 .addTorrentFile,
                 TorrentEngineIPCAddTorrentFileRequest(
-                    torrentData: data,
                     folderCapabilityID: folder.capabilityID,
                     filePriorities: priorityEntries,
                     startsPaused: startsPaused,
@@ -561,7 +560,8 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                     enablePeerExchange: enablePeerExchange,
                     allowNonHTTPSTrackers: allowNonHTTPSTrackers,
                     allowNonHTTPSWebSeeds: allowNonHTTPSWebSeeds
-                )
+                ),
+                attachment: data
             )
             capabilitiesByCanonicalPath[folder.path] = CapabilityRecord(
                 id: folder.capabilityID,
@@ -582,7 +582,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         }
         let response: TorrentEngineIPCFilePreviewResponse = try await invokeRaw(
             .previewTorrentFile,
-            payload: data
+            attachment: data
         )
         return TorrentFilePreview(
             name: response.name,
@@ -919,15 +919,11 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                 throw TorrentEngineClientError.invalidReply
             }
             encodedByteCount += page.encodedItems.count
-            let pageValues = try TorrentEngineIPCPropertyListCodec.decode(
+            let pageValues = try TorrentEngineIPCJSONCodec.decode(
                 [Value].self,
                 from: page.encodedItems,
                 maximumBytes: TorrentEngineIPCLimits.maximumDatasetPageBytes,
-                decodingLimits: .init(
-                    maximumContainerElementCount:
-                        TorrentEngineIPCLimits.maximumDatasetPageItemCount,
-                    maximumCollectionReferenceCount: 128 * 1_024
-                )
+                limits: TorrentEngineIPCLimits.datasetPageJSONLimits
             )
             guard !pageValues.isEmpty else {
                 throw TorrentEngineClientError.invalidReply
@@ -1055,26 +1051,33 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
 
     private func invoke<Request: Encodable & Sendable, Response: Decodable & Sendable>(
         _ operation: TorrentEngineIPCOperation,
-        _ request: Request
+        _ request: Request,
+        attachment: Data? = nil
     ) async throws -> Response {
         guard let engineEpoch else {
             let error = TorrentEngineClientError.connectionFailed
             terminalize(error)
             throw error
         }
-        let payload = try TorrentEngineIPCPropertyListCodec.encode(
+        let payload = try TorrentEngineIPCJSONCodec.encode(
             request,
-            maximumBytes: operation.maximumRequestPayloadBytes
+            maximumBytes: operation.maximumRequestPayloadBytes,
+            limits: operation.requestJSONLimits
         )
-        let reply = try await send(operation: operation, payload: payload, expectedEpoch: engineEpoch)
+        let reply = try await send(
+            operation: operation,
+            payload: payload,
+            attachment: attachment,
+            expectedEpoch: engineEpoch
+        )
         return try decodeValidatedResponse(reply, for: operation)
     }
 
     private func invokeRaw<Response: Decodable & Sendable>(
         _ operation: TorrentEngineIPCOperation,
-        payload: Data
+        attachment: Data
     ) async throws -> Response {
-        guard payload.count <= operation.maximumRequestPayloadBytes else {
+        guard attachment.count <= operation.maximumRequestAttachmentBytes else {
             throw TorrentEngineClientError.serviceRejected(
                 "The torrent file exceeds the supported size limit."
             )
@@ -1086,7 +1089,8 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         }
         let reply = try await send(
             operation: operation,
-            payload: payload,
+            payload: nil,
+            attachment: attachment,
             expectedEpoch: engineEpoch
         )
         return try decodeValidatedResponse(reply, for: operation)
@@ -1125,9 +1129,10 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         _ operation: TorrentEngineIPCOperation,
         _ request: Request
     ) async throws -> (Response, UUID) {
-        let payload = try TorrentEngineIPCPropertyListCodec.encode(
+        let payload = try TorrentEngineIPCJSONCodec.encode(
             request,
-            maximumBytes: operation.maximumRequestPayloadBytes
+            maximumBytes: operation.maximumRequestPayloadBytes,
+            limits: operation.requestJSONLimits
         )
         let reply = try await send(operation: operation, payload: payload, expectedEpoch: nil)
         let response: Response = try decodeValidatedResponse(reply, for: operation)
@@ -1142,11 +1147,11 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             guard let replyPayload = reply.payload else {
                 throw TorrentEngineClientError.invalidReply
             }
-            let response = try TorrentEngineIPCPropertyListCodec.decode(
+            let response = try TorrentEngineIPCJSONCodec.decode(
                 Response.self,
                 from: replyPayload,
                 maximumBytes: operation.maximumReplyPayloadBytes,
-                decodingLimits: operation.propertyListDecodingLimits
+                limits: operation.replyJSONLimits
             )
             try TorrentEngineClientResponseValidator.validate(response)
             return response
@@ -1162,6 +1167,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     private func send(
         operation: TorrentEngineIPCOperation,
         payload: Data?,
+        attachment: Data? = nil,
         expectedEpoch: UUID?
     ) async throws -> TorrentEngineIPCReply {
         let clock = ContinuousClock()
@@ -1202,7 +1208,8 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             let reply = try await transport.send(
                 TorrentEngineIPCRequest(
                     header: header,
-                    payload: payload
+                    payload: payload,
+                    attachment: attachment
                 ),
                 deadline: deadline
             )

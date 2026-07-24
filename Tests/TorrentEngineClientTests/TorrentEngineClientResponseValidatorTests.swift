@@ -229,8 +229,8 @@ struct TorrentEngineClientResponseValidatorTests {
         }
     }
 
-    @Test("Inconsistent piece metadata fails during decoding")
-    func rejectsInconsistentPieceMapDuringDecoding() throws {
+    @Test("Inconsistent piece metadata fails during encoding")
+    func rejectsInconsistentPieceMapDuringEncoding() {
         let inconsistent = TorrentPieceMap(
             totalPieces: 2,
             completedPieces: 1,
@@ -239,61 +239,57 @@ struct TorrentEngineClientResponseValidatorTests {
             isMapTruncated: false,
             pieces: [1]
         )
-        let data = try TorrentEngineIPCPropertyListCodec.encode(
-            inconsistent,
-            maximumBytes: maximumPayloadBytes
-        )
 
         #expect(throws: TorrentEngineIPCError.self) {
-            let _: TorrentPieceMap = try TorrentEngineIPCPropertyListCodec.decode(
-                from: data,
-                maximumBytes: maximumPayloadBytes
+            try TorrentEngineIPCJSONCodec.encode(
+                inconsistent,
+                maximumBytes: maximumPayloadBytes,
+                limits: TorrentEngineIPCLimits.pieceMapReplyJSONLimits
             )
         }
     }
 
     @Test("An over-bound piece map fails during decoding")
     func rejectsOverBoundPieceMapDuringDecoding() throws {
-        let inconsistent = TorrentPieceMap(
-            totalPieces: Int(Int32.max) + 1,
-            completedPieces: 0,
-            availablePieces: 0,
-            isMapAvailable: false,
-            isMapTruncated: true,
-            pieces: []
-        )
-        let data = try TorrentEngineIPCPropertyListCodec.encode(
-            inconsistent,
-            maximumBytes: maximumPayloadBytes
+        let data = Data(
+            #"{"totalPieces":2147483648,"completedPieces":0,"availablePieces":0,"isMapAvailable":false,"isMapTruncated":true,"pieces":""}"#.utf8
         )
 
         #expect(throws: TorrentEngineIPCError.self) {
-            let _: TorrentPieceMap = try TorrentEngineIPCPropertyListCodec.decode(
+            let _: TorrentPieceMap = try TorrentEngineIPCJSONCodec.decode(
                 from: data,
-                maximumBytes: maximumPayloadBytes
+                maximumBytes: maximumPayloadBytes,
+                limits: TorrentEngineIPCLimits.pieceMapReplyJSONLimits
             )
         }
     }
 
-    @Test("Invalid piece states fail during decoding")
-    func rejectsInvalidPieceStateDuringDecoding() throws {
-        let inconsistent = TorrentPieceMap(
-            totalPieces: 1,
-            completedPieces: 1,
-            availablePieces: 1,
-            isMapAvailable: true,
-            isMapTruncated: false,
-            pieces: [2]
-        )
-        let data = try TorrentEngineIPCPropertyListCodec.encode(
-            inconsistent,
-            maximumBytes: maximumPayloadBytes
+    @Test("Nonzero unused piece bits fail during decoding")
+    func rejectsNonzeroUnusedPieceBitsDuringDecoding() {
+        let data = Data(
+            #"{"totalPieces":1,"completedPieces":0,"availablePieces":1,"isMapAvailable":true,"isMapTruncated":false,"pieces":"Ag=="}"#.utf8
         )
 
         #expect(throws: TorrentEngineIPCError.self) {
-            let _: TorrentPieceMap = try TorrentEngineIPCPropertyListCodec.decode(
+            let _: TorrentPieceMap = try TorrentEngineIPCJSONCodec.decode(
                 from: data,
-                maximumBytes: maximumPayloadBytes
+                maximumBytes: maximumPayloadBytes,
+                limits: TorrentEngineIPCLimits.pieceMapReplyJSONLimits
+            )
+        }
+    }
+
+    @Test("Incorrect packed piece-map length fails during decoding")
+    func rejectsIncorrectPackedPieceMapLengthDuringDecoding() {
+        let data = Data(
+            #"{"totalPieces":9,"completedPieces":0,"availablePieces":9,"isMapAvailable":true,"isMapTruncated":false,"pieces":"AA=="}"#.utf8
+        )
+
+        #expect(throws: TorrentEngineIPCError.self) {
+            let _: TorrentPieceMap = try TorrentEngineIPCJSONCodec.decode(
+                from: data,
+                maximumBytes: maximumPayloadBytes,
+                limits: TorrentEngineIPCLimits.pieceMapReplyJSONLimits
             )
         }
     }
@@ -338,13 +334,15 @@ struct TorrentEngineClientResponseValidatorTests {
     }
 
     private func roundTrip<Value: Codable & Sendable>(_ value: Value) throws -> Value {
-        let data = try TorrentEngineIPCPropertyListCodec.encode(
+        let data = try TorrentEngineIPCJSONCodec.encode(
             value,
-            maximumBytes: maximumPayloadBytes
+            maximumBytes: maximumPayloadBytes,
+            limits: TorrentEngineIPCLimits.maximumJSONLimits
         )
-        return try TorrentEngineIPCPropertyListCodec.decode(
+        return try TorrentEngineIPCJSONCodec.decode(
             from: data,
-            maximumBytes: maximumPayloadBytes
+            maximumBytes: maximumPayloadBytes,
+            limits: TorrentEngineIPCLimits.maximumJSONLimits
         )
     }
 

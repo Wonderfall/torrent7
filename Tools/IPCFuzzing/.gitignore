@@ -1,0 +1,4 @@
+.DS_Store
+/libfuzzer-build/
+/libfuzzer-artifacts/
+/swift-build/

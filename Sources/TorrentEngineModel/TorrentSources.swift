@@ -237,13 +237,11 @@ package struct TorrentPieceMap: Codable, Equatable, Sendable {
         let availablePieces = try values.decode(Int.self, forKey: .availablePieces)
         let isMapAvailable = try values.decode(Bool.self, forKey: .isMapAvailable)
         let isMapTruncated = try values.decode(Bool.self, forKey: .isMapTruncated)
-        let pieces = try values.decode([UInt8].self, forKey: .pieces)
         guard totalPieces >= 0,
               totalPieces <= Int(Int32.max),
               (0...totalPieces).contains(completedPieces),
               (0...min(totalPieces, TorrentEngineLimits.maximumPieceMapCount))
                 .contains(availablePieces),
-              pieces.count == availablePieces,
               isMapAvailable == (availablePieces > 0),
               isMapTruncated == (availablePieces < totalPieces) else {
             throw DecodingError.dataCorrupted(
@@ -253,11 +251,37 @@ package struct TorrentPieceMap: Codable, Equatable, Sendable {
                 )
             )
         }
+        let packedPieces = try values.decode(Data.self, forKey: .pieces)
+        let expectedPackedByteCount = (availablePieces + 7) / 8
+        guard packedPieces.count == expectedPackedByteCount else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .pieces,
+                in: values,
+                debugDescription: "The packed piece map has an inconsistent size."
+            )
+        }
+        let packedBytes = [UInt8](packedPieces)
+        let usedTrailingBits = availablePieces % 8
+        if usedTrailingBits != 0, let lastByte = packedBytes.last {
+            let allowedMask = UInt8((1 << usedTrailingBits) - 1)
+            guard lastByte & ~allowedMask == 0 else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .pieces,
+                    in: values,
+                    debugDescription: "The packed piece map has nonzero unused bits."
+                )
+            }
+        }
+        var pieces = [UInt8]()
+        pieces.reserveCapacity(availablePieces)
+        for index in 0..<availablePieces {
+            let byte = packedBytes[index / 8]
+            pieces.append((byte >> (index % 8)) & 1)
+        }
         let availableCompletedPieces = pieces.reduce(into: 0) { count, piece in
             count += piece == 0 ? 0 : 1
         }
-        guard pieces.allSatisfy({ $0 <= 1 }),
-              availableCompletedPieces <= completedPieces,
+        guard availableCompletedPieces <= completedPieces,
               isMapTruncated || availableCompletedPieces == completedPieces else {
             throw DecodingError.dataCorrupted(
                 .init(
@@ -277,13 +301,40 @@ package struct TorrentPieceMap: Codable, Equatable, Sendable {
     }
 
     package func encode(to encoder: any Encoder) throws {
+        let availableCompletedPieces = pieces.reduce(into: 0) { count, piece in
+            count += piece == 0 ? 0 : 1
+        }
+        guard totalPieces >= 0,
+              totalPieces <= Int(Int32.max),
+              (0...totalPieces).contains(completedPieces),
+              (0...min(totalPieces, TorrentEngineLimits.maximumPieceMapCount))
+                .contains(availablePieces),
+              pieces.count == availablePieces,
+              isMapAvailable == (availablePieces > 0),
+              isMapTruncated == (availablePieces < totalPieces),
+              pieces.allSatisfy({ $0 <= 1 }),
+              availableCompletedPieces <= completedPieces,
+              isMapTruncated || availableCompletedPieces == completedPieces else {
+            throw EncodingError.invalidValue(
+                self,
+                .init(
+                    codingPath: encoder.codingPath,
+                    debugDescription: "The piece map cannot be packed safely."
+                )
+            )
+        }
         var values = encoder.container(keyedBy: CodingKeys.self)
         try values.encode(totalPieces, forKey: .totalPieces)
         try values.encode(completedPieces, forKey: .completedPieces)
         try values.encode(availablePieces, forKey: .availablePieces)
         try values.encode(isMapAvailable, forKey: .isMapAvailable)
         try values.encode(isMapTruncated, forKey: .isMapTruncated)
-        try values.encode(pieces, forKey: .pieces)
+        var packedPieces = [UInt8](repeating: 0, count: (pieces.count + 7) / 8)
+        // Piece index n occupies bit n % 8, least-significant bit first.
+        for (index, piece) in pieces.enumerated() where piece != 0 {
+            packedPieces[index / 8] |= UInt8(1 << (index % 8))
+        }
+        try values.encode(Data(packedPieces), forKey: .pieces)
     }
 
     package var progress: Double {

@@ -88,11 +88,15 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
   checking, and pointer-authentication settings for both Swift executables.
 - **Authenticated, bounded IPC:** identified builds require the exact app/helper
   signing identifiers from the same Team ID. Versioned envelopes, operation-specific
-  payload limits, pre-decode binary-property-list structure limits, epochs,
-  monotonic sequences, replay identifiers, queue budgets, typed failures, and
-  semantic response validation constrain both sides of the XPC boundary.
-  Property-list messages are container-rooted; the bounded raw torrent-preview
-  request receives a metadata-only response. Commit-ambiguous response
+  JSON and raw-attachment limits, pre-decode JSON depth, value-node, and
+  individual string/primitive limits,
+  epochs, monotonic sequences, replay identifiers, queue budgets, typed
+  failures, and semantic response validation constrain both sides of the XPC
+  boundary. JSON cannot alias values, so repeated decoded leaf content must
+  consume repeated bounded wire bytes. Typed JSON messages are container-rooted;
+  bounded raw torrent bytes travel separately for preview and add operations,
+  while dense piece maps use a validated bit-packed `Data` field. Neither raw
+  attachment is echoed in a response. Commit-ambiguous response
   serialization failures close the controller instead of being reported as
   definite rejections. Errors
   after native add begins receive the same treatment because libtorrent may have

@@ -159,7 +159,6 @@ package struct TorrentEngineIPCFilePriorityEntry: Codable, Equatable, Sendable {
 }
 
 package struct TorrentEngineIPCAddTorrentFileRequest: Codable, Equatable, Sendable {
-    package let torrentData: Data
     package let folderCapabilityID: UUID
     package let filePriorities: [TorrentEngineIPCFilePriorityEntry]?
     package let startsPaused: Bool
@@ -169,7 +168,6 @@ package struct TorrentEngineIPCAddTorrentFileRequest: Codable, Equatable, Sendab
     package let allowNonHTTPSWebSeeds: Bool
 
     package init(
-        torrentData: Data,
         folderCapabilityID: UUID,
         filePriorities: [TorrentEngineIPCFilePriorityEntry]?,
         startsPaused: Bool,
@@ -178,7 +176,6 @@ package struct TorrentEngineIPCAddTorrentFileRequest: Codable, Equatable, Sendab
         allowNonHTTPSTrackers: Bool,
         allowNonHTTPSWebSeeds: Bool
     ) {
-        self.torrentData = torrentData
         self.folderCapabilityID = folderCapabilityID
         self.filePriorities = filePriorities
         self.startsPaused = startsPaused
@@ -189,10 +186,8 @@ package struct TorrentEngineIPCAddTorrentFileRequest: Codable, Equatable, Sendab
     }
 }
 
-/// A dictionary-rooted add response suitable for binary property-list encoding.
-///
-/// `PropertyListEncoder` rejects scalar top-level values, so torrent identifiers
-/// must never be encoded as a bare `String` on the XPC wire.
+/// A keyed add response that preserves the container-root wire invariant and
+/// leaves room for future response metadata.
 package struct TorrentEngineIPCAddedTorrentResponse: Codable, Equatable, Sendable {
     package let identifier: String
 

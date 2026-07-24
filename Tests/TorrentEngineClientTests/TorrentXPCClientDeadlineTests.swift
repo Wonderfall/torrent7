@@ -274,9 +274,10 @@ private func queueDeadlineReply<Value: Encodable & Sendable>(
         header: request.header,
         engineEpoch: epoch,
         status: .success,
-        payload: try TorrentEngineIPCPropertyListCodec.encode(
+        payload: try TorrentEngineIPCJSONCodec.encode(
             value,
-            maximumBytes: request.header.operation.maximumReplyPayloadBytes
+            maximumBytes: request.header.operation.maximumReplyPayloadBytes,
+            limits: request.header.operation.replyJSONLimits
         )
     )
 }

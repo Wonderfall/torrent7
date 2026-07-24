@@ -449,10 +449,16 @@ package enum TorrentEngineExtensionConfiguration {
         do {
             metadata = try TorrentEngineIPCEnvelopeCodec.inspectRequest(message)
             guard metadata.payloadByteCount
-                    <= metadata.header.operation.maximumRequestPayloadBytes else {
+                    <= metadata.header.operation.maximumRequestPayloadBytes,
+                  metadata.attachmentByteCount
+                    <= metadata.header.operation.maximumRequestAttachmentBytes,
+                  !metadata.hasPayload
+                    || metadata.header.operation.maximumRequestPayloadBytes > 0,
+                  !metadata.hasAttachment
+                    || metadata.header.operation.maximumRequestAttachmentBytes > 0 else {
                 throw TorrentEngineIPCError.payloadTooLarge(
-                    actual: metadata.payloadByteCount,
-                    maximum: metadata.header.operation.maximumRequestPayloadBytes
+                    actual: metadata.totalByteCount,
+                    maximum: TorrentEngineIPCLimits.maximumPayloadBytes
                 )
             }
         } catch {
@@ -476,10 +482,10 @@ package enum TorrentEngineExtensionConfiguration {
                 return
             }
             guard state.queuedRequestCount < Self.maximumQueuedRequestCount,
-                  metadata.payloadByteCount <= Self.maximumQueuedPayloadBytes
+                  metadata.totalByteCount <= Self.maximumQueuedPayloadBytes
                     - state.queuedPayloadByteCount,
                   let admission = admissionBudget.acquireRequest(
-                    payloadByteCount: metadata.payloadByteCount
+                    payloadByteCount: metadata.totalByteCount
                   ) else {
                 sessionToCancel = session
                 return
@@ -505,7 +511,9 @@ package enum TorrentEngineExtensionConfiguration {
             request = try TorrentEngineIPCEnvelopeCodec.decodeRequest(
                 message,
                 metadata: metadata,
-                maximumPayloadBytes: metadata.header.operation.maximumRequestPayloadBytes
+                maximumPayloadBytes: metadata.header.operation.maximumRequestPayloadBytes,
+                maximumAttachmentBytes:
+                    metadata.header.operation.maximumRequestAttachmentBytes
             )
         } catch {
             requestDidFinish(requestAdmission)

@@ -134,20 +134,29 @@ static analysis, compiler hardening, or tests.
 
 ### Use a versioned, fail-closed XPC protocol
 
-Requests and replies use typed binary-property-list payloads inside a strict XPC
-envelope, except that torrent preview sends the already-bounded file bytes
-directly and receives only typed metadata. The protocol includes a version,
-request ID, operation ID, controller ID, strictly increasing sequence,
-operation, and expected engine epoch.
+Requests and replies use typed JSON payloads inside a strict XPC envelope.
+Torrent preview and add operations carry the already-bounded torrent bytes in a
+separate raw XPC-data attachment; add metadata remains typed JSON, and neither
+operation echoes the raw bytes. The protocol includes a version, request ID,
+operation ID, controller ID, strictly increasing sequence, operation, and
+expected engine epoch.
 
 The following are protocol invariants:
 
-- operation-specific request and reply byte limits are checked before decode;
-- binary-property-list object tables, per-container elements, and aggregate
-  collection references are structurally bounded before Foundation decoding;
-- every property-list payload uses a keyed or collection root; scalar add/remove
-  results are wrapped in explicit response messages because Foundation rejects
-  scalar property-list roots;
+- operation-specific JSON, raw-attachment, and reply byte limits are checked
+  before either request resource is copied or decoded;
+- JSON payloads are container-rooted, and nesting depth, decoded value-node
+  count, individual string bytes, and individual primitive bytes are bounded
+  before Foundation decoding; JSON has no aliases or object references, so
+  repeated values necessarily consume repeated bounded wire bytes;
+- duplicate JSON payload names deliberately follow Foundation's decoding
+  behavior; payloads have one receiver, are not signed or canonically hashed,
+  and remain subject to typed decoding plus semantic validation, so the
+  allocation preflight does not grow into a second JSON parser;
+- dense piece maps are bit-packed into a base64 `Data` field with exact length
+  and unused-bit validation rather than represented as millions of JSON numbers;
+- scalar add/remove results are wrapped in explicit keyed response messages to
+  preserve the container-root protocol invariant;
 - unknown, missing, duplicate, mistyped, or unexpected envelope fields fail;
 - request and reply envelopes carry no file descriptors;
 - request IDs and operation IDs are replay checked;
@@ -192,8 +201,8 @@ applying only the latest settings;
   typed cleanup episode begins, while identity, protocol, and semantic failures
   are never made retryable;
 - change notifications are coalesced hints only; the client inspects their
-  fixed-size envelope metadata without copying a payload or acquiring a file
-  descriptor, and revisions remain authoritative.
+  fixed-size envelope metadata without copying payload resources, and revisions
+  remain authoritative.
 
 Ad-hoc signatures do not have a Team ID. Local development builds therefore use
 an explicit reduced-assurance Info.plist switch on both bundles. Identified
@@ -478,9 +487,10 @@ the explicit ASan runtime and its Xcode RPATH. `LC_DYLD_ENVIRONMENT` is forbidde
 - Identified XPC peers require exact same-team signing identifiers in both
   directions. Reduced-assurance ad-hoc mode is explicit and development-only.
 - No decoded XPC value becomes engine or GUI state without operation-specific
-  byte bounds, structural binary-plist bounds, and semantic validation.
-- Property-list wire payloads are container-rooted. The sole raw preview request
-  is independently byte-bounded and is not echoed in the response. A response
+  byte bounds, pre-decode JSON depth, value-node, string, and primitive bounds,
+  and semantic validation.
+- JSON wire payloads are container-rooted. Raw torrent attachments for preview
+  and add are independently byte-bounded and are not echoed in responses. A response
   serialization failure is commit-ambiguous and terminates the controller
   rather than masquerading as a definite operation rejection.
 - Requests are serialized and bound to one controller, monotonic sequence, and

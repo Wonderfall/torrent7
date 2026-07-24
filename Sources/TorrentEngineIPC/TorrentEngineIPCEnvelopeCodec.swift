@@ -14,21 +14,31 @@ package enum TorrentEngineIPCField {
     package static let failureCode = "failureCode"
     package static let errorMessage = "error"
     package static let payload = "payload"
+    package static let attachment = "attachment"
 }
 
 package struct TorrentEngineIPCRequestMetadata: Equatable, Sendable {
     package let header: TorrentEngineIPCHeader
     package let hasPayload: Bool
     package let payloadByteCount: Int
+    package let hasAttachment: Bool
+    package let attachmentByteCount: Int
+    package let totalByteCount: Int
 
     package init(
         header: TorrentEngineIPCHeader,
         hasPayload: Bool,
-        payloadByteCount: Int
+        payloadByteCount: Int,
+        hasAttachment: Bool,
+        attachmentByteCount: Int,
+        totalByteCount: Int
     ) {
         self.header = header
         self.hasPayload = hasPayload
         self.payloadByteCount = payloadByteCount
+        self.hasAttachment = hasAttachment
+        self.attachmentByteCount = attachmentByteCount
+        self.totalByteCount = totalByteCount
     }
 }
 
@@ -44,7 +54,9 @@ package enum TorrentEngineIPCEnvelopeCodec {
         TorrentEngineIPCField.payload,
     ]
 
-    private static let requestFields = commonFields
+    private static let requestFields = commonFields.union([
+        TorrentEngineIPCField.attachment,
+    ])
     private static let replyFields = commonFields.union([
         TorrentEngineIPCField.engineEpoch,
         TorrentEngineIPCField.status,
@@ -54,10 +66,20 @@ package enum TorrentEngineIPCEnvelopeCodec {
 
     package static func encode(
         _ request: TorrentEngineIPCRequest,
-        maximumPayloadBytes: Int
+        maximumPayloadBytes: Int,
+        maximumAttachmentBytes: Int = 0
     ) throws -> XPCDictionary {
         try TorrentEngineIPCPayloadBounds.validateMaximum(maximumPayloadBytes)
+        try TorrentEngineIPCPayloadBounds.validateMaximum(maximumAttachmentBytes)
         try validate(request.header)
+        try validateRequestResources(
+            hasPayload: request.payload != nil,
+            payloadByteCount: request.payload?.count ?? 0,
+            maximumPayloadBytes: maximumPayloadBytes,
+            hasAttachment: request.attachment != nil,
+            attachmentByteCount: request.attachment?.count ?? 0,
+            maximumAttachmentBytes: maximumAttachmentBytes
+        )
 
         var dictionary = encodeHeader(request.header)
         try TorrentEngineIPCXPCValues.insertPayload(
@@ -65,30 +87,38 @@ package enum TorrentEngineIPCEnvelopeCodec {
             into: &dictionary,
             maximumBytes: maximumPayloadBytes
         )
+        try TorrentEngineIPCXPCValues.insertPayload(
+            request.attachment,
+            into: &dictionary,
+            maximumBytes: maximumAttachmentBytes,
+            field: TorrentEngineIPCField.attachment
+        )
         return dictionary
     }
 
     package static func decodeRequest(
         _ dictionary: XPCDictionary,
-        maximumPayloadBytes: Int
+        maximumPayloadBytes: Int,
+        maximumAttachmentBytes: Int = 0
     ) throws -> TorrentEngineIPCRequest {
         try TorrentEngineIPCPayloadBounds.validateMaximum(maximumPayloadBytes)
+        try TorrentEngineIPCPayloadBounds.validateMaximum(maximumAttachmentBytes)
         let metadata = try inspectRequest(dictionary)
-        guard metadata.payloadByteCount <= maximumPayloadBytes else {
-            throw TorrentEngineIPCError.payloadTooLarge(
-                actual: metadata.payloadByteCount,
-                maximum: maximumPayloadBytes
-            )
-        }
+        try validateRequestResources(
+            metadata,
+            maximumPayloadBytes: maximumPayloadBytes,
+            maximumAttachmentBytes: maximumAttachmentBytes
+        )
         return try decodeRequest(
             dictionary,
             metadata: metadata,
-            maximumPayloadBytes: maximumPayloadBytes
+            maximumPayloadBytes: maximumPayloadBytes,
+            maximumAttachmentBytes: maximumAttachmentBytes
         )
     }
 
     /// Validates the request envelope and reads only fixed-size header fields and
-    /// XPC object metadata. The payload is not copied.
+    /// XPC object metadata. Payload resources are not copied.
     package static func inspectRequest(
         _ dictionary: XPCDictionary
     ) throws -> TorrentEngineIPCRequestMetadata {
@@ -97,10 +127,21 @@ package enum TorrentEngineIPCEnvelopeCodec {
         let payloadByteCount = try TorrentEngineIPCXPCValues.payloadByteCount(
             in: dictionary
         )
+        let attachmentByteCount = try TorrentEngineIPCXPCValues.payloadByteCount(
+            in: dictionary,
+            field: TorrentEngineIPCField.attachment
+        )
+        let totalByteCount = try requestTotalByteCount(
+            payloadByteCount: payloadByteCount,
+            attachmentByteCount: attachmentByteCount
+        )
         return TorrentEngineIPCRequestMetadata(
             header: header,
             hasPayload: dictionary.keys.contains(TorrentEngineIPCField.payload),
-            payloadByteCount: payloadByteCount
+            payloadByteCount: payloadByteCount,
+            hasAttachment: dictionary.keys.contains(TorrentEngineIPCField.attachment),
+            attachmentByteCount: attachmentByteCount,
+            totalByteCount: totalByteCount
         )
     }
 
@@ -108,25 +149,32 @@ package enum TorrentEngineIPCEnvelopeCodec {
     package static func decodeRequest(
         _ dictionary: XPCDictionary,
         metadata: TorrentEngineIPCRequestMetadata,
-        maximumPayloadBytes: Int
+        maximumPayloadBytes: Int,
+        maximumAttachmentBytes: Int = 0
     ) throws -> TorrentEngineIPCRequest {
         try TorrentEngineIPCPayloadBounds.validateMaximum(maximumPayloadBytes)
+        try TorrentEngineIPCPayloadBounds.validateMaximum(maximumAttachmentBytes)
         guard try inspectRequest(dictionary) == metadata else {
             throw TorrentEngineIPCError.requestMetadataMismatch
         }
-        guard metadata.payloadByteCount <= maximumPayloadBytes else {
-            throw TorrentEngineIPCError.payloadTooLarge(
-                actual: metadata.payloadByteCount,
-                maximum: maximumPayloadBytes
-            )
-        }
+        try validateRequestResources(
+            metadata,
+            maximumPayloadBytes: maximumPayloadBytes,
+            maximumAttachmentBytes: maximumAttachmentBytes
+        )
         let payload = try TorrentEngineIPCXPCValues.copyPayload(
             from: dictionary,
             maximumBytes: maximumPayloadBytes
         )
+        let attachment = try TorrentEngineIPCXPCValues.copyPayload(
+            from: dictionary,
+            maximumBytes: maximumAttachmentBytes,
+            field: TorrentEngineIPCField.attachment
+        )
         return TorrentEngineIPCRequest(
             header: metadata.header,
-            payload: payload
+            payload: payload,
+            attachment: attachment
         )
     }
 
@@ -213,6 +261,77 @@ package enum TorrentEngineIPCEnvelopeCodec {
             errorMessage: errorMessage,
             payload: payload
         )
+    }
+
+    private static func validateRequestResources(
+        _ metadata: TorrentEngineIPCRequestMetadata,
+        maximumPayloadBytes: Int,
+        maximumAttachmentBytes: Int
+    ) throws {
+        try validateRequestResources(
+            hasPayload: metadata.hasPayload,
+            payloadByteCount: metadata.payloadByteCount,
+            maximumPayloadBytes: maximumPayloadBytes,
+            hasAttachment: metadata.hasAttachment,
+            attachmentByteCount: metadata.attachmentByteCount,
+            maximumAttachmentBytes: maximumAttachmentBytes
+        )
+        let totalByteCount = try requestTotalByteCount(
+            payloadByteCount: metadata.payloadByteCount,
+            attachmentByteCount: metadata.attachmentByteCount
+        )
+        guard metadata.totalByteCount == totalByteCount else {
+            throw TorrentEngineIPCError.requestMetadataMismatch
+        }
+    }
+
+    private static func validateRequestResources(
+        hasPayload: Bool,
+        payloadByteCount: Int,
+        maximumPayloadBytes: Int,
+        hasAttachment: Bool,
+        attachmentByteCount: Int,
+        maximumAttachmentBytes: Int
+    ) throws {
+        if hasPayload && maximumPayloadBytes == 0 {
+            throw TorrentEngineIPCError.unexpectedField(TorrentEngineIPCField.payload)
+        }
+        if hasAttachment && maximumAttachmentBytes == 0 {
+            throw TorrentEngineIPCError.unexpectedField(TorrentEngineIPCField.attachment)
+        }
+        guard payloadByteCount <= maximumPayloadBytes else {
+            throw TorrentEngineIPCError.payloadTooLarge(
+                actual: payloadByteCount,
+                maximum: maximumPayloadBytes
+            )
+        }
+        guard attachmentByteCount <= maximumAttachmentBytes else {
+            throw TorrentEngineIPCError.payloadTooLarge(
+                actual: attachmentByteCount,
+                maximum: maximumAttachmentBytes
+            )
+        }
+        _ = try requestTotalByteCount(
+            payloadByteCount: payloadByteCount,
+            attachmentByteCount: attachmentByteCount
+        )
+    }
+
+    private static func requestTotalByteCount(
+        payloadByteCount: Int,
+        attachmentByteCount: Int
+    ) throws -> Int {
+        let sum = payloadByteCount.addingReportingOverflow(attachmentByteCount)
+        guard payloadByteCount >= 0,
+              attachmentByteCount >= 0,
+              !sum.overflow,
+              sum.partialValue <= TorrentEngineIPCLimits.maximumPayloadBytes else {
+            throw TorrentEngineIPCError.payloadTooLarge(
+                actual: sum.overflow ? Int.max : sum.partialValue,
+                maximum: TorrentEngineIPCLimits.maximumPayloadBytes
+            )
+        }
+        return sum.partialValue
     }
 
     private static func encodeHeader(_ header: TorrentEngineIPCHeader) -> XPCDictionary {

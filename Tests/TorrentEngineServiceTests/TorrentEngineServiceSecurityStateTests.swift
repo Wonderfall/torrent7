@@ -673,12 +673,13 @@ private func handshakeRequest(
             operationID: UUID(),
             expectedEpoch: nil
         ),
-        payload: try TorrentEngineIPCPropertyListCodec.encode(
+        payload: try TorrentEngineIPCJSONCodec.encode(
             TorrentEngineIPCHandshakeRequest(
                 enablePeerExchangePlugin: false,
                 folders: []
             ),
-            maximumBytes: operation.maximumRequestPayloadBytes
+            maximumBytes: operation.maximumRequestPayloadBytes,
+            limits: operation.requestJSONLimits
         )
     )
 }

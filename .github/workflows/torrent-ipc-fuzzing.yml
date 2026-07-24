@@ -1,0 +1,104 @@
+name: TorrentEngineIPC Fuzzing
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/torrent-ipc-fuzzing.yml"
+      - "Package.swift"
+      - "Scripts/verify-xcode.zsh"
+      - "Sources/TorrentEngineIPC/**"
+      - "Sources/TorrentEngineModel/**"
+      - "Tools/IPCFuzzing/**"
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    paths:
+      - ".github/workflows/torrent-ipc-fuzzing.yml"
+      - "Package.swift"
+      - "Scripts/verify-xcode.zsh"
+      - "Sources/TorrentEngineIPC/**"
+      - "Sources/TorrentEngineModel/**"
+      - "Tools/IPCFuzzing/**"
+  schedule:
+    - cron: "17 4 * * 4"
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  BASE_BRANCH: ${{ github.event.repository.default_branch }}
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+
+concurrency:
+  group: torrent-ipc-fuzzing-${{ github.event_name == 'schedule' && 'schedule' || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
+jobs:
+  fuzz:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    name: Fuzz
+    runs-on: macos-26
+    permissions: {}
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        shell: zsh {0}
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            checkout_ref="refs/pull/${PR_NUMBER}/merge"
+          elif [[ "$GITHUB_EVENT_NAME" == "schedule" ]]; then
+            checkout_ref="refs/heads/${BASE_BRANCH}"
+          else
+            checkout_ref="$GITHUB_REF"
+          fi
+
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin "$checkout_ref"
+          git checkout --detach FETCH_HEAD
+
+      - name: Verify Xcode toolchain
+        shell: zsh {0}
+        run: Scripts/verify-xcode.zsh
+
+      - name: Install libFuzzer runtime
+        shell: zsh {0}
+        run: brew install llvm
+
+      - name: Run IPC JSON fuzzing
+        shell: zsh {0}
+        env:
+          DEEP_RUNS: "1000000"
+          LIGHT_RUNS: "25000"
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" || "$GITHUB_EVENT_NAME" == "push" ]]; then
+            export RUNS="$LIGHT_RUNS"
+            export LIBFUZZER_ARGS="-timeout=10 -max_total_time=120"
+          else
+            export RUNS="$DEEP_RUNS"
+            export LIBFUZZER_ARGS="-timeout=10 -max_total_time=900"
+          fi
+          Tools/IPCFuzzing/run-libfuzzer.sh
+
+      - name: Upload fuzz failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ipc-fuzz-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            Tools/IPCFuzzing/libfuzzer-artifacts/crash-*
+            Tools/IPCFuzzing/libfuzzer-artifacts/timeout-*
+            Tools/IPCFuzzing/libfuzzer-artifacts/oom-*
+            Tools/IPCFuzzing/libfuzzer-artifacts/leak-*
+          if-no-files-found: ignore
+          retention-days: 14
