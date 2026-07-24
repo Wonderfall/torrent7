@@ -5,10 +5,7 @@ struct FooterBarContainer: View {
     @Environment(TorrentStore.self) private var store
     let torrentState: TorrentListState
     let selectionState: TorrentSelectionState
-    let selection: TorrentSidebarSelection
-    let searchText: String
-    let labelIDsForTorrent: (TorrentItem.ID) -> Set<TorrentLabel.ID>
-    let trackerHostsForTorrent: (TorrentItem.ID) -> Set<String>
+    let displayedTorrentCount: Int
     let openNetworkSettings: () -> Void
     let openTransfersSettings: () -> Void
 
@@ -87,25 +84,7 @@ struct FooterBarContainer: View {
         }
         return "No incoming listener has been observed yet."
     }
-
-    private var displayedTorrentCount: Int {
-        let scopedRows = torrentState.rows.filter { row in
-            selection.contains(
-                row,
-                labelIDs: labelIDsForTorrent(row.id),
-                trackerHosts: trackerHostsForTorrent(row.id)
-            )
-        }
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else {
-            return scopedRows.count
-        }
-        return scopedRows.filter { row in
-            row.name.localizedStandardContains(query)
-        }.count
-    }
 }
-
 
 private struct FooterBar: View {
     let networkInterfaceText: String

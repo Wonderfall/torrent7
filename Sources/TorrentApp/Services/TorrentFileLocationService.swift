@@ -1,13 +1,49 @@
 import Foundation
 import TorrentEngineModel
 
-protocol TorrentFileLocationServicing: AnyObject {
-    func revealURL(for torrent: TorrentItem) -> URL?
-    func revealURL(for torrent: TorrentItem, filePath: String) -> URL?
+protocol TorrentFileLocationServicing: Sendable {
+    func revealURL(for torrent: TorrentItem) async throws -> URL?
+    func revealURL(for torrent: TorrentItem, filePath: String) async throws -> URL?
+    func revealURLs(for torrents: [TorrentItem]) async throws -> [URL]
 }
 
-final class TorrentFileLocationService: TorrentFileLocationServicing {
-    func revealURL(for torrent: TorrentItem) -> URL? {
+struct TorrentFileLocationService: TorrentFileLocationServicing {
+    @concurrent
+    func revealURL(for torrent: TorrentItem) async throws -> URL? {
+        try Task.checkCancellation()
+        let url = resolveURL(for: torrent)
+        try Task.checkCancellation()
+        return url
+    }
+
+    @concurrent
+    func revealURL(for torrent: TorrentItem, filePath: String) async throws -> URL? {
+        try Task.checkCancellation()
+        let url = resolveURL(for: torrent, filePath: filePath)
+        try Task.checkCancellation()
+        return url
+    }
+
+    @concurrent
+    func revealURLs(for torrents: [TorrentItem]) async throws -> [URL] {
+        var urls = [URL]()
+        var paths = Set<String>()
+        urls.reserveCapacity(torrents.count)
+        for (index, torrent) in torrents.enumerated() {
+            if index.isMultiple(of: 32) {
+                try Task.checkCancellation()
+            }
+            guard let url = resolveURL(for: torrent),
+                  paths.insert(url.torrentFilePath).inserted else {
+                continue
+            }
+            urls.append(url)
+        }
+        try Task.checkCancellation()
+        return urls
+    }
+
+    private func resolveURL(for torrent: TorrentItem) -> URL? {
         let saveURL = URL(filePath: torrent.savePath, directoryHint: .isDirectory)
             .standardizedFileURL
             .resolvingSymlinksInPath()
@@ -15,21 +51,23 @@ final class TorrentFileLocationService: TorrentFileLocationServicing {
             .appending(path: torrent.name)
             .standardizedFileURL
             .resolvingSymlinksInPath()
-        var isDirectory = ObjCBool(false)
+        let fileManager = FileManager()
 
         if isURLStrictlyContained(itemURL, in: saveURL),
-           unsafe FileManager.default.fileExists(atPath: itemURL.torrentFilePath, isDirectory: &isDirectory) {
+           fileManager.fileExists(atPath: itemURL.torrentFilePath) {
             return itemURL
         }
 
-        guard unsafe FileManager.default.fileExists(atPath: saveURL.torrentFilePath, isDirectory: &isDirectory) else {
+        guard fileManager.fileExists(
+            atPath: saveURL.torrentFilePath
+        ) else {
             return nil
         }
 
         return saveURL
     }
 
-    func revealURL(for torrent: TorrentItem, filePath: String) -> URL? {
+    private func resolveURL(for torrent: TorrentItem, filePath: String) -> URL? {
         let saveURL = URL(filePath: torrent.savePath, directoryHint: .isDirectory)
             .standardizedFileURL
             .resolvingSymlinksInPath()
@@ -42,8 +80,8 @@ final class TorrentFileLocationService: TorrentFileLocationServicing {
             return nil
         }
 
-        var isDirectory = ObjCBool(false)
-        if unsafe FileManager.default.fileExists(atPath: itemURL.torrentFilePath, isDirectory: &isDirectory) {
+        let fileManager = FileManager()
+        if fileManager.fileExists(atPath: itemURL.torrentFilePath) {
             return itemURL
         }
 
@@ -55,8 +93,7 @@ final class TorrentFileLocationService: TorrentFileLocationServicing {
         }
 
         while isURLStrictlyContained(parentURL, in: saveURL) {
-            if unsafe FileManager.default.fileExists(atPath: parentURL.torrentFilePath, isDirectory: &isDirectory),
-               isDirectory.boolValue {
+            if directoryExists(at: parentURL) {
                 return parentURL
             }
 
@@ -69,8 +106,7 @@ final class TorrentFileLocationService: TorrentFileLocationServicing {
             parentURL = nextParentURL
         }
 
-        guard unsafe FileManager.default.fileExists(atPath: saveURL.torrentFilePath, isDirectory: &isDirectory),
-              isDirectory.boolValue else {
+        guard directoryExists(at: saveURL) else {
             return nil
         }
 
@@ -82,5 +118,14 @@ final class TorrentFileLocationService: TorrentFileLocationServicing {
         let directoryPath = directory.torrentFilePath
         let directoryPrefix = directoryPath.hasSuffix("/") ? directoryPath : "\(directoryPath)/"
         return path != directoryPath && path.hasPrefix(directoryPrefix)
+    }
+
+    private func directoryExists(at url: URL) -> Bool {
+        guard let values = try? url.resourceValues(
+            forKeys: [.isDirectoryKey]
+        ) else {
+            return false
+        }
+        return values.isDirectory == true
     }
 }

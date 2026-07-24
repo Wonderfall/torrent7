@@ -1,7 +1,7 @@
 import Foundation
 import TorrentEngineModel
 
-enum TorrentSidebarScope: String, CaseIterable, Identifiable {
+enum TorrentSidebarScope: String, CaseIterable, Identifiable, Sendable {
     case all
     case active
     case downloading

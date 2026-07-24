@@ -2,6 +2,17 @@ import AppKit
 import Foundation
 import TorrentEngineModel
 
+struct TorrentCompletionCandidate: Sendable {
+    let id: TorrentItem.ID
+    let name: String
+}
+
+struct TorrentCompletionProjection: Sendable {
+    let completedTorrents: [TorrentCompletionCandidate]
+    let completedIDs: Set<TorrentItem.ID>
+    let activeIDs: Set<TorrentItem.ID>
+}
+
 @MainActor
 protocol ApplicationActivationProviding {
     var isApplicationActive: Bool { get }
@@ -16,8 +27,23 @@ struct SharedApplicationActivationProvider: ApplicationActivationProviding {
 
 @MainActor
 final class TorrentCompletionNotifier {
+    private static let maximumPendingNotificationCount = 64
+
+    private struct Configuration: Equatable {
+        let isEnabled: Bool
+        let includesTorrentNames: Bool
+        let playsSound: Bool
+
+        init(settings: TorrentSettings) {
+            isEnabled = settings.completionNotificationsEnabled
+            includesTorrentNames = settings.completionNotificationNamesEnabled
+            playsSound = settings.completionNotificationSoundEnabled
+        }
+    }
+
     private struct PendingNotification: Sendable {
-        let torrentName: String?
+        let torrent: TorrentCompletionCandidate
+        let includesTorrentName: Bool
         let playsSound: Bool
     }
 
@@ -26,11 +52,15 @@ final class TorrentCompletionNotifier {
     private let dockTileService: TorrentDockTileServicing
     private let activationProvider: ApplicationActivationProviding
     private var baselineRefreshesRemaining = 2
+    private var observationGeneration: UInt64 = 0
+    private var configuration = Configuration(settings: TorrentSettings())
     private var badgeCount = 0
-    private var pendingNotifications = [PendingNotification]()
+    private var pendingNotifications = [TorrentCompletionCandidate]()
+    private var nextPendingNotificationIndex = 0
     private var notificationDrainTask: Task<Void, Never>?
     private var notificationDrainID: UUID?
     private var badgeTask: Task<Void, Never>?
+    private var badgeTaskID: UUID?
 
     init(
         history: TorrentCompletionHistoryStoring = TorrentCompletionHistoryStore(),
@@ -54,7 +84,31 @@ final class TorrentCompletionNotifier {
     }
 
     func beginBaseline() {
+        advanceObservationGeneration()
         baselineRefreshesRemaining = 2
+        pendingNotifications.removeAll()
+        nextPendingNotificationIndex = 0
+        notificationDrainTask?.cancel()
+    }
+
+    func updateConfiguration(_ settings: TorrentSettings) {
+        let updatedConfiguration = Configuration(settings: settings)
+        guard updatedConfiguration != configuration else {
+            return
+        }
+
+        if updatedConfiguration.isEnabled != configuration.isEnabled {
+            advanceObservationGeneration()
+        }
+        configuration = updatedConfiguration
+        notificationDrainTask?.cancel()
+        if !updatedConfiguration.isEnabled {
+            pendingNotifications.removeAll()
+            nextPendingNotificationIndex = 0
+            clearBadge()
+        } else if notificationDrainTask == nil {
+            startNotificationDrainIfNeeded()
+        }
     }
 
     func clearBadge() {
@@ -62,7 +116,18 @@ final class TorrentCompletionNotifier {
         dockTileService.updateCompletionBadge(count: 0)
         let notificationService = notificationService
         badgeTask?.cancel()
-        badgeTask = Task {
+        let taskID = UUID()
+        badgeTaskID = taskID
+        badgeTask = Task { @MainActor [
+            weak self,
+            notificationService
+        ] in
+            defer {
+                if let self, self.badgeTaskID == taskID {
+                    self.badgeTask = nil
+                    self.badgeTaskID = nil
+                }
+            }
             guard !Task.isCancelled else {
                 return
             }
@@ -70,96 +135,156 @@ final class TorrentCompletionNotifier {
         }
     }
 
-    func forget(_ ids: Set<TorrentItem.ID>) {
-        history.forget(ids)
+    func forget(_ ids: Set<TorrentItem.ID>) async {
+        try? await history.forget(ids)
     }
 
     func observeCompletedDownloads(
-        in snapshots: [TorrentItem],
-        previousTorrents: [TorrentItem],
-        settings: TorrentSettings,
+        in projection: TorrentCompletionProjection,
+        previousTorrentsWereEmpty: Bool,
         isEnabled: Bool
-    ) {
-        let completedTorrents = snapshots.filter(\.downloadComplete)
-        let completedIDs = Set(completedTorrents.map(\.id))
-
+    ) async {
+        let generation = observationGeneration
+        let observedConfiguration = configuration
         let isBaselining = baselineRefreshesRemaining > 0
         if isBaselining {
             baselineRefreshesRemaining -= 1
-            if baselineRefreshesRemaining == 0 && (!snapshots.isEmpty || previousTorrents.isEmpty) {
-                history.prune(retaining: Set(snapshots.map(\.id)))
+            if baselineRefreshesRemaining == 0
+                && (!projection.activeIDs.isEmpty || previousTorrentsWereEmpty) {
+                try? await history.prune(retaining: projection.activeIDs)
             }
         }
 
-        guard !isBaselining && isEnabled && settings.completionNotificationsEnabled else {
-            history.remember(completedIDs)
+        guard !isBaselining && isEnabled && observedConfiguration.isEnabled else {
+            try? await history.remember(projection.completedIDs)
             return
         }
 
-        let newlyCompletedTorrents = completedTorrents.filter { !history.contains($0.id) }
-        history.remember(completedIDs)
+        let claim: TorrentCompletionClaim
+        do {
+            claim = try await history.claimNewlyCompleted(
+                from: projection.completedTorrents
+            )
+        } catch {
+            return
+        }
+
+        guard !Task.isCancelled else {
+            await history.abandonCompletionClaim(claim.id)
+            return
+        }
+        guard generation == observationGeneration,
+              configuration.isEnabled else {
+            await history.finalizeCompletionClaim(
+                claim.id,
+                remembering: projection.completedIDs
+            )
+            return
+        }
+
+        let newlyCompletedTorrents = claim.candidates
         guard !newlyCompletedTorrents.isEmpty else {
+            await history.finalizeCompletionClaim(
+                claim.id,
+                remembering: projection.completedIDs
+            )
             return
         }
 
         let shouldBadgeCompletions = !activationProvider.isApplicationActive
         if !shouldBadgeCompletions {
             clearBadge()
+        } else {
+            let (updatedBadgeCount, overflow) = badgeCount.addingReportingOverflow(
+                newlyCompletedTorrents.count
+            )
+            badgeCount = overflow ? Int.max : updatedBadgeCount
+            dockTileService.updateCompletionBadge(count: badgeCount)
         }
 
-        for torrent in newlyCompletedTorrents {
-            if shouldBadgeCompletions {
-                badgeCount += 1
-                dockTileService.updateCompletionBadge(count: badgeCount)
-            }
-            let torrentName = settings.completionNotificationNamesEnabled ? torrent.name : nil
-            let playsSound = settings.completionNotificationSoundEnabled
-            pendingNotifications.append(PendingNotification(
-                torrentName: torrentName,
-                playsSound: playsSound
-            ))
+        if nextPendingNotificationIndex > 0 {
+            pendingNotifications.removeFirst(nextPendingNotificationIndex)
+            nextPendingNotificationIndex = 0
+        }
+        let availableNotificationCount =
+            Self.maximumPendingNotificationCount - pendingNotifications.count
+        if availableNotificationCount > 0 {
+            pendingNotifications.append(
+                contentsOf: newlyCompletedTorrents.prefix(availableNotificationCount)
+            )
         }
         startNotificationDrainIfNeeded()
+        await history.finalizeCompletionClaim(
+            claim.id,
+            remembering: projection.completedIDs
+        )
     }
 
     private func startNotificationDrainIfNeeded() {
-        guard notificationDrainTask == nil else {
+        guard notificationDrainTask == nil,
+              configuration.isEnabled,
+              nextPendingNotificationIndex < pendingNotifications.count else {
             return
         }
         let drainID = UUID()
         let notificationService = notificationService
         notificationDrainID = drainID
         notificationDrainTask = Task { @MainActor [weak self, notificationService] in
+            defer {
+                self?.finishNotificationDrain(drainID: drainID)
+            }
             while !Task.isCancelled {
-                guard let batch = self?.takePendingNotificationBatch(drainID: drainID) else {
+                guard let notification = self?.takePendingNotification(drainID: drainID) else {
                     return
                 }
-                for notification in batch {
-                    guard !Task.isCancelled else {
-                        return
-                    }
-                    await notificationService.notifyDownloadFinished(
-                        torrentName: notification.torrentName,
-                        playsSound: notification.playsSound
-                    )
+                guard !Task.isCancelled else {
+                    return
                 }
+                await notificationService.notifyDownloadFinished(
+                    torrentName: notification.includesTorrentName
+                        ? notification.torrent.name
+                        : nil,
+                    playsSound: notification.playsSound
+                )
             }
         }
     }
 
-    private func takePendingNotificationBatch(
+    private func takePendingNotification(
         drainID: UUID
-    ) -> [PendingNotification]? {
+    ) -> PendingNotification? {
+        guard notificationDrainID == drainID,
+              configuration.isEnabled,
+              nextPendingNotificationIndex < pendingNotifications.count else {
+            return nil
+        }
+        let torrent = pendingNotifications[nextPendingNotificationIndex]
+        nextPendingNotificationIndex += 1
+        return PendingNotification(
+            torrent: torrent,
+            includesTorrentName: configuration.includesTorrentNames,
+            playsSound: configuration.playsSound
+        )
+    }
+
+    private func finishNotificationDrain(drainID: UUID) {
         guard notificationDrainID == drainID else {
-            return nil
+            return
         }
-        guard !pendingNotifications.isEmpty else {
-            notificationDrainTask = nil
-            notificationDrainID = nil
-            return nil
+        if nextPendingNotificationIndex > 0 {
+            pendingNotifications.removeFirst(nextPendingNotificationIndex)
+            nextPendingNotificationIndex = 0
         }
-        let batch = pendingNotifications
-        pendingNotifications.removeAll(keepingCapacity: true)
-        return batch
+        notificationDrainTask = nil
+        notificationDrainID = nil
+        startNotificationDrainIfNeeded()
+    }
+
+    private func advanceObservationGeneration() {
+        precondition(
+            observationGeneration != UInt64.max,
+            "Completion-notification observation generation exhausted"
+        )
+        observationGeneration += 1
     }
 }

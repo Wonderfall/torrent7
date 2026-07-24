@@ -190,6 +190,8 @@ struct SourceURLView: View {
 }
 
 struct IntegerFieldRow: View {
+    private static let maximumDraftByteCount = 64
+
     let title: String
     @Binding var value: Int
     let range: ClosedRange<Int>
@@ -290,9 +292,15 @@ struct IntegerFieldRow: View {
         Binding {
             draftText
         } set: { newValue in
-            draftText = newValue
+            let boundedValue = String(
+                decoding:
+                    newValue.utf8.prefix(Self.maximumDraftByteCount),
+                as: UTF8.self
+            )
+            draftText = boundedValue
 
-            if let parsedValue = parsedDraftValue(newValue), range.contains(parsedValue) {
+            if let parsedValue = parsedDraftValue(boundedValue),
+               range.contains(parsedValue) {
                 value = parsedValue
             }
         }

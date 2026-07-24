@@ -1,12 +1,12 @@
 import Foundation
 
-protocol DownloadFolderAccessing: AnyObject {
+protocol DownloadFolderAccessing: AnyObject, Sendable {
     var url: URL { get }
     func bookmarkData() throws -> Data
     func delegationBookmarkData() throws -> Data
 }
 
-protocol DownloadFolderAccessProviding {
+protocol DownloadFolderAccessProviding: Sendable {
     func createAccess(url: URL, savesBookmark: Bool, defaults: UserDefaults) throws -> DownloadFolderAccessing
     func restoreDefault(defaults: UserDefaults) throws -> DownloadFolderAccessing?
     func restore(from bookmark: Data) throws -> DownloadFolderAccessing
@@ -126,12 +126,19 @@ final class SecurityScopedFolder: DownloadFolderAccessing {
             throw TorrentStoreError.downloadFolderAccessDenied
         }
 
-        let probeURL = url.appending(path: ".torrent-app-access-\(UUID().uuidString)", directoryHint: .notDirectory)
-        guard FileManager.default.createFile(atPath: probeURL.torrentFilePath, contents: Data()) else {
+        let fileManager = FileManager()
+        let probeURL = url.appending(
+            path: ".torrent-app-access-\(UUID().uuidString)",
+            directoryHint: .notDirectory
+        )
+        guard fileManager.createFile(
+            atPath: probeURL.torrentFilePath,
+            contents: Data()
+        ) else {
             throw TorrentStoreError.downloadFolderNotWritable
         }
         do {
-            try FileManager.default.removeItem(at: probeURL)
+            try fileManager.removeItem(at: probeURL)
         } catch {
             throw TorrentStoreError.downloadFolderNotWritable
         }

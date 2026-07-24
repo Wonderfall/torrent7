@@ -2,7 +2,7 @@ import Foundation
 import Observation
 import TorrentEngineModel
 
-struct TorrentCommandSnapshot: Equatable {
+struct TorrentCommandSnapshot: Equatable, Sendable {
     var hasTorrents = false
     var sortOrder = TorrentSortOrder.dateAdded
     var sortDirection = TorrentSortDirection.ascending
@@ -16,6 +16,188 @@ struct TorrentCommandSnapshot: Equatable {
 
     var hasSelectedTorrents: Bool {
         selectedTorrentCount > 0
+    }
+
+    @concurrent
+    static func prepare(
+        torrentsByID: [TorrentItem.ID: TorrentItem],
+        selectedIDs: Set<TorrentItem.ID>,
+        sortOrder: TorrentSortOrder,
+        sortDirection: TorrentSortDirection,
+        canPauseAnyTorrent: Bool,
+        canResumeAnyTorrent: Bool
+    ) async throws -> Self {
+        try Task.checkCancellation()
+        var selectedTorrentCount = 0
+        var canPauseSelectedTorrents = false
+        var canResumeSelectedTorrents = false
+        var canForceRecheckSelectedTorrents = false
+        for (offset, id) in selectedIDs.enumerated() {
+            if offset.isMultiple(of: 128) {
+                try Task.checkCancellation()
+            }
+            guard let torrent = torrentsByID[id] else {
+                continue
+            }
+            selectedTorrentCount += 1
+            canPauseSelectedTorrents =
+                canPauseSelectedTorrents || !torrent.manuallyPaused
+            canResumeSelectedTorrents =
+                canResumeSelectedTorrents || torrent.manuallyPaused
+            canForceRecheckSelectedTorrents =
+                canForceRecheckSelectedTorrents || torrent.hasMetadata
+        }
+        try Task.checkCancellation()
+        return Self(
+            hasTorrents: !torrentsByID.isEmpty,
+            sortOrder: sortOrder,
+            sortDirection: sortDirection,
+            selectedTorrentCount: selectedTorrentCount,
+            hasSingleSelectedTorrent: selectedTorrentCount == 1,
+            canPauseSelectedTorrents: canPauseSelectedTorrents,
+            canResumeSelectedTorrents: canResumeSelectedTorrents,
+            canPauseAnyTorrent: canPauseAnyTorrent,
+            canResumeAnyTorrent: canResumeAnyTorrent,
+            canForceRecheckSelectedTorrents:
+                canForceRecheckSelectedTorrents
+        )
+    }
+}
+
+struct TorrentListPresentation: Sendable {
+    let torrents: [TorrentItem]
+    let torrentsChanged: Bool
+    let torrentsByID: [TorrentItem.ID: TorrentItem]
+    let activeIDs: Set<TorrentItem.ID>
+    let completionProjection: TorrentCompletionProjection
+    let rows: [TorrentRowSnapshot]
+    let rowsChanged: Bool
+    let metricsByID: [TorrentItem.ID: TorrentTransferMetrics]
+    let totalDownloadRate: Int64
+    let totalUploadRate: Int64
+    let dockDownloadRate: Int64
+    let dockUploadRate: Int64
+    let hasActiveTransfers: Bool
+    let canPauseAnyTorrent: Bool
+    let canResumeAnyTorrent: Bool
+
+    @concurrent
+    static func prepare(
+        torrents: [TorrentItem],
+        previousTorrents: [TorrentItem],
+        previousRows: [TorrentRowSnapshot]
+    ) async throws -> Self {
+        var torrentsByID = [TorrentItem.ID: TorrentItem]()
+        var activeIDs = Set<TorrentItem.ID>()
+        var rows = [TorrentRowSnapshot]()
+        var metricsByID = [TorrentItem.ID: TorrentTransferMetrics]()
+        var completedTorrents = [TorrentCompletionCandidate]()
+        var completedIDs = Set<TorrentItem.ID>()
+        torrentsByID.reserveCapacity(torrents.count)
+        activeIDs.reserveCapacity(torrents.count)
+        rows.reserveCapacity(torrents.count)
+        metricsByID.reserveCapacity(torrents.count)
+        completedTorrents.reserveCapacity(torrents.count)
+        completedIDs.reserveCapacity(torrents.count)
+
+        var totalDownloadRate: Int64 = 0
+        var totalUploadRate: Int64 = 0
+        var dockDownloadRate: Int64 = 0
+        var dockUploadRate: Int64 = 0
+        var hasActiveTransfers = false
+        var canPauseAnyTorrent = false
+        var canResumeAnyTorrent = false
+
+        for (index, torrent) in torrents.enumerated() {
+            if index.isMultiple(of: 128) {
+                try Task.checkCancellation()
+            }
+            if torrentsByID[torrent.id] == nil {
+                torrentsByID[torrent.id] = torrent
+            }
+            activeIDs.insert(torrent.id)
+            rows.append(TorrentRowSnapshot(torrent))
+            metricsByID[torrent.id] = TorrentTransferMetrics(torrent)
+            if torrent.downloadComplete {
+                completedTorrents.append(TorrentCompletionCandidate(
+                    id: torrent.id,
+                    name: torrent.name
+                ))
+                completedIDs.insert(torrent.id)
+            }
+            totalDownloadRate += Int64(max(0, torrent.downloadRate))
+            totalUploadRate += Int64(max(0, torrent.uploadRate))
+            dockDownloadRate += Int64(max(0, torrent.downloadPayloadRate))
+            dockUploadRate += Int64(max(0, torrent.uploadPayloadRate))
+            hasActiveTransfers = hasActiveTransfers
+                || torrent.downloadPayloadRate > 0
+                || torrent.uploadPayloadRate > 0
+            canPauseAnyTorrent = canPauseAnyTorrent || !torrent.manuallyPaused
+            canResumeAnyTorrent = canResumeAnyTorrent || torrent.manuallyPaused
+        }
+        try Task.checkCancellation()
+
+        return Self(
+            torrents: torrents,
+            torrentsChanged: torrents != previousTorrents,
+            torrentsByID: torrentsByID,
+            activeIDs: activeIDs,
+            completionProjection: TorrentCompletionProjection(
+                completedTorrents: completedTorrents,
+                completedIDs: completedIDs,
+                activeIDs: activeIDs
+            ),
+            rows: rows,
+            rowsChanged: rows != previousRows,
+            metricsByID: metricsByID,
+            totalDownloadRate: totalDownloadRate,
+            totalUploadRate: totalUploadRate,
+            dockDownloadRate: dockDownloadRate,
+            dockUploadRate: dockUploadRate,
+            hasActiveTransfers: hasActiveTransfers,
+            canPauseAnyTorrent: canPauseAnyTorrent,
+            canResumeAnyTorrent: canResumeAnyTorrent
+        )
+    }
+
+    @concurrent
+    static func prepareRemoving(
+        _ removedIDs: Set<TorrentItem.ID>,
+        from torrents: [TorrentItem],
+        previousRows: [TorrentRowSnapshot]
+    ) async throws -> Self {
+        var remainingTorrents = [TorrentItem]()
+        remainingTorrents.reserveCapacity(torrents.count)
+        for (index, torrent) in torrents.enumerated() {
+            if index.isMultiple(of: 128) {
+                try Task.checkCancellation()
+            }
+            if !removedIDs.contains(torrent.id) {
+                remainingTorrents.append(torrent)
+            }
+        }
+        return try await prepare(
+            torrents: remainingTorrents,
+            previousTorrents: torrents,
+            previousRows: previousRows
+        )
+    }
+
+    @concurrent
+    static func prepareSorted(
+        torrents: [TorrentItem],
+        sortOrder: TorrentSortOrder,
+        sortDirection: TorrentSortDirection,
+        previousRows: [TorrentRowSnapshot]
+    ) async throws -> Self {
+        try Task.checkCancellation()
+        let sortedTorrents = sortOrder.sorted(torrents, direction: sortDirection)
+        try Task.checkCancellation()
+        return try await prepare(
+            torrents: sortedTorrents,
+            previousTorrents: torrents,
+            previousRows: previousRows
+        )
     }
 }
 
@@ -40,9 +222,14 @@ final class TorrentSelectionState {
             guard ids != oldValue else {
                 return
             }
+            precondition(revision != UInt64.max)
+            revision += 1
             didChange?()
         }
     }
+
+    @ObservationIgnored
+    private(set) var revision: UInt64 = 0
 
     @ObservationIgnored
     var didChange: (() -> Void)?
@@ -51,56 +238,132 @@ final class TorrentSelectionState {
 @MainActor
 @Observable
 final class TorrentListState {
+    private struct TransferMetricStateEntry {
+        let state: TorrentTransferMetricsState
+        var registrationIDs = Set<UUID>()
+    }
+
     private(set) var torrents: [TorrentItem] = []
+    private(set) var torrentsByID = [TorrentItem.ID: TorrentItem]()
     private(set) var rows: [TorrentRowSnapshot] = []
     private(set) var totalDownloadRate: Int64 = 0
     private(set) var totalUploadRate: Int64 = 0
+    private(set) var dockDownloadRate: Int64 = 0
+    private(set) var dockUploadRate: Int64 = 0
+    private(set) var hasActiveTransfers = false
+    private(set) var rowRevision: UInt64 = 0
+    private(set) var canPauseAnyTorrent = false
+    private(set) var canResumeAnyTorrent = false
 
     @ObservationIgnored
-    private var transferMetricStatesByID = [TorrentItem.ID: TorrentTransferMetricsState]()
+    private var transferMetricStateEntriesByID =
+        [TorrentItem.ID: TransferMetricStateEntry]()
+
+    @ObservationIgnored
+    private var metricsByID = [TorrentItem.ID: TorrentTransferMetrics]()
 
     @ObservationIgnored
     private let emptyTransferMetricState = TorrentTransferMetricsState(metrics: .empty)
 
-    func update(_ torrents: [TorrentItem]) {
-        let activeIDs = Set(torrents.map(\.id))
-        transferMetricStatesByID = transferMetricStatesByID.filter { activeIDs.contains($0.key) }
-
-        for torrent in torrents {
-            let metrics = TorrentTransferMetrics(torrent)
-            if let state = transferMetricStatesByID[torrent.id] {
-                state.update(metrics)
+    func update(_ presentation: TorrentListPresentation) {
+        var staleMetricStateIDs = [TorrentItem.ID]()
+        staleMetricStateIDs.reserveCapacity(transferMetricStateEntriesByID.count)
+        for (torrentID, entry) in transferMetricStateEntriesByID {
+            if let metrics = presentation.metricsByID[torrentID] {
+                entry.state.update(metrics)
+                if entry.registrationIDs.isEmpty {
+                    staleMetricStateIDs.append(torrentID)
+                }
             } else {
-                transferMetricStatesByID[torrent.id] = TorrentTransferMetricsState(metrics: metrics)
+                staleMetricStateIDs.append(torrentID)
             }
         }
-
-        let rows = torrents.map(TorrentRowSnapshot.init)
-        if rows != self.rows {
-            self.rows = rows
+        for torrentID in staleMetricStateIDs {
+            transferMetricStateEntriesByID.removeValue(forKey: torrentID)
         }
+        metricsByID = presentation.metricsByID
 
-        let totalDownloadRate = torrents.reduce(Int64(0)) { total, torrent in
-            total + Int64(max(0, torrent.downloadRate))
-        }
-        if totalDownloadRate != self.totalDownloadRate {
-            self.totalDownloadRate = totalDownloadRate
+        if presentation.rowsChanged {
+            rows = presentation.rows
+            rowRevision &+= 1
         }
 
-        let totalUploadRate = torrents.reduce(Int64(0)) { total, torrent in
-            total + Int64(max(0, torrent.uploadRate))
-        }
-        if totalUploadRate != self.totalUploadRate {
-            self.totalUploadRate = totalUploadRate
+        if presentation.totalDownloadRate != totalDownloadRate {
+            totalDownloadRate = presentation.totalDownloadRate
         }
 
-        if torrents != self.torrents {
-            self.torrents = torrents
+        if presentation.totalUploadRate != totalUploadRate {
+            totalUploadRate = presentation.totalUploadRate
         }
+
+        dockDownloadRate = presentation.dockDownloadRate
+        dockUploadRate = presentation.dockUploadRate
+        hasActiveTransfers = presentation.hasActiveTransfers
+        canPauseAnyTorrent = presentation.canPauseAnyTorrent
+        canResumeAnyTorrent = presentation.canResumeAnyTorrent
+        torrents = presentation.torrents
+        torrentsByID = presentation.torrentsByID
+    }
+
+    func torrent(id: TorrentItem.ID) -> TorrentItem? {
+        torrentsByID[id]
     }
 
     func transferMetricState(for torrentID: TorrentItem.ID) -> TorrentTransferMetricsState {
-        transferMetricStatesByID[torrentID] ?? emptyTransferMetricState
+        if let entry = transferMetricStateEntriesByID[torrentID] {
+            return entry.state
+        }
+        guard let metrics = metricsByID[torrentID] else {
+            return emptyTransferMetricState
+        }
+        let state = TorrentTransferMetricsState(metrics: metrics)
+        transferMetricStateEntriesByID[torrentID] = TransferMetricStateEntry(state: state)
+        return state
+    }
+
+    func registerTransferMetricState(
+        for torrentID: TorrentItem.ID,
+        state: TorrentTransferMetricsState,
+        registrationID: UUID
+    ) {
+        guard let metrics = metricsByID[torrentID] else {
+            return
+        }
+        state.update(metrics)
+        if var entry = transferMetricStateEntriesByID[torrentID] {
+            precondition(
+                entry.state === state,
+                "One torrent row must use one transfer-metric state"
+            )
+            entry.registrationIDs.insert(registrationID)
+            transferMetricStateEntriesByID[torrentID] = entry
+        } else {
+            transferMetricStateEntriesByID[torrentID] = TransferMetricStateEntry(
+                state: state,
+                registrationIDs: [registrationID]
+            )
+        }
+    }
+
+    func unregisterTransferMetricState(
+        for torrentID: TorrentItem.ID,
+        registrationID: UUID
+    ) {
+        guard var entry = transferMetricStateEntriesByID[torrentID] else {
+            return
+        }
+        entry.registrationIDs.remove(registrationID)
+        if entry.registrationIDs.isEmpty {
+            transferMetricStateEntriesByID.removeValue(forKey: torrentID)
+        } else {
+            transferMetricStateEntriesByID[torrentID] = entry
+        }
+    }
+
+    var registeredTransferMetricStateCount: Int {
+        transferMetricStateEntriesByID.values.count {
+            !$0.registrationIDs.isEmpty
+        }
     }
 }
 
@@ -121,7 +384,7 @@ final class TorrentTransferMetricsState {
     }
 }
 
-struct TorrentSidebarLabelSnapshot: Equatable, Identifiable {
+struct TorrentSidebarLabelSnapshot: Equatable, Identifiable, Sendable {
     var label: TorrentLabel
     var count: Int
 
@@ -130,7 +393,7 @@ struct TorrentSidebarLabelSnapshot: Equatable, Identifiable {
     }
 }
 
-struct TorrentSidebarTrackerHostSnapshot: Equatable, Identifiable {
+struct TorrentSidebarTrackerHostSnapshot: Equatable, Identifiable, Sendable {
     var host: String
     var count: Int
 
@@ -139,7 +402,7 @@ struct TorrentSidebarTrackerHostSnapshot: Equatable, Identifiable {
     }
 }
 
-struct TorrentSidebarSnapshot: Equatable {
+struct TorrentSidebarSnapshot: Equatable, Sendable {
     var scopeCounts: [TorrentSidebarScope: Int] = [:]
     var unlabeledCount = 0
     var labelRows: [TorrentSidebarLabelSnapshot] = []
@@ -156,6 +419,40 @@ struct TorrentSidebarSnapshot: Equatable {
         labelAssignments: [TorrentItem.ID: Set<TorrentLabel.ID>],
         trackerHostsByTorrentID: [TorrentItem.ID: Set<String>]
     ) -> Self {
+        build(
+            torrents: torrents,
+            labels: labels,
+            labelAssignments: labelAssignments,
+            trackerHostsByTorrentID: trackerHostsByTorrentID,
+            checkCancellation: {}
+        )
+    }
+
+    @concurrent
+    static func prepare(
+        torrents: [TorrentItem],
+        labels: [TorrentLabel],
+        labelAssignments: [TorrentItem.ID: Set<TorrentLabel.ID>],
+        trackerHostsByTorrentID: [TorrentItem.ID: Set<String>]
+    ) async throws -> Self {
+        try build(
+            torrents: torrents,
+            labels: labels,
+            labelAssignments: labelAssignments,
+            trackerHostsByTorrentID: trackerHostsByTorrentID,
+            checkCancellation: {
+                try Task.checkCancellation()
+            }
+        )
+    }
+
+    private static func build(
+        torrents: [TorrentItem],
+        labels: [TorrentLabel],
+        labelAssignments: [TorrentItem.ID: Set<TorrentLabel.ID>],
+        trackerHostsByTorrentID: [TorrentItem.ID: Set<String>],
+        checkCancellation: () throws -> Void
+    ) rethrows -> Self {
         let validLabelIDs = Set(labels.map(\.id))
         var scopeCounts = Dictionary(uniqueKeysWithValues: TorrentSidebarScope.allCases.map { ($0, 0) })
         var labelCounts = [TorrentLabel.ID: Int]()
@@ -163,7 +460,10 @@ struct TorrentSidebarSnapshot: Equatable {
         var trackerHostCounts = [String: Int]()
         var noTrackersCount = 0
 
-        for torrent in torrents {
+        for (index, torrent) in torrents.enumerated() {
+            if index.isMultiple(of: 128) {
+                try checkCancellation()
+            }
             for scope in TorrentSidebarScope.allCases where scope.contains(torrent) {
                 scopeCounts[scope, default: 0] += 1
             }
@@ -187,6 +487,7 @@ struct TorrentSidebarSnapshot: Equatable {
             }
         }
 
+        try checkCancellation()
         return Self(
             scopeCounts: scopeCounts,
             unlabeledCount: unlabeledCount,

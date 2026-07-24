@@ -1,14 +1,16 @@
 import Foundation
+import Synchronization
 import Testing
 import TorrentEngineModel
 @testable import TorrentApp
 
+@MainActor
 @Suite("Download folder access store")
 struct DownloadFolderAccessStoreTests {
     @Test("Capability snapshots put the default first and sort and deduplicate additional paths")
-    func capabilitySnapshotsAreDeterministicAndDeduplicated() throws {
-        try withIsolatedDefaults { defaults in
-            try withTemporaryDirectory { root in
+    func capabilitySnapshotsAreDeterministicAndDeduplicated() async throws {
+        try await withIsolatedDefaults { defaults, suiteName in
+            try await withTemporaryDirectory { root in
                 let alpha = root.appending(path: "alpha", directoryHint: .isDirectory)
                 let beta = root.appending(path: "beta", directoryHint: .isDirectory)
                 defaults.set(Data(beta.torrentFilePath.utf8), forKey: SecurityScopedFolder.defaultsKey)
@@ -20,13 +22,17 @@ struct DownloadFolderAccessStoreTests {
                     forKey: TorrentBookmarkKeys.additionalDownloadFolders
                 )
                 let store = DownloadFolderAccessStore(
-                    defaults: defaults,
+                    domain: .suite(suiteName),
                     accessProvider: FakeDownloadFolderAccessProvider()
                 )
 
-                _ = try store.restoreDefault()
+                _ = await store.bootstrap()
+                let snapshot = await store.makeCapabilitySnapshot()
 
-                #expect(store.capabilitySnapshot.paths == [beta.torrentFilePath, alpha.torrentFilePath])
+                #expect(snapshot.paths == [
+                    beta.torrentFilePath,
+                    alpha.torrentFilePath
+                ])
             }
         }
     }
@@ -61,9 +67,9 @@ struct DownloadFolderAccessStoreTests {
     }
 
     @Test("Restoration and projected mutations enforce the distinct capability path limit")
-    func restorationAndProjectedMutationsEnforceCapabilityLimit() throws {
-        try withIsolatedDefaults { defaults in
-            try withTemporaryDirectory { root in
+    func restorationAndProjectedMutationsEnforceCapabilityLimit() async throws {
+        try await withIsolatedDefaults { defaults, suiteName in
+            try await withTemporaryDirectory { root in
                 let maximumPathCount = DownloadFolderCapabilitySnapshot.maximumPathCount
                 let oldDefault = root.appending(path: "default", directoryHint: .isDirectory)
                 let additionalURLs = (0..<maximumPathCount).map { index in
@@ -80,21 +86,22 @@ struct DownloadFolderAccessStoreTests {
                 defaults.set(bookmarks, forKey: TorrentBookmarkKeys.additionalDownloadFolders)
 
                 let store = DownloadFolderAccessStore(
-                    defaults: defaults,
+                    domain: .suite(suiteName),
                     accessProvider: FakeDownloadFolderAccessProvider()
                 )
-                _ = try store.restoreDefault()
+                _ = await store.bootstrap()
 
                 let restoredBookmarks = additionalBookmarks(in: defaults)
                 #expect(restoredBookmarks.count == maximumPathCount - 1)
                 #expect(restoredBookmarks[accessKey(additionalURLs[0])] != nil)
                 #expect(restoredBookmarks[accessKey(additionalURLs[maximumPathCount - 1])] == nil)
-                #expect(store.capabilitySnapshot.paths.count == maximumPathCount)
-                #expect(store.capabilitySnapshot.paths.first == oldDefault.torrentFilePath)
+                let snapshot = await store.makeCapabilitySnapshot()
+                #expect(snapshot.paths.count == maximumPathCount)
+                #expect(snapshot.paths.first == oldDefault.torrentFilePath)
 
                 let newAdditional = root.appending(path: "new-additional", directoryHint: .isDirectory)
                 do {
-                    _ = try store.prepareForAdd(
+                    _ = try await store.prepareForAdd(
                         newAdditional,
                         setsDefault: false,
                         activeTorrents: []
@@ -115,13 +122,19 @@ struct DownloadFolderAccessStoreTests {
                 activeTorrents.append(makeTorrent(savePath: oldDefault.torrentFilePath))
                 let newDefault = root.appending(path: "new-default", directoryHint: .isDirectory)
                 do {
-                    _ = try store.setDefault(newDefault, activeTorrents: activeTorrents)
+                    _ = try await store.setDefault(
+                        newDefault,
+                        activeTorrents: activeTorrents
+                    )
                     Issue.record("Setting a default folder beyond the capability limit succeeded")
                 } catch {
                     #expect(isTooManyAuthorizedDownloadFolders(error))
                 }
 
-                #expect(store.defaultURL?.torrentFilePath == oldDefault.torrentFilePath)
+                #expect(
+                    await store.currentDefaultURL()?.torrentFilePath
+                        == oldDefault.torrentFilePath
+                )
                 #expect(defaults.data(forKey: SecurityScopedFolder.defaultsKey) == Data(oldDefault.torrentFilePath.utf8))
                 #expect(additionalBookmarks(in: defaults) == restoredBookmarks)
             }
@@ -129,48 +142,56 @@ struct DownloadFolderAccessStoreTests {
     }
 
     @Test("Removal leases require an exact active download root")
-    func removalLeasesRequireExactActiveRoot() throws {
-        try withIsolatedDefaults { defaults in
-            try withTemporaryDirectory { root in
+    func removalLeasesRequireExactActiveRoot() async throws {
+        try await withIsolatedDefaults { _, suiteName in
+            try await withTemporaryDirectory { root in
                 let store = DownloadFolderAccessStore(
-                    defaults: defaults,
+                    domain: .suite(suiteName),
                     accessProvider: FakeDownloadFolderAccessProvider()
                 )
                 let downloads = root.appending(path: "downloads", directoryHint: .isDirectory)
                 let other = root.appending(path: "other", directoryHint: .isDirectory)
-                _ = try store.setDefault(downloads, activeTorrents: [])
+                _ = try await store.setDefault(
+                    downloads,
+                    activeTorrents: []
+                )
 
-                _ = try store.lease(forSavePath: downloads.torrentFilePath)
-                #expect(throws: TorrentStoreError.self) {
-                    try store.lease(forSavePath: downloads.appending(path: "child").torrentFilePath)
+                _ = try await store.lease(
+                    forSavePath: downloads.torrentFilePath
+                )
+                await #expect(throws: TorrentStoreError.self) {
+                    try await store.lease(
+                        forSavePath: downloads
+                            .appending(path: "child").torrentFilePath
+                    )
                 }
-                #expect(throws: TorrentStoreError.self) {
-                    try store.lease(forSavePath: other.torrentFilePath)
+                await #expect(throws: TorrentStoreError.self) {
+                    try await store.lease(forSavePath: other.torrentFilePath)
                 }
-                #expect(throws: TorrentStoreError.self) {
-                    try store.lease(forSavePath: "relative")
+                await #expect(throws: TorrentStoreError.self) {
+                    try await store.lease(forSavePath: "relative")
                 }
             }
         }
     }
 
     @Test("A prepared add owns live access without persisting it")
-    func preparedAddOwnsLiveAccessWithoutPersistingIt() throws {
-        try withIsolatedDefaults { defaults in
-            try withTemporaryDirectory { root in
+    func preparedAddOwnsLiveAccessWithoutPersistingIt() async throws {
+        try await withIsolatedDefaults { defaults, suiteName in
+            try await withTemporaryDirectory { root in
                 let tracker = WeakDownloadFolderAccessTracker()
                 let store = DownloadFolderAccessStore(
-                    defaults: defaults,
+                    domain: .suite(suiteName),
                     accessProvider: TrackingDownloadFolderAccessProvider(tracker: tracker)
                 )
                 let folder = root.appending(path: "folder", directoryHint: .isDirectory)
-                var prepared: PreparedDownloadFolder? = try store.prepareForAdd(
+                var prepared: PreparedDownloadFolder? = try await store.prepareForAdd(
                     folder,
                     setsDefault: false,
                     activeTorrents: []
                 )
 
-                store.prune(activeTorrents: [])
+                try await prune(store, activeTorrents: [])
 
                 #expect(additionalBookmarks(in: defaults).isEmpty)
                 #expect(tracker.access != nil)
@@ -182,80 +203,114 @@ struct DownloadFolderAccessStoreTests {
     }
 
     @Test("Committing a non-default folder saves and prunes its bookmark")
-    func committingNonDefaultFolderSavesAndPrunesAdditionalBookmark() throws {
-        try withIsolatedDefaults { defaults in
-            try withTemporaryDirectory { root in
-                let store = DownloadFolderAccessStore(defaults: defaults, accessProvider: FakeDownloadFolderAccessProvider())
+    func committingNonDefaultFolderSavesAndPrunesAdditionalBookmark() async throws {
+        try await withIsolatedDefaults { defaults, suiteName in
+            try await withTemporaryDirectory { root in
+                let store = DownloadFolderAccessStore(
+                    domain: .suite(suiteName),
+                    accessProvider: FakeDownloadFolderAccessProvider()
+                )
                 let folder = root.appending(path: "folder", directoryHint: .isDirectory)
 
-                let prepared = try store.prepareForAdd(folder, setsDefault: false, activeTorrents: [])
+                let prepared = try await store.prepareForAdd(
+                    folder,
+                    setsDefault: false,
+                    activeTorrents: []
+                )
 
                 #expect(prepared.path == folder.torrentFilePath)
                 #expect(prepared.defaultURL == nil)
                 #expect(additionalBookmarks(in: defaults).isEmpty)
 
-                store.commitPreparedForAdd(prepared, activeTorrents: [])
+                await store.commitPreparedForAdd(
+                    prepared,
+                    activeTorrents: []
+                )
                 #expect(additionalBookmarks(in: defaults)[accessKey(folder)] == Data(folder.torrentFilePath.utf8))
 
-                store.prune(activeTorrents: [makeTorrent(savePath: folder.torrentFilePath)])
+                try await prune(
+                    store,
+                    activeTorrents: [makeTorrent(savePath: folder.torrentFilePath)]
+                )
                 #expect(additionalBookmarks(in: defaults)[accessKey(folder)] == Data(folder.torrentFilePath.utf8))
 
-                store.prune(activeTorrents: [])
+                try await prune(store, activeTorrents: [])
                 #expect(additionalBookmarks(in: defaults).isEmpty)
             }
         }
     }
 
     @Test("Preparing a default folder is side-effect free until commit")
-    func preparingDefaultFolderIsSideEffectFreeUntilCommit() throws {
-        try withIsolatedDefaults { defaults in
-            try withTemporaryDirectory { root in
+    func preparingDefaultFolderIsSideEffectFreeUntilCommit() async throws {
+        try await withIsolatedDefaults { defaults, suiteName in
+            try await withTemporaryDirectory { root in
                 let store = DownloadFolderAccessStore(
-                    defaults: defaults,
+                    domain: .suite(suiteName),
                     accessProvider: FakeDownloadFolderAccessProvider()
                 )
                 let folder = root.appending(path: "folder", directoryHint: .isDirectory)
 
-                let prepared = try store.prepareForAdd(folder, setsDefault: true, activeTorrents: [])
+                let prepared = try await store.prepareForAdd(
+                    folder,
+                    setsDefault: true,
+                    activeTorrents: []
+                )
 
-                #expect(store.defaultURL == nil)
+                #expect(await store.currentDefaultURL() == nil)
                 #expect(defaults.data(forKey: SecurityScopedFolder.defaultsKey) == nil)
 
-                let committedDefault = store.commitPreparedForAdd(prepared, activeTorrents: [])
+                let committedDefault = await store.commitPreparedForAdd(
+                    prepared,
+                    activeTorrents: []
+                )
 
                 #expect(committedDefault?.torrentFilePath == folder.torrentFilePath)
-                #expect(store.defaultURL?.torrentFilePath == folder.torrentFilePath)
+                #expect(
+                    await store.currentDefaultURL()?.torrentFilePath
+                        == folder.torrentFilePath
+                )
                 #expect(defaults.data(forKey: SecurityScopedFolder.defaultsKey) == Data(folder.torrentFilePath.utf8))
             }
         }
     }
 
     @Test("Setting new default preserves old default only while active torrents use it")
-    func settingNewDefaultPreservesOldDefaultOnlyWhileActiveTorrentsUseIt() throws {
-        try withIsolatedDefaults { defaults in
-            try withTemporaryDirectory { root in
-                let store = DownloadFolderAccessStore(defaults: defaults, accessProvider: FakeDownloadFolderAccessProvider())
+    func settingNewDefaultPreservesOldDefaultOnlyWhileActiveTorrentsUseIt() async throws {
+        try await withIsolatedDefaults { defaults, suiteName in
+            try await withTemporaryDirectory { root in
+                let store = DownloadFolderAccessStore(
+                    domain: .suite(suiteName),
+                    accessProvider: FakeDownloadFolderAccessProvider()
+                )
                 let oldDefault = root.appending(path: "old", directoryHint: .isDirectory)
                 let newDefault = root.appending(path: "new", directoryHint: .isDirectory)
 
-                try store.setDefault(oldDefault, activeTorrents: [])
-                try store.setDefault(newDefault, activeTorrents: [makeTorrent(savePath: oldDefault.torrentFilePath)])
+                try await store.setDefault(oldDefault, activeTorrents: [])
+                try await store.setDefault(
+                    newDefault,
+                    activeTorrents: [
+                        makeTorrent(savePath: oldDefault.torrentFilePath)
+                    ]
+                )
 
-                #expect(store.defaultURL?.torrentFilePath == newDefault.torrentFilePath)
+                #expect(
+                    await store.currentDefaultURL()?.torrentFilePath
+                        == newDefault.torrentFilePath
+                )
                 #expect(defaults.data(forKey: SecurityScopedFolder.defaultsKey) == Data(newDefault.torrentFilePath.utf8))
                 #expect(additionalBookmarks(in: defaults)[accessKey(oldDefault)] == Data(oldDefault.torrentFilePath.utf8))
                 #expect(additionalBookmarks(in: defaults)[accessKey(newDefault)] == nil)
 
-                store.prune(activeTorrents: [])
+                try await prune(store, activeTorrents: [])
                 #expect(additionalBookmarks(in: defaults).isEmpty)
             }
         }
     }
 
     @Test("Restores valid additional bookmarks and drops invalid ones")
-    func restoresValidAdditionalBookmarksAndDropsInvalidOnes() throws {
-        try withIsolatedDefaults { defaults in
-            try withTemporaryDirectory { root in
+    func restoresValidAdditionalBookmarksAndDropsInvalidOnes() async throws {
+        try await withIsolatedDefaults { defaults, suiteName in
+            try await withTemporaryDirectory { root in
                 let validFolder = root.appending(path: "valid", directoryHint: .isDirectory)
                 let invalidData = Data("invalid".utf8)
                 defaults.set(
@@ -266,10 +321,11 @@ struct DownloadFolderAccessStoreTests {
                     forKey: TorrentBookmarkKeys.additionalDownloadFolders
                 )
 
-                _ = DownloadFolderAccessStore(
-                    defaults: defaults,
+                let store = DownloadFolderAccessStore(
+                    domain: .suite(suiteName),
                     accessProvider: FakeDownloadFolderAccessProvider(rejectedBookmarkData: [invalidData])
                 )
+                _ = await store.bootstrap()
 
                 #expect(additionalBookmarks(in: defaults) == [accessKey(validFolder): Data(validFolder.torrentFilePath.utf8)])
             }
@@ -277,19 +333,47 @@ struct DownloadFolderAccessStoreTests {
     }
 
     @Test("Clearing default preserves active default as additional access")
-    func clearingDefaultPreservesActiveDefaultAsAdditionalAccess() throws {
-        try withIsolatedDefaults { defaults in
-            try withTemporaryDirectory { root in
-                let store = DownloadFolderAccessStore(defaults: defaults, accessProvider: FakeDownloadFolderAccessProvider())
+    func clearingDefaultPreservesActiveDefaultAsAdditionalAccess() async throws {
+        try await withIsolatedDefaults { defaults, suiteName in
+            try await withTemporaryDirectory { root in
+                let store = DownloadFolderAccessStore(
+                    domain: .suite(suiteName),
+                    accessProvider: FakeDownloadFolderAccessProvider()
+                )
                 let defaultFolder = root.appending(path: "default", directoryHint: .isDirectory)
-                try store.setDefault(defaultFolder, activeTorrents: [])
+                try await store.setDefault(
+                    defaultFolder,
+                    activeTorrents: []
+                )
 
-                store.clearDefault(activeTorrents: [makeTorrent(savePath: defaultFolder.torrentFilePath)])
+                await store.clearDefault(
+                    activeTorrents: [
+                        makeTorrent(savePath: defaultFolder.torrentFilePath)
+                    ]
+                )
 
-                #expect(store.defaultURL == nil)
+                #expect(await store.currentDefaultURL() == nil)
                 #expect(defaults.data(forKey: SecurityScopedFolder.defaultsKey) == nil)
                 #expect(additionalBookmarks(in: defaults)[accessKey(defaultFolder)] == Data(defaultFolder.torrentFilePath.utf8))
             }
+        }
+    }
+}
+
+private func prune(
+    _ store: DownloadFolderAccessStore,
+    activeTorrents: [TorrentItem]
+) async throws {
+    while true {
+        let plan = try await DownloadFolderPrunePlan.prepare(
+            snapshot: await store.makePruneSnapshot(),
+            activeTorrents: activeTorrents
+        )
+        if await store.applyPrunePlan(
+            plan,
+            activeTorrents: activeTorrents
+        ) {
+            return
         }
     }
 }
@@ -317,8 +401,21 @@ private func isTooManyAuthorizedDownloadFolders(_ error: Error) -> Bool {
     return false
 }
 
-private final class WeakDownloadFolderAccessTracker {
-    weak var access: FakeDownloadFolderAccess?
+private final class WeakDownloadFolderAccessTracker: Sendable {
+    private struct State: ~Copyable {
+        weak var access: FakeDownloadFolderAccess?
+    }
+
+    private let state = Mutex(State())
+
+    var access: FakeDownloadFolderAccess? {
+        get {
+            state.withLock { $0.access }
+        }
+        set {
+            state.withLock { $0.access = newValue }
+        }
+    }
 }
 
 private struct TrackingDownloadFolderAccessProvider: DownloadFolderAccessProviding {

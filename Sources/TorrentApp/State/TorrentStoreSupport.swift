@@ -17,6 +17,7 @@ enum TorrentStoreError: LocalizedError {
     case engineStarting
     case folderAuthorityChangeInProgress
     case tooManyPendingOperations
+    case tooManyLabels
     case tooManyAuthorizedDownloadFolders
     case downloadFolderAccessDenied
     case downloadFolderNotWritable
@@ -37,6 +38,8 @@ enum TorrentStoreError: LocalizedError {
             return "Download folder authorization is currently in use. Try again shortly."
         case .tooManyPendingOperations:
             return "Too many torrent operations are waiting. Let the current operations finish, then try again."
+        case .tooManyLabels:
+            return "At most \(TorrentLabel.maximumCount) labels can be created."
         case .tooManyAuthorizedDownloadFolders:
             return "Too many download folders are authorized. Remove an unused torrent, then try again."
         case .downloadFolderAccessDenied:

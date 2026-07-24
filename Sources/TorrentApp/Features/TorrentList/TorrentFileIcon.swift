@@ -3,76 +3,175 @@ import SwiftUI
 import TorrentEngineModel
 import UniformTypeIdentifiers
 
-struct TorrentFileIcon: View, Equatable {
+@MainActor
+struct TorrentFileIcon: View, @MainActor Equatable {
     private static let size: CGFloat = 20
 
     let row: TorrentRowSnapshot
+    @State private var icon: NSImage?
 
     var body: some View {
-        Image(nsImage: TorrentFileIconProvider.icon(for: row))
-            .resizable()
-            .aspectRatio(contentMode: .fit)
-            .frame(width: Self.size, height: Self.size)
-            .accessibilityHidden(true)
+        Group {
+            if let icon {
+                Image(nsImage: icon)
+                    .resizable()
+            } else {
+                Image(systemName: row.contentKind == .directory ? "folder" : "doc")
+                    .resizable()
+            }
+        }
+        .aspectRatio(contentMode: .fit)
+        .frame(width: Self.size, height: Self.size)
+        .accessibilityHidden(true)
+        .task(id: row) {
+            icon = nil
+            guard let loadedIcon = try? await FileIconService.shared.icon(for: row),
+                  !Task.isCancelled else {
+                return
+            }
+            icon = loadedIcon
+        }
     }
-}
 
-struct FileItemIcon: View, Equatable {
-    private static let size: CGFloat = 18
-
-    let path: String
-
-    var body: some View {
-        Image(nsImage: FileItemIconProvider.icon(for: path))
-            .resizable()
-            .aspectRatio(contentMode: .fit)
-            .frame(width: Self.size, height: Self.size)
-            .accessibilityHidden(true)
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.row == rhs.row
     }
 }
 
 @MainActor
-private enum FileIconCache {
-    private static let storage: NSCache<NSString, NSImage> = {
+struct FileItemIcon: View, @MainActor Equatable {
+    private static let size: CGFloat = 18
+
+    let path: String
+    @State private var icon: NSImage?
+
+    var body: some View {
+        Group {
+            if let icon {
+                Image(nsImage: icon)
+                    .resizable()
+            } else {
+                Image(systemName: "doc")
+                    .resizable()
+            }
+        }
+        .aspectRatio(contentMode: .fit)
+        .frame(width: Self.size, height: Self.size)
+        .accessibilityHidden(true)
+        .task(id: path) {
+            icon = nil
+            guard let loadedIcon = try? await FileIconService.shared.icon(forFilePath: path),
+                  !Task.isCancelled else {
+                return
+            }
+            icon = loadedIcon
+        }
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.path == rhs.path
+    }
+}
+
+private actor FileIconService {
+    static let shared = FileIconService()
+
+    private let cache: NSCache<NSString, NSImage> = {
         let cache = NSCache<NSString, NSImage>()
         cache.countLimit = 256
         return cache
     }()
 
-    static func icon(for key: String, makeIcon: () -> NSImage) -> NSImage {
-        let cacheKey = key as NSString
-        if let cached = storage.object(forKey: cacheKey) {
+    func icon(for row: TorrentRowSnapshot) throws -> NSImage {
+        try Task.checkCancellation()
+        let source = TorrentFileIconSource.resolve(for: row)
+        try Task.checkCancellation()
+        return try icon(for: source)
+    }
+
+    func icon(forFilePath path: String) throws -> NSImage {
+        try Task.checkCancellation()
+        let source = FileItemIconSource.resolve(for: path)
+        try Task.checkCancellation()
+        return try icon(for: source)
+    }
+
+    private func icon(for source: TorrentFileIconSource) throws -> NSImage {
+        try cachedIcon(for: source.identifier) {
+            switch source {
+            case .existingItem(let path):
+                return NSWorkspace.shared.icon(forFile: path)
+            case .fileExtension(let pathExtension):
+                if let contentType = UTType(filenameExtension: pathExtension) {
+                    return NSWorkspace.shared.icon(for: contentType)
+                }
+                return NSWorkspace.shared.icon(for: .data)
+            case .genericFile:
+                return NSWorkspace.shared.icon(for: .data)
+            case .folder:
+                return NSWorkspace.shared.icon(for: .folder)
+            }
+        }
+    }
+
+    private func icon(for source: FileItemIconSource) throws -> NSImage {
+        try cachedIcon(for: source.identifier) {
+            switch source {
+            case .existingItem(let path):
+                return NSWorkspace.shared.icon(forFile: path)
+            case .fileExtension(let pathExtension):
+                if let contentType = UTType(filenameExtension: pathExtension) {
+                    return NSWorkspace.shared.icon(for: contentType)
+                }
+                return NSWorkspace.shared.icon(for: .data)
+            case .folder:
+                return NSWorkspace.shared.icon(for: .folder)
+            }
+        }
+    }
+
+    private func cachedIcon(
+        for identifier: String,
+        makeIcon: () -> NSImage
+    ) throws -> NSImage {
+        let cacheKey = identifier as NSString
+        if let cached = cache.object(forKey: cacheKey) {
             return cached
         }
-
+        try Task.checkCancellation()
         let icon = makeIcon()
-        storage.setObject(icon, forKey: cacheKey)
+        try Task.checkCancellation()
+        cache.setObject(icon, forKey: cacheKey)
         return icon
     }
 }
 
-@MainActor
-private enum TorrentFileIconProvider {
-    static func icon(for row: TorrentRowSnapshot) -> NSImage {
-        let key = TorrentFileIconSource.resolve(for: row)
-        return FileIconCache.icon(for: key.identifier) {
-            makeIcon(for: key)
+private enum FileItemIconSource: Hashable {
+    case existingItem(String)
+    case fileExtension(String)
+    case folder
+
+    static func resolve(for path: String) -> Self {
+        if (path as NSString).isAbsolutePath
+            && FileManager().fileExists(atPath: path) {
+            return .existingItem(path)
         }
+
+        let pathExtension = (path as NSString).pathExtension
+        guard !pathExtension.isEmpty else {
+            return .folder
+        }
+        return .fileExtension(pathExtension.localizedLowercase)
     }
 
-    private static func makeIcon(for key: TorrentFileIconSource) -> NSImage {
-        switch key {
+    var identifier: String {
+        switch self {
         case .existingItem(let path):
-            return NSWorkspace.shared.icon(forFile: path)
+            "item:\(path)"
         case .fileExtension(let pathExtension):
-            if let contentType = UTType(filenameExtension: pathExtension) {
-                return NSWorkspace.shared.icon(for: contentType)
-            }
-            return NSWorkspace.shared.icon(for: .data)
-        case .genericFile:
-            return NSWorkspace.shared.icon(for: .data)
+            "extension:\(pathExtension)"
         case .folder:
-            return NSWorkspace.shared.icon(for: .folder)
+            "folder"
         }
     }
 }
@@ -100,7 +199,7 @@ enum TorrentFileIconSource: Hashable {
             return .folder
         }
 
-        if FileManager.default.fileExists(atPath: itemPath) {
+        if FileManager().fileExists(atPath: itemPath) {
             return .existingItem(itemPath)
         }
 
@@ -125,59 +224,6 @@ enum TorrentFileIconSource: Hashable {
             "file"
         case .folder:
             "folder"
-        }
-    }
-}
-
-@MainActor
-private enum FileItemIconProvider {
-    static func icon(for path: String) -> NSImage {
-        let key = cacheKey(for: path)
-        return FileIconCache.icon(for: key.identifier) {
-            makeIcon(for: key)
-        }
-    }
-
-    private static func makeIcon(for key: CacheKey) -> NSImage {
-        switch key {
-        case .existingItem(let path):
-            return NSWorkspace.shared.icon(forFile: path)
-        case .fileExtension(let pathExtension):
-            if let contentType = UTType(filenameExtension: pathExtension) {
-                return NSWorkspace.shared.icon(for: contentType)
-            }
-            return NSWorkspace.shared.icon(for: .data)
-        case .folder:
-            return NSWorkspace.shared.icon(for: .folder)
-        }
-    }
-
-    private static func cacheKey(for path: String) -> CacheKey {
-        if (path as NSString).isAbsolutePath && FileManager.default.fileExists(atPath: path) {
-            return .existingItem(path)
-        }
-
-        let pathExtension = (path as NSString).pathExtension
-        guard !pathExtension.isEmpty else {
-            return .folder
-        }
-        return .fileExtension(pathExtension.localizedLowercase)
-    }
-
-    private enum CacheKey: Hashable {
-        case existingItem(String)
-        case fileExtension(String)
-        case folder
-
-        var identifier: String {
-            switch self {
-            case .existingItem(let path):
-                "item:\(path)"
-            case .fileExtension(let pathExtension):
-                "extension:\(pathExtension)"
-            case .folder:
-                "folder"
-            }
         }
     }
 }

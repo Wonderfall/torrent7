@@ -3,33 +3,76 @@ import Synchronization
 import TorrentEngineModel
 @testable import TorrentApp
 
-final class RecordingCompletionHistoryStore: TorrentCompletionHistoryStoring {
+actor RecordingCompletionHistoryStore: TorrentCompletionHistoryStoring {
     private(set) var completedIDs: Set<TorrentItem.ID>
     private(set) var rememberedIDs = [Set<TorrentItem.ID>]()
     private(set) var forgottenIDs = [Set<TorrentItem.ID>]()
     private(set) var prunedRetainedIDs = [Set<TorrentItem.ID>]()
+    private var reservedIDs = Set<TorrentItem.ID>()
+    private var reservedIDsByClaim = [UUID: Set<TorrentItem.ID>]()
 
     init(completedIDs: Set<TorrentItem.ID> = []) {
         self.completedIDs = completedIDs
     }
 
-    func contains(_ id: TorrentItem.ID) -> Bool {
+    func contains(_ id: TorrentItem.ID) async throws -> Bool {
         completedIDs.contains(id)
     }
 
-    func remember(_ ids: Set<TorrentItem.ID>) {
+    func claimNewlyCompleted(
+        from candidates: [TorrentCompletionCandidate]
+    ) async throws -> TorrentCompletionClaim {
+        try Task.checkCancellation()
+        let newlyCompleted = candidates.filter {
+            !completedIDs.contains($0.id) && !reservedIDs.contains($0.id)
+        }
+        try Task.checkCancellation()
+        let claimID = UUID()
+        let claimedIDs = Set(newlyCompleted.map(\.id))
+        reservedIDs.formUnion(claimedIDs)
+        reservedIDsByClaim[claimID] = claimedIDs
+        return TorrentCompletionClaim(
+            id: claimID,
+            candidates: newlyCompleted
+        )
+    }
+
+    func finalizeCompletionClaim(
+        _ id: UUID,
+        remembering completedIDs: Set<TorrentItem.ID>
+    ) {
+        releaseCompletionClaim(id)
+        rememberedIDs.append(completedIDs)
+        self.completedIDs.formUnion(completedIDs)
+    }
+
+    func abandonCompletionClaim(_ id: UUID) {
+        releaseCompletionClaim(id)
+    }
+
+    func remember(_ ids: Set<TorrentItem.ID>) async throws {
+        try Task.checkCancellation()
         rememberedIDs.append(ids)
         completedIDs.formUnion(ids)
     }
 
-    func forget(_ ids: Set<TorrentItem.ID>) {
+    func forget(_ ids: Set<TorrentItem.ID>) async throws {
+        try Task.checkCancellation()
         forgottenIDs.append(ids)
         completedIDs.subtract(ids)
     }
 
-    func prune(retaining activeIDs: Set<TorrentItem.ID>) {
+    func prune(retaining activeIDs: Set<TorrentItem.ID>) async throws {
+        try Task.checkCancellation()
         prunedRetainedIDs.append(activeIDs)
         completedIDs.formIntersection(activeIDs)
+    }
+
+    private func releaseCompletionClaim(_ id: UUID) {
+        guard let claimedIDs = reservedIDsByClaim.removeValue(forKey: id) else {
+            return
+        }
+        reservedIDs.subtract(claimedIDs)
     }
 }
 
@@ -42,7 +85,8 @@ actor RecordingNotificationService: TorrentNotificationServicing {
     private(set) var notifications = [Notification]()
     private(set) var clearBadgeCount = 0
 
-    nonisolated func configure() {}
+    @MainActor
+    func configure() {}
 
     func notifyDownloadFinished(torrentName: String?, playsSound: Bool) async {
         notifications.append(Notification(torrentName: torrentName, playsSound: playsSound))
@@ -80,6 +124,7 @@ final class RecordingSleepPreventionService: SleepPreventionServicing {
     }
 }
 
+@MainActor
 final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
     var defaultURL: URL?
     private(set) var capabilityRevision: UInt64 = 0
@@ -91,6 +136,14 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
             revision: capabilityRevision,
             defaultAccess: capabilityDefaultAccess,
             additionalAccesses: capabilityAdditionalAccesses
+        )
+    }
+    var pruneSnapshot: DownloadFolderPruneSnapshot {
+        DownloadFolderPruneSnapshot(
+            capabilityRevision: capabilityRevision,
+            candidateAccessKeys: Set(capabilityAdditionalAccesses.map {
+                Self.accessKey($0.url)
+            })
         )
     }
     var restoreDefaultResult: Result<URL?, Error> = .success(nil)
@@ -106,6 +159,12 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
     private(set) var commitPreparedForAddCalls = [(folder: PreparedDownloadFolder, activeTorrents: [TorrentItem])]()
     private(set) var leaseCalls = [String]()
     private(set) var pruneCalls = [[TorrentItem]]()
+    var onPrune: (() -> Void)?
+    var onMakeCapabilitySnapshot: (() -> Void)?
+    private(set) var capabilitySnapshotIsSuspended = false
+    private var suspendsNextCapabilitySnapshot = false
+    private var capabilitySnapshotContinuation:
+        CheckedContinuation<Void, Never>?
 
     func setCapabilityPaths(_ paths: [String]) {
         capabilityDefaultAccess = nil
@@ -115,16 +174,70 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
         advanceCapabilityRevision()
     }
 
-    func restoreDefault() throws -> URL? {
-        try restoreDefaultResult.get()
+    func bootstrap() async -> DownloadFolderBootstrapResult {
+        do {
+            let restoredURL = try restoreDefaultResult.get()
+            defaultURL = restoredURL
+            return DownloadFolderBootstrapResult(
+                defaultURL: restoredURL,
+                discardedInvalidDefault: false
+            )
+        } catch {
+            defaultURL = nil
+            return DownloadFolderBootstrapResult(
+                defaultURL: nil,
+                discardedInvalidDefault: true
+            )
+        }
     }
 
-    func clearDefaultBookmarkAndAccess() {
+    func currentDefaultURL() async -> URL? {
+        defaultURL
+    }
+
+    func currentCapabilityRevision() async -> UInt64 {
+        capabilityRevision
+    }
+
+    func makeCapabilitySnapshot() async -> DownloadFolderCapabilitySnapshot {
+        let snapshot = capabilitySnapshot
+        onMakeCapabilitySnapshot?()
+        if suspendsNextCapabilitySnapshot {
+            suspendsNextCapabilitySnapshot = false
+            capabilitySnapshotIsSuspended = true
+            await withCheckedContinuation { continuation in
+                precondition(capabilitySnapshotContinuation == nil)
+                capabilitySnapshotContinuation = continuation
+            }
+            capabilitySnapshotIsSuspended = false
+        }
+        return snapshot
+    }
+
+    func suspendNextCapabilitySnapshot() {
+        precondition(!suspendsNextCapabilitySnapshot)
+        precondition(capabilitySnapshotContinuation == nil)
+        suspendsNextCapabilitySnapshot = true
+    }
+
+    func resumeSuspendedCapabilitySnapshot() {
+        guard let capabilitySnapshotContinuation else {
+            return
+        }
+        self.capabilitySnapshotContinuation = nil
+        capabilitySnapshotContinuation.resume()
+    }
+
+    func makePruneSnapshot() async -> DownloadFolderPruneSnapshot {
+        pruneSnapshot
+    }
+
+    func clearDefaultBookmarkAndAccess() async {
         clearedDefaultCount += 1
         defaultURL = nil
     }
 
-    func validateSelection(_ url: URL) throws {
+    func validateSelection(_ url: URL) async throws {
         try validateSelectionResult.get()
     }
 
@@ -136,8 +249,12 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
     }
 
     @discardableResult
-    func setDefault(_ url: URL, activeTorrents: [TorrentItem]) throws -> URL {
+    func setDefault(
+        _ url: URL,
+        activeTorrents: [TorrentItem]
+    ) async throws -> DownloadFolderDefaultUpdate {
         setDefaultCalls.append((url, activeTorrents))
+        let previousURL = defaultURL
         let result = try (setDefaultResult ?? .success(url)).get()
         defaultURL = result
         if mirrorsCapabilityMutations {
@@ -154,10 +271,13 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
             pruneCapabilities(activeTorrents: activeTorrents)
             advanceCapabilityRevision()
         }
-        return result
+        return DownloadFolderDefaultUpdate(
+            url: result,
+            didChange: previousURL?.torrentFilePath != result.torrentFilePath
+        )
     }
 
-    func clearDefault(activeTorrents: [TorrentItem]) {
+    func clearDefault(activeTorrents: [TorrentItem]) async {
         clearDefaultCalls.append(activeTorrents)
         defaultURL = nil
         if mirrorsCapabilityMutations {
@@ -174,7 +294,11 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
         }
     }
 
-    func prepareForAdd(_ url: URL, setsDefault: Bool, activeTorrents: [TorrentItem]) throws -> PreparedDownloadFolder {
+    func prepareForAdd(
+        _ url: URL,
+        setsDefault: Bool,
+        activeTorrents: [TorrentItem]
+    ) async throws -> PreparedDownloadFolder {
         prepareForAddCalls.append((url, setsDefault, activeTorrents))
         let access = FakeDownloadFolderAccess(url: url)
         let fallback = PreparedDownloadFolder(
@@ -190,7 +314,7 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
     func commitPreparedForAdd(
         _ preparedFolder: PreparedDownloadFolder,
         activeTorrents: [TorrentItem]
-    ) -> URL? {
+    ) async -> URL? {
         commitPreparedForAddCalls.append((preparedFolder, activeTorrents))
         if let defaultURL = preparedFolder.defaultURL {
             self.defaultURL = defaultURL
@@ -216,7 +340,9 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
         return preparedFolder.defaultURL
     }
 
-    func lease(forSavePath path: String) throws -> DownloadFolderAccessLease {
+    func lease(
+        forSavePath path: String
+    ) async throws -> DownloadFolderAccessLease {
         leaseCalls.append(path)
         let result = leaseResult ?? .success(DownloadFolderAccessLease(
             access: FakeDownloadFolderAccess(url: URL(filePath: path, directoryHint: .isDirectory))
@@ -225,15 +351,26 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
         return try result.get()
     }
 
-    func prune(activeTorrents: [TorrentItem]) {
+    @discardableResult
+    func applyPrunePlan(
+        _ plan: DownloadFolderPrunePlan,
+        activeTorrents: [TorrentItem]
+    ) async -> Bool {
+        guard plan.capabilityRevision == capabilityRevision else {
+            return false
+        }
         pruneCalls.append(activeTorrents)
         if mirrorsCapabilityMutations {
             let previousPaths = Set(capabilitySnapshot.paths)
-            pruneCapabilities(activeTorrents: activeTorrents)
+            capabilityAdditionalAccesses.removeAll {
+                !plan.retainedAccessKeys.contains(Self.accessKey($0.url))
+            }
             if Set(capabilitySnapshot.paths) != previousPaths {
                 advanceCapabilityRevision()
             }
         }
+        onPrune?()
+        return true
     }
 
     private func advanceCapabilityRevision() {
@@ -275,15 +412,46 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
     }
 }
 
+@MainActor
 final class RecordingTorrentFileLocationService: TorrentFileLocationServicing {
     var revealURLs = [TorrentItem.ID: URL]()
+    private var revealURLSuspensionCount = 0
+    private var revealURLContinuations = [CheckedContinuation<Void, Never>]()
 
-    func revealURL(for torrent: TorrentItem) -> URL? {
+    func suspendNextRevealURLs() {
+        revealURLSuspensionCount += 1
+    }
+
+    func waitForSuspendedRevealURLs() async {
+        while revealURLContinuations.isEmpty {
+            await Task.yield()
+        }
+    }
+
+    func resumeSuspendedRevealURLs() {
+        let continuations = revealURLContinuations
+        revealURLContinuations.removeAll()
+        for continuation in continuations {
+            continuation.resume()
+        }
+    }
+
+    func revealURL(for torrent: TorrentItem) async throws -> URL? {
         revealURLs[torrent.id]
     }
 
-    func revealURL(for torrent: TorrentItem, filePath: String) -> URL? {
+    func revealURL(for torrent: TorrentItem, filePath: String) async throws -> URL? {
         revealURLs[torrent.id]
+    }
+
+    func revealURLs(for torrents: [TorrentItem]) async throws -> [URL] {
+        if revealURLSuspensionCount > 0 {
+            revealURLSuspensionCount -= 1
+            await withCheckedContinuation { continuation in
+                revealURLContinuations.append(continuation)
+            }
+        }
+        return torrents.compactMap { revealURLs[$0.id] }
     }
 }
 
@@ -315,6 +483,9 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     var webSeedBatchValue = TorrentWebSeedBatch(revision: 0, webSeeds: [])
     var fileBatchValue = TorrentFileBatch(revision: 0, files: [])
     var pieceMapBatchValue = TorrentPieceMapBatch(revision: 0, pieceMap: .empty)
+    private var trackerBatchSuspensionCount = 0
+    private var trackerBatchContinuations =
+        [CheckedContinuation<Void, Never>]()
     private var trackerHostBatchSuspensionCount = 0
     private var trackerHostBatchContinuations = [CheckedContinuation<Void, Never>]()
     private var snapshotBatchSuspensionCount = 0
@@ -478,6 +649,24 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func setPieceMapBatch(_ batch: TorrentPieceMapBatch) {
         pieceMapBatchValue = batch
+    }
+
+    func suspendNextTrackerBatchCall() {
+        trackerBatchSuspensionCount += 1
+    }
+
+    func waitForSuspendedTrackerBatchCall() async {
+        while trackerBatchContinuations.isEmpty {
+            await Task.yield()
+        }
+    }
+
+    func resumeSuspendedTrackerBatchCalls() {
+        let continuations = trackerBatchContinuations
+        trackerBatchContinuations.removeAll()
+        for continuation in continuations {
+            continuation.resume()
+        }
     }
 
     func suspendNextTrackerHostBatchCall() {
@@ -1063,7 +1252,17 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func trackerBatch(id: String, since revision: UInt64?) async -> TorrentTrackerBatch? {
         trackerBatchRequests.append((id, revision))
-        return revision == trackerBatchValue.revision ? nil : trackerBatchValue
+        let response =
+            revision == trackerBatchValue.revision
+                ? nil
+                : trackerBatchValue
+        if trackerBatchSuspensionCount > 0 {
+            trackerBatchSuspensionCount -= 1
+            await withCheckedContinuation { continuation in
+                trackerBatchContinuations.append(continuation)
+            }
+        }
+        return response
     }
 
     func trackerHostBatch() async -> TorrentTrackerHostBatch {

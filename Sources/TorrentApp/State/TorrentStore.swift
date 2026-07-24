@@ -119,6 +119,19 @@ private enum TorrentStoreEngineStartupKind {
     case replacesTerminatedController
 }
 
+private enum TorrentStoreBulkCommandFilter: Sendable {
+    case any
+    case pausible
+    case resumable
+    case hasMetadata
+}
+
+private struct TorrentStorePendingLabelMutation {
+    let id: UUID?
+    let request: TorrentLabelMutationRequest
+    let state: TorrentStoreQueuedOperationState<Void>?
+}
+
 private struct TorrentStoreEngineAuthorizationState: Equatable {
     let lifecycleGeneration: UInt64
     let capabilityRevision: UInt64
@@ -134,6 +147,7 @@ typealias TorrentStoreEngineStartupFactory = @Sendable (
 final class TorrentStore {
     private static let maximumPendingUserOperationCount = 64
     private static let maximumPendingOperationCount = maximumPendingUserOperationCount * 2 + 1
+    private static let maximumPendingLabelMutationCount = 64
     private static let engineRestartRefreshDrainTimeout: Duration = .seconds(5)
     static let engineStartupFactoryOverride = Mutex<TorrentStoreEngineStartupFactory?>(nil)
 
@@ -143,15 +157,7 @@ final class TorrentStore {
     let sidebarState = TorrentSidebarState()
     let settingsState: TorrentSettingsState
 
-    private(set) var torrents: [TorrentItem] = [] {
-        didSet {
-            torrentsByID = Dictionary(torrents.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-            torrentInfoTabRequests = torrentInfoTabRequests.filter { torrentsByID[$0.key] != nil }
-            torrentState.update(torrents)
-            updateCommandState()
-            updateSidebarState()
-        }
-    }
+    private(set) var torrents: [TorrentItem] = []
     private(set) var downloadFolder: URL?
     private(set) var lastError: String?
     private(set) var settings: TorrentSettings
@@ -164,6 +170,7 @@ final class TorrentStore {
     private(set) var labels: [TorrentLabel] = []
     private(set) var labelAssignments: [TorrentItem.ID: Set<TorrentLabel.ID>] = [:]
     private(set) var trackerHostsByTorrentID: [TorrentItem.ID: Set<String>] = [:]
+    private(set) var torrentFilterRevision: UInt64 = 0
 
     private(set) var libtorrentVersion: String
 
@@ -173,8 +180,8 @@ final class TorrentStore {
     private let sleepPreventionService: SleepPreventionServicing
     private let downloadFolderAccessStore: DownloadFolderAccessStoring
     private let fileLocationService: TorrentFileLocationServicing
-    private let labelStore: TorrentLabelStore
-    private let defaults: UserDefaults
+    private let preferencesStore: TorrentPreferencesStore
+    private let labelPersistenceStore: any TorrentLabelPersisting
     private var refreshTask: Task<Void, Never>?
     private var wakeRefreshTask: Task<Void, Never>?
     @ObservationIgnored
@@ -186,19 +193,66 @@ final class TorrentStore {
     @ObservationIgnored
     private var engineStartupTask: Task<Void, Never>?
     @ObservationIgnored
+    private var productionBootstrapID: UUID?
+    @ObservationIgnored
     private var operationDrainTask: Task<Void, Never>?
     @ObservationIgnored
     private var immediateNetworkBlockTask: Task<Void, Never>?
     @ObservationIgnored
+    private var fileRevealTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var fileRevealID: UUID?
+    @ObservationIgnored
+    private var sidebarUpdateTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var sidebarUpdateID: UUID?
+    @ObservationIgnored
+    private var commandUpdateTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var commandUpdateID: UUID?
+    @ObservationIgnored
+    private var sortUpdateTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var sortUpdateID: UUID?
+    @ObservationIgnored
+    private var labelSaveTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var labelSaveID: UUID?
+    @ObservationIgnored
+    private var labelMutationDrainTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var settingsSaveTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var settingsSaveID: UUID?
+    @ObservationIgnored
+    private var sortPreferencesSaveTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var sortPreferencesSaveID: UUID?
+    @ObservationIgnored
+    private var labelPersistenceRevision: UInt64 = 0
+    @ObservationIgnored
+    private var settingsPersistenceRevision: UInt64 = 0
+    @ObservationIgnored
+    private var sortPersistenceRevision: UInt64 = 0
+    @ObservationIgnored
+    private var torrentPresentationRevision: UInt64 = 0
+    @ObservationIgnored
     private var pendingOperations = [TorrentStorePendingOperation]()
+    private var pendingLabelMutations =
+        [TorrentStorePendingLabelMutation]()
     private var appliedNetworkBinding: AppliedNetworkBinding?
     private var appliedPeerExchangePluginEnabled: Bool?
     private var confirmedNetworkBlockLifecycleGeneration: UInt64?
     private var torrentsByID = [TorrentItem.ID: TorrentItem]()
+    private var activeTorrentIDs = Set<TorrentItem.ID>()
+    private var sortDirectionsByOrder = [
+        TorrentSortOrder: TorrentSortDirection
+    ]()
     private var lastErrorGeneration = 0
     private var lastErrorSource: TorrentStoreErrorSource?
     private var lastSnapshotRevision: UInt64?
     private var lastTrackerHostRevision: UInt64?
+    private var trackerHostMutationRevision: UInt64 = 0
     private var lastNetworkInterfaceRevision: UInt64?
     private var pendingTrackerHostRefresh = false
     private var refreshGeneration = 0
@@ -217,37 +271,30 @@ final class TorrentStore {
     private var backgroundRefreshesEnabled = false
 
     init() {
-        let defaults = UserDefaults.standard
-        self.defaults = defaults
-        let loadedSettings = TorrentSettings.load(defaults: defaults)
-        let loadedSortOrder = TorrentSortOrder.load(defaults: defaults)
-        settings = loadedSettings
-        sortOrder = loadedSortOrder
-        sortDirection = TorrentSortDirection.load(for: loadedSortOrder, defaults: defaults)
+        let defaultsDomain = TorrentDefaultsDomain.standard
+        let initialSettings = TorrentSettings().clamped()
+        let initialSortOrder = TorrentSortOrder.dateAdded
+        settings = initialSettings
+        sortOrder = initialSortOrder
+        sortDirection = initialSortOrder.defaultDirection
+        sortDirectionsByOrder = Dictionary(
+            uniqueKeysWithValues: TorrentSortOrder.allCases.map {
+                ($0, $0.defaultDirection)
+            }
+        )
         let dockTileService = TorrentDockTileService()
         self.dockTileService = dockTileService
         completionNotifier = TorrentCompletionNotifier(dockTileService: dockTileService)
         sleepPreventionService = SleepPreventionService()
-        downloadFolderAccessStore = DownloadFolderAccessStore()
+        downloadFolderAccessStore = DownloadFolderAccessStore(
+            domain: defaultsDomain
+        )
         fileLocationService = TorrentFileLocationService()
-        labelStore = TorrentLabelStore(defaults: defaults)
-        let loadedLabels = labelStore.load()
-        labels = loadedLabels.labels
-        labelAssignments = loadedLabels.assignments
-        var restoredDownloadFolder: URL?
-        var restoredFolderError: String?
-
-        do {
-            restoredDownloadFolder = try downloadFolderAccessStore.restoreDefault()
-            downloadFolder = restoredDownloadFolder
-        } catch {
-            downloadFolderAccessStore.clearDefaultBookmarkAndAccess()
-            downloadFolder = nil
-            restoredFolderError = "The saved download folder could not be restored. Choose a download folder again."
-        }
+        preferencesStore = TorrentPreferencesStore(domain: defaultsDomain)
+        labelPersistenceStore = TorrentLabelPersistenceStore(domain: defaultsDomain)
         settingsState = TorrentSettingsState(
-            settings: loadedSettings,
-            downloadFolder: restoredDownloadFolder,
+            settings: initialSettings,
+            downloadFolder: nil,
             networkInterfacesAreAuthoritative: false
         )
 
@@ -255,20 +302,17 @@ final class TorrentStore {
         engine = startingEngine
         isEngineStarting = true
         backgroundRefreshesEnabled = true
-        appliedPeerExchangePluginEnabled = loadedSettings.enablePeerExchangePlugin
+        appliedPeerExchangePluginEnabled =
+            initialSettings.enablePeerExchangePlugin
         libtorrentVersion = startingEngine.libtorrentVersion
         selectionState.didChange = { [weak self] in
             self?.updateCommandState()
         }
-        updateSidebarState()
+        scheduleSidebarUpdate()
+        completionNotifier.updateConfiguration(initialSettings)
         completionNotifier.configure()
 
-        if let restoredFolderError {
-            setLastError(restoredFolderError, source: .userAction)
-        }
-        startProductionEngine(
-            enablePeerExchangePlugin: loadedSettings.enablePeerExchangePlugin
-        )
+        startProductionBootstrap()
     }
 
     init(
@@ -282,10 +326,19 @@ final class TorrentStore {
         sleepPreventionService: SleepPreventionServicing,
         downloadFolderAccessStore: DownloadFolderAccessStoring,
         fileLocationService: TorrentFileLocationServicing,
-        defaults: UserDefaults = .standard,
+        defaultsDomain: TorrentDefaultsDomain = .standard,
+        initialFolderCapabilityRevision: UInt64 = 0,
+        initialLabels: [TorrentLabel] = [],
+        initialLabelAssignments: [
+            TorrentItem.ID: Set<TorrentLabel.ID>
+        ] = [:],
         networkInterfaces: [NetworkInterfaceOption] = [],
         startsTasks: Bool = false
     ) {
+        precondition(
+            initialLabels.count <= TorrentLabel.maximumCount,
+            "Injected label state exceeds the UI capacity."
+        )
         self.settings = settings
         self.sortOrder = sortOrder
         self.sortDirection = sortDirection
@@ -296,16 +349,20 @@ final class TorrentStore {
         self.sleepPreventionService = sleepPreventionService
         self.downloadFolderAccessStore = downloadFolderAccessStore
         self.fileLocationService = fileLocationService
-        labelStore = TorrentLabelStore(defaults: defaults)
-        self.defaults = defaults
+        preferencesStore = TorrentPreferencesStore(domain: defaultsDomain)
+        labelPersistenceStore = TorrentLabelPersistenceStore(domain: defaultsDomain)
         self.networkInterfaces = networkInterfaces
         engineAuthorizedFolderState = TorrentStoreEngineAuthorizationState(
             lifecycleGeneration: 0,
-            capabilityRevision: downloadFolderAccessStore.capabilitySnapshot.revision
+            capabilityRevision: initialFolderCapabilityRevision
         )
-        let loadedLabels = labelStore.load()
-        labels = loadedLabels.labels
-        labelAssignments = loadedLabels.assignments
+        labels = initialLabels
+        labelAssignments = initialLabelAssignments
+        sortDirectionsByOrder = Dictionary(
+            uniqueKeysWithValues: TorrentSortOrder.allCases.map {
+                ($0, $0 == sortOrder ? sortDirection : $0.defaultDirection)
+            }
+        )
         appliedPeerExchangePluginEnabled = settings.enablePeerExchangePlugin
         settingsState = TorrentSettingsState(
             settings: settings,
@@ -318,7 +375,8 @@ final class TorrentStore {
         selectionState.didChange = { [weak self] in
             self?.updateCommandState()
         }
-        updateSidebarState()
+        scheduleSidebarUpdate()
+        completionNotifier.updateConfiguration(settings)
         if startsTasks, engine.isAvailable {
             completionNotifier.configure()
             startInitialEngineSync()
@@ -332,6 +390,17 @@ final class TorrentStore {
         activeRefreshTask?.cancel()
         operationDrainTask?.cancel()
         immediateNetworkBlockTask?.cancel()
+        fileRevealTask?.cancel()
+        sidebarUpdateTask?.cancel()
+        commandUpdateTask?.cancel()
+        sortUpdateTask?.cancel()
+        labelMutationDrainTask?.cancel()
+        for mutation in pendingLabelMutations {
+            mutation.state?.cancel()
+        }
+        labelSaveTask?.cancel()
+        settingsSaveTask?.cancel()
+        sortPreferencesSaveTask?.cancel()
     }
 
     var selectedTorrent: TorrentItem? {
@@ -349,22 +418,6 @@ final class TorrentStore {
         selectionState.ids
     }
 
-    var selectedTorrents: [TorrentItem] {
-        selectionState.ids.compactMap { torrentsByID[$0] }
-    }
-
-    var hasSelectedTorrents: Bool {
-        !selectionState.ids.isEmpty
-    }
-
-    var canPauseSelectedTorrents: Bool {
-        selectedTorrents.contains { !$0.manuallyPaused }
-    }
-
-    var canResumeSelectedTorrents: Bool {
-        selectedTorrents.contains(where: \.manuallyPaused)
-    }
-
     var selectableNetworkInterfaces: [NetworkInterfaceOption] {
         settings.showOnlyVPNInterfaces ? networkInterfaces.filter(\.isVPNBacked) : networkInterfaces
     }
@@ -379,7 +432,7 @@ final class TorrentStore {
     }
 
     func torrent(id: TorrentItem.ID) -> TorrentItem? {
-        torrents.first { $0.id == id }
+        torrentsByID[id]
     }
 
     func selectTorrent(id: TorrentItem.ID) {
@@ -387,8 +440,49 @@ final class TorrentStore {
     }
 
     func selectTorrents(ids: Set<TorrentItem.ID>) {
-        let validIDs = Set(torrentsByID.keys)
-        selectionState.ids = ids.intersection(validIDs)
+        selectionState.ids = ids
+    }
+
+    private func retainSelection(
+        in activeIDs: Set<TorrentItem.ID>
+    ) async throws {
+        while true {
+            let revision = selectionState.revision
+            let ids = selectionState.ids
+            let retainedIDs = try await Self.retainedSelectionIDs(
+                ids,
+                activeIDs: activeIDs
+            )
+            try Task.checkCancellation()
+            guard revision == selectionState.revision else {
+                continue
+            }
+            if retainedIDs != ids {
+                selectionState.ids = retainedIDs
+            }
+            return
+        }
+    }
+
+    private func removeFromSelection(
+        _ removedIDs: Set<TorrentItem.ID>
+    ) async throws {
+        while true {
+            let revision = selectionState.revision
+            let ids = selectionState.ids
+            let retainedIDs = try await Self.selectionIDs(
+                ids,
+                removing: removedIDs
+            )
+            try Task.checkCancellation()
+            guard revision == selectionState.revision else {
+                continue
+            }
+            if retainedIDs != ids {
+                selectionState.ids = retainedIDs
+            }
+            return
+        }
     }
 
     func requestTorrentInfoTab(_ tab: TorrentInfoTab, for id: TorrentItem.ID) {
@@ -425,6 +519,13 @@ final class TorrentStore {
         if let existingLabel = labels.first(where: { $0.matches(name: normalizedName) }) {
             return existingLabel
         }
+        guard labels.count < TorrentLabel.maximumCount else {
+            setLastError(
+                TorrentStoreError.tooManyLabels.localizedDescription,
+                source: .userAction
+            )
+            return nil
+        }
 
         let label = TorrentLabel(name: normalizedName)
         labels.append(label)
@@ -447,47 +548,25 @@ final class TorrentStore {
     }
 
     func deleteLabel(id: TorrentLabel.ID) {
-        guard labels.contains(where: { $0.id == id }) else {
-            return
-        }
-
-        labels.removeAll { $0.id == id }
-        for torrentID in Array(labelAssignments.keys) {
-            labelAssignments[torrentID]?.remove(id)
-            if labelAssignments[torrentID]?.isEmpty == true {
-                labelAssignments[torrentID] = nil
-            }
-        }
-        saveLabels()
+        scheduleLabelMutation(.delete(labelID: id))
     }
 
     func setLabels(_ labelIDs: Set<TorrentLabel.ID>, forTorrent id: TorrentItem.ID) {
-        guard torrentsByID[id] != nil else {
-            return
-        }
-        setSanitizedLabels(labelIDs, forTorrent: id)
+        scheduleLabelMutation(.set(
+            labelIDs: labelIDs,
+            torrentID: id,
+            requiresActiveTorrent: true
+        ))
     }
 
     func toggleLabel(_ labelID: TorrentLabel.ID, forTorrentIDs torrentIDs: Set<TorrentItem.ID>) {
-        guard labels.contains(where: { $0.id == labelID }) else {
+        guard !torrentIDs.isEmpty else {
             return
         }
-        let validTorrentIDs = torrentIDs.intersection(torrentsByID.keys)
-        guard !validTorrentIDs.isEmpty else {
-            return
-        }
-
-        let shouldRemove = validTorrentIDs.allSatisfy { labelAssignments[$0]?.contains(labelID) == true }
-        for torrentID in validTorrentIDs {
-            var assignedIDs = labelAssignments[torrentID] ?? []
-            if shouldRemove {
-                assignedIDs.remove(labelID)
-            } else {
-                assignedIDs.insert(labelID)
-            }
-            setSanitizedLabels(assignedIDs, forTorrent: torrentID, saves: false)
-        }
-        saveLabels()
+        scheduleLabelMutation(.toggle(
+            labelID: labelID,
+            torrentIDs: torrentIDs
+        ))
     }
 
     func reportError(_ message: String) {
@@ -501,7 +580,14 @@ final class TorrentStore {
     }
 
     func sourcePolicy(for id: TorrentItem.ID) async throws -> TorrentSourcePolicy {
-        try await engine.sourcePolicy(id: id)
+        let requestedEngine = engine
+        let lifecycleGeneration = engineLifecycleGeneration
+        let policy = try await requestedEngine.sourcePolicy(id: id)
+        try Task.checkCancellation()
+        guard lifecycleGeneration == engineLifecycleGeneration else {
+            throw CancellationError()
+        }
+        return policy
     }
 
     func setSourcePolicy(
@@ -515,7 +601,14 @@ final class TorrentStore {
     }
 
     func torrentOptions(for id: TorrentItem.ID) async throws -> TorrentOptions {
-        try await engine.torrentOptions(id: id)
+        let requestedEngine = engine
+        let lifecycleGeneration = engineLifecycleGeneration
+        let options = try await requestedEngine.torrentOptions(id: id)
+        try Task.checkCancellation()
+        guard lifecycleGeneration == engineLifecycleGeneration else {
+            throw CancellationError()
+        }
+        return options
     }
 
     func setTorrentOptions(for id: TorrentItem.ID, options: TorrentOptions) async throws {
@@ -531,14 +624,10 @@ final class TorrentStore {
     }
 
     func setQueuePriority(for ids: Set<TorrentItem.ID>, priority: TorrentQueuePriority) {
-        let idsToUpdate = torrents
-            .filter { ids.contains($0.id) }
-            .map(\.id)
-        guard !idsToUpdate.isEmpty else {
-            return
-        }
-
-        perform { engine in
+        scheduleBulkOperation(
+            requestedIDs: ids,
+            filter: .any
+        ) { engine, idsToUpdate in
             for id in idsToUpdate {
                 var options = try await engine.torrentOptions(id: id)
                 guard options.queuePriority != priority else {
@@ -551,19 +640,11 @@ final class TorrentStore {
     }
 
     func moveTorrentsInQueue(ids: Set<TorrentItem.ID>, move: TorrentQueueMove) {
-        var orderedIDs = torrents
-            .filter { ids.contains($0.id) }
-            .map(\.id)
-        guard !orderedIDs.isEmpty else {
-            return
-        }
-
-        if move == .top || move == .down {
-            orderedIDs.reverse()
-        }
-        let idsToMove = orderedIDs
-
-        perform { engine in
+        scheduleBulkOperation(
+            requestedIDs: ids,
+            filter: .any,
+            reversesOrder: move == .top || move == .down
+        ) { engine, idsToMove in
             for id in idsToMove {
                 try await engine.moveTorrentInQueue(id: id, move: move)
             }
@@ -589,27 +670,81 @@ final class TorrentStore {
     }
 
     func trackerBatch(for id: TorrentItem.ID, since revision: UInt64?) async -> TorrentTrackerBatch? {
-        await engine.trackerBatch(id: id, since: revision)
+        let requestedEngine = engine
+        let lifecycleGeneration = engineLifecycleGeneration
+        let batch = await requestedEngine.trackerBatch(
+            id: id,
+            since: revision
+        )
+        guard !Task.isCancelled,
+              lifecycleGeneration == engineLifecycleGeneration else {
+            return nil
+        }
+        return batch
     }
 
     func webSeedBatch(for id: TorrentItem.ID, since revision: UInt64?) async -> TorrentWebSeedBatch? {
-        await engine.webSeedBatch(id: id, since: revision)
+        let requestedEngine = engine
+        let lifecycleGeneration = engineLifecycleGeneration
+        let batch = await requestedEngine.webSeedBatch(
+            id: id,
+            since: revision
+        )
+        guard !Task.isCancelled,
+              lifecycleGeneration == engineLifecycleGeneration else {
+            return nil
+        }
+        return batch
     }
 
     func webSeedActivity(for id: TorrentItem.ID) async -> TorrentWebSeedActivity? {
-        await engine.webSeedActivity(id: id)
+        let requestedEngine = engine
+        let lifecycleGeneration = engineLifecycleGeneration
+        let activity = await requestedEngine.webSeedActivity(id: id)
+        guard !Task.isCancelled,
+              lifecycleGeneration == engineLifecycleGeneration else {
+            return nil
+        }
+        return activity
     }
 
     func peerSources(for id: TorrentItem.ID) async -> TorrentPeerSources? {
-        await engine.peerSources(id: id)
+        let requestedEngine = engine
+        let lifecycleGeneration = engineLifecycleGeneration
+        let sources = await requestedEngine.peerSources(id: id)
+        guard !Task.isCancelled,
+              lifecycleGeneration == engineLifecycleGeneration else {
+            return nil
+        }
+        return sources
     }
 
     func fileBatch(for id: TorrentItem.ID, since revision: UInt64?) async -> TorrentFileBatch? {
-        await engine.fileBatch(id: id, since: revision)
+        let requestedEngine = engine
+        let lifecycleGeneration = engineLifecycleGeneration
+        let batch = await requestedEngine.fileBatch(
+            id: id,
+            since: revision
+        )
+        guard !Task.isCancelled,
+              lifecycleGeneration == engineLifecycleGeneration else {
+            return nil
+        }
+        return batch
     }
 
     func pieceMapBatch(for id: TorrentItem.ID, since revision: UInt64?) async -> TorrentPieceMapBatch? {
-        await engine.pieceMapBatch(id: id, since: revision)
+        let requestedEngine = engine
+        let lifecycleGeneration = engineLifecycleGeneration
+        let batch = await requestedEngine.pieceMapBatch(
+            id: id,
+            since: revision
+        )
+        guard !Task.isCancelled,
+              lifecycleGeneration == engineLifecycleGeneration else {
+            return nil
+        }
+        return batch
     }
 
     func dismissLastError() {
@@ -617,13 +752,21 @@ final class TorrentStore {
     }
 
     @discardableResult
-    func chooseDownloadFolder(_ url: URL, reportsGlobalError: Bool = true) -> Result<Void, Error> {
+    func chooseDownloadFolder(
+        _ url: URL,
+        reportsGlobalError: Bool = true
+    ) async -> Result<Void, Error> {
         do {
-            try setDownloadFolder(url)
+            try requireFolderAuthorityMutationAllowed()
+            try await performQueuedStoreOperation { store in
+                try await store.setDownloadFolder(url)
+            }
             if reportsGlobalError {
                 setLastError(nil)
             }
             return .success(())
+        } catch let error as CancellationError {
+            return .failure(error)
         } catch {
             if reportsGlobalError {
                 setLastError(error.localizedDescription, source: .userAction)
@@ -632,9 +775,11 @@ final class TorrentStore {
         }
     }
 
-    func validateDownloadFolderSelection(_ url: URL) -> Result<Void, Error> {
+    func validateDownloadFolderSelection(
+        _ url: URL
+    ) async -> Result<Void, Error> {
         do {
-            try downloadFolderAccessStore.validateSelection(url)
+            try await downloadFolderAccessStore.validateSelection(url)
             return .success(())
         } catch {
             return .failure(error)
@@ -642,29 +787,25 @@ final class TorrentStore {
     }
 
     func isCurrentDownloadFolder(_ url: URL?) -> Bool {
-        downloadFolderAccessStore.isCurrentDefault(url)
+        guard let url, let downloadFolder else {
+            return false
+        }
+        return url.torrentFilePath == downloadFolder.torrentFilePath
     }
 
     func previewTorrentFile(_ url: URL) async throws -> TorrentFilePreview {
         try Task.checkCancellation()
-        let didAccess = url.startAccessingSecurityScopedResource()
-        defer {
-            if didAccess {
-                url.stopAccessingSecurityScopedResource()
-            }
-        }
-
-        let readTask = Task.detached(priority: .userInitiated) {
-            try Self.readTorrentFile(url)
-        }
-        let torrentData = try await withTaskCancellationHandler {
-            try await readTask.value
-        } onCancel: {
-            readTask.cancel()
-        }
+        let torrentData = try await Self.readTorrentFile(url)
         try Task.checkCancellation()
-        let preview = try await engine.previewTorrentFile(data: torrentData)
+        let previewEngine = engine
+        let lifecycleGeneration = engineLifecycleGeneration
+        let preview = try await previewEngine.previewTorrentFile(
+            data: torrentData
+        )
         try Task.checkCancellation()
+        guard lifecycleGeneration == engineLifecycleGeneration else {
+            throw CancellationError()
+        }
         return preview
     }
 
@@ -683,7 +824,7 @@ final class TorrentStore {
             setLastError("Choose a download folder first.", source: .userAction)
             return false
         }
-        guard magnet.utf8.count <= TorrentInputLimits.maxMagnetURIBytes else {
+        guard Self.isMagnetWithinSizeLimit(magnet) else {
             setLastError(TorrentStoreError.magnetTooLarge.localizedDescription, source: .userAction)
             return false
         }
@@ -713,7 +854,7 @@ final class TorrentStore {
         allowNonHTTPSWebSeeds: Bool = false,
         allowPreMetadataDHT: Bool = false
     ) -> Bool {
-        guard magnet.utf8.count <= TorrentInputLimits.maxMagnetURIBytes else {
+        guard Self.isMagnetWithinSizeLimit(magnet) else {
             setLastError(TorrentStoreError.magnetTooLarge.localizedDescription, source: .userAction)
             return false
         }
@@ -722,7 +863,7 @@ final class TorrentStore {
             magnet,
             savePath: nil,
             prepareFolder: { store in
-                try store.downloadFolderAccessStore.prepareForAdd(
+                try await store.downloadFolderAccessStore.prepareForAdd(
                     downloadFolder,
                     setsDefault: setsDownloadFolderAsDefault,
                     activeTorrents: store.torrents
@@ -740,7 +881,7 @@ final class TorrentStore {
     private func scheduleMagnetAdd(
         _ magnet: String,
         savePath: String?,
-        prepareFolder: (@MainActor @Sendable (TorrentStore) throws -> PreparedDownloadFolder)?,
+        prepareFolder: (@MainActor @Sendable (TorrentStore) async throws -> PreparedDownloadFolder)?,
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
         labelIDs: Set<TorrentLabel.ID>,
@@ -749,7 +890,6 @@ final class TorrentStore {
         allowPreMetadataDHT: Bool
     ) -> Bool {
         let enablePeerExchange = settings.effectiveUsePeerExchangeByDefault
-        let sanitizedLabelIDs = sanitizeLabelIDs(labelIDs)
         let errorGeneration = lastErrorGeneration
         return scheduleUserOperation { store in
             var didAddTorrent = false
@@ -774,7 +914,7 @@ final class TorrentStore {
                 withExtendedLifetime(preparedFolder?.lease) {}
             }
             do {
-                preparedFolder = try prepareFolder?(store)
+                preparedFolder = try await prepareFolder?(store)
                 guard let resolvedSavePath = preparedFolder?.path ?? savePath else {
                     throw TorrentStoreError.downloadFolderAccessDenied
                 }
@@ -797,7 +937,7 @@ final class TorrentStore {
                 )
                 didAddTorrent = true
                 if let preparedFolder {
-                    store.commitDownloadFolderForAdd(preparedFolder)
+                    await store.commitDownloadFolderForAdd(preparedFolder)
                     try await store.reconcileFolderAuthorizationsIfNeeded(
                         duringFolderCapabilityTransaction: true,
                         forceExactReplacement: true,
@@ -808,7 +948,11 @@ final class TorrentStore {
                     store.endFolderCapabilityTransaction()
                     ownsFolderCapabilityTransaction = false
                 }
-                store.setSanitizedLabels(sanitizedLabelIDs, forTorrent: addedTorrentID)
+                try await store.performLabelMutation(.set(
+                    labelIDs: labelIDs,
+                    torrentID: addedTorrentID,
+                    requiresActiveTorrent: false
+                ))
                 await store.refreshFromEngine()
                 store.clearLastError(ifUnchangedSince: errorGeneration)
             } catch {
@@ -892,7 +1036,7 @@ final class TorrentStore {
             torrentData: torrentData,
             savePath: nil,
             prepareFolder: { store in
-                try store.downloadFolderAccessStore.prepareForAdd(
+                try await store.downloadFolderAccessStore.prepareForAdd(
                     downloadFolder,
                     setsDefault: setsDownloadFolderAsDefault,
                     activeTorrents: store.torrents
@@ -912,7 +1056,7 @@ final class TorrentStore {
         _ url: URL,
         torrentData: Data,
         savePath: String?,
-        prepareFolder: (@MainActor @Sendable (TorrentStore) throws -> PreparedDownloadFolder)?,
+        prepareFolder: (@MainActor @Sendable (TorrentStore) async throws -> PreparedDownloadFolder)?,
         filePriorities: [Int32: TorrentFilePriority]?,
         moveOriginalToTrash: Bool,
         startsPaused: Bool,
@@ -922,7 +1066,6 @@ final class TorrentStore {
         allowNonHTTPSWebSeeds: Bool
     ) -> Bool {
         let enablePeerExchange = settings.effectiveUsePeerExchangeByDefault
-        let sanitizedLabelIDs = sanitizeLabelIDs(labelIDs)
         let errorGeneration = lastErrorGeneration
         return scheduleUserOperation { store in
             var didAddTorrent = false
@@ -940,11 +1083,7 @@ final class TorrentStore {
                     return
                 }
             }
-            let didAccess = url.startAccessingSecurityScopedResource()
             defer {
-                if didAccess {
-                    url.stopAccessingSecurityScopedResource()
-                }
                 if ownsFolderCapabilityTransaction {
                     store.endFolderCapabilityTransaction()
                 }
@@ -952,7 +1091,7 @@ final class TorrentStore {
             }
 
             do {
-                preparedFolder = try prepareFolder?(store)
+                preparedFolder = try await prepareFolder?(store)
                 guard let resolvedSavePath = preparedFolder?.path ?? savePath else {
                     throw TorrentStoreError.downloadFolderAccessDenied
                 }
@@ -975,7 +1114,7 @@ final class TorrentStore {
                 )
                 didAddTorrent = true
                 if let preparedFolder {
-                    store.commitDownloadFolderForAdd(preparedFolder)
+                    await store.commitDownloadFolderForAdd(preparedFolder)
                     try await store.reconcileFolderAuthorizationsIfNeeded(
                         duringFolderCapabilityTransaction: true,
                         forceExactReplacement: true,
@@ -986,9 +1125,13 @@ final class TorrentStore {
                     store.endFolderCapabilityTransaction()
                     ownsFolderCapabilityTransaction = false
                 }
-                store.setSanitizedLabels(sanitizedLabelIDs, forTorrent: addedTorrentID)
+                try await store.performLabelMutation(.set(
+                    labelIDs: labelIDs,
+                    torrentID: addedTorrentID,
+                    requiresActiveTorrent: false
+                ))
                 if moveOriginalToTrash {
-                    try unsafe FileManager.default.trashItem(at: url, resultingItemURL: nil)
+                    try await Self.moveToTrash(url)
                 }
                 await store.refreshFromEngine()
                 store.clearLastError(ifUnchangedSince: errorGeneration)
@@ -1027,7 +1170,11 @@ final class TorrentStore {
     }
 
     func pauseAllTorrents() {
-        pauseTorrents(ids: Set(torrents.map(\.id)))
+        scheduleBulkOperation(
+            requestedIDs: nil,
+            filter: .pausible,
+            operation: Self.pause
+        )
     }
 
     func pauseTorrent(id: TorrentItem.ID) {
@@ -1035,18 +1182,11 @@ final class TorrentStore {
     }
 
     func pauseTorrents(ids: Set<TorrentItem.ID>) {
-        let idsToPause = torrents
-            .filter { ids.contains($0.id) && !$0.manuallyPaused }
-            .map(\.id)
-        guard !idsToPause.isEmpty else {
-            return
-        }
-
-        perform { engine in
-            for id in idsToPause {
-                try await engine.pause(id: id)
-            }
-        }
+        scheduleBulkOperation(
+            requestedIDs: ids,
+            filter: .pausible,
+            operation: Self.pause
+        )
     }
 
     func resumeSelectedTorrents() {
@@ -1054,7 +1194,11 @@ final class TorrentStore {
     }
 
     func resumeAllTorrents() {
-        resumeTorrents(ids: Set(torrents.map(\.id)))
+        scheduleBulkOperation(
+            requestedIDs: nil,
+            filter: .resumable,
+            operation: Self.resume
+        )
     }
 
     func resumeTorrent(id: TorrentItem.ID) {
@@ -1074,29 +1218,18 @@ final class TorrentStore {
     }
 
     func resumeTorrents(ids: Set<TorrentItem.ID>) {
-        let idsToResume = torrents
-            .filter { ids.contains($0.id) && $0.manuallyPaused }
-            .map(\.id)
-        guard !idsToResume.isEmpty else {
-            return
-        }
-
-        perform { engine in
-            for id in idsToResume {
-                try await engine.resume(id: id)
-            }
-        }
+        scheduleBulkOperation(
+            requestedIDs: ids,
+            filter: .resumable,
+            operation: Self.resume
+        )
     }
 
     func reannounceTorrents(ids: Set<TorrentItem.ID>) {
-        let idsToReannounce = torrents
-            .filter { ids.contains($0.id) }
-            .map(\.id)
-        guard !idsToReannounce.isEmpty else {
-            return
-        }
-
-        perform { engine in
+        scheduleBulkOperation(
+            requestedIDs: ids,
+            filter: .any
+        ) { engine, idsToReannounce in
             for id in idsToReannounce {
                 try await engine.reannounce(id: id)
             }
@@ -1104,14 +1237,10 @@ final class TorrentStore {
     }
 
     func forceRecheckTorrents(ids: Set<TorrentItem.ID>) {
-        let idsToRecheck = torrents
-            .filter { ids.contains($0.id) && $0.hasMetadata }
-            .map(\.id)
-        guard !idsToRecheck.isEmpty else {
-            return
-        }
-
-        perform { engine in
+        scheduleBulkOperation(
+            requestedIDs: ids,
+            filter: .hasMetadata
+        ) { engine, idsToRecheck in
             for id in idsToRecheck {
                 try await engine.forceRecheck(id: id)
             }
@@ -1127,17 +1256,22 @@ final class TorrentStore {
     }
 
     func removeTorrents(ids: Set<TorrentItem.ID>, deleteFiles: Bool) {
-        let idsToRemove = Set(torrentsByID.keys).intersection(ids)
-        guard !idsToRemove.isEmpty else {
+        guard !ids.isEmpty else {
             return
         }
 
         let errorGeneration = lastErrorGeneration
-        let torrentsToRemove = idsToRemove.compactMap { torrentsByID[$0] }
         scheduleUserOperation { store in
             var removedIDs = Set<TorrentItem.ID>()
             var removalWarnings = [String]()
             do {
+                let torrentsToRemove = try await Self.selectedTorrents(
+                    ids: ids,
+                    torrents: store.torrents
+                )
+                guard !torrentsToRemove.isEmpty else {
+                    return
+                }
                 for torrent in torrentsToRemove {
                     let outcome = try await store.removeFromEngine(
                         torrent,
@@ -1152,9 +1286,11 @@ final class TorrentStore {
                         break
                     }
                 }
-                store.completionNotifier.forget(removedIDs)
-                store.removeLabelAssignments(for: removedIDs)
-                store.selectionState.ids = store.selectionState.ids.subtracting(removedIDs)
+                await store.completionNotifier.forget(removedIDs)
+                try await store.performLabelMutation(
+                    .removeAssignments(torrentIDs: removedIDs)
+                )
+                try await store.removeFromSelection(removedIDs)
                 await store.reconcileAfterRemoval(removedIDs)
                 if removalWarnings.isEmpty {
                     store.clearLastError(ifUnchangedSince: errorGeneration)
@@ -1162,9 +1298,11 @@ final class TorrentStore {
                     store.setLastError(removalWarnings.joined(separator: "\n"), source: .userAction)
                 }
             } catch {
-                store.completionNotifier.forget(removedIDs)
-                store.removeLabelAssignments(for: removedIDs)
-                store.selectionState.ids = store.selectionState.ids.subtracting(removedIDs)
+                await store.completionNotifier.forget(removedIDs)
+                try? await store.performLabelMutation(
+                    .removeAssignments(torrentIDs: removedIDs)
+                )
+                try? await store.removeFromSelection(removedIDs)
                 await store.reconcileAfterRemoval(removedIDs)
                 removalWarnings.append(error.localizedDescription)
                 store.setLastError(removalWarnings.joined(separator: "\n"), source: .userAction)
@@ -1181,7 +1319,9 @@ final class TorrentStore {
             return try await engine.remove(id: torrent.id, deleteFiles: false)
         }
 
-        let folderAccessLease = try downloadFolderAccessStore.lease(forSavePath: torrent.savePath)
+        let folderAccessLease = try await downloadFolderAccessStore.lease(
+            forSavePath: torrent.savePath
+        )
         defer {
             withExtendedLifetime(folderAccessLease) {}
         }
@@ -1198,11 +1338,36 @@ final class TorrentStore {
         guard !removedIDs.isEmpty else {
             return
         }
-        torrents.removeAll { removedIDs.contains($0.id) }
-        updateDockTransferRates(in: [])
-        updateSleepPrevention(in: [])
+        let lifecycleGeneration = engineLifecycleGeneration
+        let presentationRevision = torrentPresentationRevision
+        let currentTorrents = torrents
+        let currentRows = torrentState.rows
+        let presentation: TorrentListPresentation
+        do {
+            presentation = try await TorrentListPresentation.prepareRemoving(
+                removedIDs,
+                from: currentTorrents,
+                previousRows: currentRows
+            )
+        } catch {
+            return
+        }
+        guard !Task.isCancelled,
+              lifecycleGeneration == engineLifecycleGeneration,
+              presentationRevision == torrentPresentationRevision,
+              !engine.isAvailable else {
+            return
+        }
+        applyTorrentPresentation(presentation)
+        updateDockTransferRates()
+        updateSleepPrevention()
+        let appliedPresentationRevision = torrentPresentationRevision
         await pruneAndReconcileFolderAuthorizations(activeTorrents: torrents)
-        pruneTrackerHosts(activeTorrentIDs: Set(torrents.map(\.id)))
+        guard !Task.isCancelled,
+              appliedPresentationRevision == torrentPresentationRevision else {
+            return
+        }
+        try? await pruneTrackerHosts(activeTorrentIDs: presentation.activeIDs)
     }
 
     func revealSelectedTorrentsInFinder() {
@@ -1214,48 +1379,106 @@ final class TorrentStore {
     }
 
     func revealTorrentFileInFinder(torrent: TorrentItem, file: TorrentFileItem) {
-        guard let url = fileLocationService.revealURL(for: torrent, filePath: file.path) else {
-            setLastError("The file location could not be found.", source: .userAction)
-            return
+        let filePath = file.path
+        scheduleFileReveal(
+            missingLocationMessage: "The file location could not be found."
+        ) { service in
+            guard let url = try await service.revealURL(
+                for: torrent,
+                filePath: filePath
+            ) else {
+                return []
+            }
+            return [url]
         }
-
-        NSWorkspace.shared.activateFileViewerSelecting([url])
-        setLastError(nil)
     }
 
     func revealTorrentsInFinder(ids: Set<TorrentItem.ID>) {
-        let urls = torrents
-            .filter { ids.contains($0.id) }
-            .compactMap(fileLocationService.revealURL(for:))
-            .reduce(into: [URL]()) { urls, url in
-                if !urls.contains(where: { $0.torrentFilePath == url.torrentFilePath }) {
-                    urls.append(url)
+        let torrents = torrents
+        scheduleFileReveal(
+            missingLocationMessage: "The download location could not be found."
+        ) { service in
+            let selectedTorrents = try await Self.selectedTorrents(
+                ids: ids,
+                torrents: torrents
+            )
+            return try await service.revealURLs(for: selectedTorrents)
+        }
+    }
+
+    private func scheduleFileReveal(
+        missingLocationMessage: String,
+        resolve: @escaping @Sendable (
+            any TorrentFileLocationServicing
+        ) async throws -> [URL]
+    ) {
+        fileRevealTask?.cancel()
+        let revealID = UUID()
+        let fileLocationService = fileLocationService
+        let errorGeneration = lastErrorGeneration
+        fileRevealID = revealID
+        fileRevealTask = Task { @MainActor [weak self, fileLocationService] in
+            do {
+                let urls = try await resolve(fileLocationService)
+                try Task.checkCancellation()
+                guard let self, self.fileRevealID == revealID else {
+                    return
+                }
+                self.fileRevealTask = nil
+                self.fileRevealID = nil
+                guard !urls.isEmpty else {
+                    if self.lastErrorGeneration == errorGeneration {
+                        self.setLastError(missingLocationMessage, source: .userAction)
+                    }
+                    return
+                }
+                NSWorkspace.shared.activateFileViewerSelecting(urls)
+                self.clearLastError(ifUnchangedSince: errorGeneration)
+            } catch is CancellationError {
+                guard let self, self.fileRevealID == revealID else {
+                    return
+                }
+                self.fileRevealTask = nil
+                self.fileRevealID = nil
+            } catch {
+                guard let self, self.fileRevealID == revealID else {
+                    return
+                }
+                self.fileRevealTask = nil
+                self.fileRevealID = nil
+                if self.lastErrorGeneration == errorGeneration {
+                    self.setLastError(missingLocationMessage, source: .userAction)
                 }
             }
-
-        guard !urls.isEmpty else {
-            setLastError("The download location could not be found.", source: .userAction)
-            return
         }
-
-        NSWorkspace.shared.activateFileViewerSelecting(urls)
-        setLastError(nil)
     }
 
-    private func setDownloadFolder(_ url: URL) throws {
+    private func setDownloadFolder(_ url: URL) async throws {
         try requireFolderAuthorityMutationAllowed()
-        guard !downloadFolderAccessStore.isCurrentDefault(url) else {
+        try await beginFolderCapabilityTransaction()
+        defer {
+            endFolderCapabilityTransaction()
+        }
+        let update = try await downloadFolderAccessStore.setDefault(
+            url,
+            activeTorrents: torrents
+        )
+        downloadFolder = update.url
+        settingsState.downloadFolder = downloadFolder
+        guard update.didChange else {
             return
         }
-        try requireFolderAuthorizationQueueCapacity()
-        let newURL = try downloadFolderAccessStore.setDefault(url, activeTorrents: torrents)
-        downloadFolder = newURL
-        settingsState.downloadFolder = downloadFolder
-        scheduleFolderAuthorizationReconciliation()
+        try await reconcileFolderAuthorizationsIfNeeded(
+            duringFolderCapabilityTransaction: true,
+            forceExactReplacement: true,
+            ownsFolderAuthorizationLane: true
+        )
     }
 
-    private func commitDownloadFolderForAdd(_ preparedFolder: PreparedDownloadFolder) {
-        guard let defaultURL = downloadFolderAccessStore.commitPreparedForAdd(
+    private func commitDownloadFolderForAdd(
+        _ preparedFolder: PreparedDownloadFolder
+    ) async {
+        guard let defaultURL = await downloadFolderAccessStore.commitPreparedForAdd(
             preparedFolder,
             activeTorrents: torrents
         ) else {
@@ -1265,19 +1488,27 @@ final class TorrentStore {
         settingsState.downloadFolder = defaultURL
     }
 
-    private func clearDownloadFolder() throws {
+    private func clearDownloadFolder() async throws {
         try requireFolderAuthorityMutationAllowed()
-        try requireFolderAuthorizationQueueCapacity()
-        downloadFolderAccessStore.clearDefault(activeTorrents: torrents)
+        try await beginFolderCapabilityTransaction()
+        defer {
+            endFolderCapabilityTransaction()
+        }
+        await downloadFolderAccessStore.clearDefault(activeTorrents: torrents)
         downloadFolder = nil
         settingsState.downloadFolder = nil
-        scheduleFolderAuthorizationReconciliation()
+        try await reconcileFolderAuthorizationsIfNeeded(
+            duringFolderCapabilityTransaction: true,
+            forceExactReplacement: true,
+            ownsFolderAuthorizationLane: true
+        )
     }
 
     func saveAll() async {
         let startupTask = engineStartupTask
         await startupTask?.value
         await drainPendingOperations()
+        await drainPendingPersistenceWork()
         try? await engine.saveAll()
     }
 
@@ -1290,9 +1521,11 @@ final class TorrentStore {
             // state to save.
             startupTask.cancel()
             await startupTask.value
+            await drainPendingPersistenceWork()
             return true
         }
         await drainPendingOperations()
+        await drainPendingPersistenceWork()
 
         if engineStartupFailed {
             return true
@@ -1318,8 +1551,9 @@ final class TorrentStore {
         }
 
         self.sortOrder = sortOrder
-        self.sortOrder.save(defaults: defaults)
-        sortDirection = TorrentSortDirection.load(for: sortOrder, defaults: defaults)
+        sortDirection = sortDirectionsByOrder[sortOrder]
+            ?? sortOrder.defaultDirection
+        scheduleSortPreferencesSave()
         applySort()
     }
 
@@ -1329,7 +1563,8 @@ final class TorrentStore {
         }
 
         self.sortDirection = sortDirection
-        self.sortDirection.save(for: sortOrder, defaults: defaults)
+        sortDirectionsByOrder[sortOrder] = sortDirection
+        scheduleSortPreferencesSave()
         applySort()
     }
 
@@ -1341,12 +1576,10 @@ final class TorrentStore {
 
         self.settings = clampedSettings
         settingsState.settings = clampedSettings
-        clampedSettings.save(defaults: defaults)
-        if !clampedSettings.completionNotificationsEnabled {
-            clearCompletionBadge()
-        }
-        updateDockTransferRates(in: torrents)
-        updateSleepPrevention(in: torrents)
+        scheduleSettingsSave()
+        completionNotifier.updateConfiguration(clampedSettings)
+        updateDockTransferRates()
+        updateSleepPrevention()
         scheduleApplySettings(refreshes: true)
     }
 
@@ -1371,7 +1604,7 @@ final class TorrentStore {
                 try store.requireFolderAuthorityMutationAllowed()
                 try store.requireRestoreDefaultsQueueCapacity()
                 store.updateSettings(TorrentSettings())
-                try store.clearDownloadFolder()
+                try await store.clearDownloadFolder()
             } catch {
                 store.setLastError(error.localizedDescription, source: .userAction)
             }
@@ -1582,47 +1815,134 @@ final class TorrentStore {
         }
         updateConfirmedNetworkContainment(from: poll.networkStatus)
         if let trackerHostBatch = poll.trackerHostBatch {
-            applyTrackerHostBatch(trackerHostBatch, generation: generation)
+            await applyTrackerHostBatch(
+                trackerHostBatch,
+                generation: generation,
+                lifecycleGeneration: lifecycleGeneration,
+                mutationGeneration: mutationGeneration
+            )
+            guard generation == refreshGeneration,
+                  lifecycleGeneration == engineLifecycleGeneration,
+                  mutationGeneration == engineMutationGeneration,
+                  !isFolderCapabilityTransactionInProgress else {
+                return
+            }
         }
         guard let snapshotBatch = poll.snapshotBatch else {
             return
         }
         let sortedSnapshots = snapshotBatch.torrents
-        lastSnapshotRevision = snapshotBatch.revision
-        completionNotifier.observeCompletedDownloads(
-            in: sortedSnapshots,
-            previousTorrents: torrents,
-            settings: settings,
-            isEnabled: notifiesCompletions && sortedSnapshots != torrents
-        )
-        guard sortedSnapshots != torrents else {
-            downloadFolderAccessStore.prune(activeTorrents: sortedSnapshots)
-            pruneTorrentLabels(activeTorrentIDs: Set(sortedSnapshots.map(\.id)))
-            pruneTrackerHosts(activeTorrentIDs: Set(sortedSnapshots.map(\.id)))
-            do {
-                try await reconcileFolderAuthorizationsIfNeeded()
-            } catch {
-                setLastError(error.localizedDescription, source: .userAction)
-            }
+        let previousTorrents = torrents
+        let presentationRevision = torrentPresentationRevision
+        let presentation: TorrentListPresentation
+        do {
+            presentation = try await TorrentListPresentation.prepare(
+                torrents: sortedSnapshots,
+                previousTorrents: previousTorrents,
+                previousRows: torrentState.rows
+            )
+        } catch is CancellationError {
+            return
+        } catch {
+            setLastError(error.localizedDescription, source: .userAction)
             return
         }
-        updateDockTransferRates(in: sortedSnapshots)
-        updateSleepPrevention(in: sortedSnapshots)
-        torrents = sortedSnapshots
-        downloadFolderAccessStore.prune(activeTorrents: sortedSnapshots)
-        pruneTorrentLabels(activeTorrentIDs: Set(sortedSnapshots.map(\.id)))
-        pruneTrackerHosts(activeTorrentIDs: Set(sortedSnapshots.map(\.id)))
+        guard generation == refreshGeneration,
+              lifecycleGeneration == engineLifecycleGeneration,
+              mutationGeneration == engineMutationGeneration,
+              presentationRevision == torrentPresentationRevision,
+              !isFolderCapabilityTransactionInProgress else {
+            return
+        }
 
-        let validTorrentIDs = Set(sortedSnapshots.map(\.id))
-        let updatedSelection = selectionState.ids.intersection(validTorrentIDs)
-        if updatedSelection != selectionState.ids {
-            selectionState.ids = updatedSelection
+        // Revoke stale local capabilities and reconcile the isolated engine
+        // before any unrelated asynchronous projection can invalidate this
+        // refresh. Reconciliation converges on the capability store's current
+        // revision even if presentation state changes while it is suspended.
+        do {
+            try await pruneDownloadFolderAccesses(
+                activeTorrents: sortedSnapshots,
+                generation: generation,
+                lifecycleGeneration: lifecycleGeneration,
+                mutationGeneration: mutationGeneration,
+                presentationRevision: presentationRevision
+            )
+        } catch is CancellationError {
+            return
+        } catch {
+            setLastError(error.localizedDescription, source: .userAction)
+            return
         }
         do {
             try await reconcileFolderAuthorizationsIfNeeded()
         } catch {
-            setLastError(error.localizedDescription, source: .userAction)
+            if generation == refreshGeneration,
+               lifecycleGeneration == engineLifecycleGeneration,
+               mutationGeneration == engineMutationGeneration {
+                setLastError(error.localizedDescription, source: .userAction)
+            }
+            return
         }
+        guard generation == refreshGeneration,
+              lifecycleGeneration == engineLifecycleGeneration,
+              mutationGeneration == engineMutationGeneration,
+              presentationRevision == torrentPresentationRevision,
+              !isFolderCapabilityTransactionInProgress else {
+            return
+        }
+
+        if presentation.torrentsChanged {
+            applyTorrentPresentation(presentation)
+            updateDockTransferRates()
+            updateSleepPrevention()
+            do {
+                try await retainSelection(in: presentation.activeIDs)
+            } catch {
+                return
+            }
+        }
+        let appliedPresentationRevision = torrentPresentationRevision
+        do {
+            try await pruneTorrentLabels(activeTorrentIDs: presentation.activeIDs)
+        } catch {
+            return
+        }
+        guard generation == refreshGeneration,
+              lifecycleGeneration == engineLifecycleGeneration,
+              mutationGeneration == engineMutationGeneration,
+              appliedPresentationRevision == torrentPresentationRevision,
+              !Task.isCancelled,
+              !isFolderCapabilityTransactionInProgress else {
+            return
+        }
+
+        await completionNotifier.observeCompletedDownloads(
+            in: presentation.completionProjection,
+            previousTorrentsWereEmpty: previousTorrents.isEmpty,
+            isEnabled: notifiesCompletions && presentation.torrentsChanged
+        )
+        guard generation == refreshGeneration,
+              lifecycleGeneration == engineLifecycleGeneration,
+              mutationGeneration == engineMutationGeneration,
+              appliedPresentationRevision == torrentPresentationRevision,
+              !Task.isCancelled,
+              !isFolderCapabilityTransactionInProgress else {
+            return
+        }
+        do {
+            try await pruneTrackerHosts(activeTorrentIDs: presentation.activeIDs)
+        } catch {
+            return
+        }
+        guard generation == refreshGeneration,
+              lifecycleGeneration == engineLifecycleGeneration,
+              mutationGeneration == engineMutationGeneration,
+              appliedPresentationRevision == torrentPresentationRevision,
+              !Task.isCancelled,
+              !isFolderCapabilityTransactionInProgress else {
+            return
+        }
+        lastSnapshotRevision = snapshotBatch.revision
     }
 
     private func shouldRefreshTrackerHosts() -> Bool {
@@ -1649,7 +1969,12 @@ final class TorrentStore {
         scheduleApplySettings(refreshes: true, notifiesCompletions: false)
     }
 
-    private func applyTrackerHostBatch(_ batch: TorrentTrackerHostBatch, generation: Int) {
+    private func applyTrackerHostBatch(
+        _ batch: TorrentTrackerHostBatch,
+        generation: Int,
+        lifecycleGeneration: UInt64,
+        mutationGeneration: UInt64
+    ) async {
         guard generation == refreshGeneration else {
             return
         }
@@ -1658,49 +1983,164 @@ final class TorrentStore {
             return
         }
 
-        var nextHostsByTorrentID = [TorrentItem.ID: Set<String>]()
-        for item in batch.hosts where !item.torrentID.isEmpty && !item.host.isEmpty {
-            nextHostsByTorrentID[item.torrentID, default: []].insert(item.host)
+        let trackerMutationRevision = trackerHostMutationRevision
+        let nextHostsByTorrentID: [TorrentItem.ID: Set<String>]?
+        do {
+            nextHostsByTorrentID = try await Self.makeTrackerHostIndex(
+                batch.hosts,
+                previous: trackerHostsByTorrentID
+            )
+        } catch {
+            return
         }
-        if nextHostsByTorrentID != trackerHostsByTorrentID {
+        guard generation == refreshGeneration,
+              lifecycleGeneration == engineLifecycleGeneration,
+              mutationGeneration == engineMutationGeneration,
+              trackerMutationRevision == trackerHostMutationRevision,
+              !isFolderCapabilityTransactionInProgress else {
+            return
+        }
+        if let nextHostsByTorrentID {
             trackerHostsByTorrentID = nextHostsByTorrentID
-            updateSidebarState()
+            trackerHostMutationRevision &+= 1
+            scheduleSidebarUpdate()
         }
         lastTrackerHostRevision = batch.revision
         pendingTrackerHostRefresh = false
     }
 
-    private func pruneTrackerHosts(activeTorrentIDs: Set<TorrentItem.ID>) {
-        let pruned = trackerHostsByTorrentID.filter { activeTorrentIDs.contains($0.key) }
-        if pruned != trackerHostsByTorrentID {
+    private func pruneTrackerHosts(
+        activeTorrentIDs: Set<TorrentItem.ID>
+    ) async throws {
+        let mutationRevision = trackerHostMutationRevision
+        let presentationRevision = torrentPresentationRevision
+        let currentHosts = trackerHostsByTorrentID
+        let pruned = try await Self.prunedTrackerHostIndex(
+            currentHosts,
+            activeTorrentIDs: activeTorrentIDs
+        )
+        try Task.checkCancellation()
+        guard mutationRevision == trackerHostMutationRevision,
+              presentationRevision == torrentPresentationRevision else {
+            throw CancellationError()
+        }
+        if let pruned {
             trackerHostsByTorrentID = pruned
-            updateSidebarState()
+            trackerHostMutationRevision &+= 1
+            scheduleSidebarUpdate()
         }
     }
 
-    private func updateDockTransferRates(in snapshots: [TorrentItem]) {
+    private func updateDockTransferRates() {
         guard settings.dockTransferRatesEnabled else {
             dockTileService.updateTransferRates(downloadRate: 0, uploadRate: 0)
             return
         }
 
-        let downloadRate = snapshots.reduce(Int64(0)) { total, torrent in
-            total + Int64(max(0, torrent.downloadPayloadRate))
-        }
-        let uploadRate = snapshots.reduce(Int64(0)) { total, torrent in
-            total + Int64(max(0, torrent.uploadPayloadRate))
-        }
-        dockTileService.updateTransferRates(downloadRate: downloadRate, uploadRate: uploadRate)
+        dockTileService.updateTransferRates(
+            downloadRate: torrentState.dockDownloadRate,
+            uploadRate: torrentState.dockUploadRate
+        )
     }
 
-    private func updateSleepPrevention(in snapshots: [TorrentItem]) {
-        let hasActiveTransfers = snapshots.contains { torrent in
-            torrent.downloadPayloadRate > 0 || torrent.uploadPayloadRate > 0
-        }
+    private func updateSleepPrevention() {
         sleepPreventionService.update(
             isEnabled: settings.preventSleepDuringTransfers,
-            hasActiveTransfers: hasActiveTransfers
+            hasActiveTransfers: torrentState.hasActiveTransfers
         )
+    }
+
+    private func startProductionBootstrap() {
+        let bootstrapID = UUID()
+        let settingsRevision = settingsPersistenceRevision
+        let sortRevision = sortPersistenceRevision
+        let labelRevision = labelPersistenceRevision
+        let accessStore = downloadFolderAccessStore
+        let preferencesStore = preferencesStore
+        let labelPersistenceStore = labelPersistenceStore
+        productionBootstrapID = bootstrapID
+        engineStartupTask = Task { @MainActor [
+            weak self,
+            accessStore,
+            preferencesStore,
+            labelPersistenceStore
+        ] in
+            async let loadedPreferences = preferencesStore.load()
+            async let loadedLabels = labelPersistenceStore.load()
+            async let folderResult = accessStore.bootstrap()
+
+            let preferences: TorrentPreferencesSnapshot
+            let labelSnapshot: TorrentLabelSnapshot
+            let folder: DownloadFolderBootstrapResult
+            do {
+                (preferences, labelSnapshot, folder) = try await (
+                    loadedPreferences,
+                    loadedLabels,
+                    folderResult
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                guard let self,
+                      !Task.isCancelled,
+                      self.productionBootstrapID == bootstrapID else {
+                    return
+                }
+                self.productionBootstrapID = nil
+                self.engineStartupTask = nil
+                self.setLastError(
+                    "Saved application state could not be loaded: \(error.localizedDescription)",
+                    source: .userAction
+                )
+                self.startProductionEngine(
+                    enablePeerExchangePlugin:
+                        self.settings.enablePeerExchangePlugin
+                )
+                return
+            }
+
+            guard let self,
+                  !Task.isCancelled,
+                  self.productionBootstrapID == bootstrapID else {
+                return
+            }
+            if self.settingsPersistenceRevision == settingsRevision {
+                let loadedSettings = preferences.settings.clamped()
+                self.settings = loadedSettings
+                self.settingsState.settings = loadedSettings
+            }
+            if self.sortPersistenceRevision == sortRevision {
+                self.sortOrder = preferences.sortOrder
+                self.sortDirectionsByOrder = preferences.sortDirections
+                self.sortDirection = preferences.selectedSortDirection
+            }
+            if self.labelPersistenceRevision == labelRevision {
+                self.labels = labelSnapshot.labels
+                self.labelAssignments = labelSnapshot.assignments
+                self.torrentFilterRevision &+= 1
+                self.scheduleSidebarUpdate()
+            }
+            self.downloadFolder = folder.defaultURL
+            self.settingsState.downloadFolder = folder.defaultURL
+            self.completionNotifier.updateConfiguration(self.settings)
+            self.appliedPeerExchangePluginEnabled =
+                self.settings.enablePeerExchangePlugin
+            if folder.discardedInvalidDefault {
+                self.setLastError(
+                    "The saved download folder could not be restored. Choose a download folder again.",
+                    source: .userAction
+                )
+            }
+
+            // The bootstrap task has finished owning startup. Clear its handle
+            // before the engine task captures and waits for any predecessor.
+            self.productionBootstrapID = nil
+            self.engineStartupTask = nil
+            self.startProductionEngine(
+                enablePeerExchangePlugin:
+                    self.settings.enablePeerExchangePlugin
+            )
+        }
     }
 
     func startProductionEngine(enablePeerExchangePlugin: Bool) {
@@ -1739,22 +2179,6 @@ final class TorrentStore {
         case .replacesTerminatedController:
             .replacingTerminatedController
         }
-        let capabilitySnapshot = downloadFolderAccessStore.capabilitySnapshot
-        let authorizedSavePaths = capabilitySnapshot.paths
-        let folderAuthorizations: [TorrentFolderAuthorization]
-        do {
-            folderAuthorizations = try capabilitySnapshot.engineAuthorizations()
-        } catch {
-            isEngineStarting = false
-            engineStartupFailed = !engine.isAvailable
-            let message = Self.engineStartupErrorMessage(error)
-            setLastError(TorrentEngineError.startupFailed(message).localizedDescription, source: .userAction)
-            schedulePendingRestoreDefaultsIfPossible()
-            if !pendingOperations.isEmpty {
-                startOperationDrainIfNeeded()
-            }
-            return
-        }
 
         let previousStartupTask = engineStartupTask
         previousStartupTask?.cancel()
@@ -1776,7 +2200,8 @@ final class TorrentStore {
         isEngineStarting = true
         engineStartupFailed = false
 
-        engineStartupTask = Task { @MainActor [weak self, capabilitySnapshot] in
+        let accessStore = downloadFolderAccessStore
+        engineStartupTask = Task { @MainActor [weak self, accessStore] in
             await previousStartupTask?.value
             switch kind {
             case .initial:
@@ -1797,39 +2222,47 @@ final class TorrentStore {
                   self.engineLifecycleGeneration == startupGeneration else {
                 return
             }
-            let creationTask = Task.detached(priority: .userInitiated) {
-                [authorizedSavePaths, folderAuthorizations, connectionRetryMode] () -> TorrentStoreEngineStartupOutcome in
-                guard !Task.isCancelled else {
-                    return .cancelled
-                }
-                do {
-                    let engine: any TorrentEngineServicing
-                    if let startupFactory {
-                        engine = try startupFactory(enablePeerExchangePlugin, authorizedSavePaths)
-                    } else {
-                        engine = try await TorrentXPCClient.connect(
-                            enablePeerExchangePlugin: enablePeerExchangePlugin,
-                            folderAuthorizations: folderAuthorizations,
-                            retryMode: connectionRetryMode
-                        )
-                    }
-                    guard !Task.isCancelled else {
-                        return .cancelled
-                    }
-                    return .started(engine)
-                } catch {
-                    return .failed(Self.engineStartupErrorMessage(error))
-                }
+
+            let capabilitySnapshot = await accessStore.makeCapabilitySnapshot()
+            guard !Task.isCancelled,
+                  self.engineLifecycleGeneration == startupGeneration else {
+                return
             }
-            let outcome = await withTaskCancellationHandler {
-                await creationTask.value
-            } onCancel: {
-                creationTask.cancel()
+            let folderAuthorizations: [TorrentFolderAuthorization]
+            do {
+                folderAuthorizations = try capabilitySnapshot
+                    .engineAuthorizations()
+            } catch {
+                self.engineStartupTask = nil
+                self.isEngineStarting = false
+                self.engineStartupFailed = true
+                let message = Self.engineStartupErrorMessage(error)
+                self.setLastError(
+                    TorrentEngineError.startupFailed(message)
+                        .localizedDescription,
+                    source: .userAction
+                )
+                self.schedulePendingRestoreDefaultsIfPossible()
+                if !self.pendingOperations.isEmpty {
+                    self.startOperationDrainIfNeeded()
+                }
+                return
             }
+            let authorizedSavePaths = capabilitySnapshot.paths
+            let outcome = await Self.createProductionEngine(
+                startupFactory: startupFactory,
+                enablePeerExchangePlugin: enablePeerExchangePlugin,
+                authorizedSavePaths: authorizedSavePaths,
+                folderAuthorizations: folderAuthorizations,
+                connectionRetryMode: connectionRetryMode
+            )
             withExtendedLifetime(capabilitySnapshot) {}
 
             guard !Task.isCancelled,
                   self.engineLifecycleGeneration == startupGeneration else {
+                if case .started(let staleEngine) = outcome {
+                    await staleEngine.shutdown()
+                }
                 return
             }
             self.engineStartupTask = nil
@@ -1988,78 +2421,572 @@ final class TorrentStore {
         }
     }
 
-    private func sanitizeLabelIDs(_ labelIDs: Set<TorrentLabel.ID>) -> Set<TorrentLabel.ID> {
-        labelIDs.intersection(labels.map(\.id))
-    }
-
-    private func setSanitizedLabels(
-        _ labelIDs: Set<TorrentLabel.ID>,
-        forTorrent torrentID: TorrentItem.ID,
-        saves: Bool = true
+    private func scheduleBulkOperation(
+        requestedIDs: Set<TorrentItem.ID>?,
+        filter: TorrentStoreBulkCommandFilter,
+        reversesOrder: Bool = false,
+        operation: @escaping @Sendable (
+            any TorrentEngineServicing,
+            [TorrentItem.ID]
+        ) async throws -> Void
     ) {
-        let sanitizedLabelIDs = sanitizeLabelIDs(labelIDs)
-        if sanitizedLabelIDs.isEmpty {
-            labelAssignments[torrentID] = nil
-        } else {
-            labelAssignments[torrentID] = sanitizedLabelIDs
-        }
-        if saves {
-            saveLabels()
-        }
-    }
-
-    private func removeLabelAssignments(for torrentIDs: Set<TorrentItem.ID>) {
-        guard torrentIDs.contains(where: { labelAssignments[$0] != nil }) else {
+        if let requestedIDs, requestedIDs.isEmpty {
             return
         }
-        for torrentID in torrentIDs {
-            labelAssignments[torrentID] = nil
+        let errorGeneration = lastErrorGeneration
+        scheduleUserOperation { store in
+            do {
+                let ids = try await Self.prepareBulkCommandIDs(
+                    torrents: store.torrents,
+                    requestedIDs: requestedIDs,
+                    filter: filter,
+                    reversesOrder: reversesOrder
+                )
+                try Task.checkCancellation()
+                guard !ids.isEmpty else {
+                    return
+                }
+                try await operation(store.engine, ids)
+                await store.refreshFromEngine()
+                store.clearLastError(
+                    ifUnchangedSince: errorGeneration
+                )
+            } catch {
+                await store.pruneAndReconcileFolderAuthorizations(
+                    activeTorrents: store.torrents
+                )
+                store.setLastError(
+                    error.localizedDescription,
+                    source: .userAction
+                )
+            }
         }
+    }
+
+    private static func pause(
+        _ engine: any TorrentEngineServicing,
+        _ ids: [TorrentItem.ID]
+    ) async throws {
+        for id in ids {
+            try await engine.pause(id: id)
+        }
+    }
+
+    private static func resume(
+        _ engine: any TorrentEngineServicing,
+        _ ids: [TorrentItem.ID]
+    ) async throws {
+        for id in ids {
+            try await engine.resume(id: id)
+        }
+    }
+
+    private func scheduleLabelMutation(
+        _ request: TorrentLabelMutationRequest
+    ) {
+        guard enqueueLabelMutation(
+            TorrentStorePendingLabelMutation(
+                id: nil,
+                request: request,
+                state: nil
+            )
+        ) else {
+            setLastError(
+                TorrentStoreError.tooManyPendingOperations
+                    .localizedDescription,
+                source: .userAction
+            )
+            return
+        }
+    }
+
+    private func performLabelMutation(
+        _ request: TorrentLabelMutationRequest
+    ) async throws {
+        try Task.checkCancellation()
+        let mutationID = UUID()
+        let state = TorrentStoreQueuedOperationState<Void>()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation(
+                isolation: MainActor.shared
+            ) { continuation in
+                state.install(continuation)
+                guard !Task.isCancelled else {
+                    state.cancel()
+                    return
+                }
+                guard enqueueLabelMutation(
+                    TorrentStorePendingLabelMutation(
+                        id: mutationID,
+                        request: request,
+                        state: state
+                    )
+                ) else {
+                    state.resume(
+                        throwing:
+                            TorrentStoreError.tooManyPendingOperations
+                    )
+                    return
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self, state] in
+                self?.removePendingLabelMutation(id: mutationID)
+                state.cancel()
+            }
+        }
+    }
+
+    @discardableResult
+    private func enqueueLabelMutation(
+        _ mutation: TorrentStorePendingLabelMutation
+    ) -> Bool {
+        guard pendingLabelMutations.count
+                < Self.maximumPendingLabelMutationCount else {
+            return false
+        }
+        pendingLabelMutations.append(mutation)
+        startLabelMutationDrainIfNeeded()
+        return true
+    }
+
+    private func removePendingLabelMutation(id: UUID) {
+        guard let index = pendingLabelMutations.firstIndex(where: {
+            $0.id == id
+        }) else {
+            return
+        }
+        pendingLabelMutations.remove(at: index)
+    }
+
+    private func startLabelMutationDrainIfNeeded() {
+        guard labelMutationDrainTask == nil else {
+            return
+        }
+        labelMutationDrainTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self else {
+                    return
+                }
+                guard !self.pendingLabelMutations.isEmpty else {
+                    self.labelMutationDrainTask = nil
+                    return
+                }
+                let mutation = self.pendingLabelMutations.removeFirst()
+                await self.executeLabelMutation(mutation)
+            }
+            self?.labelMutationDrainTask = nil
+        }
+    }
+
+    private func executeLabelMutation(
+        _ mutation: TorrentStorePendingLabelMutation
+    ) async {
+        guard mutation.state?.begin() ?? true else {
+            return
+        }
+        do {
+            try await applyLabelMutation(mutation.request)
+            mutation.state?.resume(returning: ())
+        } catch {
+            mutation.state?.resume(throwing: error)
+            if mutation.state == nil, !(error is CancellationError) {
+                setLastError(
+                    error.localizedDescription,
+                    source: .userAction
+                )
+            }
+        }
+    }
+
+    private func applyLabelMutation(
+        _ request: TorrentLabelMutationRequest
+    ) async throws {
+        while true {
+            let revision = labelPersistenceRevision
+            let presentationRevision = torrentPresentationRevision
+            let currentLabels = labels
+            let currentAssignments = labelAssignments
+            let currentActiveTorrentIDs = activeTorrentIDs
+            let plan = try await TorrentLabelMutationPlan.prepare(
+                request: request,
+                labels: currentLabels,
+                assignments: currentAssignments,
+                activeTorrentIDs: currentActiveTorrentIDs,
+                revision: revision
+            )
+            try Task.checkCancellation()
+            guard plan.revision == labelPersistenceRevision,
+                  presentationRevision == torrentPresentationRevision else {
+                continue
+            }
+            guard let snapshot = plan.snapshot else {
+                return
+            }
+            labels = snapshot.labels
+            labelAssignments = snapshot.assignments
+            saveLabels()
+            return
+        }
+    }
+
+    private func drainPendingLabelMutations() async {
+        while let task = labelMutationDrainTask {
+            await task.value
+        }
+    }
+
+    private func pruneTorrentLabels(
+        activeTorrentIDs: Set<TorrentItem.ID>
+    ) async throws {
+        let revision = labelPersistenceRevision
+        let assignments = labelAssignments
+        let plan = try await TorrentLabelPrunePlan.prepare(
+            assignments: assignments,
+            activeTorrentIDs: activeTorrentIDs,
+            revision: revision
+        )
+        try Task.checkCancellation()
+        guard plan.revision == labelPersistenceRevision else {
+            throw CancellationError()
+        }
+        guard let assignments = plan.assignments else {
+            return
+        }
+        labelAssignments = assignments
         saveLabels()
     }
 
-    private func pruneTorrentLabels(activeTorrentIDs: Set<TorrentItem.ID>) {
-        let staleTorrentIDs = Set(labelAssignments.keys).subtracting(activeTorrentIDs)
-        guard !staleTorrentIDs.isEmpty else {
-            return
-        }
-        removeLabelAssignments(for: staleTorrentIDs)
-    }
-
     private func saveLabels() {
-        labelStore.save(labels: labels, assignments: labelAssignments)
-        updateSidebarState()
+        precondition(
+            labelPersistenceRevision != UInt64.max,
+            "Label persistence revision exhausted"
+        )
+        labelPersistenceRevision += 1
+        let revision = labelPersistenceRevision
+        let saveID = UUID()
+        let labels = labels
+        let assignments = labelAssignments
+        let labelPersistenceStore = labelPersistenceStore
+        labelSaveTask?.cancel()
+        labelSaveID = saveID
+        labelSaveTask = Task { @MainActor [weak self, labelPersistenceStore] in
+            do {
+                try await labelPersistenceStore.save(
+                    labels: labels,
+                    assignments: assignments,
+                    revision: revision
+                )
+                try Task.checkCancellation()
+                guard let self,
+                      self.labelSaveID == saveID,
+                      self.labelPersistenceRevision == revision else {
+                    return
+                }
+                self.labelSaveTask = nil
+                self.labelSaveID = nil
+            } catch is CancellationError {
+                guard let self, self.labelSaveID == saveID else {
+                    return
+                }
+                self.labelSaveTask = nil
+                self.labelSaveID = nil
+            } catch {
+                guard let self, self.labelSaveID == saveID else {
+                    return
+                }
+                self.labelSaveTask = nil
+                self.labelSaveID = nil
+                assertionFailure("Failed to encode labels: \(error)")
+            }
+        }
+        scheduleSidebarUpdate()
     }
 
-    private func updateSidebarState() {
-        sidebarState.update(TorrentSidebarSnapshot.make(
-            torrents: torrents,
-            labels: labels,
-            labelAssignments: labelAssignments,
-            trackerHostsByTorrentID: trackerHostsByTorrentID
-        ))
+    private func drainPendingLabelSave() async {
+        while let task = labelSaveTask {
+            let saveID = labelSaveID
+            await task.value
+            if labelSaveID == saveID {
+                labelSaveTask = nil
+                labelSaveID = nil
+            }
+        }
+    }
+
+    private func scheduleSettingsSave() {
+        precondition(
+            settingsPersistenceRevision != UInt64.max,
+            "Settings persistence revision exhausted"
+        )
+        settingsPersistenceRevision += 1
+        let revision = settingsPersistenceRevision
+        let settings = settings
+        let saveID = UUID()
+        let preferencesStore = preferencesStore
+        settingsSaveTask?.cancel()
+        settingsSaveID = saveID
+        settingsSaveTask = Task { @MainActor [weak self, preferencesStore] in
+            do {
+                try await preferencesStore.saveSettings(
+                    settings,
+                    revision: revision
+                )
+                try Task.checkCancellation()
+                guard let self,
+                      self.settingsSaveID == saveID,
+                      self.settingsPersistenceRevision == revision else {
+                    return
+                }
+                self.settingsSaveTask = nil
+                self.settingsSaveID = nil
+            } catch is CancellationError {
+                guard let self, self.settingsSaveID == saveID else {
+                    return
+                }
+                self.settingsSaveTask = nil
+                self.settingsSaveID = nil
+            } catch {
+                guard let self, self.settingsSaveID == saveID else {
+                    return
+                }
+                self.settingsSaveTask = nil
+                self.settingsSaveID = nil
+                assertionFailure("Failed to save settings: \(error)")
+            }
+        }
+    }
+
+    private func scheduleSortPreferencesSave() {
+        precondition(
+            sortPersistenceRevision != UInt64.max,
+            "Sort persistence revision exhausted"
+        )
+        sortPersistenceRevision += 1
+        let revision = sortPersistenceRevision
+        let order = sortOrder
+        let direction = sortDirection
+        sortDirectionsByOrder[order] = direction
+        let saveID = UUID()
+        let preferencesStore = preferencesStore
+        sortPreferencesSaveTask?.cancel()
+        sortPreferencesSaveID = saveID
+        sortPreferencesSaveTask = Task { @MainActor [
+            weak self,
+            preferencesStore
+        ] in
+            do {
+                try await preferencesStore.saveSorting(
+                    order: order,
+                    direction: direction,
+                    revision: revision
+                )
+                try Task.checkCancellation()
+                guard let self,
+                      self.sortPreferencesSaveID == saveID,
+                      self.sortPersistenceRevision == revision else {
+                    return
+                }
+                self.sortPreferencesSaveTask = nil
+                self.sortPreferencesSaveID = nil
+            } catch is CancellationError {
+                guard let self,
+                      self.sortPreferencesSaveID == saveID else {
+                    return
+                }
+                self.sortPreferencesSaveTask = nil
+                self.sortPreferencesSaveID = nil
+            } catch {
+                guard let self,
+                      self.sortPreferencesSaveID == saveID else {
+                    return
+                }
+                self.sortPreferencesSaveTask = nil
+                self.sortPreferencesSaveID = nil
+                assertionFailure("Failed to save sort preferences: \(error)")
+            }
+        }
+    }
+
+    private func drainPendingPreferenceSaves() async {
+        while settingsSaveTask != nil || sortPreferencesSaveTask != nil {
+            let settingsTask = settingsSaveTask
+            let settingsID = settingsSaveID
+            let sortTask = sortPreferencesSaveTask
+            let sortID = sortPreferencesSaveID
+            await settingsTask?.value
+            await sortTask?.value
+            if settingsSaveID == settingsID {
+                settingsSaveTask = nil
+                settingsSaveID = nil
+            }
+            if sortPreferencesSaveID == sortID {
+                sortPreferencesSaveTask = nil
+                sortPreferencesSaveID = nil
+            }
+        }
+    }
+
+    private func drainPendingPersistenceWork() async {
+        while labelMutationDrainTask != nil
+                || labelSaveTask != nil
+                || settingsSaveTask != nil
+                || sortPreferencesSaveTask != nil {
+            await drainPendingLabelMutations()
+            await drainPendingPreferenceSaves()
+            await drainPendingLabelSave()
+        }
+    }
+
+    private func applyTorrentPresentation(
+        _ presentation: TorrentListPresentation,
+        supersedesSort: Bool = true,
+        updatesSidebar: Bool = true
+    ) {
+        if supersedesSort {
+            cancelSortUpdate()
+        }
+        torrentPresentationRevision &+= 1
+        torrents = presentation.torrents
+        torrentsByID = presentation.torrentsByID
+        activeTorrentIDs = presentation.activeIDs
+        torrentInfoTabRequests = torrentInfoTabRequests.filter {
+            presentation.torrentsByID[$0.key] != nil
+        }
+        torrentState.update(presentation)
+        updateCommandState()
+        if updatesSidebar && presentation.rowsChanged {
+            scheduleSidebarUpdate()
+        }
+    }
+
+    private func scheduleSidebarUpdate() {
+        torrentFilterRevision &+= 1
+        sidebarUpdateTask?.cancel()
+        let updateID = UUID()
+        let torrents = torrents
+        let labels = labels
+        let labelAssignments = labelAssignments
+        let trackerHostsByTorrentID = trackerHostsByTorrentID
+        sidebarUpdateID = updateID
+        sidebarUpdateTask = Task { @MainActor [weak self] in
+            do {
+                let snapshot = try await TorrentSidebarSnapshot.prepare(
+                    torrents: torrents,
+                    labels: labels,
+                    labelAssignments: labelAssignments,
+                    trackerHostsByTorrentID: trackerHostsByTorrentID
+                )
+                try Task.checkCancellation()
+                guard let self, self.sidebarUpdateID == updateID else {
+                    return
+                }
+                self.sidebarUpdateTask = nil
+                self.sidebarUpdateID = nil
+                self.sidebarState.update(snapshot)
+            } catch {
+                guard let self, self.sidebarUpdateID == updateID else {
+                    return
+                }
+                self.sidebarUpdateTask = nil
+                self.sidebarUpdateID = nil
+            }
+        }
     }
 
     private func updateCommandState() {
-        let rows = torrentState.rows
-        let selectedRows = rows.filter { selectionState.ids.contains($0.id) }
-        commandState.update(TorrentCommandSnapshot(
-            hasTorrents: !rows.isEmpty,
-            sortOrder: sortOrder,
-            sortDirection: sortDirection,
-            selectedTorrentCount: selectedRows.count,
-            hasSingleSelectedTorrent: selectedRows.count == 1,
-            canPauseSelectedTorrents: selectedRows.contains { !$0.manuallyPaused },
-            canResumeSelectedTorrents: selectedRows.contains(where: \.manuallyPaused),
-            canPauseAnyTorrent: rows.contains { !$0.manuallyPaused },
-            canResumeAnyTorrent: rows.contains(where: \.manuallyPaused),
-            canForceRecheckSelectedTorrents: selectedRows.contains(where: \.hasMetadata)
-        ))
+        commandUpdateTask?.cancel()
+        let updateID = UUID()
+        let torrentsByID = torrentsByID
+        let selectedIDs = selectionState.ids
+        let selectionRevision = selectionState.revision
+        let presentationRevision = torrentPresentationRevision
+        let sortOrder = sortOrder
+        let sortDirection = sortDirection
+        let canPauseAnyTorrent = torrentState.canPauseAnyTorrent
+        let canResumeAnyTorrent = torrentState.canResumeAnyTorrent
+        commandUpdateID = updateID
+        commandUpdateTask = Task { @MainActor [weak self] in
+            do {
+                let snapshot = try await TorrentCommandSnapshot.prepare(
+                    torrentsByID: torrentsByID,
+                    selectedIDs: selectedIDs,
+                    sortOrder: sortOrder,
+                    sortDirection: sortDirection,
+                    canPauseAnyTorrent: canPauseAnyTorrent,
+                    canResumeAnyTorrent: canResumeAnyTorrent
+                )
+                try Task.checkCancellation()
+                guard let self,
+                      self.commandUpdateID == updateID,
+                      self.selectionState.revision == selectionRevision,
+                      self.torrentPresentationRevision
+                        == presentationRevision,
+                      self.sortOrder == sortOrder,
+                      self.sortDirection == sortDirection else {
+                    return
+                }
+                self.commandUpdateTask = nil
+                self.commandUpdateID = nil
+                self.commandState.update(snapshot)
+            } catch {
+                guard let self, self.commandUpdateID == updateID else {
+                    return
+                }
+                self.commandUpdateTask = nil
+                self.commandUpdateID = nil
+            }
+        }
     }
 
     private func applySort() {
         refreshGeneration &+= 1
-        torrents = sortOrder.sorted(torrents, direction: sortDirection)
+        updateCommandState()
+        sortUpdateTask?.cancel()
+        let updateID = UUID()
+        let presentationRevision = torrentPresentationRevision
+        let torrents = torrents
+        let sortOrder = sortOrder
+        let sortDirection = sortDirection
+        let previousRows = torrentState.rows
+        sortUpdateID = updateID
+        sortUpdateTask = Task { @MainActor [weak self] in
+            do {
+                let presentation = try await TorrentListPresentation.prepareSorted(
+                    torrents: torrents,
+                    sortOrder: sortOrder,
+                    sortDirection: sortDirection,
+                    previousRows: previousRows
+                )
+                try Task.checkCancellation()
+                guard let self,
+                      self.sortUpdateID == updateID,
+                      self.torrentPresentationRevision == presentationRevision,
+                      self.sortOrder == sortOrder,
+                      self.sortDirection == sortDirection else {
+                    return
+                }
+                self.sortUpdateTask = nil
+                self.sortUpdateID = nil
+                self.applyTorrentPresentation(
+                    presentation,
+                    supersedesSort: false,
+                    updatesSidebar: false
+                )
+            } catch {
+                guard let self, self.sortUpdateID == updateID else {
+                    return
+                }
+                self.sortUpdateTask = nil
+                self.sortUpdateID = nil
+            }
+        }
+    }
+
+    private func cancelSortUpdate() {
+        sortUpdateTask?.cancel()
+        sortUpdateTask = nil
+        sortUpdateID = nil
     }
 
     private func scheduleApplySettings(refreshes: Bool = false, notifiesCompletions: Bool = true) {
@@ -2151,6 +3078,49 @@ final class TorrentStore {
                 }
                 if !accepted {
                     state.resume(throwing: TorrentStoreError.tooManyPendingOperations)
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self, state] in
+                self?.removePendingUserOperation(id: operationID)
+                state.cancel()
+            }
+        }
+    }
+
+    private func performQueuedStoreOperation<Result: Sendable>(
+        _ operation: @escaping @MainActor @Sendable (TorrentStore) async throws -> Result
+    ) async throws -> Result {
+        try Task.checkCancellation()
+        guard !isEngineStarting else {
+            throw TorrentStoreError.engineStarting
+        }
+
+        let operationID = UUID()
+        let state = TorrentStoreQueuedOperationState<Result>()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation(
+                isolation: MainActor.shared
+            ) { continuation in
+                state.install(continuation)
+                guard !Task.isCancelled else {
+                    state.cancel()
+                    return
+                }
+                let accepted = scheduleUserOperation(id: operationID) { store in
+                    guard state.begin() else {
+                        return
+                    }
+                    do {
+                        state.resume(returning: try await operation(store))
+                    } catch {
+                        state.resume(throwing: error)
+                    }
+                }
+                if !accepted {
+                    state.resume(
+                        throwing: TorrentStoreError.tooManyPendingOperations
+                    )
                 }
             }
         } onCancel: {
@@ -2356,19 +3326,21 @@ final class TorrentStore {
         wakeRefreshTask = nil
         cancelActiveRefresh()
         isEngineRestarting = true
+        defer {
+            isEngineRestarting = false
+        }
         let networkWasConfirmedBlocked = networkIsConfirmedBlocked
         advanceEngineLifecycleGeneration()
         let lifecycleGeneration = engineLifecycleGeneration
         if networkWasConfirmedBlocked {
             confirmedNetworkBlockLifecycleGeneration = lifecycleGeneration
         }
-        let capabilitySnapshot = downloadFolderAccessStore.capabilitySnapshot
-        defer {
-            isEngineRestarting = false
-            withExtendedLifetime(capabilitySnapshot) {}
-        }
         if refreshCount(for: previousLifecycleGeneration) > 0 {
             guard await blockNetworkForSettingsTransition() else {
+                return
+            }
+            try Task.checkCancellation()
+            guard lifecycleGeneration == engineLifecycleGeneration else {
                 return
             }
         }
@@ -2392,6 +3364,10 @@ final class TorrentStore {
         await previousRefreshTask?.value
         await previousWakeRefreshTask?.value
         await previousActiveRefreshTask?.value
+        try Task.checkCancellation()
+        guard lifecycleGeneration == engineLifecycleGeneration else {
+            return
+        }
         // Exact reconciliation owns bookmark delegation. A restart reuses its
         // confirmed capability IDs and must not individually regenerate or
         // incrementally grant persistent GUI authorization material.
@@ -2399,6 +3375,19 @@ final class TorrentStore {
             duringRestart: true,
             ownsFolderAuthorizationLane: true
         )
+        try Task.checkCancellation()
+        guard lifecycleGeneration == engineLifecycleGeneration else {
+            return
+        }
+        let capabilitySnapshot = await downloadFolderAccessStore
+            .makeCapabilitySnapshot()
+        try Task.checkCancellation()
+        guard lifecycleGeneration == engineLifecycleGeneration else {
+            return
+        }
+        defer {
+            withExtendedLifetime(capabilitySnapshot) {}
+        }
         do {
             try await restartedEngine.restart(
                 enablePeerExchangePlugin: enablePeerExchangePlugin,
@@ -2424,6 +3413,7 @@ final class TorrentStore {
             }
             throw error
         }
+        try Task.checkCancellation()
         guard lifecycleGeneration == engineLifecycleGeneration,
               restartedEngine.isAvailable else {
             handleUnavailableEngine(restartedEngine, lifecycleGeneration: lifecycleGeneration)
@@ -2498,7 +3488,13 @@ final class TorrentStore {
         do {
             while authorizedEngine.isAvailable,
                   lifecycleGeneration == engineLifecycleGeneration {
-                let capabilitySnapshot = downloadFolderAccessStore.capabilitySnapshot
+                let capabilitySnapshot = await downloadFolderAccessStore
+                    .makeCapabilitySnapshot()
+                guard !Task.isCancelled,
+                      lifecycleGeneration == engineLifecycleGeneration,
+                      authorizedEngine.isAvailable else {
+                    return
+                }
                 let desiredState = TorrentStoreEngineAuthorizationState(
                     lifecycleGeneration: lifecycleGeneration,
                     capabilityRevision: capabilitySnapshot.revision
@@ -2509,7 +3505,8 @@ final class TorrentStore {
                 let authorizations = try capabilitySnapshot.engineAuthorizations()
                 try await authorizedEngine.reconcileFolderAuthorizations(authorizations)
                 withExtendedLifetime(capabilitySnapshot) {}
-                guard lifecycleGeneration == engineLifecycleGeneration,
+                guard !Task.isCancelled,
+                      lifecycleGeneration == engineLifecycleGeneration,
                       authorizedEngine.isAvailable else {
                     return
                 }
@@ -2521,8 +3518,14 @@ final class TorrentStore {
                 // this operation complete until the engine reflects a stable local
                 // capability snapshot; queued adds therefore cannot observe a
                 // transiently re-granted folder.
-                if downloadFolderAccessStore.capabilitySnapshot.revision
-                    == capabilitySnapshot.revision {
+                let currentCapabilityRevision = await downloadFolderAccessStore
+                    .currentCapabilityRevision()
+                guard !Task.isCancelled,
+                      lifecycleGeneration == engineLifecycleGeneration,
+                      authorizedEngine.isAvailable else {
+                    return
+                }
+                if currentCapabilityRevision == capabilitySnapshot.revision {
                     return
                 }
             }
@@ -2604,11 +3607,57 @@ final class TorrentStore {
     private func pruneAndReconcileFolderAuthorizations(
         activeTorrents: [TorrentItem]
     ) async {
-        downloadFolderAccessStore.prune(activeTorrents: activeTorrents)
         do {
+            while true {
+                let snapshot = await downloadFolderAccessStore
+                    .makePruneSnapshot()
+                let plan = try await DownloadFolderPrunePlan.prepare(
+                    snapshot: snapshot,
+                    activeTorrents: activeTorrents
+                )
+                try Task.checkCancellation()
+                if await downloadFolderAccessStore.applyPrunePlan(
+                    plan,
+                    activeTorrents: activeTorrents
+                ) {
+                    break
+                }
+            }
             try await reconcileFolderAuthorizationsIfNeeded()
+        } catch is CancellationError {
+            return
         } catch {
             setLastError(error.localizedDescription, source: .userAction)
+        }
+    }
+
+    private func pruneDownloadFolderAccesses(
+        activeTorrents: [TorrentItem],
+        generation: Int,
+        lifecycleGeneration: UInt64,
+        mutationGeneration: UInt64,
+        presentationRevision: UInt64
+    ) async throws {
+        while true {
+            let snapshot = await downloadFolderAccessStore.makePruneSnapshot()
+            let plan = try await DownloadFolderPrunePlan.prepare(
+                snapshot: snapshot,
+                activeTorrents: activeTorrents
+            )
+            try Task.checkCancellation()
+            guard generation == refreshGeneration,
+                  lifecycleGeneration == engineLifecycleGeneration,
+                  mutationGeneration == engineMutationGeneration,
+                  presentationRevision == torrentPresentationRevision,
+                  !isFolderCapabilityTransactionInProgress else {
+                throw CancellationError()
+            }
+            if await downloadFolderAccessStore.applyPrunePlan(
+                plan,
+                activeTorrents: activeTorrents
+            ) {
+                return
+            }
         }
     }
 
@@ -2901,8 +3950,61 @@ final class TorrentStore {
         return message.isEmpty ? "Unknown startup error." : message
     }
 
-    private nonisolated static func readTorrentFile(_ url: URL) throws -> Data {
+    @concurrent
+    private static func createProductionEngine(
+        startupFactory: TorrentStoreEngineStartupFactory?,
+        enablePeerExchangePlugin: Bool,
+        authorizedSavePaths: [String],
+        folderAuthorizations: [TorrentFolderAuthorization],
+        connectionRetryMode: TorrentEngineConnectionRetryMode
+    ) async -> TorrentStoreEngineStartupOutcome {
+        guard !Task.isCancelled else {
+            return .cancelled
+        }
+        do {
+            let engine: any TorrentEngineServicing
+            if let startupFactory {
+                engine = try startupFactory(
+                    enablePeerExchangePlugin,
+                    authorizedSavePaths
+                )
+            } else {
+                engine = try await TorrentXPCClient.connect(
+                    enablePeerExchangePlugin: enablePeerExchangePlugin,
+                    folderAuthorizations: folderAuthorizations,
+                    retryMode: connectionRetryMode
+                )
+            }
+            guard !Task.isCancelled else {
+                await engine.shutdown()
+                return .cancelled
+            }
+            return .started(engine)
+        } catch {
+            guard !Task.isCancelled else {
+                return .cancelled
+            }
+            return .failed(engineStartupErrorMessage(error))
+        }
+    }
+
+    private nonisolated static func isMagnetWithinSizeLimit(
+        _ magnet: String
+    ) -> Bool {
+        magnet.utf8.prefix(
+            TorrentInputLimits.maxMagnetURIBytes + 1
+        ).count <= TorrentInputLimits.maxMagnetURIBytes
+    }
+
+    @concurrent
+    private static func readTorrentFile(_ url: URL) async throws -> Data {
         try Task.checkCancellation()
+        let didAccess = url.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
         let descriptor = try openTorrentFileDescriptor(url)
         defer {
             try? descriptor.close()
@@ -2927,6 +4029,161 @@ final class TorrentStore {
             throw TorrentStoreError.unreadableTorrentFile
         }
         return data
+    }
+
+    @concurrent
+    private static func selectedTorrents(
+        ids: Set<TorrentItem.ID>,
+        torrents: [TorrentItem]
+    ) async throws -> [TorrentItem] {
+        var selected = [TorrentItem]()
+        selected.reserveCapacity(min(ids.count, torrents.count))
+        for (index, torrent) in torrents.enumerated() {
+            if index.isMultiple(of: 128) {
+                try Task.checkCancellation()
+            }
+            if ids.contains(torrent.id) {
+                selected.append(torrent)
+            }
+        }
+        try Task.checkCancellation()
+        return selected
+    }
+
+    @concurrent
+    private static func prepareBulkCommandIDs(
+        torrents: [TorrentItem],
+        requestedIDs: Set<TorrentItem.ID>?,
+        filter: TorrentStoreBulkCommandFilter,
+        reversesOrder: Bool
+    ) async throws -> [TorrentItem.ID] {
+        try Task.checkCancellation()
+        var ids = [TorrentItem.ID]()
+        ids.reserveCapacity(min(requestedIDs?.count ?? torrents.count, torrents.count))
+        for (index, torrent) in torrents.enumerated() {
+            if index.isMultiple(of: 128) {
+                try Task.checkCancellation()
+            }
+            guard requestedIDs?.contains(torrent.id) ?? true else {
+                continue
+            }
+            let includesTorrent = switch filter {
+            case .any:
+                true
+            case .pausible:
+                !torrent.manuallyPaused
+            case .resumable:
+                torrent.manuallyPaused
+            case .hasMetadata:
+                torrent.hasMetadata
+            }
+            if includesTorrent {
+                ids.append(torrent.id)
+            }
+        }
+        try Task.checkCancellation()
+        if reversesOrder {
+            ids.reverse()
+        }
+        return ids
+    }
+
+    @concurrent
+    private static func retainedSelectionIDs(
+        _ ids: Set<TorrentItem.ID>,
+        activeIDs: Set<TorrentItem.ID>
+    ) async throws -> Set<TorrentItem.ID> {
+        try Task.checkCancellation()
+        let candidates = ids.count <= activeIDs.count ? ids : activeIDs
+        let membership = ids.count <= activeIDs.count ? activeIDs : ids
+        var retainedIDs = Set<TorrentItem.ID>()
+        retainedIDs.reserveCapacity(candidates.count)
+        for (offset, id) in candidates.enumerated() {
+            if offset.isMultiple(of: 128) {
+                try Task.checkCancellation()
+            }
+            if membership.contains(id) {
+                retainedIDs.insert(id)
+            }
+        }
+        try Task.checkCancellation()
+        return retainedIDs
+    }
+
+    @concurrent
+    private static func selectionIDs(
+        _ ids: Set<TorrentItem.ID>,
+        removing removedIDs: Set<TorrentItem.ID>
+    ) async throws -> Set<TorrentItem.ID> {
+        try Task.checkCancellation()
+        var retainedIDs = Set<TorrentItem.ID>()
+        retainedIDs.reserveCapacity(ids.count)
+        for (offset, id) in ids.enumerated() {
+            if offset.isMultiple(of: 128) {
+                try Task.checkCancellation()
+            }
+            if !removedIDs.contains(id) {
+                retainedIDs.insert(id)
+            }
+        }
+        try Task.checkCancellation()
+        return retainedIDs
+    }
+
+    @concurrent
+    private static func makeTrackerHostIndex(
+        _ items: [TorrentTrackerHostItem],
+        previous: [TorrentItem.ID: Set<String>]
+    ) async throws -> [TorrentItem.ID: Set<String>]? {
+        var hostsByTorrentID = [TorrentItem.ID: Set<String>]()
+        for (index, item) in items.enumerated() {
+            if index.isMultiple(of: 128) {
+                try Task.checkCancellation()
+            }
+            guard !item.torrentID.isEmpty, !item.host.isEmpty else {
+                continue
+            }
+            hostsByTorrentID[item.torrentID, default: []].insert(item.host)
+        }
+        try Task.checkCancellation()
+        return hostsByTorrentID == previous ? nil : hostsByTorrentID
+    }
+
+    @concurrent
+    private static func prunedTrackerHostIndex(
+        _ hostsByTorrentID: [TorrentItem.ID: Set<String>],
+        activeTorrentIDs: Set<TorrentItem.ID>
+    ) async throws -> [TorrentItem.ID: Set<String>]? {
+        var pruned = [TorrentItem.ID: Set<String>]()
+        pruned.reserveCapacity(min(hostsByTorrentID.count, activeTorrentIDs.count))
+        for (index, item) in hostsByTorrentID.enumerated() {
+            if index.isMultiple(of: 128) {
+                try Task.checkCancellation()
+            }
+            if activeTorrentIDs.contains(item.key) {
+                pruned[item.key] = item.value
+            }
+        }
+        try Task.checkCancellation()
+        return pruned.count == hostsByTorrentID.count ? nil : pruned
+    }
+
+    @concurrent
+    private static func moveToTrash(_ url: URL) async throws {
+        try Task.checkCancellation()
+        let didAccess = url.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+        let fileManager = FileManager()
+        // Foundation imports the unused result parameter as an unsafe
+        // Objective-C out pointer. Passing nil keeps that pointer unowned.
+        try unsafe fileManager.trashItem(
+            at: url,
+            resultingItemURL: nil
+        )
     }
 
     private nonisolated static func openTorrentFileDescriptor(_ url: URL) throws -> FileDescriptor {

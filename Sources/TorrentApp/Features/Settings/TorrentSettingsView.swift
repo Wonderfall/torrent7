@@ -8,7 +8,10 @@ struct TorrentSettingsView: View {
     @Bindable private var state: TorrentSettingsState
     @State private var isConfirmingRestoreDefaults = false
     @State private var isChoosingDownloadFolder = false
-    @State private var isSettingTorrentFileDefault = false
+    @State private var defaultApplicationStatus:
+        TorrentDefaultApplicationStatus?
+    @State private var defaultApplicationRequest:
+        TorrentDefaultApplicationRequest? = .refresh()
     @State private var isShowingIncomingConnectionsInfo = false
     @State private var isShowingDHTInfo = false
     @State private var isShowingPeerExchangeInfo = false
@@ -20,6 +23,7 @@ struct TorrentSettingsView: View {
     @State private var pendingRequireNetworkInterface: Bool?
     @State private var pendingPeerExchangePlugin: Bool?
     @State private var settingsError: String?
+    @State private var pendingDownloadFolderURL: URL?
 
     init(store: TorrentStore, state: TorrentSettingsState) {
         self.store = store
@@ -78,6 +82,74 @@ struct TorrentSettingsView: View {
             allowsMultipleSelection: false
         ) { result in
             handleDownloadFolderImport(result)
+        }
+        .task(id: pendingDownloadFolderURL) {
+            guard let url = pendingDownloadFolderURL else {
+                return
+            }
+            let result = await store.chooseDownloadFolder(
+                url,
+                reportsGlobalError: false
+            )
+            guard !Task.isCancelled,
+                  pendingDownloadFolderURL == url else {
+                return
+            }
+            switch result {
+            case .success:
+                settingsError = nil
+            case .failure(is CancellationError):
+                settingsError = nil
+            case .failure(let error):
+                settingsError = error.localizedDescription
+            }
+            pendingDownloadFolderURL = nil
+        }
+        .task(id: defaultApplicationRequest?.id) {
+            guard let request = defaultApplicationRequest else {
+                return
+            }
+            let context = TorrentDefaultApplicationContext(
+                bundleURL: Bundle.main.bundleURL,
+                bundleIdentifier: Bundle.main.bundleIdentifier,
+                runningApplicationBundleURL:
+                    NSRunningApplication.current.bundleURL
+            )
+            do {
+                var status = try await TorrentDefaultApplicationService.status(
+                    for: context
+                )
+                if request.action == .setTorrentFileDefault {
+                    try await TorrentDefaultApplicationService
+                        .setAsTorrentFileDefault(
+                            applicationURL: status.applicationURL
+                        )
+                    status =
+                        try await TorrentDefaultApplicationService.status(
+                            for: context
+                        )
+                }
+                try Task.checkCancellation()
+                guard defaultApplicationRequest?.id == request.id else {
+                    return
+                }
+                defaultApplicationStatus = status
+                defaultApplicationRequest = nil
+            } catch is CancellationError {
+                guard !Task.isCancelled,
+                      defaultApplicationRequest?.id
+                        == request.id else {
+                    return
+                }
+                defaultApplicationRequest = nil
+            } catch {
+                guard !Task.isCancelled,
+                      defaultApplicationRequest?.id == request.id else {
+                    return
+                }
+                defaultApplicationRequest = nil
+                settingsError = error.localizedDescription
+            }
         }
         .alert("Settings Error", isPresented: settingsErrorBinding) {
             Button("OK") {
@@ -192,8 +264,10 @@ struct TorrentSettingsView: View {
         Section("Defaults") {
             LabeledContent(".torrent files") {
                 defaultHandlerControls(
-                    isDefault: isDefaultForTorrentFiles,
-                    isUpdating: isSettingTorrentFileDefault,
+                    isDefault:
+                        defaultApplicationStatus?
+                            .isDefaultForTorrentFiles == true,
+                    isUpdating: defaultApplicationRequest != nil,
                     action: makeDefaultForTorrentFiles
                 )
             }
@@ -922,31 +996,6 @@ struct TorrentSettingsView: View {
         return "This unloads libtorrent's Peer Exchange extension and disables PEX for all torrents. Applying this restarts the libtorrent session."
     }
 
-    private var isDefaultForTorrentFiles: Bool {
-        isCurrentApp(NSWorkspace.shared.urlForApplication(toOpen: bittorrentFileType))
-    }
-
-    private var isDefaultForMagnetLinks: Bool {
-        guard let url = URL(string: "magnet:?") else {
-            return false
-        }
-        return isCurrentApp(NSWorkspace.shared.urlForApplication(toOpen: url))
-    }
-
-    private var appBundleURL: URL {
-        let bundleURL = Bundle.main.bundleURL
-        let normalizedBundlePath = normalizedAppPath(bundleURL)
-        let registeredURLs = Bundle.main.bundleIdentifier
-            .map { NSWorkspace.shared.urlsForApplications(withBundleIdentifier: $0) }
-            ?? []
-
-        if let registeredURL = registeredURLs.first(where: { normalizedAppPath($0) == normalizedBundlePath }) {
-            return registeredURL
-        }
-
-        return NSRunningApplication.current.bundleURL ?? bundleURL
-    }
-
     private var shouldShowMissingRequiredInterface: Bool {
         let selectedName = state.settings.requiredNetworkInterfaceName
         guard !selectedName.isEmpty else {
@@ -975,12 +1024,7 @@ struct TorrentSettingsView: View {
             guard let url = urls.first else {
                 return
             }
-            switch store.chooseDownloadFolder(url, reportsGlobalError: false) {
-            case .success:
-                settingsError = nil
-            case .failure(let error):
-                settingsError = error.localizedDescription
-            }
+            pendingDownloadFolderURL = url
         case .failure(let error):
             settingsError = error.localizedDescription
         }
@@ -1009,10 +1053,13 @@ struct TorrentSettingsView: View {
 
     private var magnetDefaultStatus: some View {
         HStack(spacing: 10) {
-            if isDefaultForMagnetLinks {
+            if defaultApplicationStatus?.isDefaultForMagnetLinks == true {
                 Label("Default", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.secondary)
                     .labelStyle(.titleAndIcon)
+            } else if defaultApplicationStatus == nil {
+                ProgressView()
+                    .controlSize(.small)
             } else {
                 Text("Not Default")
                     .foregroundStyle(.secondary)
@@ -1021,26 +1068,24 @@ struct TorrentSettingsView: View {
     }
 
     private func makeDefaultForTorrentFiles() {
-        isSettingTorrentFileDefault = true
-        NSWorkspace.shared.setDefaultApplication(at: appBundleURL, toOpen: bittorrentFileType) { error in
-            Task { @MainActor in
-                isSettingTorrentFileDefault = false
-                if let error {
-                    settingsError = error.localizedDescription
-                }
-            }
-        }
+        defaultApplicationRequest = .setTorrentFileDefault()
+    }
+}
+
+private struct TorrentDefaultApplicationRequest: Identifiable, Sendable {
+    enum Action: Equatable, Sendable {
+        case refresh
+        case setTorrentFileDefault
     }
 
-    private func isCurrentApp(_ defaultApplicationURL: URL?) -> Bool {
-        guard let defaultApplicationURL else {
-            return false
-        }
+    let id = UUID()
+    let action: Action
 
-        return normalizedAppPath(defaultApplicationURL) == normalizedAppPath(appBundleURL)
+    static func refresh() -> Self {
+        Self(action: .refresh)
     }
 
-    private func normalizedAppPath(_ url: URL) -> String {
-        url.standardizedFileURL.resolvingSymlinksInPath().torrentFilePath
+    static func setTorrentFileDefault() -> Self {
+        Self(action: .setTorrentFileDefault)
     }
 }

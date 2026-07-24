@@ -2,7 +2,7 @@ import Foundation
 import UserNotifications
 
 protocol TorrentNotificationServicing: Sendable {
-    nonisolated func configure()
+    @MainActor func configure()
     func notifyDownloadFinished(torrentName: String?, playsSound: Bool) async
     func clearBadge() async
 }
@@ -30,12 +30,19 @@ actor TorrentNotificationService: TorrentNotificationServicing {
         self.center = center
     }
 
-    nonisolated func configure() {
+    @MainActor
+    func configure() {
         UNUserNotificationCenter.current().delegate = Self.presentationDelegate
     }
 
     func notifyDownloadFinished(torrentName: String?, playsSound: Bool) async {
+        guard !Task.isCancelled else {
+            return
+        }
         guard await requestAuthorizationIfNeeded(playsSound: playsSound) else {
+            return
+        }
+        guard !Task.isCancelled else {
             return
         }
 
@@ -53,24 +60,39 @@ actor TorrentNotificationService: TorrentNotificationServicing {
             trigger: nil
         )
 
+        guard !Task.isCancelled else {
+            return
+        }
         try? await center.add(request)
     }
 
     func clearBadge() async {
-        center.setBadgeCount(0, withCompletionHandler: nil)
+        try? await center.setBadgeCount(0)
     }
 
     private func requestAuthorizationIfNeeded(playsSound: Bool) async -> Bool {
+        guard !Task.isCancelled else {
+            return false
+        }
         let settings = await center.notificationSettings()
+        guard !Task.isCancelled else {
+            return false
+        }
         switch settings.authorizationStatus {
         case .authorized, .provisional:
             if playsSound && settings.soundSetting != .enabled {
                 _ = try? await center.requestAuthorization(options: Self.authorizationOptions)
+                guard !Task.isCancelled else {
+                    return false
+                }
             }
             return true
         case .notDetermined:
-            let options: UNAuthorizationOptions = playsSound ? Self.authorizationOptions : [.alert]
-            return (try? await center.requestAuthorization(options: options)) ?? false
+            let options: UNAuthorizationOptions =
+                playsSound ? Self.authorizationOptions : [.alert]
+            let isAuthorized =
+                (try? await center.requestAuthorization(options: options)) ?? false
+            return !Task.isCancelled && isAuthorized
         case .denied:
             return false
         @unknown default:

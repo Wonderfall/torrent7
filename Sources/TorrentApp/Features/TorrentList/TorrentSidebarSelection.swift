@@ -1,7 +1,7 @@
 import Foundation
 import TorrentEngineModel
 
-enum TorrentSidebarSelection: Hashable, Identifiable {
+enum TorrentSidebarSelection: Hashable, Identifiable, Sendable {
     case scope(TorrentSidebarScope)
     case unlabeled
     case label(TorrentLabel.ID)

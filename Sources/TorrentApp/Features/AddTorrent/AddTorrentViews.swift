@@ -5,7 +5,10 @@ import UniformTypeIdentifiers
 struct AddMagnetView: View {
     @Binding var magnetURI: String
     let cancel: () -> Void
-    let add: () -> Void
+    let add: (TorrentAddDraft) -> Void
+
+    @State private var preparation: TorrentMagnetDraftPreparation?
+    @State private var preparationRequest: TorrentMagnetPreparationRequest?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -28,24 +31,104 @@ struct AddMagnetView: View {
             HStack {
                 Spacer()
                 Button("Cancel", action: cancel)
-                Button("Add", action: add)
+                Button("Add") {
+                    guard let draft = preparation?.draft else {
+                        return
+                    }
+                    add(draft)
+                }
                     .keyboardShortcut(.defaultAction)
                     .disabled(!canAdd)
             }
         }
         .padding(24)
-    }
-
-    private var trimmedMagnetURI: String {
-        magnetURI.trimmingCharacters(in: .whitespacesAndNewlines)
+        .onChange(of: magnetURI, initial: true) { _, value in
+            preparation = nil
+            preparationRequest =
+                TorrentMagnetPreparationRequest(value: value)
+        }
+        .task(id: preparationRequest?.id) {
+            guard let request = preparationRequest else {
+                return
+            }
+            do {
+                let prepared =
+                    try await TorrentAddSourceParser.prepareMagnetDraft(
+                        from: request.value
+                    )
+                try Task.checkCancellation()
+                guard preparationRequest?.id == request.id else {
+                    return
+                }
+                preparation = prepared
+                preparationRequest = nil
+            } catch {
+                return
+            }
+        }
     }
 
     private var isTooLarge: Bool {
-        trimmedMagnetURI.utf8.count > TorrentInputLimits.maxMagnetURIBytes
+        preparation?.isTooLarge == true
     }
 
     private var canAdd: Bool {
-        trimmedMagnetURI.range(of: "magnet:?", options: [.caseInsensitive, .anchored]) != nil && !isTooLarge
+        preparation?.draft != nil
+    }
+}
+
+struct TorrentAddFileSelectionPresentation: Sendable {
+    let generation: UInt64
+    let filePriorities: [Int32: TorrentFilePriority]?
+    let selectedFileCount: Int
+    let selectedFileSize: Int64
+
+    var hasDownloadableFile: Bool {
+        selectedFileCount > 0
+    }
+
+    @concurrent
+    static func prepare(
+        generation: UInt64,
+        files: [TorrentFileItem],
+        bulkPriority: TorrentFilePriority?,
+        overrides: [Int32: TorrentFilePriority]
+    ) async throws -> Self {
+        try Task.checkCancellation()
+        var priorities = [Int32: TorrentFilePriority]()
+        priorities.reserveCapacity(
+            bulkPriority == nil ? overrides.count : files.count
+        )
+        var selectedFileCount = 0
+        var selectedFileSize: Int64 = 0
+
+        for (offset, file) in files.enumerated() {
+            if offset.isMultiple(of: 128) {
+                try Task.checkCancellation()
+            }
+            let priority = overrides[file.index]
+                ?? bulkPriority
+                ?? .normal
+            if priority != .normal {
+                priorities[file.index] = priority
+            }
+            guard priority != .skip else {
+                continue
+            }
+            selectedFileCount += 1
+            let size = max(0, file.size)
+            selectedFileSize = selectedFileSize > Int64.max - size
+                ? .max
+                : selectedFileSize + size
+        }
+
+        try Task.checkCancellation()
+        return Self(
+            generation: generation,
+            filePriorities: priorities.isEmpty ? nil : priorities,
+            selectedFileCount: selectedFileCount,
+            selectedFileSize: selectedFileSize
+        )
     }
 }
 
@@ -62,7 +145,13 @@ struct AddTorrentConfirmationView: View {
     @State private var isLoadingPreview = false
     @State private var preview: TorrentFilePreview?
     @State private var previewError: String?
+    @State private var magnetSourceSecuritySummary:
+        TorrentSourceSecuritySummary?
     @State private var filePriorities = [Int32: TorrentFilePriority]()
+    @State private var bulkFilePriority: TorrentFilePriority?
+    @State private var fileSelectionGeneration: UInt64 = 0
+    @State private var fileSelectionPresentation:
+        TorrentAddFileSelectionPresentation?
     @State private var selectedDownloadFolder: URL?
     @State private var isMagnetLinkExpanded = true
     @State private var movesTorrentFileToTrash = false
@@ -71,6 +160,7 @@ struct AddTorrentConfirmationView: View {
     @State private var selectedLabelIDs = Set<TorrentLabel.ID>()
     @State private var allowsPreMetadataDHT = false
     @State private var folderError: String?
+    @State private var pendingDownloadFolderURL: URL?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -167,7 +257,48 @@ struct AddTorrentConfirmationView: View {
             selectedDownloadFolder = store.downloadFolder
         }
         .task(id: draft.id) {
-            await loadPreview(for: draft.id)
+            await loadDraftPresentation(for: draft.id)
+        }
+        .task(id: fileSelectionGeneration) {
+            guard let preview else {
+                fileSelectionPresentation = nil
+                return
+            }
+            let generation = fileSelectionGeneration
+            do {
+                let presentation =
+                    try await TorrentAddFileSelectionPresentation.prepare(
+                        generation: generation,
+                        files: preview.visibleFiles,
+                        bulkPriority: bulkFilePriority,
+                        overrides: filePriorities
+                    )
+                try Task.checkCancellation()
+                guard generation == fileSelectionGeneration else {
+                    return
+                }
+                fileSelectionPresentation = presentation
+            } catch {
+                return
+            }
+        }
+        .task(id: pendingDownloadFolderURL) {
+            guard let url = pendingDownloadFolderURL else {
+                return
+            }
+            let result = await store.validateDownloadFolderSelection(url)
+            guard !Task.isCancelled,
+                  pendingDownloadFolderURL == url else {
+                return
+            }
+            switch result {
+            case .success:
+                selectedDownloadFolder = url
+                folderError = nil
+            case .failure(let error):
+                folderError = error.localizedDescription
+            }
+            pendingDownloadFolderURL = nil
         }
         .onChange(of: selectedDownloadFolder) { _, _ in
             if isSetDefaultToggleDisabled {
@@ -187,7 +318,18 @@ struct AddTorrentConfirmationView: View {
 
     @ViewBuilder
     private var sourcePolicySection: some View {
-        if let sourceSecuritySummary, showsSourcePolicySection(for: sourceSecuritySummary) {
+        if draft.magnetURI != nil && magnetSourceSecuritySummary == nil {
+            Section {
+                HStack {
+                    Label("Checking Sources", systemImage: "checkmark.shield")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+        } else if let sourceSecuritySummary,
+                  showsSourcePolicySection(for: sourceSecuritySummary) {
             Section {
                 if store.settings.useHTTPSTrackersOnly && sourceSecuritySummary.hasNonHTTPSTrackers {
                     sourcePolicyRow(
@@ -345,12 +487,7 @@ struct AddTorrentConfirmationView: View {
         if let preview {
             return preview.sourceSecuritySummary
         }
-
-        if let magnetURI = draft.magnetURI {
-            return TorrentSourceSecurityInspector.summary(magnetURI: magnetURI)
-        }
-
-        return nil
+        return magnetSourceSecuritySummary
     }
 
     @ViewBuilder
@@ -381,9 +518,14 @@ struct AddTorrentConfirmationView: View {
             return true
         }
         guard draft.fileURL != nil else {
-            return false
+            return magnetSourceSecuritySummary == nil
         }
-        return isLoadingPreview || preview == nil || previewError != nil || !hasDownloadablePreviewFile
+        return isLoadingPreview
+            || preview == nil
+            || previewError != nil
+            || fileSelectionPresentation?.generation
+                != fileSelectionGeneration
+            || fileSelectionPresentation?.hasDownloadableFile != true
     }
 
     private var isSetDefaultToggleDisabled: Bool {
@@ -395,27 +537,23 @@ struct AddTorrentConfirmationView: View {
     }
 
     private var filePrioritiesForAdd: [Int32: TorrentFilePriority]? {
-        guard let preview, draft.fileURL != nil else {
+        guard draft.fileURL != nil,
+              fileSelectionPresentation?.generation
+                == fileSelectionGeneration else {
             return nil
         }
-
-        let priorities = Dictionary(uniqueKeysWithValues: preview.visibleFiles.map { file in
-            (file.index, filePriority(for: file))
-        })
-        guard priorities.contains(where: { $0.value != .normal }) else {
-            return nil
-        }
-        return priorities
+        return fileSelectionPresentation?.filePriorities
     }
 
     private func fileSummary(for preview: TorrentFilePreview) -> String {
-        let selectedFiles = preview.visibleFiles.filter { filePriority(for: $0) != .skip }
-        let selectedCount = selectedFiles.count
+        let selectedCount =
+            fileSelectionPresentation?.selectedFileCount
+            ?? preview.visibleFileCount
         let totalCount = preview.visibleFileCount
         let fileText = "\(totalCount) \(totalCount == 1 ? "file" : "files")"
-        let selectedSize = TorrentPresentationMath.saturatingNonnegativeSum(
-            selectedFiles.lazy.map(\.size)
-        )
+        let selectedSize =
+            fileSelectionPresentation?.selectedFileSize
+            ?? preview.visibleFileSize
 
         if selectedCount == 0 {
             return "0 of \(fileText) · Nothing selected"
@@ -439,28 +577,53 @@ struct AddTorrentConfirmationView: View {
         preview.visibleFiles.count > Self.fileSelectionPreviewLimit
     }
 
-    private var hasDownloadablePreviewFile: Bool {
-        guard let preview else {
-            return false
-        }
-        return preview.visibleFiles.contains { filePriority(for: $0) != .skip }
-    }
-
     private func filePriority(for file: TorrentFileItem) -> TorrentFilePriority {
-        filePriorities[file.index] ?? .normal
+        filePriorities[file.index] ?? bulkFilePriority ?? .normal
     }
 
-    private func setAllFiles(in preview: TorrentFilePreview, to priority: TorrentFilePriority) {
-        for file in preview.visibleFiles {
-            filePriorities[file.index] = priority
-        }
+    private func setAllFiles(
+        in _: TorrentFilePreview,
+        to priority: TorrentFilePriority
+    ) {
+        bulkFilePriority = priority
+        filePriorities.removeAll(keepingCapacity: true)
+        advanceFileSelectionGeneration()
     }
 
     private func filePriorityBinding(for file: TorrentFileItem) -> Binding<TorrentFilePriority> {
         Binding {
             filePriority(for: file)
         } set: { priority in
-            filePriorities[file.index] = priority
+            if priority == (bulkFilePriority ?? .normal) {
+                filePriorities.removeValue(forKey: file.index)
+            } else {
+                filePriorities[file.index] = priority
+            }
+            advanceFileSelectionGeneration()
+        }
+    }
+
+    @MainActor
+    private func loadDraftPresentation(
+        for draftID: TorrentAddDraft.ID
+    ) async {
+        magnetSourceSecuritySummary = nil
+        guard let magnetURI = draft.magnetURI else {
+            await loadPreview(for: draftID)
+            return
+        }
+        do {
+            let summary =
+                try await TorrentSourceSecurityInspector.prepareSummary(
+                    magnetURI: magnetURI
+                )
+            try Task.checkCancellation()
+            guard draft.id == draftID else {
+                return
+            }
+            magnetSourceSecuritySummary = summary
+        } catch {
+            return
         }
     }
 
@@ -476,8 +639,11 @@ struct AddTorrentConfirmationView: View {
         isLoadingPreview = true
         previewError = nil
         preview = nil
+        fileSelectionPresentation = nil
         showsAllPreviewFiles = false
         filePriorities.removeAll()
+        bulkFilePriority = nil
+        advanceFileSelectionGeneration()
 
         do {
             let loadedPreview = try await store.previewTorrentFile(fileURL)
@@ -485,9 +651,9 @@ struct AddTorrentConfirmationView: View {
                 return
             }
             preview = loadedPreview
-            filePriorities = Dictionary(uniqueKeysWithValues: loadedPreview.visibleFiles.map { file in
-                (file.index, TorrentFilePriority.normal)
-            })
+            filePriorities.removeAll(keepingCapacity: true)
+            bulkFilePriority = nil
+            advanceFileSelectionGeneration()
         } catch is CancellationError {
             return
         } catch {
@@ -502,18 +668,17 @@ struct AddTorrentConfirmationView: View {
         isLoadingPreview = false
     }
 
+    private func advanceFileSelectionGeneration() {
+        precondition(fileSelectionGeneration != UInt64.max)
+        fileSelectionGeneration += 1
+    }
+
     private func handleDownloadFolderImport(_ result: Result<[URL], Error>) {
         guard case .success(let urls) = result, let url = urls.first else {
             return
         }
 
-        switch store.validateDownloadFolderSelection(url) {
-        case .success:
-            selectedDownloadFolder = url
-            folderError = nil
-        case .failure(let error):
-            folderError = error.localizedDescription
-        }
+        pendingDownloadFolderURL = url
     }
 
     private func confirmAdd(startsPaused: Bool) {

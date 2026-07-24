@@ -461,7 +461,7 @@ package struct TorrentSourcePolicy: Codable, Equatable, Sendable {
     }
 }
 
-package enum TorrentSourcePolicyField: Codable, Sendable {
+package enum TorrentSourcePolicyField: Codable, Hashable, Sendable {
     case dht
     case peerExchange
     case localServiceDiscovery
@@ -569,6 +569,8 @@ package struct TorrentFilePreview: Equatable, Sendable {
     package let totalSize: Int64
     package let sourceSecuritySummary: TorrentSourceSecuritySummary
     package let files: [TorrentFileItem]
+    package let visibleFiles: [TorrentFileItem]
+    package let visibleFileSize: Int64
     package let torrentData: Data
 
     package init(
@@ -584,11 +586,19 @@ package struct TorrentFilePreview: Equatable, Sendable {
         self.totalSize = totalSize
         self.sourceSecuritySummary = sourceSecuritySummary
         self.files = files
+        let visibleFiles = files.filter { !$0.isPadFile }
+        self.visibleFiles = visibleFiles
+        var visibleFileSize: Int64 = 0
+        for file in visibleFiles {
+            let size = max(0, file.size)
+            if visibleFileSize > Int64.max - size {
+                visibleFileSize = .max
+                break
+            }
+            visibleFileSize += size
+        }
+        self.visibleFileSize = visibleFileSize
         self.torrentData = torrentData
-    }
-
-    package var visibleFiles: [TorrentFileItem] {
-        files.filter { !$0.isPadFile }
     }
 
     package var visibleFileCount: Int {

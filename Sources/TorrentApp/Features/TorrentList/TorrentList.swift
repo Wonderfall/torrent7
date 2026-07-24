@@ -10,11 +10,19 @@ struct TorrentList: View {
     private static let selectionCoordinateSpace = "TorrentListSelection"
 
     let rows: [TorrentRowSnapshot]
+    let visibleIDs: Set<TorrentItem.ID>
+    let orderedIDs: [TorrentItem.ID]
+    let rowIndicesByID: [TorrentItem.ID: Int]
+    let rowRevision: UInt64
+    let torrentState: TorrentListState
     let selectionState: TorrentSelectionState
     let labels: [TorrentLabel]
-    let labelsForTorrent: (TorrentItem.ID) -> [TorrentLabel]
-    let labelIDsForTorrent: (TorrentItem.ID) -> Set<TorrentLabel.ID>
-    let transferMetricState: (TorrentItem.ID) -> TorrentTransferMetricsState
+    let labelAssignments: [
+        TorrentItem.ID: Set<TorrentLabel.ID>
+    ]
+    let labelsByTorrentID: [
+        TorrentItem.ID: [TorrentLabel]
+    ]
     @State private var selectionAnchorID: TorrentItem.ID?
     @State private var activeModifiers = EventModifiers()
     @State private var didHandleRowInteraction = false
@@ -25,6 +33,10 @@ struct TorrentList: View {
     @State private var selectAllResponderActivation = 0
     @State private var selectionFocusID: TorrentItem.ID?
     @State private var scrollTargetID: TorrentItem.ID?
+    @State private var selectionSummary:
+        TorrentListSelectionSummary?
+    @State private var pendingSelectionRequest:
+        TorrentListSelectionRequest?
     @FocusState private var isListFocused: Bool
     let showInfo: (TorrentItem.ID, TorrentInfoTab) -> Void
     let pause: (Set<TorrentItem.ID>) -> Void
@@ -99,8 +111,9 @@ struct TorrentList: View {
         .onPreferenceChange(TorrentCardFramePreferenceKey.self) { frames in
             cardFrames = frames
         }
-        .onChange(of: torrentIDs) {
+        .onChange(of: rowRevision) {
             selectAllResponderActivation &+= 1
+            pendingSelectionRequest = nil
         }
         .onKeyPress("a", phases: .down) { keyPress in
             guard isListFocused, keyPress.modifiers.contains(.command), !rows.isEmpty else {
@@ -148,10 +161,57 @@ struct TorrentList: View {
                 selectionFocusID = ids.first
             }
         }
-    }
-
-    private var torrentIDs: [TorrentItem.ID] {
-        rows.map(\.id)
+        .task(id: selectionSummaryRequestID) {
+            let requestID = selectionSummaryRequestID
+            do {
+                let summary = try await TorrentListSelectionSummary.prepare(
+                    selectionRevision: requestID.selectionRevision,
+                    filterRevision: requestID.filterRevision,
+                    selectedIDs: selectionState.ids,
+                    rows: rows,
+                    rowIndicesByID: rowIndicesByID,
+                    labelAssignments: labelAssignments
+                )
+                try Task.checkCancellation()
+                guard requestID == selectionSummaryRequestID else {
+                    return
+                }
+                selectionSummary = summary
+            } catch {
+                return
+            }
+        }
+        .task(id: pendingSelectionRequest?.id) {
+            guard let request = pendingSelectionRequest else {
+                return
+            }
+            do {
+                let projection =
+                    try await TorrentListSelectionProjection.prepare(
+                        request: request,
+                        orderedIDs: orderedIDs,
+                        rowIndicesByID: rowIndicesByID
+                    )
+                try Task.checkCancellation()
+                guard pendingSelectionRequest?.id == request.id,
+                      request.filterRevision == rowRevision else {
+                    return
+                }
+                if let expectedRevision =
+                    request.expectedSelectionRevision {
+                    guard expectedRevision == selectionState.revision else {
+                        pendingSelectionRequest = nil
+                        return
+                    }
+                }
+                selectionState.ids = projection.ids
+                selectionAnchorID = request.anchorID
+                selectionFocusID = request.focusID
+                pendingSelectionRequest = nil
+            } catch {
+                return
+            }
+        }
     }
 
     private var dragSelectionGesture: some Gesture {
@@ -177,11 +237,12 @@ struct TorrentList: View {
 
     private func torrentCard(for row: TorrentRowSnapshot) -> some View {
         let isSelected = selectionState.ids.contains(row.id)
+        let metricsState = torrentState.transferMetricState(for: row.id)
         return HStack(spacing: 8) {
             AccessibleTorrentRow(
                 row: row,
-                metricsState: transferMetricState(row.id),
-                labels: labelsForTorrent(row.id),
+                metricsState: metricsState,
+                labels: labelsByTorrentID[row.id] ?? [],
                 isSelected: isSelected,
                 select: {
                     selectTorrentFromAccessibility(row)
@@ -225,6 +286,30 @@ struct TorrentList: View {
         .contextMenu {
             actions(for: row)
         }
+        .modifier(TorrentTransferMetricRegistration(
+            torrentID: row.id,
+            metricsState: metricsState,
+            torrentState: torrentState
+        ))
+    }
+
+    private var selectionSummaryRequestID:
+        TorrentListSelectionSummaryRequestID {
+        TorrentListSelectionSummaryRequestID(
+            selectionRevision: selectionState.revision,
+            filterRevision: rowRevision
+        )
+    }
+
+    private var currentSelectionSummary:
+        TorrentListSelectionSummary? {
+        guard let selectionSummary,
+              selectionSummary.selectionRevision
+                == selectionState.revision,
+              selectionSummary.filterRevision == rowRevision else {
+            return nil
+        }
+        return selectionSummary
     }
 
     private func clearSelection() {
@@ -289,15 +374,15 @@ struct TorrentList: View {
 
     private func select(_ row: TorrentRowSnapshot) {
         let modifiers = currentSelectionModifiers
-        if modifiers.contains(.shift), let rangeIDs = selectionRange(endingAt: row.id) {
-            if modifiers.contains(.command) {
-                var updatedSelection = selectionState.ids
-                updatedSelection.formUnion(rangeIDs)
-                selectionState.ids = updatedSelection
-            } else {
-                selectionState.ids = rangeIDs
-            }
-            selectionFocusID = row.id
+        if modifiers.contains(.shift) {
+            let anchorID = selectionAnchorID ?? row.id
+            selectionAnchorID = anchorID
+            scheduleRangeSelection(
+                from: anchorID,
+                to: row.id,
+                retainingCurrentSelection:
+                    modifiers.contains(.command)
+            )
         } else if modifiers.contains(.command) {
             var updatedSelection = selectionState.ids
             if updatedSelection.contains(row.id) {
@@ -335,7 +420,7 @@ struct TorrentList: View {
     }
 
     private func selectAllTorrents() {
-        selectionState.ids = Set(rows.map(\.id))
+        selectionState.ids = visibleIDs
         selectionAnchorID = rows.first?.id
         selectionFocusID = rows.first?.id
     }
@@ -353,12 +438,16 @@ struct TorrentList: View {
     }
 
     private func updateDragSelection(to location: CGPoint) {
-        let draggedIDs = Set(draggedTorrentIDs(to: location))
-        guard !draggedIDs.isEmpty else {
-            selectionState.ids = dragSelectionBase
-            return
-        }
-        selectionState.ids = dragSelectionBase.union(draggedIDs)
+        let orderedDraggedIDs = draggedTorrentIDs(to: location)
+        let draggedIDs = Set(orderedDraggedIDs)
+        pendingSelectionRequest = TorrentListSelectionRequest(
+            filterRevision: rowRevision,
+            expectedSelectionRevision: nil,
+            baseIDs: dragSelectionBase,
+            members: .ids(draggedIDs),
+            anchorID: orderedDraggedIDs.last ?? selectionAnchorID,
+            focusID: orderedDraggedIDs.last ?? selectionFocusID
+        )
     }
 
     private func draggedTorrentIDs(to location: CGPoint) -> [TorrentItem.ID] {
@@ -368,38 +457,32 @@ struct TorrentList: View {
 
         let minY = min(dragSelectionStart.y, location.y)
         let maxY = max(dragSelectionStart.y, location.y)
-        return rows.compactMap { row in
-            guard let frame = cardFrames[row.id], frame.maxY >= minY, frame.minY <= maxY else {
+        return cardFrames.compactMap { id, frame in
+            guard frame.maxY >= minY, frame.minY <= maxY else {
                 return nil
             }
-            return row.id
+            return id
+        }
+        .sorted {
+            (rowIndicesByID[$0] ?? .max)
+                < (rowIndicesByID[$1] ?? .max)
         }
     }
 
-    private func selectionRange(endingAt torrentID: TorrentItem.ID) -> Set<TorrentItem.ID>? {
-        guard
-            let selectionAnchorID,
-            let anchorIndex = rows.firstIndex(where: { $0.id == selectionAnchorID }),
-            let targetIndex = rows.firstIndex(where: { $0.id == torrentID })
-        else {
-            selectionAnchorID = torrentID
-            return [torrentID]
-        }
-
-        let bounds = min(anchorIndex, targetIndex)...max(anchorIndex, targetIndex)
-        return Set(rows[bounds].map(\.id))
-    }
-
-    private func selectionRange(from startID: TorrentItem.ID, to endID: TorrentItem.ID) -> Set<TorrentItem.ID> {
-        guard
-            let startIndex = rows.firstIndex(where: { $0.id == startID }),
-            let endIndex = rows.firstIndex(where: { $0.id == endID })
-        else {
-            return [endID]
-        }
-
-        let bounds = min(startIndex, endIndex)...max(startIndex, endIndex)
-        return Set(rows[bounds].map(\.id))
+    private func scheduleRangeSelection(
+        from startID: TorrentItem.ID,
+        to endID: TorrentItem.ID,
+        retainingCurrentSelection: Bool
+    ) {
+        pendingSelectionRequest = TorrentListSelectionRequest(
+            filterRevision: rowRevision,
+            expectedSelectionRevision: selectionState.revision,
+            baseIDs:
+                retainingCurrentSelection ? selectionState.ids : [],
+            members: .range(startID: startID, endID: endID),
+            anchorID: startID,
+            focusID: endID
+        )
     }
 
     private func moveKeyboardSelection(by offset: Int, extending: Bool) -> Bool {
@@ -415,7 +498,11 @@ struct TorrentList: View {
         if extending {
             let anchorID = keyboardSelectionAnchorID(fallback: targetID)
             selectionAnchorID = anchorID
-            selectionState.ids = selectionRange(from: anchorID, to: targetID)
+            scheduleRangeSelection(
+                from: anchorID,
+                to: targetID,
+                retainingCurrentSelection: false
+            )
         } else {
             selectionState.ids = [targetID]
             selectionAnchorID = targetID
@@ -432,7 +519,7 @@ struct TorrentList: View {
         }
 
         guard let currentID = keyboardSelectionFocusID,
-              let currentIndex = rows.firstIndex(where: { $0.id == currentID })
+              let currentIndex = rowIndicesByID[currentID]
         else {
             return offset < 0 ? rows.last?.id : rows.first?.id
         }
@@ -442,35 +529,45 @@ struct TorrentList: View {
     }
 
     private var keyboardSelectionFocusID: TorrentItem.ID? {
-        if let selectionFocusID, rows.contains(where: { $0.id == selectionFocusID }) {
+        if let selectionFocusID,
+           rowIndicesByID[selectionFocusID] != nil {
             return selectionFocusID
         }
 
-        if let selectionAnchorID, rows.contains(where: { $0.id == selectionAnchorID }) {
+        if let selectionAnchorID,
+           rowIndicesByID[selectionAnchorID] != nil {
             return selectionAnchorID
         }
 
-        return rows.first(where: { selectionState.ids.contains($0.id) })?.id
+        return currentSelectionSummary?.firstID
     }
 
     private func keyboardSelectionAnchorID(fallback: TorrentItem.ID) -> TorrentItem.ID {
-        if let selectionAnchorID, rows.contains(where: { $0.id == selectionAnchorID }) {
+        if let selectionAnchorID,
+           rowIndicesByID[selectionAnchorID] != nil {
             return selectionAnchorID
         }
 
         return keyboardSelectionFocusID ?? fallback
     }
 
-    private var keyboardActionRows: [TorrentRowSnapshot] {
-        rows.filter { selectionState.ids.contains($0.id) }
+    private func row(for id: TorrentItem.ID) -> TorrentRowSnapshot? {
+        guard let index = rowIndicesByID[id] else {
+            return nil
+        }
+        return rows[index]
     }
 
     private var keyboardFocusedRow: TorrentRowSnapshot? {
-        if let selectionFocusID, let row = rows.first(where: { $0.id == selectionFocusID }) {
+        if let selectionFocusID,
+           let row = row(for: selectionFocusID) {
             return row
         }
 
-        return keyboardActionRows.first
+        guard let firstID = currentSelectionSummary?.firstID else {
+            return nil
+        }
+        return row(for: firstID)
     }
 
     private func openKeyboardFocusedInfo() -> Bool {
@@ -483,30 +580,28 @@ struct TorrentList: View {
     }
 
     private func toggleKeyboardFocusedTorrents() -> Bool {
-        let selectedRows = keyboardActionRows
-        guard !selectedRows.isEmpty else {
+        guard let summary = currentSelectionSummary,
+              !summary.ids.isEmpty else {
             return false
         }
 
-        let selectedIDs = Set(selectedRows.map(\.id))
-        if selectedRows.contains(where: { !$0.manuallyPaused }) {
-            pause(selectedIDs)
+        if summary.canPause {
+            pause(summary.ids)
         } else {
-            resume(selectedIDs)
+            resume(summary.ids)
         }
         return true
     }
 
     private func requestKeyboardRemoval() -> Bool {
-        let selectedRows = keyboardActionRows
-        guard !selectedRows.isEmpty else {
+        guard let summary = currentSelectionSummary,
+              !summary.ids.isEmpty else {
             return false
         }
 
-        let selectedIDs = Set(selectedRows.map(\.id))
-        selectionState.ids = selectedIDs
-        selectionFocusID = selectedRows.first?.id
-        requestRemoval(selectedIDs)
+        selectionState.ids = summary.ids
+        selectionFocusID = summary.firstID
+        requestRemoval(summary.ids)
         return true
     }
 
@@ -556,161 +651,253 @@ struct TorrentList: View {
 
     @ViewBuilder
     private func actions(for row: TorrentRowSnapshot) -> some View {
-        let actionIDs = actionIDs(for: row)
-        let actionRows = rows.filter { actionIDs.contains($0.id) }
-        let actsOnMultipleTorrents = actionIDs.count > 1
+        if let actionSummary = actionSummary(for: row) {
+            let actionIDs = actionSummary.ids
+            let actsOnMultipleTorrents = actionSummary.count > 1
 
-        Button {
-            selectionState.ids = [row.id]
-            selectionAnchorID = row.id
-            selectionFocusID = row.id
-            showInfo(row.id, .general)
-        } label: {
-            Label("Get Info", systemImage: "info.circle")
-        }
-        Button {
-            selectionState.ids = [row.id]
-            selectionAnchorID = row.id
-            selectionFocusID = row.id
-            showInfo(row.id, .options)
-        } label: {
-            Label("Show Options", systemImage: "slider.horizontal.3")
-        }
-        Button {
-            selectionState.ids = actionIDs
-            selectionFocusID = row.id
-            revealInFinder(actionIDs)
-        } label: {
-            Label("Reveal in Finder", systemImage: "folder")
-        }
-        Button {
-            selectionState.ids = actionIDs
-            selectionFocusID = row.id
-            reannounce(actionIDs)
-        } label: {
-            Label(actsOnMultipleTorrents ? "Reannounce Selected" : "Reannounce", systemImage: "arrow.clockwise")
-        }
-        if actionRows.contains(where: \.hasMetadata) {
+            Button {
+                selectionState.ids = [row.id]
+                selectionAnchorID = row.id
+                selectionFocusID = row.id
+                showInfo(row.id, .general)
+            } label: {
+                Label("Get Info", systemImage: "info.circle")
+            }
+            Button {
+                selectionState.ids = [row.id]
+                selectionAnchorID = row.id
+                selectionFocusID = row.id
+                showInfo(row.id, .options)
+            } label: {
+                Label(
+                    "Show Options",
+                    systemImage: "slider.horizontal.3"
+                )
+            }
             Button {
                 selectionState.ids = actionIDs
                 selectionFocusID = row.id
-                forceRecheck(actionIDs)
+                revealInFinder(actionIDs)
             } label: {
-                Label(actsOnMultipleTorrents ? "Force Recheck Selected" : "Force Recheck", systemImage: "checkmark.shield")
+                Label("Reveal in Finder", systemImage: "folder")
             }
-        }
-
-        Divider()
-
-        if actionRows.contains(where: { !$0.manuallyPaused }) {
             Button {
                 selectionState.ids = actionIDs
                 selectionFocusID = row.id
-                pause(actionIDs)
+                reannounce(actionIDs)
             } label: {
-                Label(actsOnMultipleTorrents ? "Pause Selected" : "Pause", systemImage: "pause.fill")
+                Label(
+                    actsOnMultipleTorrents
+                        ? "Reannounce Selected"
+                        : "Reannounce",
+                    systemImage: "arrow.clockwise"
+                )
             }
-        }
-        if actionRows.contains(where: \.manuallyPaused) {
-            Button {
-                selectionState.ids = actionIDs
-                selectionFocusID = row.id
-                resume(actionIDs)
-            } label: {
-                Label(actsOnMultipleTorrents ? "Resume Selected" : "Resume", systemImage: "play.fill")
-            }
-        }
-
-        Divider()
-
-        Menu("Labels") {
-            if labels.isEmpty {
-                Text("No Labels")
-            } else {
-                ForEach(labels) { label in
-                    Button {
-                        selectionState.ids = actionIDs
-                        selectionFocusID = row.id
-                        toggleLabel(label.id, actionIDs)
-                    } label: {
-                        Label(label.name, systemImage: labelMenuImage(for: label.id, rows: actionRows))
-                    }
-                }
-            }
-        }
-
-        Divider()
-
-        Menu("Priority") {
-            ForEach(TorrentQueuePriority.allCases) { priority in
+            if actionSummary.hasMetadata {
                 Button {
                     selectionState.ids = actionIDs
                     selectionFocusID = row.id
-                    setQueuePriority(actionIDs, priority)
+                    forceRecheck(actionIDs)
                 } label: {
-                    Label(priority.title, systemImage: priorityMenuImage(for: priority, rows: actionRows))
+                    Label(
+                        actsOnMultipleTorrents
+                            ? "Force Recheck Selected"
+                            : "Force Recheck",
+                        systemImage: "checkmark.shield"
+                    )
                 }
             }
-        }
 
-        Menu("Move in Queue") {
-            Button {
-                selectionState.ids = actionIDs
-                selectionFocusID = row.id
-                moveInQueue(actionIDs, .top)
-            } label: {
-                Label("Top", systemImage: "arrow.up.to.line")
-            }
-            Button {
-                selectionState.ids = actionIDs
-                selectionFocusID = row.id
-                moveInQueue(actionIDs, .up)
-            } label: {
-                Label("Up", systemImage: "arrow.up")
-            }
-            Button {
-                selectionState.ids = actionIDs
-                selectionFocusID = row.id
-                moveInQueue(actionIDs, .down)
-            } label: {
-                Label("Down", systemImage: "arrow.down")
-            }
-            Button {
-                selectionState.ids = actionIDs
-                selectionFocusID = row.id
-                moveInQueue(actionIDs, .bottom)
-            } label: {
-                Label("Bottom", systemImage: "arrow.down.to.line")
-            }
-        }
+            Divider()
 
-        Divider()
+            if actionSummary.canPause {
+                Button {
+                    selectionState.ids = actionIDs
+                    selectionFocusID = row.id
+                    pause(actionIDs)
+                } label: {
+                    Label(
+                        actsOnMultipleTorrents
+                            ? "Pause Selected"
+                            : "Pause",
+                        systemImage: "pause.fill"
+                    )
+                }
+            }
+            if actionSummary.canResume {
+                Button {
+                    selectionState.ids = actionIDs
+                    selectionFocusID = row.id
+                    resume(actionIDs)
+                } label: {
+                    Label(
+                        actsOnMultipleTorrents
+                            ? "Resume Selected"
+                            : "Resume",
+                        systemImage: "play.fill"
+                    )
+                }
+            }
 
-        Button(role: .destructive) {
-            selectionState.ids = actionIDs
-            selectionFocusID = row.id
-            requestRemoval(actionIDs)
-        } label: {
-            Label(actsOnMultipleTorrents ? "Remove Selected" : "Remove", systemImage: "trash")
+            Divider()
+
+            Menu("Labels") {
+                if labels.isEmpty {
+                    Text("No Labels")
+                } else {
+                    ForEach(labels) { label in
+                        Button {
+                            selectionState.ids = actionIDs
+                            selectionFocusID = row.id
+                            toggleLabel(label.id, actionIDs)
+                        } label: {
+                            Label(
+                                label.name,
+                                systemImage: labelMenuImage(
+                                    for: label.id,
+                                    summary: actionSummary
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+
+            Divider()
+
+            Menu("Priority") {
+                ForEach(TorrentQueuePriority.allCases) { priority in
+                    Button {
+                        selectionState.ids = actionIDs
+                        selectionFocusID = row.id
+                        setQueuePriority(actionIDs, priority)
+                    } label: {
+                        Label(
+                            priority.title,
+                            systemImage: priorityMenuImage(
+                                for: priority,
+                                summary: actionSummary
+                            )
+                        )
+                    }
+                }
+            }
+
+            Menu("Move in Queue") {
+                Button {
+                    selectionState.ids = actionIDs
+                    selectionFocusID = row.id
+                    moveInQueue(actionIDs, .top)
+                } label: {
+                    Label("Top", systemImage: "arrow.up.to.line")
+                }
+                Button {
+                    selectionState.ids = actionIDs
+                    selectionFocusID = row.id
+                    moveInQueue(actionIDs, .up)
+                } label: {
+                    Label("Up", systemImage: "arrow.up")
+                }
+                Button {
+                    selectionState.ids = actionIDs
+                    selectionFocusID = row.id
+                    moveInQueue(actionIDs, .down)
+                } label: {
+                    Label("Down", systemImage: "arrow.down")
+                }
+                Button {
+                    selectionState.ids = actionIDs
+                    selectionFocusID = row.id
+                    moveInQueue(actionIDs, .bottom)
+                } label: {
+                    Label("Bottom", systemImage: "arrow.down.to.line")
+                }
+            }
+
+            Divider()
+
+            Button(role: .destructive) {
+                selectionState.ids = actionIDs
+                selectionFocusID = row.id
+                requestRemoval(actionIDs)
+            } label: {
+                Label(
+                    actsOnMultipleTorrents
+                        ? "Remove Selected"
+                        : "Remove",
+                    systemImage: "trash"
+                )
+            }
+        } else {
+            Text("Preparing Selection…")
+                .foregroundStyle(.secondary)
         }
     }
 
-    private func actionIDs(for row: TorrentRowSnapshot) -> Set<TorrentItem.ID> {
-        selectionState.ids.contains(row.id) ? selectionState.ids : [row.id]
+    private func actionSummary(
+        for row: TorrentRowSnapshot
+    ) -> TorrentListSelectionSummary? {
+        guard selectionState.ids.contains(row.id) else {
+            return TorrentListSelectionSummary.single(
+                row: row,
+                selectionRevision: selectionState.revision,
+                filterRevision: rowRevision,
+                labelIDs: labelAssignments[row.id] ?? []
+            )
+        }
+        return currentSelectionSummary
     }
 
-    private func priorityMenuImage(for priority: TorrentQueuePriority, rows: [TorrentRowSnapshot]) -> String {
-        rows.allSatisfy { $0.queuePriority == priority } ? "checkmark" : "circle"
+    private func priorityMenuImage(
+        for priority: TorrentQueuePriority,
+        summary: TorrentListSelectionSummary
+    ) -> String {
+        summary.commonQueuePriority == priority
+            ? "checkmark"
+            : "circle"
     }
 
-    private func labelMenuImage(for labelID: TorrentLabel.ID, rows: [TorrentRowSnapshot]) -> String {
-        let labeledCount = rows.filter { labelIDsForTorrent($0.id).contains(labelID) }.count
-        if labeledCount == rows.count, !rows.isEmpty {
+    private func labelMenuImage(
+        for labelID: TorrentLabel.ID,
+        summary: TorrentListSelectionSummary
+    ) -> String {
+        let labeledCount =
+            summary.labeledTorrentCount(for: labelID)
+        if labeledCount == summary.count, summary.count > 0 {
             return "checkmark"
         }
         return labeledCount > 0 ? "minus" : "circle"
     }
 
+}
+
+private struct TorrentListSelectionSummaryRequestID: Hashable {
+    let selectionRevision: UInt64
+    let filterRevision: UInt64
+}
+
+private struct TorrentTransferMetricRegistration: ViewModifier {
+    let torrentID: TorrentItem.ID
+    let metricsState: TorrentTransferMetricsState
+    let torrentState: TorrentListState
+    @State private var registrationID = UUID()
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear {
+                torrentState.registerTransferMetricState(
+                    for: torrentID,
+                    state: metricsState,
+                    registrationID: registrationID
+                )
+            }
+            .onDisappear {
+                torrentState.unregisterTransferMetricState(
+                    for: torrentID,
+                    registrationID: registrationID
+                )
+            }
+    }
 }
 
 private struct AccessibleTorrentRow: View {

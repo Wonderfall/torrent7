@@ -22,8 +22,8 @@ enum FileImportMode {
     }
 }
 
-struct TorrentAddDraft: Identifiable, Equatable {
-    enum Source: Equatable {
+struct TorrentAddDraft: Identifiable, Equatable, Sendable {
+    enum Source: Equatable, Sendable {
         case torrentFile(URL)
         case magnet(String)
     }
@@ -55,24 +55,94 @@ struct TorrentAddDraft: Identifiable, Equatable {
     }
 }
 
+struct TorrentFileDraftBatch: Sendable {
+    let drafts: [TorrentAddDraft]
+    let exceededLimit: Bool
+}
+
+struct TorrentMagnetDraftPreparation: Sendable {
+    let draft: TorrentAddDraft?
+    let isTooLarge: Bool
+}
+
+struct TorrentMagnetPreparationRequest: Identifiable, Sendable {
+    let id = UUID()
+    let value: String
+}
+
 enum TorrentAddSourceParser {
     static func magnetDraft(from value: String) -> TorrentAddDraft? {
-        let magnet = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard magnet.utf8.count <= TorrentInputLimits.maxMagnetURIBytes else {
-            return nil
+        magnetDraftPreparation(from: value).draft
+    }
+
+    @concurrent
+    static func prepareMagnetDraft(
+        from value: String
+    ) async throws -> TorrentMagnetDraftPreparation {
+        try Task.checkCancellation()
+        let preparation = magnetDraftPreparation(from: value)
+        try Task.checkCancellation()
+        return preparation
+    }
+
+    private static func magnetDraftPreparation(
+        from value: String
+    ) -> TorrentMagnetDraftPreparation {
+        let boundedUTF8 = value.utf8.prefix(
+            TorrentInputLimits.maxMagnetURIBytes + 1
+        )
+        guard boundedUTF8.count <= TorrentInputLimits.maxMagnetURIBytes else {
+            return TorrentMagnetDraftPreparation(
+                draft: nil,
+                isTooLarge: true
+            )
         }
+        let magnet = String(decoding: boundedUTF8, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         guard magnet.range(of: "magnet:?", options: [.caseInsensitive, .anchored]) != nil else {
-            return nil
+            return TorrentMagnetDraftPreparation(
+                draft: nil,
+                isTooLarge: false
+            )
         }
 
         let canonicalMagnet = "magnet:" + String(magnet.dropFirst("magnet:".count))
-        return TorrentAddDraft(source: .magnet(canonicalMagnet))
+        return TorrentMagnetDraftPreparation(
+            draft: TorrentAddDraft(source: .magnet(canonicalMagnet)),
+            isTooLarge: false
+        )
     }
 
-    static func torrentFileDrafts(from urls: [URL]) -> [TorrentAddDraft] {
-        urls
-            .filter { $0.pathExtension.caseInsensitiveCompare("torrent") == .orderedSame }
-            .map { TorrentAddDraft(source: .torrentFile($0)) }
+    @concurrent
+    static func torrentFileDrafts(
+        from urls: [URL],
+        maximumCount: Int
+    ) async throws -> TorrentFileDraftBatch {
+        precondition(maximumCount >= 0)
+        try Task.checkCancellation()
+
+        var drafts = [TorrentAddDraft]()
+        drafts.reserveCapacity(min(urls.count, maximumCount))
+        var exceededLimit = false
+        for (offset, url) in urls.enumerated() {
+            if offset.isMultiple(of: 16) {
+                try Task.checkCancellation()
+            }
+            guard url.pathExtension
+                .caseInsensitiveCompare("torrent") == .orderedSame else {
+                continue
+            }
+            guard drafts.count < maximumCount else {
+                exceededLimit = true
+                continue
+            }
+            drafts.append(TorrentAddDraft(source: .torrentFile(url)))
+        }
+        try Task.checkCancellation()
+        return TorrentFileDraftBatch(
+            drafts: drafts,
+            exceededLimit: exceededLimit
+        )
     }
 }
 
@@ -90,7 +160,22 @@ struct TorrentAddOptions {
 
 enum TorrentSourceSecurityInspector {
     static func summary(magnetURI: String) -> TorrentSourceSecuritySummary {
-        MagnetSourceParser.summary(magnetURI: magnetURI) ?? .empty
+        MagnetSourceParser.summary(
+            magnetURI: magnetURI,
+            checkCancellation: {}
+        ) ?? .empty
+    }
+
+    @concurrent
+    static func prepareSummary(
+        magnetURI: String
+    ) async throws -> TorrentSourceSecuritySummary {
+        try MagnetSourceParser.summary(
+            magnetURI: magnetURI,
+            checkCancellation: {
+                try Task.checkCancellation()
+            }
+        ) ?? .empty
     }
 }
 
@@ -106,28 +191,45 @@ private enum MagnetSourceParser {
         var httpsWebSeeds = 0
     }
 
-    static func summary(magnetURI: String) -> TorrentSourceSecuritySummary? {
+    static func summary(
+        magnetURI: String,
+        checkCancellation: () throws -> Void
+    ) rethrows -> TorrentSourceSecuritySummary? {
+        try checkCancellation()
         guard magnetURI.utf8.count <= TorrentInputLimits.maxMagnetURIBytes,
               magnetURI.range(of: "magnet:?", options: [.caseInsensitive, .anchored]) != nil,
               !containsControlOrWhitespace(magnetURI) else {
             return nil
         }
+        try checkCancellation()
 
         let query = magnetURI.dropFirst("magnet:?".count)
         var hasValidInfoHash = false
         var counts = Counts()
 
-        for rawField in query.split(separator: "&", omittingEmptySubsequences: false) {
+        for (offset, rawField) in query
+            .split(separator: "&", omittingEmptySubsequences: false)
+            .enumerated() {
+            if offset.isMultiple(of: 16) {
+                try checkCancellation()
+            }
             let separator = rawField.firstIndex(of: "=")
             let rawName = separator.map { rawField[..<$0] } ?? rawField[...]
             let rawValue = separator.map { rawField[rawField.index(after: $0)...] } ?? ""[...]
 
-            guard let name = formDecoded(rawName),
-                  let value = formDecoded(rawValue),
+            guard let name = try formDecoded(
+                      rawName,
+                      checkCancellation: checkCancellation
+                  ),
+                  let value = try formDecoded(
+                      rawValue,
+                      checkCancellation: checkCancellation
+                  ),
                   !containsControl(name),
                   !containsControl(value) else {
                 return nil
             }
+            try checkCancellation()
 
             if name.caseInsensitiveCompare("xt") == .orderedSame {
                 guard isValidExactTopic(value) else {
@@ -170,6 +272,7 @@ private enum MagnetSourceParser {
         guard hasValidInfoHash else {
             return nil
         }
+        try checkCancellation()
         return TorrentSourceSecuritySummary(
             trackerCount: counts.trackers,
             httpsTrackerCount: counts.httpsTrackers,
@@ -217,13 +320,20 @@ private enum MagnetSourceParser {
         return lowered.dropFirst(3).utf8.allSatisfy(isASCIIDigit)
     }
 
-    private static func formDecoded(_ value: Substring) -> String? {
+    private static func formDecoded(
+        _ value: Substring,
+        checkCancellation: () throws -> Void
+    ) rethrows -> String? {
+        try checkCancellation()
         let input = Array(value.utf8)
         var output: [UInt8] = []
         output.reserveCapacity(input.count)
 
         var index = 0
         while index < input.count {
+            if index.isMultiple(of: 256) {
+                try checkCancellation()
+            }
             switch input[index] {
             case Character("+").asciiValue:
                 output.append(Character(" ").asciiValue!)
@@ -242,6 +352,7 @@ private enum MagnetSourceParser {
             }
         }
 
+        try checkCancellation()
         return String(bytes: output, encoding: .utf8)
     }
 

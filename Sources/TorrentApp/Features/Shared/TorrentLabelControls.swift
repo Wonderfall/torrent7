@@ -173,7 +173,7 @@ struct TorrentLabelEditorView: View {
             Text(title)
                 .font(.title2.weight(.semibold))
 
-            TextField("Label name", text: $name)
+            TextField("Label name", text: boundedName)
                 .textFieldStyle(.roundedBorder)
                 .frame(minWidth: 320)
                 .onSubmit(saveTrimmedName)
@@ -191,6 +191,20 @@ struct TorrentLabelEditorView: View {
 
     private var trimmedName: String {
         TorrentLabel.normalizedName(name)
+    }
+
+    private var boundedName: Binding<String> {
+        Binding {
+            name
+        } set: { value in
+            name = String(
+                decoding:
+                    value.utf8.prefix(
+                        TorrentLabel.maxNameInputByteCount
+                    ),
+                as: UTF8.self
+            )
+        }
     }
 
     private func saveTrimmedName() {

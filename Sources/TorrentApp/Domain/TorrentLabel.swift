@@ -2,7 +2,10 @@ import Foundation
 
 struct TorrentLabel: Identifiable, Hashable, Codable, Sendable {
     typealias ID = String
+    static let maximumCount = 256
     static let maxNameLength = 48
+    static let maxNameInputByteCount = 512
+    static let maxIDByteCount = 128
 
     let id: ID
     var name: String
@@ -13,7 +16,15 @@ struct TorrentLabel: Identifiable, Hashable, Codable, Sendable {
     }
 
     static func normalizedName(_ name: String) -> String {
-        String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(maxNameLength))
+        let boundedName = String(
+            decoding: name.utf8.prefix(maxNameInputByteCount),
+            as: UTF8.self
+        )
+        return String(
+            boundedName
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .prefix(maxNameLength)
+        )
     }
 
     func matches(name otherName: String) -> Bool {

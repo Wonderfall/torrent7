@@ -67,10 +67,8 @@ final class TorrentDockTileService: TorrentDockTileServicing {
     }
 
     private static func applicationIcon() -> NSImage {
-        if let icon = NSApplication.shared.applicationIconImage {
-            return icon
-        }
-        return NSWorkspace.shared.icon(forFile: Bundle.main.bundlePath)
+        NSApplication.shared.applicationIconImage
+            ?? NSImage(size: NSSize(width: 128, height: 128))
     }
 
     private static func label(for bytesPerSecond: Int64) -> String? {

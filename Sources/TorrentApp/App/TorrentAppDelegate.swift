@@ -4,12 +4,19 @@ import AppKit
 final class TorrentAppDelegate: NSObject, NSApplicationDelegate {
     weak var store: TorrentStore?
     private var isSavingBeforeTermination = false
+    private var terminationTask: Task<Void, Never>?
+
+    isolated deinit {
+        terminationTask?.cancel()
+    }
 
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
         let menu = NSMenu()
         menu.autoenablesItems = false
-        let canPause = store?.torrents.contains { !$0.manuallyPaused } ?? false
-        let canResume = store?.torrents.contains(where: \.manuallyPaused) ?? false
+        let canPause =
+            store?.commandState.snapshot.canPauseAnyTorrent ?? false
+        let canResume =
+            store?.commandState.snapshot.canResumeAnyTorrent ?? false
 
         let pauseAllItem = NSMenuItem(
             title: "Pause All",
@@ -41,10 +48,11 @@ final class TorrentAppDelegate: NSObject, NSApplicationDelegate {
         }
 
         isSavingBeforeTermination = true
-        Task { @MainActor [weak self] in
+        terminationTask = Task { @MainActor [weak self] in
             let didSave = await store.saveAllChecked()
             sender.reply(toApplicationShouldTerminate: didSave)
             self?.isSavingBeforeTermination = false
+            self?.terminationTask = nil
         }
 
         return .terminateLater
