@@ -20,6 +20,7 @@ on:
       - "Scripts/test-enhanced-security-extension.zsh"
       - "Scripts/test-swift.zsh"
       - "Scripts/verify-app.zsh"
+      - "Scripts/verify-xcode.zsh"
       - "Sources/**"
       - "Tests/**"
       - "Tools/XPCIntegrationHost/**"
@@ -45,12 +46,17 @@ on:
       - "Scripts/test-enhanced-security-extension.zsh"
       - "Scripts/test-swift.zsh"
       - "Scripts/verify-app.zsh"
+      - "Scripts/verify-xcode.zsh"
       - "Sources/**"
       - "Tests/**"
       - "Tools/XPCIntegrationHost/**"
   workflow_dispatch:
 
 permissions: {}
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+  XCODE_CACHE_KEY: xcode-26.6-17F113
 
 concurrency:
   group: torrent-app-${{ github.event.pull_request.number || github.ref }}
@@ -82,6 +88,10 @@ jobs:
           git fetch --depth=1 origin "$checkout_ref"
           git checkout --detach FETCH_HEAD
 
+      - name: Verify Xcode toolchain
+        shell: zsh {0}
+        run: Scripts/verify-xcode.zsh
+
       - name: Install build tools
         shell: zsh {0}
         run: |
@@ -94,7 +104,7 @@ jobs:
           path: |
             .build/deps/source-cache
             .build/deps/arm64e
-          key: deps-arm64e-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/keys/**', 'Scripts/patches/**') }}
+          key: deps-arm64e-${{ env.XCODE_CACHE_KEY }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/verify-xcode.zsh', 'Scripts/keys/**', 'Scripts/patches/**') }}
       - name: Build pinned dependencies
         shell: zsh {0}
         run: |

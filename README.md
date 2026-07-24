@@ -199,13 +199,19 @@ it to exactly match the reviewed notices in `Packaging/ThirdPartyNotices.txt`.
 Requirements:
 
 - macOS 26 on Apple silicon
-- Xcode 26 or newer
+- Xcode 26.6 (build 17F113)
 - Homebrew build tools
 
 Install build tools:
 
 ```sh
 brew install cmake ninja gnupg
+```
+
+Verify the selected Xcode, macOS SDK, and Swift toolchain:
+
+```sh
+Scripts/verify-xcode.zsh
 ```
 
 Build the app:

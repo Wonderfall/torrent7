@@ -42,6 +42,8 @@ if (( ${+DEVELOPER_DIR} )); then
     [[ ${DEVELOPER_DIR:A} == "$selected_developer_dir" ]] \
         || fail "DEVELOPER_DIR must match the system-selected Xcode developer directory"
 fi
+/usr/bin/env DEVELOPER_DIR="$selected_developer_dir" \
+    "$root_dir/Scripts/verify-xcode.zsh"
 
 typeset shared_source_cache_dir=${SOURCE_CACHE_DIR:-$default_source_cache_dir}
 shared_source_cache_dir=${shared_source_cache_dir:a}

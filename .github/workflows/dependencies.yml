@@ -10,6 +10,7 @@ on:
       - ".github/workflows/dependencies.yml"
       - "Scripts/build-deps.zsh"
       - "Scripts/libtorrent-patch-series.sh"
+      - "Scripts/verify-xcode.zsh"
       - "Scripts/keys/**"
       - "Scripts/patches/**"
       - "Tools/DependencyCheck/**"
@@ -23,12 +24,16 @@ on:
       - ".github/workflows/dependencies.yml"
       - "Scripts/build-deps.zsh"
       - "Scripts/libtorrent-patch-series.sh"
+      - "Scripts/verify-xcode.zsh"
       - "Scripts/keys/**"
       - "Scripts/patches/**"
       - "Tools/DependencyCheck/**"
   workflow_dispatch:
 
 permissions: {}
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
 
 concurrency:
   group: dependencies-${{ github.event.pull_request.number || github.ref }}
@@ -62,6 +67,10 @@ jobs:
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
           git fetch --depth=1 origin "$checkout_ref"
           git checkout --detach FETCH_HEAD
+
+      - name: Verify Xcode toolchain
+        shell: zsh {0}
+        run: Scripts/verify-xcode.zsh
 
       - name: Install verification tools
         shell: zsh {0}
