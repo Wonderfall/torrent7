@@ -1,5 +1,5 @@
 diff --git a/include/libtorrent/add_torrent_params.hpp b/include/libtorrent/add_torrent_params.hpp
-index f72017a38..4cc5c4fd7 100644
+index f72017a38539b26e14b0ebcc81e0f4d0eb6dbfdb..4cc5c4fd7bddab9a81add591fc043f31c08f1bd5 100644
 --- a/include/libtorrent/add_torrent_params.hpp
 +++ b/include/libtorrent/add_torrent_params.hpp
 @@ -156,6 +156,11 @@ TORRENT_VERSION_NAMESPACE_3
@@ -15,7 +15,7 @@ index f72017a38..4cc5c4fd7 100644
  		// will be stored in the specified subdirectory, still inside its
  		// download directory. i.e. ``part_file_dir`` is a relative directory.
 diff --git a/include/libtorrent/aux_/file.hpp b/include/libtorrent/aux_/file.hpp
-index c41a666ad..9fe1e356c 100644
+index 467b5e8eb4c2bd722b55433a3119d90b118152dd..ffe85faf0d70d2c6e61c4477e7e0469b4d3d9dce 100644
 --- a/include/libtorrent/aux_/file.hpp
 +++ b/include/libtorrent/aux_/file.hpp
 @@ -15,8 +15,10 @@ see LICENSE file.
@@ -29,7 +29,7 @@ index c41a666ad..9fe1e356c 100644
  #include "libtorrent/string_view.hpp"
  #include "libtorrent/span.hpp"
  #include "libtorrent/aux_/storage_utils.hpp"
-@@ -84,11 +86,15 @@ namespace libtorrent::aux {
+@@ -82,11 +84,15 @@ namespace libtorrent::aux {
  		file_handle(): m_fd(invalid_handle) {}
  		file_handle(string_view name, std::int64_t size, open_mode_t mode);
  		file_handle(string_view root, string_view relative, std::int64_t size
@@ -47,7 +47,7 @@ index c41a666ad..9fe1e356c 100644
  		file_handle& operator=(file_handle&& rhs) & noexcept;
  
  		~file_handle();
-@@ -101,6 +107,7 @@ namespace libtorrent::aux {
+@@ -99,6 +105,7 @@ namespace libtorrent::aux {
  	private:
  		void close();
  		handle_type m_fd;
@@ -56,7 +56,7 @@ index c41a666ad..9fe1e356c 100644
  		aux::open_mode_t m_open_mode;
  #endif
 diff --git a/include/libtorrent/aux_/file_descriptor.hpp b/include/libtorrent/aux_/file_descriptor.hpp
-index 6492294fd..cc3945c19 100644
+index 6492294fda54b3824e6e28269656b49930757a34..cc3945c19b48250ea13ab3ccbf7c8e5ddf2bf9b2 100644
 --- a/include/libtorrent/aux_/file_descriptor.hpp
 +++ b/include/libtorrent/aux_/file_descriptor.hpp
 @@ -57,6 +57,12 @@ struct file_descriptor
@@ -73,7 +73,7 @@ index 6492294fd..cc3945c19 100644
  	int m_fd;
  };
 diff --git a/include/libtorrent/aux_/file_pool.hpp b/include/libtorrent/aux_/file_pool.hpp
-index 48e7ce38d..875d77df8 100644
+index 48e7ce38d746f757cb0e4c383c38b0dc153fb15c..875d77df8da3be70179fad6e93812a69227654aa 100644
 --- a/include/libtorrent/aux_/file_pool.hpp
 +++ b/include/libtorrent/aux_/file_pool.hpp
 @@ -27,6 +27,7 @@ namespace libtorrent::aux {
@@ -95,7 +95,7 @@ index 48e7ce38d..875d77df8 100644
  		{}
  
 diff --git a/include/libtorrent/aux_/file_pool_impl.hpp b/include/libtorrent/aux_/file_pool_impl.hpp
-index b5cb31534..f60ec07ac 100644
+index b5cb31534bbc67448478e186b9c3ede2da923c2c..f60ec07acf139054caddacbcde27884102a175fe 100644
 --- a/include/libtorrent/aux_/file_pool_impl.hpp
 +++ b/include/libtorrent/aux_/file_pool_impl.hpp
 @@ -77,6 +77,7 @@ namespace libtorrent::aux {
@@ -115,7 +115,7 @@ index b5cb31534..f60ec07ac 100644
  			, open_mode_t m, file_id file_key
  #if TORRENT_HAVE_MAP_VIEW_OF_FILE
 diff --git a/include/libtorrent/aux_/file_view_pool.hpp b/include/libtorrent/aux_/file_view_pool.hpp
-index 87c712a80..74c6f7f88 100644
+index 87c712a80e21c2c9060c68aa0689d3e6e954448b..74c6f7f882dec210b5ad63b9c0d0a1cfa41c5762 100644
 --- a/include/libtorrent/aux_/file_view_pool.hpp
 +++ b/include/libtorrent/aux_/file_view_pool.hpp
 @@ -29,6 +29,7 @@ namespace libtorrent::aux {
@@ -137,7 +137,7 @@ index 87c712a80..74c6f7f88 100644
  				, open_unmap_lock
  #endif
 diff --git a/include/libtorrent/aux_/part_file.hpp b/include/libtorrent/aux_/part_file.hpp
-index abecf3134..d68d34672 100644
+index abecf3134d0990a70ff551e364a5a67788defaca..d68d34672a578d5f6792e95ab43d215a2036b1e6 100644
 --- a/include/libtorrent/aux_/part_file.hpp
 +++ b/include/libtorrent/aux_/part_file.hpp
 @@ -35,9 +35,11 @@ namespace libtorrent::aux {
@@ -163,7 +163,7 @@ index abecf3134..d68d34672 100644
  		// allocate a slot and return the slot index
  		slot_index_t allocate_slot(piece_index_t piece);
 diff --git a/include/libtorrent/aux_/path.hpp b/include/libtorrent/aux_/path.hpp
-index 70c3784fc..6140c107f 100644
+index 70c3784fc6b3e05be6836f814d11d15e47c78011..6140c107f6651600c798c1d90c680507f106cee6 100644
 --- a/include/libtorrent/aux_/path.hpp
 +++ b/include/libtorrent/aux_/path.hpp
 @@ -12,6 +12,7 @@ see LICENSE file.
@@ -260,7 +260,7 @@ index 70c3784fc..6140c107f 100644
  #endif
  
 diff --git a/include/libtorrent/aux_/pread_storage.hpp b/include/libtorrent/aux_/pread_storage.hpp
-index 3136db878..9fa35f59e 100644
+index 3136db878cb6b74ff6f3bf6f80469a4cfc6ae5c2..9fa35f59e23c5e588b6da97940c629b1788e0be8 100644
 --- a/include/libtorrent/aux_/pread_storage.hpp
 +++ b/include/libtorrent/aux_/pread_storage.hpp
 @@ -170,6 +170,7 @@ namespace libtorrent::aux {
@@ -272,7 +272,7 @@ index 3136db878..9fa35f59e 100644
  		std::string m_part_file_name;
  
 diff --git a/include/libtorrent/aux_/stat_cache.hpp b/include/libtorrent/aux_/stat_cache.hpp
-index 7f25b264e..908a913a9 100644
+index 7f25b264e689d37d743e42e9ed1ba935edbf6cc7..908a913a91f49da82b165bba246e78bd9d5a5025 100644
 --- a/include/libtorrent/aux_/stat_cache.hpp
 +++ b/include/libtorrent/aux_/stat_cache.hpp
 @@ -15,6 +15,7 @@ see LICENSE file.
@@ -294,7 +294,7 @@ index 7f25b264e..908a913a9 100644
  		void set_dirty(file_index_t i);
  
 diff --git a/include/libtorrent/aux_/storage_utils.hpp b/include/libtorrent/aux_/storage_utils.hpp
-index e081bec79..4bbb37538 100644
+index e081bec79bbf984e3b7759d331a2b20710ca23ce..4bbb375381e8ebb294fb1e975d53a0e6440cc8e8 100644
 --- a/include/libtorrent/aux_/storage_utils.hpp
 +++ b/include/libtorrent/aux_/storage_utils.hpp
 @@ -14,6 +14,7 @@ see LICENSE file.
@@ -357,7 +357,7 @@ index e081bec79..4bbb37538 100644
  
  #endif
 diff --git a/include/libtorrent/fwd.hpp b/include/libtorrent/fwd.hpp
-index 411ba2caf..e6e844497 100644
+index 5c35cb01abddaca2dd8ca0f262eb4cefa9d28552..4b497631f5bfa7edb123c2419bcb55350374f969 100644
 --- a/include/libtorrent/fwd.hpp
 +++ b/include/libtorrent/fwd.hpp
 @@ -16,6 +16,10 @@ see LICENSE file.
@@ -372,7 +372,7 @@ index 411ba2caf..e6e844497 100644
  TORRENT_VERSION_NAMESPACE_3
  struct add_torrent_params;
 diff --git a/include/libtorrent/storage_defs.hpp b/include/libtorrent/storage_defs.hpp
-index 667886065..6d9ddfb13 100644
+index 6678860654df230eb9e509a209f450686329c5ee..6d9ddfb133e560a114fae0329ce40830300f4c35 100644
 --- a/include/libtorrent/storage_defs.hpp
 +++ b/include/libtorrent/storage_defs.hpp
 @@ -20,7 +20,9 @@ see LICENSE file.
@@ -414,10 +414,10 @@ index 667886065..6d9ddfb13 100644
  }
  
 diff --git a/src/copy_file.cpp b/src/copy_file.cpp
-index 7e1b72031..c91654b3f 100644
+index fe12ddfde8481d1a5e07ea995fab436bbe4675b1..49432133f5597ba49e8ac954b5129b0e4d120c23 100644
 --- a/src/copy_file.cpp
 +++ b/src/copy_file.cpp
-@@ -233,8 +233,12 @@ void copy_file(std::string const& inf, std::string const& newf, storage_error& s
+@@ -227,8 +227,12 @@ void copy_file(std::string const& inf, std::string const& newf, storage_error& s
  
  void confined_copy_file(std::string const& old_root
  	, std::string const& old_relative, std::string const& new_root
@@ -431,7 +431,7 @@ index 7e1b72031..c91654b3f 100644
  	copy_file(combine_path(old_root, old_relative)
  		, combine_path(new_root, new_relative), se);
  }
-@@ -440,7 +444,9 @@ void copy_file(std::string const& inf, std::string const& newf, storage_error& s
+@@ -431,7 +435,9 @@ void copy_file(std::string const& inf, std::string const& newf, storage_error& s
  
  void confined_copy_file(std::string const& old_root
  	, std::string const& old_relative, std::string const& new_root
@@ -442,7 +442,7 @@ index 7e1b72031..c91654b3f 100644
  {
  	se.ec.clear();
  	int read_flags = O_RDONLY;
-@@ -449,15 +455,17 @@ void confined_copy_file(std::string const& old_root
+@@ -440,15 +446,17 @@ void confined_copy_file(std::string const& old_root
  #endif
  	error_code open_error;
  	aux::file_descriptor const infd = aux::confined_open(old_root, old_relative
@@ -463,7 +463,7 @@ index 7e1b72031..c91654b3f 100644
  			if (link_error)
  			{
  				se.operation = operation_t::file_copy;
-@@ -484,7 +492,7 @@ void confined_copy_file(std::string const& old_root
+@@ -475,7 +483,7 @@ void confined_copy_file(std::string const& old_root
  	write_flags |= O_CLOEXEC;
  #endif
  	aux::file_descriptor const outfd = aux::confined_open(new_root, new_relative
@@ -473,10 +473,10 @@ index 7e1b72031..c91654b3f 100644
  	{
  		se.operation = operation_t::file_open;
 diff --git a/src/file.cpp b/src/file.cpp
-index 9724c0acf..967a16bee 100644
+index 7e18af0e768633f533063209ad68885fbd1b1a0b..4e36a7d997c12de0bb803fe7c514cee802573002 100644
 --- a/src/file.cpp
 +++ b/src/file.cpp
-@@ -538,17 +538,19 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
+@@ -559,17 +559,19 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
  	}
  
  	int open_file(std::string const& root, std::string const& relative
@@ -499,7 +499,7 @@ index 9724c0acf..967a16bee 100644
  		}
  #endif
  		if (ret < 0) throw_ex<storage_error>(ec, operation_t::file_open);
-@@ -600,9 +602,12 @@ file_handle::file_handle(string_view name, std::int64_t const size
+@@ -621,9 +623,12 @@ file_handle::file_handle(string_view name, std::int64_t const size
  }
  
  file_handle::file_handle(string_view const root, string_view const relative
@@ -514,7 +514,7 @@ index 9724c0acf..967a16bee 100644
  
  #else
  
-@@ -613,10 +618,12 @@ file_handle::file_handle(string_view name, std::int64_t const size
+@@ -634,10 +639,12 @@ file_handle::file_handle(string_view name, std::int64_t const size
  
  file_handle::file_handle(string_view const root, string_view const relative
  	, std::int64_t const size
@@ -530,7 +530,7 @@ index 9724c0acf..967a16bee 100644
  {
  #ifdef DIRECTIO_ON
  	// for solaris
-@@ -774,6 +781,7 @@ file_handle& file_handle::operator=(file_handle&& rhs) & noexcept
+@@ -795,6 +802,7 @@ file_handle& file_handle::operator=(file_handle&& rhs) & noexcept
  	if (&rhs == this) return *this;
  	close();
  	m_fd = rhs.m_fd;
@@ -539,7 +539,7 @@ index 9724c0acf..967a16bee 100644
  	return *this;
  }
 diff --git a/src/file_pool_impl.cpp b/src/file_pool_impl.cpp
-index 9e99d69c2..6b27fee10 100644
+index 9e99d69c20f66d048147c736b312fc96eed6f152..6b27fee10f02827811c7eafc4c2b814b13f33f3b 100644
 --- a/src/file_pool_impl.cpp
 +++ b/src/file_pool_impl.cpp
 @@ -37,6 +37,7 @@ namespace libtorrent::aux {
@@ -607,7 +607,7 @@ index 9e99d69c2..6b27fee10 100644
  				, open_unmap_lock
  #endif
 diff --git a/src/mmap_storage.cpp b/src/mmap_storage.cpp
-index bdf7ef3ad..8ba9204d3 100644
+index 837a6af5b06df92963960b728b9d0faecec6b580..cfe44a676ac7007e95964fcf6972dd4d72ddaa3a 100644
 --- a/src/mmap_storage.cpp
 +++ b/src/mmap_storage.cpp
 @@ -15,6 +15,7 @@ see LICENSE file.
@@ -639,7 +639,7 @@ index bdf7ef3ad..8ba9204d3 100644
  #if TORRENT_HAVE_MAP_VIEW_OF_FILE
  				, std::shared_ptr<std::mutex>(m_file_open_unmap_lock
 diff --git a/src/part_file.cpp b/src/part_file.cpp
-index 962f454a2..999818717 100644
+index 962f454a27c36d9609223a82af9112020972915d..999818717587f3ec312b2af1f3e68abaa731c6dc 100644
 --- a/src/part_file.cpp
 +++ b/src/part_file.cpp
 @@ -59,15 +59,19 @@ namespace {
@@ -716,7 +716,7 @@ index 962f454a2..999818717 100644
  			if (ec == boost::system::errc::no_such_file_or_directory)
  				ec.clear();
 diff --git a/src/path.cpp b/src/path.cpp
-index 01c86ed0d..ae8f6419b 100644
+index 01c86ed0d4fb6669ca3198ea2661dd2a5544e8ed..ae8f6419b46c4fda694b230054018b4c75971f9f 100644
 --- a/src/path.cpp
 +++ b/src/path.cpp
 @@ -112,6 +112,89 @@ namespace libtorrent {
@@ -995,7 +995,7 @@ index 01c86ed0d..ae8f6419b 100644
  		int open_flags = flags | O_NOFOLLOW_ANY | O_RESOLVE_BENEATH;
  		if ((flags & O_ACCMODE) != O_RDONLY) open_flags |= O_UNIQUE;
 diff --git a/src/posix_storage.cpp b/src/posix_storage.cpp
-index fdceb3108..02128c8e5 100644
+index da633486ce7480b93d9c2161e3eb81b8233218a3..02877ccdb35aa630398416892d5708ff85fee0d5 100644
 --- a/src/posix_storage.cpp
 +++ b/src/posix_storage.cpp
 @@ -19,6 +19,7 @@ see LICENSE file.
@@ -1021,7 +1021,7 @@ index fdceb3108..02128c8e5 100644
  	filenames posix_storage::names() const
  	{
 diff --git a/src/pread_storage.cpp b/src/pread_storage.cpp
-index 9e0af24f1..124f08839 100644
+index 6edd914f1193830c2df82198189467e3974feffa..59c5e6b2893ccd4a314c565983b11d91fc626751 100644
 --- a/src/pread_storage.cpp
 +++ b/src/pread_storage.cpp
 @@ -45,6 +45,7 @@ namespace libtorrent::aux {
@@ -1193,7 +1193,7 @@ index 9e0af24f1..124f08839 100644
  #if TORRENT_HAVE_MAP_VIEW_OF_FILE
  				, &dummy
 diff --git a/src/stat_cache.cpp b/src/stat_cache.cpp
-index 77a0fc241..be2136648 100644
+index 77a0fc241b243dc18f1ee0689868722639255ecc..be213664825a69e68ddcf20cb72982bbf9536137 100644
 --- a/src/stat_cache.cpp
 +++ b/src/stat_cache.cpp
 @@ -55,7 +55,8 @@ namespace libtorrent::aux {
@@ -1216,7 +1216,7 @@ index 77a0fc241..be2136648 100644
  			{
  				set_error_impl(i, ec);
 diff --git a/src/storage_utils.cpp b/src/storage_utils.cpp
-index 2ba9d7765..22f0fa4e5 100644
+index 2ba9d7765a1f96a1bbeeea8baa03c50bad680fbb..22f0fa4e59fda60fb65a2147b298f55c719b26ba 100644
 --- a/src/storage_utils.cpp
 +++ b/src/storage_utils.cpp
 @@ -230,9 +230,10 @@ namespace libtorrent { namespace aux {
@@ -1363,10 +1363,10 @@ index 2ba9d7765..22f0fa4e5 100644
  			if (err && err != boost::system::errc::no_such_file_or_directory)
  			{
 diff --git a/src/torrent.cpp b/src/torrent.cpp
-index 8252edbdc..2deeee228 100644
+index 0e5909bfc35277a4dcab9f57f4d5ab9e415362ad..1326bed60ed88cfdf24f48382bc04705255e8099 100644
 --- a/src/torrent.cpp
 +++ b/src/torrent.cpp
-@@ -1905,7 +1905,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -1913,7 +1913,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  			m_file_priority,
  			m_info_hash.get_best(),
  			m_torrent_file->v1() && !m_disable_v1_hashes,
@@ -1377,10 +1377,10 @@ index 8252edbdc..2deeee228 100644
  
  		// the shared_from_this() will create an intentional
 diff --git a/test/test_file.cpp b/test/test_file.cpp
-index 3732a7649..856cd0871 100644
+index ccfaaf74dcf9ed0e2aea830453f89d5c9411dbce..075f049d373f4738035f2ff1f4cef0021d78fbc7 100644
 --- a/test/test_file.cpp
 +++ b/test/test_file.cpp
-@@ -26,6 +26,9 @@ see LICENSE file.
+@@ -29,6 +29,9 @@ see LICENSE file.
  #include <set>
  #include <thread>
  #include <iostream>
@@ -1388,9 +1388,9 @@ index 3732a7649..856cd0871 100644
 +#include <sys/stat.h>
 +#include <unistd.h>
  
- using namespace lt;
- 
-@@ -536,6 +539,116 @@ TORRENT_TEST(lexically_relative_normal)
+ #ifndef TORRENT_WINDOWS
+ #include <csignal>
+@@ -605,6 +608,116 @@ TORRENT_TEST(lexically_relative_normal)
  }
  
  #if defined __APPLE__ && defined __MACH__
@@ -1508,7 +1508,7 @@ index 3732a7649..856cd0871 100644
  {
  	std::string const root = complete("confined-file-root");
 diff --git a/test/test_storage.cpp b/test/test_storage.cpp
-index d976702b9..84ecd0998 100644
+index d976702b9a1dd6a6de4cd6bae6e251a117a5f69f..84ecd099862825198f346a50e51e8c3be23c7165 100644
 --- a/test/test_storage.cpp
 +++ b/test/test_storage.cpp
 @@ -333,6 +333,34 @@ std::vector<char> new_piece(std::size_t const size)
@@ -1739,4 +1739,3 @@ index d976702b9..84ecd0998 100644
  #endif
  #endif
  
-

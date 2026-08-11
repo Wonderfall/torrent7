@@ -89,7 +89,7 @@ index 4b1476845dce440c71a9b0074f09060f0dcb31b8..639fc0665d16c6c50c334c080e8f8a9d
  	};
  
 diff --git a/src/http_tracker_connection.cpp b/src/http_tracker_connection.cpp
-index 004bd4198aecb4751f5ca5157c8c0498a9743b40..4d83c0e01995fa248390cb4ea4cfb4615c17d67b 100644
+index 72684af91603bf06b7e8d15beeaa37f60507472b..93d469b2884a391d67b92c57142606bb2039d897 100644
 --- a/src/http_tracker_connection.cpp
 +++ b/src/http_tracker_connection.cpp
 @@ -57,10 +57,118 @@ namespace libtorrent::aux {
@@ -329,7 +329,7 @@ index 7a136540d9af7c9aa3138d62f7811bb9e0ef7166..8673121bf4724d940669d4f54a6f5e48
  		span<address const> const addresses)
  	{
 diff --git a/src/udp_tracker_connection.cpp b/src/udp_tracker_connection.cpp
-index c43781fe00fa87096ff8169ed0187b6591304074..2fafcd31423018367d37ea81eb54a001a3b12bb4 100644
+index 922c8940dab202cee639e9aa3bb0145c9ebc3ccf..70c6687d1b079a6e0a24f51c0ad91e189d7863cb 100644
 --- a/src/udp_tracker_connection.cpp
 +++ b/src/udp_tracker_connection.cpp
 @@ -55,6 +55,64 @@ namespace libtorrent::aux {
@@ -418,7 +418,7 @@ index c43781fe00fa87096ff8169ed0187b6591304074..2fafcd31423018367d37ea81eb54a001
  	}
  
  	void udp_tracker_connection::fail(error_code const& ec, operation_t const op
-@@ -191,15 +246,24 @@ namespace libtorrent::aux {
+@@ -192,15 +247,24 @@ namespace libtorrent::aux {
  		// filter all endpoints we cannot reach from this listen socket, which may
  		// be all of them, in which case we should not announce this listen socket
  		// to this tracker
@@ -444,7 +444,7 @@ index c43781fe00fa87096ff8169ed0187b6591304074..2fafcd31423018367d37ea81eb54a001
  			return;
  		}
  
-@@ -238,6 +302,13 @@ namespace libtorrent::aux {
+@@ -239,6 +303,13 @@ namespace libtorrent::aux {
  
  	void udp_tracker_connection::start_announce()
  	{
@@ -458,7 +458,7 @@ index c43781fe00fa87096ff8169ed0187b6591304074..2fafcd31423018367d37ea81eb54a001
  		std::unique_lock<std::mutex> l(m_cache_mutex);
  		auto const cc = m_connection_cache.find(m_target.address());
  		if (cc != m_connection_cache.end())
-@@ -262,6 +333,17 @@ namespace libtorrent::aux {
+@@ -263,6 +334,17 @@ namespace libtorrent::aux {
  
  	void udp_tracker_connection::on_timeout(error_code const& ec)
  	{
@@ -504,10 +504,10 @@ index 0315c8a55cc7e21257816537f44310176f4bfaed..51b15730b54e320f5a904aca29cd0a0c
  	std::array<address, 2> const mixed_v6 = {{
  		make_address("2001:4860:c000:aa::"),
 diff --git a/test/test_http_connection.cpp b/test/test_http_connection.cpp
-index 396d604f7e5605e098ceb0cb5a5dd0b043c4b6fd..343389e9ffb3d663c7422db472fa64f42e9438ed 100644
+index 177c855f04317adf92130cd74b15d38be18c237a..540b812520eb0b2b64648ec7eacc8e81264b4e86 100644
 --- a/test/test_http_connection.cpp
 +++ b/test/test_http_connection.cpp
-@@ -257,3 +257,43 @@ TORRENT_TEST(no_keepalive)
+@@ -258,3 +258,43 @@ TORRENT_TEST(no_keepalive)
  {
  	run_suite("http", settings_pack::none, 0);
  }
@@ -552,7 +552,7 @@ index 396d604f7e5605e098ceb0cb5a5dd0b043c4b6fd..343389e9ffb3d663c7422db472fa64f4
 +	stop_web_server();
 +}
 diff --git a/test/test_tracker_manager.cpp b/test/test_tracker_manager.cpp
-index 9ead66df7b693ad5fe49941e1aa770d98ef1b3f9..c509d0cee242333d583c91ffcbe5241d04fb0108 100644
+index b265d65e9629eaf5a7f25bd7df01750366031cb5..4703ba55a072f4dd91e67fe0835879b8aeb96992 100644
 --- a/test/test_tracker_manager.cpp
 +++ b/test/test_tracker_manager.cpp
 @@ -11,8 +11,19 @@ see LICENSE file.
@@ -580,10 +580,11 @@ index 9ead66df7b693ad5fe49941e1aa770d98ef1b3f9..c509d0cee242333d583c91ffcbe5241d
  	tracker_manager_handler(io_context& ios, aux::session_settings& sett)
  		: m_host_resolver(ios)
 +		, m_resolver(m_host_resolver)
-+		, m_tracker_manager(
-+			std::bind(&tracker_manager_handler::send_fn, this, _1, _2, _3, _4, _5)
-+			, std::bind(&tracker_manager_handler::send_fn_hostname, this, _1, _2, _3, _4, _5, _6)
-+			, m_stats_counters
+ 		, m_tracker_manager(
+ 			std::bind(&tracker_manager_handler::send_fn, this, _1, _2, _3, _4, _5)
+ 			, std::bind(&tracker_manager_handler::send_fn_hostname, this, _1, _2, _3, _4, _5, _6)
+ 			, m_stats_counters
+-			, m_host_resolver
 +			, m_resolver
 +			, sett
 +#if !defined TORRENT_DISABLE_LOGGING || TORRENT_USE_ASSERTS
@@ -596,11 +597,10 @@ index 9ead66df7b693ad5fe49941e1aa770d98ef1b3f9..c509d0cee242333d583c91ffcbe5241d
 +		, aux::resolver_interface& resolver)
 +		: m_host_resolver(ios)
 +		, m_resolver(resolver)
- 		, m_tracker_manager(
- 			std::bind(&tracker_manager_handler::send_fn, this, _1, _2, _3, _4, _5)
- 			, std::bind(&tracker_manager_handler::send_fn_hostname, this, _1, _2, _3, _4, _5, _6)
- 			, m_stats_counters
--			, m_host_resolver
++		, m_tracker_manager(
++			std::bind(&tracker_manager_handler::send_fn, this, _1, _2, _3, _4, _5)
++			, std::bind(&tracker_manager_handler::send_fn_hostname, this, _1, _2, _3, _4, _5, _6)
++			, m_stats_counters
 +			, m_resolver
  			, sett
  #if !defined TORRENT_DISABLE_LOGGING || TORRENT_USE_ASSERTS
@@ -614,10 +614,15 @@ index 9ead66df7b693ad5fe49941e1aa770d98ef1b3f9..c509d0cee242333d583c91ffcbe5241d
  
  #ifndef TORRENT_DISABLE_LOGGING
  	bool should_log() const override { return false; }
-@@ -64,2 +92,2 @@ struct tracker_manager_handler
+@@ -61,7 +89,7 @@ struct tracker_manager_handler
+ #endif
+ 
+ #if TORRENT_USE_ASSERTS
 -	bool is_single_thread() const override { return false; }
 +	bool is_single_thread() const override { return true; }
  	bool has_peer(aux::peer_connection const*) const override { return false; }
+ 	bool any_torrent_has_peer(aux::peer_connection const*) const override { return false; }
+ 	bool is_posting_torrent_updates() const override { return false; }
 @@ -70,7 +98,56 @@ struct tracker_manager_handler
  	io_context m_io_context;
  	counters m_stats_counters;
@@ -722,7 +727,9 @@ index 9ead66df7b693ad5fe49941e1aa770d98ef1b3f9..c509d0cee242333d583c91ffcbe5241d
  TORRENT_TEST(empty_and_num_requests)
  {
  	io_context ios;
-@@ -226 +327,342 @@ TORRENT_TEST(protocol_dispatch_is_case_insensitive)
+@@ -224,3 +325,344 @@ TORRENT_TEST(protocol_dispatch_is_case_insensitive)
+ 	h.m_tracker_manager.abort_all_requests(true);
+ 	ios.run();
  }
 +
 +TORRENT_TEST(http_tracker_blocks_non_global_resolved_endpoint)

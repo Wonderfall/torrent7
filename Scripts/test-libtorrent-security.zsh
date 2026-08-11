@@ -24,6 +24,7 @@ typeset -r build_dir="$deps_dir/build/libtorrent"
 typeset -r patch_helper="$root_dir/Scripts/libtorrent-patch-series.sh"
 typeset -ra test_targets=(
     test_enum_net
+    test_disk_io
     test_file
     test_http_connection
     test_http_parser
@@ -68,6 +69,8 @@ restore_configuration=0
         "$source_dir/test/test_enum_net.cpp.nat64_prefix_discovery"
     ./test_enum_net --no-redirect \
         "$source_dir/test/test_enum_net.cpp.nat64_discovery_fails_closed_on_malformed_answers"
+    ./test_disk_io --no-redirect \
+        "$source_dir/test/test_disk_io.cpp.pread_hash_respects_checking_memory_budget"
     ./test_tracker_manager --no-redirect \
         "$source_dir/test/test_tracker_manager.cpp.http_tracker_blocks_non_global_resolved_endpoint"
     ./test_tracker_manager --no-redirect \
@@ -116,6 +119,8 @@ restore_configuration=0
         "$source_dir/test/test_file.cpp.descriptor_backed_root_rejects_symlink_replacement"
     ./test_file --no-redirect \
         "$source_dir/test/test_file.cpp.descriptor_backed_root_rejects_directory_replacement"
+    ./test_file --no-redirect \
+        "$source_dir/test/test_file.cpp.pwrite_all_short_write"
     ./test_storage --no-redirect \
         "$source_dir/test/test_storage.cpp.confined_hard_link_write_pread"
     ./test_storage --no-redirect \

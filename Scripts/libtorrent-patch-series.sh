@@ -4,13 +4,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-readonly LIBTORRENT_COMMIT="578e06824c3546f3371ab43967ab288a7e253eca"
+readonly LIBTORRENT_COMMIT="56ae8caba38bf154ffc210403cb23f91d0ecaa49"
 readonly -a LIBTORRENT_PATCHES=(
-    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.0-xcode-26.patch"
-    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.0-network-security.patch"
-    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.0-storage-confinement.patch"
-    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.0-tracker-endpoint-security.patch"
-    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.0-root-authority.patch"
+    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-xcode-26.patch"
+    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-network-security.patch"
+    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-storage-confinement.patch"
+    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-tracker-endpoint-security.patch"
+    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-root-authority.patch"
+    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-bounded-pread-hashing.patch"
 )
 
 fail() {

@@ -165,7 +165,7 @@ typeset -r LIBTORRENT_BUILD_STAMP="$DEPS_PREFIX/.torrent-app-libtorrent-build"
 typeset -r LIBTORRENT_PROVENANCE="$DEPS_PREFIX/share/torrent7/libtorrent-provenance.txt"
 typeset -r LIBTORRENT_PATCH_HELPER="$ROOT_DIR/Scripts/libtorrent-patch-series.sh"
 typeset -r LIBTORRENT_REPO=${LIBTORRENT_REPO:-https://github.com/arvidn/libtorrent.git}
-typeset -r LIBTORRENT_TAG=${LIBTORRENT_TAG:-v2.1.0}
+typeset -r LIBTORRENT_TAG=${LIBTORRENT_TAG:-v2.1.1}
 typeset -r LIBTORRENT_COMMIT=$("$LIBTORRENT_PATCH_HELPER" commit)
 typeset -r LIBTORRENT_MIRROR_DIR="$GIT_CACHE_DIR/libtorrent.git"
 typeset -r LIBTORRENT_SUBMODULE_MIRROR_ROOT="$GIT_CACHE_DIR/libtorrent-submodules"
@@ -196,10 +196,11 @@ typeset -a LIBTORRENT_CMAKE_OPTIONS=(
 typeset -r LIBTORRENT_EXTRA_DEFINES="-DTORRENT_DISABLE_SUPERSEEDING -DTORRENT_DISABLE_SHARE_MODE -DTORRENT_DISABLE_PREDICTIVE_PIECES"
 # These AppleClang diagnostics are audited upstream implementation patterns:
 # Boost.Pool's matching new[]/delete[] raw allocator, explicit RAII mutex
-# acquisition, a non-elided endpoint return, and two private statistics fields
-# left unused when streaming is disabled. Keep the suppressions scoped to the
-# pinned libtorrent build rather than weakening bridge warnings.
-typeset -r LIBTORRENT_UPSTREAM_WARNING_FLAGS="-Wno-allocator-wrappers -Wno-thread-safety-negative -Wno-nrvo -Wno-unused-private-field"
+# acquisition, a non-elided endpoint return, two private statistics fields left
+# unused when streaming is disabled, and an inline hidden counter whose
+# duplication warning applies only to shared libraries. Keep the suppressions
+# scoped to this static libtorrent build rather than weakening bridge warnings.
+typeset -r LIBTORRENT_UPSTREAM_WARNING_FLAGS="-Wno-allocator-wrappers -Wno-thread-safety-negative -Wno-nrvo -Wno-unused-private-field -Wno-unique-object-duplication"
 typeset -r ALLOW_EXTERNAL_DEPS_CLEAN=${ALLOW_EXTERNAL_DEPS_CLEAN:-0}
 typeset -a TEMPORARY_FILES=()
 # Keep global PAC options compatible with system C/C++ runtime contracts.
@@ -1061,7 +1062,7 @@ build_libtorrent() {
         -S "$LIBTORRENT_SOURCE_DIR" \
         -B "$LIBTORRENT_BUILD_DIR" \
         "${cmake_generator_args[@]}" \
-        -Wno-dev \
+        -Wno-author \
         -DCMAKE_BUILD_TYPE="$LIBTORRENT_CMAKE_BUILD_TYPE" \
         -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
         -DCMAKE_C_COMPILER="$LIBTORRENT_CC" \

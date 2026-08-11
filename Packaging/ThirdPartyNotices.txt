@@ -4,13 +4,13 @@ Torrent 7 Third-Party Notices
 The distributed Torrent 7 application statically incorporates the following
 third-party software:
 
-- libtorrent-rasterbar 2.1.0
+- libtorrent-rasterbar 2.1.1
 - Boost 1.91.0
 - OpenSSL 3.5.7
 
 The corresponding license notices follow.
 
-libtorrent-rasterbar 2.1.0
+libtorrent-rasterbar 2.1.1
 --------------------------------
 Copyright (c) 2003-2020, Arvid Norberg
 All rights reserved.

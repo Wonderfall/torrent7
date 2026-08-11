@@ -1,0 +1,154 @@
+diff --git a/src/pread_disk_io.cpp b/src/pread_disk_io.cpp
+index 3057cf673bfe9f0d09366d77e03e16cf75393555..56503064ffb8148ab5e08051d96996f0d2e65a44 100644
+--- a/src/pread_disk_io.cpp
++++ b/src/pread_disk_io.cpp
+@@ -1282,9 +1282,10 @@ status_t pread_disk_io::do_job(aux::job::hash& a, aux::pread_disk_job* j)
+ 
+ 	if (hpr == aux::disk_cache::hash_piece_result::deferred) return disk_status::job_deferred;
+ 
+-	// Fast path for a piece that isn't in the cache at all: read the whole
+-	// piece from disk in a single I/O operation, rather than one read per
+-	// 16 kiB block. v1's addressing spans whatever files/pad-files the piece
++	// Fast path for a piece that isn't in the cache at all and fits within the
++	// configured checking memory budget: read the whole piece from disk in a
++	// single I/O operation, rather than one read per 16 kiB block. v1's
++	// addressing spans whatever files/pad-files the piece
+ 	// touches and zero-fills any pad-file range (see storage->read()); v2's
+ 	// real data is always a prefix of that same span, since a pad file only
+ 	// ever follows the real bytes of the file it aligns, never precedes or
+@@ -1296,6 +1297,19 @@ status_t pread_disk_io::do_job(aux::job::hash& a, aux::pread_disk_job* j)
+ 	// with no further I/O.
+ 	if (hpr == aux::disk_cache::hash_piece_result::not_in_cache)
+ 	{
++		int const hashing_threads = std::max(1, pool_for_job(j).max_threads());
++		int const checking_blocks = std::max(
++			1, m_settings.get_int(settings_pack::checking_mem_usage));
++		int const per_hasher_blocks = std::max(1, checking_blocks / hashing_threads);
++		if (blocks_to_read > per_hasher_blocks)
++		{
++			TORRENT_ALLOCA(blocks, char const*, blocks_to_read);
++			for (char const*& b : blocks) b = nullptr;
++			lt::aux::piece_hasher ph_storage;
++			hash_partial_piece(v1 ? &ph_storage : nullptr, 0, blocks);
++			return j->error ? disk_status::fatal_disk_error : status_t{};
++		}
++
+ 		time_point const start_time = clock_type::now();
+ 
+ 		int const read_len = v1 ? piece_size : piece_size2;
+diff --git a/test/test_disk_io.cpp b/test/test_disk_io.cpp
+index 8d95c37a8cf8a819005cbcc04cd520af207cc528..94ca1a7841b563233bf1cc96b1a9b0b6613dcf2b 100644
+--- a/test/test_disk_io.cpp
++++ b/test/test_disk_io.cpp
+@@ -833,6 +833,111 @@ static void clear_during_flush_suite(lt::disk_io_constructor_type disk_io)
+ 
+ #endif // TORRENT_SIMULATE_SLOW_WRITE
+ 
++static std::int64_t pread_hash_read_operations(
++	int const checking_blocks, int const hashing_threads, int const aio_threads)
++{
++	lt::io_context ios;
++	lt::counters cnt;
++	lt::settings_pack sett = lt::default_settings();
++	sett.set_int(lt::settings_pack::hashing_threads, hashing_threads);
++	sett.set_int(lt::settings_pack::aio_threads, aio_threads);
++	sett.set_int(lt::settings_pack::checking_mem_usage, checking_blocks);
++	std::unique_ptr<lt::disk_interface> disk_thread =
++		lt::pread_disk_io_constructor(ios, sett, cnt);
++
++	int constexpr piece_size = 4 * lt::default_block_size;
++	lt::file_storage fs;
++	fs.set_piece_length(piece_size);
++	std::string const suffix = std::to_string(checking_blocks) + "-"
++		+ std::to_string(hashing_threads) + "-" + std::to_string(aio_threads);
++	fs.add_file("checking_memory_torrent_" + suffix + "/file-0", piece_size, {});
++	fs.set_num_pieces(1);
++	std::string const save_path = "checking_memory_store_" + suffix;
++	lt::storage_holder storage = add_test_torrent(
++		*disk_thread, fs, save_path.c_str(), true, false);
++
++	std::vector<char> const buffer = generate_piece(lt::piece_index_t{0}, piece_size);
++	lt::hasher expected_hasher;
++	expected_hasher.update({buffer.data(), piece_size});
++	lt::sha1_hash const expected_hash = expected_hasher.final();
++
++	int writes_done = 0;
++	int initial_hashes_done = 0;
++	for (int offset = 0; offset < piece_size; offset += lt::default_block_size)
++	{
++		disk_thread->async_write(storage,
++			lt::peer_request{lt::piece_index_t{0}, offset, lt::default_block_size},
++			buffer.data() + offset,
++			std::shared_ptr<lt::disk_observer>(),
++			[&writes_done](lt::storage_error const& error) {
++				TEST_CHECK(!error.ec);
++				++writes_done;
++			},
++			lt::disk_job_flags_t{});
++	}
++	disk_thread->async_hash(storage,
++		lt::piece_index_t{0},
++		lt::span<lt::sha256_hash>{},
++		lt::disk_interface::v1_hash | lt::disk_interface::flush_piece,
++		[&initial_hashes_done, expected_hash](lt::piece_index_t,
++			lt::sha1_hash const& hash, lt::storage_error const& error) {
++			TEST_CHECK(!error.ec);
++			TEST_CHECK(hash == expected_hash);
++			++initial_hashes_done;
++		});
++	disk_thread->submit_jobs();
++
++	auto const drive = [&ios](auto condition, char const* timeout_message) {
++		auto const start = lt::aux::time_now();
++		while (condition())
++		{
++			ios.run_for(5ms);
++			if (lt::aux::time_now() - start > 20s)
++			{
++				TEST_ERROR(timeout_message);
++				break;
++			}
++		}
++	};
++	drive([&] { return writes_done < 4 || initial_hashes_done < 1; },
++		"timeout preparing checking-memory hash test");
++
++	int clears_done = 0;
++	disk_thread->async_clear_piece(storage,
++		lt::piece_index_t{0}, [&clears_done](lt::piece_index_t) { ++clears_done; });
++	disk_thread->submit_jobs();
++	drive([&] { return clears_done < 1; }, "timeout clearing checking-memory hash cache");
++
++	std::int64_t const reads_before = cnt[lt::counters::num_read_ops];
++	int hashes_done = 0;
++	disk_thread->async_hash(storage,
++		lt::piece_index_t{0},
++		lt::span<lt::sha256_hash>{},
++		lt::disk_interface::v1_hash,
++		[&hashes_done, expected_hash](lt::piece_index_t,
++			lt::sha1_hash const& hash, lt::storage_error const& error) {
++			TEST_CHECK(!error.ec);
++			TEST_CHECK(hash == expected_hash);
++			++hashes_done;
++		});
++	disk_thread->submit_jobs();
++	drive([&] { return hashes_done < 1; }, "timeout hashing within checking-memory budget");
++
++	std::int64_t const read_operations = cnt[lt::counters::num_read_ops] - reads_before;
++	disk_thread->abort(true);
++	return read_operations;
++}
++
++TORRENT_TEST(pread_hash_respects_checking_memory_budget)
++{
++	// A four-block piece exceeds a two-block budget and uses bounded block reads.
++	TEST_EQUAL(pread_hash_read_operations(2, 1, 1), 4);
++	// The whole-piece fast path remains available when the piece fits the budget.
++	TEST_EQUAL(pread_hash_read_operations(4, 1, 1), 1);
++	// With no dedicated hash threads, the generic disk pool shares the budget.
++	TEST_EQUAL(pread_hash_read_operations(4, 0, 2), 4);
++}
++
+ // Exercises dispatching a deferred clear_piece from inside the cache flush.
+ // Only deterministic (and only built) under simulate-slow=write; see
+ // clear_during_flush_impl.

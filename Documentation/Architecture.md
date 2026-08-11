@@ -439,7 +439,8 @@ discovery, and storage path resolution happen inside libtorrent. The application
 cannot reliably secure those paths after the fact, so the pinned dependency
 patch series validates destinations at every relevant transition, blocks
 non-global peers during untrusted magnet metadata discovery, confines storage,
-and revalidates redirect and send targets. Application source policy separately
+revalidates redirect and send targets, and keeps pread recheck buffers within
+the configured checking-memory budget. Application source policy separately
 controls allowed tracker and web-seed schemes.
 
 Dependency patches remain ordered, hashed, reproducible, and covered by focused

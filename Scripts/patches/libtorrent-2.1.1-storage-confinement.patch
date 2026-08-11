@@ -1,8 +1,8 @@
 diff --git a/include/libtorrent/aux_/file.hpp b/include/libtorrent/aux_/file.hpp
-index d543c425829b43909a14fc3e32b9ad15a4949a43..c41a666ad6fd0de4eb5729418fe84f2e8c1dab9e 100644
+index 4e8c26b5ac416df02759b3bf3479c1af9b49c08a..467b5e8eb4c2bd722b55433a3119d90b118152dd 100644
 --- a/include/libtorrent/aux_/file.hpp
 +++ b/include/libtorrent/aux_/file.hpp
-@@ -83,6 +83,8 @@ namespace libtorrent::aux {
+@@ -81,6 +81,8 @@ namespace libtorrent::aux {
  	{
  		file_handle(): m_fd(invalid_handle) {}
  		file_handle(string_view name, std::int64_t size, open_mode_t mode);
@@ -178,10 +178,10 @@ index 574928a08a67d26dae898cdbc1859048b19d49c1..e081bec79bbf984e3b7759d331a2b207
  
  #endif
 diff --git a/src/copy_file.cpp b/src/copy_file.cpp
-index 9fd84c3a9f6fefa64182e66ed23abbbc4bfee9ba..7e1b7203111187f9cd0273aa34b015ca3a0efa05 100644
+index 33d0e73c6a7ab42bd0a7cb99cb16a33babb3d9da..fe12ddfde8481d1a5e07ea995fab436bbe4675b1 100644
 --- a/src/copy_file.cpp
 +++ b/src/copy_file.cpp
-@@ -231,6 +231,14 @@ void copy_file(std::string const& inf, std::string const& newf, storage_error& s
+@@ -225,6 +225,14 @@ void copy_file(std::string const& inf, std::string const& newf, storage_error& s
  	}
  }
  
@@ -196,7 +196,7 @@ index 9fd84c3a9f6fefa64182e66ed23abbbc4bfee9ba..7e1b7203111187f9cd0273aa34b015ca
  #else
  // Generic/linux implementation
  
-@@ -315,6 +323,73 @@ ssize_t copy_range(int const fd_in, int const fd_out, off_t in_offset
+@@ -306,6 +314,73 @@ ssize_t copy_range(int const fd_in, int const fd_out, off_t in_offset
  #endif
  }
  
@@ -270,7 +270,7 @@ index 9fd84c3a9f6fefa64182e66ed23abbbc4bfee9ba..7e1b7203111187f9cd0273aa34b015ca
  } // anonymous namespace
  
  void copy_file(std::string const& inf, std::string const& newf, storage_error& se)
-@@ -360,78 +435,67 @@ void copy_file(std::string const& inf, std::string const& newf, storage_error& s
+@@ -351,74 +426,64 @@ void copy_file(std::string const& inf, std::string const& newf, storage_error& s
  		return;
  	}
  
@@ -389,15 +389,11 @@ index 9fd84c3a9f6fefa64182e66ed23abbbc4bfee9ba..7e1b7203111187f9cd0273aa34b015ca
  }
  
  #endif // TORRENT_WINDOWS
- 
- }
- }
--
 diff --git a/src/file.cpp b/src/file.cpp
-index 5cbb28ed212ba3fb7b4a25de63c5746580decedb..9724c0acf71d1605f521118cb04d3ab96409ce3a 100644
+index 356c62a80418e40129b202660076f719ef3eb844..7e18af0e768633f533063209ad68885fbd1b1a0b 100644
 --- a/src/file.cpp
 +++ b/src/file.cpp
-@@ -536,6 +536,24 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
+@@ -557,6 +557,24 @@ typedef struct _FILE_ALLOCATED_RANGE_BUFFER {
  		if (ret < 0) throw_ex<storage_error>(error_code(errno, system_category()), operation_t::file_open);
  		return ret;
  	}
@@ -422,7 +418,7 @@ index 5cbb28ed212ba3fb7b4a25de63c5746580decedb..9724c0acf71d1605f521118cb04d3ab9
  #endif // TORRENT_WINDOWS
  
  } // anonymous namespace
-@@ -581,11 +599,24 @@ file_handle::file_handle(string_view name, std::int64_t const size
+@@ -602,11 +620,24 @@ file_handle::file_handle(string_view name, std::int64_t const size
  	}
  }
  
@@ -496,7 +492,7 @@ index 0ebc9725b641b1864d1112036484abd616c19ce5..9e99d69c20f66d048147c736b312fc96
  }
 -
 diff --git a/src/mmap_storage.cpp b/src/mmap_storage.cpp
-index cb51cda332a9409419906b3d762302221e07ce7a..bdf7ef3ad72a0ebe304534a9d0d1b811393bae8d 100644
+index 97ce7a6d5a5e59f9fa589e7abdd3dcfd76ebc1e6..837a6af5b06df92963960b728b9d0faecec6b580 100644
 --- a/src/mmap_storage.cpp
 +++ b/src/mmap_storage.cpp
 @@ -150,7 +150,8 @@ mmap_storage::mmap_storage(storage_params const& params, aux::file_view_pool& po
@@ -1161,7 +1157,7 @@ index 59b829db20f26901f930df918c9ca991679d4285..01c86ed0d4fb6669ca3198ea2661dd2a
  	{
  		ec.clear();
 diff --git a/src/pread_storage.cpp b/src/pread_storage.cpp
-index c6e7fa9779990069593c44c60b8f000c0f28fc3c..9e0af24f1517117fd59a1206cec8d1d3a3d68800 100644
+index a8fc9effb633942cbb25b288777147a8183f382d..6edd914f1193830c2df82198189467e3974feffa 100644
 --- a/src/pread_storage.cpp
 +++ b/src/pread_storage.cpp
 @@ -101,7 +101,8 @@ namespace libtorrent::aux {
@@ -1515,10 +1511,10 @@ index 70f353acc0716e0cb1a91f9f34749c7667f58c08..2ba9d7765a1f96a1bbeeea8baa03c50b
 +
  }}
 diff --git a/test/test_file.cpp b/test/test_file.cpp
-index 71a20be7fc7acdaf707148aa23bdcbbcc355333e..3732a764960c0108812f3bbdc4021c7b45123e0a 100644
+index 2ab0f66ecc262dc3061f1d706d89d0bf9e6ca62c..ccfaaf74dcf9ed0e2aea830453f89d5c9411dbce 100644
 --- a/test/test_file.cpp
 +++ b/test/test_file.cpp
-@@ -535,6 +535,161 @@ TORRENT_TEST(lexically_relative_normal)
+@@ -604,6 +604,161 @@ TORRENT_TEST(lexically_relative_normal)
  #undef S
  }
  
@@ -1680,11 +1676,6 @@ index 71a20be7fc7acdaf707148aa23bdcbbcc355333e..3732a764960c0108812f3bbdc4021c7b
  // UNC tests
  #if TORRENT_USE_UNC_PATHS
  
-@@ -700,4 +855,3 @@ TORRENT_TEST(to_file_open_mode)
- 	TEST_CHECK(aux::to_file_open_mode(aux::open_mode::write | aux::open_mode::no_atime, false) == (file_open_mode::read_write | file_open_mode::no_atime));
- 	TEST_CHECK(aux::to_file_open_mode(aux::open_mode::write, true) == (file_open_mode::read_write | file_open_mode::mmapped));
- }
--
 diff --git a/test/test_storage.cpp b/test/test_storage.cpp
 index fac4bfff65e4339f12bb732ea19feac9ca983ca4..d976702b9a1dd6a6de4cd6bae6e251a117a5f69f 100644
 --- a/test/test_storage.cpp
