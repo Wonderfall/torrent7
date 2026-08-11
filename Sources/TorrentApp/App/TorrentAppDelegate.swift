@@ -2,7 +2,7 @@ import AppKit
 
 @MainActor
 final class TorrentAppDelegate: NSObject, NSApplicationDelegate {
-    weak var store: TorrentStore?
+    let store = TorrentStore()
     private var isSavingBeforeTermination = false
     private var terminationTask: Task<Void, Never>?
 
@@ -10,13 +10,17 @@ final class TorrentAppDelegate: NSObject, NSApplicationDelegate {
         terminationTask?.cancel()
     }
 
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        store.start()
+    }
+
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
         let menu = NSMenu()
         menu.autoenablesItems = false
         let canPause =
-            store?.commandState.snapshot.canPauseAnyTorrent ?? false
+            store.commandState.snapshot.canPauseAnyTorrent
         let canResume =
-            store?.commandState.snapshot.canResumeAnyTorrent ?? false
+            store.commandState.snapshot.canResumeAnyTorrent
 
         let pauseAllItem = NSMenuItem(
             title: "Pause All",
@@ -40,15 +44,13 @@ final class TorrentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let store else {
-            return .terminateNow
-        }
         guard !isSavingBeforeTermination else {
             return .terminateLater
         }
 
         isSavingBeforeTermination = true
-        terminationTask = Task { @MainActor [weak self] in
+        let store = store
+        terminationTask = Task { @MainActor [weak self, store] in
             let didSave = await store.saveAllChecked()
             sender.reply(toApplicationShouldTerminate: didSave)
             self?.isSavingBeforeTermination = false
@@ -59,10 +61,10 @@ final class TorrentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func pauseAllTorrentsFromDock(_ sender: NSMenuItem) {
-        store?.pauseAllTorrents()
+        store.pauseAllTorrents()
     }
 
     @objc private func resumeAllTorrentsFromDock(_ sender: NSMenuItem) {
-        store?.resumeAllTorrents()
+        store.resumeAllTorrents()
     }
 }

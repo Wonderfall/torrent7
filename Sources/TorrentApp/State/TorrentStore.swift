@@ -195,6 +195,8 @@ final class TorrentStore {
     @ObservationIgnored
     private var productionBootstrapID: UUID?
     @ObservationIgnored
+    private var hasStarted = false
+    @ObservationIgnored
     private var operationDrainTask: Task<Void, Never>?
     @ObservationIgnored
     private var immediateNetworkBlockTask: Task<Void, Never>?
@@ -300,19 +302,12 @@ final class TorrentStore {
 
         let startingEngine = TorrentUnavailableEngine(message: "Torrent engine startup is in progress.")
         engine = startingEngine
-        isEngineStarting = true
-        backgroundRefreshesEnabled = true
         appliedPeerExchangePluginEnabled =
             initialSettings.enablePeerExchangePlugin
         libtorrentVersion = startingEngine.libtorrentVersion
         selectionState.didChange = { [weak self] in
             self?.updateCommandState()
         }
-        scheduleSidebarUpdate()
-        completionNotifier.updateConfiguration(initialSettings)
-        completionNotifier.configure()
-
-        startProductionBootstrap()
     }
 
     init(
@@ -372,6 +367,7 @@ final class TorrentStore {
         libtorrentVersion = engine.libtorrentVersion
         appliedNetworkBinding = currentNetworkBinding
         backgroundRefreshesEnabled = startsTasks
+        hasStarted = startsTasks
         selectionState.didChange = { [weak self] in
             self?.updateCommandState()
         }
@@ -401,6 +397,18 @@ final class TorrentStore {
         labelSaveTask?.cancel()
         settingsSaveTask?.cancel()
         sortPreferencesSaveTask?.cancel()
+    }
+
+    func start() {
+        guard !hasStarted else {
+            return
+        }
+        hasStarted = true
+        isEngineStarting = true
+        backgroundRefreshesEnabled = true
+        completionNotifier.updateConfiguration(settings)
+        completionNotifier.configure()
+        startProductionBootstrap()
     }
 
     var selectedTorrent: TorrentItem? {

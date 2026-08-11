@@ -4,8 +4,11 @@ import SwiftUI
 @main
 struct TorrentApp: App {
     @NSApplicationDelegateAdaptor(TorrentAppDelegate.self) private var appDelegate
-    @State private var store = TorrentStore()
     @State private var commandActions = TorrentCommandActions()
+
+    private var store: TorrentStore {
+        appDelegate.store
+    }
 
     var body: some Scene {
         Window(AppIdentity.displayName, id: "main") {
@@ -16,9 +19,6 @@ struct TorrentApp: App {
                 torrentState: store.torrentState
             )
                 .environment(store)
-                .onAppear {
-                    appDelegate.store = store
-                }
                 .background {
                     WindowMenuRegistrationView()
                 }

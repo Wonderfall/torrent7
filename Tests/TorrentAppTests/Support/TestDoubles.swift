@@ -161,6 +161,7 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
     private(set) var pruneCalls = [[TorrentItem]]()
     var onPrune: (() -> Void)?
     var onMakeCapabilitySnapshot: (() -> Void)?
+    private(set) var bootstrapCount = 0
     private(set) var capabilitySnapshotIsSuspended = false
     private var suspendsNextCapabilitySnapshot = false
     private var capabilitySnapshotContinuation:
@@ -175,6 +176,7 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
     }
 
     func bootstrap() async -> DownloadFolderBootstrapResult {
+        bootstrapCount += 1
         do {
             let restoredURL = try restoreDefaultResult.get()
             defaultURL = restoredURL

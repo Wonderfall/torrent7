@@ -10,6 +10,41 @@ import TorrentEngineModel
 @MainActor
 @Suite("Torrent store integration", .serialized)
 struct TorrentStoreIntegrationTests {
+    @Test("Application services start explicitly and only once")
+    func applicationServicesStartExplicitlyAndOnlyOnce() async throws {
+        let suiteName = "app.torrent7.startup.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
+        }
+
+        let harness = makeStoreHarness(
+            defaultsDomain: .suite(suiteName)
+        )
+        let productionEngine = FakeTorrentEngine()
+        let startupCount = Mutex(0)
+        TorrentStore.engineStartupFactoryOverride.withLock { factory in
+            factory = { _, _ in
+                startupCount.withLock { $0 += 1 }
+                return productionEngine
+            }
+        }
+
+        #expect(harness.accessStore.bootstrapCount == 0)
+        #expect(startupCount.withLock { $0 } == 0)
+
+        harness.store.start()
+        harness.store.start()
+        await harness.store.saveAll()
+
+        #expect(harness.accessStore.bootstrapCount == 1)
+        #expect(startupCount.withLock { $0 } == 1)
+        #expect(!harness.engine.isAvailable)
+        #expect(harness.store.engineAvailable)
+    }
+
     @Test("Best-effort save suppresses engine failures")
     func bestEffortSaveSuppressesFailure() async {
         let harness = makeStoreHarness()
