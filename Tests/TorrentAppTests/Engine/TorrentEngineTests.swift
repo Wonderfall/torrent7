@@ -287,7 +287,10 @@ struct TorrentEngineTests {
         #expect(engine.isAvailable == true)
 
         TorrentEngine.clientCreationPreflight.withLock { preflight in
-            preflight = { _, _, _ in
+            preflight = { createdStateDirectory, _, _ in
+                guard createdStateDirectory == stateDirectory else {
+                    return
+                }
                 throw TorrentEngineError.bridgeError("restart boom")
             }
         }
