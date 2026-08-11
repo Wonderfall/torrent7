@@ -30,7 +30,8 @@ struct AddMagnetView: View {
 
             HStack {
                 Spacer()
-                Button("Cancel", action: cancel)
+                Button("Cancel", role: .cancel, action: cancel)
+                    .keyboardShortcut(.cancelAction)
                 Button("Add") {
                     guard let draft = preparation?.draft else {
                         return
@@ -237,7 +238,8 @@ struct AddTorrentConfirmationView: View {
 
             HStack {
                 Spacer()
-                Button("Cancel", action: cancel)
+                Button("Cancel", role: .cancel, action: cancel)
+                    .keyboardShortcut(.cancelAction)
                 Button("Add Paused") {
                     confirmAdd(startsPaused: true)
                 }

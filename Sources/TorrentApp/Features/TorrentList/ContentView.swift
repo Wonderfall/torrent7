@@ -96,6 +96,7 @@ struct ContentView: View {
             presentNextTorrentAddDraftIfNeeded()
         }
         .onDisappear {
+            commandActions.removeAllHandlers()
             sceneSaveTask?.cancel()
             addDraftPresentationTask?.cancel()
             fileImporterResetTask?.cancel()

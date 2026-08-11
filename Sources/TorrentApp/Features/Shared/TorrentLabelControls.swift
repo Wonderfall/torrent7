@@ -180,7 +180,8 @@ struct TorrentLabelEditorView: View {
 
             HStack {
                 Spacer()
-                Button("Cancel", action: cancel)
+                Button("Cancel", role: .cancel, action: cancel)
+                    .keyboardShortcut(.cancelAction)
                 Button(saveTitle, action: saveTrimmedName)
                 .keyboardShortcut(.defaultAction)
                 .disabled(trimmedName.isEmpty)

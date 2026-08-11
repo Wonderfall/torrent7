@@ -13,6 +13,19 @@ final class TorrentCommandActions {
     var requestSelectedTorrentRemovalHandler: () -> Void = {}
     var focusSearchHandler: () -> Void = {}
 
+    func removeAllHandlers() {
+        addTorrentFileHandler = {}
+        addMagnetLinkHandler = {}
+        chooseDownloadFolderHandler = {}
+        showSelectedTorrentInfoHandler = {}
+        showSelectedTorrentOptionsHandler = {}
+        revealSelectedTorrentsInFinderHandler = {}
+        pauseSelectedTorrentsHandler = {}
+        resumeSelectedTorrentsHandler = {}
+        requestSelectedTorrentRemovalHandler = {}
+        focusSearchHandler = {}
+    }
+
     func addTorrentFile() {
         addTorrentFileHandler()
     }
