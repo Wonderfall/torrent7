@@ -195,10 +195,10 @@ typeset -a LIBTORRENT_CMAKE_OPTIONS=(
 )
 typeset -r LIBTORRENT_EXTRA_DEFINES="-DTORRENT_DISABLE_SUPERSEEDING -DTORRENT_DISABLE_SHARE_MODE -DTORRENT_DISABLE_PREDICTIVE_PIECES"
 # These AppleClang diagnostics are audited upstream implementation patterns:
-# raw allocation wrappers, incomplete negative capability annotations, and
-# ordinary named return paths. Keep the suppressions scoped to the pinned
-# libtorrent build rather than weakening bridge warnings.
-typeset -r LIBTORRENT_UPSTREAM_WARNING_FLAGS="-Wno-allocator-wrappers -Wno-thread-safety-negative -Wno-nrvo"
+# incomplete negative capability annotations and ordinary named return paths.
+# Keep the suppressions scoped to the pinned libtorrent build rather than
+# weakening bridge warnings.
+typeset -r LIBTORRENT_UPSTREAM_WARNING_FLAGS="-Wno-thread-safety-negative -Wno-nrvo"
 typeset -r ALLOW_EXTERNAL_DEPS_CLEAN=${ALLOW_EXTERNAL_DEPS_CLEAN:-0}
 typeset -a TEMPORARY_FILES=()
 # Keep global PAC options compatible with system C/C++ runtime contracts.

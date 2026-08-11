@@ -440,8 +440,10 @@ cannot reliably secure those paths after the fact, so the pinned dependency
 patch series validates destinations at every relevant transition, blocks
 non-global peers during untrusted magnet metadata discovery, confines storage,
 revalidates redirect and send targets, and keeps pread recheck buffers within
-the configured checking-memory budget. Application source policy separately
-controls allowed tracker and web-seed schemes.
+the configured checking-memory budget. The series also preserves Apple's typed
+allocation metadata across libtorrent's pool and disk-buffer wrappers instead
+of disabling allocator-wrapper diagnostics for the dependency. Application
+source policy separately controls allowed tracker and web-seed schemes.
 
 Dependency patches remain ordered, hashed, reproducible, and covered by focused
 security tests. Both release and sanitizer dependency profiles must record the
@@ -537,8 +539,9 @@ the explicit ASan runtime and its Xcode RPATH. `LC_DYLD_ENVIRONMENT` is forbidde
   the controller session; an independent short watchdog bounds that containment,
   while a separate longer watchdog bounds native restart and all remaining
   resource cleanup, including helper-initiated shutdown.
-- Tracker, redirect, proxy, UDP, peer-discovery, and storage confinement patches
-  remain part of the pinned libtorrent provenance and focused test suite.
+- Tracker, redirect, proxy, UDP, peer-discovery, storage confinement, and typed
+  allocator patches remain part of the pinned libtorrent provenance and focused
+  build/test suite.
 - Both bundles retain quarantine, exact entitlements, hardened runtime,
   library validation, matching identity, and an allowlisted code inventory.
 - Native worker failures back off, publish typed health, and remain
