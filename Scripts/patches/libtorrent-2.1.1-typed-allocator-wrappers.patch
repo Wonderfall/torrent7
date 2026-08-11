@@ -1,5 +1,5 @@
 diff --git a/include/libtorrent/aux_/pool.hpp b/include/libtorrent/aux_/pool.hpp
-index 618378363..538634f4a 100644
+index 618378363..f70b43d88 100644
 --- a/include/libtorrent/aux_/pool.hpp
 +++ b/include/libtorrent/aux_/pool.hpp
 @@ -15,6 +15,12 @@ see LICENSE file.
@@ -15,7 +15,7 @@ index 618378363..538634f4a 100644
  
  namespace libtorrent {
  namespace aux {
-@@ -25,10 +31,54 @@ struct allocator_new_delete
+@@ -25,10 +31,43 @@ struct allocator_new_delete
  	using difference_type = std::ptrdiff_t;
  
  	// TODO: ensure the alignment is good here
@@ -29,20 +29,8 @@ index 618378363..538634f4a 100644
 +		std::max_align_t storage;
 +	};
 +
-+#pragma clang diagnostic push
-+#pragma clang diagnostic ignored "-Wallocator-wrappers"
-+	// AppleClang diagnoses typed allocator targets even though they consume the
-+	// compiler-provided type. Keep that false positive local.
-+	static void* allocate_typed(size_type const bytes, malloc_type_id_t const type)
-+	{
-+		void* const block = malloc_type_malloc(bytes, type);
-+		if (block == nullptr) throw std::bad_alloc();
-+		return block;
-+	}
-+#pragma clang diagnostic pop
-+
 +	static void* allocate(size_type const bytes)
-+		_MALLOC_TYPED(allocate_typed, 1);
++		_MALLOC_TYPED(malloc_type_malloc, 1);
 +
 +#pragma clang diagnostic push
 +#pragma clang diagnostic ignored "-Wallocator-wrappers"
@@ -51,6 +39,7 @@ index 618378363..538634f4a 100644
 +	static char* malloc(size_type const bytes)
 +	{
 +		auto* const block = static_cast<pool_allocation*>(allocate(bytes));
++		if (block == nullptr) throw std::bad_alloc();
 +		return reinterpret_cast<char*>(block);
 +	}
 +#pragma clang diagnostic pop
@@ -100,10 +89,10 @@ index a5729ea9b..937deeb92 100644
  	// if found, returns the string_view representing the range from the start of
  	// `last` up to (but not including) the separator. The second return value is
 diff --git a/src/disk_buffer_pool.cpp b/src/disk_buffer_pool.cpp
-index cfe9d76f0..c6c1dc195 100644
+index cfe9d76f0..fccf65f27 100644
 --- a/src/disk_buffer_pool.cpp
 +++ b/src/disk_buffer_pool.cpp
-@@ -33,9 +33,42 @@ see LICENSE file.
+@@ -33,9 +33,29 @@ see LICENSE file.
  
  #include "libtorrent/aux_/disable_warnings_pop.hpp"
  
@@ -126,27 +115,14 @@ index cfe9d76f0..c6c1dc195 100644
 +
 +}
 +
-+	void* allocate_disk_buffer_typed(std::size_t bytes, malloc_type_id_t type);
-+
-+#pragma clang diagnostic push
-+#pragma clang diagnostic ignored "-Wallocator-wrappers"
-+	// AppleClang diagnoses typed allocator targets even though they consume the
-+	// compiler-provided type. Keep that false positive local.
-+	void* allocate_disk_buffer_typed(std::size_t const bytes
-+		, malloc_type_id_t const type)
-+	{
-+		return malloc_type_malloc(bytes, type);
-+	}
-+#pragma clang diagnostic pop
-+
 +	void* allocate_disk_buffer(std::size_t bytes)
-+		_MALLOC_TYPED(allocate_disk_buffer_typed, 1);
++		_MALLOC_TYPED(malloc_type_malloc, 1);
 +#endif
 +
  	disk_buffer_pool::disk_buffer_pool() = default;
  
  	disk_buffer_pool::~disk_buffer_pool()
-@@ -52,6 +85,12 @@ namespace aux {
+@@ -52,6 +72,13 @@ namespace aux {
  		return allocate_buffer_impl(l, category);
  	}
  
@@ -154,12 +130,13 @@ index cfe9d76f0..c6c1dc195 100644
 +#pragma clang diagnostic push
 +#pragma clang diagnostic ignored "-Wallocator-wrappers"
 +#endif
-+	// Keep allocation inside the pool's accounting lock. The inner annotated
-+	// call describes this fixed-size raw disk block to the typed allocator.
++	// Keep allocation inside the pool's accounting lock. This raw-pointer API
++	// cannot expose its fixed disk-block type to callers, so the inner annotated
++	// call supplies that descriptor directly.
  	char* disk_buffer_pool::allocate_buffer_impl(std::unique_lock<std::mutex>& l
  		, char const* category)
  	{
-@@ -60,7 +99,13 @@ namespace aux {
+@@ -60,7 +87,13 @@ namespace aux {
  		TORRENT_UNUSED(l);
  		TORRENT_UNUSED(category);
  
@@ -173,7 +150,7 @@ index cfe9d76f0..c6c1dc195 100644
  
  		if (ret == nullptr)
  		{
-@@ -87,6 +132,9 @@ namespace aux {
+@@ -87,6 +120,9 @@ namespace aux {
  
  		return ret;
  	}
