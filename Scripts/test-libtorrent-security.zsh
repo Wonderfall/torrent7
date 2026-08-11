@@ -28,6 +28,7 @@ typeset -ra test_targets=(
     test_file
     test_http_connection
     test_http_parser
+    test_ip_voter
     test_storage
     test_torrent
     test_tracker_list
@@ -91,8 +92,7 @@ restore_configuration=0
         "$source_dir/test/test_tracker_manager.cpp.nat64_preflight_is_bounded_by_tracker_operation_timeout"
     ./test_torrent --no-redirect \
         "$source_dir/test/test_torrent.cpp.non_global_discovery_peers_are_temporarily_blocked"
-    ./test_tracker_list --no-redirect \
-        "$source_dir/test/test_tracker_list.cpp.test_prioritize_udp"
+    ./test_tracker_list --no-redirect
     ./test_tracker_manager --no-redirect \
         "$source_dir/test/test_tracker_manager.cpp.protocol_dispatch_is_case_insensitive"
     ./test_http_connection --no-redirect \
@@ -101,6 +101,7 @@ restore_configuration=0
         "$source_dir/test/test_http_connection.cpp.endpoint_filter_rechecks_redirect_target"
     ./test_http_parser --no-redirect \
         "$source_dir/test/test_http_parser.cpp.http_parser"
+    ./test_ip_voter --no-redirect
     ./test_web_seed_redirect --no-redirect \
         "$source_dir/test/test_web_seed_redirect.cpp.web_seed_proxy_request_target_uses_vetted_endpoint"
     ./test_web_seed_redirect --no-redirect \

@@ -144,7 +144,9 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
 - **Compiler hardening:** arm64e builds use stack protection, PIE codegen, fortify,
   hidden visibility, pointer authentication, branch target identification,
   straight-line speculation hardening, jump-table hardening, typed allocation
-  hardening, libc++ hardening, and trap-only UBSan for release bridge code.
+  hardening, libc++ hardening, and trap-only UBSan for release bridge code. The
+  dependency build also rejects raw C allocation and untyped global C++
+  allocation imports in the final libtorrent archive.
 - **Network privacy defaults:** a coarse libtorrent client identity is used, anonymous
   mode is enabled by default, DHT privacy lookups are enabled, and local discovery
   is disabled by default.
@@ -193,7 +195,8 @@ app bundle. OpenSSL archives are verified with SHA-256 and a pinned upstream PGP
 signing fingerprint. Boost is verified by SHA-256. Libtorrent is fetched from a
 pinned tag and commit through a local source cache, then receives an ordered,
 hashed patch series for Xcode compatibility, network boundaries, storage
-confinement, and bounded pread recheck hashing. WebTorrent support stays
+confinement, bounded pread recheck hashing, and complete typed-allocation
+coverage. WebTorrent support stays
 disabled to avoid adding its unused protocol and dependency surface.
 The app bundle also contains `ThirdPartyNotices.txt`; release verification requires
 it to exactly match the reviewed notices in `Packaging/ThirdPartyNotices.txt`.

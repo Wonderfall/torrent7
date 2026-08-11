@@ -1,0 +1,181 @@
+diff --git a/include/libtorrent/aux_/tracker_list.hpp b/include/libtorrent/aux_/tracker_list.hpp
+index da21215f5..abbd0b1fa 100644
+--- a/include/libtorrent/aux_/tracker_list.hpp
++++ b/include/libtorrent/aux_/tracker_list.hpp
+@@ -14,6 +14,7 @@ see LICENSE file.
+ #include <unordered_map>
+ 
+ #include "libtorrent/aux_/announce_entry.hpp"
++#include "libtorrent/aux_/pool.hpp"
+ #include "libtorrent/announce_entry.hpp"
+ #include "libtorrent/aux_/vector.hpp"
+ #include "libtorrent/aux_/invariant_check.hpp"
+@@ -88,7 +89,9 @@ private:
+ 	void check_invariant() const;
+ #endif
+ 
+-	boost::object_pool<aux::announce_entry> m_storage;
++	using tracker_pool = boost::object_pool<aux::announce_entry
++		, aux::allocator_new_delete>;
++	tracker_pool m_storage;
+ 	trackers_t m_trackers;
+ 	std::unordered_map<string_view, aux::announce_entry*> m_url_index;
+ 
+@@ -98,4 +101,3 @@ private:
+ 
+ }
+ #endif
+-
+diff --git a/include/libtorrent/entry.hpp b/include/libtorrent/entry.hpp
+index 6d78b6fb5..bb1ffb329 100644
+--- a/include/libtorrent/entry.hpp
++++ b/include/libtorrent/entry.hpp
+@@ -40,6 +40,7 @@ see LICENSE file.
+ 
+ #include <map>
+ #include <list>
++#include <memory>
+ #include <string>
+ #include <vector>
+ #include <stdexcept>
+@@ -71,7 +72,9 @@ namespace libtorrent {
+ 
+ 	namespace entry_types {
+ 
+-		using dictionary_type = boost::container::map<std::string, entry, aux::strview_less>;
++		using dictionary_value_type = std::pair<std::string const, entry>;
++		using dictionary_type = boost::container::map<std::string, entry
++			, aux::strview_less, std::allocator<dictionary_value_type>>;
+ 		using string_type = std::string;
+ 		using list_type = std::vector<entry>;
+ 		using integer_type = std::int64_t;
+diff --git a/src/bt_peer_connection.cpp b/src/bt_peer_connection.cpp
+index 93dc0c367..dab91bab0 100644
+--- a/src/bt_peer_connection.cpp
++++ b/src/bt_peer_connection.cpp
+@@ -20,6 +20,7 @@ see LICENSE file.
+ #include "libtorrent/config.hpp"
+ 
+ #include <memory> // unique_ptr
++#include <new>
+ #include <vector>
+ #include <functional>
+ 
+@@ -3063,7 +3064,13 @@ namespace {
+ 			{
+ 				TORRENT_ASSERT(m_sync_bytes_read == 0);
+ 
+-				m_sync_vc.reset(new (std::nothrow) char[8]);
++				try
++				{
++					m_sync_vc.reset(new char[8]);
++				}
++				catch (std::bad_alloc const&)
++				{
++				}
+ 				if (!m_sync_vc)
+ 				{
+ 					disconnect(errors::no_memory, operation_t::encryption);
+diff --git a/src/enum_net.cpp b/src/enum_net.cpp
+index c91da7300..26283f64e 100644
+--- a/src/enum_net.cpp
++++ b/src/enum_net.cpp
+@@ -26,6 +26,7 @@ see LICENSE file.
+ 
+ #include <functional>
+ #include <cstdlib> // for wcstombscstombs
++#include <new>
+ #include <optional>
+ 
+ #include "libtorrent/aux_/disable_warnings_push.hpp"
+@@ -1157,7 +1158,14 @@ int _System __libsocket_sysctl(int* mib, u_int namelen, void *oldp, size_t *oldl
+ 		return std::vector<ip_route>();
+ 	}
+ 
+-	std::unique_ptr<char[]> buf(new (std::nothrow) char[needed]);
++	std::unique_ptr<char[]> buf;
++	try
++	{
++		buf.reset(new char[needed]);
++	}
++	catch (std::bad_alloc const&)
++	{
++	}
+ 	if (buf == nullptr)
+ 	{
+ 		ec = boost::asio::error::no_memory;
+diff --git a/src/ip_voter.cpp b/src/ip_voter.cpp
+index fdfb06bdf..80b71e0cb 100644
+--- a/src/ip_voter.cpp
++++ b/src/ip_voter.cpp
+@@ -104,12 +104,22 @@ namespace libtorrent::aux {
+ 			{
+ 				if (random(1)) return maybe_rotate();
+ 
+-				// use stable sort here to maintain the fifo-order
+-				// of the entries with the same number of votes
+-				// this will sort in ascending order, i.e. the lowest
+-				// votes first. Also, the oldest are first, so this
+-				// is a sort of weighted LRU.
+-				std::stable_sort(m_external_addresses.begin(), m_external_addresses.end());
++				// Keep the FIFO order of entries with equal vote rank without
++				// std::stable_sort's untyped nothrow temporary allocation. This
++				// collection is bounded to 41 entries, so insertion sort is cheap.
++				for (auto current = m_external_addresses.begin() + 1
++					; current != m_external_addresses.end(); ++current)
++				{
++					auto value = std::move(*current);
++					auto position = current;
++					while (position != m_external_addresses.begin()
++						&& value < *(position - 1))
++					{
++						*position = std::move(*(position - 1));
++						--position;
++					}
++					*position = std::move(value);
++				}
+ 
+ 				// erase the last element, since it is one of the
+ 				// ones with the fewest votes
+diff --git a/src/torrent.cpp b/src/torrent.cpp
+index 1326bed60..e6387b747 100644
+--- a/src/torrent.cpp
++++ b/src/torrent.cpp
+@@ -46,6 +46,7 @@ see LICENSE file.
+ #include <memory>
+ #include <numeric>
+ #include <limits> // for numeric_limits
++#include <new>
+ #include <cstdio> // for snprintf
+ #include <functional>
+ 
+@@ -852,7 +853,13 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 		}
+ 
+ 		std::shared_ptr<read_piece_struct> rp = std::make_shared<read_piece_struct>();
+-		rp->piece_data.reset(new (std::nothrow) char[std::size_t(piece_size)]);
++		try
++		{
++			rp->piece_data.reset(new char[std::size_t(piece_size)]);
++		}
++		catch (std::bad_alloc const&)
++		{
++		}
+ 		if (!rp->piece_data)
+ 		{
+ 			m_ses.alerts().emplace_alert<read_piece_alert>(
+diff --git a/src/tracker_list.cpp b/src/tracker_list.cpp
+index 303c1a257..863f54b0e 100644
+--- a/src/tracker_list.cpp
++++ b/src/tracker_list.cpp
+@@ -145,8 +145,8 @@ void tracker_list::replace(std::vector<lt::announce_entry> const& aes)
+ 	m_trackers.clear();
+ 	m_url_index.clear();
+ 
+-	m_storage.~object_pool<aux::announce_entry>();
+-	new (&m_storage) boost::object_pool<aux::announce_entry>();
++	m_storage.~tracker_pool();
++	new (&m_storage) tracker_pool();
+ 
+ 	for (auto const& ae : aes)
+ 	{

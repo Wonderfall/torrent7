@@ -227,7 +227,7 @@ typeset LIBTORRENT_SANITIZER_FLAGS=
 case "$SANITIZER_PROFILE" in
     address)
         OPENSSL_SANITIZER_FLAGS="-g -fno-omit-frame-pointer -fsanitize=address -fsanitize-address-use-after-scope"
-        LIBTORRENT_SANITIZER_FLAGS="-g -fno-omit-frame-pointer -fsanitize=address,undefined,local-bounds -fsanitize-address-use-after-scope -fno-sanitize-recover=undefined,local-bounds"
+        LIBTORRENT_SANITIZER_FLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined,local-bounds -fsanitize-address-use-after-scope -fno-sanitize-recover=undefined,local-bounds"
         ;;
     thread)
         OPENSSL_SANITIZER_FLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=thread"
@@ -655,6 +655,47 @@ verify_archive_arch() {
     rm -rf "$tmpdir"
 }
 
+verify_libtorrent_typed_allocation_coverage() {
+    local archive="$1"
+    local symbols
+    local raw_c_allocators
+    local untyped_cpp_allocators
+
+    require_path "$archive" "libtorrent static archive"
+    symbols="$(/usr/bin/xcrun nm -u "$archive")"
+
+    raw_c_allocators="$(
+        print -r -- "$symbols" \
+            | /usr/bin/awk '$NF ~ /^_(malloc|calloc|realloc|aligned_alloc|valloc|posix_memalign)$/ { print $NF }' \
+            | /usr/bin/sort -u
+    )"
+    if [[ -n "$raw_c_allocators" ]]; then
+        print -ru2 -- "libtorrent imports untyped C allocation functions:"
+        print -ru2 -- "$raw_c_allocators"
+        exit 1
+    fi
+
+    untyped_cpp_allocators="$(
+        print -r -- "$symbols" \
+            | /usr/bin/awk '$NF ~ /^__Zn[aw]m/ && $NF !~ /^__Zn[aw]mSt19__type_descriptor_t$/ { print $NF }' \
+            | /usr/bin/sort -u
+    )"
+    if [[ -n "$untyped_cpp_allocators" ]]; then
+        print -ru2 -- "libtorrent imports untyped global C++ allocation functions:"
+        print -ru2 -- "$untyped_cpp_allocators"
+        exit 1
+    fi
+
+    print -r -- "$symbols" | /usr/bin/awk '$NF == "_malloc_type_malloc" { found = 1 } END { exit !found }' \
+        || fail "libtorrent has no typed malloc import: $archive"
+    print -r -- "$symbols" | /usr/bin/awk '$NF == "_malloc_type_aligned_alloc" { found = 1 } END { exit !found }' \
+        || fail "libtorrent has no typed aligned allocation import: $archive"
+    print -r -- "$symbols" | /usr/bin/awk '$NF == "__ZnwmSt19__type_descriptor_t" { found = 1 } END { exit !found }' \
+        || fail "libtorrent has no typed global operator new import: $archive"
+    print -r -- "$symbols" | /usr/bin/awk '$NF == "__ZnamSt19__type_descriptor_t" { found = 1 } END { exit !found }' \
+        || fail "libtorrent has no typed global operator new[] import: $archive"
+}
+
 thin_archive_arch() {
     local archive="$1"
     local arch="$2"
@@ -1036,6 +1077,7 @@ build_libtorrent() {
     local -a cmake_generator_args=()
     if [[ -f "$DEPS_PREFIX/lib/libtorrent-rasterbar.a" ]] && stamp_matches "$LIBTORRENT_BUILD_STAMP" libtorrent_build_manifest "$DEPS_PREFIX"; then
         verify_archive_arch "$DEPS_PREFIX/lib/libtorrent-rasterbar.a" "$TARGET_ARCH"
+        verify_libtorrent_typed_allocation_coverage "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
         write_stamp "$LIBTORRENT_PROVENANCE" libtorrent_build_manifest "$DEPS_PREFIX"
         return
     fi
@@ -1092,6 +1134,7 @@ build_libtorrent() {
     cmake --build "$LIBTORRENT_BUILD_DIR" --target install --parallel "${JOBS:-$(sysctl -n hw.ncpu)}"
 
     verify_archive_arch "$DEPS_PREFIX/lib/libtorrent-rasterbar.a" "$TARGET_ARCH"
+    verify_libtorrent_typed_allocation_coverage "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
     write_stamp "$LIBTORRENT_BUILD_STAMP" libtorrent_build_manifest "$DEPS_PREFIX"
     write_stamp "$LIBTORRENT_PROVENANCE" libtorrent_build_manifest "$DEPS_PREFIX"
 }
