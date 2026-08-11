@@ -355,10 +355,8 @@ build_libtorrent() {
 
     # These diagnostics are audited pinned-upstream patterns: conservative
     # mutex annotations, a non-elided endpoint return, fields unused only
-    # because streaming is disabled, and an inline hidden counter whose
-    # duplication warning applies only to shared libraries. Keep them scoped
-    # to this static libtorrent build.
-    local upstream_warning_flags="-Wno-thread-safety-negative -Wno-thread-safety-analysis -Wno-nrvo -Wno-unused-private-field -Wno-unique-object-duplication"
+    # because streaming is disabled. Keep them scoped to libtorrent itself.
+    local upstream_warning_flags="-Wno-thread-safety-negative -Wno-thread-safety-analysis -Wno-nrvo -Wno-unused-private-field"
     local libtorrent_common_flags="${base_flags[*]} -fsanitize=$LIBTORRENT_SANITIZERS -fsanitize-address-use-after-scope -fno-sanitize-recover=undefined,local-bounds $upstream_warning_flags -DTORRENT_USE_RTC=0 -DTORRENT_DISABLE_SUPERSEEDING -DTORRENT_DISABLE_SHARE_MODE -DTORRENT_DISABLE_PREDICTIVE_PIECES"
     local -a generator_args=()
     if command -v ninja >/dev/null 2>&1; then

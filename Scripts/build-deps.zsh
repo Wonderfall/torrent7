@@ -196,11 +196,10 @@ typeset -a LIBTORRENT_CMAKE_OPTIONS=(
 typeset -r LIBTORRENT_EXTRA_DEFINES="-DTORRENT_DISABLE_SUPERSEEDING -DTORRENT_DISABLE_SHARE_MODE -DTORRENT_DISABLE_PREDICTIVE_PIECES"
 # These AppleClang diagnostics are audited upstream implementation patterns:
 # Boost.Pool's matching new[]/delete[] raw allocator, explicit RAII mutex
-# acquisition, a non-elided endpoint return, two private statistics fields left
-# unused when streaming is disabled, and an inline hidden counter whose
-# duplication warning applies only to shared libraries. Keep the suppressions
-# scoped to this static libtorrent build rather than weakening bridge warnings.
-typeset -r LIBTORRENT_UPSTREAM_WARNING_FLAGS="-Wno-allocator-wrappers -Wno-thread-safety-negative -Wno-nrvo -Wno-unused-private-field -Wno-unique-object-duplication"
+# acquisition, a non-elided endpoint return, and two private statistics fields
+# left unused when streaming is disabled. Keep the suppressions scoped to the
+# pinned libtorrent build rather than weakening bridge warnings.
+typeset -r LIBTORRENT_UPSTREAM_WARNING_FLAGS="-Wno-allocator-wrappers -Wno-thread-safety-negative -Wno-nrvo -Wno-unused-private-field"
 typeset -r ALLOW_EXTERNAL_DEPS_CLEAN=${ALLOW_EXTERNAL_DEPS_CLEAN:-0}
 typeset -a TEMPORARY_FILES=()
 # Keep global PAC options compatible with system C/C++ runtime contracts.

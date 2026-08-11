@@ -1,0 +1,38 @@
+diff --git a/include/libtorrent/aux_/session_impl.hpp b/include/libtorrent/aux_/session_impl.hpp
+index 5de95a222..1fb4ad7f4 100644
+--- a/include/libtorrent/aux_/session_impl.hpp
++++ b/include/libtorrent/aux_/session_impl.hpp
+@@ -259,13 +259,7 @@ namespace aux {
+ 		bool incoming_connection = false;
+ 
+ 	private:
+-		// non-atomic is fine: listen_socket_t is only ever constructed on
+-		// the network thread.
+-		static std::uint32_t next_id()
+-		{
+-			static std::uint32_t next = 0;
+-			return ++next;
+-		}
++		static std::uint32_t next_id();
+ 	};
+ 
+ 		struct TORRENT_EXTRA_EXPORT listen_endpoint_t
+diff --git a/src/session_impl.cpp b/src/session_impl.cpp
+index d6d5b2f3b..242524293 100644
+--- a/src/session_impl.cpp
++++ b/src/session_impl.cpp
+@@ -337,6 +337,14 @@ void apply_deprecated_dht_settings(settings_pack& sett, bdecode_node const& s)
+ 		}
+ 	}
+ 
++	std::uint32_t listen_socket_t::next_id()
++	{
++		// non-atomic is fine: listen_socket_t is only ever constructed on
++		// the network thread.
++		static std::uint32_t next = 0;
++		return ++next;
++	}
++
+ 	bool listen_socket_t::can_route(address const& addr) const
+ 	{
+ 		// if this is a proxy, we assume it can reach everything
