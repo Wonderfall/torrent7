@@ -1103,8 +1103,10 @@ TEST_CASE("network client identity is generic and coarse")
 
     CHECK(settings.get_str(lt::settings_pack::user_agent) == std::string(kNetworkClientIdentity));
     CHECK(settings.get_str(lt::settings_pack::handshake_client_version) == std::string(kNetworkClientIdentity));
+    CHECK(settings.get_str(lt::settings_pack::peer_fingerprint) == std::string(kCoarsePeerFingerprint));
     CHECK(settings.get_str(lt::settings_pack::user_agent).find("torrent-app") == std::string::npos);
     CHECK(settings.get_str(lt::settings_pack::handshake_client_version).find("torrent-app") == std::string::npos);
+    CHECK(settings.get_str(lt::settings_pack::peer_fingerprint).find("torrent-app") == std::string::npos);
     CHECK(settings.get_bool(lt::settings_pack::no_connect_privileged_ports));
     CHECK(settings.get_int(lt::settings_pack::alert_queue_size) == kLibtorrentAlertQueueSize);
 }

@@ -2064,6 +2064,7 @@ lt::settings_pack make_settings()
     lt::settings_pack settings;
     settings.set_str(lt::settings_pack::user_agent, std::string(kNetworkClientIdentity));
     settings.set_str(lt::settings_pack::handshake_client_version, std::string(kNetworkClientIdentity));
+    settings.set_str(lt::settings_pack::peer_fingerprint, std::string(kCoarsePeerFingerprint));
     settings.set_str(lt::settings_pack::listen_interfaces, "");
     settings.set_bool(lt::settings_pack::enable_lsd, false);
     settings.set_bool(lt::settings_pack::enable_upnp, false);

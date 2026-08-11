@@ -125,6 +125,9 @@ constexpr std::string_view kQueuePriorityResumeKey = "torrent-app-queue-priority
 constexpr std::string_view kQueueRankResumeKey = "torrent-app-queue-rank";
 constexpr std::string_view kCanonicalIDPrefix = "t:";
 constexpr std::string_view kNetworkClientIdentity = "libtorrent/2.1";
+// Keep the BitTorrent peer ID coarse and stable across the 2.1.x series, just
+// like the HTTP user agent and extension handshake identity above.
+constexpr std::string_view kCoarsePeerFingerprint = "-LT2100-";
 constexpr int32_t kUnsetQueueRank = -1;
 constexpr std::size_t kOneKilobyte = 1024U;
 constexpr std::uintmax_t kOneMegabyte = static_cast<std::uintmax_t>(1024U) * 1024U;
@@ -175,6 +178,7 @@ constexpr auto kFullResumeSaveFlags = lt::torrent_handle::flush_disk_cache | lt:
 
 static_assert(kMaxTorrentFileBytes <= static_cast<std::uintmax_t>(std::numeric_limits<int>::max()));
 static_assert(kMaxResumeFileBytes <= static_cast<std::uintmax_t>(std::numeric_limits<int>::max()));
+static_assert(kCoarsePeerFingerprint.size() == 8U);
 static_assert(TTORRENT_MAX_FILE_COUNT > 0);
 static_assert(TTORRENT_MAX_TRACKER_COUNT > 0);
 static_assert(TTORRENT_MAX_WEB_SEED_COUNT > 0);
