@@ -195,11 +195,10 @@ typeset -a LIBTORRENT_CMAKE_OPTIONS=(
 )
 typeset -r LIBTORRENT_EXTRA_DEFINES="-DTORRENT_DISABLE_SUPERSEEDING -DTORRENT_DISABLE_SHARE_MODE -DTORRENT_DISABLE_PREDICTIVE_PIECES"
 # These AppleClang diagnostics are audited upstream implementation patterns:
-# Boost.Pool's matching new[]/delete[] raw allocator, explicit RAII mutex
-# acquisition, a non-elided endpoint return, and two private statistics fields
-# left unused when streaming is disabled. Keep the suppressions scoped to the
-# pinned libtorrent build rather than weakening bridge warnings.
-typeset -r LIBTORRENT_UPSTREAM_WARNING_FLAGS="-Wno-allocator-wrappers -Wno-thread-safety-negative -Wno-nrvo -Wno-unused-private-field"
+# raw allocation wrappers, incomplete negative capability annotations, and
+# ordinary named return paths. Keep the suppressions scoped to the pinned
+# libtorrent build rather than weakening bridge warnings.
+typeset -r LIBTORRENT_UPSTREAM_WARNING_FLAGS="-Wno-allocator-wrappers -Wno-thread-safety-negative -Wno-nrvo"
 typeset -r ALLOW_EXTERNAL_DEPS_CLEAN=${ALLOW_EXTERNAL_DEPS_CLEAN:-0}
 typeset -a TEMPORARY_FILES=()
 # Keep global PAC options compatible with system C/C++ runtime contracts.
@@ -243,7 +242,7 @@ if [[ -n "$SANITIZER_PROFILE" ]]; then
     # sanitizer subset currently excludes UBSan.
     STRICT_OVERFLOW_FLAGS=
 fi
-typeset -r HARDENED_COMMON_FLAGS="-Wno-poison-system-directories -Wformat -Wformat-security -Werror=format-security -fstack-protector-strong $FORTIFY_FLAGS -fPIE -ftrivial-auto-var-init=zero $RETAIN_NULL_POINTER_CHECKS_FLAG $STRICT_OVERFLOW_FLAGS $NO_STRICT_ALIASING_FLAG -fvisibility=hidden -faarch64-jump-table-hardening $STRICT_FLEX_ARRAYS_FLAG $BRANCH_TARGET_IDENTIFICATION_FLAG $SLS_HARDENING_FLAG $ZERO_CALL_USED_REGS_FLAG $PTRAUTH_C_FLAGS"
+typeset -r HARDENED_COMMON_FLAGS="-Wformat -Wformat-security -Werror=format-security -fstack-protector-strong $FORTIFY_FLAGS -fPIE -ftrivial-auto-var-init=zero $RETAIN_NULL_POINTER_CHECKS_FLAG $STRICT_OVERFLOW_FLAGS $NO_STRICT_ALIASING_FLAG -fvisibility=hidden -faarch64-jump-table-hardening $STRICT_FLEX_ARRAYS_FLAG $BRANCH_TARGET_IDENTIFICATION_FLAG $SLS_HARDENING_FLAG $ZERO_CALL_USED_REGS_FLAG $PTRAUTH_C_FLAGS"
 typeset -r HARDENED_C_FLAGS="$HARDENED_COMMON_FLAGS $TYPED_ALLOCATOR_C_FLAGS"
 typeset -r OPENSSL_HARDENED_CXX_FLAGS="$HARDENED_COMMON_FLAGS $PTRAUTH_CXX_FLAGS $TYPED_ALLOCATOR_CXX_FLAGS -D_LIBCPP_HARDENING_MODE=$LIBCPP_HARDENING_MODE -fvisibility-inlines-hidden"
 typeset -r HARDENED_CXX_FLAGS="$HARDENED_COMMON_FLAGS $PTRAUTH_CXX_FLAGS $TYPED_ALLOCATOR_CXX_FLAGS -D_LIBCPP_HARDENING_MODE=$LIBCPP_HARDENING_MODE -fvisibility-inlines-hidden"
@@ -1061,7 +1060,7 @@ build_libtorrent() {
         -S "$LIBTORRENT_SOURCE_DIR" \
         -B "$LIBTORRENT_BUILD_DIR" \
         "${cmake_generator_args[@]}" \
-        -Wno-author \
+        -Wno-policy \
         -DCMAKE_BUILD_TYPE="$LIBTORRENT_CMAKE_BUILD_TYPE" \
         -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
         -DCMAKE_C_COMPILER="$LIBTORRENT_CC" \

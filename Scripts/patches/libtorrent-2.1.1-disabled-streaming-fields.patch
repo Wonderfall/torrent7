@@ -1,0 +1,18 @@
+diff --git a/include/libtorrent/aux_/torrent.hpp b/include/libtorrent/aux_/torrent.hpp
+index e93be4ddb..4b2bba2b6 100644
+--- a/include/libtorrent/aux_/torrent.hpp
++++ b/include/libtorrent/aux_/torrent.hpp
+@@ -1649,11 +1649,13 @@ namespace libtorrent::aux {
+ 		// set_error()
+ 		file_index_t m_error_file;
+ 
++#ifndef TORRENT_DISABLE_STREAMING
+ 		// the average time it takes to download one time critical piece
+ 		std::int32_t m_average_piece_time = 0;
+ 
+ 		// the average piece download time deviation
+ 		std::int32_t m_piece_time_deviation = 0;
++#endif // TORRENT_DISABLE_STREAMING
+ 
+ 		// the number of bytes that has been
+ 		// downloaded that failed the hash-test

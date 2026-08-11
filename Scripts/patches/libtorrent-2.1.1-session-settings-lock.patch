@@ -1,0 +1,16 @@
+diff --git a/include/libtorrent/aux_/session_settings.hpp b/include/libtorrent/aux_/session_settings.hpp
+index 6dda64820..8e965eec1 100644
+--- a/include/libtorrent/aux_/session_settings.hpp
++++ b/include/libtorrent/aux_/session_settings.hpp
+@@ -127,10 +127,7 @@ namespace libtorrent::aux {
+ 		session_settings& operator=(session_settings const& rhs)
+ 		{
+ 			if (this == &rhs) return *this;
+-			// in C++17, use a single std::scoped_lock instead
+-			std::lock(rhs.m_mutex, m_mutex);
+-			std::unique_lock<std::mutex> l1(rhs.m_mutex, std::adopt_lock);
+-			std::unique_lock<std::mutex> l2(m_mutex, std::adopt_lock);
++			std::scoped_lock const l(rhs.m_mutex, m_mutex);
+ 			m_store = rhs.m_store;
+ 			return *this;
+ 		}
