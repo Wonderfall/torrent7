@@ -31,13 +31,25 @@ typeset -a checks=(
     "performance-*"
     "modernize-*"
     "darwin-*"
+    "android-cloexec-open"
+    "hicpp-exception-baseclass"
+    "hicpp-no-assembler"
+    "hicpp-signed-bitwise"
     "misc-confusable-identifiers"
+    "misc-definitions-in-headers"
+    "misc-header-include-cycle"
     "misc-misleading-bidirectional"
     "misc-misleading-identifier"
+    "misc-misplaced-const"
+    "misc-no-recursion"
+    "misc-override-with-different-visibility"
     "misc-redundant-expression"
     "misc-uniqueptr-reset-release"
     "misc-use-internal-linkage"
+    "portability-std-allocator-const"
     "readability-ambiguous-smartptr-reset-call"
+    "readability-braces-around-statements"
+    "readability-implicit-bool-conversion"
     "readability-inconsistent-declaration-parameter-name"
     "readability-inconsistent-ifelse-braces"
     "readability-math-missing-parentheses"
@@ -45,6 +57,7 @@ typeset -a checks=(
     "readability-redundant-declaration"
     "readability-redundant-member-init"
     "readability-reference-to-constructed-temporary"
+    "readability-string-compare"
     "readability-suspicious-call-argument"
     "readability-uniqueptr-delete-release"
     "-modernize-use-trailing-return-type"
@@ -99,6 +112,7 @@ typeset -a compiler_args=(
     -Wcast-qual
     -Wundef
     -Wthread-safety
+    -Wthread-safety-pointer
     -Wunsafe-buffer-usage
     -Werror
     -fstack-protector-strong

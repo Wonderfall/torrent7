@@ -21,6 +21,7 @@ typeset -a swift_test_args=(
     --scratch-path "$scratch_path"
     --configuration "$configuration"
     --triple arm64e-apple-macosx26.0
+    --explicit-target-dependency-import-check error
 )
 case $sanitizer_profile in
     address) swift_test_args+=(--sanitize address --sanitize undefined) ;;

@@ -24,7 +24,7 @@ namespace torrent_bridge::internal {
 
 namespace {
 
-constexpr int kUnlimitedTorrentCountLimit = (1 << 24) - 1;
+constexpr int kUnlimitedTorrentCountLimit = static_cast<int>((1U << 24U) - 1U);
 
 int normalized_torrent_count_limit(int limit)
 {

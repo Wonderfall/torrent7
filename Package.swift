@@ -44,6 +44,7 @@ let bridgeWarnings: [CXXSetting] = [
     .enableWarning("cast-qual"),
     .enableWarning("undef"),
     .enableWarning("thread-safety"),
+    .enableWarning("thread-safety-pointer"),
     .enableWarning("unsafe-buffer-usage")
 ]
 
