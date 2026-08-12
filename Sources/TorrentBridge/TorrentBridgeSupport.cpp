@@ -52,22 +52,16 @@ constexpr char ascii_lower(unsigned char const character) noexcept
 }
 
 #ifndef TORRENT_DISABLE_EXTENSIONS
+using TorrentPluginFactoryFunction =
+    std::shared_ptr<lt::torrent_plugin> (*)(lt::torrent_handle const &, lt::client_data_t);
+
+template <TorrentPluginFactoryFunction Factory>
 class TorrentPluginFactory final : public lt::plugin {
 public:
-    using Factory = std::shared_ptr<lt::torrent_plugin> (*)(lt::torrent_handle const &, lt::client_data_t);
-
-    explicit TorrentPluginFactory(Factory factory)
-        : factory_(factory)
-    {
-    }
-
     std::shared_ptr<lt::torrent_plugin> new_torrent(lt::torrent_handle const &handle, lt::client_data_t userdata) override
     {
-        return factory_(handle, userdata);
+        return Factory(handle, userdata);
     }
-
-private:
-    Factory factory_;
 };
 #endif
 
@@ -77,10 +71,10 @@ std::vector<std::shared_ptr<lt::plugin>> session_plugins(bool enable_peer_exchan
 #ifndef TORRENT_DISABLE_EXTENSIONS
     plugins.reserve(enable_peer_exchange_plugin ? 3U : 2U);
     if (enable_peer_exchange_plugin) {
-        plugins.push_back(std::make_shared<TorrentPluginFactory>(lt::create_ut_pex_plugin));
+        plugins.push_back(std::make_shared<TorrentPluginFactory<lt::create_ut_pex_plugin>>());
     }
-    plugins.push_back(std::make_shared<TorrentPluginFactory>(lt::create_ut_metadata_plugin));
-    plugins.push_back(std::make_shared<TorrentPluginFactory>(lt::create_smart_ban_plugin));
+    plugins.push_back(std::make_shared<TorrentPluginFactory<lt::create_ut_metadata_plugin>>());
+    plugins.push_back(std::make_shared<TorrentPluginFactory<lt::create_smart_ban_plugin>>());
 #else
     static_cast<void>(enable_peer_exchange_plugin);
 #endif
