@@ -515,6 +515,10 @@ verify_binary_hardening \
     "$engine_header_output" \
     "$engine_text_output" \
     true
+require_match "[[:space:]]pacdb[[:space:]]" "$engine_text_output" \
+    "Engine extension has no authenticated data-pointer signing"
+require_match "[[:space:]]autdb[[:space:]]" "$engine_text_output" \
+    "Engine extension has no authenticated data-pointer use"
 require_match "_malloc_type_malloc" "$engine_symbol_output" \
     "Engine extension has no typed malloc symbol"
 require_match "__ZnwmSt19__type_descriptor_t" "$engine_symbol_output" \

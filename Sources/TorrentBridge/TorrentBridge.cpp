@@ -555,12 +555,15 @@ constexpr ptrauth_extra_data_t kAuthorizedRootRetainCallbackDiscriminator =
     ptrauth_string_discriminator("torrent.bridge.authorized-root.retain");
 constexpr ptrauth_extra_data_t kAuthorizedRootReleaseCallbackDiscriminator =
     ptrauth_string_discriminator("torrent.bridge.authorized-root.release");
+constexpr ptrauth_extra_data_t kAuthorizedRootContextDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.authorized-root.context");
 
 static_assert(kWakeCallbackDiscriminator != kAuthorizedRootRetainCallbackDiscriminator);
 static_assert(kWakeCallbackDiscriminator != kAuthorizedRootReleaseCallbackDiscriminator);
 static_assert(
     kAuthorizedRootRetainCallbackDiscriminator != kAuthorizedRootReleaseCallbackDiscriminator
 );
+static_assert(kAuthorizedRootContextDiscriminator != kWakeContextDiscriminator);
 
 struct AuthorizedRootLifetimeCallbacks {
     using RetainCallback = TTorrentAuthorizedRootLifetimeCallback __ptrauth(
@@ -579,6 +582,25 @@ struct AuthorizedRootLifetimeCallbacks {
 };
 
 static_assert(!std::is_trivially_copyable_v<AuthorizedRootLifetimeCallbacks>);
+
+using StoredAuthorizedRootContext = void * __ptrauth(
+    ptrauth_key_process_dependent_data,
+    1,
+    kAuthorizedRootContextDiscriminator
+);
+
+struct AuthorizedRootLifetimeRelease {
+    AuthorizedRootLifetimeCallbacks callbacks;
+    StoredAuthorizedRootContext context = nullptr;
+
+    void operator()(void *) const noexcept
+    {
+        callbacks.release(context);
+    }
+};
+
+static_assert(!std::is_trivially_copyable_v<AuthorizedRootLifetimeRelease>);
+static_assert(std::is_nothrow_copy_constructible_v<AuthorizedRootLifetimeRelease>);
 
 BridgeResult preflight_authorized_root_lifetime_replacement(
     TTorrentClient &client,
@@ -705,15 +727,13 @@ BridgeResult preflight_authorized_root_lifetime_replacement(
     AuthorizedRootLifetimeCallbacks const &callbacks
 )
 {
-    callbacks.retain(context);
-    try {
-        return {context, [callbacks](void *retained_context) noexcept {
-            callbacks.release(retained_context);
-        }};
-    } catch (...) {
-        callbacks.release(context);
-        throw;
-    }
+    AuthorizedRootLifetimeRelease release{
+        .callbacks = callbacks,
+        .context = context,
+    };
+    void *const retained_context = release.context;
+    release.callbacks.retain(retained_context);
+    return {retained_context, std::move(release)};
 }
 
 AuthorizedSaveRootResult authorized_save_roots_from_c_buffer(

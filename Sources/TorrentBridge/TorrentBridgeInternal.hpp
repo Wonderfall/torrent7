@@ -633,19 +633,27 @@ using RemovalTombstoneEntryMap = std::map<std::string, std::unique_ptr<RemovalTo
 using RemovalTombstoneIDIndex = std::map<std::string, std::set<RemovalTombstoneEntry const *>>;
 using DirtyMask = std::uint32_t;
 
-// Preserve the standard C callback ABI at the exported boundary, then
-// authenticate and re-sign callbacks into role- and address-diversified storage.
+// Preserve the standard C callback ABI at the exported boundary, then keep
+// each callback capability in role- and address-diversified authenticated
+// storage.
 inline constexpr ptrauth_extra_data_t kWakeCallbackDiscriminator =
     ptrauth_string_discriminator("torrent.bridge.wake");
+inline constexpr ptrauth_extra_data_t kWakeContextDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.wake.context");
 using StoredWakeCallback = TTorrentWakeCallback __ptrauth(
     ptrauth_key_function_pointer,
     1,
     kWakeCallbackDiscriminator
 );
+using StoredWakeContext = void * __ptrauth(
+    ptrauth_key_process_dependent_data,
+    1,
+    kWakeContextDiscriminator
+);
 
 struct WakeCallbackInvocation {
     StoredWakeCallback callback = nullptr;
-    void *context = nullptr;
+    StoredWakeContext context = nullptr;
 };
 
 static_assert(!std::is_trivially_copyable_v<WakeCallbackInvocation>);
@@ -1383,7 +1391,7 @@ struct TTorrentClient {
     std::uint64_t publication_epoch TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
     DirtyMask pending_changes TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
     StoredWakeCallback wake_callback TORRENT_BRIDGE_GUARDED_BY(lock) = nullptr;
-    void *wake_callback_context TORRENT_BRIDGE_GUARDED_BY(lock) = nullptr;
+    StoredWakeContext wake_callback_context TORRENT_BRIDGE_GUARDED_BY(lock) = nullptr;
     int32_t wake_callbacks_in_flight TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
     bool wake_pending TORRENT_BRIDGE_GUARDED_BY(lock) = false;
     std::condition_variable wake_callback_quiesced TORRENT_BRIDGE_GUARDED_BY(lock);
