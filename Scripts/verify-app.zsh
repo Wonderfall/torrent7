@@ -80,11 +80,13 @@ typeset -r temporary_dir=$(/usr/bin/mktemp -d)
 typeset -r app_entitlements_output="$temporary_dir/app-entitlements.plist"
 typeset -r app_signature_output="$temporary_dir/app-signature.txt"
 typeset -r app_arch_output="$temporary_dir/app-arch.txt"
+typeset -r app_header_output="$temporary_dir/app-header.txt"
 typeset -r app_text_output="$temporary_dir/app-text.txt"
 typeset -r app_symbol_output="$temporary_dir/app-symbols.txt"
 typeset -r engine_entitlements_output="$temporary_dir/engine-entitlements.plist"
 typeset -r engine_signature_output="$temporary_dir/engine-signature.txt"
 typeset -r engine_arch_output="$temporary_dir/engine-arch.txt"
+typeset -r engine_header_output="$temporary_dir/engine-header.txt"
 typeset -r engine_text_output="$temporary_dir/engine-text.txt"
 typeset -r engine_symbol_output="$temporary_dir/engine-symbols.txt"
 trap '/bin/rm -rf -- "$temporary_dir"' EXIT
@@ -137,10 +139,13 @@ verify_binary_hardening() {
     local -r signature_file=$2
     local -r entitlements_file=$3
     local -r arch_file=$4
-    local -r text_file=$5
-    local -r requires_bti=$6
+    local -r header_file=$5
+    local -r text_file=$6
+    local -r requires_bti=$7
 
     require_match "architecture: arm64e" "$arch_file" "$label executable is not arm64e"
+    require_match "[[:space:]]PIE([[:space:]]|$)" "$header_file" \
+        "$label executable is not position-independent"
     require_match "pacibsp|retab|autd|braa|blraa" "$text_file" \
         "$label executable has no expected PAC instructions"
     if [[ $requires_bti == true ]]; then
@@ -485,6 +490,8 @@ reject_match "com\\.apple\\.security\\.files\\.(bookmarks|user-selected)" "$engi
 
 /usr/bin/xcrun lipo -info "$executable" >"$app_arch_output"
 /usr/bin/xcrun lipo -info "$engine_extension_executable" >"$engine_arch_output"
+/usr/bin/xcrun otool -hv "$executable" >"$app_header_output"
+/usr/bin/xcrun otool -hv "$engine_extension_executable" >"$engine_header_output"
 /usr/bin/xcrun otool -tvV "$executable" >"$app_text_output"
 /usr/bin/xcrun otool -tvV "$engine_extension_executable" >"$engine_text_output"
 /usr/bin/xcrun nm -m "$executable" >"$app_symbol_output"
@@ -497,6 +504,7 @@ verify_binary_hardening \
     "$app_signature_output" \
     "$app_entitlements_output" \
     "$app_arch_output" \
+    "$app_header_output" \
     "$app_text_output" \
     false
 verify_binary_hardening \
@@ -504,6 +512,7 @@ verify_binary_hardening \
     "$engine_signature_output" \
     "$engine_entitlements_output" \
     "$engine_arch_output" \
+    "$engine_header_output" \
     "$engine_text_output" \
     true
 require_match "_malloc_type_malloc" "$engine_symbol_output" \
