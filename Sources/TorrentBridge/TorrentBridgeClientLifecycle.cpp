@@ -303,7 +303,7 @@ void TTorrentClient::complete_wake_callback() noexcept
     }
 }
 
-void TTorrentClient::invoke_wake_callback(WakeCallbackInvocation wake) noexcept
+void TTorrentClient::invoke_wake_callback(WakeCallbackInvocation const &wake) noexcept
 {
     if (wake.callback == nullptr) {
         return;

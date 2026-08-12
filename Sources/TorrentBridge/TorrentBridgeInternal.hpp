@@ -61,6 +61,7 @@
 #include <vector>
 #include <fcntl.h>
 #include <cstdlib>
+#include <ptrauth.h>
 #include <sys/cdefs.h>
 #include <sys/file.h>
 #include <sys/socket.h>
@@ -632,10 +633,22 @@ using RemovalTombstoneEntryMap = std::map<std::string, std::unique_ptr<RemovalTo
 using RemovalTombstoneIDIndex = std::map<std::string, std::set<RemovalTombstoneEntry const *>>;
 using DirtyMask = std::uint32_t;
 
+// Preserve the standard C callback ABI at the exported boundary, then
+// authenticate and re-sign callbacks into role- and address-diversified storage.
+inline constexpr ptrauth_extra_data_t kWakeCallbackDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.wake");
+using StoredWakeCallback = TTorrentWakeCallback __ptrauth(
+    ptrauth_key_function_pointer,
+    1,
+    kWakeCallbackDiscriminator
+);
+
 struct WakeCallbackInvocation {
-    TTorrentWakeCallback callback = nullptr;
+    StoredWakeCallback callback = nullptr;
     void *context = nullptr;
 };
+
+static_assert(!std::is_trivially_copyable_v<WakeCallbackInvocation>);
 
 [[nodiscard]] constexpr bool has_dirty_changes(DirtyMask changes) noexcept
 {
@@ -1369,7 +1382,7 @@ struct TTorrentClient {
     std::size_t synchronous_adds_since_alert_drain TORRENT_BRIDGE_GUARDED_BY(lock) = 0U;
     std::uint64_t publication_epoch TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
     DirtyMask pending_changes TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
-    TTorrentWakeCallback wake_callback TORRENT_BRIDGE_GUARDED_BY(lock) = nullptr;
+    StoredWakeCallback wake_callback TORRENT_BRIDGE_GUARDED_BY(lock) = nullptr;
     void *wake_callback_context TORRENT_BRIDGE_GUARDED_BY(lock) = nullptr;
     int32_t wake_callbacks_in_flight TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
     bool wake_pending TORRENT_BRIDGE_GUARDED_BY(lock) = false;
@@ -1407,7 +1420,7 @@ struct TTorrentClient {
 
     void complete_wake_callback() noexcept TORRENT_BRIDGE_REQUIRES_NOT(lock);
 
-    void invoke_wake_callback(WakeCallbackInvocation wake) noexcept TORRENT_BRIDGE_REQUIRES_NOT(lock);
+    void invoke_wake_callback(WakeCallbackInvocation const &wake) noexcept TORRENT_BRIDGE_REQUIRES_NOT(lock);
 
     [[nodiscard]] std::string reserve_canonical_torrent_id_locked(std::string canonical_id)
         TORRENT_BRIDGE_REQUIRES(resume_io_lock);

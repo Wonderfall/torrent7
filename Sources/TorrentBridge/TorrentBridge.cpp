@@ -551,10 +551,34 @@ BridgeResult prepare_authorized_root_lifetime_replacement(
     return {};
 }
 
+constexpr ptrauth_extra_data_t kAuthorizedRootRetainCallbackDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.authorized-root.retain");
+constexpr ptrauth_extra_data_t kAuthorizedRootReleaseCallbackDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.authorized-root.release");
+
+static_assert(kWakeCallbackDiscriminator != kAuthorizedRootRetainCallbackDiscriminator);
+static_assert(kWakeCallbackDiscriminator != kAuthorizedRootReleaseCallbackDiscriminator);
+static_assert(
+    kAuthorizedRootRetainCallbackDiscriminator != kAuthorizedRootReleaseCallbackDiscriminator
+);
+
 struct AuthorizedRootLifetimeCallbacks {
-    TTorrentAuthorizedRootLifetimeCallback retain;
-    TTorrentAuthorizedRootLifetimeCallback release;
+    using RetainCallback = TTorrentAuthorizedRootLifetimeCallback __ptrauth(
+        ptrauth_key_function_pointer,
+        1,
+        kAuthorizedRootRetainCallbackDiscriminator
+    );
+    using ReleaseCallback = TTorrentAuthorizedRootLifetimeCallback __ptrauth(
+        ptrauth_key_function_pointer,
+        1,
+        kAuthorizedRootReleaseCallbackDiscriminator
+    );
+
+    RetainCallback retain = nullptr;
+    ReleaseCallback release = nullptr;
 };
+
+static_assert(!std::is_trivially_copyable_v<AuthorizedRootLifetimeCallbacks>);
 
 BridgeResult preflight_authorized_root_lifetime_replacement(
     TTorrentClient &client,
@@ -562,7 +586,7 @@ BridgeResult preflight_authorized_root_lifetime_replacement(
     int32_t const authorized_save_paths_blob_size,
     TTorrentAuthorizedSaveRoot const *authorized_save_roots,
     int32_t const authorized_save_root_count,
-    AuthorizedRootLifetimeCallbacks const callbacks
+    AuthorizedRootLifetimeCallbacks const &callbacks
 )
 {
     if (authorized_save_paths_blob_size < 0
@@ -678,7 +702,7 @@ BridgeResult preflight_authorized_root_lifetime_replacement(
 
 [[nodiscard]] std::shared_ptr<void> retain_authorized_root_lifetime(
     void *context,
-    AuthorizedRootLifetimeCallbacks const callbacks
+    AuthorizedRootLifetimeCallbacks const &callbacks
 )
 {
     callbacks.retain(context);
