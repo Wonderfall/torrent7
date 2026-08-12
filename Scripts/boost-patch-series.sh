@@ -79,13 +79,36 @@ validate_series() (
         cp "$source/$relative" "$temporary_directory/$relative"
     done
     for patch in "${BOOST_PATCHES[@]}"; do
-        git -C "$temporary_directory" apply --check --whitespace=error-all "$patch"
-        git -C "$temporary_directory" apply --whitespace=error-all "$patch"
+        apply_boost_patch "$temporary_directory" "$patch" check
+        apply_boost_patch "$temporary_directory" "$patch"
     done
     actual="$(worktree_tree "$temporary_directory")"
     [[ "$actual" == "$BOOST_PATCHED_TREE" ]] \
         || fail "Boost patch series does not produce the pinned patched tree"
 )
+
+apply_boost_patch() {
+    local source="$1"
+    local patch="$2"
+    local mode="${3:-apply}"
+    local physical_source
+    local source_parent
+    local -a arguments=(--whitespace=error-all)
+
+    physical_source="$(cd "$source" && pwd -P)"
+    source_parent="$(dirname "$physical_source")"
+    if [[ "$mode" == "check" ]]; then
+        arguments=(--check "${arguments[@]}")
+    elif [[ "$mode" != "apply" ]]; then
+        fail "Unknown Boost patch operation: $mode"
+    fi
+
+    # Boost is normally extracted below the project's ignored .build tree.
+    # Prevent Git from discovering that enclosing repository, otherwise
+    # git-apply silently skips the ignored dependency headers.
+    GIT_CEILING_DIRECTORIES="$source_parent" \
+        git -C "$physical_source" apply "${arguments[@]}" "$patch"
+}
 
 apply_patches() {
     local source="$1"
@@ -105,8 +128,8 @@ apply_patches() {
     # changing the shared header cache.
     validate_series "$source"
     for patch in "${BOOST_PATCHES[@]}"; do
-        git -C "$source" apply --check --whitespace=error-all "$patch"
-        git -C "$source" apply --whitespace=error-all "$patch"
+        apply_boost_patch "$source" "$patch" check
+        apply_boost_patch "$source" "$patch"
     done
     verify_source "$source"
 }
