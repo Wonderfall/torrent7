@@ -112,6 +112,7 @@ typeset -a compiler_args=(
     -Wcast-qual
     -Wundef
     -Wthread-safety
+    -Wthread-safety-negative
     -Wthread-safety-pointer
     -Wunsafe-buffer-usage
     -Werror
