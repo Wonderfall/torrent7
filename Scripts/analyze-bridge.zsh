@@ -30,6 +30,23 @@ typeset -a checks=(
     "cppcoreguidelines-*"
     "performance-*"
     "modernize-*"
+    "darwin-*"
+    "misc-confusable-identifiers"
+    "misc-misleading-bidirectional"
+    "misc-misleading-identifier"
+    "misc-redundant-expression"
+    "misc-uniqueptr-reset-release"
+    "misc-use-internal-linkage"
+    "readability-ambiguous-smartptr-reset-call"
+    "readability-inconsistent-declaration-parameter-name"
+    "readability-inconsistent-ifelse-braces"
+    "readability-math-missing-parentheses"
+    "readability-misplaced-array-index"
+    "readability-redundant-declaration"
+    "readability-redundant-member-init"
+    "readability-reference-to-constructed-temporary"
+    "readability-suspicious-call-argument"
+    "readability-uniqueptr-delete-release"
     "-modernize-use-trailing-return-type"
     "-modernize-use-using"
     "-modernize-avoid-c-arrays"
@@ -88,6 +105,7 @@ typeset -a compiler_args=(
     -U_FORTIFY_SOURCE
     -D_FORTIFY_SOURCE=3
     -fPIE
+    -fapplication-extension
     -ftrivial-auto-var-init=zero
     -fno-delete-null-pointer-checks
     -fno-strict-aliasing
@@ -133,6 +151,8 @@ typeset -a compiler_args=(
     -DOPENSSL_NO_TLS1_1
     -DOPENSSL_NO_DTLS1
 )
+
+"$clang_tidy" --checks="$checks_csv" --verify-config
 
 for source in "${bridge_sources[@]}"; do
     "$clang_tidy" "$source" \

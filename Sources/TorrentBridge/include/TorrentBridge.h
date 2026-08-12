@@ -651,7 +651,7 @@ int32_t TorrentClientTakeRemovalResult(
 
 int32_t TorrentClientApplySettings(
     TTorrentClient *client,
-    const TTorrentSessionSettings *settings,
+    const TTorrentSessionSettings *requested,
     char *error_out,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;

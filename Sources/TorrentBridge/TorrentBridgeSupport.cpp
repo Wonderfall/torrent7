@@ -71,8 +71,6 @@ private:
 };
 #endif
 
-} // namespace
-
 std::vector<std::shared_ptr<lt::plugin>> session_plugins(bool enable_peer_exchange_plugin)
 {
     std::vector<std::shared_ptr<lt::plugin>> plugins;
@@ -88,6 +86,8 @@ std::vector<std::shared_ptr<lt::plugin>> session_plugins(bool enable_peer_exchan
 #endif
     return plugins;
 }
+
+} // namespace
 
 std::string_view c_string_view(char const *value)
 {
@@ -1182,6 +1182,8 @@ std::string canonical_id_from_resume_data(std::vector<char> const &buffer)
     return is_canonical_torrent_id(id) ? id : std::string();
 }
 
+namespace {
+
 bool resume_data_bool(std::vector<char> const &buffer, std::string_view key_name)
 {
     lt::error_code error;
@@ -1211,6 +1213,8 @@ int32_t resume_data_int(std::vector<char> const &buffer, std::string_view key_na
     lt::string_view const key(key_name.data(), key_name.size());
     return static_cast<int32_t>(root.dict_find_int_value(key, default_value));
 }
+
+} // namespace
 
 bool metadata_validation_pending_from_resume_data(std::vector<char> const &buffer)
 {
@@ -1861,6 +1865,8 @@ BridgeResult validate_torrent_sources(lt::add_torrent_params const &params)
     return {};
 }
 
+namespace {
+
 template <typename Strings>
 bool filter_non_https_strings(Strings &strings)
 {
@@ -1873,6 +1879,8 @@ bool filter_non_https_strings(Strings &strings)
     strings = std::move(filtered);
     return changed;
 }
+
+} // namespace
 
 bool filter_non_https_sources(
     lt::add_torrent_params &params,
@@ -1914,6 +1922,8 @@ bool filter_non_https_sources(
     return changed;
 }
 
+namespace {
+
 void remember_source_policy_tracker(TorrentIdentity &identity, lt::announce_entry const &tracker)
 {
     if (identity.source_trackers.size() >= static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT)) {
@@ -1937,6 +1947,8 @@ void remember_source_policy_web_seed(TorrentIdentity &identity, std::string cons
     }
     identity.source_web_seeds.push_back(web_seed);
 }
+
+} // namespace
 
 void remember_source_policy_sources(TorrentIdentity &identity, lt::add_torrent_params const &params)
 {

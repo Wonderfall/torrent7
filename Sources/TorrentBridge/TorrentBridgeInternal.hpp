@@ -494,7 +494,7 @@ struct TorrentIdentity {
     std::vector<lt::announce_entry> source_trackers;
     std::vector<std::string> source_web_seeds;
     std::vector<lt::download_priority_t> intended_file_priorities;
-    std::chrono::steady_clock::time_point metadata_validation_retry_after{};
+    std::chrono::steady_clock::time_point metadata_validation_retry_after;
 };
 
 struct ResumePolicySnapshot {
@@ -835,8 +835,6 @@ std::uint8_t bridge_bool(bool value) noexcept;
 bool bridge_bool(std::uint8_t value) noexcept;
 
 int32_t bridge_torrent_state(lt::torrent_status::state_t state) noexcept;
-
-void ignore_shutdown_failure() noexcept;
 
 std::string system_error_message(std::string_view action, int error_number);
 
@@ -1260,7 +1258,7 @@ struct TTorrentClient {
     TTorrentClient(
         std::string_view state_path,
         bool enable_peer_exchange_plugin,
-        AuthorizedSaveRootMap authorized_save_roots
+        AuthorizedSaveRootMap authorized_roots
     );
 
     ~TTorrentClient() noexcept;
