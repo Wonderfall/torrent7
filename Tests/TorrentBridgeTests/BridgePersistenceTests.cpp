@@ -2,9 +2,7 @@
 
 #include <doctest.h>
 
-#include <array>
 #include <filesystem>
-#include <span>
 #include <string>
 #include <system_error>
 #include <vector>

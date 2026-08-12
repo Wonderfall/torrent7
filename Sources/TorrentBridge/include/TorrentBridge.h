@@ -1,7 +1,6 @@
 #ifndef TORRENT_BRIDGE_H
 #define TORRENT_BRIDGE_H
 
-#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus

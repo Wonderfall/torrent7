@@ -47,6 +47,7 @@
 #include <ranges>
 #include <set>
 #include <span>
+#include <stop_token>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -401,8 +402,6 @@ struct PendingResumeRequest {
     lt::torrent_handle handle;
     lt::resume_data_flags_t flags = kRoutineResumeSaveFlags;
 };
-
-struct TorrentIdentity;
 
 // Libtorrent may retain userdata after the app has stopped considering a
 // torrent active. Keep only this compact token alive for the session lifetime;
@@ -1173,8 +1172,6 @@ bool contains_invalid_interface_character(std::string_view value);
 bool is_ipv4_address(std::string const &value);
 
 bool is_ipv6_address(std::string const &value);
-
-struct TTorrentClient;
 
 struct NetworkBinding {
     NetworkBindingKind kind = NetworkBindingKind::any;

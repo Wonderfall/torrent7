@@ -13,7 +13,7 @@
 #include <filesystem>
 #include <fcntl.h>
 #include <fstream>
-#include <iterator>
+#include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
