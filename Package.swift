@@ -46,7 +46,14 @@ let bridgeWarnings: [CXXSetting] = [
     .enableWarning("thread-safety"),
     .enableWarning("thread-safety-negative"),
     .enableWarning("thread-safety-pointer"),
+    .enableWarning("alloca"),
+    .enableWarning("vla"),
     .enableWarning("unsafe-buffer-usage")
+]
+
+// Test-framework-generated frames are outside the production Bridge budget.
+let bridgeTargetWarnings: [CXXSetting] = [
+    .enableWarning("frame-larger-than=16384")
 ]
 
 let bridgeSystemIncludeFlags = [
@@ -370,7 +377,7 @@ let package = Package(
             cxxSettings: [
                 .treatAllWarnings(as: .error),
                 .unsafeFlags(bridgeCompilerFlags)
-            ] + bridgeWarnings + bridgeDefines,
+            ] + bridgeWarnings + bridgeTargetWarnings + bridgeDefines,
             linkerSettings: [
                 .linkedFramework("CoreFoundation"),
                 .linkedFramework("SystemConfiguration"),

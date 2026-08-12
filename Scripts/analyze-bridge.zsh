@@ -114,6 +114,9 @@ typeset -a compiler_args=(
     -Wthread-safety
     -Wthread-safety-negative
     -Wthread-safety-pointer
+    -Walloca
+    -Wvla
+    -Wframe-larger-than=16384
     -Wunsafe-buffer-usage
     -Werror
     -fstack-protector-strong
