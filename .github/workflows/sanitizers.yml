@@ -61,7 +61,7 @@ jobs:
             runtime_symbol: ___tsan_
     env:
       SANITIZER_PROFILE: ${{ matrix.profile }}
-      ASAN_OPTIONS: halt_on_error=1:abort_on_error=1
+      ASAN_OPTIONS: detect_stack_use_after_return=1:strict_string_checks=1:halt_on_error=1:abort_on_error=1
       TSAN_OPTIONS: halt_on_error=1:exitcode=66:print_full_thread_history=1
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
     steps:
