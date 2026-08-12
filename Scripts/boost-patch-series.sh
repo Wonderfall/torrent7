@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-readonly BOOST_VERSION="1.91.0"
+readonly BOOST_VERSION="1.92.0"
 readonly BOOST_BASE_TREE="5361be71183447ba73da19e42233771725d7a6a4d056e8978f55893355ede04e"
 readonly BOOST_PATCHED_TREE="81b71313db567209a1b591dc5b910f54cc6873d8a7b5abafe5c6f369b6e08d3b"
 readonly -a BOOST_PATCHED_FILES=(
@@ -12,7 +12,7 @@ readonly -a BOOST_PATCHED_FILES=(
     "boost/asio/detail/scheduler_operation.hpp"
 )
 readonly -a BOOST_PATCHES=(
-    "$ROOT_DIR/Scripts/patches/boost-1.91.0-asio-operation-pac.patch"
+    "$ROOT_DIR/Scripts/patches/boost-1.92.0-asio-operation-pac.patch"
 )
 
 fail() {

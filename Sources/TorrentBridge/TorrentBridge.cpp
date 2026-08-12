@@ -2,7 +2,7 @@
 
 #if __has_feature(address_sanitizer)
 extern "C" __attribute__((visibility("default"), used, retain))
-char const *__asan_default_options() noexcept
+char const *__asan_default_options()
 {
     // Enhanced Security helpers are launched by the system and may not inherit
     // the test runner's environment. Make every helper-side violation fail the lane.
@@ -12,7 +12,7 @@ char const *__asan_default_options() noexcept
 
 #if __has_feature(thread_sanitizer)
 extern "C" __attribute__((visibility("default"), used, retain))
-char const *__tsan_default_options() noexcept
+char const *__tsan_default_options()
 {
     // Enhanced Security helpers are launched by the system and may not inherit
     // the test runner's environment. Make every helper-side race fail the lane.

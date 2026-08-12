@@ -12,7 +12,7 @@ if [[ -n "${LIBFUZZER_DEPS_PREFIX:-}" \
     exit 1
 fi
 DEPS_PREFIX="$DEPS_ROOT/prefix"
-BOOST_PREFIX="${BOOST_PREFIX:-$ROOT_DIR/.build/deps/source-cache/boost/boost_1_91_0}"
+BOOST_PREFIX="${BOOST_PREFIX:-$ROOT_DIR/.build/deps/source-cache/boost/boost_1_92_0}"
 LLVM_PREFIX="${LLVM_PREFIX:-$(brew --prefix llvm 2>/dev/null || true)}"
 CXX="${CXX:-$LLVM_PREFIX/bin/clang++}"
 SDK_PATH="${SDK_PATH:-$(xcrun --sdk macosx --show-sdk-path)}"

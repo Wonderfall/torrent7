@@ -190,7 +190,7 @@ The production app builds pinned dependencies into local static artifacts:
 | --- | --- | --- |
 | libtorrent-rasterbar | 2.1.1 | Torrent engine |
 | OpenSSL | 3.5.7 LTS | TLS support for libtorrent |
-| Boost | 1.91.0 headers | Header-only Boost pieces used by libtorrent |
+| Boost | 1.92.0 headers | Header-only Boost pieces used by libtorrent |
 
 Homebrew supplies build tools only; it is not a runtime dependency source for the
 app bundle. OpenSSL archives are verified with SHA-256 and a pinned upstream PGP
