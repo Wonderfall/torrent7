@@ -23,12 +23,15 @@ typeset -r source_dir="$deps_dir/src/libtorrent"
 typeset -r build_dir="$deps_dir/build/libtorrent"
 typeset -r patch_helper="$root_dir/Scripts/libtorrent-patch-series.sh"
 typeset -ra test_targets=(
+    test_buffer
     test_enum_net
     test_disk_io
     test_file
+    test_heterogeneous_queue
     test_http_connection
     test_http_parser
     test_ip_voter
+    test_pe_crypto
     test_storage
     test_torrent
     test_tracker_list
@@ -64,6 +67,13 @@ restore_configuration=0
 
 (
     cd -- "$build_dir/test"
+    ./test_heterogeneous_queue --no-redirect
+    ./test_buffer --no-redirect \
+        "$source_dir/test/test_buffer.cpp.chained_buffer"
+    ./test_pe_crypto --no-redirect \
+        "$source_dir/test/test_pe_crypto.cpp.diffie_hellman"
+    ./test_pe_crypto --no-redirect \
+        "$source_dir/test/test_pe_crypto.cpp.diffie_hellman_degenerate_key"
     ./test_enum_net --no-redirect \
         "$source_dir/test/test_enum_net.cpp.is_global_addresses"
     ./test_enum_net --no-redirect \

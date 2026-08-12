@@ -17,6 +17,7 @@ readonly -a LIBTORRENT_PATCHES=(
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-disabled-streaming-fields.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-typed-allocator-wrappers.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-complete-typed-allocation.patch"
+    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-indirect-operation-pac.patch"
 )
 
 fail() {

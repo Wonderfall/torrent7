@@ -1,0 +1,170 @@
+diff --git a/include/libtorrent/aux_/chained_buffer.hpp b/include/libtorrent/aux_/chained_buffer.hpp
+index 3064c4e8f..11ad1c25e 100644
+--- a/include/libtorrent/aux_/chained_buffer.hpp
++++ b/include/libtorrent/aux_/chained_buffer.hpp
+@@ -20,6 +20,10 @@ see LICENSE file.
+ #include <utility>
+ #include <vector>
+ 
++#if defined(__PTRAUTH__)
++#include <ptrauth.h>
++#endif
++
+ #include "libtorrent/aux_/disable_warnings_push.hpp"
+ #include <boost/asio/buffer.hpp>
+ #include "libtorrent/aux_/disable_warnings_pop.hpp"
+@@ -48,8 +52,16 @@ namespace libtorrent::aux {
+ 	private:
+ 
+ 		// destructs/frees the holder object
+-		using destruct_holder_fun = void (*)(void*);
+-		using move_construct_holder_fun = void (*)(void*, void*);
++		using destruct_holder_function = void (*)(void*);
++#if defined(__PTRAUTH__)
++		using destruct_holder_fun = destruct_holder_function __ptrauth(
++			ptrauth_key_function_pointer,
++			1,
++			ptrauth_string_discriminator("libtorrent.chained-buffer.destroy-holder"));
++#else
++		using destruct_holder_fun = destruct_holder_function;
++#endif
++		using move_construct_holder_fun = void (*)(void*, void*);
+ 
+ 		struct buffer_t
+ 		{
+diff --git a/include/libtorrent/aux_/heterogeneous_queue.hpp b/include/libtorrent/aux_/heterogeneous_queue.hpp
+index 1b99b9c6a..5e1d21f7b 100644
+--- a/include/libtorrent/aux_/heterogeneous_queue.hpp
++++ b/include/libtorrent/aux_/heterogeneous_queue.hpp
+@@ -18,6 +18,10 @@ see LICENSE file.
+ #include <memory>
+ #include <algorithm>
+ 
++#if defined(__PTRAUTH__)
++#include <ptrauth.h>
++#endif
++
+ #include "libtorrent/assert.hpp"
+ #include "libtorrent/aux_/throw.hpp"
+ 
+@@ -194,6 +198,15 @@ namespace aux {
+ 		~heterogeneous_queue() { clear(); }
+ 
+ 	private:
++		using move_function = void (*)(char* dst, char* src);
++#if defined(__PTRAUTH__)
++		using stored_move_function = move_function __ptrauth(
++			ptrauth_key_function_pointer,
++			1,
++			ptrauth_string_discriminator("libtorrent.heterogeneous-queue.move"));
++#else
++		using stored_move_function = move_function;
++#endif
+ 
+ 		// this header is put in front of every element. It tells us
+ 		// how many bytes it's using for its allocation, and it
+@@ -211,7 +224,7 @@ namespace aux {
+ 			// stricter alignment requirements
+ 			std::uint8_t pad_bytes;
+ 
+-			void (*move)(char* dst, char* src);
++			stored_move_function move;
+ 		};
+ 
+ 		void grow_capacity(int const size)
+diff --git a/include/libtorrent/aux_/pe_crypto.hpp b/include/libtorrent/aux_/pe_crypto.hpp
+index ad8b12b6b..147e53398 100644
+--- a/include/libtorrent/aux_/pe_crypto.hpp
++++ b/include/libtorrent/aux_/pe_crypto.hpp
+@@ -85,12 +85,18 @@ namespace libtorrent::aux {
+ 		// wraps a valid BIGNUM.
+ 		class key_t
+ 		{
++			struct bignum_deleter
++			{
++				void operator()(::BIGNUM* value) const noexcept
++				{ BN_free(value); }
++			};
++
+ 		public:
+ 			key_t()
+ 				: key_t(BN_new())
+ 			{}
+ 			explicit key_t(::BIGNUM* b)
+-				: m_b(b, &BN_free)
++				: m_b(b)
+ 			{
+ 				if (!m_b)
+ 					aux::throw_ex<system_error>(errors::no_memory);
+@@ -105,7 +111,7 @@ namespace libtorrent::aux {
+ 			::BIGNUM const* get() const { return m_b.get(); }
+ 
+ 		private:
+-			std::unique_ptr<::BIGNUM, void (*)(::BIGNUM*)> m_b;
++			std::unique_ptr<::BIGNUM, bignum_deleter> m_b;
+ 		};
+ 
+ 		// the DH generator (also the lower bound of the valid public-key range)
+diff --git a/src/pe_crypto.cpp b/src/pe_crypto.cpp
+index f7ad7fdca..0665515e5 100644
+--- a/src/pe_crypto.cpp
++++ b/src/pe_crypto.cpp
+@@ -50,6 +50,19 @@ namespace {
+ namespace libtorrent::aux {
+ 
+ #if defined TORRENT_USE_LIBCRYPTO && !defined TORRENT_USE_WOLFSSL
++	namespace {
++		struct bn_ctx_deleter
++		{
++			void operator()(::BN_CTX* value) const noexcept
++			{ BN_CTX_free(value); }
++		};
++
++		struct bn_mont_ctx_deleter
++		{
++			void operator()(::BN_MONT_CTX* value) const noexcept
++			{ BN_MONT_CTX_free(value); }
++		};
++	}
+ 
+ 	dh_key_exchange::key_t const& dh_key_exchange::dh_prime()
+ 	{
+@@ -92,15 +105,15 @@ namespace libtorrent::aux {
+ 	::BN_CTX* dh_key_exchange::ctx()
+ 	{
+ 		auto make_ctx = [] {
+-			std::unique_ptr<::BN_CTX, void (*)(::BN_CTX*)> ret(BN_CTX_new(), &BN_CTX_free);
++			std::unique_ptr<::BN_CTX, bn_ctx_deleter> ret(BN_CTX_new());
+ 			if (!ret)
+ 				aux::throw_ex<system_error>(errors::no_memory);
+ 			return ret;
+ 		};
+ #ifdef BOOST_NO_CXX11_THREAD_LOCAL
+-		static std::unique_ptr<::BN_CTX, void (*)(::BN_CTX*)> shared_ctx = make_ctx();
++		static std::unique_ptr<::BN_CTX, bn_ctx_deleter> shared_ctx = make_ctx();
+ #else
+-		thread_local static std::unique_ptr<::BN_CTX, void (*)(::BN_CTX*)> shared_ctx = make_ctx();
++		thread_local static std::unique_ptr<::BN_CTX, bn_ctx_deleter> shared_ctx = make_ctx();
+ #endif
+ 		return shared_ctx.get();
+ 	}
+@@ -108,16 +121,15 @@ namespace libtorrent::aux {
+ 	::BN_MONT_CTX* dh_key_exchange::mont()
+ 	{
+ 		auto make_mont = [] {
+-			std::unique_ptr<::BN_MONT_CTX, void (*)(::BN_MONT_CTX*)> ret(
+-				BN_MONT_CTX_new(), &BN_MONT_CTX_free);
++			std::unique_ptr<::BN_MONT_CTX, bn_mont_ctx_deleter> ret(BN_MONT_CTX_new());
+ 			if (!ret || !BN_MONT_CTX_set(ret.get(), dh_prime().get(), ctx()))
+ 				aux::throw_ex<system_error>(errors::no_memory);
+ 			return ret;
+ 		};
+ #ifdef BOOST_NO_CXX11_THREAD_LOCAL
+-		static std::unique_ptr<::BN_MONT_CTX, void (*)(::BN_MONT_CTX*)> shared_mont = make_mont();
++		static std::unique_ptr<::BN_MONT_CTX, bn_mont_ctx_deleter> shared_mont = make_mont();
+ #else
+-		thread_local static std::unique_ptr<::BN_MONT_CTX, void (*)(::BN_MONT_CTX*)> shared_mont =
++		thread_local static std::unique_ptr<::BN_MONT_CTX, bn_mont_ctx_deleter> shared_mont =
+ 			make_mont();
+ #endif
+ 		return shared_mont.get();
