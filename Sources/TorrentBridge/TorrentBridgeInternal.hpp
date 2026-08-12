@@ -633,9 +633,10 @@ using RemovalTombstoneEntryMap = std::map<std::string, std::unique_ptr<RemovalTo
 using RemovalTombstoneIDIndex = std::map<std::string, std::set<RemovalTombstoneEntry const *>>;
 using DirtyMask = std::uint32_t;
 
-// Preserve the standard C callback ABI at the exported boundary, then keep
-// each callback capability in role- and address-diversified authenticated
-// storage.
+// Preserve the standard C callback ABI at the exported boundary. PAC targets
+// keep each callback capability in role- and address-diversified authenticated
+// storage; the plain-arm64 libFuzzer build retains the same source-level types.
+#if defined(__PTRAUTH__)
 inline constexpr ptrauth_extra_data_t kWakeCallbackDiscriminator =
     ptrauth_string_discriminator("torrent.bridge.wake");
 inline constexpr ptrauth_extra_data_t kWakeContextDiscriminator =
@@ -650,13 +651,19 @@ using StoredWakeContext = void * __ptrauth(
     1,
     kWakeContextDiscriminator
 );
+#else
+using StoredWakeCallback = TTorrentWakeCallback;
+using StoredWakeContext = void *;
+#endif
 
 struct WakeCallbackInvocation {
     StoredWakeCallback callback = nullptr;
     StoredWakeContext context = nullptr;
 };
 
+#if defined(__PTRAUTH__)
 static_assert(!std::is_trivially_copyable_v<WakeCallbackInvocation>);
+#endif
 
 [[nodiscard]] constexpr bool has_dirty_changes(DirtyMask changes) noexcept
 {

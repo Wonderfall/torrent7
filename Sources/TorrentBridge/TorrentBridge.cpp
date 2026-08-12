@@ -551,6 +551,7 @@ BridgeResult prepare_authorized_root_lifetime_replacement(
     return {};
 }
 
+#if defined(__PTRAUTH__)
 constexpr ptrauth_extra_data_t kAuthorizedRootRetainCallbackDiscriminator =
     ptrauth_string_discriminator("torrent.bridge.authorized-root.retain");
 constexpr ptrauth_extra_data_t kAuthorizedRootReleaseCallbackDiscriminator =
@@ -564,8 +565,10 @@ static_assert(
     kAuthorizedRootRetainCallbackDiscriminator != kAuthorizedRootReleaseCallbackDiscriminator
 );
 static_assert(kAuthorizedRootContextDiscriminator != kWakeContextDiscriminator);
+#endif
 
 struct AuthorizedRootLifetimeCallbacks {
+#if defined(__PTRAUTH__)
     using RetainCallback = TTorrentAuthorizedRootLifetimeCallback __ptrauth(
         ptrauth_key_function_pointer,
         1,
@@ -576,11 +579,16 @@ struct AuthorizedRootLifetimeCallbacks {
         1,
         kAuthorizedRootReleaseCallbackDiscriminator
     );
+#else
+    using RetainCallback = TTorrentAuthorizedRootLifetimeCallback;
+    using ReleaseCallback = TTorrentAuthorizedRootLifetimeCallback;
+#endif
 
     RetainCallback retain = nullptr;
     ReleaseCallback release = nullptr;
 };
 
+#if defined(__PTRAUTH__)
 static_assert(!std::is_trivially_copyable_v<AuthorizedRootLifetimeCallbacks>);
 
 using StoredAuthorizedRootContext = void * __ptrauth(
@@ -588,6 +596,9 @@ using StoredAuthorizedRootContext = void * __ptrauth(
     1,
     kAuthorizedRootContextDiscriminator
 );
+#else
+using StoredAuthorizedRootContext = void *;
+#endif
 
 struct AuthorizedRootLifetimeRelease {
     AuthorizedRootLifetimeCallbacks callbacks;
@@ -599,7 +610,9 @@ struct AuthorizedRootLifetimeRelease {
     }
 };
 
+#if defined(__PTRAUTH__)
 static_assert(!std::is_trivially_copyable_v<AuthorizedRootLifetimeRelease>);
+#endif
 static_assert(std::is_nothrow_copy_constructible_v<AuthorizedRootLifetimeRelease>);
 
 BridgeResult preflight_authorized_root_lifetime_replacement(
