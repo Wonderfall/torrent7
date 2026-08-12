@@ -86,7 +86,6 @@ int main()
     reinterpret_cast<queue_item*>(destination_item.data())->~queue_item();
   }
 
-  using torrent7::test_support::PointerAuthenticationFailure;
   using torrent7::test_support::replay_triggers_pointer_authentication_failure;
 
   if (!replay_triggers_pointer_authentication_failure([] {
@@ -100,7 +99,7 @@ int main()
             sizeof(source.m_vec.front()));
         torrent7_invoke_chained_buffer_destructor(&destination.m_vec.front());
         ::_exit(90);
-      }, PointerAuthenticationFailure::code_pointer))
+      }))
   {
     std::fputs("chained-buffer destructor callback replay was accepted\n", stderr);
     return 1;
@@ -124,7 +123,7 @@ int main()
         torrent7_invoke_heterogeneous_queue_move(
             header, destination_item.data(), source_item.data());
         ::_exit(90);
-      }, PointerAuthenticationFailure::code_pointer))
+      }))
   {
     std::fputs("heterogeneous-queue move callback replay was accepted\n", stderr);
     return 1;

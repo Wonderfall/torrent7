@@ -85,7 +85,6 @@ int main()
     return 1;
   }
 
-  using torrent7::test_support::PointerAuthenticationFailure;
   using torrent7::test_support::replay_triggers_pointer_authentication_failure;
 
   if (!replay_triggers_pointer_authentication_failure([] {
@@ -93,7 +92,7 @@ int main()
         scheduler_probe destination;
         replay_object_bytes(&destination, &source, sizeof(source));
         destination.complete(nullptr, boost::system::error_code(), 0);
-      }, PointerAuthenticationFailure::code_pointer))
+      }))
   {
     std::fputs("scheduler callback replay was accepted\n", stderr);
     return 1;
@@ -104,7 +103,7 @@ int main()
         reactor_probe destination;
         replay_object_bytes(&destination, &source, sizeof(source));
         static_cast<void>(destination.perform());
-      }, PointerAuthenticationFailure::code_pointer))
+      }))
   {
     std::fputs("reactor callback replay was accepted\n", stderr);
     return 1;
