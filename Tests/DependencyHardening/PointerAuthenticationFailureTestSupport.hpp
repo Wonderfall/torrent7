@@ -15,6 +15,9 @@ namespace detail {
 inline constexpr int authentication_failure_status = 0;
 inline constexpr int handler_setup_failure_status = 240;
 inline constexpr int no_fault_status = 241;
+// Darwin 25.5 reports AppleClang's PAC-failure brk with this kernel code;
+// newer Darwin may report the standardized TRAP_BRKPT code instead.
+inline constexpr int darwin_kernel_breakpoint_code = 0;
 
 [[nodiscard]] constexpr bool is_kernel_authentication_fault(
     int const signal,
@@ -23,11 +26,13 @@ inline constexpr int no_fault_status = 241;
 {
     return (signal == SIGSEGV && (code == SEGV_MAPERR || code == SEGV_ACCERR))
         || (signal == SIGBUS && (code == BUS_ADRALN || code == BUS_ADRERR))
-        || (signal == SIGTRAP && code == TRAP_BRKPT);
+        || (signal == SIGTRAP
+            && (code == darwin_kernel_breakpoint_code || code == TRAP_BRKPT));
 }
 
 static_assert(is_kernel_authentication_fault(SIGSEGV, SEGV_ACCERR));
 static_assert(is_kernel_authentication_fault(SIGBUS, BUS_ADRALN));
+static_assert(is_kernel_authentication_fault(SIGTRAP, darwin_kernel_breakpoint_code));
 static_assert(is_kernel_authentication_fault(SIGTRAP, TRAP_BRKPT));
 static_assert(!is_kernel_authentication_fault(SIGABRT, 0));
 static_assert(!is_kernel_authentication_fault(SIGSEGV, SI_USER));
