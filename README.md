@@ -194,9 +194,11 @@ The production app builds pinned dependencies into local static artifacts:
 
 Homebrew supplies build tools only; it is not a runtime dependency source for the
 app bundle. OpenSSL archives are verified with SHA-256 and a pinned upstream PGP
-signing fingerprint. Boost is verified by SHA-256. Libtorrent is fetched from a
-pinned tag and commit through a local source cache, then receives an ordered,
-hashed patch series for Xcode compatibility, network boundaries, storage
+signing fingerprint. Boost is verified by SHA-256, then receives an ordered,
+hashed patch series that authenticates the active Asio scheduler and reactor
+operation callbacks with address-and-role-diversified PAC. Libtorrent is fetched
+from a pinned tag and commit through a local source cache, then receives its own
+ordered, hashed patch series for Xcode compatibility, network boundaries, storage
 confinement, bounded pread recheck hashing, and complete typed-allocation
 coverage. WebTorrent support stays
 disabled to avoid adding its unused protocol and dependency surface.
@@ -312,6 +314,13 @@ Run the focused libtorrent network and storage security regressions:
 
 ```sh
 Scripts/test-libtorrent-security.zsh
+```
+
+That suite also runs the focused Boost.Asio PAC code-generation and callback
+replay test. It can be invoked directly with:
+
+```sh
+Scripts/test-boost-asio-pac.zsh
 ```
 
 Run the bridge static-analysis pass:

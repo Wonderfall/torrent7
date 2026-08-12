@@ -11,6 +11,7 @@ on:
       - "Packaging/**"
       - "Scripts/build-app.zsh"
       - "Scripts/build-deps.zsh"
+      - "Scripts/boost-patch-series.sh"
       - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/compare-entitlements.swift"
       - "Scripts/verify-enhanced-security-metadata.swift"
@@ -37,6 +38,7 @@ on:
       - "Packaging/**"
       - "Scripts/build-app.zsh"
       - "Scripts/build-deps.zsh"
+      - "Scripts/boost-patch-series.sh"
       - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/compare-entitlements.swift"
       - "Scripts/verify-enhanced-security-metadata.swift"
@@ -104,7 +106,7 @@ jobs:
           path: |
             .build/deps/source-cache
             .build/deps/arm64e
-          key: deps-arm64e-${{ env.XCODE_CACHE_KEY }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/verify-xcode.zsh', 'Scripts/keys/**', 'Scripts/patches/**') }}
+          key: deps-arm64e-${{ env.XCODE_CACHE_KEY }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/boost-patch-series.sh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/verify-xcode.zsh', 'Scripts/keys/**', 'Scripts/patches/**') }}
       - name: Build pinned dependencies
         shell: zsh {0}
         run: |

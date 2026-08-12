@@ -56,6 +56,7 @@ fi
 [[ -f "$build_dir/CMakeCache.txt" ]] \
     || fail "Missing configured libtorrent build: $build_dir"
 "$patch_helper" verify "$source_dir"
+SKIP_BUILD_DEPS=1 "$root_dir/Scripts/test-boost-asio-pac.zsh"
 
 restore_configuration=1
 cmake -S "$source_dir" -B "$build_dir" -Dbuild_tests=ON

@@ -432,7 +432,7 @@ latches that contender terminal, drains any queued successors without executing
 them, and owns a one-second reply-delivery deadline before closing the peer. A
 stalled client therefore cannot retain or later reuse an admission slot.
 
-### Patch libtorrent only at boundaries the application cannot own
+### Patch dependencies only at boundaries the application cannot own
 
 Tracker DNS resolution, redirects, proxy target selection, UDP sends, peer
 discovery, and storage path resolution happen inside libtorrent. The application
@@ -444,6 +444,14 @@ the configured checking-memory budget. The series also preserves Apple's typed
 allocation metadata across libtorrent's pool and disk-buffer wrappers instead
 of disabling allocator-wrapper diagnostics for the dependency. Application
 source policy separately controls allowed tracker and web-seed schemes.
+
+Boost.Asio's active scheduler-completion and reactor-performance operation
+pointers are likewise long-lived dependency-owned dispatch state. On arm64e,
+the pinned Boost patch authenticates each slot with its storage address and a
+distinct role discriminator. A focused code-generation test requires those
+address-and-role blends and rejects generic zero-discriminator branches; a
+forked runtime probe verifies that copying either signed callback to the same
+slot in another operation traps instead of dispatching it.
 
 Dependency patches remain ordered, hashed, reproducible, and covered by focused
 security tests. Both release and sanitizer dependency profiles must record the
@@ -539,9 +547,9 @@ the explicit ASan runtime and its Xcode RPATH. `LC_DYLD_ENVIRONMENT` is forbidde
   the controller session; an independent short watchdog bounds that containment,
   while a separate longer watchdog bounds native restart and all remaining
   resource cleanup, including helper-initiated shutdown.
-- Tracker, redirect, proxy, UDP, peer-discovery, storage confinement, and typed
-  allocator patches remain part of the pinned libtorrent provenance and focused
-  build/test suite.
+- Tracker, redirect, proxy, UDP, peer-discovery, storage confinement, typed
+  allocator, and indirect-operation patches remain part of pinned dependency
+  provenance and focused build/test suites.
 - Both bundles retain quarantine, exact entitlements, hardened runtime,
   library validation, matching identity, and an allowlisted code inventory.
 - Native worker failures back off, publish typed health, and remain

@@ -99,7 +99,7 @@ jobs:
           path: |
             .build/deps/source-cache
             .build/deps/arm64e-${{ matrix.profile }}
-          key: deps-arm64e-${{ matrix.profile }}-${{ env.XCODE_CACHE_KEY }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/verify-xcode.zsh', 'Scripts/keys/**', 'Scripts/patches/**') }}
+          key: deps-arm64e-${{ matrix.profile }}-${{ env.XCODE_CACHE_KEY }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/boost-patch-series.sh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/verify-xcode.zsh', 'Scripts/keys/**', 'Scripts/patches/**') }}
 
       - name: Build fully instrumented dependencies
         shell: zsh {0}

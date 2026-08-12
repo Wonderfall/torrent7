@@ -20,6 +20,7 @@ OPENSSL_SOURCE="${OPENSSL_SOURCE:-$ROOT_DIR/.build/deps/arm64e/src/openssl-3.5.7
 LIBTORRENT_SOURCE="${LIBTORRENT_SOURCE:-$ROOT_DIR/.build/deps/arm64e/src/libtorrent}"
 LIBTORRENT_PATCH_HELPER="$ROOT_DIR/Scripts/libtorrent-patch-series.sh"
 BOOST_SOURCE="${BOOST_SOURCE:-$ROOT_DIR/.build/deps/source-cache/boost/boost_1_91_0}"
+BOOST_PATCH_HELPER="$ROOT_DIR/Scripts/boost-patch-series.sh"
 LLVM_PREFIX="${LLVM_PREFIX:-$(brew --prefix llvm 2>/dev/null || true)}"
 CC="${CC:-$LLVM_PREFIX/bin/clang}"
 CXX="${CXX:-$LLVM_PREFIX/bin/clang++}"
@@ -148,15 +149,19 @@ require_path "$LIBTORRENT_SOURCE/CMakeLists.txt" "libtorrent source"
 require_path "$LIBTORRENT_SOURCE/deps/try_signal/try_signal.cpp" "libtorrent try_signal source"
 require_path "$LIBTORRENT_PATCH_HELPER" "libtorrent patch-series helper"
 require_path "$BOOST_SOURCE/boost" "Boost headers"
+require_path "$BOOST_PATCH_HELPER" "Boost patch-series helper"
 
 BUILDER_SHA256="$(shasum -a 256 "$TOOLS_DIR/build-libfuzzer-deps.sh" | awk '{print $1}')"
 LIBTORRENT_PATCH_HELPER_SHA256="$(shasum -a 256 "$LIBTORRENT_PATCH_HELPER" | awk '{print $1}')"
+BOOST_PATCH_HELPER_SHA256="$(shasum -a 256 "$BOOST_PATCH_HELPER" | awk '{print $1}')"
 CC_SHA256="$(shasum -a 256 "$CC" | awk '{print $1}')"
 CXX_SHA256="$(shasum -a 256 "$CXX" | awk '{print $1}')"
 AR_SHA256="$(shasum -a 256 "$AR" | awk '{print $1}')"
 RANLIB_SHA256="$(shasum -a 256 "$RANLIB" | awk '{print $1}')"
 "$LIBTORRENT_PATCH_HELPER" verify "$LIBTORRENT_SOURCE"
 LIBTORRENT_PATCH_MANIFEST="$("$LIBTORRENT_PATCH_HELPER" manifest "$LIBTORRENT_SOURCE")"
+"$BOOST_PATCH_HELPER" verify "$BOOST_SOURCE"
+BOOST_PATCH_MANIFEST="$("$BOOST_PATCH_HELPER" manifest "$BOOST_SOURCE")"
 LIBTORRENT_TRY_SIGNAL_COMMIT="$(git -C "$LIBTORRENT_SOURCE/deps/try_signal" rev-parse HEAD)"
 LIBTORRENT_TRY_SIGNAL_EXPECTED_COMMIT="$(git -C "$LIBTORRENT_SOURCE" ls-tree HEAD deps/try_signal | awk '{print $3}')"
 if [[ "$LIBTORRENT_TRY_SIGNAL_COMMIT" != "$LIBTORRENT_TRY_SIGNAL_EXPECTED_COMMIT" ]]; then
@@ -171,6 +176,7 @@ expected_config="$(
     cat <<EOF
 builder_sha256=$BUILDER_SHA256
 libtorrent_patch_helper_sha256=$LIBTORRENT_PATCH_HELPER_SHA256
+boost_patch_helper_sha256=$BOOST_PATCH_HELPER_SHA256
 target=$TARGET_TRIPLE
 sdk=$SDK_PATH
 prefix=$PREFIX
@@ -188,6 +194,7 @@ libtorrent_source=$LIBTORRENT_SOURCE
 $LIBTORRENT_PATCH_MANIFEST
 libtorrent_try_signal_commit=$LIBTORRENT_TRY_SIGNAL_COMMIT
 boost_source=$BOOST_SOURCE
+$BOOST_PATCH_MANIFEST
 openssl_sanitizers=$OPENSSL_SANITIZERS
 libtorrent_sanitizers=$LIBTORRENT_SANITIZERS
 EOF

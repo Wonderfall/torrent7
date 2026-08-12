@@ -58,7 +58,9 @@ typeset -r BOOST_TARBALL_URL=${BOOST_TARBALL_URL:-https://archives.boost.io/rele
 typeset -r BOOST_TARBALL="$ARCHIVE_CACHE_DIR/$BOOST_ARCHIVE_BASENAME.tar.gz"
 typeset -r BOOST_SOURCE_ROOT=${BOOST_SOURCE_ROOT:-$SOURCE_CACHE_DIR/boost}
 typeset -r BOOST_SOURCE_DIR="$BOOST_SOURCE_ROOT/$BOOST_ARCHIVE_BASENAME"
+typeset -r BOOST_SOURCE_STAMP="$BOOST_SOURCE_DIR/.torrent-app-source"
 typeset -r BOOST_HEADERS_STAMP="$BOOST_PREFIX/.torrent-app-boost-headers"
+typeset -r BOOST_PATCH_HELPER="$ROOT_DIR/Scripts/boost-patch-series.sh"
 typeset -r OPENSSL_VERSION=${OPENSSL_VERSION:-3.5.7}
 typeset -r OPENSSL_SHA256=${OPENSSL_SHA256:-a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8}
 typeset -r OPENSSL_TARBALL_URL=${OPENSSL_TARBALL_URL:-https://github.com/openssl/openssl/releases/download/openssl-$OPENSSL_VERSION/openssl-$OPENSSL_VERSION.tar.gz}
@@ -507,12 +509,20 @@ libtorrent_cmake_options_text() {
     print -r -- "${(j: :)LIBTORRENT_CMAKE_OPTIONS}"
 }
 
+boost_source_manifest() {
+    cat <<EOF
+boost-archive-sha256=$BOOST_SHA256
+boost-url=$BOOST_TARBALL_URL
+boost-patch-helper-sha256=$(file_sha256 "$BOOST_PATCH_HELPER")
+$("$BOOST_PATCH_HELPER" manifest "$BOOST_SOURCE_DIR")
+EOF
+}
+
 boost_headers_manifest() {
     cat <<EOF
-boost-version=$BOOST_VERSION
-boost-sha256=$BOOST_SHA256
-boost-url=$BOOST_TARBALL_URL
+$(boost_source_manifest)
 boost-prefix=$BOOST_PREFIX
+boost-source-stamp-sha256=$(file_sha256 "$BOOST_SOURCE_STAMP")
 EOF
 }
 
@@ -585,6 +595,9 @@ openssl-configure-options=$(openssl_configure_options_text)
 boost-version=$BOOST_VERSION
 boost-sha256=$BOOST_SHA256
 boost-prefix=$BOOST_PREFIX
+boost-patch-helper-sha256=$(file_sha256 "$BOOST_PATCH_HELPER")
+$("$BOOST_PATCH_HELPER" manifest "$BOOST_SOURCE_DIR" | /usr/bin/sed '1d')
+boost-headers-stamp-sha256=$(file_sha256 "$BOOST_HEADERS_STAMP")
 EOF
 }
 
@@ -694,6 +707,31 @@ verify_libtorrent_typed_allocation_coverage() {
         || fail "libtorrent has no typed global operator new import: $archive"
     print -r -- "$symbols" | /usr/bin/awk '$NF == "__ZnamSt19__type_descriptor_t" { found = 1 } END { exit !found }' \
         || fail "libtorrent has no typed global operator new[] import: $archive"
+}
+
+verify_libtorrent_asio_operation_pac() {
+    local archive="$1"
+    local disassembly
+    local discriminator
+
+    require_path "$archive" "libtorrent static archive"
+    make_temporary_file "$DEPS_DIR/libtorrent-asio-pac.txt"
+    disassembly=$REPLY
+    "$ARCH_LIPO" "$archive" -verify_arch arm64e \
+        || fail "Boost.Asio PAC verification requires an arm64e libtorrent archive"
+    /usr/bin/xcrun otool -tvV "$archive" >"$disassembly"
+
+    # AppleClang's pinned 16-bit string discriminators for
+    # scheduler-operation.complete and reactor-operation.perform respectively.
+    for discriminator in 0x8ab7 0xaf42; do
+        /usr/bin/awk -v discriminator="#$discriminator" '
+            /movk[[:space:]]+x17,/ && index($0, discriminator) { remaining = 4 }
+            remaining > 0 && /[[:space:]](braa|blraa)[[:space:]]/ { found = 1 }
+            remaining > 0 { remaining-- }
+            END { exit !found }
+        ' "$disassembly" || fail \
+            "libtorrent has no address-diversified Asio callback branch for role $discriminator"
+    done
 }
 
 thin_archive_arch() {
@@ -862,22 +900,53 @@ download_boost() {
 }
 
 extract_boost() {
-    local stamp="$BOOST_SOURCE_DIR/.torrent-app-sha256"
+    local legacy_stamp="$BOOST_SOURCE_DIR/.torrent-app-sha256"
+    local actual_tree
+    local recorded_tree
+    local source_matches_archive=0
 
-    if [[ -d "$BOOST_SOURCE_DIR" && -f "$stamp" && "$(cat "$stamp")" == "$BOOST_SHA256" ]]; then
-        return
+    if [[ -d "$BOOST_SOURCE_DIR" ]]; then
+        if [[ -f "$legacy_stamp" && ! -L "$legacy_stamp" \
+            && "$(cat "$legacy_stamp")" == "$BOOST_SHA256" ]]; then
+            source_matches_archive=1
+        elif [[ -f "$BOOST_SOURCE_STAMP" && ! -L "$BOOST_SOURCE_STAMP" ]] \
+            && grep -qx "boost-archive-sha256=$BOOST_SHA256" "$BOOST_SOURCE_STAMP"; then
+            source_matches_archive=1
+        fi
+
+        actual_tree="$("$BOOST_PATCH_HELPER" worktree-tree "$BOOST_SOURCE_DIR")" \
+            || fail "Could not inspect cached Boost source"
+        if [[ "$source_matches_archive" == "1" \
+            && ( "$actual_tree" == "$("$BOOST_PATCH_HELPER" base-tree)" \
+                || "$actual_tree" == "$("$BOOST_PATCH_HELPER" expected-tree)" ) ]]; then
+            "$BOOST_PATCH_HELPER" apply "$BOOST_SOURCE_DIR"
+            write_stamp "$BOOST_SOURCE_STAMP" boost_source_manifest "$BOOST_SOURCE_DIR"
+            rm -f -- "$legacy_stamp"
+            return
+        fi
+
+        if [[ -f "$BOOST_SOURCE_STAMP" && ! -L "$BOOST_SOURCE_STAMP" ]]; then
+            recorded_tree="$(awk -F= '$1 == "boost-patched-files-tree" { print $2 }' \
+                "$BOOST_SOURCE_STAMP")"
+        else
+            recorded_tree=""
+        fi
+        [[ -n "$recorded_tree" && "$actual_tree" == "$recorded_tree" ]] \
+            || fail "Refusing to replace cached Boost source with unexpected local changes: $BOOST_SOURCE_DIR"
     fi
 
     remove_dependency_path "$BOOST_SOURCE_DIR"
     mkdir -p "$BOOST_SOURCE_ROOT"
     tar -xzf "$BOOST_TARBALL" -C "$BOOST_SOURCE_ROOT"
-    print -r -- "$BOOST_SHA256" >"$stamp"
     require_path "$BOOST_SOURCE_DIR/boost/version.hpp" "Boost headers"
     require_path "$BOOST_SOURCE_DIR/LICENSE_1_0.txt" "Boost license"
+    "$BOOST_PATCH_HELPER" apply "$BOOST_SOURCE_DIR"
+    write_stamp "$BOOST_SOURCE_STAMP" boost_source_manifest "$BOOST_SOURCE_DIR"
 }
 
 install_boost_headers() {
     if [[ -f "$BOOST_PREFIX/include/boost/version.hpp" ]] && stamp_matches "$BOOST_HEADERS_STAMP" boost_headers_manifest "$BOOST_PREFIX"; then
+        "$BOOST_PATCH_HELPER" verify "$BOOST_PREFIX/include"
         return
     fi
 
@@ -886,6 +955,7 @@ install_boost_headers() {
     cp -R "$BOOST_SOURCE_DIR/boost" "$BOOST_PREFIX/include/"
     cp "$BOOST_SOURCE_DIR/LICENSE_1_0.txt" "$BOOST_PREFIX/share/licenses/boost/LICENSE_1_0.txt"
     write_stamp "$BOOST_HEADERS_STAMP" boost_headers_manifest "$BOOST_PREFIX"
+    "$BOOST_PATCH_HELPER" verify "$BOOST_PREFIX/include"
 }
 
 extract_openssl() {
@@ -1078,6 +1148,7 @@ build_libtorrent() {
     if [[ -f "$DEPS_PREFIX/lib/libtorrent-rasterbar.a" ]] && stamp_matches "$LIBTORRENT_BUILD_STAMP" libtorrent_build_manifest "$DEPS_PREFIX"; then
         verify_archive_arch "$DEPS_PREFIX/lib/libtorrent-rasterbar.a" "$TARGET_ARCH"
         verify_libtorrent_typed_allocation_coverage "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
+        verify_libtorrent_asio_operation_pac "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
         write_stamp "$LIBTORRENT_PROVENANCE" libtorrent_build_manifest "$DEPS_PREFIX"
         return
     fi
@@ -1135,6 +1206,7 @@ build_libtorrent() {
 
     verify_archive_arch "$DEPS_PREFIX/lib/libtorrent-rasterbar.a" "$TARGET_ARCH"
     verify_libtorrent_typed_allocation_coverage "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
+    verify_libtorrent_asio_operation_pac "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
     write_stamp "$LIBTORRENT_BUILD_STAMP" libtorrent_build_manifest "$DEPS_PREFIX"
     write_stamp "$LIBTORRENT_PROVENANCE" libtorrent_build_manifest "$DEPS_PREFIX"
 }
@@ -1147,6 +1219,9 @@ require_tool perl
 require_tool shasum
 require_tool tar
 require_path "$GPG" "GnuPG verifier"
+require_path "$BOOST_PATCH_HELPER" "Boost patch-series helper"
+[[ "$("$BOOST_PATCH_HELPER" version)" == "$BOOST_VERSION" ]] \
+    || fail "Boost patch-series version does not match BOOST_VERSION=$BOOST_VERSION"
 require_path "$OPENSSL_CC" "OpenSSL C compiler"
 require_path "$OPENSSL_CXX" "OpenSSL C++ compiler"
 require_path "$OPENSSL_AR" "OpenSSL archiver"

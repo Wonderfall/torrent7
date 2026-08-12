@@ -232,7 +232,7 @@ final class DependencyChecker {
             "# Dependency Check",
             "",
             "- Cooldown: \(cooldownDays) day\(cooldownDays == 1 ? "" : "s")",
-            "- Pins source: `Scripts/build-deps.zsh` and `Scripts/libtorrent-patch-series.sh`",
+            "- Pins source: `Scripts/build-deps.zsh`, `Scripts/boost-patch-series.sh`, and `Scripts/libtorrent-patch-series.sh`",
             ""
         ]
 

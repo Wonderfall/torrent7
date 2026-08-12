@@ -9,14 +9,17 @@ on:
       - "Package.swift"
       - "Scripts/analyze-bridge.zsh"
       - "Scripts/build-deps.zsh"
+      - "Scripts/boost-patch-series.sh"
       - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/verify-xcode.zsh"
       - "Scripts/keys/**"
       - "Scripts/patches/**"
       - "Scripts/test-bridge.zsh"
+      - "Scripts/test-boost-asio-pac.zsh"
       - "Scripts/test-libtorrent-security.zsh"
       - "Sources/TorrentBridge/**"
       - "Tests/TorrentBridgeTests/**"
+      - "Tests/DependencyHardening/**"
       - "ThirdParty/doctest/**"
   pull_request:
     types:
@@ -29,14 +32,17 @@ on:
       - "Package.swift"
       - "Scripts/analyze-bridge.zsh"
       - "Scripts/build-deps.zsh"
+      - "Scripts/boost-patch-series.sh"
       - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/verify-xcode.zsh"
       - "Scripts/keys/**"
       - "Scripts/patches/**"
       - "Scripts/test-bridge.zsh"
+      - "Scripts/test-boost-asio-pac.zsh"
       - "Scripts/test-libtorrent-security.zsh"
       - "Sources/TorrentBridge/**"
       - "Tests/TorrentBridgeTests/**"
+      - "Tests/DependencyHardening/**"
       - "ThirdParty/doctest/**"
   workflow_dispatch:
 
@@ -92,7 +98,7 @@ jobs:
           path: |
             .build/deps/source-cache
             .build/deps/arm64e
-          key: deps-arm64e-${{ env.XCODE_CACHE_KEY }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/verify-xcode.zsh', 'Scripts/keys/**', 'Scripts/patches/**') }}
+          key: deps-arm64e-${{ env.XCODE_CACHE_KEY }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/boost-patch-series.sh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/verify-xcode.zsh', 'Scripts/keys/**', 'Scripts/patches/**') }}
       - name: Build pinned dependencies
         shell: zsh {0}
         run: |

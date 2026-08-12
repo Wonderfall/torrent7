@@ -1,0 +1,77 @@
+diff --git a/boost/asio/detail/reactor_op.hpp b/boost/asio/detail/reactor_op.hpp
+index b19e5c04e..b9d494dc4 100644
+--- a/boost/asio/detail/reactor_op.hpp
++++ b/boost/asio/detail/reactor_op.hpp
+@@ -18,6 +18,10 @@
+ #include <boost/asio/detail/config.hpp>
+ #include <boost/asio/detail/operation.hpp>
+ 
++#if defined(__PTRAUTH__)
++# include <ptrauth.h>
++#endif // defined(__PTRAUTH__)
++
+ #include <boost/asio/detail/push_options.hpp>
+ 
+ namespace boost {
+@@ -50,6 +54,13 @@ public:
+ 
+ protected:
+   typedef status (*perform_func_type)(reactor_op*);
++#if defined(__PTRAUTH__)
++  using stored_perform_func_type = perform_func_type __ptrauth(
++      ptrauth_key_function_pointer, 1,
++      ptrauth_string_discriminator("boost.asio.reactor-operation.perform"));
++#else // defined(__PTRAUTH__)
++  typedef perform_func_type stored_perform_func_type;
++#endif // defined(__PTRAUTH__)
+ 
+   reactor_op(const boost::system::error_code& success_ec,
+       perform_func_type perform_func, func_type complete_func)
+@@ -62,7 +73,7 @@ protected:
+   }
+ 
+ private:
+-  perform_func_type perform_func_;
++  stored_perform_func_type perform_func_;
+ };
+ 
+ } // namespace detail
+diff --git a/boost/asio/detail/scheduler_operation.hpp b/boost/asio/detail/scheduler_operation.hpp
+index 74d2406ae..68d74f420 100644
+--- a/boost/asio/detail/scheduler_operation.hpp
++++ b/boost/asio/detail/scheduler_operation.hpp
+@@ -19,6 +19,10 @@
+ #include <boost/asio/detail/handler_tracking.hpp>
+ #include <boost/asio/detail/op_queue.hpp>
+ 
++#if defined(__PTRAUTH__)
++# include <ptrauth.h>
++#endif // defined(__PTRAUTH__)
++
+ #include <boost/asio/detail/push_options.hpp>
+ 
+ namespace boost {
+@@ -50,6 +54,14 @@ protected:
+   typedef void (*func_type)(void*,
+       scheduler_operation*,
+       const boost::system::error_code&, std::size_t);
++#if defined(__PTRAUTH__)
++  using stored_func_type = func_type __ptrauth(
++      ptrauth_key_function_pointer, 1,
++      ptrauth_string_discriminator(
++        "boost.asio.scheduler-operation.complete"));
++#else // defined(__PTRAUTH__)
++  typedef func_type stored_func_type;
++#endif // defined(__PTRAUTH__)
+ 
+   scheduler_operation(func_type func)
+     : next_(0),
+@@ -66,7 +78,7 @@ private:
+ private:
+   friend class op_queue_access;
+   scheduler_operation* next_;
+-  func_type func_;
++  stored_func_type func_;
+ protected:
+   friend class scheduler;
+   unsigned int task_result_; // Passed into bytes transferred.

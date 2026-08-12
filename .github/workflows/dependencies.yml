@@ -9,6 +9,7 @@ on:
     paths:
       - ".github/workflows/dependencies.yml"
       - "Scripts/build-deps.zsh"
+      - "Scripts/boost-patch-series.sh"
       - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/verify-xcode.zsh"
       - "Scripts/keys/**"
@@ -23,6 +24,7 @@ on:
     paths:
       - ".github/workflows/dependencies.yml"
       - "Scripts/build-deps.zsh"
+      - "Scripts/boost-patch-series.sh"
       - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/verify-xcode.zsh"
       - "Scripts/keys/**"
