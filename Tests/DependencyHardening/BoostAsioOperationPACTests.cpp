@@ -1,10 +1,8 @@
+#include "PointerAuthenticationFailureTestSupport.hpp"
+
 #include <boost/asio/detail/reactor_op.hpp>
 #include <boost/asio/detail/scheduler_operation.hpp>
 
-#include <sys/wait.h>
-#include <unistd.h>
-
-#include <cerrno>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -55,37 +53,6 @@ __attribute__((noinline)) void replay_object_bytes(
   std::memcpy(destination, source, size);
 }
 
-template <typename Function>
-bool replay_traps(Function function)
-{
-  const pid_t child = fork();
-  if (child == -1)
-  {
-    std::perror("fork");
-    return false;
-  }
-  if (child == 0)
-  {
-    function();
-    _exit(90);
-  }
-
-  int child_status = 0;
-  pid_t waited;
-  do
-  {
-    waited = waitpid(child, &child_status, 0);
-  }
-  while (waited == -1 && errno == EINTR);
-
-  if (waited == -1)
-  {
-    std::perror("waitpid");
-    return false;
-  }
-  return WIFSIGNALED(child_status);
-}
-
 } // namespace
 
 extern "C" __attribute__((noinline)) void torrent7_invoke_scheduler(
@@ -118,23 +85,26 @@ int main()
     return 1;
   }
 
-  if (!replay_traps([] {
+  using torrent7::test_support::PointerAuthenticationFailure;
+  using torrent7::test_support::replay_triggers_pointer_authentication_failure;
+
+  if (!replay_triggers_pointer_authentication_failure([] {
         scheduler_probe source;
         scheduler_probe destination;
         replay_object_bytes(&destination, &source, sizeof(source));
         destination.complete(nullptr, boost::system::error_code(), 0);
-      }))
+      }, PointerAuthenticationFailure::code_pointer))
   {
     std::fputs("scheduler callback replay was accepted\n", stderr);
     return 1;
   }
 
-  if (!replay_traps([] {
+  if (!replay_triggers_pointer_authentication_failure([] {
         reactor_probe source;
         reactor_probe destination;
         replay_object_bytes(&destination, &source, sizeof(source));
         static_cast<void>(destination.perform());
-      }))
+      }, PointerAuthenticationFailure::code_pointer))
   {
     std::fputs("reactor callback replay was accepted\n", stderr);
     return 1;

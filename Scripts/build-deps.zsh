@@ -709,29 +709,58 @@ verify_libtorrent_typed_allocation_coverage() {
         || fail "libtorrent has no typed global operator new[] import: $archive"
 }
 
-verify_libtorrent_asio_operation_pac() {
+verify_libtorrent_indirect_operation_pac() {
     local archive="$1"
     local disassembly
     local discriminator
 
     require_path "$archive" "libtorrent static archive"
-    make_temporary_file "$DEPS_DIR/libtorrent-asio-pac.txt"
+    make_temporary_file "$DEPS_DIR/libtorrent-indirect-operation-pac.txt"
     disassembly=$REPLY
     "$ARCH_LIPO" "$archive" -verify_arch arm64e \
         || fail "Boost.Asio PAC verification requires an arm64e libtorrent archive"
     /usr/bin/xcrun otool -tvV "$archive" >"$disassembly"
 
-    # AppleClang's pinned 16-bit string discriminators for
-    # scheduler-operation.complete and reactor-operation.perform respectively.
-    for discriminator in 0x8ab7 0xaf42; do
+    # AppleClang's pinned 16-bit string discriminators for the two Asio
+    # operation slots and libtorrent's chained-buffer destructor respectively.
+    for discriminator in 0x8ab7 0xaf42 0x89ff; do
         /usr/bin/awk -v discriminator="#$discriminator" '
-            /movk[[:space:]]+x17,/ && index($0, discriminator) { remaining = 4 }
-            remaining > 0 && /[[:space:]](braa|blraa)[[:space:]]/ { found = 1 }
+            /movk[[:space:]]+x[0-9]+,/ && index($0, discriminator) {
+                modifier = $3
+                sub(/,$/, "", modifier)
+                remaining = 4
+            }
+            remaining > 0 && /[[:space:]](braa|blraa)[[:space:]]/ \
+                && index($0, ", " modifier) { found = 1 }
             remaining > 0 { remaining-- }
             END { exit !found }
         ' "$disassembly" || fail \
-            "libtorrent has no address-diversified Asio callback branch for role $discriminator"
+            "libtorrent has no address-diversified indirect callback branch for role $discriminator"
     done
+
+    # heterogeneous_queue authenticates and re-signs the copied header before
+    # the eventual move callback, so its modifier can be live for longer.
+    /usr/bin/awk -v discriminator="#0xf073" '
+        /movk[[:space:]]+x[0-9]+,/ && index($0, discriminator) {
+            register = $3
+            sub(/,$/, "", register)
+            remaining[register] = 24
+        }
+        /[[:space:]](braa|blraa)[[:space:]]/ {
+            for (register in remaining) {
+                if (remaining[register] > 0 && index($0, ", " register))
+                    found = 1
+            }
+        }
+        {
+            for (register in remaining) {
+                if (remaining[register] > 0)
+                    remaining[register]--
+            }
+        }
+        END { exit !found }
+    ' "$disassembly" || fail \
+        "libtorrent has no address-diversified heterogeneous-queue move callback branch"
 }
 
 thin_archive_arch() {
@@ -1148,7 +1177,7 @@ build_libtorrent() {
     if [[ -f "$DEPS_PREFIX/lib/libtorrent-rasterbar.a" ]] && stamp_matches "$LIBTORRENT_BUILD_STAMP" libtorrent_build_manifest "$DEPS_PREFIX"; then
         verify_archive_arch "$DEPS_PREFIX/lib/libtorrent-rasterbar.a" "$TARGET_ARCH"
         verify_libtorrent_typed_allocation_coverage "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
-        verify_libtorrent_asio_operation_pac "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
+        verify_libtorrent_indirect_operation_pac "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
         write_stamp "$LIBTORRENT_PROVENANCE" libtorrent_build_manifest "$DEPS_PREFIX"
         return
     fi
@@ -1206,7 +1235,7 @@ build_libtorrent() {
 
     verify_archive_arch "$DEPS_PREFIX/lib/libtorrent-rasterbar.a" "$TARGET_ARCH"
     verify_libtorrent_typed_allocation_coverage "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
-    verify_libtorrent_asio_operation_pac "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
+    verify_libtorrent_indirect_operation_pac "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
     write_stamp "$LIBTORRENT_BUILD_STAMP" libtorrent_build_manifest "$DEPS_PREFIX"
     write_stamp "$LIBTORRENT_PROVENANCE" libtorrent_build_manifest "$DEPS_PREFIX"
 }

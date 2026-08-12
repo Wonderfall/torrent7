@@ -32,3 +32,5 @@ case $sanitizer_profile in
 esac
 
 swift run "${swift_run_args[@]}" TorrentBridgeTests "$@"
+"$root_dir/Scripts/verify-bridge-pac.zsh" \
+    "$scratch_path/arm64e-apple-macosx/$configuration/TorrentBridgeTests"

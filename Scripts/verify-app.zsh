@@ -109,6 +109,44 @@ reject_match() {
     fi
 }
 
+extract_disassembly_function() {
+    local -r input=$1
+    local -r symbol=$2
+    local -r output=$3
+
+    /usr/bin/awk -v label="$symbol:" '
+        index($0, label) == 1 { capture = 1; next }
+        capture && /^[^[:space:]][^:]*:$/ { exit }
+        capture { print }
+    ' "$input" >"$output"
+    [[ -s "$output" ]] || fail "Missing targeted PAC product function: $symbol"
+}
+
+verify_nearby_pac_instruction() {
+    local -r label=$1
+    local -r input=$2
+    local -r discriminator=$3
+    local -r instruction_kind=$4
+    local -r distance=$5
+
+    /usr/bin/awk -v discriminator="#$discriminator" \
+        -v instruction_kind="$instruction_kind" -v distance="$distance" '
+        /movk[[:space:]]+x[0-9]+,/ && index($0, discriminator) {
+            modifier = $3
+            sub(/,$/, "", modifier)
+            remaining = distance
+        }
+        remaining > 0 && instruction_kind == "callback" \
+            && /[[:space:]](braa|blraa)[[:space:]]/ \
+            && index($0, ", " modifier) { found = 1 }
+        remaining > 0 && instruction_kind == "data" \
+            && /[[:space:]]autdb[[:space:]]/ \
+            && index($0, ", " modifier) { found = 1 }
+        remaining > 0 { remaining-- }
+        END { exit !found }
+    ' "$input" || fail "$label lacks targeted PAC role $discriminator"
+}
+
 require_literal_line() {
     local -r value=$1
     local -r file=$2
@@ -519,6 +557,23 @@ require_match "[[:space:]]pacdb[[:space:]]" "$engine_text_output" \
     "Engine extension has no authenticated data-pointer signing"
 require_match "[[:space:]]autdb[[:space:]]" "$engine_text_output" \
     "Engine extension has no authenticated data-pointer use"
+typeset -r wake_pac_output="$temporary_dir/wake-pac.txt"
+typeset -r authorized_root_release_pac_output="$temporary_dir/authorized-root-release-pac.txt"
+extract_disassembly_function \
+    "$engine_text_output" \
+    "__ZN14torrent_bridge8internal14TTorrentClient20invoke_wake_callbackERKNS0_22WakeCallbackInvocationE" \
+    "$wake_pac_output"
+extract_disassembly_function \
+    "$engine_text_output" \
+    "__ZNK14torrent_bridge8internal12_GLOBAL__N_129AuthorizedRootLifetimeReleaseclEPv" \
+    "$authorized_root_release_pac_output"
+verify_nearby_pac_instruction wake.callback "$wake_pac_output" 0x9cc0 callback 40
+verify_nearby_pac_instruction wake.context "$wake_pac_output" 0x8cdb data 4
+verify_nearby_pac_instruction \
+    authorized-root.release "$authorized_root_release_pac_output" 0xc7ee callback 24
+verify_nearby_pac_instruction \
+    authorized-root.context "$authorized_root_release_pac_output" 0x2f9a data 4
+verify_nearby_pac_instruction authorized-root.retain "$engine_text_output" 0xca4d callback 4
 require_match "_malloc_type_malloc" "$engine_symbol_output" \
     "Engine extension has no typed malloc symbol"
 require_match "__ZnwmSt19__type_descriptor_t" "$engine_symbol_output" \

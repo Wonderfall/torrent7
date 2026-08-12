@@ -475,6 +475,7 @@ let package = Package(
                 "Tests/TorrentBridgeTests/BridgeHashAndSnapshotTests.cpp",
                 "Tests/TorrentBridgeTests/BridgeInputValidationTests.cpp",
                 "Tests/TorrentBridgeTests/BridgePersistenceTests.cpp",
+                "Tests/TorrentBridgeTests/BridgePointerAuthenticationTests.cpp",
                 "Tests/TorrentBridgeTests/BridgeSLSThunks.cpp",
                 "Tests/TorrentBridgeTests/BridgeStringTests.cpp",
                 "Tests/TorrentBridgeTests/BridgeUnderTest.cpp"
