@@ -69,9 +69,9 @@ namespace {
 
 [[nodiscard]] TTorrentSourceSecurityInspection inspect_magnet_sources(std::string const &magnet)
 {
-    TTorrentSourceSecurityInspection inspection{};
-    REQUIRE(TorrentBridgeInspectMagnetSources(magnet.c_str(), &inspection) == 0);
-    return inspection;
+    TTorrentSourceSecurityInspectionResult const result = TorrentBridgeInspectMagnetSources(magnet.c_str());
+    REQUIRE(result.status == 0);
+    return result.inspection;
 }
 
 void check_inspection_matches_native_parse(std::string const &magnet)
@@ -730,49 +730,43 @@ TEST_CASE("magnet source inspection enforces source count caps")
         too_many_trackers += "&tr=http://t/a";
     }
     REQUIRE(too_many_trackers.size() <= kMaxMagnetURIBytes);
-    TTorrentSourceSecurityInspection tracker_output{
-        .tracker_count = 1,
-        .https_tracker_count = 1,
-        .web_seed_count = 1,
-        .https_web_seed_count = 1
-    };
-    CHECK(TorrentBridgeInspectMagnetSources(too_many_trackers.c_str(), &tracker_output) == 2);
-    CHECK(tracker_output.tracker_count == 0);
-    CHECK(tracker_output.https_tracker_count == 0);
-    CHECK(tracker_output.web_seed_count == 0);
-    CHECK(tracker_output.https_web_seed_count == 0);
+    TTorrentSourceSecurityInspectionResult const tracker_result =
+        TorrentBridgeInspectMagnetSources(too_many_trackers.c_str());
+    CHECK(tracker_result.status == 2);
+    CHECK(tracker_result.inspection.tracker_count == 0);
+    CHECK(tracker_result.inspection.https_tracker_count == 0);
+    CHECK(tracker_result.inspection.web_seed_count == 0);
+    CHECK(tracker_result.inspection.https_web_seed_count == 0);
 
     std::string too_many_web_seeds = source_inspection_magnet();
     for (int32_t index = 0; index <= TTORRENT_MAX_WEB_SEED_COUNT; ++index) {
         too_many_web_seeds += "&ws=http://s/f";
     }
     REQUIRE(too_many_web_seeds.size() <= kMaxMagnetURIBytes);
-    TTorrentSourceSecurityInspection web_seed_output{};
-    CHECK(TorrentBridgeInspectMagnetSources(too_many_web_seeds.c_str(), &web_seed_output) == 2);
+    TTorrentSourceSecurityInspectionResult const web_seed_result =
+        TorrentBridgeInspectMagnetSources(too_many_web_seeds.c_str());
+    CHECK(web_seed_result.status == 2);
+    CHECK(web_seed_result.inspection.web_seed_count == 0);
 }
 
 TEST_CASE("magnet source inspection fails closed for invalid or oversized input")
 {
-    TTorrentSourceSecurityInspection output{
-        .tracker_count = 1,
-        .https_tracker_count = 1,
-        .web_seed_count = 1,
-        .https_web_seed_count = 1
-    };
-    CHECK(TorrentBridgeInspectMagnetSources("not-a-magnet", &output) == 2);
-    CHECK(output.tracker_count == 0);
-    CHECK(output.https_tracker_count == 0);
-    CHECK(output.web_seed_count == 0);
-    CHECK(output.https_web_seed_count == 0);
+    TTorrentSourceSecurityInspectionResult result = TorrentBridgeInspectMagnetSources("not-a-magnet");
+    CHECK(result.status == 2);
+    CHECK(result.inspection.tracker_count == 0);
+    CHECK(result.inspection.https_tracker_count == 0);
+    CHECK(result.inspection.web_seed_count == 0);
+    CHECK(result.inspection.https_web_seed_count == 0);
 
     std::string oversized = source_inspection_magnet();
     oversized.append(kMaxMagnetURIBytes, 'x');
-    CHECK(TorrentBridgeInspectMagnetSources(oversized.c_str(), &output) == 2);
-    CHECK(output.tracker_count == 0);
+    result = TorrentBridgeInspectMagnetSources(oversized.c_str());
+    CHECK(result.status == 2);
+    CHECK(result.inspection.tracker_count == 0);
 
-    CHECK(TorrentBridgeInspectMagnetSources(nullptr, &output) == 1);
-    CHECK(output.tracker_count == 0);
-    CHECK(TorrentBridgeInspectMagnetSources(source_inspection_magnet().c_str(), nullptr) == 1);
+    result = TorrentBridgeInspectMagnetSources(nullptr);
+    CHECK(result.status == 1);
+    CHECK(result.inspection.tracker_count == 0);
 }
 
 TEST_CASE("source validation rejects source lists above bridge limits")

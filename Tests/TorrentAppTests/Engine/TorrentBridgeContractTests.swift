@@ -6,7 +6,7 @@ import TorrentBridge
 struct TorrentBridgeContractTests {
     @Test("Pins bridge ABI version, limits, states, and dirty masks")
     func pinsBridgeConstants() {
-        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 40)
+        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 41)
         #expect(Int32(TTORRENT_BRIDGE_STATE_UNKNOWN) == -1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_CHECKING_FILES) == 1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_DOWNLOADING_METADATA) == 2)
@@ -100,6 +100,32 @@ struct TorrentBridgeContractTests {
         #expect(MemoryLayout<TTorrentAddOptions>.alignment == 1)
         #expect(MemoryLayout<TTorrentOptions>.size == 20)
         #expect(MemoryLayout<TTorrentOptions>.alignment == 4)
+        #expect(MemoryLayout<TTorrentSourceSecurityInspectionResult>.size == 20)
+        #expect(MemoryLayout<TTorrentSourceSecurityInspectionResult>.alignment == 4)
+        #expect(MemoryLayout<TTorrentSourceSecurityInspectionResult>.offset(of: \.inspection) == 4)
+        #expect(MemoryLayout<TTorrentSourcePolicyResult>.size == 16)
+        #expect(MemoryLayout<TTorrentSourcePolicyResult>.alignment == 4)
+        #expect(MemoryLayout<TTorrentSourcePolicyResult>.offset(of: \.policy) == 4)
+        #expect(MemoryLayout<TTorrentOptionsResult>.size == 24)
+        #expect(MemoryLayout<TTorrentOptionsResult>.alignment == 4)
+        #expect(MemoryLayout<TTorrentOptionsResult>.offset(of: \.options) == 4)
+        #expect(MemoryLayout<TTorrentWebSeedActivityResult>.size == 32)
+        #expect(MemoryLayout<TTorrentWebSeedActivityResult>.alignment == 8)
+        #expect(MemoryLayout<TTorrentWebSeedActivityResult>.offset(of: \.revision) == 8)
+        #expect(MemoryLayout<TTorrentWebSeedActivityResult>.offset(of: \.activity) == 16)
+        #expect(MemoryLayout<TTorrentPeerSourcesResult>.size == 56)
+        #expect(MemoryLayout<TTorrentPeerSourcesResult>.alignment == 8)
+        #expect(MemoryLayout<TTorrentPeerSourcesResult>.offset(of: \.revision) == 8)
+        #expect(MemoryLayout<TTorrentPeerSourcesResult>.offset(of: \.sources) == 16)
+        #expect(MemoryLayout<TTorrentRemovalReadResult>.size == 520)
+        #expect(MemoryLayout<TTorrentRemovalReadResult>.alignment == 4)
+        #expect(MemoryLayout<TTorrentRemovalReadResult>.offset(of: \.result) == 4)
+        #expect(MemoryLayout<TTorrentNetworkStatusResult>.size == 672)
+        #expect(MemoryLayout<TTorrentNetworkStatusResult>.alignment == 8)
+        #expect(MemoryLayout<TTorrentNetworkStatusResult>.offset(of: \.network_status) == 8)
+        #expect(MemoryLayout<TTorrentBridgeHealthResult>.size == 544)
+        #expect(MemoryLayout<TTorrentBridgeHealthResult>.alignment == 8)
+        #expect(MemoryLayout<TTorrentBridgeHealthResult>.offset(of: \.health) == 8)
         let authorizedSaveRootSize = MemoryLayout<TTorrentAuthorizedSaveRoot>.size
         let authorizedSaveRootAlignment = MemoryLayout<TTorrentAuthorizedSaveRoot>.alignment
         #expect(authorizedSaveRootSize == 32)
@@ -171,57 +197,32 @@ struct TorrentBridgeContractTests {
         #expect(revision == 0)
         #expect(requiredCount == 0)
 
-        var status = TTorrentNetworkStatus()
-        status.listen_port = 51_413
-        let copiedNetworkStatus = unsafe TorrentClientCopyNetworkStatus(nil, &status)
-        #expect(copiedNetworkStatus == 0)
-        #expect(status.listen_port == 0)
-        #expect(status.network_blocked == 0)
-        #expect(status.has_listener == 0)
+        let networkResult = TorrentClientCopyNetworkStatus(nil)
+        #expect(networkResult.status == 0)
+        #expect(networkResult.network_status.listen_port == 0)
+        #expect(networkResult.network_status.network_blocked == 0)
+        #expect(networkResult.network_status.has_listener == 0)
 
-        var health = TTorrentBridgeHealth()
-        health.total_alert_worker_failures = 7
-        health.consecutive_alert_worker_failures = 3
-        health.alert_worker_degraded = 1
-        let copiedHealth = unsafe TorrentClientCopyHealth(nil, &health)
-        #expect(copiedHealth == 0)
-        #expect(health.total_alert_worker_failures == 0)
-        #expect(health.consecutive_alert_worker_failures == 0)
-        #expect(health.alert_worker_degraded == 0)
-        let firstHealthErrorByte = unsafe withUnsafeBytes(of: health.last_alert_worker_error) { bytes in
+        let healthResult = TorrentClientCopyHealth(nil)
+        #expect(healthResult.status == 0)
+        #expect(healthResult.health.total_alert_worker_failures == 0)
+        #expect(healthResult.health.consecutive_alert_worker_failures == 0)
+        #expect(healthResult.health.alert_worker_degraded == 0)
+        let firstHealthErrorByte = unsafe withUnsafeBytes(of: healthResult.health.last_alert_worker_error) { bytes in
             unsafe bytes[0]
         }
         #expect(firstHealthErrorByte == 0)
 
-        var sourcePolicy = TTorrentSourcePolicy(
-            enable_dht: 1,
-            enable_peer_exchange: 1,
-            enable_lsd: 1,
-            require_https_trackers: 1,
-            require_https_web_seeds: 1,
-            dht_locked: 1,
-            peer_exchange_locked: 1,
-            lsd_locked: 1,
-            metadata_validation_pending: 1,
-            allow_pre_metadata_dht: 1
-        )
         var errorBuffer = BridgeErrorBuffer()
         errorBuffer.writeSentinel()
-        let copiedSourcePolicy = errorBuffer.withMutableBuffer { buffer in
-            unsafe TorrentClientCopySourcePolicy(nil, nil, &sourcePolicy, &buffer, Int32(buffer.count))
+        let sourcePolicyResult = errorBuffer.withMutableBuffer { buffer in
+            unsafe TorrentClientCopySourcePolicy(nil, nil, &buffer, Int32(buffer.count))
         }
-        #expect(copiedSourcePolicy == 1)
-        #expect(sourcePolicy.enable_dht == 0)
-        #expect(sourcePolicy.enable_peer_exchange == 0)
-        #expect(sourcePolicy.enable_lsd == 0)
-        #expect(sourcePolicy.require_https_trackers == 0)
-        #expect(sourcePolicy.require_https_web_seeds == 0)
-        #expect(sourcePolicy.dht_locked == 0)
-        #expect(sourcePolicy.peer_exchange_locked == 0)
-        #expect(sourcePolicy.lsd_locked == 0)
-        #expect(sourcePolicy.metadata_validation_pending == 0)
-        #expect(sourcePolicy.allow_pre_metadata_dht == 0)
-        #expect(errorBuffer.string == "Missing torrent client, torrent id, or source policy.")
+        #expect(sourcePolicyResult.status == 1)
+        #expect(sourcePolicyResult.policy.enable_dht == 0)
+        #expect(sourcePolicyResult.policy.enable_peer_exchange == 0)
+        #expect(sourcePolicyResult.policy.enable_lsd == 0)
+        #expect(errorBuffer.string == "Missing torrent client or torrent id.")
 
         errorBuffer.writeSentinel()
         let setSourcePolicy = errorBuffer.withMutableBuffer { buffer in
@@ -237,14 +238,17 @@ struct TorrentBridgeContractTests {
         #expect(setSourcePolicy == 1)
         #expect(errorBuffer.string == "Missing torrent client or torrent id.")
 
-        var activity = TTorrentWebSeedActivitySnapshot(active_count: 3, download_rate: 4, total_download: 5)
-        revision = UInt64.max
-        let copiedWebSeedActivity = unsafe TorrentClientCopyWebSeedActivity(nil, nil, &activity, &revision)
-        #expect(copiedWebSeedActivity == 0)
-        #expect(activity.active_count == 0)
-        #expect(activity.download_rate == 0)
-        #expect(activity.total_download == 0)
-        #expect(revision == 0)
+        let webSeedActivityResult = TorrentClientCopyWebSeedActivity(nil, nil)
+        #expect(webSeedActivityResult.status == 0)
+        #expect(webSeedActivityResult.activity.active_count == 0)
+        #expect(webSeedActivityResult.activity.download_rate == 0)
+        #expect(webSeedActivityResult.activity.total_download == 0)
+        #expect(webSeedActivityResult.revision == 0)
+
+        let peerSourcesResult = TorrentClientCopyPeerSources(nil, nil)
+        #expect(peerSourcesResult.status == 0)
+        #expect(peerSourcesResult.sources.connected == 0)
+        #expect(peerSourcesResult.revision == 0)
 
         var pieceMap = TTorrentPieceMapSnapshot(
             total_pieces: 12,
@@ -325,12 +329,12 @@ struct TorrentBridgeContractTests {
 
         #expect(previewResult != 0)
 
-        var settings = TTorrentSessionSettings()
+        let settings = TTorrentSessionSettings()
         let interfaceStorage = "utun4".utf8.map { CChar(bitPattern: $0) }
         let interface: Span<CChar>? = interfaceStorage.span
-        let settingsResult = unsafe TorrentClientApplySettings(
+        let settingsResult = TorrentClientApplySettings(
             nil,
-            &settings,
+            settings,
             interface,
             &error
         )
@@ -343,7 +347,7 @@ struct TorrentBridgeContractTests {
         var addOutcome = Int32.max
         expectBridgeError(
             code: 1,
-            message: "Missing torrent client, magnet URI, save path, add options, or add outcome output."
+            message: "Missing torrent client, magnet URI, save path, or add outcome output."
         ) { errorBuffer, capacity in
             var addedID = Array<CChar>(repeating: 1, count: Int(TTORRENT_ID_CAPACITY))
             return unsafe addedID.withUnsafeMutableBufferPointer { addedIDBuffer in
@@ -351,7 +355,7 @@ struct TorrentBridgeContractTests {
                     nil,
                     nil,
                     nil,
-                    nil,
+                    TTorrentAddOptions(),
                     addedIDBuffer.baseAddress,
                     Int32(addedIDBuffer.count),
                     &addOutcome,
@@ -553,15 +557,15 @@ private func emptyClientSmokeResult(statePath: String) -> EmptyClientSmokeResult
     }
     result.blockNetworkError = blockNetworkErrorBuffer.string
 
-    var status = TTorrentNetworkStatus()
-    result.copiedNetworkStatus = unsafe TorrentClientCopyNetworkStatus(client, &status)
-    result.networkBlocked = status.network_blocked != 0
+    let networkResult = unsafe TorrentClientCopyNetworkStatus(client)
+    result.copiedNetworkStatus = networkResult.status
+    result.networkBlocked = networkResult.network_status.network_blocked != 0
 
-    var health = TTorrentBridgeHealth()
-    result.copiedHealth = unsafe TorrentClientCopyHealth(client, &health)
-    result.bridgeHealthIsHealthy = health.total_alert_worker_failures == 0
-        && health.consecutive_alert_worker_failures == 0
-        && health.alert_worker_degraded == 0
+    let healthResult = unsafe TorrentClientCopyHealth(client)
+    result.copiedHealth = healthResult.status
+    result.bridgeHealthIsHealthy = healthResult.health.total_alert_worker_failures == 0
+        && healthResult.health.consecutive_alert_worker_failures == 0
+        && healthResult.health.alert_worker_degraded == 0
 
     var revision: UInt64 = UInt64.max
     var requiredCount: Int32 = -1

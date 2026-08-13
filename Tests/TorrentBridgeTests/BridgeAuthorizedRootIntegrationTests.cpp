@@ -298,7 +298,7 @@ struct TorrentFixture {
         bridge_tests::byte_data(fixture.metainfo),
         static_cast<std::int32_t>(fixture.metainfo.size()),
         save_path.c_str(),
-        &options,
+        options,
         &skipped_file,
         1,
         added_id.data(),
@@ -443,20 +443,20 @@ void exercise_confined_storage_and_destroy(
     REQUIRE(bridge_bool(removal_committed));
     REQUIRE(removal_token != 0U);
 
-    TTorrentRemovalResult terminal_result{};
+    TTorrentRemovalReadResult terminal_read{};
     REQUIRE(eventually([&] {
         client->pump_alerts();
         error.fill('\0');
-        return TorrentClientTakeRemovalResult(
+        terminal_read = TorrentClientTakeRemovalResult(
             client,
             removal_token,
-            &terminal_result,
             error.data(),
             static_cast<std::int32_t>(error.size())
-        ) == 0 && terminal_result.state != TTORRENT_REMOVAL_PENDING;
+        );
+        return terminal_read.status == 0 && terminal_read.result.state != TTORRENT_REMOVAL_PENDING;
     }));
     INFO(error.data());
-    CHECK(terminal_result.state == TTORRENT_REMOVAL_SUCCEEDED);
+    CHECK(terminal_read.result.state == TTORRENT_REMOVAL_SUCCEEDED);
     CHECK_FALSE(file_exists(retained_renamed));
     CHECK_FALSE(file_exists(retained_partfile));
     CHECK(bridge_tests::read_text_file(decoy_payload) == "decoy-payload");

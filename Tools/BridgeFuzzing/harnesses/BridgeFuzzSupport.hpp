@@ -28,7 +28,7 @@ namespace bridge_fuzz {
 
 namespace fs = std::filesystem;
 
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 40, "Update the fuzz harnesses for the current TorrentBridge ABI.");
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 41, "Update the fuzz harnesses for the current TorrentBridge ABI.");
 #if !defined(TORRENT_USE_ASSERTS) || !TORRENT_USE_ASSERTS
 #error "Fuzz consumers must match the assertion-enabled Debug libtorrent archive."
 #endif
@@ -475,13 +475,8 @@ inline void exercise_change_copy(TTorrentClient *client)
     static_cast<void>(TorrentClientTakeChanges(client, nullptr));
     static_cast<void>(TorrentClientTakeChanges(client, &dirty_mask));
 
-    TTorrentNetworkStatus status{};
-    static_cast<void>(TorrentClientCopyNetworkStatus(client, nullptr));
-    static_cast<void>(TorrentClientCopyNetworkStatus(client, &status));
-
-    TTorrentBridgeHealth health{};
-    static_cast<void>(TorrentClientCopyHealth(client, nullptr));
-    static_cast<void>(TorrentClientCopyHealth(client, &health));
+    static_cast<void>(TorrentClientCopyNetworkStatus(client));
+    static_cast<void>(TorrentClientCopyHealth(client));
 }
 
 inline void exercise_snapshot_copy(TTorrentClient *client)
@@ -565,9 +560,6 @@ inline void exercise_detail_copies(TTorrentClient *client)
         std::array<TTorrentTrackerSnapshot, 8> trackers{};
         std::array<TTorrentWebSeedSnapshot, 8> web_seeds{};
         std::array<TTorrentFileSnapshot, 16> files{};
-        TTorrentWebSeedActivitySnapshot activity{};
-        TTorrentPeerSourceSnapshot peer_sources{};
-        TTorrentSourcePolicy policy{};
         TTorrentOptions options{};
         TTorrentPieceMapSnapshot piece_map{};
         std::array<std::uint8_t, 256> pieces{};
@@ -575,8 +567,7 @@ inline void exercise_detail_copies(TTorrentClient *client)
         int32_t required_count = 0;
         std::uint8_t resident = 0;
 
-        static_cast<void>(TorrentClientCopySourcePolicy(client, id.c_str(), nullptr, error.data(), error.capacity()));
-        static_cast<void>(TorrentClientCopySourcePolicy(client, id.c_str(), &policy, error.data(), error.capacity()));
+        static_cast<void>(TorrentClientCopySourcePolicy(client, id.c_str(), error.data(), error.capacity()));
         static_cast<void>(TorrentClientSetSourcePolicyField(
             client,
             id.c_str(),
@@ -585,9 +576,8 @@ inline void exercise_detail_copies(TTorrentClient *client)
             error.data(),
             error.capacity()
         ));
-        static_cast<void>(TorrentClientCopyTorrentOptions(client, id.c_str(), nullptr, error.data(), error.capacity()));
-        static_cast<void>(TorrentClientCopyTorrentOptions(client, id.c_str(), &options, error.data(), error.capacity()));
-        static_cast<void>(TorrentClientSetTorrentOptions(client, id.c_str(), &options, error.data(), error.capacity()));
+        static_cast<void>(TorrentClientCopyTorrentOptions(client, id.c_str(), error.data(), error.capacity()));
+        static_cast<void>(TorrentClientSetTorrentOptions(client, id.c_str(), options, error.data(), error.capacity()));
         static_cast<void>(TorrentClientCopyTrackerBatch(
             client,
             id.c_str(),
@@ -624,10 +614,8 @@ inline void exercise_detail_copies(TTorrentClient *client)
             &required_count,
             &resident
         ));
-        static_cast<void>(TorrentClientCopyWebSeedActivity(client, id.c_str(), nullptr, &revision));
-        static_cast<void>(TorrentClientCopyWebSeedActivity(client, id.c_str(), &activity, &revision));
-        static_cast<void>(TorrentClientCopyPeerSources(client, id.c_str(), nullptr, &revision));
-        static_cast<void>(TorrentClientCopyPeerSources(client, id.c_str(), &peer_sources, &revision));
+        static_cast<void>(TorrentClientCopyWebSeedActivity(client, id.c_str()));
+        static_cast<void>(TorrentClientCopyPeerSources(client, id.c_str()));
         static_cast<void>(TorrentClientRequestPieceMap(client, id.c_str(), error.data(), error.capacity()));
         static_cast<void>(TorrentClientCopyPieceMap(
             client,

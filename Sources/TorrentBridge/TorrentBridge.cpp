@@ -1649,18 +1649,14 @@ extern "C" const char *TorrentBridgeLibtorrentVersion(void) noexcept
     return LIBTORRENT_VERSION;
 }
 
-extern "C" int32_t TorrentBridgeInspectMagnetSources(
-    const char *magnet_uri,
-    TTorrentSourceSecurityInspection *inspection
+extern "C" TTorrentSourceSecurityInspectionResult TorrentBridgeInspectMagnetSources(
+    const char *magnet_uri
 ) noexcept
 {
-    if (inspection != nullptr) {
-        *inspection = {};
-    }
-
-    return run_bridge_operation({}, 3, [&]() -> BridgeResult {
-        if (magnet_uri == nullptr || inspection == nullptr) {
-            return bridge_error(1, "Missing magnet URI or source inspection output.");
+    TTorrentSourceSecurityInspectionResult output{};
+    output.status = run_bridge_operation({}, 3, [&]() -> BridgeResult {
+        if (magnet_uri == nullptr) {
+            return bridge_error(1, "Missing magnet URI.");
         }
 
         TorrentLoadResult parsed = parse_sanitized_magnet(c_string_view(magnet_uri));
@@ -1673,9 +1669,10 @@ extern "C" int32_t TorrentBridgeInspectMagnetSources(
             return valid_sources;
         }
 
-        *inspection = torrent_source_counts(*parsed);
+        output.inspection = torrent_source_counts(*parsed);
         return {};
     });
+    return output;
 }
 
 extern "C" TTorrentClient *TorrentClientCreateWithError(
@@ -1854,7 +1851,7 @@ extern "C" uint64_t TorrentClientTakeChanges(TTorrentClient *client, uint32_t *d
 }
 
 extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *magnet_uri, const char *save_path,
-                                          const TTorrentAddOptions *options,
+                                          TTorrentAddOptions options,
                                           char *added_id_out, int32_t added_id_capacity,
                                           int32_t *add_outcome_out,
                                           char *error_out, int32_t error_capacity) noexcept
@@ -1866,11 +1863,10 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
     std::span<char> const added_id_buffer = output_buffer(added_id_out, added_id_capacity);
     copy_string_dynamic(added_id_buffer, "");
     int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 4, [&]() -> BridgeResult {
-        if (client == nullptr || magnet_uri == nullptr || save_path == nullptr || options == nullptr
-            || add_outcome_out == nullptr) {
-            return bridge_error(1, "Missing torrent client, magnet URI, save path, add options, or add outcome output.");
+        if (client == nullptr || magnet_uri == nullptr || save_path == nullptr || add_outcome_out == nullptr) {
+            return bridge_error(1, "Missing torrent client, magnet URI, save path, or add outcome output.");
         }
-        TTorrentAddOptions const add_options = *options;
+        TTorrentAddOptions const &add_options = options;
         std::string_view const magnet = c_string_view(magnet_uri);
         if (magnet.size() > kMaxMagnetURIBytes) {
             return bridge_error(2, "The magnet link is too large.");
@@ -2149,7 +2145,7 @@ template <typename LoadTorrent>
 int32_t add_torrent_file_data_with_priorities(
     TTorrentClient *client,
     const char *save_path,
-    const TTorrentAddOptions *options,
+    TTorrentAddOptions const &options,
     bool apply_file_priority_overrides,
     const TTorrentFilePriorityEntry *file_priorities,
     int32_t file_priority_count,
@@ -2168,10 +2164,10 @@ int32_t add_torrent_file_data_with_priorities(
     std::span<char> const added_id_buffer = output_buffer(added_id_out, added_id_capacity);
     copy_string_dynamic(added_id_buffer, "");
     int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 3, [&]() -> BridgeResult {
-        if (client == nullptr || save_path == nullptr || options == nullptr || add_outcome_out == nullptr) {
-            return bridge_error(1, "Missing torrent client, save path, add options, or add outcome output.");
+        if (client == nullptr || save_path == nullptr || add_outcome_out == nullptr) {
+            return bridge_error(1, "Missing torrent client, save path, or add outcome output.");
         }
-        TTorrentAddOptions const add_options = *options;
+        TTorrentAddOptions const &add_options = options;
         if (file_priority_count < 0) {
             return bridge_error(1, "Invalid file priority count.");
         }
@@ -2422,7 +2418,7 @@ extern "C" int32_t TorrentClientAddTorrentFileData(
     std::uint8_t const *torrent_data,
     int32_t torrent_data_size,
     const char *save_path,
-    const TTorrentAddOptions *options,
+    TTorrentAddOptions options,
     char *added_id_out,
     int32_t added_id_capacity,
     int32_t *add_outcome_out,
@@ -2453,7 +2449,7 @@ extern "C" int32_t TorrentClientAddTorrentFileDataWithPriorities(
     std::uint8_t const *torrent_data,
     int32_t torrent_data_size,
     const char *save_path,
-    const TTorrentAddOptions *options,
+    TTorrentAddOptions options,
     const TTorrentFilePriorityEntry *file_priorities,
     int32_t file_priority_count,
     char *added_id_out,
@@ -2604,21 +2600,17 @@ extern "C" int32_t TorrentClientRequestSources(
     return result;
 }
 
-extern "C" int32_t TorrentClientCopySourcePolicy(
+extern "C" TTorrentSourcePolicyResult TorrentClientCopySourcePolicy(
     TTorrentClient *client,
     const char *torrent_id,
-    TTorrentSourcePolicy *policy,
     char *error_out,
     int32_t error_capacity
 ) noexcept
 {
-    if (policy != nullptr) {
-        *policy = TTorrentSourcePolicy{};
-    }
-
-    return run_bridge_operation(output_buffer(error_out, error_capacity), 2, [&]() -> BridgeResult {
-        if (client == nullptr || torrent_id == nullptr || policy == nullptr) {
-            return bridge_error(1, "Missing torrent client, torrent id, or source policy.");
+    TTorrentSourcePolicyResult output{};
+    output.status = run_bridge_operation(output_buffer(error_out, error_capacity), 2, [&]() -> BridgeResult {
+        if (client == nullptr || torrent_id == nullptr) {
+            return bridge_error(1, "Missing torrent client or torrent id.");
         }
 
         std::scoped_lock guard(client->lock);
@@ -2627,9 +2619,10 @@ extern "C" int32_t TorrentClientCopySourcePolicy(
             return bridge_error(2, "Torrent not found.");
         }
 
-        *policy = client->source_policy(*handle, identity_from_handle(*handle));
+        output.policy = client->source_policy(*handle, identity_from_handle(*handle));
         return {};
     });
+    return output;
 }
 
 extern "C" int32_t TorrentClientSetSourcePolicyField(
@@ -2710,21 +2703,17 @@ extern "C" int32_t TorrentClientSetSourcePolicyField(
     return result;
 }
 
-extern "C" int32_t TorrentClientCopyTorrentOptions(
+extern "C" TTorrentOptionsResult TorrentClientCopyTorrentOptions(
     TTorrentClient *client,
     const char *torrent_id,
-    TTorrentOptions *options,
     char *error_out,
     int32_t error_capacity
 ) noexcept
 {
-    if (options != nullptr) {
-        *options = TTorrentOptions{};
-    }
-
-    return run_bridge_operation(output_buffer(error_out, error_capacity), 2, [&]() -> BridgeResult {
-        if (client == nullptr || torrent_id == nullptr || options == nullptr) {
-            return bridge_error(1, "Missing torrent client, torrent id, or options.");
+    TTorrentOptionsResult output{};
+    output.status = run_bridge_operation(output_buffer(error_out, error_capacity), 2, [&]() -> BridgeResult {
+        if (client == nullptr || torrent_id == nullptr) {
+            return bridge_error(1, "Missing torrent client or torrent id.");
         }
 
         std::scoped_lock guard(client->lock);
@@ -2734,36 +2723,37 @@ extern "C" int32_t TorrentClientCopyTorrentOptions(
         }
 
         TorrentIdentity const *identity = identity_from_handle(*handle);
-        options->download_rate_limit = handle->download_limit();
-        options->upload_rate_limit = handle->upload_limit();
-        options->max_uploads = normalized_torrent_count_limit(handle->max_uploads());
-        options->max_connections = normalized_torrent_count_limit(handle->max_connections());
-        options->queue_priority = identity == nullptr ? TTORRENT_QUEUE_PRIORITY_NORMAL : identity->queue_priority;
+        output.options.download_rate_limit = handle->download_limit();
+        output.options.upload_rate_limit = handle->upload_limit();
+        output.options.max_uploads = normalized_torrent_count_limit(handle->max_uploads());
+        output.options.max_connections = normalized_torrent_count_limit(handle->max_connections());
+        output.options.queue_priority = identity == nullptr ? TTORRENT_QUEUE_PRIORITY_NORMAL : identity->queue_priority;
         return {};
     });
+    return output;
 }
 
 extern "C" int32_t TorrentClientSetTorrentOptions(
     TTorrentClient *client,
     const char *torrent_id,
-    const TTorrentOptions *options,
+    TTorrentOptions options,
     char *error_out,
     int32_t error_capacity
 ) noexcept
 {
     WakeCallbackInvocation wake;
     int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 2, [&]() -> BridgeResult {
-        if (client == nullptr || torrent_id == nullptr || options == nullptr) {
-            return bridge_error(1, "Missing torrent client, torrent id, or options.");
+        if (client == nullptr || torrent_id == nullptr) {
+            return bridge_error(1, "Missing torrent client or torrent id.");
         }
-        if (options->download_rate_limit < -1 || options->upload_rate_limit < -1) {
+        if (options.download_rate_limit < -1 || options.upload_rate_limit < -1) {
             return bridge_error(1, "Torrent rate limits must be unlimited or nonnegative.");
         }
-        if (!is_valid_torrent_count_limit(options->max_uploads)
-            || !is_valid_torrent_count_limit(options->max_connections)) {
+        if (!is_valid_torrent_count_limit(options.max_uploads)
+            || !is_valid_torrent_count_limit(options.max_connections)) {
             return bridge_error(1, "Torrent count limits must be unlimited or at least 2.");
         }
-        if (!is_valid_queue_priority(options->queue_priority)) {
+        if (!is_valid_queue_priority(options.queue_priority)) {
             return bridge_error(1, "Invalid queue priority.");
         }
 
@@ -2783,23 +2773,23 @@ extern "C" int32_t TorrentClientSetTorrentOptions(
             return bridge_error(2, "Torrent identity not found.");
         }
 
-        if (handle->download_limit() != options->download_rate_limit) {
-            handle->set_download_limit(options->download_rate_limit);
+        if (handle->download_limit() != options.download_rate_limit) {
+            handle->set_download_limit(options.download_rate_limit);
         }
-        if (handle->upload_limit() != options->upload_rate_limit) {
-            handle->set_upload_limit(options->upload_rate_limit);
+        if (handle->upload_limit() != options.upload_rate_limit) {
+            handle->set_upload_limit(options.upload_rate_limit);
         }
-        if (normalized_torrent_count_limit(handle->max_uploads()) != options->max_uploads) {
-            handle->set_max_uploads(options->max_uploads);
+        if (normalized_torrent_count_limit(handle->max_uploads()) != options.max_uploads) {
+            handle->set_max_uploads(options.max_uploads);
         }
-        if (normalized_torrent_count_limit(handle->max_connections()) != options->max_connections) {
-            handle->set_max_connections(options->max_connections);
+        if (normalized_torrent_count_limit(handle->max_connections()) != options.max_connections) {
+            handle->set_max_connections(options.max_connections);
         }
         std::vector<lt::torrent_handle> queue_handles_to_save;
         bool queue_priority_changed = false;
-        if (identity->queue_priority != options->queue_priority) {
+        if (identity->queue_priority != options.queue_priority) {
             client->invalidate_queue_order_index_locked();
-            identity->queue_priority = options->queue_priority;
+            identity->queue_priority = options.queue_priority;
             identity->queue_rank = kUnsetQueueRank;
             queue_handles_to_save = client->apply_queue_priority_order_locked();
             queue_priority_changed = true;
@@ -2967,46 +2957,48 @@ extern "C" int32_t TorrentClientCopyWebSeedBatch(TTorrentClient *client, const c
     }
 }
 
-extern "C" int32_t TorrentClientCopyWebSeedActivity(TTorrentClient *client, const char *torrent_id,
-                                                    TTorrentWebSeedActivitySnapshot *activity,
-                                                    uint64_t *revision_out) noexcept
+extern "C" TTorrentWebSeedActivityResult TorrentClientCopyWebSeedActivity(
+    TTorrentClient *client,
+    const char *torrent_id
+) noexcept
 {
-    if (activity != nullptr) {
-        *activity = TTorrentWebSeedActivitySnapshot{};
-    }
-    if (revision_out != nullptr) {
-        *revision_out = 0;
-    }
+    TTorrentWebSeedActivityResult output{};
     if (client == nullptr || torrent_id == nullptr) {
-        return 0;
+        return output;
     }
 
     try {
-        return client->copy_web_seed_activity(std::string(c_string_view(torrent_id)), activity, revision_out) ? 1 : 0;
+        output.status = client->copy_web_seed_activity(
+            std::string(c_string_view(torrent_id)),
+            &output.activity,
+            &output.revision
+        ) ? 1 : 0;
     } catch (...) {
-        return 0;
+        output = {};
     }
+    return output;
 }
 
-extern "C" int32_t TorrentClientCopyPeerSources(TTorrentClient *client, const char *torrent_id,
-                                                TTorrentPeerSourceSnapshot *sources,
-                                                uint64_t *revision_out) noexcept
+extern "C" TTorrentPeerSourcesResult TorrentClientCopyPeerSources(
+    TTorrentClient *client,
+    const char *torrent_id
+) noexcept
 {
-    if (sources != nullptr) {
-        *sources = TTorrentPeerSourceSnapshot{};
-    }
-    if (revision_out != nullptr) {
-        *revision_out = 0;
-    }
+    TTorrentPeerSourcesResult output{};
     if (client == nullptr || torrent_id == nullptr) {
-        return 0;
+        return output;
     }
 
     try {
-        return client->copy_peer_sources(std::string(c_string_view(torrent_id)), sources, revision_out) ? 1 : 0;
+        output.status = client->copy_peer_sources(
+            std::string(c_string_view(torrent_id)),
+            &output.sources,
+            &output.revision
+        ) ? 1 : 0;
     } catch (...) {
-        return 0;
+        output = {};
     }
+    return output;
 }
 
 extern "C" int32_t TorrentClientRequestFiles(TTorrentClient *client, const char *torrent_id, char *error_out,
@@ -3390,26 +3382,28 @@ extern "C" int32_t TorrentClientRemove(TTorrentClient *client, const char *torre
     return result;
 }
 
-extern "C" int32_t TorrentClientTakeRemovalResult(TTorrentClient *client, std::uint64_t request_token,
-                                                   TTorrentRemovalResult *result, char *error_out,
-                                                   int32_t error_capacity) noexcept
+extern "C" TTorrentRemovalReadResult TorrentClientTakeRemovalResult(
+    TTorrentClient *client,
+    std::uint64_t request_token,
+    char *error_out,
+    int32_t error_capacity
+) noexcept
 {
-    if (result != nullptr) {
-        *result = {};
-    }
-    return run_bridge_operation(output_buffer(error_out, error_capacity), 3, [&]() -> BridgeResult {
-        if (client == nullptr || result == nullptr) {
-            return bridge_error(1, "Missing torrent client or removal result output.");
+    TTorrentRemovalReadResult output{};
+    output.status = run_bridge_operation(output_buffer(error_out, error_capacity), 3, [&]() -> BridgeResult {
+        if (client == nullptr) {
+            return bridge_error(1, "Missing torrent client.");
         }
 
         std::scoped_lock guard(client->lock);
-        return client->take_removal_result(request_token, result);
+        return client->take_removal_result(request_token, &output.result);
     });
+    return output;
 }
 
 extern "C" int32_t TorrentClientApplySettings(
     TTorrentClient *client,
-    TTorrentSessionSettings const *requested,
+    TTorrentSessionSettings requested,
     char const *required_network_interface,
     int32_t required_network_interface_size,
     char *error_out,
@@ -3418,8 +3412,8 @@ extern "C" int32_t TorrentClientApplySettings(
 {
     WakeCallbackInvocation wake;
     int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 2, [&]() -> BridgeResult {
-        if (client == nullptr || requested == nullptr) {
-            return bridge_error(1, "Missing torrent client or settings.");
+        if (client == nullptr) {
+            return bridge_error(1, "Missing torrent client.");
         }
         bool const has_network_interface = required_network_interface != nullptr;
         bool const has_network_interface_bytes = required_network_interface_size != 0;
@@ -3437,25 +3431,25 @@ extern "C" int32_t TorrentClientApplySettings(
             network_interface_bytes.begin(),
             network_interface_bytes.end()
         );
-        bool const accept_incoming_connections = bridge_bool(requested->accept_incoming_connections);
-        bool const enable_port_forwarding = bridge_bool(requested->enable_port_forwarding);
-        bool const enable_dht = bridge_bool(requested->enable_dht);
-        bool const use_dht_by_default = bridge_bool(requested->use_dht_by_default);
-        bool const enable_lsd = bridge_bool(requested->enable_lsd);
-        bool const use_lsd_by_default = bridge_bool(requested->use_lsd_by_default);
-        bool const use_pex_by_default = bridge_bool(requested->use_pex_by_default);
-        bool const require_https_trackers = bridge_bool(requested->require_https_trackers);
-        bool const require_https_web_seeds = bridge_bool(requested->require_https_web_seeds);
-        bool const anonymous_mode = bridge_bool(requested->anonymous_mode);
-        bool const network_blocked = bridge_bool(requested->network_blocked);
-        if (!is_valid_encryption_policy(requested->encryption_policy)) {
+        bool const accept_incoming_connections = bridge_bool(requested.accept_incoming_connections);
+        bool const enable_port_forwarding = bridge_bool(requested.enable_port_forwarding);
+        bool const enable_dht = bridge_bool(requested.enable_dht);
+        bool const use_dht_by_default = bridge_bool(requested.use_dht_by_default);
+        bool const enable_lsd = bridge_bool(requested.enable_lsd);
+        bool const use_lsd_by_default = bridge_bool(requested.use_lsd_by_default);
+        bool const use_pex_by_default = bridge_bool(requested.use_pex_by_default);
+        bool const require_https_trackers = bridge_bool(requested.require_https_trackers);
+        bool const require_https_web_seeds = bridge_bool(requested.require_https_web_seeds);
+        bool const anonymous_mode = bridge_bool(requested.anonymous_mode);
+        bool const network_blocked = bridge_bool(requested.network_blocked);
+        if (!is_valid_encryption_policy(requested.encryption_policy)) {
             return bridge_error(1, "Invalid encryption policy.");
         }
         if (!network_blocked) {
             static_cast<void>(network_binding(network_interface));
         }
         std::string const listen_interface_settings =
-            listen_interfaces(requested->incoming_port, network_interface, network_blocked);
+            listen_interfaces(requested.incoming_port, network_interface, network_blocked);
         std::string const outgoing_interface_settings =
             outgoing_interfaces(network_interface, network_blocked);
 
@@ -3490,14 +3484,14 @@ extern "C" int32_t TorrentClientApplySettings(
         lt::settings_pack settings;
         settings.set_str(lt::settings_pack::listen_interfaces, listen_interface_settings);
         settings.set_str(lt::settings_pack::outgoing_interfaces, outgoing_interface_settings);
-        settings.set_int(lt::settings_pack::download_rate_limit, requested->download_rate_limit);
-        settings.set_int(lt::settings_pack::upload_rate_limit, requested->upload_rate_limit);
-        settings.set_int(lt::settings_pack::active_downloads, requested->active_downloads);
-        settings.set_int(lt::settings_pack::active_seeds, requested->active_seeds);
-        settings.set_int(lt::settings_pack::active_limit, requested->active_limit);
+        settings.set_int(lt::settings_pack::download_rate_limit, requested.download_rate_limit);
+        settings.set_int(lt::settings_pack::upload_rate_limit, requested.upload_rate_limit);
+        settings.set_int(lt::settings_pack::active_downloads, requested.active_downloads);
+        settings.set_int(lt::settings_pack::active_seeds, requested.active_seeds);
+        settings.set_int(lt::settings_pack::active_limit, requested.active_limit);
         settings.set_bool(lt::settings_pack::dont_count_slow_torrents, false);
-        settings.set_int(lt::settings_pack::share_ratio_limit, requested->share_ratio_limit);
-        settings.set_int(lt::settings_pack::seed_time_limit, requested->seed_time_limit);
+        settings.set_int(lt::settings_pack::share_ratio_limit, requested.share_ratio_limit);
+        settings.set_int(lt::settings_pack::seed_time_limit, requested.seed_time_limit);
         settings.set_bool(lt::settings_pack::enable_upnp, !network_blocked && enable_port_forwarding);
         settings.set_bool(lt::settings_pack::enable_natpmp, !network_blocked && enable_port_forwarding);
         settings.set_bool(lt::settings_pack::enable_dht, !network_blocked && enable_dht);
@@ -3514,8 +3508,8 @@ extern "C" int32_t TorrentClientApplySettings(
         settings.set_bool(lt::settings_pack::validate_https_trackers, true);
         settings.set_bool(lt::settings_pack::ssrf_mitigation, true);
         settings.set_bool(lt::settings_pack::always_send_user_agent, false);
-        settings.set_int(lt::settings_pack::out_enc_policy, encryption_policy(requested->encryption_policy));
-        settings.set_int(lt::settings_pack::in_enc_policy, encryption_policy(requested->encryption_policy));
+        settings.set_int(lt::settings_pack::out_enc_policy, encryption_policy(requested.encryption_policy));
+        settings.set_int(lt::settings_pack::in_enc_policy, encryption_policy(requested.encryption_policy));
         settings.set_int(lt::settings_pack::allowed_enc_level, static_cast<int>(lt::settings_pack::pe_both));
         settings.set_bool(lt::settings_pack::prefer_rc4, false);
         client->session.apply_settings(std::move(settings));
@@ -3598,48 +3592,38 @@ extern "C" int32_t TorrentClientBlockNetwork(
     return result;
 }
 
-extern "C" int32_t TorrentClientCopyNetworkStatus(
-    TTorrentClient *client,
-    TTorrentNetworkStatus *status
-) noexcept
+extern "C" TTorrentNetworkStatusResult TorrentClientCopyNetworkStatus(TTorrentClient *client) noexcept
 {
-    if (status != nullptr) {
-        *status = TTorrentNetworkStatus{};
-    }
-    if (client == nullptr || status == nullptr) {
-        return 0;
+    TTorrentNetworkStatusResult output{};
+    if (client == nullptr) {
+        return output;
     }
 
     try {
         std::scoped_lock guard(client->lock);
-        *status = client->network_status();
-        return 1;
+        output.network_status = client->network_status();
+        output.status = 1;
     } catch (...) {
-        *status = TTorrentNetworkStatus{};
-        return 0;
+        output = {};
     }
+    return output;
 }
 
-extern "C" int32_t TorrentClientCopyHealth(
-    TTorrentClient *client,
-    TTorrentBridgeHealth *health
-) noexcept
+extern "C" TTorrentBridgeHealthResult TorrentClientCopyHealth(TTorrentClient *client) noexcept
 {
-    if (health != nullptr) {
-        *health = TTorrentBridgeHealth{};
-    }
-    if (client == nullptr || health == nullptr) {
-        return 0;
+    TTorrentBridgeHealthResult output{};
+    if (client == nullptr) {
+        return output;
     }
 
     try {
         std::scoped_lock guard(client->lock);
-        *health = client->health_status();
-        return 1;
+        output.health = client->health_status();
+        output.status = 1;
     } catch (...) {
-        *health = TTorrentBridgeHealth{};
-        return 0;
+        output = {};
     }
+    return output;
 }
 
 extern "C" int32_t TorrentClientSaveAllChecked(

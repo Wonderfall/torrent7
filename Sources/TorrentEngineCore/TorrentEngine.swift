@@ -295,7 +295,7 @@ package enum TorrentAddError: LocalizedError, Sendable {
         allowPreMetadataDHT: Bool = false
     ) throws -> String {
         let client = try unsafe requireClient()
-        var options = TTorrentAddOptions(
+        let options = TTorrentAddOptions(
             starts_paused: startsPaused.bridgeFlag,
             queue_priority: queuePriority.bridgeByteValue,
             enable_peer_exchange: enablePeerExchange.bridgeFlag,
@@ -310,7 +310,7 @@ package enum TorrentAddError: LocalizedError, Sendable {
                         client,
                         magnetPointer,
                         savePointer,
-                        &options,
+                        options,
                         &outputBuffer,
                         addOutcome,
                         &errorBuffer
@@ -337,7 +337,7 @@ package enum TorrentAddError: LocalizedError, Sendable {
                 TTorrentFilePriorityEntry(index: index, priority: priority.bridgeValue)
             }
             .sorted { $0.index < $1.index }
-        var options = TTorrentAddOptions(
+        let options = TTorrentAddOptions(
             starts_paused: startsPaused.bridgeFlag,
             queue_priority: queuePriority.bridgeByteValue,
             enable_peer_exchange: enablePeerExchange.bridgeFlag,
@@ -354,7 +354,7 @@ package enum TorrentAddError: LocalizedError, Sendable {
                         client,
                         torrentData,
                         savePointer,
-                        &options,
+                        options,
                         priorities,
                         &outputBuffer,
                         addOutcome,
@@ -370,7 +370,7 @@ package enum TorrentAddError: LocalizedError, Sendable {
                         client,
                         torrentData,
                         savePointer,
-                        &options,
+                        options,
                         &outputBuffer,
                         addOutcome,
                         &errorBuffer
@@ -574,18 +574,18 @@ package enum TorrentAddError: LocalizedError, Sendable {
             }
         }
 
-        var result = TTorrentRemovalResult()
+        var readResult = TTorrentRemovalReadResult()
         try throwingBridgeCall { errorBuffer in
-            unsafe TorrentClientTakeRemovalResult(
+            readResult = unsafe TorrentClientTakeRemovalResult(
                 client,
                 requestToken,
-                &result,
                 &errorBuffer
             )
+            return readResult.status
         }
         return TorrentRemovalResultStatus(
-            state: result.state,
-            error: String(cStringTuple: result.error)
+            state: readResult.result.state,
+            error: String(cStringTuple: readResult.result.error)
         )
     }
 
@@ -672,7 +672,7 @@ package enum TorrentAddError: LocalizedError, Sendable {
             bridgeSettings.network_blocked = networkBinding.networkBlocked.bridgeFlag
             return unsafe TorrentClientApplySettings(
                 client,
-                &bridgeSettings,
+                bridgeSettings,
                 networkInterface,
                 &errorBuffer
             )
@@ -743,12 +743,11 @@ package enum TorrentAddError: LocalizedError, Sendable {
             return .empty
         }
 
-        var status = TTorrentNetworkStatus()
-        let copied = unsafe TorrentClientCopyNetworkStatus(pointer, &status) != 0
-        guard copied else {
+        let result = unsafe TorrentClientCopyNetworkStatus(pointer)
+        guard result.status != 0 else {
             return .empty
         }
-        return TorrentNetworkStatus(status: status)
+        return TorrentNetworkStatus(status: result.network_status)
     }
 
     package func bridgeHealth() -> TorrentBridgeHealth {
@@ -756,12 +755,11 @@ package enum TorrentAddError: LocalizedError, Sendable {
             return .unavailable
         }
 
-        var health = TTorrentBridgeHealth()
-        let copied = unsafe TorrentClientCopyHealth(pointer, &health) != 0
-        guard copied else {
+        let result = unsafe TorrentClientCopyHealth(pointer)
+        guard result.status != 0 else {
             return .unavailable
         }
-        return TorrentBridgeHealth(snapshot: health)
+        return TorrentBridgeHealth(snapshot: result.health)
     }
 
     package func poll(
@@ -836,13 +834,14 @@ package enum TorrentAddError: LocalizedError, Sendable {
 
     package func sourcePolicy(id: String) throws -> TorrentSourcePolicy {
         let client = try unsafe requireClient()
-        var policy = TTorrentSourcePolicy()
+        var result = TTorrentSourcePolicyResult()
         try throwingBridgeCall { errorBuffer in
             unsafe id.withCString {
-                unsafe TorrentClientCopySourcePolicy(client, $0, &policy, &errorBuffer)
+                result = unsafe TorrentClientCopySourcePolicy(client, $0, &errorBuffer)
+                return result.status
             }
         }
-        return TorrentSourcePolicy(snapshot: policy)
+        return TorrentSourcePolicy(snapshot: result.policy)
     }
 
     package func setSourcePolicy(id: String, field: TorrentSourcePolicyField, enabled: Bool) throws {
@@ -862,21 +861,22 @@ package enum TorrentAddError: LocalizedError, Sendable {
 
     package func torrentOptions(id: String) throws -> TorrentOptions {
         let client = try unsafe requireClient()
-        var options = TTorrentOptions()
+        var result = TTorrentOptionsResult()
         try throwingBridgeCall { errorBuffer in
             unsafe id.withCString {
-                unsafe TorrentClientCopyTorrentOptions(client, $0, &options, &errorBuffer)
+                result = unsafe TorrentClientCopyTorrentOptions(client, $0, &errorBuffer)
+                return result.status
             }
         }
-        return TorrentOptions(snapshot: options)
+        return TorrentOptions(snapshot: result.options)
     }
 
     package func setTorrentOptions(id: String, options: TorrentOptions) throws {
         let client = try unsafe requireClient()
-        var bridgeOptions = options.bridgeValue
+        let bridgeOptions = options.bridgeValue
         try throwingBridgeCall { errorBuffer in
             unsafe id.withCString {
-                unsafe TorrentClientSetTorrentOptions(client, $0, &bridgeOptions, &errorBuffer)
+                unsafe TorrentClientSetTorrentOptions(client, $0, bridgeOptions, &errorBuffer)
             }
         }
     }
@@ -1130,14 +1130,13 @@ package enum TorrentAddError: LocalizedError, Sendable {
             return nil
         }
 
-        var activity = TTorrentWebSeedActivitySnapshot()
-        let copied = unsafe id.withCString { idPointer in
-            unsafe TorrentClientCopyWebSeedActivity(pointer, idPointer, &activity, nil)
+        let result = unsafe id.withCString { idPointer in
+            unsafe TorrentClientCopyWebSeedActivity(pointer, idPointer)
         }
-        guard copied != 0 else {
+        guard result.status != 0 else {
             return nil
         }
-        return TorrentWebSeedActivity(snapshot: activity)
+        return TorrentWebSeedActivity(snapshot: result.activity)
     }
 
     package func peerSources(id: String) -> TorrentPeerSources? {
@@ -1145,14 +1144,13 @@ package enum TorrentAddError: LocalizedError, Sendable {
             return nil
         }
 
-        var sources = TTorrentPeerSourceSnapshot()
-        let copied = unsafe id.withCString { idPointer in
-            unsafe TorrentClientCopyPeerSources(pointer, idPointer, &sources, nil)
+        let result = unsafe id.withCString { idPointer in
+            unsafe TorrentClientCopyPeerSources(pointer, idPointer)
         }
-        guard copied != 0 else {
+        guard result.status != 0 else {
             return nil
         }
-        return TorrentPeerSources(snapshot: sources)
+        return TorrentPeerSources(snapshot: result.sources)
     }
 
     package func fileBatch(id: String, since previousRevision: UInt64?) -> TorrentFileBatch? {

@@ -124,7 +124,7 @@ private:
 
 int32_t apply_settings(
     TTorrentClient *client,
-    TTorrentSessionSettings const *settings,
+    TTorrentSessionSettings settings,
     char *error,
     int32_t error_capacity,
     std::string_view network_interface = {}
@@ -141,6 +141,49 @@ int32_t apply_settings(
         error,
         error_capacity
     );
+}
+
+int32_t copy_source_policy(
+    TTorrentClient *client,
+    char const *torrent_id,
+    TTorrentSourcePolicy *policy,
+    char *error,
+    int32_t error_capacity
+)
+{
+    TTorrentSourcePolicyResult const result = TorrentClientCopySourcePolicy(
+        client,
+        torrent_id,
+        error,
+        error_capacity
+    );
+    *policy = result.policy;
+    return result.status;
+}
+
+int32_t copy_torrent_options(
+    TTorrentClient *client,
+    char const *torrent_id,
+    TTorrentOptions *options,
+    char *error,
+    int32_t error_capacity
+)
+{
+    TTorrentOptionsResult const result = TorrentClientCopyTorrentOptions(
+        client,
+        torrent_id,
+        error,
+        error_capacity
+    );
+    *options = result.options;
+    return result.status;
+}
+
+int32_t copy_health(TTorrentClient *client, TTorrentBridgeHealth *health)
+{
+    TTorrentBridgeHealthResult const result = TorrentClientCopyHealth(client);
+    *health = result.health;
+    return result.status;
 }
 
 [[nodiscard]] bool has_owner_directory_permissions(fs::path const &path)
@@ -432,7 +475,7 @@ void check_replaced_resume_root_remains_confined(bool const replace_with_symlink
         &client,
         magnet.c_str(),
         download_directory.c_str(),
-        &add_options,
+        add_options,
         added_id.data(),
         static_cast<int32_t>(added_id.size()),
         &add_outcome,
@@ -564,13 +607,14 @@ void check_replaced_resume_root_remains_confined(bool const replace_with_symlink
 {
     return eventually([&] {
         client.pump_alerts();
-        return TorrentClientTakeRemovalResult(
+        TTorrentRemovalReadResult const read = TorrentClientTakeRemovalResult(
             &client,
             request_token,
-            &result,
             error.data(),
             static_cast<int32_t>(error.size())
-        ) == 0 && result.state != TTORRENT_REMOVAL_PENDING;
+        );
+        result = read.result;
+        return read.status == 0 && result.state != TTORRENT_REMOVAL_PENDING;
     });
 }
 
@@ -722,7 +766,7 @@ TEST_CASE("live magnet adds require the current exact authorized save path")
             &client,
             magnet.c_str(),
             save_path.c_str(),
-            &add_options,
+            add_options,
             added_id.data(),
             static_cast<int32_t>(added_id.size()),
             &add_outcome,
@@ -825,7 +869,7 @@ TEST_CASE("live torrent file adds require a dynamically authorized save path")
             bridge_tests::byte_data(torrent_data),
             static_cast<int32_t>(torrent_data.size()),
             download_directory.c_str(),
-            &add_options,
+            add_options,
             added_id.data(),
             static_cast<int32_t>(added_id.size()),
             &add_outcome,
@@ -887,7 +931,7 @@ TEST_CASE("add failures report an unknown outcome when durable rollback cannot b
         &client,
         magnet.c_str(),
         download_directory.c_str(),
-        &add_options,
+        add_options,
         added_id.data(),
         static_cast<int32_t>(added_id.size()),
         &add_outcome,
@@ -966,7 +1010,7 @@ TEST_CASE("post-accept add failures remain unknown after a durable removal reque
         &client,
         magnet.c_str(),
         download_directory.c_str(),
-        &add_options,
+        add_options,
         added_id.data(),
         static_cast<int32_t>(added_id.size()),
         &add_outcome,
@@ -1227,7 +1271,7 @@ TEST_CASE("alert worker health publishes bounded failures and recovery")
     CHECK(client.record_alert_worker_failure(long_error) == 1U);
 
     TTorrentBridgeHealth health{};
-    REQUIRE(TorrentClientCopyHealth(&client, &health) == 1);
+    REQUIRE(copy_health(&client, &health) == 1);
     CHECK(health.total_alert_worker_failures == 1U);
     CHECK(health.consecutive_alert_worker_failures == 1U);
     CHECK(bridge_bool(health.alert_worker_degraded));
@@ -1250,7 +1294,7 @@ TEST_CASE("alert worker health publishes bounded failures and recovery")
     client.record_alert_worker_recovery();
     static_cast<void>(client.take_changes(&changes));
     CHECK(changes == TTORRENT_DIRTY_HEALTH);
-    REQUIRE(TorrentClientCopyHealth(&client, &health) == 1);
+    REQUIRE(copy_health(&client, &health) == 1);
     CHECK(health.total_alert_worker_failures == 2U);
     CHECK(health.consecutive_alert_worker_failures == 0U);
     CHECK_FALSE(bridge_bool(health.alert_worker_degraded));
@@ -1526,7 +1570,7 @@ TEST_CASE("live magnet bursts opportunistically drain synchronous add alerts")
             &client,
             magnet.c_str(),
             save_path.c_str(),
-            &add_options,
+            add_options,
             added_id.data(),
             static_cast<int32_t>(added_id.size()),
             &add_outcome,
@@ -1889,7 +1933,7 @@ TEST_CASE("resume metadata flows through add, async save alerts, and reload")
             bridge_tests::byte_data(torrent_data),
             static_cast<int32_t>(torrent_data.size()),
             temporary_directory.path().c_str(),
-            &add_options,
+            add_options,
             added_id,
             static_cast<int32_t>(sizeof(added_id)),
             &add_outcome,
@@ -2491,7 +2535,7 @@ TEST_CASE("settings apply toggles peer exchange for loaded torrents")
     settings.use_pex_by_default = bridge_bool(false);
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -2500,7 +2544,7 @@ TEST_CASE("settings apply toggles peer exchange for loaded torrents")
     settings.use_pex_by_default = bridge_bool(true);
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -2509,7 +2553,7 @@ TEST_CASE("settings apply toggles peer exchange for loaded torrents")
     handle.set_flags(lt::torrent_flags::disable_pex);
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -2533,13 +2577,13 @@ TEST_CASE("disabled peer exchange plugin gates per-torrent PEX policy")
     settings.use_pex_by_default = bridge_bool(true);
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
 
     TTorrentSourcePolicy policy{};
-    REQUIRE(TorrentClientCopySourcePolicy(
+    REQUIRE(copy_source_policy(
         &client,
         identity->canonical_id.c_str(),
         &policy,
@@ -2557,7 +2601,7 @@ TEST_CASE("disabled peer exchange plugin gates per-torrent PEX policy")
         true,
         error
     ) == 0);
-    REQUIRE(TorrentClientCopySourcePolicy(
+    REQUIRE(copy_source_policy(
         &client,
         identity->canonical_id.c_str(),
         &policy,
@@ -2571,7 +2615,7 @@ TEST_CASE("disabled peer exchange plugin gates per-torrent PEX policy")
     BRIDGE_WITH_CLIENT_LOCK(client, client.peer_exchange_plugin_enabled = true);
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -2595,7 +2639,7 @@ TEST_CASE("per-torrent options copy and set bandwidth limits")
     char error[512]{};
 
     TTorrentOptions options{};
-    REQUIRE(TorrentClientCopyTorrentOptions(
+    REQUIRE(copy_torrent_options(
         &client,
         identity->canonical_id.c_str(),
         &options,
@@ -2616,7 +2660,7 @@ TEST_CASE("per-torrent options copy and set bandwidth limits")
     REQUIRE(TorrentClientSetTorrentOptions(
         &client,
         identity->canonical_id.c_str(),
-        &options,
+        options,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -2627,7 +2671,7 @@ TEST_CASE("per-torrent options copy and set bandwidth limits")
     CHECK(identity->queue_priority == TTORRENT_QUEUE_PRIORITY_HIGH);
 
     TTorrentOptions copied{};
-    REQUIRE(TorrentClientCopyTorrentOptions(
+    REQUIRE(copy_torrent_options(
         &client,
         identity->canonical_id.c_str(),
         &copied,
@@ -2879,7 +2923,7 @@ TEST_CASE("fallible queue rebuilds invalidate the fast index before mutating que
 
     std::array<char, 512> error{};
     TTorrentOptions options{};
-    REQUIRE(TorrentClientCopyTorrentOptions(
+    REQUIRE(copy_torrent_options(
         &client,
         identity->canonical_id.c_str(),
         &options,
@@ -2891,7 +2935,7 @@ TEST_CASE("fallible queue rebuilds invalidate the fast index before mutating que
     CHECK(TorrentClientSetTorrentOptions(
         &client,
         identity->canonical_id.c_str(),
-        &options,
+        options,
         error.data(),
         static_cast<int32_t>(error.size())
     ) != 0);
@@ -2961,7 +3005,7 @@ TEST_CASE("definite duplicate add rejection preserves the valid queue index")
         bridge_tests::byte_data(torrent_data),
         static_cast<int32_t>(torrent_data.size()),
         temporary_directory.path().c_str(),
-        &add_options,
+        add_options,
         added_id.data(),
         static_cast<int32_t>(added_id.size()),
         &add_outcome,
@@ -2998,7 +3042,7 @@ TEST_CASE("per-torrent source policy can override DHT PEX and LSD defaults")
     settings.use_pex_by_default = bridge_bool(false);
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -3011,7 +3055,7 @@ TEST_CASE("per-torrent source policy can override DHT PEX and LSD defaults")
     CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.lsd_disabled_by_app.contains(identity)));
 
     TTorrentSourcePolicy policy{};
-    REQUIRE(TorrentClientCopySourcePolicy(
+    REQUIRE(copy_source_policy(
         &client,
         identity->canonical_id.c_str(),
         &policy,
@@ -3050,7 +3094,7 @@ TEST_CASE("per-torrent source policy can override DHT PEX and LSD defaults")
 
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -3106,7 +3150,7 @@ TEST_CASE("blocked settings fail closed before persistent source policy changes"
     char error[512]{};
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -3121,7 +3165,7 @@ TEST_CASE("blocked settings fail closed before persistent source policy changes"
     settings.use_pex_by_default = bridge_bool(false);
     CHECK(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 2);
@@ -3164,7 +3208,7 @@ TEST_CASE("settings validation rejects invalid ports before source policy mutati
     char error[512]{};
     CHECK(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 2);
@@ -3193,7 +3237,7 @@ TEST_CASE("settings interface input enforces explicit buffer bounds")
 
     CHECK(TorrentClientApplySettings(
         &client,
-        &settings,
+        settings,
         nullptr,
         1,
         error.data(),
@@ -3204,7 +3248,7 @@ TEST_CASE("settings interface input enforces explicit buffer bounds")
 
     CHECK(TorrentClientApplySettings(
         &client,
-        &settings,
+        settings,
         interface_name,
         0,
         error.data(),
@@ -3215,7 +3259,7 @@ TEST_CASE("settings interface input enforces explicit buffer bounds")
 
     CHECK(TorrentClientApplySettings(
         &client,
-        &settings,
+        settings,
         interface_name,
         TTORRENT_MAX_NETWORK_INTERFACE_BYTES + 1,
         error.data(),
@@ -3226,7 +3270,7 @@ TEST_CASE("settings interface input enforces explicit buffer bounds")
 
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error.data(),
         static_cast<int32_t>(error.size()),
         interface_name
@@ -3265,7 +3309,7 @@ TEST_CASE("global LSD and PEX default changes request resume persistence")
     char error[512]{};
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -3304,7 +3348,7 @@ TEST_CASE("per-torrent DHT policy does not override disabled DHT node")
     char error[512]{};
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -3317,7 +3361,7 @@ TEST_CASE("per-torrent DHT policy does not override disabled DHT node")
     REQUIRE(static_cast<bool>(handle.flags() & lt::torrent_flags::auto_managed));
 
     TTorrentSourcePolicy policy{};
-    REQUIRE(TorrentClientCopySourcePolicy(
+    REQUIRE(copy_source_policy(
         &client,
         identity->canonical_id.c_str(),
         &policy,
@@ -3355,7 +3399,7 @@ TEST_CASE("per-torrent DHT enable does not resume paused torrents")
     char error[512]{};
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -3369,7 +3413,7 @@ TEST_CASE("per-torrent DHT enable does not resume paused torrents")
     REQUIRE_FALSE(static_cast<bool>(handle.flags() & lt::torrent_flags::auto_managed));
 
     TTorrentSourcePolicy policy{};
-    REQUIRE(TorrentClientCopySourcePolicy(
+    REQUIRE(copy_source_policy(
         &client,
         identity->canonical_id.c_str(),
         &policy,
@@ -3406,7 +3450,7 @@ TEST_CASE("enabling the DHT node preserves default DHT-off torrent policy")
     char error[512]{};
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -3417,7 +3461,7 @@ TEST_CASE("enabling the DHT node preserves default DHT-off torrent policy")
     settings.enable_dht = bridge_bool(true);
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -3451,7 +3495,7 @@ TEST_CASE("ordinary settings apply does not resume an already unblocked session"
     REQUIRE(client.session.is_paused());
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -3462,7 +3506,7 @@ TEST_CASE("ordinary settings apply does not resume an already unblocked session"
     settings.enable_dht = bridge_bool(true);
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -3479,7 +3523,7 @@ TEST_CASE("forced network block waits for libtorrent executor acknowledgement")
     std::array<char, 512> error{};
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error.data(),
         static_cast<int32_t>(error.size())
     ) == 0);
@@ -3530,7 +3574,7 @@ TEST_CASE("network unblock waits for libtorrent executor acknowledgement")
     std::jthread transition([&] {
         result_promise.set_value(apply_settings(
             &client,
-            &settings,
+            settings,
             error.data(),
             static_cast<int32_t>(error.size())
         ));
@@ -3580,7 +3624,7 @@ TEST_CASE("privacy-sensitive tracker settings are explicit")
 
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -3616,7 +3660,7 @@ TEST_CASE("DHT privacy lookups follow effective DHT availability")
 
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -3627,7 +3671,7 @@ TEST_CASE("DHT privacy lookups follow effective DHT availability")
     settings.enable_dht = bridge_bool(false);
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -3639,7 +3683,7 @@ TEST_CASE("DHT privacy lookups follow effective DHT availability")
     settings.network_blocked = bridge_bool(true);
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -3669,7 +3713,7 @@ TEST_CASE("settings apply enforces HTTPS-only source policy on loaded torrents")
     char error[512]{};
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -3682,7 +3726,7 @@ TEST_CASE("settings apply enforces HTTPS-only source policy on loaded torrents")
     settings.require_https_web_seeds = bridge_bool(true);
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -3695,7 +3739,7 @@ TEST_CASE("settings apply enforces HTTPS-only source policy on loaded torrents")
     settings.require_https_web_seeds = bridge_bool(false);
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -3724,7 +3768,7 @@ TEST_CASE("per-torrent HTTPS source exception preserves loaded torrent sources")
     char error[512]{};
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -3746,7 +3790,7 @@ TEST_CASE("source policy toggles DHT PEX LSD and HTTPS sources for a loaded torr
 
     char error[512]{};
     TTorrentSourcePolicy policy{};
-    REQUIRE(TorrentClientCopySourcePolicy(
+    REQUIRE(copy_source_policy(
         &client,
         identity->canonical_id.c_str(),
         &policy,
@@ -3786,7 +3830,7 @@ TEST_CASE("source policy toggles DHT PEX LSD and HTTPS sources for a loaded torr
         error
     ) == 0);
 
-    REQUIRE(TorrentClientCopySourcePolicy(
+    REQUIRE(copy_source_policy(
         &client,
         identity->canonical_id.c_str(),
         &policy,
@@ -3856,7 +3900,7 @@ TEST_CASE("unrelated source policy mutations preserve global HTTPS enforcement")
     char error[512]{};
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -3927,7 +3971,7 @@ TEST_CASE("source policy reports explicit user policy over transient libtorrent 
 
     char error[512]{};
     TTorrentSourcePolicy policy{};
-    REQUIRE(TorrentClientCopySourcePolicy(
+    REQUIRE(copy_source_policy(
         &client,
         identity->canonical_id.c_str(),
         &policy,
@@ -3948,7 +3992,7 @@ TEST_CASE("source policy reports explicit user policy over transient libtorrent 
     handle.unset_flags(lt::torrent_flags::disable_pex);
     handle.unset_flags(lt::torrent_flags::disable_lsd);
 
-    REQUIRE(TorrentClientCopySourcePolicy(
+    REQUIRE(copy_source_policy(
         &client,
         identity->canonical_id.c_str(),
         &policy,
@@ -4049,7 +4093,7 @@ TEST_CASE("metadata-less magnets replace retained file and piece details with au
         &client,
         magnet.c_str(),
         save_path.c_str(),
-        &add_options,
+        add_options,
         added_id,
         static_cast<int32_t>(sizeof(added_id)),
         &add_outcome,
@@ -4190,7 +4234,7 @@ TEST_CASE("source policy cannot override DHT PEX or LSD source locks")
 
     char error[512]{};
     TTorrentSourcePolicy policy{};
-    REQUIRE(TorrentClientCopySourcePolicy(
+    REQUIRE(copy_source_policy(
         &client,
         identity->canonical_id.c_str(),
         &policy,
@@ -4214,7 +4258,7 @@ TEST_CASE("source policy cannot override DHT PEX or LSD source locks")
     ) == 0);
     REQUIRE(set_source_policy_field(client, *identity, TTORRENT_SOURCE_POLICY_ENABLE_LSD, true, error) == 0);
 
-    REQUIRE(TorrentClientCopySourcePolicy(
+    REQUIRE(copy_source_policy(
         &client,
         identity->canonical_id.c_str(),
         &policy,
@@ -4344,7 +4388,7 @@ TEST_CASE("magnet torrents gate payload files and untrusted discovery until meta
         &client,
         magnet.c_str(),
         save_path.c_str(),
-        &add_options,
+        add_options,
         added_id,
         static_cast<int32_t>(sizeof(added_id)),
         &add_outcome,
@@ -4391,7 +4435,7 @@ TEST_CASE("trackerless magnet can explicitly allow DHT before metadata validatio
             &client,
             magnet.c_str(),
             save_path.c_str(),
-            &add_options,
+            add_options,
             added_id,
             static_cast<int32_t>(sizeof(added_id)),
             &add_outcome,
@@ -4454,7 +4498,7 @@ TEST_CASE("pending magnet DHT revocation is durable before the setter returns")
         &client,
         magnet.c_str(),
         save_path.c_str(),
-        &add_options,
+        add_options,
         added_id,
         static_cast<int32_t>(sizeof(added_id)),
         &add_outcome,
@@ -4571,13 +4615,14 @@ TEST_CASE("payload deletion waits for libtorrent and removes an exact torrent fi
     REQUIRE(bridge_bool(removal_committed));
 
     TTorrentRemovalResult result{};
-    REQUIRE(TorrentClientTakeRemovalResult(
+    TTorrentRemovalReadResult read = TorrentClientTakeRemovalResult(
         &client,
         request_token,
-        &result,
         error.data(),
         static_cast<int32_t>(error.size())
-    ) == 0);
+    );
+    REQUIRE(read.status == 0);
+    result = read.result;
     CHECK(result.state == TTORRENT_REMOVAL_PENDING);
 
     REQUIRE(eventually_take_removal_result(client, request_token, result, error));
@@ -4707,25 +4752,26 @@ TEST_CASE("a completed payload deletion remains tracked until its result is coll
 
     TTorrentRemovalResult result{};
     std::array<char, 512> error{};
-    CHECK(TorrentClientTakeRemovalResult(
+    TTorrentRemovalReadResult read = TorrentClientTakeRemovalResult(
         &client,
         first_token + 1U,
-        &result,
         error.data(),
         static_cast<int32_t>(error.size())
-    ) != 0);
+    );
+    CHECK(read.status != 0);
     CHECK_THROWS(BRIDGE_WITH_CLIENT_LOCK(
         client,
         client.begin_delete_request(second_info->info_hashes())
     ));
 
-    REQUIRE(TorrentClientTakeRemovalResult(
+    read = TorrentClientTakeRemovalResult(
         &client,
         first_token,
-        &result,
         error.data(),
         static_cast<int32_t>(error.size())
-    ) == 0);
+    );
+    REQUIRE(read.status == 0);
+    result = read.result;
     CHECK(result.state == TTORRENT_REMOVAL_SUCCEEDED);
 
     std::uint64_t const second_token = BRIDGE_WITH_CLIENT_LOCK(
@@ -4768,13 +4814,14 @@ TEST_CASE("a dropped terminal deletion alert fails the request and completes cle
 
     TTorrentRemovalResult result{};
     std::array<char, 512> error{};
-    REQUIRE(TorrentClientTakeRemovalResult(
+    TTorrentRemovalReadResult const read = TorrentClientTakeRemovalResult(
         &client,
         request_token,
-        &result,
         error.data(),
         static_cast<int32_t>(error.size())
-    ) == 0);
+    );
+    REQUIRE(read.status == 0);
+    result = read.result;
     CHECK(result.state == TTORRENT_REMOVAL_FAILED);
     CHECK(bridge_tests::string_from_c_buffer(std::span{result.error}).contains("terminal libtorrent alert was dropped"));
 }
@@ -4802,7 +4849,7 @@ TEST_CASE("metadata-less magnet removal treats a zero-error failed alert conserv
         &client,
         magnet.c_str(),
         save_path.c_str(),
-        &add_options,
+        add_options,
         added_id,
         static_cast<int32_t>(sizeof(added_id)),
         &add_outcome,
@@ -4828,13 +4875,14 @@ TEST_CASE("metadata-less magnet removal treats a zero-error failed alert conserv
     TTorrentRemovalResult removal_result{};
     CHECK(eventually([&] {
         client.pump_alerts();
-        return TorrentClientTakeRemovalResult(
+        TTorrentRemovalReadResult const read = TorrentClientTakeRemovalResult(
             &client,
             request_token,
-            &removal_result,
             error,
             static_cast<int32_t>(sizeof(error))
-        ) == 0 && removal_result.state != TTORRENT_REMOVAL_PENDING;
+        );
+        removal_result = read.result;
+        return read.status == 0 && removal_result.state != TTORRENT_REMOVAL_PENDING;
     }));
 
     CHECK(removal_result.state == TTORRENT_REMOVAL_FAILED);
@@ -4865,7 +4913,7 @@ TEST_CASE("metadata validation gate survives resume reload")
             &client,
             magnet.c_str(),
             save_path.c_str(),
-            &add_options,
+            add_options,
             added_id,
             static_cast<int32_t>(sizeof(added_id)),
             &add_outcome,
@@ -4972,7 +5020,7 @@ TEST_CASE("app-default DHT changes do not bypass pending metadata consent after 
         settings.active_limit = 500;
         REQUIRE(apply_settings(
             &client,
-            &settings,
+            settings,
             error,
             static_cast<int32_t>(sizeof(error))
         ) == 0);
@@ -4981,7 +5029,7 @@ TEST_CASE("app-default DHT changes do not bypass pending metadata consent after 
             &client,
             magnet.c_str(),
             save_path.c_str(),
-            &add_options,
+            add_options,
             added_id,
             static_cast<int32_t>(sizeof(added_id)),
             &add_outcome,
@@ -5018,7 +5066,7 @@ TEST_CASE("app-default DHT changes do not bypass pending metadata consent after 
     settings.active_limit = 500;
     REQUIRE(apply_settings(
         &reloaded,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
@@ -5132,7 +5180,7 @@ TEST_CASE("metadata resolution owns peer exchange pending policy")
     char error[512]{};
     REQUIRE(apply_settings(
         &client,
-        &settings,
+        settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);

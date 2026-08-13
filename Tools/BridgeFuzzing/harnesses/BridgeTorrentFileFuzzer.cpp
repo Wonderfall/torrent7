@@ -9,7 +9,6 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
 )
 {
     auto &harness = bridge_fuzz::shared_harness("bridge-torrent-file");
-    auto const *begin = reinterpret_cast<char const *>(data);
 
     TTorrentAddOptions options{
         .starts_paused = 1,
@@ -24,10 +23,10 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
     int32_t add_outcome = TTORRENT_ADD_REJECTED;
     int32_t const result = TorrentClientAddTorrentFileData(
         harness.client(),
-        begin,
+        data,
         static_cast<int32_t>(size),
         harness.save_path(),
-        &options,
+        options,
         added_id.data(),
         added_id.capacity(),
         &add_outcome,
