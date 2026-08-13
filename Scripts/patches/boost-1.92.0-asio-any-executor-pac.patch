@@ -1,0 +1,43 @@
+diff --git a/boost/asio/execution/any_executor.hpp b/boost/asio/execution/any_executor.hpp
+index 2e176e5ed..c177db9f7 100644
+--- a/boost/asio/execution/any_executor.hpp
++++ b/boost/asio/execution/any_executor.hpp
+@@ -35,5 +35,9 @@
+ #include <boost/asio/require.hpp>
+ 
++#if defined(__PTRAUTH__)
++# include <ptrauth.h>
++#endif // defined(__PTRAUTH__)
++
+ #include <boost/asio/detail/push_options.hpp>
+ 
+ namespace boost {
+@@ -864,8 +868,26 @@ protected:
+     const void* (*target_type)();
+ #endif // !defined(BOOST_ASIO_NO_TYPEID)
+     bool (*equal)(const any_executor_base&, const any_executor_base&);
+-    void (*execute)(const any_executor_base&, function&&);
+-    void (*blocking_execute)(const any_executor_base&, function_view);
++    typedef void (*execute_func_type)(
++        const any_executor_base&, function&&);
++    typedef void (*blocking_execute_func_type)(
++        const any_executor_base&, function_view);
++#if defined(__PTRAUTH__)
++    using stored_execute_func_type = execute_func_type __ptrauth(
++        ptrauth_key_function_pointer, 1,
++        ptrauth_string_discriminator(
++          "boost.asio.any-executor.execute"));
++    using stored_blocking_execute_func_type =
++      blocking_execute_func_type __ptrauth(
++        ptrauth_key_function_pointer, 1,
++        ptrauth_string_discriminator(
++          "boost.asio.any-executor.blocking-execute"));
++#else // defined(__PTRAUTH__)
++    typedef execute_func_type stored_execute_func_type;
++    typedef blocking_execute_func_type stored_blocking_execute_func_type;
++#endif // defined(__PTRAUTH__)
++    stored_execute_func_type execute;
++    stored_blocking_execute_func_type blocking_execute;
+   };
+ 
+ #if !defined(BOOST_ASIO_NO_TYPEID)

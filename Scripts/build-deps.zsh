@@ -721,9 +721,9 @@ verify_libtorrent_indirect_operation_pac() {
         || fail "Boost.Asio PAC verification requires an arm64e libtorrent archive"
     /usr/bin/xcrun otool -tvV "$archive" >"$disassembly"
 
-    # AppleClang's pinned 16-bit string discriminators for the three Asio
-    # operation slots and libtorrent's chained-buffer destructor respectively.
-    for discriminator in 0x8ab7 0xaf42 0x9890 0x89ff; do
+    # AppleClang's pinned 16-bit string discriminators for the active Asio
+    # operation/executor slots and libtorrent's chained-buffer destructor.
+    for discriminator in 0x8ab7 0xaf42 0x9890 0x4642 0x89ff; do
         /usr/bin/awk -v discriminator="#$discriminator" '
             /movk[[:space:]]+x[0-9]+,/ && index($0, discriminator) {
                 modifier = $3

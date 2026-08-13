@@ -129,18 +129,28 @@ typeset scheduler_ir="$temporary_directory/scheduler.ll"
 typeset reactor_ir="$temporary_directory/reactor.ll"
 typeset executor_invoke_ir="$temporary_directory/executor-invoke.ll"
 typeset executor_destroy_ir="$temporary_directory/executor-destroy.ll"
+typeset any_executor_ir="$temporary_directory/any-executor.ll"
+typeset blocking_any_executor_ir="$temporary_directory/blocking-any-executor.ll"
 typeset scheduler_assembly="$temporary_directory/scheduler.s"
 typeset reactor_assembly="$temporary_directory/reactor.s"
 typeset executor_invoke_assembly="$temporary_directory/executor-invoke.s"
 typeset executor_destroy_assembly="$temporary_directory/executor-destroy.s"
+typeset any_executor_assembly="$temporary_directory/any-executor.s"
+typeset blocking_any_executor_assembly="$temporary_directory/blocking-any-executor.s"
 extract_ir_function torrent7_invoke_scheduler "$scheduler_ir"
 extract_ir_function torrent7_invoke_reactor "$reactor_ir"
 extract_ir_function torrent7_invoke_executor "$executor_invoke_ir"
 extract_ir_function torrent7_destroy_executor "$executor_destroy_ir"
+extract_ir_function torrent7_invoke_any_executor "$any_executor_ir"
+extract_ir_function torrent7_invoke_blocking_any_executor \
+    "$blocking_any_executor_ir"
 extract_assembly_function torrent7_invoke_scheduler "$scheduler_assembly"
 extract_assembly_function torrent7_invoke_reactor "$reactor_assembly"
 extract_assembly_function torrent7_invoke_executor "$executor_invoke_assembly"
 extract_assembly_function torrent7_destroy_executor "$executor_destroy_assembly"
+extract_assembly_function torrent7_invoke_any_executor "$any_executor_assembly"
+extract_assembly_function torrent7_invoke_blocking_any_executor \
+    "$blocking_any_executor_assembly"
 
 verify_ir_diversification scheduler_operation::func_ "$scheduler_ir"
 typeset -r scheduler_discriminator=$REPLY
@@ -150,12 +160,19 @@ verify_ir_diversification executor_function::complete_.invoke "$executor_invoke_
 typeset -r executor_invoke_discriminator=$REPLY
 verify_ir_diversification executor_function::complete_.destroy "$executor_destroy_ir"
 typeset -r executor_destroy_discriminator=$REPLY
+verify_ir_diversification any_executor::execute "$any_executor_ir"
+typeset -r any_executor_discriminator=$REPLY
+verify_ir_diversification any_executor::blocking_execute \
+    "$blocking_any_executor_ir"
+typeset -r blocking_any_executor_discriminator=$REPLY
 [[ "$executor_invoke_discriminator" == "$executor_destroy_discriminator" ]] \
     || fail "Asio executor invocation and destruction use different PAC role discriminators"
 typeset -ra discriminators=(
     "$scheduler_discriminator"
     "$reactor_discriminator"
     "$executor_invoke_discriminator"
+    "$any_executor_discriminator"
+    "$blocking_any_executor_discriminator"
 )
 typeset -ra unique_discriminators=("${(u)discriminators[@]}")
 (( ${#unique_discriminators[@]} == ${#discriminators[@]} )) \
@@ -165,7 +182,9 @@ for assembly in \
     "$scheduler_assembly" \
     "$reactor_assembly" \
     "$executor_invoke_assembly" \
-    "$executor_destroy_assembly"; do
+    "$executor_destroy_assembly" \
+    "$any_executor_assembly" \
+    "$blocking_any_executor_assembly"; do
     /usr/bin/grep -Eq '[[:space:]](braa|blraa)[[:space:]]' "$assembly" \
         || fail "Targeted Asio callback does not use diversified authenticated branch codegen"
     if /usr/bin/grep -Eq '[[:space:]](braaz|blraaz)[[:space:]]' "$assembly"; then

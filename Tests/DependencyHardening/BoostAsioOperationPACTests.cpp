@@ -3,6 +3,8 @@
 #include <boost/asio/detail/executor_function.hpp>
 #include <boost/asio/detail/reactor_op.hpp>
 #include <boost/asio/detail/scheduler_operation.hpp>
+#include <boost/asio/execution/any_executor.hpp>
+#include <boost/asio/system_executor.hpp>
 
 #include <cstddef>
 #include <cstdio>
@@ -62,6 +64,69 @@ struct executor_probe
   }
 };
 
+struct any_executor_probe
+{
+  bool* called;
+
+  template <typename Function>
+  void execute(Function&& function) const
+  {
+    if (called != nullptr)
+      *called = true;
+    static_cast<Function&&>(function)();
+  }
+
+  friend bool operator==(any_executor_probe const& left,
+      any_executor_probe const& right) noexcept
+  {
+    return left.called == right.called;
+  }
+};
+
+class any_executor_access final
+  : public boost::asio::execution::detail::any_executor_base
+{
+public:
+  template <typename Executor>
+  explicit any_executor_access(Executor executor)
+    : any_executor_base(static_cast<Executor&&>(executor),
+        boost::asio::false_type())
+  {
+  }
+
+  void invoke(boost::asio::detail::executor_function&& function) const
+  {
+    target_fns_->execute(*this,
+        static_cast<boost::asio::detail::executor_function&&>(function));
+  }
+
+  void invoke_blocking(
+      boost::asio::detail::executor_function_view function) const
+  {
+    target_fns_->blocking_execute(*this, function);
+  }
+
+  void invoke_from_replayed_table(
+      boost::asio::detail::executor_function&& function)
+  {
+    target_fns replayed_functions{};
+    std::memcpy(static_cast<void*>(&replayed_functions),
+        static_cast<const void*>(target_fns_), sizeof(replayed_functions));
+    target_fns_ = &replayed_functions;
+    invoke(static_cast<boost::asio::detail::executor_function&&>(function));
+  }
+
+  void invoke_blocking_from_replayed_table(
+      boost::asio::detail::executor_function_view function)
+  {
+    target_fns replayed_functions{};
+    std::memcpy(static_cast<void*>(&replayed_functions),
+        static_cast<const void*>(target_fns_), sizeof(replayed_functions));
+    target_fns_ = &replayed_functions;
+    invoke_blocking(function);
+  }
+};
+
 void* executor_implementation(
     const boost::asio::detail::executor_function& function)
 {
@@ -103,6 +168,21 @@ extern "C" __attribute__((noinline)) void torrent7_destroy_executor(
     boost::asio::detail::executor_function* function)
 {
   function->~executor_function();
+}
+
+extern "C" __attribute__((noinline)) void torrent7_invoke_any_executor(
+    any_executor_access* executor,
+    boost::asio::detail::executor_function* function)
+{
+  executor->invoke(
+      static_cast<boost::asio::detail::executor_function&&>(*function));
+}
+
+extern "C" __attribute__((noinline)) void torrent7_invoke_blocking_any_executor(
+    any_executor_access* executor,
+    boost::asio::detail::executor_function_view function)
+{
+  executor->invoke_blocking(function);
 }
 
 int main()
@@ -153,7 +233,30 @@ int main()
     std::fputs("executor destruction did not release callback state\n", stderr);
     return 1;
   }
+  bool any_executor_called = false;
+  any_executor_access any_executor(any_executor_probe{&any_executor_called});
+  boost::asio::detail::executor_function any_executor_function(
+      executor_probe{nullptr}, allocator);
+  torrent7_invoke_any_executor(&any_executor, &any_executor_function);
+  if (!any_executor_called)
+  {
+    std::fputs("any_executor callback did not run normally\n", stderr);
+    return 1;
+  }
 
+  bool blocking_function_called = false;
+  executor_probe blocking_function{&blocking_function_called};
+  auto blocking_system_executor = boost::asio::require(
+      boost::asio::system_executor(), boost::asio::execution::blocking.always);
+  any_executor_access blocking_executor{blocking_system_executor};
+  torrent7_invoke_blocking_any_executor(
+      &blocking_executor,
+      boost::asio::detail::executor_function_view(blocking_function));
+  if (!blocking_function_called)
+  {
+    std::fputs("blocking any_executor callback did not run normally\n", stderr);
+    return 1;
+  }
   using torrent7::test_support::replay_triggers_pointer_authentication_failure;
 
   if (!replay_triggers_pointer_authentication_failure([] {
@@ -213,6 +316,36 @@ int main()
       }))
   {
     std::fputs("executor destruction callback replay was accepted\n", stderr);
+    return 1;
+  }
+
+  if (!replay_triggers_pointer_authentication_failure([] {
+        std::allocator<std::byte> child_allocator;
+        any_executor_access child_executor(any_executor_probe{nullptr});
+        boost::asio::detail::executor_function child_function(
+            executor_probe{nullptr}, child_allocator);
+        child_executor.invoke_from_replayed_table(
+            static_cast<boost::asio::detail::executor_function&&>(
+              child_function));
+      }))
+  {
+    std::fputs("any_executor dispatch-table replay was accepted\n", stderr);
+    return 1;
+  }
+
+  if (!replay_triggers_pointer_authentication_failure([] {
+        bool child_called = false;
+        executor_probe child_function{&child_called};
+        auto blocking_system_executor = boost::asio::require(
+            boost::asio::system_executor(),
+            boost::asio::execution::blocking.always);
+        any_executor_access child_executor{blocking_system_executor};
+        child_executor.invoke_blocking_from_replayed_table(
+            boost::asio::detail::executor_function_view(child_function));
+      }))
+  {
+    std::fputs(
+        "blocking any_executor dispatch-table replay was accepted\n", stderr);
     return 1;
   }
 

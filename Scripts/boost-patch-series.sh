@@ -9,18 +9,21 @@ readonly -a BOOST_PATCHED_FILES=(
     "boost/asio/detail/reactor_op.hpp"
     "boost/asio/detail/scheduler_operation.hpp"
     "boost/asio/detail/executor_function.hpp"
+    "boost/asio/execution/any_executor.hpp"
 )
 readonly -a BOOST_PATCHES=(
     "$ROOT_DIR/Scripts/patches/boost-1.92.0-asio-operation-pac.patch"
     "$ROOT_DIR/Scripts/patches/boost-1.92.0-asio-executor-function-pac.patch"
+    "$ROOT_DIR/Scripts/patches/boost-1.92.0-asio-any-executor-pac.patch"
 )
 # One exact tree per ordered patch-series stage. Recognizing intermediate
 # stages lets an existing verified header cache receive only newly appended
 # patches without weakening the unexpected-change guard.
 readonly -a BOOST_PATCH_TREES=(
-    "b05b431f6b5e1dba5d56d37b1fda33737411844edc1f7c568c89954c075cd41b"
-    "601ccf950bd8cb2cc8b00094e643f616745466805fb83b0eabc1152a3e1e5df4"
-    "7acf3c857b2872d3ee1a72087aa88357823ceae7c504d173f18e505840a4b45f"
+    "273f287b950eacb7bffbcdd63ec7b356889f2e1ae7bbad8d101f5e1596a6fa75"
+    "d1a2e7e67dc055854b764d0a918d87e9db12a4f5fb19de6ad92a00cd2c62c9f6"
+    "ddb69d8fe48882e10a948aaee6857276de6efd667a1d9cda76310900df407d30"
+    "d72bfdbded4c324af854ec0c45d2a76e2fe551c82c0a1e961a17e59e3fcb0d6c"
 )
 readonly BOOST_BASE_TREE="${BOOST_PATCH_TREES[0]}"
 readonly BOOST_PATCHED_TREE="${BOOST_PATCH_TREES[${#BOOST_PATCH_TREES[@]} - 1]}"
