@@ -637,35 +637,39 @@ package enum TorrentAddError: LocalizedError, Sendable {
     ) throws {
         let client = try unsafe requireClient()
         try throwingBridgeCall { errorBuffer in
-            unsafe settings.libtorrentRequiredNetworkInterfaceName.withCString { networkInterface in
-                var bridgeSettings = unsafe TTorrentSessionSettings()
-                unsafe bridgeSettings.download_rate_limit = settings.libtorrentDownloadRateLimit
-                unsafe bridgeSettings.upload_rate_limit = settings.libtorrentUploadRateLimit
-                unsafe bridgeSettings.active_downloads = settings.libtorrentActiveDownloads
-                unsafe bridgeSettings.active_seeds = settings.libtorrentActiveSeeds
-                unsafe bridgeSettings.active_limit = settings.libtorrentActiveLimit
-                unsafe bridgeSettings.share_ratio_limit = settings.libtorrentShareRatioLimit
-                unsafe bridgeSettings.seed_time_limit = settings.libtorrentSeedTimeLimit
-                unsafe bridgeSettings.incoming_port = settings.libtorrentIncomingPort
-                unsafe bridgeSettings.accept_incoming_connections = settings.acceptIncomingConnections.bridgeFlag
-                unsafe bridgeSettings.enable_port_forwarding = settings.effectiveUsePortForwarding.bridgeFlag
-                unsafe bridgeSettings.enable_dht = settings.enableDHTNetwork.bridgeFlag
-                unsafe bridgeSettings.use_dht_by_default = settings.effectiveUseDHTByDefault.bridgeFlag
-                unsafe bridgeSettings.enable_lsd = settings.effectiveEnableLocalServiceDiscovery.bridgeFlag
-                unsafe bridgeSettings.use_lsd_by_default = settings.effectiveUseLocalServiceDiscoveryByDefault.bridgeFlag
-                unsafe bridgeSettings.use_pex_by_default = settings.effectiveUsePeerExchangeByDefault.bridgeFlag
-                unsafe bridgeSettings.require_https_trackers = settings.useHTTPSTrackersOnly.bridgeFlag
-                unsafe bridgeSettings.require_https_web_seeds = settings.useHTTPSWebSeedsOnly.bridgeFlag
-                unsafe bridgeSettings.encryption_policy = settings.libtorrentEncryptionPolicy
-                unsafe bridgeSettings.anonymous_mode = settings.effectiveAnonymousMode.bridgeFlag
-                unsafe bridgeSettings.required_network_interface = networkInterface
-                unsafe bridgeSettings.network_blocked = networkBinding.networkBlocked.bridgeFlag
-                return unsafe TorrentClientApplySettings(
-                    client,
-                    &bridgeSettings,
-                    &errorBuffer
-                )
+            let networkInterfaceBytes = settings.libtorrentRequiredNetworkInterfaceName.utf8.map {
+                CChar(bitPattern: $0)
             }
+            let networkInterface: Span<CChar>? = networkInterfaceBytes.isEmpty
+                ? nil
+                : networkInterfaceBytes.span
+            var bridgeSettings = TTorrentSessionSettings()
+            bridgeSettings.download_rate_limit = settings.libtorrentDownloadRateLimit
+            bridgeSettings.upload_rate_limit = settings.libtorrentUploadRateLimit
+            bridgeSettings.active_downloads = settings.libtorrentActiveDownloads
+            bridgeSettings.active_seeds = settings.libtorrentActiveSeeds
+            bridgeSettings.active_limit = settings.libtorrentActiveLimit
+            bridgeSettings.share_ratio_limit = settings.libtorrentShareRatioLimit
+            bridgeSettings.seed_time_limit = settings.libtorrentSeedTimeLimit
+            bridgeSettings.incoming_port = settings.libtorrentIncomingPort
+            bridgeSettings.accept_incoming_connections = settings.acceptIncomingConnections.bridgeFlag
+            bridgeSettings.enable_port_forwarding = settings.effectiveUsePortForwarding.bridgeFlag
+            bridgeSettings.enable_dht = settings.enableDHTNetwork.bridgeFlag
+            bridgeSettings.use_dht_by_default = settings.effectiveUseDHTByDefault.bridgeFlag
+            bridgeSettings.enable_lsd = settings.effectiveEnableLocalServiceDiscovery.bridgeFlag
+            bridgeSettings.use_lsd_by_default = settings.effectiveUseLocalServiceDiscoveryByDefault.bridgeFlag
+            bridgeSettings.use_pex_by_default = settings.effectiveUsePeerExchangeByDefault.bridgeFlag
+            bridgeSettings.require_https_trackers = settings.useHTTPSTrackersOnly.bridgeFlag
+            bridgeSettings.require_https_web_seeds = settings.useHTTPSWebSeedsOnly.bridgeFlag
+            bridgeSettings.encryption_policy = settings.libtorrentEncryptionPolicy
+            bridgeSettings.anonymous_mode = settings.effectiveAnonymousMode.bridgeFlag
+            bridgeSettings.network_blocked = networkBinding.networkBlocked.bridgeFlag
+            return unsafe TorrentClientApplySettings(
+                client,
+                &bridgeSettings,
+                networkInterface,
+                &errorBuffer
+            )
         }
     }
 

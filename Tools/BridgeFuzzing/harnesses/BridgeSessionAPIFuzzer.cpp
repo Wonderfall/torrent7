@@ -258,6 +258,8 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             static_cast<void>(TorrentClientApplySettings(
                 harness.client(),
                 reader.read_bool() ? nullptr : &settings,
+                reader.read_bool() ? nullptr : network_interface.c_str(),
+                reader.read_bool() ? -1 : static_cast<int32_t>(network_interface.size()),
                 error.data(),
                 error.capacity()
             ));

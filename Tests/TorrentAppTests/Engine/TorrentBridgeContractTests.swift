@@ -6,7 +6,7 @@ import TorrentBridge
 struct TorrentBridgeContractTests {
     @Test("Pins bridge ABI version, limits, states, and dirty masks")
     func pinsBridgeConstants() {
-        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 38)
+        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 39)
         #expect(Int32(TTORRENT_BRIDGE_STATE_UNKNOWN) == -1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_CHECKING_FILES) == 1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_DOWNLOADING_METADATA) == 2)
@@ -88,10 +88,8 @@ struct TorrentBridgeContractTests {
         #expect(MemoryLayout<TTorrentFilePreview>.alignment == 8)
         #expect(MemoryLayout<TTorrentSourceSecurityInspection>.size == 16)
         #expect(MemoryLayout<TTorrentSourceSecurityInspection>.alignment == 4)
-        let sessionSettingsSize = unsafe MemoryLayout<TTorrentSessionSettings>.size
-        let sessionSettingsAlignment = unsafe MemoryLayout<TTorrentSessionSettings>.alignment
-        #expect(sessionSettingsSize == 72)
-        #expect(sessionSettingsAlignment == 8)
+        #expect(MemoryLayout<TTorrentSessionSettings>.size == 52)
+        #expect(MemoryLayout<TTorrentSessionSettings>.alignment == 4)
         #expect(MemoryLayout<TTorrentNetworkStatus>.size == 664)
         #expect(MemoryLayout<TTorrentNetworkStatus>.alignment == 8)
         #expect(MemoryLayout<TTorrentBridgeHealth>.size == 536)
@@ -326,6 +324,18 @@ struct TorrentBridgeContractTests {
         )
 
         #expect(previewResult != 0)
+
+        var settings = TTorrentSessionSettings()
+        let interfaceStorage = "utun4".utf8.map { CChar(bitPattern: $0) }
+        let interface: Span<CChar>? = interfaceStorage.span
+        let settingsResult = unsafe TorrentClientApplySettings(
+            nil,
+            &settings,
+            interface,
+            &error
+        )
+
+        #expect(settingsResult != 0)
     }
 
     @Test("Null client mutation APIs report contract errors")

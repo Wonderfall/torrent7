@@ -59,6 +59,7 @@ inline constexpr int32_t TTORRENT_MAX_TRACKER_HOST_ROW_COUNT = 20000;
 inline constexpr int32_t TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT = 32;
 inline constexpr int32_t TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES = 1023;
 inline constexpr int32_t TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES = 32768;
+inline constexpr int32_t TTORRENT_MAX_NETWORK_INTERFACE_BYTES = 64;
 inline constexpr int32_t TTORRENT_ERROR_AUTHORIZED_SAVE_ROOT_CAPACITY = 4;
 inline constexpr int32_t TTORRENT_ID_CAPACITY = 68;
 inline constexpr int32_t TTORRENT_TRACKER_HOST_CAPACITY = 256;
@@ -98,7 +99,7 @@ inline constexpr int32_t TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT = 5;
 inline constexpr uint8_t TTORRENT_CONTENT_KIND_UNKNOWN = 0;
 inline constexpr uint8_t TTORRENT_CONTENT_KIND_SINGLE_FILE = 1;
 inline constexpr uint8_t TTORRENT_CONTENT_KIND_DIRECTORY = 2;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 38;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 39;
 namespace torrent_bridge::internal {
 struct TTorrentClient;
 }
@@ -122,6 +123,7 @@ enum {
     TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT = 32,
     TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES = 1023,
     TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES = 32768,
+    TTORRENT_MAX_NETWORK_INTERFACE_BYTES = 64,
     TTORRENT_ERROR_AUTHORIZED_SAVE_ROOT_CAPACITY = 4,
     TTORRENT_ID_CAPACITY = 68,
     TTORRENT_TRACKER_HOST_CAPACITY = 256,
@@ -161,7 +163,7 @@ enum {
     TTORRENT_CONTENT_KIND_UNKNOWN = 0,
     TTORRENT_CONTENT_KIND_SINGLE_FILE = 1,
     TTORRENT_CONTENT_KIND_DIRECTORY = 2,
-    TTORRENT_BRIDGE_ABI_VERSION = 38
+    TTORRENT_BRIDGE_ABI_VERSION = 39
 };
 #endif
 
@@ -316,7 +318,6 @@ typedef struct TTorrentSessionSettings {
     uint8_t require_https_web_seeds;
     int32_t encryption_policy;
     uint8_t anonymous_mode;
-    const char * TORRENT_BRIDGE_NULLABLE required_network_interface;
     uint8_t network_blocked;
 } TTorrentSessionSettings;
 
@@ -716,6 +717,9 @@ int32_t TorrentClientTakeRemovalResult(
 int32_t TorrentClientApplySettings(
     TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
     const TTorrentSessionSettings * TORRENT_BRIDGE_NULLABLE requested TORRENT_BRIDGE_NOESCAPE,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(required_network_interface_size)
+        required_network_interface TORRENT_BRIDGE_NOESCAPE,
+    int32_t required_network_interface_size,
     char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;

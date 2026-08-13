@@ -114,7 +114,8 @@ surface without removing the underlying C++ dependency.
 
 The bridge therefore remains a narrow C ABI facade with:
 
-- C-compatible values with pinned layouts;
+- C-compatible values with pinned layouts and no borrowed pointers embedded in
+  value aggregates;
 - explicit RAII ownership for the native client;
 - bounded input and output spans whose C pointer contracts import into Swift as
   lifetime-scoped `Span`, `MutableSpan`, and `RawSpan` wrappers used by the

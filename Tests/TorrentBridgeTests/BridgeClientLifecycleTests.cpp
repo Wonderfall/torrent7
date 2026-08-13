@@ -114,13 +114,33 @@ private:
 [[nodiscard]] TTorrentSessionSettings unblocked_session_settings()
 {
     TTorrentSessionSettings settings{};
-    settings.required_network_interface = "";
     settings.network_blocked = bridge_bool(false);
     settings.use_pex_by_default = bridge_bool(true);
     settings.active_downloads = 3;
     settings.active_seeds = 5;
     settings.active_limit = 500;
     return settings;
+}
+
+int32_t apply_settings(
+    TTorrentClient *client,
+    TTorrentSessionSettings const *settings,
+    char *error,
+    int32_t error_capacity,
+    std::string_view network_interface = {}
+)
+{
+    char const *const network_interface_data = network_interface.empty()
+        ? nullptr
+        : network_interface.data();
+    return TorrentClientApplySettings(
+        client,
+        settings,
+        network_interface_data,
+        static_cast<int32_t>(network_interface.size()),
+        error,
+        error_capacity
+    );
 }
 
 [[nodiscard]] bool has_owner_directory_permissions(fs::path const &path)
@@ -2467,10 +2487,9 @@ TEST_CASE("settings apply toggles peer exchange for loaded torrents")
     CHECK_FALSE(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex));
 
     TTorrentSessionSettings settings{};
-    settings.required_network_interface = "";
     settings.network_blocked = bridge_bool(true);
     settings.use_pex_by_default = bridge_bool(false);
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,
@@ -2479,7 +2498,7 @@ TEST_CASE("settings apply toggles peer exchange for loaded torrents")
     CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex));
 
     settings.use_pex_by_default = bridge_bool(true);
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,
@@ -2488,7 +2507,7 @@ TEST_CASE("settings apply toggles peer exchange for loaded torrents")
     CHECK_FALSE(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex));
 
     handle.set_flags(lt::torrent_flags::disable_pex);
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,
@@ -2510,10 +2529,9 @@ TEST_CASE("disabled peer exchange plugin gates per-torrent PEX policy")
     char error[512]{};
 
     TTorrentSessionSettings settings{};
-    settings.required_network_interface = "";
     settings.network_blocked = bridge_bool(true);
     settings.use_pex_by_default = bridge_bool(true);
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,
@@ -2551,7 +2569,7 @@ TEST_CASE("disabled peer exchange plugin gates per-torrent PEX policy")
     CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.peer_exchange_disabled_by_app.contains(identity)));
 
     BRIDGE_WITH_CLIENT_LOCK(client, client.peer_exchange_plugin_enabled = true);
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,
@@ -2972,14 +2990,13 @@ TEST_CASE("per-torrent source policy can override DHT PEX and LSD defaults")
     char error[512]{};
 
     TTorrentSessionSettings settings{};
-    settings.required_network_interface = "";
     settings.network_blocked = bridge_bool(true);
     settings.enable_dht = bridge_bool(true);
     settings.use_dht_by_default = bridge_bool(false);
     settings.enable_lsd = bridge_bool(true);
     settings.use_lsd_by_default = bridge_bool(false);
     settings.use_pex_by_default = bridge_bool(false);
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,
@@ -3031,7 +3048,7 @@ TEST_CASE("per-torrent source policy can override DHT PEX and LSD defaults")
     CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(client, client.peer_exchange_disabled_by_app.contains(identity)));
     CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(client, client.lsd_disabled_by_app.contains(identity)));
 
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,
@@ -3077,7 +3094,6 @@ TEST_CASE("blocked settings fail closed before persistent source policy changes"
     REQUIRE(identity != nullptr);
 
     TTorrentSessionSettings settings{};
-    settings.required_network_interface = "";
     settings.network_blocked = bridge_bool(false);
     settings.enable_dht = bridge_bool(true);
     settings.use_dht_by_default = bridge_bool(true);
@@ -3088,7 +3104,7 @@ TEST_CASE("blocked settings fail closed before persistent source policy changes"
     settings.active_seeds = 5;
     settings.active_limit = 500;
     char error[512]{};
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,
@@ -3103,7 +3119,7 @@ TEST_CASE("blocked settings fail closed before persistent source policy changes"
     settings.use_dht_by_default = bridge_bool(false);
     settings.use_lsd_by_default = bridge_bool(false);
     settings.use_pex_by_default = bridge_bool(false);
-    CHECK(TorrentClientApplySettings(
+    CHECK(apply_settings(
         &client,
         &settings,
         error,
@@ -3135,7 +3151,6 @@ TEST_CASE("settings validation rejects invalid ports before source policy mutati
     REQUIRE(identity != nullptr);
 
     TTorrentSessionSettings settings{};
-    settings.required_network_interface = "";
     settings.network_blocked = bridge_bool(false);
     settings.incoming_port = 1;
     settings.enable_dht = bridge_bool(true);
@@ -3147,7 +3162,7 @@ TEST_CASE("settings validation rejects invalid ports before source policy mutati
     settings.active_seeds = 5;
     settings.active_limit = 500;
     char error[512]{};
-    CHECK(TorrentClientApplySettings(
+    CHECK(apply_settings(
         &client,
         &settings,
         error,
@@ -3164,6 +3179,60 @@ TEST_CASE("settings validation rejects invalid ports before source policy mutati
     CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(client, client.dht_disabled_by_app.contains(identity)));
     CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(client, client.lsd_disabled_by_app.contains(identity)));
     CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(client, client.peer_exchange_disabled_by_app.contains(identity)));
+}
+
+TEST_CASE("settings interface input enforces explicit buffer bounds")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+
+    TTorrentSessionSettings settings = unblocked_session_settings();
+    std::array<char, 512> error{};
+    char const interface_name[] = "127.0.0.1";
+
+    CHECK(TorrentClientApplySettings(
+        &client,
+        &settings,
+        nullptr,
+        1,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == 1);
+    CHECK(bridge_tests::string_from_c_buffer(error)
+        == "Invalid required network interface buffer.");
+
+    CHECK(TorrentClientApplySettings(
+        &client,
+        &settings,
+        interface_name,
+        0,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == 1);
+    CHECK(bridge_tests::string_from_c_buffer(error)
+        == "Invalid required network interface buffer.");
+
+    CHECK(TorrentClientApplySettings(
+        &client,
+        &settings,
+        interface_name,
+        TTORRENT_MAX_NETWORK_INTERFACE_BYTES + 1,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == 1);
+    CHECK(bridge_tests::string_from_c_buffer(error)
+        == "Invalid required network interface buffer.");
+
+    REQUIRE(apply_settings(
+        &client,
+        &settings,
+        error.data(),
+        static_cast<int32_t>(error.size()),
+        interface_name
+    ) == 0);
+    lt::settings_pack const applied = client.session.get_settings();
+    CHECK(applied.get_str(lt::settings_pack::outgoing_interfaces) == interface_name);
 }
 
 TEST_CASE("global LSD and PEX default changes request resume persistence")
@@ -3184,7 +3253,6 @@ TEST_CASE("global LSD and PEX default changes request resume persistence")
     }
 
     TTorrentSessionSettings settings{};
-    settings.required_network_interface = "";
     settings.network_blocked = bridge_bool(false);
     settings.enable_dht = bridge_bool(true);
     settings.use_dht_by_default = bridge_bool(true);
@@ -3195,7 +3263,7 @@ TEST_CASE("global LSD and PEX default changes request resume persistence")
     settings.active_seeds = 5;
     settings.active_limit = 500;
     char error[512]{};
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,
@@ -3226,7 +3294,6 @@ TEST_CASE("per-torrent DHT policy does not override disabled DHT node")
     REQUIRE(identity != nullptr);
 
     TTorrentSessionSettings settings{};
-    settings.required_network_interface = "";
     settings.network_blocked = bridge_bool(false);
     settings.enable_dht = bridge_bool(false);
     settings.use_dht_by_default = bridge_bool(false);
@@ -3235,7 +3302,7 @@ TEST_CASE("per-torrent DHT policy does not override disabled DHT node")
     settings.active_seeds = 5;
     settings.active_limit = 500;
     char error[512]{};
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,
@@ -3278,7 +3345,6 @@ TEST_CASE("per-torrent DHT enable does not resume paused torrents")
     REQUIRE(identity != nullptr);
 
     TTorrentSessionSettings settings{};
-    settings.required_network_interface = "";
     settings.network_blocked = bridge_bool(false);
     settings.enable_dht = bridge_bool(true);
     settings.use_dht_by_default = bridge_bool(false);
@@ -3287,7 +3353,7 @@ TEST_CASE("per-torrent DHT enable does not resume paused torrents")
     settings.active_seeds = 5;
     settings.active_limit = 500;
     char error[512]{};
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,
@@ -3330,7 +3396,6 @@ TEST_CASE("enabling the DHT node preserves default DHT-off torrent policy")
     REQUIRE(identity != nullptr);
 
     TTorrentSessionSettings settings{};
-    settings.required_network_interface = "";
     settings.network_blocked = bridge_bool(false);
     settings.enable_dht = bridge_bool(false);
     settings.use_dht_by_default = bridge_bool(false);
@@ -3339,7 +3404,7 @@ TEST_CASE("enabling the DHT node preserves default DHT-off torrent policy")
     settings.active_seeds = 5;
     settings.active_limit = 500;
     char error[512]{};
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,
@@ -3350,7 +3415,7 @@ TEST_CASE("enabling the DHT node preserves default DHT-off torrent policy")
     CHECK_FALSE(client.session.is_dht_running());
 
     settings.enable_dht = bridge_bool(true);
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,
@@ -3374,7 +3439,6 @@ TEST_CASE("ordinary settings apply does not resume an already unblocked session"
     client.set_session_shutdown_asynchronous(false);
 
     TTorrentSessionSettings settings{};
-    settings.required_network_interface = "";
     settings.network_blocked = bridge_bool(false);
     settings.enable_dht = bridge_bool(false);
     settings.use_dht_by_default = bridge_bool(false);
@@ -3385,7 +3449,7 @@ TEST_CASE("ordinary settings apply does not resume an already unblocked session"
     char error[512]{};
 
     REQUIRE(client.session.is_paused());
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,
@@ -3396,7 +3460,7 @@ TEST_CASE("ordinary settings apply does not resume an already unblocked session"
     client.session.pause();
     REQUIRE(client.session.is_paused());
     settings.enable_dht = bridge_bool(true);
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,
@@ -3413,7 +3477,7 @@ TEST_CASE("forced network block waits for libtorrent executor acknowledgement")
 
     TTorrentSessionSettings settings = unblocked_session_settings();
     std::array<char, 512> error{};
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error.data(),
@@ -3464,7 +3528,7 @@ TEST_CASE("network unblock waits for libtorrent executor acknowledgement")
     std::promise<int32_t> result_promise;
     std::future<int32_t> result = result_promise.get_future();
     std::jthread transition([&] {
-        result_promise.set_value(TorrentClientApplySettings(
+        result_promise.set_value(apply_settings(
             &client,
             &settings,
             error.data(),
@@ -3504,7 +3568,6 @@ TEST_CASE("privacy-sensitive tracker settings are explicit")
     CHECK_FALSE(initial.get_bool(lt::settings_pack::always_send_user_agent));
 
     TTorrentSessionSettings settings{};
-    settings.required_network_interface = "";
     settings.network_blocked = bridge_bool(false);
     settings.enable_dht = bridge_bool(true);
     settings.use_dht_by_default = bridge_bool(false);
@@ -3515,7 +3578,7 @@ TEST_CASE("privacy-sensitive tracker settings are explicit")
     settings.active_limit = 500;
     char error[512]{};
 
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,
@@ -3541,7 +3604,6 @@ TEST_CASE("DHT privacy lookups follow effective DHT availability")
     client.set_session_shutdown_asynchronous(false);
 
     TTorrentSessionSettings settings{};
-    settings.required_network_interface = "";
     settings.network_blocked = bridge_bool(false);
     settings.enable_dht = bridge_bool(true);
     settings.use_dht_by_default = bridge_bool(false);
@@ -3552,7 +3614,7 @@ TEST_CASE("DHT privacy lookups follow effective DHT availability")
     settings.active_limit = 500;
     char error[512]{};
 
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,
@@ -3563,7 +3625,7 @@ TEST_CASE("DHT privacy lookups follow effective DHT availability")
     }));
 
     settings.enable_dht = bridge_bool(false);
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,
@@ -3575,7 +3637,7 @@ TEST_CASE("DHT privacy lookups follow effective DHT availability")
 
     settings.enable_dht = bridge_bool(true);
     settings.network_blocked = bridge_bool(true);
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,
@@ -3600,13 +3662,12 @@ TEST_CASE("settings apply enforces HTTPS-only source policy on loaded torrents")
     REQUIRE(handle.url_seeds().size() == 2U);
 
     TTorrentSessionSettings settings{};
-    settings.required_network_interface = "";
     settings.network_blocked = bridge_bool(true);
     settings.use_pex_by_default = bridge_bool(true);
     settings.require_https_trackers = bridge_bool(true);
     settings.require_https_web_seeds = bridge_bool(false);
     char error[512]{};
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,
@@ -3619,7 +3680,7 @@ TEST_CASE("settings apply enforces HTTPS-only source policy on loaded torrents")
     CHECK(handle.url_seeds().size() == 2U);
 
     settings.require_https_web_seeds = bridge_bool(true);
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,
@@ -3632,7 +3693,7 @@ TEST_CASE("settings apply enforces HTTPS-only source policy on loaded torrents")
 
     settings.require_https_trackers = bridge_bool(false);
     settings.require_https_web_seeds = bridge_bool(false);
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,
@@ -3656,13 +3717,12 @@ TEST_CASE("per-torrent HTTPS source exception preserves loaded torrent sources")
     identity->allows_non_https_web_seeds = true;
 
     TTorrentSessionSettings settings{};
-    settings.required_network_interface = "";
     settings.network_blocked = bridge_bool(true);
     settings.use_pex_by_default = bridge_bool(true);
     settings.require_https_trackers = bridge_bool(true);
     settings.require_https_web_seeds = bridge_bool(true);
     char error[512]{};
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,
@@ -3789,13 +3849,12 @@ TEST_CASE("unrelated source policy mutations preserve global HTTPS enforcement")
     REQUIRE(identity != nullptr);
 
     TTorrentSessionSettings settings{};
-    settings.required_network_interface = "";
     settings.network_blocked = bridge_bool(true);
     settings.use_pex_by_default = bridge_bool(true);
     settings.require_https_trackers = bridge_bool(true);
     settings.require_https_web_seeds = bridge_bool(true);
     char error[512]{};
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,
@@ -4904,7 +4963,6 @@ TEST_CASE("app-default DHT changes do not bypass pending metadata consent after 
         client.set_session_shutdown_asynchronous(false);
 
         TTorrentSessionSettings settings{};
-        settings.required_network_interface = "";
         settings.network_blocked = bridge_bool(false);
         settings.enable_dht = bridge_bool(false);
         settings.use_dht_by_default = bridge_bool(false);
@@ -4912,7 +4970,7 @@ TEST_CASE("app-default DHT changes do not bypass pending metadata consent after 
         settings.active_downloads = 3;
         settings.active_seeds = 5;
         settings.active_limit = 500;
-        REQUIRE(TorrentClientApplySettings(
+        REQUIRE(apply_settings(
             &client,
             &settings,
             error,
@@ -4951,7 +5009,6 @@ TEST_CASE("app-default DHT changes do not bypass pending metadata consent after 
     CHECK(BRIDGE_WITH_CLIENT_LOCK(reloaded, reloaded.dht_disabled_by_app.contains(identity)));
 
     TTorrentSessionSettings settings{};
-    settings.required_network_interface = "";
     settings.network_blocked = bridge_bool(false);
     settings.enable_dht = bridge_bool(true);
     settings.use_dht_by_default = bridge_bool(true);
@@ -4959,7 +5016,7 @@ TEST_CASE("app-default DHT changes do not bypass pending metadata consent after 
     settings.active_downloads = 3;
     settings.active_seeds = 5;
     settings.active_limit = 500;
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &reloaded,
         &settings,
         error,
@@ -5070,11 +5127,10 @@ TEST_CASE("metadata resolution owns peer exchange pending policy")
     ));
 
     TTorrentSessionSettings settings{};
-    settings.required_network_interface = "";
     settings.network_blocked = bridge_bool(true);
     settings.use_pex_by_default = bridge_bool(true);
     char error[512]{};
-    REQUIRE(TorrentClientApplySettings(
+    REQUIRE(apply_settings(
         &client,
         &settings,
         error,

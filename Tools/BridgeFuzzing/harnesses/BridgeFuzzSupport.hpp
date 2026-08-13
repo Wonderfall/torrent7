@@ -28,7 +28,7 @@ namespace bridge_fuzz {
 
 namespace fs = std::filesystem;
 
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 38, "Update the fuzz harnesses for the current TorrentBridge ABI.");
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 39, "Update the fuzz harnesses for the current TorrentBridge ABI.");
 #if !defined(TORRENT_USE_ASSERTS) || !TORRENT_USE_ASSERTS
 #error "Fuzz consumers must match the assertion-enabled Debug libtorrent archive."
 #endif
@@ -670,7 +670,6 @@ inline TTorrentSessionSettings settings_from_reader(ByteReader &reader, std::str
     settings.network_blocked = reader.read_u8();
 
     network_interface = reader.read_string(128);
-    settings.required_network_interface = reader.read_bool() ? nullptr : network_interface.c_str();
     return settings;
 }
 

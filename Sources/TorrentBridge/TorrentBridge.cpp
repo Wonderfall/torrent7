@@ -3388,16 +3388,36 @@ extern "C" int32_t TorrentClientTakeRemovalResult(TTorrentClient *client, std::u
     });
 }
 
-extern "C" int32_t TorrentClientApplySettings(TTorrentClient *client, TTorrentSessionSettings const *requested,
-                                              char *error_out, int32_t error_capacity) noexcept
+extern "C" int32_t TorrentClientApplySettings(
+    TTorrentClient *client,
+    TTorrentSessionSettings const *requested,
+    char const *required_network_interface,
+    int32_t required_network_interface_size,
+    char *error_out,
+    int32_t error_capacity
+) noexcept
 {
     WakeCallbackInvocation wake;
     int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 2, [&]() -> BridgeResult {
         if (client == nullptr || requested == nullptr) {
             return bridge_error(1, "Missing torrent client or settings.");
         }
+        bool const has_network_interface = required_network_interface != nullptr;
+        bool const has_network_interface_bytes = required_network_interface_size != 0;
+        if (required_network_interface_size < 0
+            || required_network_interface_size > TTORRENT_MAX_NETWORK_INTERFACE_BYTES
+            || has_network_interface != has_network_interface_bytes) {
+            return bridge_error(1, "Invalid required network interface buffer.");
+        }
 
-        std::string_view const network_interface = c_string_view(requested->required_network_interface);
+        std::span<char const> const network_interface_bytes = input_span_from_c_buffer(
+            required_network_interface,
+            required_network_interface_size
+        );
+        std::string const network_interface(
+            network_interface_bytes.begin(),
+            network_interface_bytes.end()
+        );
         bool const accept_incoming_connections = bridge_bool(requested->accept_incoming_connections);
         bool const enable_port_forwarding = bridge_bool(requested->enable_port_forwarding);
         bool const enable_dht = bridge_bool(requested->enable_dht);
