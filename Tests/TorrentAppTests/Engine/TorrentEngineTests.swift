@@ -31,7 +31,7 @@ struct TorrentEngineTests {
         #expect(root.canonicalPath == downloadDirectory.torrentFilePath)
         #expect(root.device == descriptor.device)
         #expect(root.inode == descriptor.inode)
-        let hasDuplicatedDescriptor = unsafe (
+        let hasDuplicatedDescriptor = (
             root.nativeRecord().directory_descriptor != descriptor.value
         )
         #expect(hasDuplicatedDescriptor)
@@ -777,10 +777,13 @@ private func authorizedSaveRoot(
         let lifetimeAnchor = TestAuthorizedSaveRootLifetimeProbe(state: state)
         let firstRoot = try authorizedSaveRoot(at: directory, retaining: lifetimeAnchor)
         let secondRoot = try authorizedSaveRoot(at: directory, retaining: lifetimeAnchor)
-        let firstRecord = unsafe firstRoot.nativeRecord()
-        let secondRecord = unsafe secondRoot.nativeRecord()
-        guard let firstContext = unsafe firstRecord.lifetime_context,
-              let secondContext = unsafe secondRecord.lifetime_context else {
+        let firstRecord = firstRoot.nativeRecord()
+        let secondRecord = secondRoot.nativeRecord()
+        guard let firstContext = unsafe UnsafeMutableRawPointer(
+            bitPattern: firstRecord.lifetime_context
+        ), let secondContext = unsafe UnsafeMutableRawPointer(
+            bitPattern: secondRecord.lifetime_context
+        ) else {
             throw TorrentEngineError.bridgeError("An authorized root lifetime context is missing.")
         }
         hasStableContext = unsafe firstContext == secondContext

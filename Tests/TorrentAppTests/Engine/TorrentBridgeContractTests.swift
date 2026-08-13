@@ -102,8 +102,8 @@ struct TorrentBridgeContractTests {
         #expect(MemoryLayout<TTorrentAddOptions>.alignment == 1)
         #expect(MemoryLayout<TTorrentOptions>.size == 20)
         #expect(MemoryLayout<TTorrentOptions>.alignment == 4)
-        let authorizedSaveRootSize = unsafe MemoryLayout<TTorrentAuthorizedSaveRoot>.size
-        let authorizedSaveRootAlignment = unsafe MemoryLayout<TTorrentAuthorizedSaveRoot>.alignment
+        let authorizedSaveRootSize = MemoryLayout<TTorrentAuthorizedSaveRoot>.size
+        let authorizedSaveRootAlignment = MemoryLayout<TTorrentAuthorizedSaveRoot>.alignment
         #expect(authorizedSaveRootSize == 32)
         #expect(authorizedSaveRootAlignment == 8)
     }

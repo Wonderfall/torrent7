@@ -203,6 +203,12 @@ let bridgeSafeInteropSwiftSettings: [SwiftSetting] = [
     .enableExperimentalFeature("SafeInteropWrappers"),
     .unsafeFlags(["-Xcc", "-fexperimental-bounds-safety-attributes"])
 ]
+// Swift 6.3 IRGen crashes when lifetime-dependent imported wrappers are emitted
+// under whole-module optimization in this multi-file target. Keep normal -O
+// per-file optimization until the compiler can emit this module under WMO.
+let engineBridgeSafeInteropWorkaround: [SwiftSetting] = [
+    .unsafeFlags(["-no-whole-module-optimization"], .when(configuration: .release))
+]
 let engineExtensionSwiftFlags = appSwiftStrictnessFlags
     + appSwiftPointerAuthenticationFlags
     + ["-application-extension"]
@@ -311,7 +317,7 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(engineExtensionSwiftFlags)
-            ] + bridgeSafeInteropSwiftSettings
+            ] + bridgeSafeInteropSwiftSettings + engineBridgeSafeInteropWorkaround
         ),
         .target(
             name: "TorrentEngineServiceSupport",

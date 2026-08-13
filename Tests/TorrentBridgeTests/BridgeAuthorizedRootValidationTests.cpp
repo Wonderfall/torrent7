@@ -345,7 +345,7 @@ TEST_CASE("ABI 37 authorized roots reject invalid descriptors contexts and ident
     check_error(error, "An authorized save root record is invalid.");
 
     TTorrentAuthorizedSaveRoot missing_context = valid_record;
-    missing_context.lifetime_context = nullptr;
+    missing_context.lifetime_context = 0U;
     CHECK(replace_authorized_roots(client, blob, &missing_context, 1, error) != 0);
     check_error(error, "An authorized save root record is invalid.");
     CHECK(root.lifetime_probe().retain_count.load() == 0);
@@ -380,7 +380,7 @@ TEST_CASE("ABI 37 authorized roots reject invalid descriptors contexts and ident
         .directory_descriptor = file_descriptor.get(),
         .device = static_cast<std::uint64_t>(file_metadata.st_dev),
         .inode = static_cast<std::uint64_t>(file_metadata.st_ino),
-        .lifetime_context = &file_probe,
+        .lifetime_context = reinterpret_cast<std::uintptr_t>(&file_probe),
     };
     CHECK(replace_authorized_roots(client, blob, &file_record, 1, error) != 0);
     check_error(error, "An authorized save root does not match its directory capability.");

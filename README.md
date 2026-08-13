@@ -105,10 +105,11 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
 - **C++ bridge discipline:** C++23, RAII ownership, `std::span`, `std::expected`,
   and no exception crossing into Swift. The C ABI declares nullability,
   synchronous borrows, and byte/element bounds so Swift imports its buffers as
-  lifetime-scoped `Span` wrappers. The removal ABI reports native commit
-  separately from asynchronous deletion tracking, preventing a post-commit
-  bookkeeping failure from being treated as a rejected removal. The bridge is
-  linked only into the engine helper extension.
+  lifetime-scoped `Span` wrappers; production bridge calls use those wrappers
+  rather than separate raw pointers and caller-supplied counts. The removal ABI
+  reports native commit separately from asynchronous deletion tracking,
+  preventing a post-commit bookkeeping failure from being treated as a rejected
+  removal. The bridge is linked only into the engine helper extension.
 - **Input bounds:** caps for torrent files, magnets, file counts, tracker/web-seed
   counts, tracker host rows, snapshots, piece-map data, XPC payloads, paged
   datasets, queued requests, file descriptors, and open peers.

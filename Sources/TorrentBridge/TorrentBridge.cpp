@@ -24,6 +24,13 @@ namespace torrent_bridge::internal {
 
 namespace {
 
+[[nodiscard]] void *authorized_root_lifetime_context(
+    TTorrentAuthorizedSaveRoot const &record
+) noexcept
+{
+    return std::bit_cast<void *>(record.lifetime_context);
+}
+
 constexpr int kUnlimitedTorrentCountLimit = static_cast<int>((1U << 24U) - 1U);
 
 int normalized_torrent_count_limit(int limit)
@@ -660,7 +667,7 @@ BridgeResult preflight_authorized_root_lifetime_replacement(
     for (std::size_t index = 0U; index < records.size(); ++index) {
         TTorrentAuthorizedSaveRoot const &record = records.at(index);
         if (record.directory_descriptor < 0
-            || record.lifetime_context == nullptr
+            || record.lifetime_context == 0U
             || !unique_paths.insert(paths->at(index)).second
             || !unique_identities.emplace(record.device, record.inode).second) {
             return {};
@@ -715,7 +722,8 @@ BridgeResult preflight_authorized_root_lifetime_replacement(
                 return live_root.root->path() == paths->at(index)
                     && live_root.root->device() == record.device
                     && live_root.root->inode() == record.inode
-                    && live_root.root->lifetime_context() == record.lifetime_context;
+                    && live_root.root->lifetime_context()
+                        == authorized_root_lifetime_context(record);
             }
         );
         if (reusable == live_roots.end()) {
@@ -831,7 +839,7 @@ AuthorizedSaveRootResult authorized_save_roots_from_c_buffer(
     for (TTorrentAuthorizedSaveRoot const &record : records) {
         std::string const &canonical_path = *path;
         ++path;
-        if (record.directory_descriptor < 0 || record.lifetime_context == nullptr) {
+        if (record.directory_descriptor < 0 || record.lifetime_context == 0U) {
             return std::unexpected(BridgeError{
                 .code = 1,
                 .message = "An authorized save root record is invalid.",
@@ -846,7 +854,7 @@ AuthorizedSaveRootResult authorized_save_roots_from_c_buffer(
         }
 
         std::shared_ptr<void> lifetime = retain_authorized_root_lifetime(
-            record.lifetime_context,
+            authorized_root_lifetime_context(record),
             lifetime_callbacks
         );
         lt::error_code root_error;
@@ -878,7 +886,8 @@ AuthorizedSaveRootResult authorized_save_roots_from_c_buffer(
                     && candidate->path() == canonical_path
                     && candidate->device() == record.device
                     && candidate->inode() == record.inode
-                    && candidate->lifetime_context() == record.lifetime_context) {
+                    && candidate->lifetime_context()
+                        == authorized_root_lifetime_context(record)) {
                     root = std::move(candidate);
                     break;
                 }

@@ -133,7 +133,7 @@ public:
             .directory_descriptor = context_->descriptor.get(),
             .device = context_->device,
             .inode = context_->inode,
-            .lifetime_context = context_,
+            .lifetime_context = reinterpret_cast<std::uintptr_t>(context_),
         };
     }
 

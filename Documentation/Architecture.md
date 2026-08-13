@@ -117,7 +117,8 @@ The bridge therefore remains a narrow C ABI facade with:
 - C-compatible values with pinned layouts;
 - explicit RAII ownership for the native client;
 - bounded input and output spans whose C pointer contracts import into Swift as
-  lifetime-scoped `Span`, `MutableSpan`, and `RawSpan` wrappers;
+  lifetime-scoped `Span`, `MutableSpan`, and `RawSpan` wrappers used by the
+  production engine rather than raw pointer/count pairs;
 - integer status codes and bounded diagnostics;
 - no exception crossing into Swift;
 - an explicit removal-commit output, separate from the optional asynchronous

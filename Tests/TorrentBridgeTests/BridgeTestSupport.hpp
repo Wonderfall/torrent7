@@ -128,7 +128,7 @@ public:
             .directory_descriptor = descriptor_.get(),
             .device = device_,
             .inode = inode_,
-            .lifetime_context = &lifetime_probe_,
+            .lifetime_context = reinterpret_cast<std::uintptr_t>(&lifetime_probe_),
         };
     }
 

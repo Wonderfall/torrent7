@@ -101,9 +101,11 @@ package func torrentAuthorizedSaveRootReleaseCallback(
             directory_descriptor: directoryDescriptor,
             device: device,
             inode: inode,
-            lifetime_context: Unmanaged<AnyObject>
-                .passUnretained(lifetimeAnchor)
-                .toOpaque()
+            lifetime_context: UInt(
+                bitPattern: Unmanaged<AnyObject>
+                    .passUnretained(lifetimeAnchor)
+                    .toOpaque()
+            )
         )
     }
 }

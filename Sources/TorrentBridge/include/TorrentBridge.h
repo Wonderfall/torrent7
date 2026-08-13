@@ -381,7 +381,9 @@ typedef struct TTorrentAuthorizedSaveRoot {
     int32_t directory_descriptor;
     uint64_t device;
     uint64_t inode;
-    void * TORRENT_BRIDGE_NULLABLE lifetime_context;
+    // Opaque pointer bits, never dereferenced as part of this borrowed record.
+    // The callback boundary converts the token back to its original context.
+    uintptr_t lifetime_context;
 } TTorrentAuthorizedSaveRoot;
 
 const char * TORRENT_BRIDGE_NONNULL TORRENT_BRIDGE_NULL_TERMINATED TorrentBridgeLibtorrentVersion(void)
