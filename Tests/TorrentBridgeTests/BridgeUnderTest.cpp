@@ -17,19 +17,21 @@ namespace torrent_bridge::internal {
 namespace {
 
 struct PointerAuthenticationProbe {
-    int retain_count = 0;
-    int release_count = 0;
     int wake_count = 0;
 };
 
-void pointer_authentication_retain(void *context)
+int pointer_authentication_retain_count = 0;
+int pointer_authentication_release_count = 0;
+
+std::uint8_t pointer_authentication_retain(std::uint64_t)
 {
-    ++static_cast<PointerAuthenticationProbe *>(context)->retain_count;
+    ++pointer_authentication_retain_count;
+    return 1U;
 }
 
-void pointer_authentication_release(void *context)
+void pointer_authentication_release(std::uint64_t)
 {
-    ++static_cast<PointerAuthenticationProbe *>(context)->release_count;
+    ++pointer_authentication_release_count;
 }
 
 void pointer_authentication_wake(void *context)
@@ -50,17 +52,17 @@ __attribute__((noinline)) void replay_object_bytes(
     __unsafe_buffer_usage_end
 }
 
-[[nodiscard]] AuthorizedRootLifetimeRelease make_pointer_authentication_lifetime(
-    PointerAuthenticationProbe *context
+[[nodiscard]] AuthorizedRootLifetime make_pointer_authentication_lifetime(
+    std::uint64_t const token
 )
 {
-    return AuthorizedRootLifetimeRelease{
-        .callbacks = {
+    return AuthorizedRootLifetime(
+        AuthorizedRootLifetimeCallbacks{
             .retain = pointer_authentication_retain,
             .release = pointer_authentication_release,
         },
-        .context = context,
-    };
+        token
+    );
 }
 
 } // namespace
@@ -73,17 +75,17 @@ extern "C" __attribute__((noinline, used)) void TorrentBridgeTestInvokeWake(
 }
 
 extern "C" __attribute__((noinline, used)) void TorrentBridgeTestInvokeAuthorizedRootRetain(
-    AuthorizedRootLifetimeRelease const *lifetime
+    AuthorizedRootLifetime const *lifetime
 ) noexcept
 {
-    lifetime->callbacks.retain(lifetime->context);
+    static_cast<void>(lifetime->callbacks.retain(lifetime->token));
 }
 
 extern "C" __attribute__((noinline, used)) void TorrentBridgeTestInvokeAuthorizedRootRelease(
-    AuthorizedRootLifetimeRelease const *lifetime
+    AuthorizedRootLifetime const *lifetime
 ) noexcept
 {
-    lifetime->callbacks.release(lifetime->context);
+    lifetime->callbacks.release(lifetime->token);
 }
 
 extern "C" bool TorrentBridgeTestPACSlotsInvokeNormally() noexcept
@@ -93,12 +95,16 @@ extern "C" bool TorrentBridgeTestPACSlotsInvokeNormally() noexcept
         .callback = pointer_authentication_wake,
         .context = &probe,
     };
-    AuthorizedRootLifetimeRelease const lifetime = make_pointer_authentication_lifetime(&probe);
+    pointer_authentication_retain_count = 0;
+    pointer_authentication_release_count = 0;
+    AuthorizedRootLifetime const lifetime = make_pointer_authentication_lifetime(1U);
 
     TorrentBridgeTestInvokeWake(&wake);
     TorrentBridgeTestInvokeAuthorizedRootRetain(&lifetime);
     TorrentBridgeTestInvokeAuthorizedRootRelease(&lifetime);
-    return probe.wake_count == 1 && probe.retain_count == 1 && probe.release_count == 1;
+    return probe.wake_count == 1
+        && pointer_authentication_retain_count == 1
+        && pointer_authentication_release_count == 1;
 }
 
 extern "C" void TorrentBridgeTestReplayWakeCallback() noexcept
@@ -137,37 +143,21 @@ extern "C" void TorrentBridgeTestReplayWakeContext() noexcept
 
 extern "C" void TorrentBridgeTestReplayAuthorizedRootRetain() noexcept
 {
-    PointerAuthenticationProbe source_context;
-    PointerAuthenticationProbe destination_context;
-    AuthorizedRootLifetimeRelease source = make_pointer_authentication_lifetime(&source_context);
-    AuthorizedRootLifetimeRelease destination = make_pointer_authentication_lifetime(&destination_context);
+    AuthorizedRootLifetime source = make_pointer_authentication_lifetime(1U);
+    AuthorizedRootLifetime destination = make_pointer_authentication_lifetime(2U);
     replay_object_bytes(&destination, &source, sizeof(destination));
     destination.callbacks.release = pointer_authentication_release;
-    destination.context = &destination_context;
+    destination.token = 2U;
     TorrentBridgeTestInvokeAuthorizedRootRetain(&destination);
 }
 
 extern "C" void TorrentBridgeTestReplayAuthorizedRootRelease() noexcept
 {
-    PointerAuthenticationProbe source_context;
-    PointerAuthenticationProbe destination_context;
-    AuthorizedRootLifetimeRelease source = make_pointer_authentication_lifetime(&source_context);
-    AuthorizedRootLifetimeRelease destination = make_pointer_authentication_lifetime(&destination_context);
+    AuthorizedRootLifetime source = make_pointer_authentication_lifetime(1U);
+    AuthorizedRootLifetime destination = make_pointer_authentication_lifetime(2U);
     replay_object_bytes(&destination, &source, sizeof(destination));
     destination.callbacks.retain = pointer_authentication_retain;
-    destination.context = &destination_context;
-    TorrentBridgeTestInvokeAuthorizedRootRelease(&destination);
-}
-
-extern "C" void TorrentBridgeTestReplayAuthorizedRootContext() noexcept
-{
-    PointerAuthenticationProbe source_context;
-    PointerAuthenticationProbe destination_context;
-    AuthorizedRootLifetimeRelease source = make_pointer_authentication_lifetime(&source_context);
-    AuthorizedRootLifetimeRelease destination = make_pointer_authentication_lifetime(&destination_context);
-    replay_object_bytes(&destination, &source, sizeof(destination));
-    destination.callbacks.retain = pointer_authentication_retain;
-    destination.callbacks.release = pointer_authentication_release;
+    destination.token = 2U;
     TorrentBridgeTestInvokeAuthorizedRootRelease(&destination);
 }
 

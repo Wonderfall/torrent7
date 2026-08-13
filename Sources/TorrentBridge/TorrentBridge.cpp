@@ -24,13 +24,6 @@ namespace torrent_bridge::internal {
 
 namespace {
 
-[[nodiscard]] void *authorized_root_lifetime_context(
-    TTorrentAuthorizedSaveRoot const &record
-) noexcept
-{
-    return std::bit_cast<void *>(record.lifetime_context);
-}
-
 constexpr int kUnlimitedTorrentCountLimit = static_cast<int>((1U << 24U) - 1U);
 
 int normalized_torrent_count_limit(int limit)
@@ -563,32 +556,29 @@ constexpr ptrauth_extra_data_t kAuthorizedRootRetainCallbackDiscriminator =
     ptrauth_string_discriminator("torrent.bridge.authorized-root.retain");
 constexpr ptrauth_extra_data_t kAuthorizedRootReleaseCallbackDiscriminator =
     ptrauth_string_discriminator("torrent.bridge.authorized-root.release");
-constexpr ptrauth_extra_data_t kAuthorizedRootContextDiscriminator =
-    ptrauth_string_discriminator("torrent.bridge.authorized-root.context");
 
 static_assert(kWakeCallbackDiscriminator != kAuthorizedRootRetainCallbackDiscriminator);
 static_assert(kWakeCallbackDiscriminator != kAuthorizedRootReleaseCallbackDiscriminator);
 static_assert(
     kAuthorizedRootRetainCallbackDiscriminator != kAuthorizedRootReleaseCallbackDiscriminator
 );
-static_assert(kAuthorizedRootContextDiscriminator != kWakeContextDiscriminator);
 #endif
 
 struct AuthorizedRootLifetimeCallbacks {
 #if defined(__PTRAUTH__)
-    using RetainCallback = TTorrentAuthorizedRootLifetimeCallback __ptrauth(
+    using RetainCallback = TTorrentAuthorizedRootLifetimeRetainCallback __ptrauth(
         ptrauth_key_function_pointer,
         1,
         kAuthorizedRootRetainCallbackDiscriminator
     );
-    using ReleaseCallback = TTorrentAuthorizedRootLifetimeCallback __ptrauth(
+    using ReleaseCallback = TTorrentAuthorizedRootLifetimeReleaseCallback __ptrauth(
         ptrauth_key_function_pointer,
         1,
         kAuthorizedRootReleaseCallbackDiscriminator
     );
 #else
-    using RetainCallback = TTorrentAuthorizedRootLifetimeCallback;
-    using ReleaseCallback = TTorrentAuthorizedRootLifetimeCallback;
+    using RetainCallback = TTorrentAuthorizedRootLifetimeRetainCallback;
+    using ReleaseCallback = TTorrentAuthorizedRootLifetimeReleaseCallback;
 #endif
 
     RetainCallback retain = nullptr;
@@ -597,30 +587,53 @@ struct AuthorizedRootLifetimeCallbacks {
 
 #if defined(__PTRAUTH__)
 static_assert(!std::is_trivially_copyable_v<AuthorizedRootLifetimeCallbacks>);
-
-using StoredAuthorizedRootContext = void * __ptrauth(
-    ptrauth_key_process_dependent_data,
-    1,
-    kAuthorizedRootContextDiscriminator
-);
-#else
-using StoredAuthorizedRootContext = void *;
 #endif
 
-struct AuthorizedRootLifetimeRelease {
-    AuthorizedRootLifetimeCallbacks callbacks;
-    StoredAuthorizedRootContext context = nullptr;
-
-    void operator()(void *) const noexcept
+struct AuthorizedRootLifetime {
+    AuthorizedRootLifetime(
+        AuthorizedRootLifetimeCallbacks lifetime_callbacks,
+        std::uint64_t const lifetime_token
+    ) noexcept
+        : callbacks(std::move(lifetime_callbacks)), token(lifetime_token)
     {
-        callbacks.release(context);
     }
+
+    AuthorizedRootLifetime(AuthorizedRootLifetime const &) = delete;
+    AuthorizedRootLifetime &operator=(AuthorizedRootLifetime const &) = delete;
+    AuthorizedRootLifetime(AuthorizedRootLifetime &&) = delete;
+    AuthorizedRootLifetime &operator=(AuthorizedRootLifetime &&) = delete;
+
+    ~AuthorizedRootLifetime()
+    {
+        if (retained) {
+            callbacks.release(token);
+        }
+    }
+
+    [[nodiscard]] bool retain() noexcept
+    {
+        retained = callbacks.retain(token) != 0U;
+        return retained;
+    }
+
+    AuthorizedRootLifetimeCallbacks callbacks;
+    std::uint64_t token = 0U;
+    bool retained = false;
 };
 
 #if defined(__PTRAUTH__)
-static_assert(!std::is_trivially_copyable_v<AuthorizedRootLifetimeRelease>);
+static_assert(!std::is_trivially_copyable_v<AuthorizedRootLifetime>);
 #endif
-static_assert(std::is_nothrow_copy_constructible_v<AuthorizedRootLifetimeRelease>);
+
+[[nodiscard]] std::uint64_t authorized_root_lifetime_token(
+    lt::aux::storage_root const &root
+) noexcept
+{
+    auto const *lifetime = static_cast<AuthorizedRootLifetime const *>(
+        root.lifetime_context()
+    );
+    return lifetime == nullptr ? 0U : lifetime->token;
+}
 
 BridgeResult preflight_authorized_root_lifetime_replacement(
     TTorrentClient &client,
@@ -667,7 +680,7 @@ BridgeResult preflight_authorized_root_lifetime_replacement(
     for (std::size_t index = 0U; index < records.size(); ++index) {
         TTorrentAuthorizedSaveRoot const &record = records.at(index);
         if (record.directory_descriptor < 0
-            || record.lifetime_context == 0U
+            || record.lifetime_token == 0U
             || !unique_paths.insert(paths->at(index)).second
             || !unique_identities.emplace(record.device, record.inode).second) {
             return {};
@@ -722,8 +735,8 @@ BridgeResult preflight_authorized_root_lifetime_replacement(
                 return live_root.root->path() == paths->at(index)
                     && live_root.root->device() == record.device
                     && live_root.root->inode() == record.inode
-                    && live_root.root->lifetime_context()
-                        == authorized_root_lifetime_context(record);
+                    && authorized_root_lifetime_token(*live_root.root)
+                        == record.lifetime_token;
             }
         );
         if (reusable == live_roots.end()) {
@@ -743,18 +756,21 @@ BridgeResult preflight_authorized_root_lifetime_replacement(
     return {};
 }
 
-[[nodiscard]] std::shared_ptr<void> retain_authorized_root_lifetime(
-    void *context,
+using AuthorizedRootLifetimeResult = std::expected<std::shared_ptr<void>, BridgeError>;
+
+[[nodiscard]] AuthorizedRootLifetimeResult retain_authorized_root_lifetime(
+    std::uint64_t const token,
     AuthorizedRootLifetimeCallbacks const &callbacks
 )
 {
-    AuthorizedRootLifetimeRelease release{
-        .callbacks = callbacks,
-        .context = context,
-    };
-    void *const retained_context = release.context;
-    release.callbacks.retain(retained_context);
-    return {retained_context, std::move(release)};
+    auto lifetime = std::make_shared<AuthorizedRootLifetime>(callbacks, token);
+    if (!lifetime->retain()) {
+        return std::unexpected(BridgeError{
+            .code = 1,
+            .message = "An authorized save root lifetime token is invalid.",
+        });
+    }
+    return std::static_pointer_cast<void>(std::move(lifetime));
 }
 
 AuthorizedSaveRootResult authorized_save_roots_from_c_buffer(
@@ -762,8 +778,8 @@ AuthorizedSaveRootResult authorized_save_roots_from_c_buffer(
     int32_t const authorized_save_paths_blob_size,
     TTorrentAuthorizedSaveRoot const *authorized_save_roots,
     int32_t const authorized_save_root_count,
-    TTorrentAuthorizedRootLifetimeCallback const retain_authorized_root,
-    TTorrentAuthorizedRootLifetimeCallback const release_authorized_root,
+    TTorrentAuthorizedRootLifetimeRetainCallback const retain_authorized_root,
+    TTorrentAuthorizedRootLifetimeReleaseCallback const release_authorized_root,
     AuthorizedSaveRootWeakList const *reusable_roots = nullptr
 )
 {
@@ -839,7 +855,7 @@ AuthorizedSaveRootResult authorized_save_roots_from_c_buffer(
     for (TTorrentAuthorizedSaveRoot const &record : records) {
         std::string const &canonical_path = *path;
         ++path;
-        if (record.directory_descriptor < 0 || record.lifetime_context == 0U) {
+        if (record.directory_descriptor < 0 || record.lifetime_token == 0U) {
             return std::unexpected(BridgeError{
                 .code = 1,
                 .message = "An authorized save root record is invalid.",
@@ -853,17 +869,20 @@ AuthorizedSaveRootResult authorized_save_roots_from_c_buffer(
             });
         }
 
-        std::shared_ptr<void> lifetime = retain_authorized_root_lifetime(
-            authorized_root_lifetime_context(record),
+        AuthorizedRootLifetimeResult lifetime = retain_authorized_root_lifetime(
+            record.lifetime_token,
             lifetime_callbacks
         );
+        if (!lifetime) {
+            return std::unexpected(lifetime.error());
+        }
         lt::error_code root_error;
         std::shared_ptr<lt::aux::storage_root> root = lt::aux::make_storage_root(
             canonical_path,
             record.directory_descriptor,
             record.device,
             record.inode,
-            std::move(lifetime),
+            std::move(*lifetime),
             root_error
         );
         if (root_error || !root) {
@@ -886,8 +905,8 @@ AuthorizedSaveRootResult authorized_save_roots_from_c_buffer(
                     && candidate->path() == canonical_path
                     && candidate->device() == record.device
                     && candidate->inode() == record.inode
-                    && candidate->lifetime_context()
-                        == authorized_root_lifetime_context(record)) {
+                    && authorized_root_lifetime_token(*candidate)
+                        == record.lifetime_token) {
                     root = std::move(candidate);
                     break;
                 }
@@ -1666,8 +1685,8 @@ extern "C" TTorrentClient *TorrentClientCreateWithError(
     int32_t authorized_save_paths_blob_size,
     TTorrentAuthorizedSaveRoot const *authorized_save_roots,
     int32_t authorized_save_root_count,
-    TTorrentAuthorizedRootLifetimeCallback retain_authorized_root,
-    TTorrentAuthorizedRootLifetimeCallback release_authorized_root,
+    TTorrentAuthorizedRootLifetimeRetainCallback retain_authorized_root,
+    TTorrentAuthorizedRootLifetimeReleaseCallback release_authorized_root,
     char *error_out,
     int32_t error_capacity
 ) noexcept
@@ -1722,8 +1741,8 @@ extern "C" int32_t TorrentClientReplaceAuthorizedSavePaths(
     int32_t authorized_save_paths_blob_size,
     TTorrentAuthorizedSaveRoot const *authorized_save_roots,
     int32_t authorized_save_root_count,
-    TTorrentAuthorizedRootLifetimeCallback retain_authorized_root,
-    TTorrentAuthorizedRootLifetimeCallback release_authorized_root,
+    TTorrentAuthorizedRootLifetimeRetainCallback retain_authorized_root,
+    TTorrentAuthorizedRootLifetimeReleaseCallback release_authorized_root,
     char *error_out,
     int32_t error_capacity
 ) noexcept

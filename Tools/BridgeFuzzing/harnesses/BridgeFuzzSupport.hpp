@@ -28,7 +28,7 @@ namespace bridge_fuzz {
 
 namespace fs = std::filesystem;
 
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 39, "Update the fuzz harnesses for the current TorrentBridge ABI.");
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 40, "Update the fuzz harnesses for the current TorrentBridge ABI.");
 #if !defined(TORRENT_USE_ASSERTS) || !TORRENT_USE_ASSERTS
 #error "Fuzz consumers must match the assertion-enabled Debug libtorrent archive."
 #endif
@@ -207,16 +207,76 @@ struct AuthorizedSaveRootLifetimeProbe {
     std::atomic_uint32_t release_count = 0;
 };
 
-inline void retain_authorized_save_root(void *context)
+inline std::atomic<std::uint64_t> next_authorized_save_root_lifetime_token = 1U;
+inline std::atomic<std::uint64_t> authorized_save_root_lifetime_token = 0U;
+inline std::atomic<AuthorizedSaveRootLifetimeProbe *> authorized_save_root_lifetime_probe = nullptr;
+
+inline std::uint64_t register_authorized_save_root_lifetime(
+    AuthorizedSaveRootLifetimeProbe &probe
+)
 {
-    auto *probe = static_cast<AuthorizedSaveRootLifetimeProbe *>(context);
-    probe->retain_count.fetch_add(1U, std::memory_order_relaxed);
+    std::uint64_t token = next_authorized_save_root_lifetime_token.fetch_add(
+        1U,
+        std::memory_order_relaxed
+    );
+    if (token == 0U) {
+        token = next_authorized_save_root_lifetime_token.fetch_add(
+            1U,
+            std::memory_order_relaxed
+        );
+    }
+    AuthorizedSaveRootLifetimeProbe *expected = nullptr;
+    authorized_save_root_lifetime_token.store(token, std::memory_order_relaxed);
+    if (!authorized_save_root_lifetime_probe.compare_exchange_strong(
+            expected,
+            &probe,
+            std::memory_order_release,
+            std::memory_order_relaxed
+        )) {
+        throw std::logic_error("The fuzz authorized-root lifetime is already registered");
+    }
+    return token;
 }
 
-inline void release_authorized_save_root(void *context)
+inline void unregister_authorized_save_root_lifetime(
+    std::uint64_t const token,
+    AuthorizedSaveRootLifetimeProbe &probe
+)
 {
-    auto *probe = static_cast<AuthorizedSaveRootLifetimeProbe *>(context);
-    probe->release_count.fetch_add(1U, std::memory_order_relaxed);
+    AuthorizedSaveRootLifetimeProbe *expected = &probe;
+    if (authorized_save_root_lifetime_token.load(std::memory_order_relaxed) == token
+        && authorized_save_root_lifetime_probe.compare_exchange_strong(
+            expected,
+            nullptr,
+            std::memory_order_acq_rel,
+            std::memory_order_relaxed
+        )) {
+        authorized_save_root_lifetime_token.store(0U, std::memory_order_relaxed);
+    }
+}
+
+inline std::uint8_t retain_authorized_save_root(std::uint64_t const token)
+{
+    AuthorizedSaveRootLifetimeProbe *const probe = authorized_save_root_lifetime_probe.load(
+        std::memory_order_acquire
+    );
+    if (probe == nullptr
+        || authorized_save_root_lifetime_token.load(std::memory_order_relaxed) != token) {
+        return 0U;
+    }
+    probe->retain_count.fetch_add(1U, std::memory_order_relaxed);
+    return 1U;
+}
+
+inline void release_authorized_save_root(std::uint64_t const token)
+{
+    AuthorizedSaveRootLifetimeProbe *const probe = authorized_save_root_lifetime_probe.load(
+        std::memory_order_acquire
+    );
+    if (probe != nullptr
+        && authorized_save_root_lifetime_token.load(std::memory_order_relaxed) == token) {
+        probe->release_count.fetch_add(1U, std::memory_order_relaxed);
+    }
 }
 
 class AuthorizedSaveRoot {
@@ -249,6 +309,7 @@ public:
         }
         device_ = static_cast<std::uint64_t>(metadata.st_dev);
         inode_ = static_cast<std::uint64_t>(metadata.st_ino);
+        lifetime_token_ = register_authorized_save_root_lifetime(lifetime_probe_);
     }
 
     AuthorizedSaveRoot(AuthorizedSaveRoot const &) = delete;
@@ -258,6 +319,7 @@ public:
 
     ~AuthorizedSaveRoot()
     {
+        unregister_authorized_save_root_lifetime(lifetime_token_, lifetime_probe_);
         if (descriptor_ >= 0) {
             static_cast<void>(::close(descriptor_));
         }
@@ -269,7 +331,7 @@ public:
             .directory_descriptor = descriptor_,
             .device = device_,
             .inode = inode_,
-            .lifetime_context = &lifetime_probe_,
+            .lifetime_token = lifetime_token_,
         };
     }
 
@@ -278,6 +340,7 @@ private:
     std::uint64_t device_ = 0U;
     std::uint64_t inode_ = 0U;
     AuthorizedSaveRootLifetimeProbe lifetime_probe_;
+    std::uint64_t lifetime_token_ = 0U;
 };
 
 class BridgeClientHarness {

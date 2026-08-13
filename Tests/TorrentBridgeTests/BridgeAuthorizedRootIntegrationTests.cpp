@@ -12,11 +12,13 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -84,37 +86,82 @@ struct RootLifetimeContext {
     std::uint64_t inode = 0U;
 };
 
-void release_root_reference(RootLifetimeContext *context) noexcept
-{
-    if (context->references.fetch_sub(1, std::memory_order_acq_rel) != 1) {
-        return;
-    }
+AnalyzedMutex root_lifetime_registry_lock;
+std::unordered_map<std::uint64_t, RootLifetimeContext *> root_lifetime_registry;
+std::atomic<std::uint64_t> next_root_lifetime_token = 1U;
 
-    std::shared_ptr<RootLifetimeProbe> const probe = context->probe;
-    delete context;
-    probe->destroyed.store(true, std::memory_order_release);
+[[nodiscard]] std::uint64_t register_root_lifetime(RootLifetimeContext *context)
+    TORRENT_BRIDGE_REQUIRES_NOT(root_lifetime_registry_lock)
+{
+    std::uint64_t token = next_root_lifetime_token.fetch_add(1U, std::memory_order_relaxed);
+    if (token == 0U) {
+        token = next_root_lifetime_token.fetch_add(1U, std::memory_order_relaxed);
+    }
+    std::scoped_lock guard(root_lifetime_registry_lock);
+    root_lifetime_registry.emplace(token, context);
+    return token;
 }
 
-void retain_authorized_root(void *opaque_context) noexcept
+void release_root_reference(std::uint64_t const token, bool const native_release) noexcept
+    TORRENT_BRIDGE_REQUIRES_NOT(root_lifetime_registry_lock)
 {
-    auto *context = static_cast<RootLifetimeContext *>(opaque_context);
+    std::shared_ptr<RootLifetimeProbe> destroyed_probe;
+    RootLifetimeContext *destroyed_context = nullptr;
+    {
+        std::scoped_lock guard(root_lifetime_registry_lock);
+        auto const registered = root_lifetime_registry.find(token);
+        if (registered == root_lifetime_registry.end()) {
+            return;
+        }
+        RootLifetimeContext *const context = registered->second;
+        if (native_release) {
+            context->probe->release_count.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (context->references.fetch_sub(1, std::memory_order_acq_rel) != 1) {
+            return;
+        }
+        destroyed_probe = context->probe;
+        destroyed_context = context;
+        root_lifetime_registry.erase(registered);
+    }
+    delete destroyed_context;
+    destroyed_probe->destroyed.store(true, std::memory_order_release);
+}
+
+std::uint8_t retain_authorized_root(std::uint64_t const token) noexcept
+    TORRENT_BRIDGE_REQUIRES_NOT(root_lifetime_registry_lock)
+{
+    std::scoped_lock guard(root_lifetime_registry_lock);
+    auto const registered = root_lifetime_registry.find(token);
+    if (registered == root_lifetime_registry.end()) {
+        return 0U;
+    }
+    RootLifetimeContext *const context = registered->second;
     context->references.fetch_add(1, std::memory_order_relaxed);
     context->probe->retain_count.fetch_add(1, std::memory_order_relaxed);
+    return 1U;
 }
 
-void release_authorized_root(void *opaque_context) noexcept
+void release_authorized_root(std::uint64_t const token) noexcept
+    TORRENT_BRIDGE_REQUIRES_NOT(root_lifetime_registry_lock)
 {
-    auto *context = static_cast<RootLifetimeContext *>(opaque_context);
-    context->probe->release_count.fetch_add(1, std::memory_order_relaxed);
-    release_root_reference(context);
+    release_root_reference(token, true);
 }
 
 class RootCapabilityOwner {
 public:
     explicit RootCapabilityOwner(fs::path const &path)
+        __attribute__((assert_capability(!root_lifetime_registry_lock)))
         : probe_(std::make_shared<RootLifetimeProbe>()),
-          context_(new RootLifetimeContext(path, probe_))
+          context_(new RootLifetimeContext(path, probe_)),
+          token_(0U)
     {
+        try {
+            token_ = register_root_lifetime(context_);
+        } catch (...) {
+            delete std::exchange(context_, nullptr);
+            throw;
+        }
     }
 
     RootCapabilityOwner(RootCapabilityOwner const &) = delete;
@@ -122,7 +169,7 @@ public:
     RootCapabilityOwner(RootCapabilityOwner &&) = delete;
     RootCapabilityOwner &operator=(RootCapabilityOwner &&) = delete;
 
-    ~RootCapabilityOwner()
+    ~RootCapabilityOwner() TORRENT_BRIDGE_REQUIRES_NOT(root_lifetime_registry_lock)
     {
         drop_caller_ownership();
     }
@@ -133,7 +180,7 @@ public:
             .directory_descriptor = context_->descriptor.get(),
             .device = context_->device,
             .inode = context_->inode,
-            .lifetime_context = reinterpret_cast<std::uintptr_t>(context_),
+            .lifetime_token = token_,
         };
     }
 
@@ -143,16 +190,18 @@ public:
     }
 
     void drop_caller_ownership() noexcept
+        TORRENT_BRIDGE_REQUIRES_NOT(root_lifetime_registry_lock)
     {
         RootLifetimeContext *const context = std::exchange(context_, nullptr);
         if (context != nullptr) {
-            release_root_reference(context);
+            release_root_reference(token_, false);
         }
     }
 
 private:
     std::shared_ptr<RootLifetimeProbe> probe_;
     RootLifetimeContext *context_;
+    std::uint64_t token_;
 };
 
 struct TorrentFixture {
@@ -316,7 +365,7 @@ void exercise_confined_storage_and_destroy(
     fs::path const &root_path,
     fs::path const &retained_path,
     RootCapabilityOwner &capability
-)
+) TORRENT_BRIDGE_REQUIRES_NOT(root_lifetime_registry_lock)
 {
     lt::torrent_handle const handle = active_handle(*client, torrent_id);
     clear_authorized_roots(client);

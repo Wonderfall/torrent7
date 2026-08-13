@@ -564,21 +564,14 @@ require_match "[[:space:]]pacdb[[:space:]]" "$engine_text_output" \
 require_match "[[:space:]]autdb[[:space:]]" "$engine_text_output" \
     "Engine extension has no authenticated data-pointer use"
 typeset -r wake_pac_output="$temporary_dir/wake-pac.txt"
-typeset -r authorized_root_release_pac_output="$temporary_dir/authorized-root-release-pac.txt"
 extract_disassembly_function \
     "$engine_text_output" \
     "__ZN14torrent_bridge8internal14TTorrentClient20invoke_wake_callbackERKNS0_22WakeCallbackInvocationE" \
     "$wake_pac_output"
-extract_disassembly_function \
-    "$engine_text_output" \
-    "__ZNK14torrent_bridge8internal12_GLOBAL__N_129AuthorizedRootLifetimeReleaseclEPv" \
-    "$authorized_root_release_pac_output"
 verify_nearby_pac_instruction wake.callback "$wake_pac_output" 0x9cc0 callback 40
 verify_nearby_pac_instruction wake.context "$wake_pac_output" 0x8cdb data 4
 verify_nearby_pac_instruction \
-    authorized-root.release "$authorized_root_release_pac_output" 0xc7ee callback 24
-verify_nearby_pac_instruction \
-    authorized-root.context "$authorized_root_release_pac_output" 0x2f9a data 4
+    authorized-root.release "$engine_text_output" 0xc7ee callback 4
 verify_nearby_pac_instruction authorized-root.retain "$engine_text_output" 0xca4d callback 4
 verify_nearby_pac_instruction \
     asio.executor-function.complete "$engine_text_output" 0x9890 callback 4

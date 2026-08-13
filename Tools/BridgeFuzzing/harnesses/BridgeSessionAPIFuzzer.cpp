@@ -108,7 +108,7 @@ void exercise_authorized_save_path_replacement(
         ++root.inode;
         break;
     case 3:
-        root.lifetime_context = nullptr;
+        root.lifetime_token = 0U;
         break;
     default:
         break;
@@ -120,8 +120,8 @@ void exercise_authorized_save_path_replacement(
     std::array<TTorrentAuthorizedSaveRoot, root_capacity> roots{};
     roots.fill(root);
 
-    TTorrentAuthorizedRootLifetimeCallback retain = nullptr;
-    TTorrentAuthorizedRootLifetimeCallback release = nullptr;
+    TTorrentAuthorizedRootLifetimeRetainCallback retain = nullptr;
+    TTorrentAuthorizedRootLifetimeReleaseCallback release = nullptr;
     switch (reader.read_u8() % 4U) {
     case 0:
         retain = bridge_fuzz::retain_authorized_save_root;

@@ -538,6 +538,9 @@ the explicit ASan runtime and its Xcode RPATH. `LC_DYLD_ENVIRONMENT` is forbidde
   freshly reconciled capability set.
 - Canonical path text alone never grants storage authority; a live capability
   must also match the verified directory descriptor's device and inode.
+- Native root lifetimes use random process-local tokens validated by a locked
+  Swift registry that owns each security-scope anchor; Swift object pointers do
+  not cross the C ABI.
 - Resume restoration requires a currently authorized canonical save path.
 - Resume and removal state is helper-owned, atomic, owner-only, and durable.
   Unauthorized or temporarily unreadable valid entries are preserved.

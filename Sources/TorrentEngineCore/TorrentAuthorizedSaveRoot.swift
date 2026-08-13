@@ -1,28 +1,86 @@
 import Darwin
 import Foundation
+import Synchronization
 import TorrentBridge
 import TorrentEngineModel
 
 package func torrentAuthorizedSaveRootRetainCallback(
-    _ context: UnsafeMutableRawPointer?
-) {
-    guard let context = unsafe context else {
-        return
-    }
-    _ = unsafe Unmanaged<AnyObject>
-        .fromOpaque(context)
-        .retain()
+    _ token: UInt64
+) -> UInt8 {
+    TorrentAuthorizedRootLifetimeRegistry.retain(token: token) ? 1 : 0
 }
 
 package func torrentAuthorizedSaveRootReleaseCallback(
-    _ context: UnsafeMutableRawPointer?
+    _ token: UInt64
 ) {
-    guard let context = unsafe context else {
-        return
+    TorrentAuthorizedRootLifetimeRegistry.release(token: token)
+}
+
+private enum TorrentAuthorizedRootLifetimeRegistry {
+    private struct Entry: Sendable {
+        let anchor: any AnyObject & Sendable
+        var ownerIsAlive = true
+        var nativeRetainCount = 0
     }
-    unsafe Unmanaged<AnyObject>
-        .fromOpaque(context)
-        .release()
+
+    private struct State: Sendable {
+        var entries: [UInt64: Entry] = [:]
+    }
+
+    private static let state = Mutex(State())
+
+    static func register(anchor: any AnyObject & Sendable) -> UInt64 {
+        state.withLock { state in
+            var token = UInt64.random(in: UInt64(1)..<UInt64.max)
+            while state.entries[token] != nil {
+                token = UInt64.random(in: UInt64(1)..<UInt64.max)
+            }
+            state.entries[token] = Entry(anchor: anchor)
+            return token
+        }
+    }
+
+    static func retain(token: UInt64) -> Bool {
+        state.withLock { state in
+            guard var entry = state.entries[token],
+                  entry.ownerIsAlive,
+                  entry.nativeRetainCount < Int.max else {
+                return false
+            }
+            entry.nativeRetainCount += 1
+            state.entries[token] = entry
+            return true
+        }
+    }
+
+    static func release(token: UInt64) {
+        state.withLock { state in
+            guard var entry = state.entries[token],
+                  entry.nativeRetainCount > 0 else {
+                return
+            }
+            entry.nativeRetainCount -= 1
+            if !entry.ownerIsAlive && entry.nativeRetainCount == 0 {
+                state.entries.removeValue(forKey: token)
+            } else {
+                state.entries[token] = entry
+            }
+        }
+    }
+
+    static func releaseOwner(token: UInt64) {
+        state.withLock { state in
+            guard var entry = state.entries[token] else {
+                return
+            }
+            if entry.nativeRetainCount == 0 {
+                state.entries.removeValue(forKey: token)
+            } else {
+                entry.ownerIsAlive = false
+                state.entries[token] = entry
+            }
+        }
+    }
 }
 
 /// A descriptor-backed download-root authority borrowed by the native bridge.
@@ -37,7 +95,7 @@ package func torrentAuthorizedSaveRootReleaseCallback(
     package let inode: UInt64
 
     private let directoryDescriptor: Int32
-    private let lifetimeAnchor: any AnyObject & Sendable
+    private let lifetimeToken: UInt64
 
     package init(
         canonicalPath: String,
@@ -89,23 +147,22 @@ package func torrentAuthorizedSaveRootReleaseCallback(
         self.device = device
         self.inode = inode
         directoryDescriptor = duplicated
-        self.lifetimeAnchor = lifetimeAnchor
+        lifetimeToken = TorrentAuthorizedRootLifetimeRegistry.register(
+            anchor: lifetimeAnchor
+        )
     }
 
     deinit {
+        TorrentAuthorizedRootLifetimeRegistry.releaseOwner(token: lifetimeToken)
         Darwin.close(directoryDescriptor)
     }
 
     nonisolated func nativeRecord() -> TTorrentAuthorizedSaveRoot {
-        unsafe TTorrentAuthorizedSaveRoot(
+        TTorrentAuthorizedSaveRoot(
             directory_descriptor: directoryDescriptor,
             device: device,
             inode: inode,
-            lifetime_context: UInt(
-                bitPattern: Unmanaged<AnyObject>
-                    .passUnretained(lifetimeAnchor)
-                    .toOpaque()
-            )
+            lifetime_token: lifetimeToken
         )
     }
 }

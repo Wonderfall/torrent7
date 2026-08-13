@@ -9,10 +9,12 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>
 #include <vector>
 
 // Bridge tests intentionally exercise the private C++ implementation surface.
@@ -85,17 +87,94 @@ struct AuthorizedSaveRootLifetimeProbe {
     std::atomic<int> release_count = 0;
 };
 
-inline void retain_authorized_save_root(void *context)
+inline AnalyzedMutex authorized_save_root_lifetime_registry_lock;
+inline std::unordered_map<std::uint64_t, AuthorizedSaveRootLifetimeProbe *>
+    authorized_save_root_lifetime_registry;
+inline std::atomic<std::uint64_t> next_authorized_save_root_lifetime_token = 1U;
+
+inline std::uint64_t register_authorized_save_root_lifetime(
+    AuthorizedSaveRootLifetimeProbe &probe
+) TORRENT_BRIDGE_REQUIRES_NOT(authorized_save_root_lifetime_registry_lock)
 {
-    auto *probe = static_cast<AuthorizedSaveRootLifetimeProbe *>(context);
-    probe->retain_count.fetch_add(1, std::memory_order_relaxed);
+    std::uint64_t token = next_authorized_save_root_lifetime_token.fetch_add(
+        1U,
+        std::memory_order_relaxed
+    );
+    if (token == 0U) {
+        token = next_authorized_save_root_lifetime_token.fetch_add(
+            1U,
+            std::memory_order_relaxed
+        );
+    }
+    std::scoped_lock guard(authorized_save_root_lifetime_registry_lock);
+    authorized_save_root_lifetime_registry.emplace(token, &probe);
+    return token;
 }
 
-inline void release_authorized_save_root(void *context)
+inline void unregister_authorized_save_root_lifetime(
+    std::uint64_t const token,
+    AuthorizedSaveRootLifetimeProbe const &probe
+) TORRENT_BRIDGE_REQUIRES_NOT(authorized_save_root_lifetime_registry_lock)
 {
-    auto *probe = static_cast<AuthorizedSaveRootLifetimeProbe *>(context);
-    probe->release_count.fetch_add(1, std::memory_order_relaxed);
+    std::scoped_lock guard(authorized_save_root_lifetime_registry_lock);
+    auto const registered = authorized_save_root_lifetime_registry.find(token);
+    if (registered != authorized_save_root_lifetime_registry.end()
+        && registered->second == &probe) {
+        authorized_save_root_lifetime_registry.erase(registered);
+    }
 }
+
+inline std::uint8_t retain_authorized_save_root(std::uint64_t const token)
+    TORRENT_BRIDGE_REQUIRES_NOT(authorized_save_root_lifetime_registry_lock)
+{
+    std::scoped_lock guard(authorized_save_root_lifetime_registry_lock);
+    auto const registered = authorized_save_root_lifetime_registry.find(token);
+    if (registered == authorized_save_root_lifetime_registry.end()) {
+        return 0U;
+    }
+    registered->second->retain_count.fetch_add(1, std::memory_order_relaxed);
+    return 1U;
+}
+
+inline void release_authorized_save_root(std::uint64_t const token)
+    TORRENT_BRIDGE_REQUIRES_NOT(authorized_save_root_lifetime_registry_lock)
+{
+    std::scoped_lock guard(authorized_save_root_lifetime_registry_lock);
+    auto const registered = authorized_save_root_lifetime_registry.find(token);
+    if (registered != authorized_save_root_lifetime_registry.end()) {
+        registered->second->release_count.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+class AuthorizedSaveRootLifetimeRegistration {
+public:
+    explicit AuthorizedSaveRootLifetimeRegistration(
+        AuthorizedSaveRootLifetimeProbe &probe
+    ) : probe_(probe), token_(register_authorized_save_root_lifetime(probe))
+    {
+    }
+
+    AuthorizedSaveRootLifetimeRegistration(
+        AuthorizedSaveRootLifetimeRegistration const &
+    ) = delete;
+    AuthorizedSaveRootLifetimeRegistration &operator=(
+        AuthorizedSaveRootLifetimeRegistration const &
+    ) = delete;
+
+    ~AuthorizedSaveRootLifetimeRegistration()
+    {
+        unregister_authorized_save_root_lifetime(token_, probe_);
+    }
+
+    [[nodiscard]] std::uint64_t token() const noexcept
+    {
+        return token_;
+    }
+
+private:
+    AuthorizedSaveRootLifetimeProbe &probe_;
+    std::uint64_t token_;
+};
 
 class AuthorizedSaveRoot {
 public:
@@ -128,7 +207,7 @@ public:
             .directory_descriptor = descriptor_.get(),
             .device = device_,
             .inode = inode_,
-            .lifetime_context = reinterpret_cast<std::uintptr_t>(&lifetime_probe_),
+            .lifetime_token = lifetime_registration_.token(),
         };
     }
 
@@ -156,6 +235,7 @@ private:
     std::uint64_t device_ = 0U;
     std::uint64_t inode_ = 0U;
     AuthorizedSaveRootLifetimeProbe lifetime_probe_;
+    AuthorizedSaveRootLifetimeRegistration lifetime_registration_{lifetime_probe_};
 };
 
 [[nodiscard]] inline std::string string_from_c_buffer(std::span<char const> buffer)

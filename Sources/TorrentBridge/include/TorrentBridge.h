@@ -99,7 +99,7 @@ inline constexpr int32_t TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT = 5;
 inline constexpr uint8_t TTORRENT_CONTENT_KIND_UNKNOWN = 0;
 inline constexpr uint8_t TTORRENT_CONTENT_KIND_SINGLE_FILE = 1;
 inline constexpr uint8_t TTORRENT_CONTENT_KIND_DIRECTORY = 2;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 39;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 40;
 namespace torrent_bridge::internal {
 struct TTorrentClient;
 }
@@ -163,7 +163,7 @@ enum {
     TTORRENT_CONTENT_KIND_UNKNOWN = 0,
     TTORRENT_CONTENT_KIND_SINGLE_FILE = 1,
     TTORRENT_CONTENT_KIND_DIRECTORY = 2,
-    TTORRENT_BRIDGE_ABI_VERSION = 39
+    TTORRENT_BRIDGE_ABI_VERSION = 40
 };
 #endif
 
@@ -368,23 +368,25 @@ typedef struct TTorrentOptions {
     int32_t queue_priority;
 } TTorrentOptions;
 
-typedef void (* TORRENT_BRIDGE_NULLABLE TTorrentAuthorizedRootLifetimeCallback)(void * TORRENT_BRIDGE_NULLABLE context);
+typedef uint8_t (* TORRENT_BRIDGE_NULLABLE TTorrentAuthorizedRootLifetimeRetainCallback)(uint64_t token);
+typedef void (* TORRENT_BRIDGE_NULLABLE TTorrentAuthorizedRootLifetimeReleaseCallback)(uint64_t token);
 
 // A borrowed, descriptor-backed directory capability corresponding one-to-one
 // with a path in the authorized-save-path blob. The bridge validates the
 // descriptor, identity, and current canonical pathname, then duplicates the
-// descriptor and retains lifetime_context before returning. Input records and
-// contexts must remain valid for the synchronous bridge call. Callbacks must be
-// thread-safe, non-throwing, and must not reenter TorrentBridge. Every successful
-// retain is balanced by one release; release may run on a libtorrent worker or
-// detached-shutdown thread before blocking client destruction has completed.
+// descriptor and validates and retains lifetime_token before returning. Input
+// records must remain valid for the synchronous bridge call. Tokens must be
+// unguessable, process-local capabilities owned by the callback registry.
+// Callbacks must be thread-safe, non-throwing, and must not reenter
+// TorrentBridge. The retain callback returns nonzero only for a live token.
+// Every successful retain is balanced by one release; release may run on a
+// libtorrent worker or detached-shutdown thread before blocking client
+// destruction has completed.
 typedef struct TTorrentAuthorizedSaveRoot {
     int32_t directory_descriptor;
     uint64_t device;
     uint64_t inode;
-    // Opaque pointer bits, never dereferenced as part of this borrowed record.
-    // The callback boundary converts the token back to its original context.
-    uintptr_t lifetime_context;
+    uint64_t lifetime_token;
 } TTorrentAuthorizedSaveRoot;
 
 const char * TORRENT_BRIDGE_NONNULL TORRENT_BRIDGE_NULL_TERMINATED TorrentBridgeLibtorrentVersion(void)
@@ -412,8 +414,8 @@ TTorrentClient * TORRENT_BRIDGE_NULLABLE TorrentClientCreateWithError(
     const TTorrentAuthorizedSaveRoot * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(authorized_save_root_count)
         authorized_save_roots TORRENT_BRIDGE_NOESCAPE,
     int32_t authorized_save_root_count,
-    TTorrentAuthorizedRootLifetimeCallback retain_authorized_root,
-    TTorrentAuthorizedRootLifetimeCallback release_authorized_root,
+    TTorrentAuthorizedRootLifetimeRetainCallback retain_authorized_root,
+    TTorrentAuthorizedRootLifetimeReleaseCallback release_authorized_root,
     char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
@@ -434,8 +436,8 @@ int32_t TorrentClientReplaceAuthorizedSavePaths(
     const TTorrentAuthorizedSaveRoot * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(authorized_save_root_count)
         authorized_save_roots TORRENT_BRIDGE_NOESCAPE,
     int32_t authorized_save_root_count,
-    TTorrentAuthorizedRootLifetimeCallback retain_authorized_root,
-    TTorrentAuthorizedRootLifetimeCallback release_authorized_root,
+    TTorrentAuthorizedRootLifetimeRetainCallback retain_authorized_root,
+    TTorrentAuthorizedRootLifetimeReleaseCallback release_authorized_root,
     char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;

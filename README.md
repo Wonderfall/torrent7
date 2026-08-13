@@ -120,6 +120,8 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
   exclusive authorization transaction and always end in an exact capability-set
   replacement or controller termination. Local bookmark/path validation failures
   fail closed too, and restart reuses only an exactly reconciled capability set.
+  Native lifetime retention uses validated random tokens rather than Swift
+  object pointers.
 - **Helper-authoritative network policy:** the engine starts blocked. A network
   binding can unblock it only after the helper-side interface monitor validates
   the interface fingerprint and VPN service identity. The networkless GUI gets a

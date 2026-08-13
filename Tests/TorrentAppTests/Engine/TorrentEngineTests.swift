@@ -78,8 +78,10 @@ struct TorrentEngineTests {
             at: stateDirectory,
             state: lifetimeState
         )
-        #expect(retainedLifetime.hasStableContext)
+        #expect(retainedLifetime.usesDistinctTokens)
         #expect(!lifetimeState.isReleased)
+        #expect(torrentAuthorizedSaveRootRetainCallback(UInt64.max) == 0)
+        torrentAuthorizedSaveRootReleaseCallback(UInt64.max)
 
         retainedLifetime.release()
         #expect(lifetimeState.isReleased)
@@ -767,8 +769,8 @@ private func authorizedSaveRoot(
 }
 
 @safe private final class TestRetainedAuthorizedSaveRootLifetime: @unchecked Sendable {
-    let hasStableContext: Bool
-    private var context: UnsafeMutableRawPointer?
+    let usesDistinctTokens: Bool
+    private var token: UInt64?
 
     init(
         at directory: URL,
@@ -779,24 +781,23 @@ private func authorizedSaveRoot(
         let secondRoot = try authorizedSaveRoot(at: directory, retaining: lifetimeAnchor)
         let firstRecord = firstRoot.nativeRecord()
         let secondRecord = secondRoot.nativeRecord()
-        guard let firstContext = unsafe UnsafeMutableRawPointer(
-            bitPattern: firstRecord.lifetime_context
-        ), let secondContext = unsafe UnsafeMutableRawPointer(
-            bitPattern: secondRecord.lifetime_context
-        ) else {
-            throw TorrentEngineError.bridgeError("An authorized root lifetime context is missing.")
+        guard firstRecord.lifetime_token != 0,
+              secondRecord.lifetime_token != 0 else {
+            throw TorrentEngineError.bridgeError("An authorized root lifetime token is missing.")
         }
-        hasStableContext = unsafe firstContext == secondContext
-        unsafe torrentAuthorizedSaveRootRetainCallback(firstContext)
-        unsafe context = firstContext
+        usesDistinctTokens = firstRecord.lifetime_token != secondRecord.lifetime_token
+        guard torrentAuthorizedSaveRootRetainCallback(firstRecord.lifetime_token) != 0 else {
+            throw TorrentEngineError.bridgeError("An authorized root lifetime token is invalid.")
+        }
+        token = firstRecord.lifetime_token
     }
 
     func release() {
-        guard let context = unsafe context else {
+        guard let token else {
             return
         }
-        unsafe self.context = nil
-        unsafe torrentAuthorizedSaveRootReleaseCallback(context)
+        self.token = nil
+        torrentAuthorizedSaveRootReleaseCallback(token)
     }
 
     deinit {

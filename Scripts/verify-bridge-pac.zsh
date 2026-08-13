@@ -75,9 +75,7 @@ extract_function TorrentBridgeTestInvokeAuthorizedRootRelease "$release"
 # AppleClang's pinned 16-bit string discriminators for the Bridge-owned slots.
 verify_data_authentication wake.context "$wake" 0x8cdb
 verify_callback_branch wake.callback "$wake" 0x9cc0
-verify_data_authentication authorized-root.context "$retain" 0x2f9a
 verify_callback_branch authorized-root.retain "$retain" 0xca4d
-verify_data_authentication authorized-root.context "$release" 0x2f9a
 verify_callback_branch authorized-root.release "$release" 0xc7ee
 
 print -r -- "Bridge callback/context PAC codegen verification passed"

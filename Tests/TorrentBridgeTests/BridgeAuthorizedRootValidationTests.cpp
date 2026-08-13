@@ -12,7 +12,7 @@
 
 namespace {
 
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 39U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 40U);
 static_assert(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT == 32);
 
 using ErrorBuffer = std::array<char, 512>;
@@ -47,8 +47,8 @@ using ErrorBuffer = std::array<char, 512>;
     int32_t const path_blob_size,
     TTorrentAuthorizedSaveRoot const *roots,
     int32_t const root_count,
-    TTorrentAuthorizedRootLifetimeCallback const retain,
-    TTorrentAuthorizedRootLifetimeCallback const release,
+    TTorrentAuthorizedRootLifetimeRetainCallback const retain,
+    TTorrentAuthorizedRootLifetimeReleaseCallback const release,
     ErrorBuffer &error
 )
 {
@@ -125,7 +125,7 @@ void clear_authorized_roots(TTorrentClient &client, ErrorBuffer &error)
 
 } // namespace
 
-TEST_CASE("ABI 37 authorized roots enforce pointer count and callback contracts")
+TEST_CASE("ABI 40 authorized roots enforce pointer count and callback contracts")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
     fs::path const root_path = temporary_directory.path() / "Root";
@@ -327,7 +327,7 @@ TEST_CASE("ABI 37 authorized roots enforce pointer count and callback contracts"
     CHECK(root.lifetime_probe().release_count.load() == 0);
 }
 
-TEST_CASE("ABI 37 authorized roots reject invalid descriptors contexts and identities")
+TEST_CASE("ABI 40 authorized roots reject invalid descriptors tokens and identities")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
     fs::path const root_path = temporary_directory.path() / "Root";
@@ -344,10 +344,17 @@ TEST_CASE("ABI 37 authorized roots reject invalid descriptors contexts and ident
     CHECK(replace_authorized_roots(client, blob, &invalid_descriptor, 1, error) != 0);
     check_error(error, "An authorized save root record is invalid.");
 
-    TTorrentAuthorizedSaveRoot missing_context = valid_record;
-    missing_context.lifetime_context = 0U;
-    CHECK(replace_authorized_roots(client, blob, &missing_context, 1, error) != 0);
+    TTorrentAuthorizedSaveRoot missing_token = valid_record;
+    missing_token.lifetime_token = 0U;
+    CHECK(replace_authorized_roots(client, blob, &missing_token, 1, error) != 0);
     check_error(error, "An authorized save root record is invalid.");
+    CHECK(root.lifetime_probe().retain_count.load() == 0);
+    CHECK(root.lifetime_probe().release_count.load() == 0);
+
+    TTorrentAuthorizedSaveRoot unknown_token = valid_record;
+    unknown_token.lifetime_token = std::numeric_limits<std::uint64_t>::max();
+    CHECK(replace_authorized_roots(client, blob, &unknown_token, 1, error) != 0);
+    check_error(error, "An authorized save root lifetime token is invalid.");
     CHECK(root.lifetime_probe().retain_count.load() == 0);
     CHECK(root.lifetime_probe().release_count.load() == 0);
 
@@ -376,11 +383,12 @@ TEST_CASE("ABI 37 authorized roots reject invalid descriptors contexts and ident
     struct ::stat file_metadata {};
     REQUIRE(::fstat(file_descriptor.get(), &file_metadata) == 0);
     bridge_tests::AuthorizedSaveRootLifetimeProbe file_probe;
+    bridge_tests::AuthorizedSaveRootLifetimeRegistration file_lifetime(file_probe);
     TTorrentAuthorizedSaveRoot const file_record{
         .directory_descriptor = file_descriptor.get(),
         .device = static_cast<std::uint64_t>(file_metadata.st_dev),
         .inode = static_cast<std::uint64_t>(file_metadata.st_ino),
-        .lifetime_context = reinterpret_cast<std::uintptr_t>(&file_probe),
+        .lifetime_token = file_lifetime.token(),
     };
     CHECK(replace_authorized_roots(client, blob, &file_record, 1, error) != 0);
     check_error(error, "An authorized save root does not match its directory capability.");
@@ -399,7 +407,7 @@ TEST_CASE("ABI 37 authorized roots reject invalid descriptors contexts and ident
     CHECK(closed_root.lifetime_probe().release_count.load() == 1);
 }
 
-TEST_CASE("ABI 37 authorized roots reject duplicate normalized paths and identities")
+TEST_CASE("ABI 40 authorized roots reject duplicate normalized paths and identities")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
     TTorrentClient client((temporary_directory.path() / "State").string());
@@ -461,7 +469,7 @@ TEST_CASE("ABI 37 authorized roots reject duplicate normalized paths and identit
     CHECK(identity_root.lifetime_probe().release_count.load() == 1);
 }
 
-TEST_CASE("ABI 37 authorized roots require path and record ordering to agree")
+TEST_CASE("ABI 40 authorized roots require path and record ordering to agree")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
     fs::path const first_path = temporary_directory.path() / "First";
@@ -497,7 +505,7 @@ TEST_CASE("ABI 37 authorized roots require path and record ordering to agree")
     CHECK(second_root.lifetime_probe().release_count.load() == 1);
 }
 
-TEST_CASE("ABI 37 second-record failures clean up and preserve replacement atomicity")
+TEST_CASE("ABI 40 second-record failures clean up and preserve replacement atomicity")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
     fs::path const existing_path = temporary_directory.path() / "Existing";
@@ -593,7 +601,7 @@ TEST_CASE("ABI 37 second-record failures clean up and preserve replacement atomi
           == existing_root.lifetime_probe().release_count.load());
 }
 
-TEST_CASE("ABI 37 same-root reuse balances callbacks without accumulating descriptors")
+TEST_CASE("ABI 40 same-root reuse balances callbacks without accumulating descriptors")
 {
     constexpr int replacement_count = 64;
     bridge_tests::TemporaryDirectory temporary_directory;
@@ -652,7 +660,7 @@ TEST_CASE("ABI 37 same-root reuse balances callbacks without accumulating descri
           == stable_descriptor_count - 1);
 }
 
-TEST_CASE("ABI 37 root reuse never crosses lifetime contexts")
+TEST_CASE("ABI 40 root reuse never crosses lifetime tokens")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
     fs::path const root_path = temporary_directory.path() / "Root";
@@ -692,7 +700,7 @@ TEST_CASE("ABI 37 root reuse never crosses lifetime contexts")
     CHECK(second_capability.lifetime_probe().release_count.load() == 1);
 }
 
-TEST_CASE("ABI 37 live root budget includes authorities retained after allowlist replacement")
+TEST_CASE("ABI 40 live root budget includes authorities retained after allowlist replacement")
 {
     constexpr int root_limit = TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT;
     bridge_tests::TemporaryDirectory temporary_directory;
@@ -752,7 +760,7 @@ TEST_CASE("ABI 37 live root budget includes authorities retained after allowlist
     }
 }
 
-TEST_CASE("ABI 37 authorized root limit accepts 32 and rejects 33 atomically")
+TEST_CASE("ABI 40 authorized root limit accepts 32 and rejects 33 atomically")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
     TTorrentClient client((temporary_directory.path() / "State").string());
