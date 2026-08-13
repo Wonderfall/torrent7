@@ -2102,7 +2102,7 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
 
 namespace {
 
-TorrentLoadResult load_torrent_data_from_c_buffer(char const *torrent_data, int32_t torrent_data_size)
+TorrentLoadResult load_torrent_data_from_c_buffer(void const *torrent_data, int32_t torrent_data_size)
 {
     if (torrent_data == nullptr) {
         return std::unexpected(BridgeError{.code = 1, .message = "Missing torrent data."});
@@ -2111,7 +2111,10 @@ TorrentLoadResult load_torrent_data_from_c_buffer(char const *torrent_data, int3
         return std::unexpected(BridgeError{.code = 1, .message = "Invalid torrent data size."});
     }
 
-    return load_torrent_data(input_span_from_c_buffer(torrent_data, torrent_data_size));
+    return load_torrent_data(input_span_from_c_buffer(
+        static_cast<char const *>(torrent_data),
+        torrent_data_size
+    ));
 }
 
 template <typename LoadTorrent>
@@ -2119,6 +2122,7 @@ int32_t add_torrent_file_data_with_priorities(
     TTorrentClient *client,
     const char *save_path,
     const TTorrentAddOptions *options,
+    bool apply_file_priority_overrides,
     const TTorrentFilePriorityEntry *file_priorities,
     int32_t file_priority_count,
     char *added_id_out,
@@ -2140,7 +2144,7 @@ int32_t add_torrent_file_data_with_priorities(
             return bridge_error(1, "Missing torrent client, save path, add options, or add outcome output.");
         }
         TTorrentAddOptions const add_options = *options;
-        if (file_priority_count < -1) {
+        if (file_priority_count < 0) {
             return bridge_error(1, "Invalid file priority count.");
         }
         if (file_priority_count > TTORRENT_MAX_FILE_COUNT) {
@@ -2170,12 +2174,13 @@ int32_t add_torrent_file_data_with_priorities(
         }
         sanitize_resume_endpoint_hints(params);
         lt::add_torrent_params const source_params = params;
-        if (file_priority_count > params.ti->layout().num_files()) {
+        if (apply_file_priority_overrides
+            && file_priority_count > params.ti->layout().num_files()) {
             return bridge_error(2, "The file priorities are invalid.");
         }
 
         std::optional<std::span<TTorrentFilePriorityEntry const>> priority_entries;
-        if (file_priority_count >= 0) {
+        if (apply_file_priority_overrides) {
             priority_entries = input_span_from_c_buffer(file_priorities, file_priority_count);
         }
         BridgeResult const valid_file_policy = apply_file_priorities(params, priority_entries);
@@ -2386,7 +2391,7 @@ int32_t add_torrent_file_data_with_priorities(
 
 extern "C" int32_t TorrentClientAddTorrentFileData(
     TTorrentClient *client,
-    const char *torrent_data,
+    const void *torrent_data,
     int32_t torrent_data_size,
     const char *save_path,
     const TTorrentAddOptions *options,
@@ -2401,8 +2406,9 @@ extern "C" int32_t TorrentClientAddTorrentFileData(
         client,
         save_path,
         options,
+        false,
         nullptr,
-        -1,
+        0,
         added_id_out,
         added_id_capacity,
         add_outcome_out,
@@ -2416,7 +2422,7 @@ extern "C" int32_t TorrentClientAddTorrentFileData(
 
 extern "C" int32_t TorrentClientAddTorrentFileDataWithPriorities(
     TTorrentClient *client,
-    const char *torrent_data,
+    const void *torrent_data,
     int32_t torrent_data_size,
     const char *save_path,
     const TTorrentAddOptions *options,
@@ -2433,6 +2439,7 @@ extern "C" int32_t TorrentClientAddTorrentFileDataWithPriorities(
         client,
         save_path,
         options,
+        true,
         file_priorities,
         file_priority_count,
         added_id_out,
@@ -2501,7 +2508,7 @@ int32_t preview_torrent_file_with_loader(
 
 extern "C" int32_t TorrentClientPreviewTorrentFileData(
     TTorrentClient *client,
-    const char *torrent_data,
+    const void *torrent_data,
     int32_t torrent_data_size,
     TTorrentFilePreview *preview,
     TTorrentFileSnapshot *files,

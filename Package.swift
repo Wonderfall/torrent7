@@ -197,6 +197,12 @@ let appSwiftPointerAuthenticationFlags = [
     "-swift-ptrauth-mode",
     "NewAndAuth"
 ]
+let bridgeSafeInteropSwiftSettings: [SwiftSetting] = [
+    // Limit the experimental Clang flag to Swift's importer. Applying it to the
+    // C++ target also activates unrelated SDK bounds contracts in Boost.Asio.
+    .enableExperimentalFeature("SafeInteropWrappers"),
+    .unsafeFlags(["-Xcc", "-fexperimental-bounds-safety-attributes"])
+]
 let engineExtensionSwiftFlags = appSwiftStrictnessFlags
     + appSwiftPointerAuthenticationFlags
     + ["-application-extension"]
@@ -305,7 +311,7 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(engineExtensionSwiftFlags)
-            ]
+            ] + bridgeSafeInteropSwiftSettings
         ),
         .target(
             name: "TorrentEngineServiceSupport",
@@ -402,7 +408,7 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
-            ]
+            ] + bridgeSafeInteropSwiftSettings
         ),
         .testTarget(
             name: "TorrentEngineIPCTests",

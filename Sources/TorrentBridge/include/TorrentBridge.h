@@ -3,6 +3,42 @@
 
 #include <stdint.h>
 
+// The public declarations carry ABI-neutral bounds and lifetime metadata for
+// Swift's safe interop importer. Definitions use conventional C pointer types
+// so the implementation can include third-party C++ headers without enabling
+// their unrelated experimental bounds contracts.
+#if defined(TORRENT_BRIDGE_IMPLEMENTATION)
+#define TORRENT_BRIDGE_COUNTED_BY(count)
+#define TORRENT_BRIDGE_NOESCAPE
+#define TORRENT_BRIDGE_NONNULL
+#define TORRENT_BRIDGE_NULLABLE
+#define TORRENT_BRIDGE_NULL_TERMINATED
+#define TORRENT_BRIDGE_SIZED_BY(size)
+#else
+#define TORRENT_BRIDGE_NONNULL _Nonnull
+#define TORRENT_BRIDGE_NULLABLE _Nullable
+
+#if __has_include(<lifetimebound.h>)
+#include <lifetimebound.h>
+#define TORRENT_BRIDGE_NOESCAPE __noescape
+#elif __has_attribute(noescape)
+#define TORRENT_BRIDGE_NOESCAPE __attribute__((noescape))
+#else
+#define TORRENT_BRIDGE_NOESCAPE
+#endif
+
+#if __has_include(<ptrcheck.h>)
+#include <ptrcheck.h>
+#define TORRENT_BRIDGE_COUNTED_BY(count) __counted_by(count)
+#define TORRENT_BRIDGE_SIZED_BY(size) __sized_by(size)
+#define TORRENT_BRIDGE_NULL_TERMINATED __null_terminated
+#else
+#define TORRENT_BRIDGE_COUNTED_BY(count)
+#define TORRENT_BRIDGE_SIZED_BY(size)
+#define TORRENT_BRIDGE_NULL_TERMINATED
+#endif
+#endif
+
 #ifdef __cplusplus
 #define TORRENT_BRIDGE_NOEXCEPT noexcept
 inline constexpr int32_t TTORRENT_BRIDGE_STATE_UNKNOWN = -1;
@@ -132,7 +168,7 @@ enum {
 #ifndef __cplusplus
 typedef struct TTorrentClient TTorrentClient;
 #endif
-typedef void (*TTorrentWakeCallback)(void *context);
+typedef void (* TORRENT_BRIDGE_NULLABLE TTorrentWakeCallback)(void * TORRENT_BRIDGE_NULLABLE context);
 
 typedef struct TTorrentSnapshot {
     char id[68];
@@ -280,7 +316,7 @@ typedef struct TTorrentSessionSettings {
     uint8_t require_https_web_seeds;
     int32_t encryption_policy;
     uint8_t anonymous_mode;
-    const char *required_network_interface;
+    const char * TORRENT_BRIDGE_NULLABLE required_network_interface;
     uint8_t network_blocked;
 } TTorrentSessionSettings;
 
@@ -331,7 +367,7 @@ typedef struct TTorrentOptions {
     int32_t queue_priority;
 } TTorrentOptions;
 
-typedef void (*TTorrentAuthorizedRootLifetimeCallback)(void *context);
+typedef void (* TORRENT_BRIDGE_NULLABLE TTorrentAuthorizedRootLifetimeCallback)(void * TORRENT_BRIDGE_NULLABLE context);
 
 // A borrowed, descriptor-backed directory capability corresponding one-to-one
 // with a path in the authorized-save-path blob. The bridge validates the
@@ -345,16 +381,17 @@ typedef struct TTorrentAuthorizedSaveRoot {
     int32_t directory_descriptor;
     uint64_t device;
     uint64_t inode;
-    void *lifetime_context;
+    void * TORRENT_BRIDGE_NULLABLE lifetime_context;
 } TTorrentAuthorizedSaveRoot;
 
-const char *TorrentBridgeLibtorrentVersion(void) TORRENT_BRIDGE_NOEXCEPT;
+const char * TORRENT_BRIDGE_NONNULL TORRENT_BRIDGE_NULL_TERMINATED TorrentBridgeLibtorrentVersion(void)
+    TORRENT_BRIDGE_NOEXCEPT;
 
 // Parses and sanitizes the magnet with the same native path used by add.
 // Returns 0 only when all sources are valid and within the bridge limits.
 int32_t TorrentBridgeInspectMagnetSources(
-    const char *magnet_uri,
-    TTorrentSourceSecurityInspection *inspection
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED magnet_uri TORRENT_BRIDGE_NOESCAPE,
+    TTorrentSourceSecurityInspection * TORRENT_BRIDGE_NULLABLE inspection TORRENT_BRIDGE_NOESCAPE
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 // Returns an owned client handle. Release it exactly once with TorrentClientDestroy.
@@ -363,16 +400,18 @@ int32_t TorrentBridgeInspectMagnetSources(
 // descriptor-backed capability per path in the same order. Pass NULL/0 for both
 // collections to deny all resume restoration. Pointer/count mismatches,
 // malformed records, and identity mismatches fail creation atomically.
-TTorrentClient *TorrentClientCreateWithError(
-    const char *state_path,
+TTorrentClient * TORRENT_BRIDGE_NULLABLE TorrentClientCreateWithError(
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED state_path TORRENT_BRIDGE_NOESCAPE,
     uint8_t enable_pex_plugin,
-    const uint8_t *authorized_save_paths_blob,
+    const uint8_t * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(authorized_save_paths_blob_size)
+        authorized_save_paths_blob TORRENT_BRIDGE_NOESCAPE,
     int32_t authorized_save_paths_blob_size,
-    const TTorrentAuthorizedSaveRoot *authorized_save_roots,
+    const TTorrentAuthorizedSaveRoot * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(authorized_save_root_count)
+        authorized_save_roots TORRENT_BRIDGE_NOESCAPE,
     int32_t authorized_save_root_count,
     TTorrentAuthorizedRootLifetimeCallback retain_authorized_root,
     TTorrentAuthorizedRootLifetimeCallback release_authorized_root,
-    char *error_out,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
@@ -385,35 +424,37 @@ TTorrentClient *TorrentClientCreateWithError(
 // TTORRENT_ERROR_AUTHORIZED_SAVE_ROOT_CAPACITY without changing the current
 // roots if active torrents retain too many historical root generations.
 int32_t TorrentClientReplaceAuthorizedSavePaths(
-    TTorrentClient *client,
-    const uint8_t *authorized_save_paths_blob,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const uint8_t * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(authorized_save_paths_blob_size)
+        authorized_save_paths_blob TORRENT_BRIDGE_NOESCAPE,
     int32_t authorized_save_paths_blob_size,
-    const TTorrentAuthorizedSaveRoot *authorized_save_roots,
+    const TTorrentAuthorizedSaveRoot * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(authorized_save_root_count)
+        authorized_save_roots TORRENT_BRIDGE_NOESCAPE,
     int32_t authorized_save_root_count,
     TTorrentAuthorizedRootLifetimeCallback retain_authorized_root,
     TTorrentAuthorizedRootLifetimeCallback release_authorized_root,
-    char *error_out,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 // Consumes a client handle returned by TorrentClientCreateWithError. Passing NULL is allowed.
 // No other bridge call may race with destruction of the same client.
-void TorrentClientDestroy(TTorrentClient *client) TORRENT_BRIDGE_NOEXCEPT;
+void TorrentClientDestroy(TTorrentClient * TORRENT_BRIDGE_NULLABLE client) TORRENT_BRIDGE_NOEXCEPT;
 
 // Like TorrentClientDestroy, but waits for libtorrent's shutdown proxy before returning.
-void TorrentClientDestroyBlocking(TTorrentClient *client) TORRENT_BRIDGE_NOEXCEPT;
+void TorrentClientDestroyBlocking(TTorrentClient * TORRENT_BRIDGE_NULLABLE client) TORRENT_BRIDGE_NOEXCEPT;
 
 // The wake callback is invoked outside the client lock and remains installed until
 // client destruction. It must not destroy the client from inside the callback.
 void TorrentClientSetWakeCallback(
-    TTorrentClient *client,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
     TTorrentWakeCallback callback,
-    void *context
+    void * TORRENT_BRIDGE_NULLABLE context
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 uint64_t TorrentClientTakeChanges(
-    TTorrentClient *client,
-    uint32_t *dirty_mask_out
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    uint32_t * TORRENT_BRIDGE_NULLABLE dirty_mask_out TORRENT_BRIDGE_NOESCAPE
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 // add_outcome_out is mandatory. It reports REJECTED until the native add can
@@ -422,205 +463,226 @@ uint64_t TorrentClientTakeChanges(
 // bookkeeping step succeeds. A failed call may therefore be distinguished as
 // a definite rejection or a commit-ambiguous failure without replaying it.
 int32_t TorrentClientAddMagnet(
-    TTorrentClient *client,
-    const char *magnet_uri,
-    const char *save_path,
-    const TTorrentAddOptions *options,
-    char *added_id_out,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED magnet_uri TORRENT_BRIDGE_NOESCAPE,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED save_path TORRENT_BRIDGE_NOESCAPE,
+    const TTorrentAddOptions * TORRENT_BRIDGE_NULLABLE options TORRENT_BRIDGE_NOESCAPE,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(added_id_capacity) added_id_out TORRENT_BRIDGE_NOESCAPE,
     int32_t added_id_capacity,
-    int32_t *add_outcome_out,
-    char *error_out,
+    int32_t * TORRENT_BRIDGE_NULLABLE add_outcome_out TORRENT_BRIDGE_NOESCAPE,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientAddTorrentFileData(
-    TTorrentClient *client,
-    const char *torrent_data,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const void * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_SIZED_BY(torrent_data_size) torrent_data TORRENT_BRIDGE_NOESCAPE,
     int32_t torrent_data_size,
-    const char *save_path,
-    const TTorrentAddOptions *options,
-    char *added_id_out,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED save_path TORRENT_BRIDGE_NOESCAPE,
+    const TTorrentAddOptions * TORRENT_BRIDGE_NULLABLE options TORRENT_BRIDGE_NOESCAPE,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(added_id_capacity) added_id_out TORRENT_BRIDGE_NOESCAPE,
     int32_t added_id_capacity,
-    int32_t *add_outcome_out,
-    char *error_out,
+    int32_t * TORRENT_BRIDGE_NULLABLE add_outcome_out TORRENT_BRIDGE_NOESCAPE,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientAddTorrentFileDataWithPriorities(
-    TTorrentClient *client,
-    const char *torrent_data,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const void * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_SIZED_BY(torrent_data_size) torrent_data TORRENT_BRIDGE_NOESCAPE,
     int32_t torrent_data_size,
-    const char *save_path,
-    const TTorrentAddOptions *options,
-    const TTorrentFilePriorityEntry *file_priorities,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED save_path TORRENT_BRIDGE_NOESCAPE,
+    const TTorrentAddOptions * TORRENT_BRIDGE_NULLABLE options TORRENT_BRIDGE_NOESCAPE,
+    const TTorrentFilePriorityEntry * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(file_priority_count)
+        file_priorities TORRENT_BRIDGE_NOESCAPE,
     int32_t file_priority_count,
-    char *added_id_out,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(added_id_capacity) added_id_out TORRENT_BRIDGE_NOESCAPE,
     int32_t added_id_capacity,
-    int32_t *add_outcome_out,
-    char *error_out,
+    int32_t * TORRENT_BRIDGE_NULLABLE add_outcome_out TORRENT_BRIDGE_NOESCAPE,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientPreviewTorrentFileData(
-    TTorrentClient *client,
-    const char *torrent_data,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const void * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_SIZED_BY(torrent_data_size) torrent_data TORRENT_BRIDGE_NOESCAPE,
     int32_t torrent_data_size,
-    TTorrentFilePreview *preview,
-    TTorrentFileSnapshot *files,
+    TTorrentFilePreview * TORRENT_BRIDGE_NULLABLE preview TORRENT_BRIDGE_NOESCAPE,
+    TTorrentFileSnapshot * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(capacity) files TORRENT_BRIDGE_NOESCAPE,
     int32_t capacity,
-    int32_t *required_count_out,
-    char *error_out,
+    int32_t * TORRENT_BRIDGE_NULLABLE required_count_out TORRENT_BRIDGE_NOESCAPE,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientCopySnapshotBatch(
-    TTorrentClient *client,
-    TTorrentSnapshot *snapshots,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    TTorrentSnapshot * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(capacity) snapshots TORRENT_BRIDGE_NOESCAPE,
     int32_t capacity,
-    uint64_t *revision_out,
-    int32_t *required_count_out
+    uint64_t * TORRENT_BRIDGE_NULLABLE revision_out TORRENT_BRIDGE_NOESCAPE,
+    int32_t * TORRENT_BRIDGE_NULLABLE required_count_out TORRENT_BRIDGE_NOESCAPE
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientRequestSources(
-    TTorrentClient *client,
-    const char *torrent_id,
-    char *error_out,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED torrent_id TORRENT_BRIDGE_NOESCAPE,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientCopySourcePolicy(
-    TTorrentClient *client,
-    const char *torrent_id,
-    TTorrentSourcePolicy *policy,
-    char *error_out,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED torrent_id TORRENT_BRIDGE_NOESCAPE,
+    TTorrentSourcePolicy * TORRENT_BRIDGE_NULLABLE policy TORRENT_BRIDGE_NOESCAPE,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 // Mutates one policy field against the current torrent state and commits the
 // resulting policy to resume data before returning success.
 int32_t TorrentClientSetSourcePolicyField(
-    TTorrentClient *client,
-    const char *torrent_id,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED torrent_id TORRENT_BRIDGE_NOESCAPE,
     int32_t field,
     uint8_t enabled,
-    char *error_out,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientCopyTorrentOptions(
-    TTorrentClient *client,
-    const char *torrent_id,
-    TTorrentOptions *options,
-    char *error_out,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED torrent_id TORRENT_BRIDGE_NOESCAPE,
+    TTorrentOptions * TORRENT_BRIDGE_NULLABLE options TORRENT_BRIDGE_NOESCAPE,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientSetTorrentOptions(
-    TTorrentClient *client,
-    const char *torrent_id,
-    const TTorrentOptions *options,
-    char *error_out,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED torrent_id TORRENT_BRIDGE_NOESCAPE,
+    const TTorrentOptions * TORRENT_BRIDGE_NULLABLE options TORRENT_BRIDGE_NOESCAPE,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientMoveTorrentInQueue(
-    TTorrentClient *client,
-    const char *torrent_id,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED torrent_id TORRENT_BRIDGE_NOESCAPE,
     int32_t move,
-    char *error_out,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientCopyTrackerBatch(
-    TTorrentClient *client,
-    const char *torrent_id,
-    TTorrentTrackerSnapshot *trackers,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED torrent_id TORRENT_BRIDGE_NOESCAPE,
+    TTorrentTrackerSnapshot * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(capacity) trackers TORRENT_BRIDGE_NOESCAPE,
     int32_t capacity,
-    uint64_t *revision_out,
-    int32_t *required_count_out,
-    uint8_t *resident_out
+    uint64_t * TORRENT_BRIDGE_NULLABLE revision_out TORRENT_BRIDGE_NOESCAPE,
+    int32_t * TORRENT_BRIDGE_NULLABLE required_count_out TORRENT_BRIDGE_NOESCAPE,
+    uint8_t * TORRENT_BRIDGE_NULLABLE resident_out TORRENT_BRIDGE_NOESCAPE
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientCopyTrackerHostBatch(
-    TTorrentClient *client,
-    TTorrentTrackerHostSnapshot *hosts,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    TTorrentTrackerHostSnapshot * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(capacity) hosts TORRENT_BRIDGE_NOESCAPE,
     int32_t capacity,
-    uint64_t *revision_out,
-    int32_t *required_count_out
+    uint64_t * TORRENT_BRIDGE_NULLABLE revision_out TORRENT_BRIDGE_NOESCAPE,
+    int32_t * TORRENT_BRIDGE_NULLABLE required_count_out TORRENT_BRIDGE_NOESCAPE
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientCopyWebSeedBatch(
-    TTorrentClient *client,
-    const char *torrent_id,
-    TTorrentWebSeedSnapshot *web_seeds,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED torrent_id TORRENT_BRIDGE_NOESCAPE,
+    TTorrentWebSeedSnapshot * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(capacity) web_seeds TORRENT_BRIDGE_NOESCAPE,
     int32_t capacity,
-    uint64_t *revision_out,
-    int32_t *required_count_out,
-    uint8_t *resident_out
+    uint64_t * TORRENT_BRIDGE_NULLABLE revision_out TORRENT_BRIDGE_NOESCAPE,
+    int32_t * TORRENT_BRIDGE_NULLABLE required_count_out TORRENT_BRIDGE_NOESCAPE,
+    uint8_t * TORRENT_BRIDGE_NULLABLE resident_out TORRENT_BRIDGE_NOESCAPE
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientCopyWebSeedActivity(
-    TTorrentClient *client,
-    const char *torrent_id,
-    TTorrentWebSeedActivitySnapshot *activity,
-    uint64_t *revision_out
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED torrent_id TORRENT_BRIDGE_NOESCAPE,
+    TTorrentWebSeedActivitySnapshot * TORRENT_BRIDGE_NULLABLE activity TORRENT_BRIDGE_NOESCAPE,
+    uint64_t * TORRENT_BRIDGE_NULLABLE revision_out TORRENT_BRIDGE_NOESCAPE
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientCopyPeerSources(
-    TTorrentClient *client,
-    const char *torrent_id,
-    TTorrentPeerSourceSnapshot *sources,
-    uint64_t *revision_out
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED torrent_id TORRENT_BRIDGE_NOESCAPE,
+    TTorrentPeerSourceSnapshot * TORRENT_BRIDGE_NULLABLE sources TORRENT_BRIDGE_NOESCAPE,
+    uint64_t * TORRENT_BRIDGE_NULLABLE revision_out TORRENT_BRIDGE_NOESCAPE
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientRequestFiles(
-    TTorrentClient *client,
-    const char *torrent_id,
-    char *error_out,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED torrent_id TORRENT_BRIDGE_NOESCAPE,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientCopyFileBatch(
-    TTorrentClient *client,
-    const char *torrent_id,
-    TTorrentFileSnapshot *files,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED torrent_id TORRENT_BRIDGE_NOESCAPE,
+    TTorrentFileSnapshot * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(capacity) files TORRENT_BRIDGE_NOESCAPE,
     int32_t capacity,
-    uint64_t *revision_out,
-    int32_t *required_count_out,
-    uint8_t *resident_out
+    uint64_t * TORRENT_BRIDGE_NULLABLE revision_out TORRENT_BRIDGE_NOESCAPE,
+    int32_t * TORRENT_BRIDGE_NULLABLE required_count_out TORRENT_BRIDGE_NOESCAPE,
+    uint8_t * TORRENT_BRIDGE_NULLABLE resident_out TORRENT_BRIDGE_NOESCAPE
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientRequestPieceMap(
-    TTorrentClient *client,
-    const char *torrent_id,
-    char *error_out,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED torrent_id TORRENT_BRIDGE_NOESCAPE,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientCopyPieceMap(
-    TTorrentClient *client,
-    const char *torrent_id,
-    TTorrentPieceMapSnapshot *snapshot,
-    uint8_t *pieces,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED torrent_id TORRENT_BRIDGE_NOESCAPE,
+    TTorrentPieceMapSnapshot * TORRENT_BRIDGE_NULLABLE snapshot TORRENT_BRIDGE_NOESCAPE,
+    uint8_t * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(capacity) pieces TORRENT_BRIDGE_NOESCAPE,
     int32_t capacity,
-    uint64_t *revision_out,
-    int32_t *required_count_out,
-    uint8_t *resident_out
+    uint64_t * TORRENT_BRIDGE_NULLABLE revision_out TORRENT_BRIDGE_NOESCAPE,
+    int32_t * TORRENT_BRIDGE_NULLABLE required_count_out TORRENT_BRIDGE_NOESCAPE,
+    uint8_t * TORRENT_BRIDGE_NULLABLE resident_out TORRENT_BRIDGE_NOESCAPE
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientSetFilePriority(
-    TTorrentClient *client,
-    const char *torrent_id,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED torrent_id TORRENT_BRIDGE_NOESCAPE,
     int32_t file_index,
     int32_t priority,
-    char *error_out,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
-int32_t TorrentClientPause(TTorrentClient *client, const char *torrent_id, char *error_out, int32_t error_capacity) TORRENT_BRIDGE_NOEXCEPT;
-int32_t TorrentClientResume(TTorrentClient *client, const char *torrent_id, char *error_out, int32_t error_capacity) TORRENT_BRIDGE_NOEXCEPT;
-int32_t TorrentClientReannounce(TTorrentClient *client, const char *torrent_id, char *error_out, int32_t error_capacity) TORRENT_BRIDGE_NOEXCEPT;
-int32_t TorrentClientForceRecheck(TTorrentClient *client, const char *torrent_id, char *error_out, int32_t error_capacity) TORRENT_BRIDGE_NOEXCEPT;
+int32_t TorrentClientPause(
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED torrent_id TORRENT_BRIDGE_NOESCAPE,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
+    int32_t error_capacity
+) TORRENT_BRIDGE_NOEXCEPT;
+int32_t TorrentClientResume(
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED torrent_id TORRENT_BRIDGE_NOESCAPE,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
+    int32_t error_capacity
+) TORRENT_BRIDGE_NOEXCEPT;
+int32_t TorrentClientReannounce(
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED torrent_id TORRENT_BRIDGE_NOESCAPE,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
+    int32_t error_capacity
+) TORRENT_BRIDGE_NOEXCEPT;
+int32_t TorrentClientForceRecheck(
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED torrent_id TORRENT_BRIDGE_NOESCAPE,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
+    int32_t error_capacity
+) TORRENT_BRIDGE_NOEXCEPT;
 
 // removal_committed_out becomes true immediately after libtorrent accepts any
 // removal and remains authoritative even if later bridge bookkeeping fails. A
@@ -628,13 +690,13 @@ int32_t TorrentClientForceRecheck(TTorrentClient *client, const char *torrent_id
 // deletion. After commit, the caller must either consume that token's terminal
 // result when present or blocking-destroy the client before releasing access.
 int32_t TorrentClientRemove(
-    TTorrentClient *client,
-    const char *torrent_id,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED torrent_id TORRENT_BRIDGE_NOESCAPE,
     uint8_t delete_files,
     uint8_t delete_partfile,
-    uint64_t *request_token_out,
-    uint8_t *removal_committed_out,
-    char *error_out,
+    uint64_t * TORRENT_BRIDGE_NULLABLE request_token_out TORRENT_BRIDGE_NOESCAPE,
+    uint8_t * TORRENT_BRIDGE_NULLABLE removal_committed_out TORRENT_BRIDGE_NOESCAPE,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
@@ -642,47 +704,47 @@ int32_t TorrentClientRemove(
 // terminal result. Pending results remain available; a terminal result is
 // consumed when read. An accepted removal cannot be cancelled.
 int32_t TorrentClientTakeRemovalResult(
-    TTorrentClient *client,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
     uint64_t request_token,
-    TTorrentRemovalResult *result,
-    char *error_out,
+    TTorrentRemovalResult * TORRENT_BRIDGE_NULLABLE result TORRENT_BRIDGE_NOESCAPE,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientApplySettings(
-    TTorrentClient *client,
-    const TTorrentSessionSettings *requested,
-    char *error_out,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const TTorrentSessionSettings * TORRENT_BRIDGE_NULLABLE requested TORRENT_BRIDGE_NOESCAPE,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientBlockNetwork(
-    TTorrentClient *client,
-    char *error_out,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientCopyNetworkStatus(
-    TTorrentClient *client,
-    TTorrentNetworkStatus *status
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    TTorrentNetworkStatus * TORRENT_BRIDGE_NULLABLE status TORRENT_BRIDGE_NOESCAPE
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientCopyHealth(
-    TTorrentClient *client,
-    TTorrentBridgeHealth *health
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    TTorrentBridgeHealth * TORRENT_BRIDGE_NULLABLE health TORRENT_BRIDGE_NOESCAPE
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientSaveAllChecked(
-    TTorrentClient *client,
-    char *error_out,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
-void TorrentClientSaveAll(TTorrentClient *client) TORRENT_BRIDGE_NOEXCEPT;
+void TorrentClientSaveAll(TTorrentClient * TORRENT_BRIDGE_NULLABLE client) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientTakeAlertError(
-    TTorrentClient *client,
-    char *error_out,
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
@@ -691,5 +753,11 @@ int32_t TorrentClientTakeAlertError(
 #endif
 
 #undef TORRENT_BRIDGE_NOEXCEPT
+#undef TORRENT_BRIDGE_COUNTED_BY
+#undef TORRENT_BRIDGE_NOESCAPE
+#undef TORRENT_BRIDGE_NONNULL
+#undef TORRENT_BRIDGE_NULLABLE
+#undef TORRENT_BRIDGE_NULL_TERMINATED
+#undef TORRENT_BRIDGE_SIZED_BY
 
 #endif

@@ -1,7 +1,9 @@
 #ifndef TORRENT_BRIDGE_INTERNAL_HPP
 #define TORRENT_BRIDGE_INTERNAL_HPP
 
+#define TORRENT_BRIDGE_IMPLEMENTATION
 #include "TorrentBridge.h"
+#undef TORRENT_BRIDGE_IMPLEMENTATION
 
 #include <libtorrent/add_torrent_params.hpp>
 #include <libtorrent/alert.hpp>

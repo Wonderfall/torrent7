@@ -290,6 +290,44 @@ struct TorrentBridgeContractTests {
         #expect(errorBuffer.string == "")
     }
 
+    @Test("Imports bounded bridge buffers as lifetime-scoped Swift spans")
+    func importsBoundedBuffersAsSwiftSpans() {
+        var snapshotStorage = [TTorrentSnapshot()]
+        var snapshots: MutableSpan<TTorrentSnapshot>? = snapshotStorage.mutableSpan
+        var revision: UInt64 = UInt64.max
+        var requiredCount: Int32 = -1
+
+        let copiedSnapshots = unsafe TorrentClientCopySnapshotBatch(
+            nil,
+            &snapshots,
+            &revision,
+            &requiredCount
+        )
+
+        #expect(copiedSnapshots == 0)
+        #expect(revision == 0)
+        #expect(requiredCount == 0)
+
+        let torrentBytes: [UInt8] = [0x64, 0x34, 0x3A, 0x69, 0x6E, 0x66, 0x6F]
+        let torrentData: RawSpan? = unsafe torrentBytes.span.bytes
+        var preview = TTorrentFilePreview()
+        var files: MutableSpan<TTorrentFileSnapshot>?
+        var previewRequiredCount: Int32 = 0
+        var errorStorage = [CChar](repeating: 0, count: 128)
+        var error: MutableSpan<CChar>? = errorStorage.mutableSpan
+
+        let previewResult = unsafe TorrentClientPreviewTorrentFileData(
+            nil,
+            torrentData,
+            &preview,
+            &files,
+            &previewRequiredCount,
+            &error
+        )
+
+        #expect(previewResult != 0)
+    }
+
     @Test("Null client mutation APIs report contract errors")
     func nullClientMutationAPIsReportContractErrors() {
         var addOutcome = Int32.max
