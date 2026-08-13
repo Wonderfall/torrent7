@@ -1,0 +1,53 @@
+diff --git a/boost/asio/detail/executor_function.hpp b/boost/asio/detail/executor_function.hpp
+index 370cd8a3f..2a34cf580 100644
+--- a/boost/asio/detail/executor_function.hpp
++++ b/boost/asio/detail/executor_function.hpp
+@@ -142,6 +142,23 @@ public:
+   {
+   }
+ 
++  executor_function_view(const executor_function_view& other) noexcept
++    : complete_(other.complete_),
++      function_(other.function_)
++  {
++  }
++
++  executor_function_view& operator=(
++      const executor_function_view& other) noexcept
++  {
++    if (this != &other)
++    {
++      complete_ = other.complete_;
++      function_ = other.function_;
++    }
++    return *this;
++  }
++
+   void operator()()
+   {
+     complete_(function_);
+@@ -155,8 +172,22 @@ private:
+     (*static_cast<F*>(f))();
+   }
+ 
+-  void (*complete_)(void*);
+-  void* function_;
++  typedef void (*complete_func_type)(void*);
++#if defined(__PTRAUTH__)
++  using stored_complete_func_type = complete_func_type __ptrauth(
++      ptrauth_key_function_pointer, 1,
++      ptrauth_string_discriminator(
++        "boost.asio.executor-function-view.complete"));
++  using stored_function_type = void* __ptrauth(
++      ptrauth_key_process_dependent_data, 1,
++      ptrauth_string_discriminator(
++        "boost.asio.executor-function-view.context"));
++#else // defined(__PTRAUTH__)
++  typedef complete_func_type stored_complete_func_type;
++  typedef void* stored_function_type;
++#endif // defined(__PTRAUTH__)
++  stored_complete_func_type complete_;
++  stored_function_type function_;
+ };
+ 
+ } // namespace detail

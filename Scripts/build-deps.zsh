@@ -713,6 +713,8 @@ verify_libtorrent_indirect_operation_pac() {
     local archive="$1"
     local disassembly
     local discriminator
+    local instruction
+    local role_and_instruction
 
     require_path "$archive" "libtorrent static archive"
     make_temporary_file "$DEPS_DIR/libtorrent-indirect-operation-pac.txt"
@@ -723,7 +725,7 @@ verify_libtorrent_indirect_operation_pac() {
 
     # AppleClang's pinned 16-bit string discriminators for the active Asio
     # operation/executor slots and libtorrent's chained-buffer destructor.
-    for discriminator in 0x8ab7 0xaf42 0x9890 0x4642 0x02a6 0x89ff; do
+    for discriminator in 0x8ab7 0xaf42 0x9890 0x4642 0x2a6 0x89ff; do
         /usr/bin/awk -v discriminator="#$discriminator" '
             /movk[[:space:]]+x[0-9]+,/ && index($0, discriminator) {
                 modifier = $3
@@ -736,6 +738,24 @@ verify_libtorrent_indirect_operation_pac() {
             END { exit !found }
         ' "$disassembly" || fail \
             "libtorrent has no address-diversified indirect callback branch for role $discriminator"
+    done
+
+    for role_and_instruction in 0x8444:pacia 0x5f88:pacdb; do
+        discriminator=${role_and_instruction%%:*}
+        instruction=${role_and_instruction#*:}
+        /usr/bin/awk -v discriminator="#$discriminator" \
+            -v instruction="$instruction" '
+        /movk[[:space:]]+x[0-9]+,/ && index($0, discriminator) {
+            modifier = $3
+            sub(/,$/, "", modifier)
+            remaining = 4
+        }
+        remaining > 0 && index($0, "\t" instruction "\t") \
+            && index($0, ", " modifier) { found = 1 }
+        remaining > 0 { remaining-- }
+        END { exit !found }
+        ' "$disassembly" || fail \
+            "libtorrent has no address-diversified executor-function-view $instruction for role $discriminator"
     done
 
     # heterogeneous_queue authenticates and re-signs the copied header before

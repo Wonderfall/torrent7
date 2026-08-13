@@ -177,6 +177,21 @@ void* executor_implementation(
   return implementation;
 }
 
+void replay_executor_view_field(
+    boost::asio::detail::executor_function_view& destination,
+    boost::asio::detail::executor_function_view const& source,
+    std::size_t offset)
+{
+  static_assert(std::is_standard_layout_v<
+      boost::asio::detail::executor_function_view>);
+  static_assert(sizeof(boost::asio::detail::executor_function_view)
+      == 2 * sizeof(void*));
+  auto* destination_bytes = reinterpret_cast<std::byte*>(&destination);
+  auto const* source_bytes = reinterpret_cast<std::byte const*>(&source);
+  std::memcpy(destination_bytes + offset,
+      source_bytes + offset, sizeof(void*));
+}
+
 __attribute__((noinline)) void replay_object_bytes(
     void* destination, const void* source, std::size_t size)
 {
@@ -207,6 +222,12 @@ extern "C" __attribute__((noinline)) void torrent7_destroy_executor(
     boost::asio::detail::executor_function* function)
 {
   function->~executor_function();
+}
+
+extern "C" __attribute__((noinline)) void torrent7_invoke_executor_view(
+    boost::asio::detail::executor_function_view* function)
+{
+  (*function)();
 }
 
 extern "C" __attribute__((noinline)) void torrent7_invoke_any_executor(
@@ -270,6 +291,33 @@ int main()
   if (!executor_lifetime.expired())
   {
     std::fputs("executor destruction did not release callback state\n", stderr);
+    return 1;
+  }
+
+  bool executor_view_called = false;
+  executor_probe executor_view_function{&executor_view_called};
+  boost::asio::detail::executor_function_view executor_view(
+      executor_view_function);
+  boost::asio::detail::executor_function_view copied_executor_view(
+      executor_view);
+  torrent7_invoke_executor_view(&copied_executor_view);
+  if (!executor_view_called)
+  {
+    std::fputs("copied executor_function_view did not run normally\n", stderr);
+    return 1;
+  }
+
+  executor_view_called = false;
+  bool replaced_executor_view_called = false;
+  executor_probe replaced_executor_view_function{
+      &replaced_executor_view_called};
+  boost::asio::detail::executor_function_view assigned_executor_view(
+      replaced_executor_view_function);
+  assigned_executor_view = executor_view;
+  torrent7_invoke_executor_view(&assigned_executor_view);
+  if (!executor_view_called || replaced_executor_view_called)
+  {
+    std::fputs("assigned executor_function_view did not re-sign its pair\n", stderr);
     return 1;
   }
   bool any_executor_called = false;
@@ -418,6 +466,38 @@ int main()
       }))
   {
     std::fputs("execution_context service destroy replay was accepted\n", stderr);
+    return 1;
+  }
+
+  if (!replay_triggers_pointer_authentication_failure([] {
+        bool source_called = false;
+        bool destination_called = false;
+        executor_probe source_function{&source_called};
+        executor_probe destination_function{&destination_called};
+        boost::asio::detail::executor_function_view source(source_function);
+        boost::asio::detail::executor_function_view destination(
+            destination_function);
+        replay_executor_view_field(destination, source, 0);
+        destination();
+      }))
+  {
+    std::fputs("executor_function_view callback replay was accepted\n", stderr);
+    return 1;
+  }
+
+  if (!replay_triggers_pointer_authentication_failure([] {
+        bool source_called = false;
+        bool destination_called = false;
+        executor_probe source_function{&source_called};
+        executor_probe destination_function{&destination_called};
+        boost::asio::detail::executor_function_view source(source_function);
+        boost::asio::detail::executor_function_view destination(
+            destination_function);
+        replay_executor_view_field(destination, source, sizeof(void*));
+        destination();
+      }))
+  {
+    std::fputs("executor_function_view context replay was accepted\n", stderr);
     return 1;
   }
 

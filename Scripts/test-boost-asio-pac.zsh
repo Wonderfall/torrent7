@@ -125,21 +125,19 @@ verify_ir_diversification() {
     local name=$1
     local input=$2
     local address_value
+    local blend_result
     local blend_line
     local blend_address
-    local blend_result
     local discriminator
 
-    address_value=$(/usr/bin/sed -nE \
-        's/^[[:space:]]*(%[[:alnum:].]+) = ptrtoint ptr .*$/\1/p' "$input")
-    [[ -n "$address_value" && "$address_value" != *$'\n'* ]] \
-        || fail "$name does not derive one PAC modifier from its callback field address"
-
-    blend_line=$(/usr/bin/grep '@llvm\.ptrauth\.blend' "$input" || true)
+    blend_result=$(/usr/bin/sed -nE \
+        's/.*"ptrauth"\(i32 0, i64 (%[[:alnum:].]+)\).*/\1/p' "$input")
+    [[ -n "$blend_result" && "$blend_result" != *$'\n'* ]] \
+        || fail "$name does not use one authenticated callback modifier"
+    blend_line=$(/usr/bin/grep -F "$blend_result =" "$input" \
+        | /usr/bin/grep '@llvm\.ptrauth\.blend' || true)
     [[ -n "$blend_line" && "$blend_line" != *$'\n'* ]] \
-        || fail "$name does not contain exactly one address-and-role PAC blend"
-    blend_result=$(print -r -- "$blend_line" \
-        | /usr/bin/sed -nE 's/^[[:space:]]*(%[[:alnum:].]+) = .*$/\1/p')
+        || fail "$name callback modifier is not address-and-role diversified"
     blend_address=$(print -r -- "$blend_line" \
         | /usr/bin/sed -nE \
             's/.*@llvm\.ptrauth\.blend\(i64 (%[[:alnum:].]+), i64 [0-9]+\).*/\1/p')
@@ -147,13 +145,61 @@ verify_ir_diversification() {
         | /usr/bin/sed -nE \
             's/.*@llvm\.ptrauth\.blend\(i64 %[[:alnum:].]+, i64 ([0-9]+)\).*/\1/p')
 
-    [[ "$blend_address" == "$address_value" ]] \
-        || fail "$name PAC blend is not bound to the callback field address"
+    address_value=$(/usr/bin/sed -nE \
+        "s/^[[:space:]]*($blend_address) = ptrtoint ptr .*$/\\1/p" "$input")
+    [[ "$address_value" == "$blend_address" ]] \
+        || fail "$name PAC blend is not derived from the callback field address"
     [[ -n "$discriminator" && "$discriminator" != 0 ]] \
         || fail "$name PAC blend has no role discriminator"
     /usr/bin/grep -Fq -- "\"ptrauth\"(i32 0, i64 $blend_result)" "$input" \
         || fail "$name indirect call does not authenticate with the blended modifier"
     REPLY=$discriminator
+}
+
+verify_ir_callback_context_pair() {
+    local name=$1
+    local input=$2
+    local callback_modifier
+    local context_modifier
+    local modifier
+    local blend_line
+    local blend_address
+    local discriminator
+
+    callback_modifier=$(/usr/bin/sed -nE \
+        's/.*"ptrauth"\(i32 0, i64 (%[[:alnum:].]+)\).*/\1/p' "$input")
+    context_modifier=$(/usr/bin/sed -nE \
+        's/.*@llvm\.ptrauth\.auth\(i64 [^,]+, i32 3, i64 (%[[:alnum:].]+)\).*/\1/p' \
+        "$input")
+    [[ -n "$callback_modifier" && "$callback_modifier" != *$'\n'* ]] \
+        || fail "$name callback does not use one authenticated PAC modifier"
+    [[ -n "$context_modifier" && "$context_modifier" != *$'\n'* ]] \
+        || fail "$name context does not use one authenticated data modifier"
+
+    for modifier in "$callback_modifier" "$context_modifier"; do
+        blend_line=$(/usr/bin/grep -F "$modifier =" "$input" \
+            | /usr/bin/grep '@llvm\.ptrauth\.blend' || true)
+        [[ -n "$blend_line" && "$blend_line" != *$'\n'* ]] \
+            || fail "$name PAC role is not address diversified"
+        blend_address=$(print -r -- "$blend_line" \
+            | /usr/bin/sed -nE \
+                's/.*@llvm\.ptrauth\.blend\(i64 (%[[:alnum:].]+), i64 [0-9]+\).*/\1/p')
+        discriminator=$(print -r -- "$blend_line" \
+            | /usr/bin/sed -nE \
+                's/.*@llvm\.ptrauth\.blend\(i64 %[[:alnum:].]+, i64 ([0-9]+)\).*/\1/p')
+        [[ -n "$blend_address" ]] \
+            || fail "$name PAC blend has no field-address input"
+        /usr/bin/grep -Eq \
+            "^[[:space:]]*$blend_address = ptrtoint ptr " "$input" \
+            || fail "$name PAC blend is not derived from a field address"
+        [[ -n "$discriminator" && "$discriminator" != 0 ]] \
+            || fail "$name PAC blend has no role discriminator"
+        if [[ "$modifier" == "$callback_modifier" ]]; then
+            REPLY_CALLBACK=$discriminator
+        else
+            REPLY_CONTEXT=$discriminator
+        fi
+    done
 }
 
 typeset scheduler_ir="$temporary_directory/scheduler.ll"
@@ -162,12 +208,14 @@ typeset executor_invoke_ir="$temporary_directory/executor-invoke.ll"
 typeset executor_destroy_ir="$temporary_directory/executor-destroy.ll"
 typeset any_executor_ir="$temporary_directory/any-executor.ll"
 typeset blocking_any_executor_ir="$temporary_directory/blocking-any-executor.ll"
+typeset executor_view_ir="$temporary_directory/executor-view.ll"
 typeset scheduler_assembly="$temporary_directory/scheduler.s"
 typeset reactor_assembly="$temporary_directory/reactor.s"
 typeset executor_invoke_assembly="$temporary_directory/executor-invoke.s"
 typeset executor_destroy_assembly="$temporary_directory/executor-destroy.s"
 typeset any_executor_assembly="$temporary_directory/any-executor.s"
 typeset blocking_any_executor_assembly="$temporary_directory/blocking-any-executor.s"
+typeset executor_view_assembly="$temporary_directory/executor-view.s"
 typeset service_destroy_linked="$temporary_directory/service-destroy.disassembly"
 extract_ir_function torrent7_invoke_scheduler "$scheduler_ir"
 extract_ir_function torrent7_invoke_reactor "$reactor_ir"
@@ -176,6 +224,7 @@ extract_ir_function torrent7_destroy_executor "$executor_destroy_ir"
 extract_ir_function torrent7_invoke_any_executor "$any_executor_ir"
 extract_ir_function torrent7_invoke_blocking_any_executor \
     "$blocking_any_executor_ir"
+extract_ir_function torrent7_invoke_executor_view "$executor_view_ir"
 extract_assembly_function torrent7_invoke_scheduler "$scheduler_assembly"
 extract_assembly_function torrent7_invoke_reactor "$reactor_assembly"
 extract_assembly_function torrent7_invoke_executor "$executor_invoke_assembly"
@@ -183,6 +232,7 @@ extract_assembly_function torrent7_destroy_executor "$executor_destroy_assembly"
 extract_assembly_function torrent7_invoke_any_executor "$any_executor_assembly"
 extract_assembly_function torrent7_invoke_blocking_any_executor \
     "$blocking_any_executor_assembly"
+extract_assembly_function torrent7_invoke_executor_view "$executor_view_assembly"
 extract_linked_function __ZN5boost4asio17execution_contextD2Ev \
     "$service_destroy_linked"
 
@@ -199,6 +249,9 @@ typeset -r any_executor_discriminator=$REPLY
 verify_ir_diversification any_executor::blocking_execute \
     "$blocking_any_executor_ir"
 typeset -r blocking_any_executor_discriminator=$REPLY
+verify_ir_callback_context_pair executor_function_view "$executor_view_ir"
+typeset -r executor_view_callback_discriminator=$REPLY_CALLBACK
+typeset -r executor_view_context_discriminator=$REPLY_CONTEXT
 [[ "$executor_invoke_discriminator" == "$executor_destroy_discriminator" ]] \
     || fail "Asio executor invocation and destruction use different PAC role discriminators"
 typeset -ra discriminators=(
@@ -207,12 +260,16 @@ typeset -ra discriminators=(
     "$executor_invoke_discriminator"
     "$any_executor_discriminator"
     "$blocking_any_executor_discriminator"
+    "$executor_view_callback_discriminator"
+    "$executor_view_context_discriminator"
 )
 typeset -ra unique_discriminators=("${(u)discriminators[@]}")
 (( ${#unique_discriminators[@]} == ${#discriminators[@]} )) \
-    || fail "Targeted Asio callbacks do not have distinct PAC role discriminators"
+    || fail "Targeted Asio PAC slots do not have distinct role discriminators"
 verify_linked_role execution_context::service::destroy_ 0x2a6 \
     "$service_destroy_linked"
+/usr/bin/grep -Eq '[[:space:]]autdb[[:space:]]' "$executor_view_assembly" \
+    || fail "executor_function_view context does not use authenticated data codegen"
 
 for assembly in \
     "$scheduler_assembly" \
@@ -227,5 +284,13 @@ for assembly in \
         fail "Targeted Asio callback fell back to a zero-discriminator authenticated branch"
     fi
 done
+
+/usr/bin/grep -Eq '[[:space:]](braa|blraa)[[:space:]]' \
+    "$executor_view_assembly" \
+    || fail "executor_function_view callback does not use authenticated branch codegen"
+if /usr/bin/grep -Eq '[[:space:]](braaz|blraaz)[[:space:]]' \
+    "$executor_view_assembly"; then
+    fail "executor_function_view callback fell back to zero-discriminator PAC"
+fi
 
 print -r -- "Boost.Asio operation/executor PAC codegen and replay tests passed"

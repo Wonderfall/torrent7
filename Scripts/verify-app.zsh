@@ -142,6 +142,12 @@ verify_nearby_pac_instruction() {
         remaining > 0 && instruction_kind == "data" \
             && /[[:space:]]autdb[[:space:]]/ \
             && index($0, ", " modifier) { found = 1 }
+        remaining > 0 && instruction_kind == "callback-signing" \
+            && /[[:space:]]pacia[[:space:]]/ \
+            && index($0, ", " modifier) { found = 1 }
+        remaining > 0 && instruction_kind == "data-signing" \
+            && /[[:space:]]pacdb[[:space:]]/ \
+            && index($0, ", " modifier) { found = 1 }
         remaining > 0 { remaining-- }
         END { exit !found }
     ' "$input" || fail "$label lacks targeted PAC role $discriminator"
@@ -579,7 +585,11 @@ verify_nearby_pac_instruction \
 verify_nearby_pac_instruction \
     asio.any-executor.execute "$engine_text_output" 0x4642 callback 4
 verify_nearby_pac_instruction \
-    asio.execution-context.service.destroy "$engine_text_output" 0x02a6 callback 4
+    asio.execution-context.service.destroy "$engine_text_output" 0x2a6 callback 4
+verify_nearby_pac_instruction \
+    asio.executor-function-view.complete "$engine_text_output" 0x8444 callback-signing 4
+verify_nearby_pac_instruction \
+    asio.executor-function-view.context "$engine_text_output" 0x5f88 data-signing 4
 require_match "_malloc_type_malloc" "$engine_symbol_output" \
     "Engine extension has no typed malloc symbol"
 require_match "__ZnwmSt19__type_descriptor_t" "$engine_symbol_output" \
