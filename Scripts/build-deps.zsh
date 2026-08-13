@@ -220,12 +220,16 @@ typeset -r ZERO_CALL_USED_REGS_FLAG="-fzero-call-used-regs=used-gpr"
 typeset -r RETAIN_NULL_POINTER_CHECKS_FLAG="-fno-delete-null-pointer-checks"
 typeset -r NO_STRICT_OVERFLOW_FLAG="-fno-strict-overflow"
 typeset -r NO_STRICT_ALIASING_FLAG="-fno-strict-aliasing"
+# Libtorrent and its template dependencies intentionally use unsigned modular
+# arithmetic and narrowing. Reserve those extra traps for the owned Bridge;
+# keep the dependency's production profile focused on actual UB and bounds.
+typeset -r LIBTORRENT_TRAP_ONLY_SANITIZERS="undefined,local-bounds"
 typeset LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE
 # Keep fortify out of sanitizer profiles so it cannot obscure reports.
 typeset FORTIFY_FLAGS="-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3"
-typeset STRICT_OVERFLOW_FLAGS="$NO_STRICT_OVERFLOW_FLAG"
+typeset OPENSSL_STRICT_OVERFLOW_FLAGS="$NO_STRICT_OVERFLOW_FLAG"
 typeset OPENSSL_SANITIZER_FLAGS=
-typeset LIBTORRENT_SANITIZER_FLAGS=
+typeset LIBTORRENT_SANITIZER_FLAGS="-fsanitize=$LIBTORRENT_TRAP_ONLY_SANITIZERS -fsanitize-trap=$LIBTORRENT_TRAP_ONLY_SANITIZERS -fno-sanitize-recover=$LIBTORRENT_TRAP_ONLY_SANITIZERS"
 case "$SANITIZER_PROFILE" in
     address)
         OPENSSL_SANITIZER_FLAGS="-g -fno-omit-frame-pointer -fsanitize=address -fsanitize-address-use-after-scope"
@@ -239,23 +243,26 @@ esac
 if [[ -n "$SANITIZER_PROFILE" ]]; then
     LIBCPP_HARDENING_MODE="_LIBCPP_HARDENING_MODE_DEBUG"
     FORTIFY_FLAGS="-U_FORTIFY_SOURCE"
-    # Preserve undefined signed overflow so UBSan can diagnose it. OpenSSL's
-    # diagnostic builds follow the same profile even though their upstream
-    # sanitizer subset currently excludes UBSan.
-    STRICT_OVERFLOW_FLAGS=
+    # Do not impose defined signed-overflow semantics in diagnostic OpenSSL
+    # builds, preserving instrumentation opportunities for combined profiles.
+    OPENSSL_STRICT_OVERFLOW_FLAGS=
 fi
-typeset -r HARDENED_COMMON_FLAGS="-Wformat -Wformat-security -Werror=format-security -fstack-protector-strong $FORTIFY_FLAGS -fPIE -ftrivial-auto-var-init=zero $RETAIN_NULL_POINTER_CHECKS_FLAG $STRICT_OVERFLOW_FLAGS $NO_STRICT_ALIASING_FLAG -fvisibility=hidden -faarch64-jump-table-hardening $STRICT_FLEX_ARRAYS_FLAG $BRANCH_TARGET_IDENTIFICATION_FLAG $SLS_HARDENING_FLAG $ZERO_CALL_USED_REGS_FLAG $PTRAUTH_C_FLAGS"
-typeset -r HARDENED_C_FLAGS="$HARDENED_COMMON_FLAGS $TYPED_ALLOCATOR_C_FLAGS"
-typeset -r OPENSSL_HARDENED_CXX_FLAGS="$HARDENED_COMMON_FLAGS $PTRAUTH_CXX_FLAGS $TYPED_ALLOCATOR_CXX_FLAGS -D_LIBCPP_HARDENING_MODE=$LIBCPP_HARDENING_MODE -fvisibility-inlines-hidden"
-typeset -r HARDENED_CXX_FLAGS="$HARDENED_COMMON_FLAGS $PTRAUTH_CXX_FLAGS $TYPED_ALLOCATOR_CXX_FLAGS -D_LIBCPP_HARDENING_MODE=$LIBCPP_HARDENING_MODE -fvisibility-inlines-hidden"
+typeset -r HARDENED_COMMON_PREFIX="-Wformat -Wformat-security -Werror=format-security -fstack-protector-strong $FORTIFY_FLAGS -fPIE -ftrivial-auto-var-init=zero $RETAIN_NULL_POINTER_CHECKS_FLAG"
+typeset -r HARDENED_COMMON_SUFFIX="$NO_STRICT_ALIASING_FLAG -fvisibility=hidden -faarch64-jump-table-hardening $STRICT_FLEX_ARRAYS_FLAG $BRANCH_TARGET_IDENTIFICATION_FLAG $SLS_HARDENING_FLAG $ZERO_CALL_USED_REGS_FLAG $PTRAUTH_C_FLAGS"
+typeset -r OPENSSL_HARDENED_COMMON_FLAGS="$HARDENED_COMMON_PREFIX $OPENSSL_STRICT_OVERFLOW_FLAGS $HARDENED_COMMON_SUFFIX"
+typeset -r LIBTORRENT_HARDENED_COMMON_FLAGS="$HARDENED_COMMON_PREFIX $HARDENED_COMMON_SUFFIX"
+typeset -r LIBTORRENT_HARDENED_C_FLAGS="$LIBTORRENT_HARDENED_COMMON_FLAGS $TYPED_ALLOCATOR_C_FLAGS"
+typeset -r OPENSSL_HARDENED_C_FLAGS="$OPENSSL_HARDENED_COMMON_FLAGS $TYPED_ALLOCATOR_C_FLAGS"
+typeset -r OPENSSL_HARDENED_CXX_FLAGS="$OPENSSL_HARDENED_COMMON_FLAGS $PTRAUTH_CXX_FLAGS $TYPED_ALLOCATOR_CXX_FLAGS -D_LIBCPP_HARDENING_MODE=$LIBCPP_HARDENING_MODE -fvisibility-inlines-hidden"
+typeset -r LIBTORRENT_HARDENED_CXX_FLAGS="$LIBTORRENT_HARDENED_COMMON_FLAGS $PTRAUTH_CXX_FLAGS $TYPED_ALLOCATOR_CXX_FLAGS -D_LIBCPP_HARDENING_MODE=$LIBCPP_HARDENING_MODE -fvisibility-inlines-hidden"
 # OpenSSL 3.5.7 extends one-element trailing arrays with larger allocations in
 # its property parser. Clang's extra local-bounds group rejects that upstream
 # representation, so OpenSSL keeps the primary sanitizer while libtorrent and
 # the owned Bridge also use UBSan and local-bounds.
-typeset -r OPENSSL_CFLAGS="$HARDENED_C_FLAGS $OPENSSL_SANITIZER_FLAGS -isysroot $SDK_PATH -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
+typeset -r OPENSSL_CFLAGS="$OPENSSL_HARDENED_C_FLAGS $OPENSSL_SANITIZER_FLAGS -isysroot $SDK_PATH -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
 typeset -r OPENSSL_CXXFLAGS="$OPENSSL_HARDENED_CXX_FLAGS $OPENSSL_SANITIZER_FLAGS -isysroot $SDK_PATH -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
-typeset LIBTORRENT_C_FLAGS="$HARDENED_C_FLAGS $LIBTORRENT_SANITIZER_FLAGS"
-typeset LIBTORRENT_CXX_FLAGS="$HARDENED_CXX_FLAGS $LIBTORRENT_SANITIZER_FLAGS"
+typeset LIBTORRENT_C_FLAGS="$LIBTORRENT_HARDENED_C_FLAGS $LIBTORRENT_SANITIZER_FLAGS"
+typeset LIBTORRENT_CXX_FLAGS="$LIBTORRENT_HARDENED_CXX_FLAGS $LIBTORRENT_SANITIZER_FLAGS"
 LIBTORRENT_C_FLAGS="$LIBTORRENT_C_FLAGS $LIBTORRENT_EXTRA_DEFINES"
 LIBTORRENT_CXX_FLAGS="$LIBTORRENT_CXX_FLAGS $LIBTORRENT_EXTRA_DEFINES $LIBTORRENT_UPSTREAM_WARNING_FLAGS"
 
@@ -707,6 +714,25 @@ verify_libtorrent_typed_allocation_coverage() {
         || fail "libtorrent has no typed global operator new import: $archive"
     print -r -- "$symbols" | /usr/bin/awk '$NF == "__ZnamSt19__type_descriptor_t" { found = 1 } END { exit !found }' \
         || fail "libtorrent has no typed global operator new[] import: $archive"
+}
+
+verify_libtorrent_trap_only_ubsan() {
+    local archive="$1"
+    local disassembly
+    local undefined_symbols
+
+    [[ -z "$SANITIZER_PROFILE" ]] || return 0
+    require_path "$archive" "libtorrent static archive"
+    make_temporary_file "$DEPS_DIR/libtorrent-trap-only-ubsan.txt"
+    disassembly=$REPLY
+    /usr/bin/xcrun otool -tvV "$archive" >"$disassembly"
+    /usr/bin/awk '$2 == "brk" && $3 ~ /^#0x55/ { found = 1 } END { exit !found }' "$disassembly" \
+        || fail "libtorrent has no trap-only UBSan instrumentation: $archive"
+
+    undefined_symbols="$(/usr/bin/xcrun nm -u "$archive")"
+    if print -r -- "$undefined_symbols" | /usr/bin/grep -q '___ubsan_handle_'; then
+        fail "Normal libtorrent archive unexpectedly depends on the UBSan runtime: $archive"
+    fi
 }
 
 verify_libtorrent_indirect_operation_pac() {
@@ -1196,6 +1222,7 @@ build_libtorrent() {
     if [[ -f "$DEPS_PREFIX/lib/libtorrent-rasterbar.a" ]] && stamp_matches "$LIBTORRENT_BUILD_STAMP" libtorrent_build_manifest "$DEPS_PREFIX"; then
         verify_archive_arch "$DEPS_PREFIX/lib/libtorrent-rasterbar.a" "$TARGET_ARCH"
         verify_libtorrent_typed_allocation_coverage "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
+        verify_libtorrent_trap_only_ubsan "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
         verify_libtorrent_indirect_operation_pac "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
         write_stamp "$LIBTORRENT_PROVENANCE" libtorrent_build_manifest "$DEPS_PREFIX"
         return
@@ -1254,6 +1281,7 @@ build_libtorrent() {
 
     verify_archive_arch "$DEPS_PREFIX/lib/libtorrent-rasterbar.a" "$TARGET_ARCH"
     verify_libtorrent_typed_allocation_coverage "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
+    verify_libtorrent_trap_only_ubsan "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
     verify_libtorrent_indirect_operation_pac "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
     write_stamp "$LIBTORRENT_BUILD_STAMP" libtorrent_build_manifest "$DEPS_PREFIX"
     write_stamp "$LIBTORRENT_PROVENANCE" libtorrent_build_manifest "$DEPS_PREFIX"
