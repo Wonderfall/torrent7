@@ -721,9 +721,9 @@ verify_libtorrent_indirect_operation_pac() {
         || fail "Boost.Asio PAC verification requires an arm64e libtorrent archive"
     /usr/bin/xcrun otool -tvV "$archive" >"$disassembly"
 
-    # AppleClang's pinned 16-bit string discriminators for the two Asio
+    # AppleClang's pinned 16-bit string discriminators for the three Asio
     # operation slots and libtorrent's chained-buffer destructor respectively.
-    for discriminator in 0x8ab7 0xaf42 0x89ff; do
+    for discriminator in 0x8ab7 0xaf42 0x9890 0x89ff; do
         /usr/bin/awk -v discriminator="#$discriminator" '
             /movk[[:space:]]+x[0-9]+,/ && index($0, discriminator) {
                 modifier = $3
@@ -945,9 +945,8 @@ extract_boost() {
 
         actual_tree="$("$BOOST_PATCH_HELPER" worktree-tree "$BOOST_SOURCE_DIR")" \
             || fail "Could not inspect cached Boost source"
-        if [[ "$source_matches_archive" == "1" \
-            && ( "$actual_tree" == "$("$BOOST_PATCH_HELPER" base-tree)" \
-                || "$actual_tree" == "$("$BOOST_PATCH_HELPER" expected-tree)" ) ]]; then
+        if [[ "$source_matches_archive" == "1" ]] \
+            && "$BOOST_PATCH_HELPER" can-apply "$BOOST_SOURCE_DIR"; then
             "$BOOST_PATCH_HELPER" apply "$BOOST_SOURCE_DIR"
             write_stamp "$BOOST_SOURCE_STAMP" boost_source_manifest "$BOOST_SOURCE_DIR"
             rm -f -- "$legacy_stamp"

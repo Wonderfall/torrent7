@@ -5,15 +5,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 readonly BOOST_VERSION="1.92.0"
-readonly BOOST_BASE_TREE="5361be71183447ba73da19e42233771725d7a6a4d056e8978f55893355ede04e"
-readonly BOOST_PATCHED_TREE="81b71313db567209a1b591dc5b910f54cc6873d8a7b5abafe5c6f369b6e08d3b"
 readonly -a BOOST_PATCHED_FILES=(
     "boost/asio/detail/reactor_op.hpp"
     "boost/asio/detail/scheduler_operation.hpp"
+    "boost/asio/detail/executor_function.hpp"
 )
 readonly -a BOOST_PATCHES=(
     "$ROOT_DIR/Scripts/patches/boost-1.92.0-asio-operation-pac.patch"
+    "$ROOT_DIR/Scripts/patches/boost-1.92.0-asio-executor-function-pac.patch"
 )
+# One exact tree per ordered patch-series stage. Recognizing intermediate
+# stages lets an existing verified header cache receive only newly appended
+# patches without weakening the unexpected-change guard.
+readonly -a BOOST_PATCH_TREES=(
+    "b05b431f6b5e1dba5d56d37b1fda33737411844edc1f7c568c89954c075cd41b"
+    "601ccf950bd8cb2cc8b00094e643f616745466805fb83b0eabc1152a3e1e5df4"
+    "7acf3c857b2872d3ee1a72087aa88357823ceae7c504d173f18e505840a4b45f"
+)
+readonly BOOST_BASE_TREE="${BOOST_PATCH_TREES[0]}"
+readonly BOOST_PATCHED_TREE="${BOOST_PATCH_TREES[${#BOOST_PATCH_TREES[@]} - 1]}"
 
 fail() {
     echo "$1" >&2
@@ -38,6 +48,8 @@ require_source() {
 
 require_patches() {
     local patch
+    (( ${#BOOST_PATCH_TREES[@]} == ${#BOOST_PATCHES[@]} + 1 )) \
+        || fail "Boost patch-stage manifest is inconsistent"
     for patch in "${BOOST_PATCHES[@]}"; do
         require_file "$patch" "Boost patch"
     done
@@ -65,11 +77,27 @@ verify_source() {
         || fail "Boost source does not match the ordered patch series"
 }
 
+patch_stage() {
+    local source="$1"
+    local actual
+    local index
+
+    actual="$(worktree_tree "$source")"
+    for ((index = 0; index < ${#BOOST_PATCH_TREES[@]}; index++)); do
+        if [[ "$actual" == "${BOOST_PATCH_TREES[$index]}" ]]; then
+            echo "$index"
+            return
+        fi
+    done
+    return 1
+}
+
 validate_series() (
     local source="$1"
+    local start_index="$2"
     local temporary_directory
     local relative
-    local patch
+    local index
     local actual
 
     temporary_directory="$(mktemp -d)"
@@ -78,9 +106,9 @@ validate_series() (
         mkdir -p "$temporary_directory/${relative%/*}"
         cp "$source/$relative" "$temporary_directory/$relative"
     done
-    for patch in "${BOOST_PATCHES[@]}"; do
-        apply_boost_patch "$temporary_directory" "$patch" check
-        apply_boost_patch "$temporary_directory" "$patch"
+    for ((index = start_index; index < ${#BOOST_PATCHES[@]}; index++)); do
+        apply_boost_patch "$temporary_directory" "${BOOST_PATCHES[$index]}" check
+        apply_boost_patch "$temporary_directory" "${BOOST_PATCHES[$index]}"
     done
     actual="$(worktree_tree "$temporary_directory")"
     [[ "$actual" == "$BOOST_PATCHED_TREE" ]] \
@@ -112,24 +140,23 @@ apply_boost_patch() {
 
 apply_patches() {
     local source="$1"
-    local actual
-    local patch
+    local stage
+    local index
 
     require_source "$source"
     require_patches
-    actual="$(worktree_tree "$source")"
-    if [[ "$actual" == "$BOOST_PATCHED_TREE" ]]; then
+    stage="$(patch_stage "$source")" \
+        || fail "Could not apply Boost patch series to source with unexpected local changes"
+    if (( stage == ${#BOOST_PATCHES[@]} )); then
         return
     fi
-    [[ "$actual" == "$BOOST_BASE_TREE" ]] \
-        || fail "Could not apply Boost patch series to source with unexpected local changes"
 
-    # Validate the complete ordered series against the pinned base before
+    # Validate every remaining patch against the exact recognized stage before
     # changing the shared header cache.
-    validate_series "$source"
-    for patch in "${BOOST_PATCHES[@]}"; do
-        apply_boost_patch "$source" "$patch" check
-        apply_boost_patch "$source" "$patch"
+    validate_series "$source" "$stage"
+    for ((index = stage; index < ${#BOOST_PATCHES[@]}; index++)); do
+        apply_boost_patch "$source" "${BOOST_PATCHES[$index]}" check
+        apply_boost_patch "$source" "${BOOST_PATCHES[$index]}"
     done
     verify_source "$source"
 }
@@ -151,7 +178,7 @@ print_manifest() {
 }
 
 usage() {
-    echo "Usage: ${0##*/} {apply|base-tree|expected-tree|manifest|verify|version|worktree-tree} [boost-source]" >&2
+    echo "Usage: ${0##*/} {apply|base-tree|can-apply|expected-tree|manifest|verify|version|worktree-tree} [boost-source]" >&2
     exit 64
 }
 
@@ -169,10 +196,11 @@ case "$command_name" in
         [[ $# -eq 1 ]] || usage
         echo "$BOOST_VERSION"
         ;;
-    apply|manifest|verify|worktree-tree)
+    apply|can-apply|manifest|verify|worktree-tree)
         [[ $# -eq 2 ]] || usage
         case "$command_name" in
             apply) apply_patches "$2" ;;
+            can-apply) patch_stage "$2" >/dev/null ;;
             manifest) print_manifest "$2" ;;
             verify) verify_source "$2" ;;
             worktree-tree) worktree_tree "$2" ;;

@@ -1,0 +1,33 @@
+diff --git a/boost/asio/detail/executor_function.hpp b/boost/asio/detail/executor_function.hpp
+index 6d135514d..370cd8a3f 100644
+--- a/boost/asio/detail/executor_function.hpp
++++ b/boost/asio/detail/executor_function.hpp
+@@ -18,6 +18,10 @@
+ #include <boost/asio/detail/handler_alloc_helpers.hpp>
+ #include <boost/asio/detail/memory.hpp>
+ 
++#if defined(__PTRAUTH__)
++# include <ptrauth.h>
++#endif // defined(__PTRAUTH__)
++
+ #include <boost/asio/detail/push_options.hpp>
+ 
+ namespace boost {
+@@ -59,7 +63,16 @@ private:
+   // Base class for polymorphic function implementations.
+   struct impl_base
+   {
+-    void (*complete_)(impl_base*, bool);
++    typedef void (*complete_func_type)(impl_base*, bool);
++#if defined(__PTRAUTH__)
++    using stored_complete_func_type = complete_func_type __ptrauth(
++        ptrauth_key_function_pointer, 1,
++        ptrauth_string_discriminator(
++          "boost.asio.executor-function.complete"));
++#else // defined(__PTRAUTH__)
++    typedef complete_func_type stored_complete_func_type;
++#endif // defined(__PTRAUTH__)
++    stored_complete_func_type complete_;
+   };
+ 
+   // Polymorphic function implementation.
