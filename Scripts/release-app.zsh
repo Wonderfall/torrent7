@@ -114,6 +114,9 @@ typeset -r notarization_status=$(/usr/bin/plutil -extract status raw -o - "$nota
     "TMPDIR=${TMPDIR:-/tmp}" \
     "LC_ALL=C" \
     "DEVELOPER_DIR=$selected_developer_dir" \
+    "DEPS_PREFIX=$release_deps_prefix" \
+    "BOOST_PREFIX=$release_deps_prefix" \
+    "OPENSSL_PREFIX=$release_deps_prefix" \
     "$root_dir/Scripts/verify-app.zsh" \
     --mode distribution \
     --team-id "$expected_team_id" \

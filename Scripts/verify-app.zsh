@@ -89,6 +89,7 @@ typeset -r engine_arch_output="$temporary_dir/engine-arch.txt"
 typeset -r engine_header_output="$temporary_dir/engine-header.txt"
 typeset -r engine_text_output="$temporary_dir/engine-text.txt"
 typeset -r engine_symbol_output="$temporary_dir/engine-symbols.txt"
+typeset -r engine_strings_output="$temporary_dir/engine-strings.txt"
 trap '/bin/rm -rf -- "$temporary_dir"' EXIT
 
 require_match() {
@@ -119,7 +120,7 @@ extract_disassembly_function() {
         capture && /^[^[:space:]][^:]*:$/ { exit }
         capture { print }
     ' "$input" >"$output"
-    [[ -s "$output" ]] || fail "Missing targeted PAC product function: $symbol"
+    [[ -s "$output" ]] || fail "Missing targeted product function: $symbol"
 }
 
 verify_nearby_pac_instruction() {
@@ -540,6 +541,7 @@ reject_match "com\\.apple\\.security\\.files\\.(bookmarks|user-selected)" "$engi
 /usr/bin/xcrun otool -tvV "$engine_extension_executable" >"$engine_text_output"
 /usr/bin/xcrun nm -m "$executable" >"$app_symbol_output"
 /usr/bin/xcrun nm -m "$engine_extension_executable" >"$engine_symbol_output"
+/usr/bin/strings -a "$engine_extension_executable" >"$engine_strings_output"
 
 # The GUI is now pure Swift. Swift arm64e emits PAC but has no BTI codegen
 # switch; the native engine remains the executable where BTI is applicable.
@@ -583,6 +585,29 @@ verify_nearby_pac_instruction \
     asio.executor-function-view.complete "$engine_text_output" 0x8444 callback-signing 4
 verify_nearby_pac_instruction \
     asio.executor-function-view.context "$engine_text_output" 0x5f88 data-signing 4
+typeset native_deps_sanitizer_profile=$expected_sanitizer
+[[ $native_deps_sanitizer_profile != none ]] || native_deps_sanitizer_profile=
+typeset -r expected_native_deps_build_id=$(
+    SANITIZER_PROFILE=$native_deps_sanitizer_profile \
+        "$root_dir/Scripts/native-deps-build-id.zsh"
+)
+require_literal_line \
+    "torrent7-native-deps:$expected_native_deps_build_id" \
+    "$engine_strings_output" \
+    "Engine extension does not match the current native dependencies"
+if [[ $expected_sanitizer == none ]]; then
+    typeset -r libtorrent_trap_output="$temporary_dir/libtorrent-trap-only.txt"
+    extract_disassembly_function \
+        "$engine_text_output" \
+        "__ZN10libtorrent3aux12session_impl13start_sessionEv" \
+        "$libtorrent_trap_output"
+    require_match \
+        $'[[:space:]]brk[[:space:]]+#0x55[0-9a-f]+' \
+        "$libtorrent_trap_output" \
+        "Engine extension lacks trap-only checks in libtorrent session code"
+    reject_match "___ubsan_handle_" "$engine_symbol_output" \
+        "Engine extension unexpectedly depends on the UBSan runtime"
+fi
 require_match "_malloc_type_malloc" "$engine_symbol_output" \
     "Engine extension has no typed malloc symbol"
 require_match "__ZnwmSt19__type_descriptor_t" "$engine_symbol_output" \

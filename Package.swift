@@ -14,6 +14,14 @@ let defaultDepsProfile = sanitizerProfile.map { "arm64e-\($0)" } ?? "arm64e"
 let depsPrefix = environment["DEPS_PREFIX"] ?? "\(packageRoot)/.build/deps/\(defaultDepsProfile)/prefix"
 let boostPrefix = environment["BOOST_PREFIX"] ?? depsPrefix
 let opensslPrefix = environment["OPENSSL_PREFIX"] ?? depsPrefix
+let nativeDepsBuildID = environment["TORRENT7_NATIVE_DEPS_BUILD_ID"] ?? "unbound"
+let nativeDepsBuildIDIsValid = nativeDepsBuildID == "unbound"
+    || (nativeDepsBuildID.hasPrefix("v_")
+        && nativeDepsBuildID.count == 66
+        && nativeDepsBuildID.dropFirst(2).allSatisfy { "0123456789abcdef".contains($0) })
+if !nativeDepsBuildIDIsValid {
+    fatalError("TORRENT7_NATIVE_DEPS_BUILD_ID must be unbound or v_ followed by 64 lowercase hexadecimal digits")
+}
 let libcppHardeningMode = enableDiagnostics ? "_LIBCPP_HARDENING_MODE_DEBUG" : "_LIBCPP_HARDENING_MODE_EXTENSIVE"
 
 let bridgeWarnings: [CXXSetting] = [
@@ -155,6 +163,10 @@ let bridgeTestCompilerFlags = [
 
 let bridgeDefines: [CXXSetting] = [
     .define("_LIBCPP_HARDENING_MODE", to: libcppHardeningMode),
+    .define(
+        "TORRENT7_NATIVE_DEPS_BUILD_ID",
+        to: "\"torrent7-native-deps:\(nativeDepsBuildID)\""
+    ),
     .define("BOOST_ASIO_ENABLE_CANCELIO"),
     .define("BOOST_ASIO_NO_DEPRECATED"),
     .define("BOOST_SYSTEM_USE_UTF8"),

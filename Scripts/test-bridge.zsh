@@ -20,6 +20,7 @@ export CXX="$(xcrun --find clang++)"
 if [[ "${SKIP_BUILD_DEPS:-0}" != "1" ]]; then
     "$root_dir/Scripts/build-deps.zsh"
 fi
+export TORRENT7_NATIVE_DEPS_BUILD_ID=$("$root_dir/Scripts/native-deps-build-id.zsh")
 
 typeset -a swift_run_args=(
     --scratch-path "$scratch_path"

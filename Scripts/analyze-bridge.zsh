@@ -12,6 +12,7 @@ typeset -r homebrew_prefix=${HOMEBREW_PREFIX:-/opt/homebrew}
 typeset -r deps_prefix=${DEPS_PREFIX:-$root_dir/.build/deps/arm64e/prefix}
 typeset -r boost_prefix=${BOOST_PREFIX:-$deps_prefix}
 typeset -r openssl_prefix=${OPENSSL_PREFIX:-$deps_prefix}
+typeset -r native_deps_build_id=$("$root_dir/Scripts/native-deps-build-id.zsh")
 typeset clang_tidy=${CLANG_TIDY:-$homebrew_prefix/opt/llvm/bin/clang-tidy}
 
 if [[ ! -x $clang_tidy ]]; then
@@ -148,6 +149,7 @@ typeset -a compiler_args=(
     -fsanitize-trap=undefined,local-bounds,unsigned-integer-overflow,implicit-conversion
     -fno-sanitize-recover=undefined,local-bounds,unsigned-integer-overflow,implicit-conversion
     -D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE
+    "-DTORRENT7_NATIVE_DEPS_BUILD_ID=\"torrent7-native-deps:$native_deps_build_id\""
     -DBOOST_ASIO_ENABLE_CANCELIO
     -DBOOST_ASIO_NO_DEPRECATED
     -DBOOST_SYSTEM_USE_UTF8

@@ -16,6 +16,7 @@ cd -- "$root_dir"
 
 export CC="${CC:-$(xcrun --find clang)}"
 export CXX="${CXX:-$(xcrun --find clang++)}"
+export TORRENT7_NATIVE_DEPS_BUILD_ID=$("$root_dir/Scripts/native-deps-build-id.zsh")
 
 typeset -a swift_test_args=(
     --scratch-path "$scratch_path"

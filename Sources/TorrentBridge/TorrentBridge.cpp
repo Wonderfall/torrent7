@@ -1,5 +1,10 @@
 #include "TorrentBridgeInternal.hpp"
 
+extern "C" {
+__attribute__((visibility("hidden"), used, retain))
+extern char const torrent7_native_deps_build_id[] = TORRENT7_NATIVE_DEPS_BUILD_ID;
+}
+
 #if __has_feature(address_sanitizer)
 extern "C" __attribute__((visibility("default"), used, retain))
 char const *__asan_default_options()
