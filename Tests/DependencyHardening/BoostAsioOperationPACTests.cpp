@@ -4,6 +4,7 @@
 #include <boost/asio/detail/reactor_op.hpp>
 #include <boost/asio/detail/scheduler_operation.hpp>
 #include <boost/asio/execution/any_executor.hpp>
+#include <boost/asio/execution_context.hpp>
 #include <boost/asio/system_executor.hpp>
 
 #include <cstddef>
@@ -126,6 +127,44 @@ public:
     invoke_blocking(function);
   }
 };
+
+class tracked_service final : public boost::asio::execution_context::service
+{
+public:
+  static boost::asio::execution_context::id id;
+
+  tracked_service(boost::asio::execution_context& context, bool* destroyed)
+    : service(context), destroyed_(destroyed)
+  {
+  }
+
+  ~tracked_service() override
+  {
+    if (destroyed_ != nullptr)
+      *destroyed_ = true;
+  }
+
+private:
+  void shutdown() override
+  {
+  }
+
+  bool* destroyed_;
+};
+
+boost::asio::execution_context::id tracked_service::id;
+
+void replay_service_destroy_callback(
+    tracked_service& destination, tracked_service const& source)
+{
+  using service_type = boost::asio::execution_context::service;
+  auto* destination_bytes = reinterpret_cast<std::byte*>(&destination);
+  auto const* source_bytes = reinterpret_cast<std::byte const*>(&source);
+  constexpr std::size_t callback_offset =
+      sizeof(service_type) - sizeof(void*);
+  std::memcpy(destination_bytes + callback_offset,
+      source_bytes + callback_offset, sizeof(void*));
+}
 
 void* executor_implementation(
     const boost::asio::detail::executor_function& function)
@@ -257,6 +296,18 @@ int main()
     std::fputs("blocking any_executor callback did not run normally\n", stderr);
     return 1;
   }
+
+  bool service_destroyed = false;
+  {
+    boost::asio::execution_context context;
+    static_cast<void>(boost::asio::make_service<tracked_service>(
+        context, &service_destroyed));
+  }
+  if (!service_destroyed)
+  {
+    std::fputs("execution_context service was not destroyed normally\n", stderr);
+    return 1;
+  }
   using torrent7::test_support::replay_triggers_pointer_authentication_failure;
 
   if (!replay_triggers_pointer_authentication_failure([] {
@@ -346,6 +397,27 @@ int main()
   {
     std::fputs(
         "blocking any_executor dispatch-table replay was accepted\n", stderr);
+    return 1;
+  }
+
+  if (!replay_triggers_pointer_authentication_failure([] {
+        static_assert(sizeof(tracked_service)
+            == sizeof(boost::asio::execution_context::service) + sizeof(void*));
+        auto source_context =
+            std::make_unique<boost::asio::execution_context>();
+        auto destination_context =
+            std::make_unique<boost::asio::execution_context>();
+        bool source_destroyed = false;
+        bool destination_destroyed = false;
+        auto& source = boost::asio::make_service<tracked_service>(
+            *source_context, &source_destroyed);
+        auto& destination = boost::asio::make_service<tracked_service>(
+            *destination_context, &destination_destroyed);
+        replay_service_destroy_callback(destination, source);
+        destination_context.reset();
+      }))
+  {
+    std::fputs("execution_context service destroy replay was accepted\n", stderr);
     return 1;
   }
 

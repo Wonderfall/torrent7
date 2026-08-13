@@ -578,6 +578,8 @@ verify_nearby_pac_instruction \
     asio.executor-function.complete "$engine_text_output" 0x9890 callback 4
 verify_nearby_pac_instruction \
     asio.any-executor.execute "$engine_text_output" 0x4642 callback 4
+verify_nearby_pac_instruction \
+    asio.execution-context.service.destroy "$engine_text_output" 0x02a6 callback 4
 require_match "_malloc_type_malloc" "$engine_symbol_output" \
     "Engine extension has no typed malloc symbol"
 require_match "__ZnwmSt19__type_descriptor_t" "$engine_symbol_output" \

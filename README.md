@@ -196,8 +196,8 @@ Homebrew supplies build tools only; it is not a runtime dependency source for th
 app bundle. OpenSSL archives are verified with SHA-256 and a pinned upstream PGP
 signing fingerprint. Boost is verified by SHA-256, then receives an ordered,
 hashed patch series that authenticates the active Asio scheduler and reactor
-operation callbacks, executor-function callbacks, and polymorphic executor
-dispatch with address-and-role-diversified PAC. Libtorrent is fetched
+operation callbacks, executor-function callbacks, polymorphic executor dispatch,
+and service teardown with address-and-role-diversified PAC. Libtorrent is fetched
 from a pinned tag and commit through a local source cache, then receives its own
 ordered, hashed patch series for Xcode compatibility, network boundaries, storage
 confinement, bounded pread recheck hashing, and complete typed-allocation

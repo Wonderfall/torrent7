@@ -1,0 +1,33 @@
+diff --git a/boost/asio/execution_context.hpp b/boost/asio/execution_context.hpp
+index 0ff1ee410..2094f0af6 100644
+--- a/boost/asio/execution_context.hpp
++++ b/boost/asio/execution_context.hpp
+@@ -20,6 +20,10 @@
+ #include <boost/asio/detail/memory.hpp>
+ #include <boost/asio/detail/noncopyable.hpp>
+ 
++#if defined(__PTRAUTH__)
++# include <ptrauth.h>
++#endif // defined(__PTRAUTH__)
++
+ #include <boost/asio/detail/push_options.hpp>
+ 
+ namespace boost {
+@@ -511,7 +515,16 @@ private:
+ 
+   execution_context& owner_;
+   service* next_;
+-  void (*destroy_)(service*);
++  typedef void (*destroy_func_type)(service*);
++#if defined(__PTRAUTH__)
++  using stored_destroy_func_type = destroy_func_type __ptrauth(
++      ptrauth_key_function_pointer, 1,
++      ptrauth_string_discriminator(
++        "boost.asio.execution-context.service.destroy"));
++#else // defined(__PTRAUTH__)
++  typedef destroy_func_type stored_destroy_func_type;
++#endif // defined(__PTRAUTH__)
++  stored_destroy_func_type destroy_;
+ };
+ 
+ /// Base class for all execution context service makers.

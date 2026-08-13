@@ -62,6 +62,9 @@ typeset -ar compiler_flags=(
 "$cxx" "${compiler_flags[@]}" "$test_source" \
     -o "$temporary_directory/boost-asio-operation-pac-tests"
 "$temporary_directory/boost-asio-operation-pac-tests"
+/usr/bin/xcrun otool -tvV \
+    "$temporary_directory/boost-asio-operation-pac-tests" \
+    >"$temporary_directory/boost-asio-operation-pac.disassembly"
 
 "$cxx" "${compiler_flags[@]}" -S -emit-llvm "$test_source" \
     -o "$temporary_directory/boost-asio-operation-pac.ll"
@@ -88,6 +91,34 @@ extract_assembly_function() {
         capture && /; -- End function/ { exit }
     ' "$temporary_directory/boost-asio-operation-pac.s" >"$output"
     [[ -s "$output" ]] || fail "Missing assembly for $name"
+}
+
+extract_linked_function() {
+    local name=$1
+    local output=$2
+    /usr/bin/awk -v symbol="$name:" '
+        $0 == symbol { capture = 1 }
+        capture && $0 != symbol && $0 ~ /^_[^:]*:$/ { exit }
+        capture { print }
+    ' "$temporary_directory/boost-asio-operation-pac.disassembly" >"$output"
+    [[ -s "$output" ]] || fail "Missing linked code for $name"
+}
+
+verify_linked_role() {
+    local name=$1
+    local discriminator=$2
+    local input=$3
+    /usr/bin/awk -v discriminator="#$discriminator" '
+        /movk[[:space:]]+x[0-9]+,/ && index($0, discriminator) {
+            modifier = $3
+            sub(/,$/, "", modifier)
+            remaining = 4
+        }
+        remaining > 0 && /[[:space:]](braa|blraa)[[:space:]]/ \
+            && index($0, ", " modifier) { found = 1 }
+        remaining > 0 { remaining-- }
+        END { exit !found }
+    ' "$input" || fail "$name does not use its pinned diversified PAC role"
 }
 
 verify_ir_diversification() {
@@ -137,6 +168,7 @@ typeset executor_invoke_assembly="$temporary_directory/executor-invoke.s"
 typeset executor_destroy_assembly="$temporary_directory/executor-destroy.s"
 typeset any_executor_assembly="$temporary_directory/any-executor.s"
 typeset blocking_any_executor_assembly="$temporary_directory/blocking-any-executor.s"
+typeset service_destroy_linked="$temporary_directory/service-destroy.disassembly"
 extract_ir_function torrent7_invoke_scheduler "$scheduler_ir"
 extract_ir_function torrent7_invoke_reactor "$reactor_ir"
 extract_ir_function torrent7_invoke_executor "$executor_invoke_ir"
@@ -151,6 +183,8 @@ extract_assembly_function torrent7_destroy_executor "$executor_destroy_assembly"
 extract_assembly_function torrent7_invoke_any_executor "$any_executor_assembly"
 extract_assembly_function torrent7_invoke_blocking_any_executor \
     "$blocking_any_executor_assembly"
+extract_linked_function __ZN5boost4asio17execution_contextD2Ev \
+    "$service_destroy_linked"
 
 verify_ir_diversification scheduler_operation::func_ "$scheduler_ir"
 typeset -r scheduler_discriminator=$REPLY
@@ -177,6 +211,8 @@ typeset -ra discriminators=(
 typeset -ra unique_discriminators=("${(u)discriminators[@]}")
 (( ${#unique_discriminators[@]} == ${#discriminators[@]} )) \
     || fail "Targeted Asio callbacks do not have distinct PAC role discriminators"
+verify_linked_role execution_context::service::destroy_ 0x2a6 \
+    "$service_destroy_linked"
 
 for assembly in \
     "$scheduler_assembly" \
