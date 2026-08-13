@@ -78,6 +78,7 @@ cxx_flags=(
     -fvisibility=hidden
     -fvisibility-inlines-hidden
     -D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_DEBUG
+    '-DTORRENT7_NATIVE_DEPS_BUILD_ID="torrent7-native-deps:fuzz"'
     -DBOOST_ASIO_ENABLE_CANCELIO
     -DBOOST_ASIO_NO_DEPRECATED
     -DBOOST_SYSTEM_USE_UTF8
