@@ -1,0 +1,73 @@
+diff --git a/boost/asio/detail/executor_function.hpp b/boost/asio/detail/executor_function.hpp
+index fa76ac1..5706b95 100644
+--- a/boost/asio/detail/executor_function.hpp
++++ b/boost/asio/detail/executor_function.hpp
+@@ -128,7 +128,15 @@ private:
+     }
+   }
+ 
+-  impl_base* impl_;
++#if defined(__PTRAUTH__)
++  using stored_impl_type = impl_base* __ptrauth(
++      ptrauth_key_process_dependent_data, 1,
++      ptrauth_string_discriminator(
++        "boost.asio.executor-function.impl"));
++#else // defined(__PTRAUTH__)
++  typedef impl_base* stored_impl_type;
++#endif // defined(__PTRAUTH__)
++  stored_impl_type impl_;
+ };
+ 
+ // Lightweight, non-owning, copyable function object wrapper.
+diff --git a/boost/asio/execution/any_executor.hpp b/boost/asio/execution/any_executor.hpp
+index e6ad1af..8488d84 100644
+--- a/boost/asio/execution/any_executor.hpp
++++ b/boost/asio/execution/any_executor.hpp
+@@ -1221,9 +1221,27 @@ private:
+     >::type object_type;
+ 
+   object_type object_;
+-  const object_fns* object_fns_;
+-  void* target_;
+-  const target_fns* target_fns_;
++#if defined(__PTRAUTH__)
++  using stored_object_fns_type = const object_fns* __ptrauth(
++      ptrauth_key_process_dependent_data, 1,
++      ptrauth_string_discriminator(
++        "boost.asio.any-executor.object-fns"));
++  using stored_target_type = void* __ptrauth(
++      ptrauth_key_process_dependent_data, 1,
++      ptrauth_string_discriminator(
++        "boost.asio.any-executor.target"));
++  using stored_target_fns_type = const target_fns* __ptrauth(
++      ptrauth_key_process_dependent_data, 1,
++      ptrauth_string_discriminator(
++        "boost.asio.any-executor.target-fns"));
++#else // defined(__PTRAUTH__)
++  typedef const object_fns* stored_object_fns_type;
++  typedef void* stored_target_type;
++  typedef const target_fns* stored_target_fns_type;
++#endif // defined(__PTRAUTH__)
++  stored_object_fns_type object_fns_;
++  stored_target_type target_;
++  stored_target_fns_type target_fns_;
+ };
+ 
+ template <typename Derived, typename Property, typename = void>
+@@ -1854,7 +1872,15 @@ public:
+     return fns;
+   }
+ 
+-  const prop_fns<any_executor>* prop_fns_;
++#if defined(__PTRAUTH__)
++  using stored_prop_fns_type = const prop_fns<any_executor>* __ptrauth(
++      ptrauth_key_process_dependent_data, 1,
++      ptrauth_string_discriminator(
++        "boost.asio.any-executor.property-fns"));
++#else // defined(__PTRAUTH__)
++  typedef const prop_fns<any_executor>* stored_prop_fns_type;
++#endif // defined(__PTRAUTH__)
++  stored_prop_fns_type prop_fns_;
+ };
+ 
+ template <typename... SupportableProperties>

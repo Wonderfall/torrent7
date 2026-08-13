@@ -585,6 +585,16 @@ verify_nearby_pac_instruction \
     asio.executor-function-view.complete "$engine_text_output" 0x8444 callback-signing 4
 verify_nearby_pac_instruction \
     asio.executor-function-view.context "$engine_text_output" 0x5f88 data-signing 4
+verify_nearby_pac_instruction \
+    asio.executor-function.impl "$engine_text_output" 0xc4a3 data 4
+verify_nearby_pac_instruction \
+    asio.any-executor.object-fns "$engine_text_output" 0x8efa data 4
+verify_nearby_pac_instruction \
+    asio.any-executor.target "$engine_text_output" 0xeffa data 4
+verify_nearby_pac_instruction \
+    asio.any-executor.target-fns "$engine_text_output" 0x380f data 4
+verify_nearby_pac_instruction \
+    asio.any-executor.property-fns "$engine_text_output" 0xed97 data 4
 typeset native_deps_sanitizer_profile=$expected_sanitizer
 [[ $native_deps_sanitizer_profile != none ]] || native_deps_sanitizer_profile=
 typeset -r expected_native_deps_build_id=$(

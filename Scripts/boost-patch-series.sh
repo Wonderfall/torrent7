@@ -18,6 +18,7 @@ readonly -a BOOST_PATCHES=(
     "$ROOT_DIR/Scripts/patches/boost-1.92.0-asio-any-executor-pac.patch"
     "$ROOT_DIR/Scripts/patches/boost-1.92.0-asio-service-destroy-pac.patch"
     "$ROOT_DIR/Scripts/patches/boost-1.92.0-asio-executor-function-view-pac.patch"
+    "$ROOT_DIR/Scripts/patches/boost-1.92.0-asio-type-erasure-carrier-pac.patch"
 )
 # One exact tree per ordered patch-series stage. Recognizing intermediate
 # stages lets an existing verified header cache receive only newly appended
@@ -29,6 +30,7 @@ readonly -a BOOST_PATCH_TREES=(
     "ab2a9bfb66358dfa61e86f97d0a3dd63adb07aec9aebf11a4e6e278a23fc0442"
     "eb95e39fc3803d1e26a3b518206523137b38c0b9c09c5f06a00423b5fd486fa5"
     "18b02f610921ab093909b80f36d562bb2a11d8cdd07d78e109954917606f00b8"
+    "8a834fcb894e00d4fa6fd58bc4826a577381a890b909d5881954aac2f31fdfd5"
 )
 readonly BOOST_BASE_TREE="${BOOST_PATCH_TREES[0]}"
 readonly BOOST_PATCHED_TREE="${BOOST_PATCH_TREES[${#BOOST_PATCH_TREES[@]} - 1]}"

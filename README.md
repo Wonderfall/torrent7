@@ -203,8 +203,8 @@ app bundle. OpenSSL archives are verified with SHA-256 and a pinned upstream PGP
 signing fingerprint. Boost is verified by SHA-256, then receives an ordered,
 hashed patch series that authenticates the active Asio scheduler and reactor
 operation callbacks, owning and non-owning executor callbacks and contexts,
-polymorphic executor dispatch, and service teardown with address-and-role-
-diversified PAC. Libtorrent is fetched
+polymorphic executor dispatch and carrier state, and service teardown with
+address-and-role-diversified PAC. Libtorrent is fetched
 from a pinned tag and commit through a local source cache, then receives its own
 ordered, hashed patch series for Xcode compatibility, network boundaries, storage
 confinement, bounded pread recheck hashing, and complete typed-allocation

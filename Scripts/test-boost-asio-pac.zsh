@@ -147,12 +147,51 @@ verify_ir_diversification() {
 
     address_value=$(/usr/bin/sed -nE \
         "s/^[[:space:]]*($blend_address) = ptrtoint ptr .*$/\\1/p" "$input")
+    if [[ "$address_value" != "$blend_address" ]]; then
+        address_value=$(/usr/bin/sed -nE \
+            "s/^[[:space:]]*($blend_address) = .*@llvm\\.ptrauth\\.auth\\(.*$/\\1/p" \
+            "$input")
+    fi
     [[ "$address_value" == "$blend_address" ]] \
-        || fail "$name PAC blend is not derived from the callback field address"
+        || fail "$name PAC blend is not derived from an authenticated callback field address"
     [[ -n "$discriminator" && "$discriminator" != 0 ]] \
         || fail "$name PAC blend has no role discriminator"
     /usr/bin/grep -Fq -- "\"ptrauth\"(i32 0, i64 $blend_result)" "$input" \
         || fail "$name indirect call does not authenticate with the blended modifier"
+    REPLY=$discriminator
+}
+
+verify_ir_data_diversification() {
+    local name=$1
+    local input=$2
+    local modifier
+    local blend_line
+    local blend_address
+    local discriminator
+
+    modifier=$(/usr/bin/sed -nE \
+        's/.*@llvm\.ptrauth\.auth\(i64 [^,]+, i32 3, i64 (%[[:alnum:].]+)\).*/\1/p' \
+        "$input" | /usr/bin/sort -u)
+    [[ -n "$modifier" && "$modifier" != *$'\n'* ]] \
+        || fail "$name does not use one authenticated data-pointer modifier"
+    blend_line=$(/usr/bin/grep -F "$modifier =" "$input" \
+        | /usr/bin/grep '@llvm\.ptrauth\.blend' || true)
+    [[ -n "$blend_line" && "$blend_line" != *$'\n'* ]] \
+        || fail "$name data-pointer role is not address diversified"
+    blend_address=$(print -r -- "$blend_line" \
+        | /usr/bin/sed -nE \
+            's/.*@llvm\.ptrauth\.blend\(i64 (%[[:alnum:].]+), i64 [0-9]+\).*/\1/p')
+    discriminator=$(print -r -- "$blend_line" \
+        | /usr/bin/sed -nE \
+            's/.*@llvm\.ptrauth\.blend\(i64 %[[:alnum:].]+, i64 ([0-9]+)\).*/\1/p')
+    /usr/bin/grep -Eq \
+        "^[[:space:]]*$blend_address = ptrtoint ptr " "$input" \
+        || fail "$name PAC blend is not derived from its carrier field address"
+    [[ -n "$discriminator" && "$discriminator" != 0 ]] \
+        || fail "$name PAC blend has no role discriminator"
+    /usr/bin/grep -Fq -- \
+        "@llvm.ptrauth.auth(i64 " "$input" \
+        || fail "$name does not authenticate its carrier pointer"
     REPLY=$discriminator
 }
 
@@ -209,6 +248,10 @@ typeset executor_destroy_ir="$temporary_directory/executor-destroy.ll"
 typeset any_executor_ir="$temporary_directory/any-executor.ll"
 typeset blocking_any_executor_ir="$temporary_directory/blocking-any-executor.ll"
 typeset executor_view_ir="$temporary_directory/executor-view.ll"
+typeset any_executor_object_fns_ir="$temporary_directory/any-executor-object-fns.ll"
+typeset any_executor_target_ir="$temporary_directory/any-executor-target.ll"
+typeset any_executor_target_fns_ir="$temporary_directory/any-executor-target-fns.ll"
+typeset any_executor_property_fns_ir="$temporary_directory/any-executor-property-fns.ll"
 typeset scheduler_assembly="$temporary_directory/scheduler.s"
 typeset reactor_assembly="$temporary_directory/reactor.s"
 typeset executor_invoke_assembly="$temporary_directory/executor-invoke.s"
@@ -216,6 +259,10 @@ typeset executor_destroy_assembly="$temporary_directory/executor-destroy.s"
 typeset any_executor_assembly="$temporary_directory/any-executor.s"
 typeset blocking_any_executor_assembly="$temporary_directory/blocking-any-executor.s"
 typeset executor_view_assembly="$temporary_directory/executor-view.s"
+typeset any_executor_object_fns_assembly="$temporary_directory/any-executor-object-fns.s"
+typeset any_executor_target_assembly="$temporary_directory/any-executor-target.s"
+typeset any_executor_target_fns_assembly="$temporary_directory/any-executor-target-fns.s"
+typeset any_executor_property_fns_assembly="$temporary_directory/any-executor-property-fns.s"
 typeset service_destroy_linked="$temporary_directory/service-destroy.disassembly"
 extract_ir_function torrent7_invoke_scheduler "$scheduler_ir"
 extract_ir_function torrent7_invoke_reactor "$reactor_ir"
@@ -225,6 +272,13 @@ extract_ir_function torrent7_invoke_any_executor "$any_executor_ir"
 extract_ir_function torrent7_invoke_blocking_any_executor \
     "$blocking_any_executor_ir"
 extract_ir_function torrent7_invoke_executor_view "$executor_view_ir"
+extract_ir_function torrent7_any_executor_object_functions \
+    "$any_executor_object_fns_ir"
+extract_ir_function torrent7_any_executor_target "$any_executor_target_ir"
+extract_ir_function torrent7_any_executor_target_functions \
+    "$any_executor_target_fns_ir"
+extract_ir_function torrent7_any_executor_property_functions \
+    "$any_executor_property_fns_ir"
 extract_assembly_function torrent7_invoke_scheduler "$scheduler_assembly"
 extract_assembly_function torrent7_invoke_reactor "$reactor_assembly"
 extract_assembly_function torrent7_invoke_executor "$executor_invoke_assembly"
@@ -233,6 +287,14 @@ extract_assembly_function torrent7_invoke_any_executor "$any_executor_assembly"
 extract_assembly_function torrent7_invoke_blocking_any_executor \
     "$blocking_any_executor_assembly"
 extract_assembly_function torrent7_invoke_executor_view "$executor_view_assembly"
+extract_assembly_function torrent7_any_executor_object_functions \
+    "$any_executor_object_fns_assembly"
+extract_assembly_function torrent7_any_executor_target \
+    "$any_executor_target_assembly"
+extract_assembly_function torrent7_any_executor_target_functions \
+    "$any_executor_target_fns_assembly"
+extract_assembly_function torrent7_any_executor_property_functions \
+    "$any_executor_property_fns_assembly"
 extract_linked_function __ZN5boost4asio17execution_contextD2Ev \
     "$service_destroy_linked"
 
@@ -252,6 +314,20 @@ typeset -r blocking_any_executor_discriminator=$REPLY
 verify_ir_callback_context_pair executor_function_view "$executor_view_ir"
 typeset -r executor_view_callback_discriminator=$REPLY_CALLBACK
 typeset -r executor_view_context_discriminator=$REPLY_CONTEXT
+verify_ir_data_diversification executor_function::impl_ "$executor_invoke_ir"
+typeset -r executor_impl_discriminator=$REPLY
+verify_ir_data_diversification any_executor::object_fns_ \
+    "$any_executor_object_fns_ir"
+typeset -r any_executor_object_fns_discriminator=$REPLY
+verify_ir_data_diversification any_executor::target_ \
+    "$any_executor_target_ir"
+typeset -r any_executor_target_discriminator=$REPLY
+verify_ir_data_diversification any_executor::target_fns_ \
+    "$any_executor_target_fns_ir"
+typeset -r any_executor_target_fns_discriminator=$REPLY
+verify_ir_data_diversification any_executor::prop_fns_ \
+    "$any_executor_property_fns_ir"
+typeset -r any_executor_property_fns_discriminator=$REPLY
 [[ "$executor_invoke_discriminator" == "$executor_destroy_discriminator" ]] \
     || fail "Asio executor invocation and destruction use different PAC role discriminators"
 typeset -ra discriminators=(
@@ -262,6 +338,11 @@ typeset -ra discriminators=(
     "$blocking_any_executor_discriminator"
     "$executor_view_callback_discriminator"
     "$executor_view_context_discriminator"
+    "$executor_impl_discriminator"
+    "$any_executor_object_fns_discriminator"
+    "$any_executor_target_discriminator"
+    "$any_executor_target_fns_discriminator"
+    "$any_executor_property_fns_discriminator"
 )
 typeset -ra unique_discriminators=("${(u)discriminators[@]}")
 (( ${#unique_discriminators[@]} == ${#discriminators[@]} )) \
@@ -270,6 +351,16 @@ verify_linked_role execution_context::service::destroy_ 0x2a6 \
     "$service_destroy_linked"
 /usr/bin/grep -Eq '[[:space:]]autdb[[:space:]]' "$executor_view_assembly" \
     || fail "executor_function_view context does not use authenticated data codegen"
+
+for assembly in \
+    "$executor_invoke_assembly" \
+    "$any_executor_object_fns_assembly" \
+    "$any_executor_target_assembly" \
+    "$any_executor_target_fns_assembly" \
+    "$any_executor_property_fns_assembly"; do
+    /usr/bin/grep -Eq '[[:space:]]autdb[[:space:]]' "$assembly" \
+        || fail "Targeted Asio carrier does not use authenticated data-pointer codegen"
+done
 
 for assembly in \
     "$scheduler_assembly" \

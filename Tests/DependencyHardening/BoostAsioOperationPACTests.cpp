@@ -1,5 +1,6 @@
 #include "PointerAuthenticationFailureTestSupport.hpp"
 
+#include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/detail/executor_function.hpp>
 #include <boost/asio/detail/reactor_op.hpp>
 #include <boost/asio/detail/scheduler_operation.hpp>
@@ -15,6 +16,14 @@
 #include <utility>
 
 namespace {
+
+const void* volatile observed_carrier = nullptr;
+
+__attribute__((noinline)) void replay_object_bytes(
+    void* destination, const void* source, std::size_t size)
+{
+  std::memcpy(destination, source, size);
+}
 
 class scheduler_probe final : public boost::asio::detail::scheduler_operation
 {
@@ -126,6 +135,44 @@ public:
     target_fns_ = &replayed_functions;
     invoke_blocking(function);
   }
+
+  const void* object_functions() const
+  {
+    return object_fns_;
+  }
+
+  void* erased_target() const
+  {
+    return target_;
+  }
+
+  const void* target_functions() const
+  {
+    return target_fns_;
+  }
+};
+
+class property_executor_access final
+  : public boost::asio::any_io_executor::base_type
+{
+public:
+  using base = boost::asio::any_io_executor::base_type;
+
+  explicit property_executor_access(boost::asio::system_executor executor)
+    : base(executor)
+  {
+  }
+
+  const void* property_functions() const
+  {
+    return prop_fns_;
+  }
+
+  boost::asio::execution_context& query_context() const
+  {
+    return query(boost::asio::execution::context_as<
+        boost::asio::execution_context&>);
+  }
 };
 
 class tracked_service final : public boost::asio::execution_context::service
@@ -192,10 +239,13 @@ void replay_executor_view_field(
       source_bytes + offset, sizeof(void*));
 }
 
-__attribute__((noinline)) void replay_object_bytes(
-    void* destination, const void* source, std::size_t size)
+void replay_executor_holder(
+    boost::asio::detail::executor_function& destination,
+    const boost::asio::detail::executor_function& source)
 {
-  std::memcpy(destination, source, size);
+  static_assert(sizeof(boost::asio::detail::executor_function)
+      == sizeof(void*));
+  replay_object_bytes(&destination, &source, sizeof(destination));
 }
 
 } // namespace
@@ -243,6 +293,30 @@ extern "C" __attribute__((noinline)) void torrent7_invoke_blocking_any_executor(
     boost::asio::detail::executor_function_view function)
 {
   executor->invoke_blocking(function);
+}
+
+extern "C" __attribute__((noinline)) const void*
+torrent7_any_executor_object_functions(any_executor_access* executor)
+{
+  return executor->object_functions();
+}
+
+extern "C" __attribute__((noinline)) void*
+torrent7_any_executor_target(any_executor_access* executor)
+{
+  return executor->erased_target();
+}
+
+extern "C" __attribute__((noinline)) const void*
+torrent7_any_executor_target_functions(any_executor_access* executor)
+{
+  return executor->target_functions();
+}
+
+extern "C" __attribute__((noinline)) const void*
+torrent7_any_executor_property_functions(property_executor_access* executor)
+{
+  return executor->property_functions();
 }
 
 int main()
@@ -331,6 +405,48 @@ int main()
     return 1;
   }
 
+  bool copied_any_executor_called = false;
+  any_executor_access copied_any_executor_source(
+      any_executor_probe{&copied_any_executor_called});
+  any_executor_access copied_any_executor(copied_any_executor_source);
+  any_executor_access moved_any_executor(std::move(copied_any_executor));
+  boost::asio::detail::executor_function copied_any_executor_function(
+      executor_probe{nullptr}, allocator);
+  moved_any_executor.invoke(
+      static_cast<boost::asio::detail::executor_function&&>(
+        copied_any_executor_function));
+  if (!copied_any_executor_called)
+  {
+    std::fputs("copied and moved any_executor did not run normally\n", stderr);
+    return 1;
+  }
+
+  bool swapped_any_executor_called = false;
+  any_executor_access swapped_any_executor(
+      any_executor_probe{&swapped_any_executor_called});
+  moved_any_executor.swap(swapped_any_executor);
+  boost::asio::detail::executor_function swapped_any_executor_function(
+      executor_probe{nullptr}, allocator);
+  moved_any_executor.invoke(
+      static_cast<boost::asio::detail::executor_function&&>(
+        swapped_any_executor_function));
+  if (!swapped_any_executor_called)
+  {
+    std::fputs("swapped any_executor did not re-sign its carriers\n", stderr);
+    return 1;
+  }
+
+  property_executor_access property_executor{boost::asio::system_executor()};
+  static_cast<void>(property_executor.query_context());
+  property_executor_access copied_property_executor(property_executor);
+  property_executor_access moved_property_executor(
+      std::move(copied_property_executor));
+  static_cast<void>(moved_property_executor.query_context());
+  property_executor_access swapped_property_executor{
+      boost::asio::system_executor()};
+  moved_property_executor.swap(swapped_property_executor);
+  static_cast<void>(moved_property_executor.query_context());
+
   bool blocking_function_called = false;
   executor_probe blocking_function{&blocking_function_called};
   auto blocking_system_executor = boost::asio::require(
@@ -396,6 +512,75 @@ int main()
       }))
   {
     std::fputs("executor invocation callback replay was accepted\n", stderr);
+    return 1;
+  }
+
+  if (!replay_triggers_pointer_authentication_failure([] {
+        std::allocator<std::byte> child_allocator;
+        auto* source = new boost::asio::detail::executor_function(
+            executor_probe{nullptr}, child_allocator);
+        auto* destination = new boost::asio::detail::executor_function(
+            executor_probe{nullptr}, child_allocator);
+        replay_executor_holder(*destination, *source);
+        (*destination)();
+      }))
+  {
+    std::fputs("executor implementation carrier replay was accepted\n", stderr);
+    return 1;
+  }
+
+  if (!replay_triggers_pointer_authentication_failure([] {
+        auto* source = new any_executor_access(any_executor_probe{nullptr});
+        auto* destination = new any_executor_access(
+            any_executor_probe{nullptr});
+        replay_object_bytes(destination, source, sizeof(*destination));
+        observed_carrier =
+            torrent7_any_executor_object_functions(destination);
+      }))
+  {
+    std::fputs("any_executor object-functions carrier replay was accepted\n",
+        stderr);
+    return 1;
+  }
+
+  if (!replay_triggers_pointer_authentication_failure([] {
+        auto* source = new any_executor_access(any_executor_probe{nullptr});
+        auto* destination = new any_executor_access(
+            any_executor_probe{nullptr});
+        replay_object_bytes(destination, source, sizeof(*destination));
+        observed_carrier = torrent7_any_executor_target(destination);
+      }))
+  {
+    std::fputs("any_executor target carrier replay was accepted\n", stderr);
+    return 1;
+  }
+
+  if (!replay_triggers_pointer_authentication_failure([] {
+        auto* source = new any_executor_access(any_executor_probe{nullptr});
+        auto* destination = new any_executor_access(
+            any_executor_probe{nullptr});
+        replay_object_bytes(destination, source, sizeof(*destination));
+        observed_carrier =
+            torrent7_any_executor_target_functions(destination);
+      }))
+  {
+    std::fputs("any_executor target-functions carrier replay was accepted\n",
+        stderr);
+    return 1;
+  }
+
+  if (!replay_triggers_pointer_authentication_failure([] {
+        auto* source = new property_executor_access(
+            boost::asio::system_executor());
+        auto* destination = new property_executor_access(
+            boost::asio::system_executor());
+        replay_object_bytes(destination, source, sizeof(*destination));
+        observed_carrier =
+            torrent7_any_executor_property_functions(destination);
+      }))
+  {
+    std::fputs("any_executor property-functions carrier replay was accepted\n",
+        stderr);
     return 1;
   }
 

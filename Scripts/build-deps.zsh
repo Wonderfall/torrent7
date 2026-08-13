@@ -784,6 +784,23 @@ verify_libtorrent_indirect_operation_pac() {
             "libtorrent has no address-diversified executor-function-view $instruction for role $discriminator"
     done
 
+    # Active Asio type-erasure carriers use the process-dependent data key,
+    # with independent address-and-role discriminators for each stored role.
+    for discriminator in 0xc4a3 0x8efa 0xeffa 0x380f 0xed97; do
+        /usr/bin/awk -v discriminator="#$discriminator" '
+            /movk[[:space:]]+x[0-9]+,/ && index($0, discriminator) {
+                modifier = $3
+                sub(/,$/, "", modifier)
+                remaining = 4
+            }
+            remaining > 0 && /[[:space:]]autdb[[:space:]]/ \
+                && index($0, ", " modifier) { found = 1 }
+            remaining > 0 { remaining-- }
+            END { exit !found }
+        ' "$disassembly" || fail \
+            "libtorrent has no address-diversified Asio carrier authentication for role $discriminator"
+    done
+
     # heterogeneous_queue authenticates and re-signs the copied header before
     # the eventual move callback, so its modifier can be live for longer.
     /usr/bin/awk -v discriminator="#0xf073" '
