@@ -295,7 +295,7 @@ struct TorrentFixture {
     int32_t add_outcome = TTORRENT_ADD_REJECTED;
     int32_t const result = TorrentClientAddTorrentFileDataWithPriorities(
         client,
-        fixture.metainfo.data(),
+        bridge_tests::byte_data(fixture.metainfo),
         static_cast<std::int32_t>(fixture.metainfo.size()),
         save_path.c_str(),
         &options,

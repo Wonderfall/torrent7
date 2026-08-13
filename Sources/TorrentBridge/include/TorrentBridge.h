@@ -13,7 +13,6 @@
 #define TORRENT_BRIDGE_NONNULL
 #define TORRENT_BRIDGE_NULLABLE
 #define TORRENT_BRIDGE_NULL_TERMINATED
-#define TORRENT_BRIDGE_SIZED_BY(size)
 #else
 #define TORRENT_BRIDGE_NONNULL _Nonnull
 #define TORRENT_BRIDGE_NULLABLE _Nullable
@@ -30,11 +29,9 @@
 #if __has_include(<ptrcheck.h>)
 #include <ptrcheck.h>
 #define TORRENT_BRIDGE_COUNTED_BY(count) __counted_by(count)
-#define TORRENT_BRIDGE_SIZED_BY(size) __sized_by(size)
 #define TORRENT_BRIDGE_NULL_TERMINATED __null_terminated
 #else
 #define TORRENT_BRIDGE_COUNTED_BY(count)
-#define TORRENT_BRIDGE_SIZED_BY(size)
 #define TORRENT_BRIDGE_NULL_TERMINATED
 #endif
 #endif
@@ -481,7 +478,8 @@ int32_t TorrentClientAddMagnet(
 
 int32_t TorrentClientAddTorrentFileData(
     TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
-    const void * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_SIZED_BY(torrent_data_size) torrent_data TORRENT_BRIDGE_NOESCAPE,
+    const uint8_t * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(torrent_data_size)
+        torrent_data TORRENT_BRIDGE_NOESCAPE,
     int32_t torrent_data_size,
     const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED save_path TORRENT_BRIDGE_NOESCAPE,
     const TTorrentAddOptions * TORRENT_BRIDGE_NULLABLE options TORRENT_BRIDGE_NOESCAPE,
@@ -494,7 +492,8 @@ int32_t TorrentClientAddTorrentFileData(
 
 int32_t TorrentClientAddTorrentFileDataWithPriorities(
     TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
-    const void * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_SIZED_BY(torrent_data_size) torrent_data TORRENT_BRIDGE_NOESCAPE,
+    const uint8_t * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(torrent_data_size)
+        torrent_data TORRENT_BRIDGE_NOESCAPE,
     int32_t torrent_data_size,
     const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED save_path TORRENT_BRIDGE_NOESCAPE,
     const TTorrentAddOptions * TORRENT_BRIDGE_NULLABLE options TORRENT_BRIDGE_NOESCAPE,
@@ -510,7 +509,8 @@ int32_t TorrentClientAddTorrentFileDataWithPriorities(
 
 int32_t TorrentClientPreviewTorrentFileData(
     TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
-    const void * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_SIZED_BY(torrent_data_size) torrent_data TORRENT_BRIDGE_NOESCAPE,
+    const uint8_t * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(torrent_data_size)
+        torrent_data TORRENT_BRIDGE_NOESCAPE,
     int32_t torrent_data_size,
     TTorrentFilePreview * TORRENT_BRIDGE_NULLABLE preview TORRENT_BRIDGE_NOESCAPE,
     TTorrentFileSnapshot * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(capacity) files TORRENT_BRIDGE_NOESCAPE,
@@ -766,6 +766,5 @@ int32_t TorrentClientTakeAlertError(
 #undef TORRENT_BRIDGE_NONNULL
 #undef TORRENT_BRIDGE_NULLABLE
 #undef TORRENT_BRIDGE_NULL_TERMINATED
-#undef TORRENT_BRIDGE_SIZED_BY
 
 #endif

@@ -3,6 +3,11 @@ import Synchronization
 import TorrentBridge
 import TorrentEngineModel
 
+private func stringFromBridgeBuffer(_ buffer: [CChar]) -> String {
+    let bytes = buffer.prefix { $0 != 0 }.map(UInt8.init(bitPattern:))
+    return String(decoding: bytes, as: UTF8.self)
+}
+
 @safe private final class TorrentWakeRelay: Sendable {
     private struct State: Sendable {
         var continuation: AsyncStream<Void>.Continuation?
@@ -70,8 +75,9 @@ package enum TorrentRemovalResultReadOverride: Sendable {
 @safe private struct TorrentEncodedAuthorizedSaveRoots {
     let pathBlob: [UInt8]
     let nativeRoots: [TTorrentAuthorizedSaveRoot]
-    // Native records contain unretained pointers into these roots. Keep the
-    // Swift owners alive until the synchronous bridge call returns.
+    // Native records contain process-local tokens registered by these roots.
+    // Keep the token owners alive until the synchronous bridge call retains
+    // every accepted lifetime.
     let retainedRoots: [TorrentAuthorizedSaveRoot]
 }
 
@@ -341,7 +347,7 @@ package enum TorrentAddError: LocalizedError, Sendable {
         )
         if let priorityEntries {
             return try unsafe throwingBridgeAddReturningString(capacity: Int(TTORRENT_ID_CAPACITY)) { outputBuffer, addOutcome, errorBuffer in
-                let torrentData: RawSpan? = unsafe data.span.bytes
+                let torrentData: Span<UInt8>? = data.span
                 let priorities: Span<TTorrentFilePriorityEntry>? = priorityEntries.span
                 return unsafe savePath.withCString { savePointer in
                     unsafe TorrentClientAddTorrentFileDataWithPriorities(
@@ -358,7 +364,7 @@ package enum TorrentAddError: LocalizedError, Sendable {
             }
         } else {
             return try unsafe throwingBridgeAddReturningString(capacity: Int(TTORRENT_ID_CAPACITY)) { outputBuffer, addOutcome, errorBuffer in
-                let torrentData: RawSpan? = unsafe data.span.bytes
+                let torrentData: Span<UInt8>? = data.span
                 return unsafe savePath.withCString { savePointer in
                     unsafe TorrentClientAddTorrentFileData(
                         client,
@@ -380,7 +386,7 @@ package enum TorrentAddError: LocalizedError, Sendable {
         var preview = TTorrentFilePreview()
         var requiredCount: Int32 = 0
         try throwingBridgeCall { errorBuffer in
-            let torrentData: RawSpan? = unsafe data.span.bytes
+            let torrentData: Span<UInt8>? = data.span
             var files: MutableSpan<TTorrentFileSnapshot>?
             return unsafe TorrentClientPreviewTorrentFileData(
                 client,
@@ -400,7 +406,7 @@ package enum TorrentAddError: LocalizedError, Sendable {
         var fileSnapshots = Array(repeating: TTorrentFileSnapshot(), count: capacity)
         if capacity > 0 {
             try throwingBridgeCall { errorBuffer in
-                let torrentData: RawSpan? = unsafe data.span.bytes
+                let torrentData: Span<UInt8>? = data.span
                 var files: MutableSpan<TTorrentFileSnapshot>? = fileSnapshots.mutableSpan
                 return unsafe TorrentClientPreviewTorrentFileData(
                     client,
@@ -719,12 +725,7 @@ package enum TorrentAddError: LocalizedError, Sendable {
         guard didCopyError else {
             return nil
         }
-        return unsafe errorBuffer.withUnsafeBufferPointer { buffer -> String in
-            guard let baseAddress = buffer.baseAddress else {
-                return ""
-            }
-            return unsafe String(cString: baseAddress)
-        }
+        return stringFromBridgeBuffer(errorBuffer)
     }
 
     package func takeChanges() -> UInt32 {
@@ -1417,12 +1418,7 @@ package enum TorrentAddError: LocalizedError, Sendable {
         }
         errorSpan = nil
         guard let created = unsafe created else {
-            let message = unsafe errorBuffer.withUnsafeBufferPointer { buffer -> String in
-                guard let baseAddress = buffer.baseAddress else {
-                    return ""
-                }
-                return unsafe String(cString: baseAddress)
-            }
+            let message = stringFromBridgeBuffer(errorBuffer)
             throw TorrentEngineError.bridgeError(message.isEmpty ? "Unknown startup error." : message)
         }
         return unsafe TorrentClientHandle(created, wakeRelay: wakeRelay)
@@ -1501,12 +1497,7 @@ package enum TorrentAddError: LocalizedError, Sendable {
         let result = body(&errorSpan)
         errorSpan = nil
         if result != 0 {
-            let message = unsafe errorBuffer.withUnsafeBufferPointer { buffer -> String in
-                guard let baseAddress = buffer.baseAddress else {
-                    return ""
-                }
-                return unsafe String(cString: baseAddress)
-            }
+            let message = stringFromBridgeBuffer(errorBuffer)
             throw TorrentEngineError.bridgeError(message)
         }
     }
@@ -1521,12 +1512,7 @@ package enum TorrentAddError: LocalizedError, Sendable {
         guard result != 0 else {
             return
         }
-        let message = unsafe errorBuffer.withUnsafeBufferPointer { buffer -> String in
-            guard let baseAddress = buffer.baseAddress else {
-                return ""
-            }
-            return unsafe String(cString: baseAddress)
-        }
+        let message = stringFromBridgeBuffer(errorBuffer)
         if result == Int32(TTORRENT_ERROR_AUTHORIZED_SAVE_ROOT_CAPACITY) {
             throw TorrentEngineError.authorizedRootCapacityReached(message)
         }
@@ -1549,12 +1535,7 @@ package enum TorrentAddError: LocalizedError, Sendable {
         let result = unsafe body(&outputSpan, &addOutcome, &errorSpan)
         outputSpan = nil
         errorSpan = nil
-        let errorMessage = unsafe errorBuffer.withUnsafeBufferPointer { buffer -> String in
-            guard let baseAddress = buffer.baseAddress else {
-                return ""
-            }
-            return unsafe String(cString: baseAddress)
-        }
+        let errorMessage = stringFromBridgeBuffer(errorBuffer)
 
         guard result == 0 else {
             if addOutcome == Int32(TTORRENT_ADD_REJECTED) {
@@ -1568,12 +1549,7 @@ package enum TorrentAddError: LocalizedError, Sendable {
             )
         }
 
-        let value = unsafe outputBuffer.withUnsafeBufferPointer { buffer -> String in
-            guard let baseAddress = buffer.baseAddress else {
-                return ""
-            }
-            return unsafe String(cString: baseAddress)
-        }
+        let value = stringFromBridgeBuffer(outputBuffer)
         guard !value.isEmpty else {
             throw TorrentAddError.commitStatusUnknown(
                 "Torrent was added, but its identity was not returned."
@@ -1608,7 +1584,7 @@ package enum TorrentAddError: LocalizedError, Sendable {
     }
 }
 
-@safe private final class TorrentClientHandle: @unchecked Sendable {
+@safe private final class TorrentClientHandle {
     private var rawPointer: OpaquePointer?
     private let wakeRelay: TorrentWakeRelay
 

@@ -845,7 +845,7 @@ TEST_CASE("torrent file data preview counts sources drained into add params")
     char error[512]{};
     REQUIRE(TorrentClientPreviewTorrentFileData(
         &client,
-        torrent_data.data(),
+        bridge_tests::byte_data(torrent_data),
         static_cast<int32_t>(torrent_data.size()),
         &preview,
         nullptr,
@@ -886,7 +886,7 @@ TEST_CASE("torrent file data preview applies duplicate filename renames from add
     char error[512]{};
     REQUIRE(TorrentClientPreviewTorrentFileData(
         &client,
-        torrent_data.data(),
+        bridge_tests::byte_data(torrent_data),
         static_cast<int32_t>(torrent_data.size()),
         &preview,
         files.data(),

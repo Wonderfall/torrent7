@@ -2419,7 +2419,7 @@ int32_t add_torrent_file_data_with_priorities(
 
 extern "C" int32_t TorrentClientAddTorrentFileData(
     TTorrentClient *client,
-    const void *torrent_data,
+    std::uint8_t const *torrent_data,
     int32_t torrent_data_size,
     const char *save_path,
     const TTorrentAddOptions *options,
@@ -2450,7 +2450,7 @@ extern "C" int32_t TorrentClientAddTorrentFileData(
 
 extern "C" int32_t TorrentClientAddTorrentFileDataWithPriorities(
     TTorrentClient *client,
-    const void *torrent_data,
+    std::uint8_t const *torrent_data,
     int32_t torrent_data_size,
     const char *save_path,
     const TTorrentAddOptions *options,
@@ -2536,7 +2536,7 @@ int32_t preview_torrent_file_with_loader(
 
 extern "C" int32_t TorrentClientPreviewTorrentFileData(
     TTorrentClient *client,
-    const void *torrent_data,
+    std::uint8_t const *torrent_data,
     int32_t torrent_data_size,
     TTorrentFilePreview *preview,
     TTorrentFileSnapshot *files,

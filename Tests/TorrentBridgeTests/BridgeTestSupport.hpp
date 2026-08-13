@@ -249,6 +249,13 @@ private:
     return {value.begin(), value.end()};
 }
 
+[[nodiscard]] inline std::uint8_t const *byte_data(
+    std::vector<char> const &bytes
+) noexcept
+{
+    return reinterpret_cast<std::uint8_t const *>(bytes.data());
+}
+
 [[nodiscard]] inline lt::add_torrent_params load_torrent_params(
     std::vector<char> const &buffer,
     std::string_view description

@@ -307,7 +307,7 @@ struct TorrentBridgeContractTests {
         #expect(requiredCount == 0)
 
         let torrentBytes: [UInt8] = [0x64, 0x34, 0x3A, 0x69, 0x6E, 0x66, 0x6F]
-        let torrentData: RawSpan? = unsafe torrentBytes.span.bytes
+        let torrentData: Span<UInt8>? = torrentBytes.span
         var preview = TTorrentFilePreview()
         var files: MutableSpan<TTorrentFileSnapshot>?
         var previewRequiredCount: Int32 = 0
@@ -417,12 +417,8 @@ private struct BridgeErrorBuffer {
     private var storage = Array<CChar>(repeating: 0, count: 1_024)
 
     var string: String {
-        unsafe storage.withUnsafeBufferPointer { buffer in
-            guard let baseAddress = buffer.baseAddress else {
-                return ""
-            }
-            return unsafe String(cString: baseAddress)
-        }
+        let bytes = storage.prefix { $0 != 0 }.map(UInt8.init(bitPattern:))
+        return String(decoding: bytes, as: UTF8.self)
     }
 
     mutating func writeSentinel() {

@@ -189,7 +189,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             break;
         }
         case 1: {
-            std::vector<char> bytes = reader.read_bytes(8192);
+            std::vector<std::uint8_t> bytes = reader.read_bytes(8192);
             std::string save_path = reader.read_bool() ? std::string(harness.save_path()) : reader.read_string(256);
             TTorrentAddOptions options = bridge_fuzz::add_options_from_reader(reader);
             bridge_fuzz::AddedIdBuffer added_id;
@@ -209,7 +209,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             break;
         }
         case 2: {
-            std::vector<char> bytes = reader.read_bytes(8192);
+            std::vector<std::uint8_t> bytes = reader.read_bytes(8192);
             std::vector<TTorrentFilePriorityEntry> priorities = bridge_fuzz::file_priorities_from_reader(reader);
             std::string save_path = reader.read_bool() ? std::string(harness.save_path()) : reader.read_string(256);
             TTorrentAddOptions options = bridge_fuzz::add_options_from_reader(reader);
@@ -235,7 +235,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             break;
         }
         case 3: {
-            std::vector<char> bytes = reader.read_bytes(8192);
+            std::vector<std::uint8_t> bytes = reader.read_bytes(8192);
             std::array<TTorrentFileSnapshot, 16> files{};
             TTorrentFilePreview preview{};
             int32_t required_count = 0;

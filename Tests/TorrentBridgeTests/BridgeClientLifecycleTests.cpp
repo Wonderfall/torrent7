@@ -822,7 +822,7 @@ TEST_CASE("live torrent file adds require a dynamically authorized save path")
         add_outcome = TTORRENT_ADD_REJECTED;
         return TorrentClientAddTorrentFileData(
             &client,
-            torrent_data.data(),
+            bridge_tests::byte_data(torrent_data),
             static_cast<int32_t>(torrent_data.size()),
             download_directory.c_str(),
             &add_options,
@@ -1886,7 +1886,7 @@ TEST_CASE("resume metadata flows through add, async save alerts, and reload")
         int32_t add_outcome = TTORRENT_ADD_REJECTED;
         REQUIRE(TorrentClientAddTorrentFileData(
             &client,
-            torrent_data.data(),
+            bridge_tests::byte_data(torrent_data),
             static_cast<int32_t>(torrent_data.size()),
             temporary_directory.path().c_str(),
             &add_options,
@@ -2958,7 +2958,7 @@ TEST_CASE("definite duplicate add rejection preserves the valid queue index")
     int32_t add_outcome = TTORRENT_ADD_OUTCOME_UNKNOWN;
     CHECK(TorrentClientAddTorrentFileData(
         &client,
-        torrent_data.data(),
+        bridge_tests::byte_data(torrent_data),
         static_cast<int32_t>(torrent_data.size()),
         temporary_directory.path().c_str(),
         &add_options,

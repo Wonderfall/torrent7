@@ -108,7 +108,7 @@ public:
         return value;
     }
 
-    std::vector<char> read_bytes(std::size_t max_length)
+    std::vector<std::uint8_t> read_bytes(std::size_t max_length)
     {
         std::size_t length = 0;
         if (max_length > 0) {
@@ -117,7 +117,7 @@ public:
         length = std::min(length, remaining());
 
         auto const begin = bytes_.begin() + static_cast<std::ptrdiff_t>(offset_);
-        std::vector<char> value(begin, begin + static_cast<std::ptrdiff_t>(length));
+        std::vector<std::uint8_t> value(begin, begin + static_cast<std::ptrdiff_t>(length));
         offset_ += length;
         return value;
     }
