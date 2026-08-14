@@ -11,6 +11,11 @@ readonly -a BOOST_PATCHED_FILES=(
     "boost/asio/detail/executor_function.hpp"
     "boost/asio/execution/any_executor.hpp"
     "boost/asio/execution_context.hpp"
+    "boost/asio/detail/memory.hpp"
+    "boost/asio/detail/thread_info_base.hpp"
+    "boost/asio/detail/recycling_allocator.hpp"
+    "boost/asio/cancellation_signal.hpp"
+    "boost/asio/impl/cancellation_signal.ipp"
 )
 readonly -a BOOST_PATCHES=(
     "$ROOT_DIR/Scripts/patches/boost-1.92.0-asio-operation-pac.patch"
@@ -19,18 +24,20 @@ readonly -a BOOST_PATCHES=(
     "$ROOT_DIR/Scripts/patches/boost-1.92.0-asio-service-destroy-pac.patch"
     "$ROOT_DIR/Scripts/patches/boost-1.92.0-asio-executor-function-view-pac.patch"
     "$ROOT_DIR/Scripts/patches/boost-1.92.0-asio-type-erasure-carrier-pac.patch"
+    "$ROOT_DIR/Scripts/patches/boost-1.92.0-asio-recycling-allocator-typing.patch"
 )
 # One exact tree per ordered patch-series stage. Recognizing intermediate
 # stages lets an existing verified header cache receive only newly appended
 # patches without weakening the unexpected-change guard.
 readonly -a BOOST_PATCH_TREES=(
-    "2b93190641516c1495c0d9f214975f48630d2228d7fd23b5a22f52d30898226a"
-    "435c4fba1ca3b9233ebfdd20e535d66c8e2a4f5f962d1c20c368bdd8da9659d8"
-    "e21da5ddbbd2702100a5638d571e8df1a3fe3697c570e4cc7ae97b89af6693d9"
-    "ab2a9bfb66358dfa61e86f97d0a3dd63adb07aec9aebf11a4e6e278a23fc0442"
-    "eb95e39fc3803d1e26a3b518206523137b38c0b9c09c5f06a00423b5fd486fa5"
-    "18b02f610921ab093909b80f36d562bb2a11d8cdd07d78e109954917606f00b8"
-    "8a834fcb894e00d4fa6fd58bc4826a577381a890b909d5881954aac2f31fdfd5"
+    "b8dd2f8c526b757b85a6a3e391db03b7a85328b346f78373f469f7d1e6b04e02"
+    "5079b3d5607186e6bd4a883cf2ef9b45f5b1576840ffa4c59cfc5533a4f3c0b2"
+    "8ee166c6923fbffb51c09659c0d0fc0179e6b9561481513726050bbf15fa1761"
+    "422b26a5107192743666aaf50438f0f5a0c8c91bd2f5993decd2a1c7d5fe902e"
+    "80f19cd7ba60c77651a85b383ba45d5a4b6276892824ca754f01775246d8038d"
+    "c354d9431c448edfb00a927dc90e9c745a7c9794ce24f04ce3ef13f30e140911"
+    "42a7e71f1148a57c5556740184de36e431b6884bbb4bffc16eecc616de262663"
+    "41c2d583d20ec9768db0b70e12f01e50d2a388c7d7301da908009ebe943d83c0"
 )
 readonly BOOST_BASE_TREE="${BOOST_PATCH_TREES[0]}"
 readonly BOOST_PATCHED_TREE="${BOOST_PATCH_TREES[${#BOOST_PATCH_TREES[@]} - 1]}"

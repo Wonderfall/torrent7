@@ -76,6 +76,7 @@ typeset -r extension_points_dir="$app_dir/Contents/Extensions"
 typeset -r expected_app_entitlements="$root_dir/Packaging/Torrent7.entitlements"
 typeset -r expected_engine_entitlements="$root_dir/Packaging/Torrent7Engine.entitlements"
 typeset -r expected_third_party_notices="$root_dir/Packaging/ThirdPartyNotices.txt"
+typeset -r boost_recycler_verifier="$root_dir/Scripts/verify-boost-asio-recycling-allocator.zsh"
 typeset -r temporary_dir=$(/usr/bin/mktemp -d)
 typeset -r app_entitlements_output="$temporary_dir/app-entitlements.plist"
 typeset -r app_signature_output="$temporary_dir/app-signature.txt"
@@ -622,6 +623,9 @@ require_match "_malloc_type_malloc" "$engine_symbol_output" \
     "Engine extension has no typed malloc symbol"
 require_match "__ZnwmSt19__type_descriptor_t" "$engine_symbol_output" \
     "Engine extension has no typed C++ operator new symbol"
+[[ -x $boost_recycler_verifier ]] \
+    || fail "Missing Boost.Asio recycler verifier: $boost_recycler_verifier"
+"$boost_recycler_verifier" "$engine_extension_executable"
 require_match "[[:space:]]_NSExtensionMain" "$engine_symbol_output" \
     "Engine extension is not linked with the ExtensionKit process entry point"
 reject_match "[[:space:]]_Torrent(Client|Bridge)|__ZN10libtorrent|libtorrent-rasterbar" \

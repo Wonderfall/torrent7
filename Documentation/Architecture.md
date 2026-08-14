@@ -448,6 +448,12 @@ allocation metadata across libtorrent's pool and disk-buffer wrappers instead
 of disabling allocator-wrapper diagnostics for the dependency. Application
 source policy separately controls allowed tracker and web-seed schemes.
 
+Boost.Asio's small-block recycler also preserves each concrete allocation type
+instead of erasing it to `void *`. Its per-thread cache records the matching
+type descriptor and never returns a block under a different allocation class.
+Focused runtime tests exercise that isolation, while archive and final-product
+verification reject aligned-allocation call sites with a zero semantic summary.
+
 Boost.Asio's active scheduler-completion and reactor-performance operation
 pointers are likewise long-lived dependency-owned dispatch state. On arm64e,
 the pinned Boost patch authenticates each slot with its storage address and a

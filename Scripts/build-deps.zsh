@@ -61,6 +61,7 @@ typeset -r BOOST_SOURCE_DIR="$BOOST_SOURCE_ROOT/$BOOST_ARCHIVE_BASENAME"
 typeset -r BOOST_SOURCE_STAMP="$BOOST_SOURCE_DIR/.torrent-app-source"
 typeset -r BOOST_HEADERS_STAMP="$BOOST_PREFIX/.torrent-app-boost-headers"
 typeset -r BOOST_PATCH_HELPER="$ROOT_DIR/Scripts/boost-patch-series.sh"
+typeset -r BOOST_RECYCLER_VERIFIER="$ROOT_DIR/Scripts/verify-boost-asio-recycling-allocator.zsh"
 typeset -r OPENSSL_VERSION=${OPENSSL_VERSION:-3.5.7}
 typeset -r OPENSSL_SHA256=${OPENSSL_SHA256:-a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8}
 typeset -r OPENSSL_TARBALL_URL=${OPENSSL_TARBALL_URL:-https://github.com/openssl/openssl/releases/download/openssl-$OPENSSL_VERSION/openssl-$OPENSSL_VERSION.tar.gz}
@@ -1239,6 +1240,7 @@ build_libtorrent() {
     if [[ -f "$DEPS_PREFIX/lib/libtorrent-rasterbar.a" ]] && stamp_matches "$LIBTORRENT_BUILD_STAMP" libtorrent_build_manifest "$DEPS_PREFIX"; then
         verify_archive_arch "$DEPS_PREFIX/lib/libtorrent-rasterbar.a" "$TARGET_ARCH"
         verify_libtorrent_typed_allocation_coverage "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
+        "$BOOST_RECYCLER_VERIFIER" "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
         verify_libtorrent_trap_only_ubsan "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
         verify_libtorrent_indirect_operation_pac "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
         write_stamp "$LIBTORRENT_PROVENANCE" libtorrent_build_manifest "$DEPS_PREFIX"
@@ -1298,6 +1300,7 @@ build_libtorrent() {
 
     verify_archive_arch "$DEPS_PREFIX/lib/libtorrent-rasterbar.a" "$TARGET_ARCH"
     verify_libtorrent_typed_allocation_coverage "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
+    "$BOOST_RECYCLER_VERIFIER" "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
     verify_libtorrent_trap_only_ubsan "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
     verify_libtorrent_indirect_operation_pac "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
     write_stamp "$LIBTORRENT_BUILD_STAMP" libtorrent_build_manifest "$DEPS_PREFIX"
@@ -1313,6 +1316,7 @@ require_tool shasum
 require_tool tar
 require_path "$GPG" "GnuPG verifier"
 require_path "$BOOST_PATCH_HELPER" "Boost patch-series helper"
+require_path "$BOOST_RECYCLER_VERIFIER" "Boost.Asio recycler verifier"
 [[ "$("$BOOST_PATCH_HELPER" version)" == "$BOOST_VERSION" ]] \
     || fail "Boost patch-series version does not match BOOST_VERSION=$BOOST_VERSION"
 require_path "$OPENSSL_CC" "OpenSSL C compiler"

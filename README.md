@@ -204,7 +204,9 @@ signing fingerprint. Boost is verified by SHA-256, then receives an ordered,
 hashed patch series that authenticates the active Asio scheduler and reactor
 operation callbacks, owning and non-owning executor callbacks and contexts,
 polymorphic executor dispatch and carrier state, and service teardown with
-address-and-role-diversified PAC. Libtorrent is fetched
+address-and-role-diversified PAC. It also preserves concrete allocation types
+through Asio's small-block recycler and keeps cached blocks type-segregated.
+Libtorrent is fetched
 from a pinned tag and commit through a local source cache, then receives its own
 ordered, hashed patch series for Xcode compatibility, network boundaries, storage
 confinement, bounded pread recheck hashing, and complete typed-allocation
@@ -324,11 +326,12 @@ Run the focused libtorrent network and storage security regressions:
 Scripts/test-libtorrent-security.zsh
 ```
 
-That suite also runs the focused Boost.Asio PAC code-generation and callback
-replay test. It can be invoked directly with:
+That suite also runs the focused Boost.Asio PAC code-generation, callback replay,
+and typed-recycler tests. They can be invoked directly with:
 
 ```sh
 Scripts/test-boost-asio-pac.zsh
+Scripts/test-boost-asio-recycling-allocator.zsh
 ```
 
 Run the bridge static-analysis pass:

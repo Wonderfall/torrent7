@@ -1,0 +1,518 @@
+diff --git a/boost/asio/cancellation_signal.hpp b/boost/asio/cancellation_signal.hpp
+index c9e5811..52e583b 100644
+--- a/boost/asio/cancellation_signal.hpp
++++ b/boost/asio/cancellation_signal.hpp
+@@ -21,6 +21,10 @@
+ #include <utility>
+ #include <boost/asio/cancellation_type.hpp>
+ #include <boost/asio/detail/cstddef.hpp>
++#if defined(__APPLE__)
++# include <boost/asio/detail/thread_context.hpp>
++# include <boost/asio/detail/thread_info_base.hpp>
++#endif // defined(__APPLE__)
+ #include <boost/asio/detail/type_traits.hpp>
+ 
+ #include <boost/asio/detail/push_options.hpp>
+@@ -30,11 +34,20 @@ namespace asio {
+ BOOST_ASIO_INLINE_NAMESPACE_BEGIN
+ namespace detail {
+ 
++struct cancellation_handler_memory
++{
++  void* pointer = 0;
++  std::size_t size = 0;
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++  malloc_type_id_t allocation_type = 0;
++#endif // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++};
++
+ class cancellation_handler_base
+ {
+ public:
+   virtual void call(cancellation_type_t) = 0;
+-  virtual std::pair<void*, std::size_t> destroy() noexcept = 0;
++  virtual cancellation_handler_memory destroy() noexcept = 0;
+ 
+ protected:
+   ~cancellation_handler_base() {}
+@@ -57,9 +70,14 @@ public:
+     handler_(type);
+   }
+ 
+-  std::pair<void*, std::size_t> destroy() noexcept
++  cancellation_handler_memory destroy() noexcept
+   {
+-    std::pair<void*, std::size_t> mem(this, size_);
++    cancellation_handler_memory mem = {
++      this, size_
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++      , thread_info_base::allocation_type<cancellation_handler>()
++#endif // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++    };
+     this->cancellation_handler::~cancellation_handler();
+     return mem;
+   }
+@@ -152,13 +170,18 @@ public:
+   {
+     typedef detail::cancellation_handler<CancellationHandler>
+       cancellation_handler_type;
+-    auto_delete_helper del = { prepare_memory(
++    auto_delete_helper del = {
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++      prepare_memory<cancellation_handler_type>(
++#else // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++      prepare_memory(
++#endif // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
+         sizeof(cancellation_handler_type),
+-        alignof(CancellationHandler)) };
++        alignof(cancellation_handler_type)) };
+     cancellation_handler_type* handler_obj =
+-      new (del.mem.first) cancellation_handler_type(
+-        del.mem.second, static_cast<Args&&>(args)...);
+-    del.mem.first = 0;
++      new (del.mem.pointer) cancellation_handler_type(
++        del.mem.size, static_cast<Args&&>(args)...);
++    del.mem.pointer = 0;
+     *handler_ = handler_obj;
+     return handler_obj->handler();
+   }
+@@ -224,12 +247,37 @@ private:
+   {
+   }
+ 
+-  BOOST_ASIO_DECL std::pair<void*, std::size_t> prepare_memory(
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++  template <typename T>
++  detail::cancellation_handler_memory prepare_memory(
++      std::size_t size, std::size_t align)
++  {
++    assert(handler_);
++    detail::cancellation_handler_memory mem;
++    if (*handler_)
++    {
++      mem = (*handler_)->destroy();
++      *handler_ = 0;
++      detail::thread_info_base::deallocate(
++          detail::thread_info_base::cancellation_signal_tag(),
++          detail::thread_context::top_of_thread_call_stack(),
++          mem.pointer, mem.size, mem.allocation_type);
++    }
++    mem.pointer = detail::thread_info_base::allocate<T>(
++        detail::thread_info_base::cancellation_signal_tag(),
++        detail::thread_context::top_of_thread_call_stack(), size, align);
++    mem.size = size;
++    mem.allocation_type = detail::thread_info_base::allocation_type<T>();
++    return mem;
++  }
++#else // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++  BOOST_ASIO_DECL detail::cancellation_handler_memory prepare_memory(
+       std::size_t size, std::size_t align);
++#endif // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
+ 
+   struct auto_delete_helper
+   {
+-    std::pair<void*, std::size_t> mem;
++    detail::cancellation_handler_memory mem;
+ 
+     BOOST_ASIO_DECL ~auto_delete_helper();
+   };
+diff --git a/boost/asio/detail/memory.hpp b/boost/asio/detail/memory.hpp
+index ebb79ef..ad6af98 100644
+--- a/boost/asio/detail/memory.hpp
++++ b/boost/asio/detail/memory.hpp
+@@ -100,12 +100,14 @@ using std::allocator_arg_t;
+   typename std::allocator_traits<alloc>::template rebind_alloc<t>
+   /**/
+ 
+-inline void* aligned_new(std::size_t align, std::size_t size)
++// An explicit T preserves typed-allocation metadata across this wrapper.
++template <typename T = void>
++inline T* aligned_new(std::size_t align, std::size_t size)
+ {
+ #if defined(BOOST_ASIO_HAS_STD_ALIGNED_ALLOC)
+   align = (align < BOOST_ASIO_DEFAULT_ALIGN) ? BOOST_ASIO_DEFAULT_ALIGN : align;
+   size = (size % align == 0) ? size : size + (align - size % align);
+-  void* ptr = std::aligned_alloc(align, size);
++  T* ptr = static_cast<T*>(std::aligned_alloc(align, size));
+   if (!ptr)
+   {
+     std::bad_alloc ex;
+@@ -115,7 +117,7 @@ inline void* aligned_new(std::size_t align, std::size_t size)
+ #elif defined(BOOST_ASIO_HAS_BOOST_ALIGN)
+   align = (align < BOOST_ASIO_DEFAULT_ALIGN) ? BOOST_ASIO_DEFAULT_ALIGN : align;
+   size = (size % align == 0) ? size : size + (align - size % align);
+-  void* ptr = boost::alignment::aligned_alloc(align, size);
++  T* ptr = static_cast<T*>(boost::alignment::aligned_alloc(align, size));
+   if (!ptr)
+   {
+     std::bad_alloc ex;
+@@ -125,7 +127,7 @@ inline void* aligned_new(std::size_t align, std::size_t size)
+ #elif defined(BOOST_ASIO_MSVC)
+   align = (align < BOOST_ASIO_DEFAULT_ALIGN) ? BOOST_ASIO_DEFAULT_ALIGN : align;
+   size = (size % align == 0) ? size : size + (align - size % align);
+-  void* ptr = _aligned_malloc(size, align);
++  T* ptr = static_cast<T*>(_aligned_malloc(size, align));
+   if (!ptr)
+   {
+     std::bad_alloc ex;
+@@ -134,7 +136,7 @@ inline void* aligned_new(std::size_t align, std::size_t size)
+   return ptr;
+ #else // defined(BOOST_ASIO_MSVC)
+   (void)align;
+-  return ::operator new(size);
++  return static_cast<T*>(::operator new(size));
+ #endif // defined(BOOST_ASIO_MSVC)
+ }
+ 
+diff --git a/boost/asio/detail/recycling_allocator.hpp b/boost/asio/detail/recycling_allocator.hpp
+index d4ed8dc..7353871 100644
+--- a/boost/asio/detail/recycling_allocator.hpp
++++ b/boost/asio/detail/recycling_allocator.hpp
+@@ -51,7 +51,11 @@ public:
+   T* allocate(std::size_t n)
+   {
+ #if !defined(BOOST_ASIO_DISABLE_SMALL_BLOCK_RECYCLING)
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++    void* p = thread_info_base::allocate<T>(Purpose(),
++#else // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
+     void* p = thread_info_base::allocate(Purpose(),
++#endif // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
+         thread_context::top_of_thread_call_stack(),
+         sizeof(T) * n, alignof(T));
+ #else // !defined(BOOST_ASIO_DISABLE_SMALL_BLOCK_RECYCLING)
+@@ -63,8 +67,14 @@ public:
+   void deallocate(T* p, std::size_t n)
+   {
+ #if !defined(BOOST_ASIO_DISABLE_SMALL_BLOCK_RECYCLING)
+-    thread_info_base::deallocate(Purpose(),
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++    thread_info_base::deallocate<T>(Purpose(),
+         thread_context::top_of_thread_call_stack(), p, sizeof(T) * n);
++#else // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++    thread_info_base::deallocate(Purpose(),
++        thread_context::top_of_thread_call_stack(),
++        static_cast<void*>(p), sizeof(T) * n);
++#endif // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
+ #else // !defined(BOOST_ASIO_DISABLE_SMALL_BLOCK_RECYCLING)
+     (void)n;
+     boost::asio::aligned_delete(p);
+diff --git a/boost/asio/detail/thread_info_base.hpp b/boost/asio/detail/thread_info_base.hpp
+index c11c11b..625f70a 100644
+--- a/boost/asio/detail/thread_info_base.hpp
++++ b/boost/asio/detail/thread_info_base.hpp
+@@ -21,6 +21,10 @@
+ #include <boost/asio/detail/memory.hpp>
+ #include <boost/asio/detail/noncopyable.hpp>
+ 
++#if defined(__APPLE__)
++# include <malloc/malloc.h>
++#endif // defined(__APPLE__)
++
+ #if !defined(BOOST_ASIO_NO_EXCEPTIONS)
+ # include <exception>
+ # include <boost/asio/multiple_exceptions.hpp>
+@@ -109,7 +113,12 @@ public:
+ #endif // !defined(BOOST_ASIO_NO_EXCEPTIONS)
+   {
+     for (int i = 0; i < max_mem_index; ++i)
++    {
+       reusable_memory_[i] = 0;
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++      reusable_memory_type_[i] = 0;
++#endif // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++    }
+   }
+ 
+   ~thread_info_base()
+@@ -136,18 +145,36 @@ public:
+     deallocate(default_tag(), this_thread, pointer, size);
+   }
+ 
+-  template <typename Purpose>
+-  static void* allocate(Purpose, thread_info_base* this_thread,
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++  template <typename T>
++  static constexpr malloc_type_id_t allocation_type()
++  {
++    return __builtin_tmo_get_type_descriptor(T);
++  }
++#endif // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++
++  template <typename T = void, typename Purpose>
++  static T* allocate(Purpose, thread_info_base* this_thread,
+       std::size_t size, std::size_t align = BOOST_ASIO_DEFAULT_ALIGN)
+   {
+     std::size_t chunks = (size + chunk_size - 1) / chunk_size;
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++    // A recycled block retains its allocation descriptor. Only reuse storage
++    // whose descriptor matches the concrete type requested by the caller.
++    malloc_type_id_t const allocation_type =
++      get_allocation_type(static_cast<T*>(0));
++#endif // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
+ 
+     if (this_thread)
+     {
+       for (int mem_index = Purpose::begin_mem_index;
+           mem_index < Purpose::end_mem_index; ++mem_index)
+       {
+-        if (this_thread->reusable_memory_[mem_index])
++        if (this_thread->reusable_memory_[mem_index]
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++            && this_thread->reusable_memory_type_[mem_index] == allocation_type
++#endif // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++            )
+         {
+           void* const pointer = this_thread->reusable_memory_[mem_index];
+           unsigned char* const mem = static_cast<unsigned char*>(pointer);
+@@ -155,12 +182,45 @@ public:
+               && reinterpret_cast<std::size_t>(pointer) % align == 0)
+           {
+             this_thread->reusable_memory_[mem_index] = 0;
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++            this_thread->reusable_memory_type_[mem_index] = 0;
++#endif // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
+             mem[size] = mem[0];
+-            return pointer;
++            return static_cast<T*>(pointer);
+           }
+         }
+       }
+ 
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++      // Preserve differently typed blocks while this purpose cache still has
++      // room for the allocation that is currently becoming active.
++      bool has_empty_slot = false;
++      for (int mem_index = Purpose::begin_mem_index;
++          mem_index < Purpose::end_mem_index; ++mem_index)
++      {
++        if (!this_thread->reusable_memory_[mem_index])
++        {
++          has_empty_slot = true;
++          break;
++        }
++      }
++
++      if (!has_empty_slot)
++      {
++        for (int mem_index = Purpose::begin_mem_index;
++            mem_index < Purpose::end_mem_index; ++mem_index)
++        {
++          if (this_thread->reusable_memory_[mem_index])
++          {
++            void* const pointer = this_thread->reusable_memory_[mem_index];
++            this_thread->reusable_memory_[mem_index] = 0;
++            this_thread->reusable_memory_type_[mem_index] = 0;
++            aligned_delete(pointer);
++            break;
++          }
++        }
++      }
++#else // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
+       for (int mem_index = Purpose::begin_mem_index;
+           mem_index < Purpose::end_mem_index; ++mem_index)
+       {
+@@ -172,18 +232,57 @@ public:
+           break;
+         }
+       }
++#endif // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
+     }
+ 
+-    void* const pointer = aligned_new(align, chunks * chunk_size + 1);
+-    unsigned char* const mem = static_cast<unsigned char*>(pointer);
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++    T* const pointer = aligned_new<T>(align, chunks * chunk_size + 1);
++#else // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++    T* const pointer = static_cast<T*>(
++        aligned_new(align, chunks * chunk_size + 1));
++#endif // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++    unsigned char* const mem = reinterpret_cast<unsigned char*>(pointer);
+     mem[size] = (chunks <= UCHAR_MAX) ? static_cast<unsigned char>(chunks) : 0;
+     return pointer;
+   }
+ 
++  template <typename T = void, typename Purpose>
++  static void deallocate(Purpose, thread_info_base* this_thread,
++      T* pointer, std::size_t size)
++  {
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++    deallocate(Purpose(), this_thread, static_cast<void*>(pointer), size,
++        get_allocation_type(static_cast<T*>(0)));
++    return;
++#else // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++    unsigned char* const mem = reinterpret_cast<unsigned char*>(pointer);
++    if (size <= chunk_size * UCHAR_MAX)
++    {
++      if (this_thread)
++      {
++        for (int mem_index = Purpose::begin_mem_index;
++            mem_index < Purpose::end_mem_index; ++mem_index)
++        {
++          if (this_thread->reusable_memory_[mem_index] == 0)
++          {
++            mem[0] = mem[size];
++            this_thread->reusable_memory_[mem_index] = pointer;
++            return;
++          }
++        }
++      }
++    }
++
++    aligned_delete(pointer);
++#endif // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++  }
++
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
+   template <typename Purpose>
+   static void deallocate(Purpose, thread_info_base* this_thread,
+-      void* pointer, std::size_t size)
++      void* pointer, std::size_t size, malloc_type_id_t allocation_type)
+   {
++    unsigned char* const mem = static_cast<unsigned char*>(pointer);
+     if (size <= chunk_size * UCHAR_MAX)
+     {
+       if (this_thread)
+@@ -193,9 +292,9 @@ public:
+         {
+           if (this_thread->reusable_memory_[mem_index] == 0)
+           {
+-            unsigned char* const mem = static_cast<unsigned char*>(pointer);
+             mem[0] = mem[size];
+             this_thread->reusable_memory_[mem_index] = pointer;
++            this_thread->reusable_memory_type_[mem_index] = allocation_type;
+             return;
+           }
+         }
+@@ -204,6 +303,7 @@ public:
+ 
+     aligned_delete(pointer);
+   }
++#endif // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
+ 
+   void capture_current_exception()
+   {
+@@ -241,12 +341,29 @@ public:
+   }
+ 
+ private:
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++  static constexpr malloc_type_id_t get_allocation_type(void*)
++  {
++    return 0;
++  }
++
++  template <typename T>
++  static constexpr malloc_type_id_t get_allocation_type(T*)
++  {
++    return __builtin_tmo_get_type_descriptor(T);
++  }
++
++#endif // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++
+ #if defined(BOOST_ASIO_HAS_IO_URING)
+   enum { chunk_size = 8 };
+ #else // defined(BOOST_ASIO_HAS_IO_URING)
+   enum { chunk_size = 4 };
+ #endif // defined(BOOST_ASIO_HAS_IO_URING)
+   void* reusable_memory_[max_mem_index];
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++  malloc_type_id_t reusable_memory_type_[max_mem_index];
++#endif // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
+ 
+ #if !defined(BOOST_ASIO_NO_EXCEPTIONS)
+   int has_pending_exception_;
+diff --git a/boost/asio/impl/cancellation_signal.ipp b/boost/asio/impl/cancellation_signal.ipp
+index b9216d4..c2dc8af 100644
+--- a/boost/asio/impl/cancellation_signal.ipp
++++ b/boost/asio/impl/cancellation_signal.ipp
+@@ -30,10 +30,14 @@ cancellation_signal::~cancellation_signal()
+ {
+   if (handler_)
+   {
+-    std::pair<void*, std::size_t> mem = handler_->destroy();
++    detail::cancellation_handler_memory mem = handler_->destroy();
+     detail::thread_info_base::deallocate(
+         detail::thread_info_base::cancellation_signal_tag(),
+         detail::thread_context::top_of_thread_call_stack(),
+-        mem.first, mem.second);
++        mem.pointer, mem.size
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++        , mem.allocation_type
++#endif // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++        );
+   }
+ }
+@@ -42,51 +46,61 @@ void cancellation_slot::clear()
+ {
+   if (handler_ != 0 && *handler_ != 0)
+   {
+-    std::pair<void*, std::size_t> mem = (*handler_)->destroy();
++    detail::cancellation_handler_memory mem = (*handler_)->destroy();
+     detail::thread_info_base::deallocate(
+         detail::thread_info_base::cancellation_signal_tag(),
+         detail::thread_context::top_of_thread_call_stack(),
+-        mem.first, mem.second);
++        mem.pointer, mem.size
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++        , mem.allocation_type
++#endif // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++        );
+     *handler_ = 0;
+   }
+ }
+ 
+-std::pair<void*, std::size_t> cancellation_slot::prepare_memory(
++#if !defined(_MALLOC_TYPE_ENABLED) || !_MALLOC_TYPE_ENABLED
++detail::cancellation_handler_memory cancellation_slot::prepare_memory(
+     std::size_t size, std::size_t align)
+ {
+   assert(handler_);
+-  std::pair<void*, std::size_t> mem;
++  detail::cancellation_handler_memory mem;
+   if (*handler_)
+   {
+     mem = (*handler_)->destroy();
+     *handler_ = 0;
+   }
+-  if (size > mem.second
+-      || reinterpret_cast<std::size_t>(mem.first) % align != 0)
++  if (size > mem.size
++      || reinterpret_cast<std::size_t>(mem.pointer) % align != 0)
+   {
+-    if (mem.first)
++    if (mem.pointer)
+     {
+       detail::thread_info_base::deallocate(
+           detail::thread_info_base::cancellation_signal_tag(),
+           detail::thread_context::top_of_thread_call_stack(),
+-          mem.first, mem.second);
++          mem.pointer, mem.size);
+     }
+-    mem.first = detail::thread_info_base::allocate(
++    mem.pointer = detail::thread_info_base::allocate(
+         detail::thread_info_base::cancellation_signal_tag(),
+         detail::thread_context::top_of_thread_call_stack(),
+         size, align);
+-    mem.second = size;
++    mem.size = size;
+   }
+   return mem;
+ }
++#endif // !defined(_MALLOC_TYPE_ENABLED) || !_MALLOC_TYPE_ENABLED
+ 
+ cancellation_slot::auto_delete_helper::~auto_delete_helper()
+ {
+-  if (mem.first)
++  if (mem.pointer)
+   {
+     detail::thread_info_base::deallocate(
+         detail::thread_info_base::cancellation_signal_tag(),
+         detail::thread_context::top_of_thread_call_stack(),
+-        mem.first, mem.second);
++        mem.pointer, mem.size
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++        , mem.allocation_type
++#endif // defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++        );
+   }
+ }

@@ -57,6 +57,7 @@ fi
     || fail "Missing configured libtorrent build: $build_dir"
 "$patch_helper" verify "$source_dir"
 SKIP_BUILD_DEPS=1 "$root_dir/Scripts/test-boost-asio-pac.zsh"
+SKIP_BUILD_DEPS=1 "$root_dir/Scripts/test-boost-asio-recycling-allocator.zsh"
 SKIP_BUILD_DEPS=1 "$root_dir/Scripts/test-libtorrent-indirect-operation-pac.zsh"
 
 restore_configuration=1
