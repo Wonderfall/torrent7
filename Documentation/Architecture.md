@@ -58,7 +58,7 @@ allows for the possibility that the engine process has been compromised.
 
 The production GUI target depends on the engine model, the XPC client, and the
 UI-facing network model. It does not link `TorrentEngineCore`, `TorrentBridge`,
-libtorrent, or OpenSSL. The engine extension owns those targets and is the only
+libtorrent, or BoringSSL. The engine extension owns those targets and is the only
 production executable that can perform torrent networking.
 
 This split is preferable to placing an XPC facade in front of an engine that
@@ -480,7 +480,7 @@ capabilities otherwise differ:
 | Network client/server entitlement | Absent | Present |
 | User-selected read/write entitlement | Present | Absent |
 | App-scoped bookmark entitlement | Present | Absent |
-| C++ bridge and statically linked libtorrent/OpenSSL | Absent | Present |
+| C++ bridge and statically linked libtorrent/BoringSSL | Absent | Present |
 | `LSFileQuarantineEnabled` | `true` | `true` |
 
 The nested `.appex` is signed first and the outer app second. Identified

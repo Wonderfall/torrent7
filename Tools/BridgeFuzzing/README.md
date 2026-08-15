@@ -31,7 +31,7 @@ by the harnesses.
 
 ## Build
 
-The build creates separate fuzz-only OpenSSL/libtorrent archives under
+The build creates separate fuzz-only BoringSSL/libtorrent archives under
 `Tools/BridgeFuzzing/deps/arm64-libfuzzer`, leaving app deps untouched. The dependency
 builder reads the already-cached source trees under `.build/deps`; if those
 sources are missing, rebuild normal deps first.

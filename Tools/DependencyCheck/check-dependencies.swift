@@ -1,6 +1,5 @@
 #!/usr/bin/env swift
 
-import CryptoKit
 import Foundation
 import System
 
@@ -46,11 +45,28 @@ struct ProcessResult {
     let status: Int32
 }
 
+struct GitHubCommit: Decodable {
+    struct Metadata: Decodable {
+        struct Identity: Decodable {
+            let date: String
+        }
+
+        let committer: Identity
+    }
+
+    let sha: String
+    let commit: Metadata
+}
+
+struct GitilesCommit: Decodable {
+    let commit: String
+    let tree: String
+}
+
 @MainActor
 final class DependencyChecker {
     private let buildDepsPath: URL
     private let libtorrentPatchSeriesPath: URL
-    private let opensslReleaseKeysPath: URL
     private let summaryPath: URL?
     private let now: Date
     private let cooldownDays: Int
@@ -68,7 +84,6 @@ final class DependencyChecker {
 
         self.buildDepsPath = root.appending(path: "Scripts/build-deps.zsh")
         self.libtorrentPatchSeriesPath = root.appending(path: "Scripts/libtorrent-patch-series.sh")
-        self.opensslReleaseKeysPath = root.appending(path: "Scripts/keys/openssl-release-pubkeys.asc")
         self.summaryPath = try Self.summaryPath(from: Array(CommandLine.arguments.dropFirst()))
 
         if let override = ProcessInfo.processInfo.environment["DEPENDENCY_CHECK_NOW"] {
@@ -152,9 +167,9 @@ final class DependencyChecker {
         }
 
         do {
-            try await checkOpenSSL()
+            try await checkBoringSSL()
         } catch {
-            recordFailure("OpenSSL check error: \(error)")
+            recordFailure("BoringSSL check error: \(error)")
         }
 
         do {
@@ -189,14 +204,6 @@ final class DependencyChecker {
     private static let fallbackISODateFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
-        return formatter
-    }()
-
-    private static let opensslDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "dd MMM yyyy"
         return formatter
     }()
 
@@ -472,23 +479,6 @@ final class DependencyChecker {
         return nil
     }
 
-    private func gpgPath() throws -> String {
-        if let configured = ProcessInfo.processInfo.environment["GPG"],
-           !configured.isEmpty,
-           let path = executablePath(configured)
-        {
-            return path
-        }
-
-        for candidate in ["/opt/homebrew/bin/gpg", "gpg"] {
-            if let path = executablePath(candidate) {
-                return path
-            }
-        }
-
-        throw CheckFailure.message("Missing gpg. Install GnuPG or set GPG to a usable executable.")
-    }
-
     private func runProcess(_ executable: String, _ arguments: [String]) throws -> ProcessResult {
         guard let path = executablePath(executable) else {
             throw CheckFailure.message("Missing executable: \(executable)")
@@ -511,93 +501,6 @@ final class DependencyChecker {
         let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
         let stderr = String(data: stderrData, encoding: .utf8) ?? ""
         return ProcessResult(stdout: stdout, stderr: stderr, status: process.terminationStatus)
-    }
-
-    private func sha256Hex(_ data: Data) -> String {
-        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-    }
-
-    private func verifyOpenSSLSignature(version: String, expectedSHA256: String, expectedFingerprint: String) async throws {
-        if ProcessInfo.processInfo.environment["VERIFY_OPENSSL_SIGNATURE"] == "0" {
-            info("Skipping OpenSSL PGP verification because VERIFY_OPENSSL_SIGNATURE=0")
-            return
-        }
-
-        guard FileManager.default.fileExists(atPath: opensslReleaseKeysPath.fileSystemPath) else {
-            throw CheckFailure.message("Missing OpenSSL release keyring: \(opensslReleaseKeysPath.fileSystemPath)")
-        }
-
-        let archiveURL = "https://github.com/openssl/openssl/releases/download/openssl-\(version)/openssl-\(version).tar.gz"
-        let archiveData = try await fetchData(from: archiveURL)
-        let actualSHA256 = sha256Hex(archiveData)
-        guard actualSHA256 == expectedSHA256 else {
-            recordFailure("OpenSSL \(version) archive SHA-256 mismatch: expected \(expectedSHA256), got \(actualSHA256)")
-            return
-        }
-
-        let signatureURL = "\(archiveURL).asc"
-        let signatureData = try await fetchData(from: signatureURL)
-
-        let temporaryDirectory = URL(filePath: "/tmp", directoryHint: .isDirectory)
-            .appending(path: "torrent7-openssl-\(UUID().uuidString)", directoryHint: .isDirectory)
-        let gnupgHome = temporaryDirectory.appending(path: "gnupg", directoryHint: .isDirectory)
-        let archivePath = temporaryDirectory.appending(path: "openssl-\(version).tar.gz")
-        let signaturePath = temporaryDirectory.appending(path: "openssl-\(version).tar.gz.asc")
-
-        try FileManager.default.createDirectory(at: gnupgHome, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        defer {
-            try? FileManager.default.removeItem(at: temporaryDirectory)
-        }
-
-        try archiveData.write(to: archivePath, options: .atomic)
-        try signatureData.write(to: signaturePath, options: .atomic)
-
-        let gpg = try gpgPath()
-        let importResult = try runProcess(gpg, ["--homedir", gnupgHome.fileSystemPath, "--batch", "--quiet", "--import", opensslReleaseKeysPath.fileSystemPath])
-        guard importResult.status == 0 else {
-            recordFailure("OpenSSL keyring import failed: \(importResult.stderr.trimmingCharacters(in: .whitespacesAndNewlines))")
-            return
-        }
-
-        let fingerprintResult = try runProcess(gpg, ["--homedir", gnupgHome.fileSystemPath, "--batch", "--with-colons", "--fingerprint", expectedFingerprint])
-        let keyFingerprint = fingerprintResult.stdout
-            .split(separator: "\n")
-            .first { $0.hasPrefix("fpr:") }?
-            .split(separator: ":", omittingEmptySubsequences: false)
-            .dropFirst(9)
-            .first
-            .map(String.init)
-
-        guard fingerprintResult.status == 0, keyFingerprint == expectedFingerprint else {
-            recordFailure("OpenSSL release keyring does not contain expected signing fingerprint \(expectedFingerprint)")
-            return
-        }
-
-        let verifyResult = try runProcess(gpg, [
-            "--homedir", gnupgHome.fileSystemPath,
-            "--batch",
-            "--status-fd", "1",
-            "--verify", signaturePath.fileSystemPath, archivePath.fileSystemPath
-        ])
-        guard verifyResult.status == 0 else {
-            recordFailure("OpenSSL \(version) signature verification failed: \(verifyResult.stderr.trimmingCharacters(in: .whitespacesAndNewlines))")
-            return
-        }
-
-        let signer = verifyResult.stdout
-            .split(separator: "\n")
-            .first { $0.hasPrefix("[GNUPG:] VALIDSIG ") }?
-            .split(separator: " ")
-            .dropFirst(2)
-            .first
-            .map(String.init)
-
-        guard signer == expectedFingerprint else {
-            recordFailure("OpenSSL \(version) signature signer mismatch: expected \(expectedFingerprint), got \(signer ?? "none")")
-            return
-        }
-
-        ok("OpenSSL \(version) archive SHA-256 and PGP signature match the pinned metadata")
     }
 
     private func checkLibtorrent() async throws {
@@ -668,60 +571,103 @@ final class DependencyChecker {
         }
     }
 
-    private func opensslSHA256(version: String) async throws -> String {
-        let body = try await fetchText(from: "https://github.com/openssl/openssl/releases/download/openssl-\(version)/openssl-\(version).tar.gz.sha256")
-        guard let match = try firstMatch(pattern: #"\b[0-9a-fA-F]{64}\b"#, in: body)?.first else {
-            throw CheckFailure.message("Could not parse OpenSSL \(version) SHA-256")
+    private func checkBoringSSL() async throws {
+        let pinnedRepository = try buildDepDefault("BORINGSSL_REPO")
+        let pinnedCommit = try buildDepDefault("BORINGSSL_COMMIT")
+        let pinnedTree = try buildDepDefault("BORINGSSL_TREE")
+        guard pinnedCommit.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil,
+              pinnedTree.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil
+        else {
+            throw CheckFailure.message("BoringSSL commit and tree pins must be full lowercase SHA-1 values")
         }
-        return match.lowercased()
-    }
 
-    private func checkOpenSSL() async throws {
-        let pinnedVersion = try buildDepDefault("OPENSSL_VERSION")
-        let pinnedSHA256 = try buildDepDefault("OPENSSL_SHA256")
-        let pinnedFingerprint = try buildDepDefault("OPENSSL_SIGNING_FINGERPRINT")
-        let sourcePage = try await fetchText(from: "https://openssl-library.org/source/")
+        let remoteResult = try runProcess("git", ["ls-remote", pinnedRepository, "HEAD"])
+        let remoteHead = remoteResult.stdout.split(whereSeparator: \.isWhitespace).first.map(String.init)
+        guard remoteResult.status == 0, let remoteHead else {
+            throw CheckFailure.message(
+                "Could not resolve BoringSSL HEAD: "
+                    + remoteResult.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        }
 
-        let rows = try matches(
-            pattern: #"<tr>\s*<td>(.*?)</td>\s*<td><a href="[^"]*">openssl-([0-9.]+)\.tar\.gz</a></td>\s*<td>.*?</td>\s*<td>(.*?)</td>.*?</tr>"#,
-            in: sourcePage,
-            options: [.dotMatchesLineSeparators]
+        let gitilesData = try await fetchData(
+            from: "https://boringssl.googlesource.com/boringssl/+/\(pinnedCommit)?format=JSON"
         )
-        let ltsReleases = try rows.compactMap { row -> Release? in
-            guard row.count >= 4 else {
-                return nil
-            }
-
-            let branch = try parseHTMLText(row[1])
-            guard branch.contains("[LTS]") else {
-                return nil
-            }
-
-            let version = row[2]
-            let dateText = try parseHTMLText(row[3])
-            guard let date = Self.opensslDateFormatter.date(from: dateText) else {
-                throw CheckFailure.message("Could not parse OpenSSL release date: \(dateText)")
-            }
-
-            return Release(version: version, publishedAt: date)
+        let xssiPrefix = Data(")]}'\n".utf8)
+        guard gitilesData.starts(with: xssiPrefix) else {
+            throw CheckFailure.message("BoringSSL Gitiles response lacks its XSSI prefix")
         }
-
-        guard !ltsReleases.isEmpty else {
-            throw CheckFailure.message("No OpenSSL LTS releases found on source page")
-        }
-
-        let observed = maxByVersion(ltsReleases)
-        let eligible = maxByVersion(ltsReleases.filter { releaseIsEligible($0.publishedAt) })
-        checkLatestVersion(name: "OpenSSL LTS", pinnedVersion: pinnedVersion, observed: observed, eligible: eligible)
-
-        let upstreamSHA256 = try await opensslSHA256(version: pinnedVersion)
-        if upstreamSHA256 == pinnedSHA256 {
-            ok("OpenSSL \(pinnedVersion) SHA-256 matches upstream metadata")
+        let pinnedMetadata = try JSONDecoder().decode(
+            GitilesCommit.self,
+            from: gitilesData.dropFirst(xssiPrefix.count)
+        )
+        if pinnedMetadata.commit == pinnedCommit, pinnedMetadata.tree == pinnedTree {
+            ok("BoringSSL pinned commit and tree match upstream metadata")
         } else {
-            recordFailure("OpenSSL \(pinnedVersion) SHA-256 mismatch: expected \(upstreamSHA256), pinned \(pinnedSHA256)")
+            recordFailure(
+                "BoringSSL source identity mismatch: expected \(pinnedCommit) tree \(pinnedTree), "
+                    + "got \(pinnedMetadata.commit) tree \(pinnedMetadata.tree)"
+            )
         }
 
-        try await verifyOpenSSLSignature(version: pinnedVersion, expectedSHA256: pinnedSHA256, expectedFingerprint: pinnedFingerprint)
+        var history: [(sha: String, date: Date)] = []
+        for page in 1...20 {
+            let commits = try await fetchJSON(
+                [GitHubCommit].self,
+                from: "https://api.github.com/repos/google/boringssl/commits?per_page=100&page=\(page)"
+            )
+            for commit in commits {
+                history.append((
+                    sha: commit.sha,
+                    date: try parseISODate(commit.commit.committer.date)
+                ))
+            }
+
+            let hasPinnedCommit = history.contains { $0.sha == pinnedCommit }
+            let hasEligibleCommit = history.contains { releaseIsEligible($0.date) }
+            if commits.count < 100 || (hasPinnedCommit && hasEligibleCommit) {
+                break
+            }
+        }
+
+        guard let observed = history.first else {
+            throw CheckFailure.message("BoringSSL upstream history is empty")
+        }
+        if observed.sha == remoteHead {
+            ok("BoringSSL official repository and GitHub mirror agree on HEAD \(remoteHead)")
+        } else {
+            recordFailure(
+                "BoringSSL mirror mismatch: official HEAD \(remoteHead), GitHub mirror \(observed.sha)"
+            )
+        }
+
+        guard let pinnedIndex = history.firstIndex(where: { $0.sha == pinnedCommit }) else {
+            recordFailure("BoringSSL pinned commit is not in the recent upstream history")
+            return
+        }
+        guard let eligibleIndex = history.firstIndex(where: { releaseIsEligible($0.date) }) else {
+            ok("BoringSSL has no commit older than the \(cooldownDays)-day cooldown")
+            return
+        }
+
+        let eligible = history[eligibleIndex]
+        if pinnedIndex <= eligibleIndex {
+            ok(
+                "BoringSSL pin is at least as recent as eligible commit \(eligible.sha) "
+                    + "from \(dateString(eligible.date))"
+            )
+        } else {
+            recordFailure(
+                "BoringSSL is behind: pinned \(pinnedCommit), latest eligible \(eligible.sha) "
+                    + "from \(dateString(eligible.date))"
+            )
+        }
+
+        if remoteHead != pinnedCommit, !releaseIsEligible(observed.date) {
+            info(
+                "BoringSSL HEAD \(remoteHead) is cooling down until \(coolingUntil(observed.date))"
+            )
+        }
     }
 
     private func boostArchiveBasename(version: String) -> String {

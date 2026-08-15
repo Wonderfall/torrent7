@@ -13,7 +13,6 @@ on:
       - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/verify-boost-asio-recycling-allocator.zsh"
       - "Scripts/verify-xcode.zsh"
-      - "Scripts/keys/**"
       - "Scripts/patches/**"
       - "Tools/DependencyCheck/**"
   pull_request:
@@ -29,7 +28,6 @@ on:
       - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/verify-boost-asio-recycling-allocator.zsh"
       - "Scripts/verify-xcode.zsh"
-      - "Scripts/keys/**"
       - "Scripts/patches/**"
       - "Tools/DependencyCheck/**"
   workflow_dispatch:
@@ -75,12 +73,6 @@ jobs:
       - name: Verify Xcode toolchain
         shell: zsh {0}
         run: Scripts/verify-xcode.zsh
-
-      - name: Install verification tools
-        shell: zsh {0}
-        run: |
-          set -euo pipefail
-          brew install gnupg
 
       - name: Check pinned dependencies
         shell: zsh {0}

@@ -13,7 +13,7 @@ let enableDiagnostics = sanitizerProfile != nil
 let defaultDepsProfile = sanitizerProfile.map { "arm64e-\($0)" } ?? "arm64e"
 let depsPrefix = environment["DEPS_PREFIX"] ?? "\(packageRoot)/.build/deps/\(defaultDepsProfile)/prefix"
 let boostPrefix = environment["BOOST_PREFIX"] ?? depsPrefix
-let opensslPrefix = environment["OPENSSL_PREFIX"] ?? depsPrefix
+let boringsslPrefix = environment["BORINGSSL_PREFIX"] ?? depsPrefix
 let nativeDepsBuildID = environment["TORRENT7_NATIVE_DEPS_BUILD_ID"] ?? "unbound"
 let nativeDepsBuildIDIsValid = nativeDepsBuildID == "unbound"
     || (nativeDepsBuildID.hasPrefix("v_")
@@ -67,7 +67,7 @@ let bridgeTargetWarnings: [CXXSetting] = [
 let bridgeSystemIncludeFlags = [
     "-isystem", "\(depsPrefix)/include",
     "-isystem", "\(boostPrefix)/include",
-    "-isystem", "\(opensslPrefix)/include"
+    "-isystem", "\(boringsslPrefix)/include"
 ]
 let bridgeLanguageAndRuntimeFlags = [
     "-std=c++23",
@@ -179,14 +179,11 @@ let bridgeDefines: [CXXSetting] = [
     .define("TORRENT_DISABLE_SUPERSEEDING"),
     .define("TORRENT_DISABLE_SHARE_MODE"),
     .define("TORRENT_DISABLE_PREDICTIVE_PIECES"),
+    // Libtorrent uses these names for its OpenSSL-compatible TLS API backend;
+    // the linked implementation is the pinned BoringSSL build.
     .define("TORRENT_USE_OPENSSL"),
     .define("TORRENT_USE_LIBCRYPTO"),
-    .define("TORRENT_SSL_PEERS"),
-    .define("OPENSSL_NO_SSL2"),
-    .define("OPENSSL_NO_SSL3"),
-    .define("OPENSSL_NO_TLS1"),
-    .define("OPENSSL_NO_TLS1_1"),
-    .define("OPENSSL_NO_DTLS1")
+    .define("TORRENT_SSL_PEERS")
 ] + (enableDiagnostics ? [
     // Sanitizer dependencies use libtorrent's CMake Debug configuration,
     // whose public assertion mode changes internal C++ object layouts.
@@ -194,8 +191,8 @@ let bridgeDefines: [CXXSetting] = [
 ] : [])
 let bridgeStaticLibraryFlags = [
     "\(depsPrefix)/lib/libtorrent-rasterbar.a",
-    "\(opensslPrefix)/lib/libssl.a",
-    "\(opensslPrefix)/lib/libcrypto.a"
+    "\(boringsslPrefix)/lib/libssl.a",
+    "\(boringsslPrefix)/lib/libcrypto.a"
 ]
 let bridgeLinkerHardeningFlags = [
     "-Xlinker", "-dead_strip",

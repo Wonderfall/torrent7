@@ -11,7 +11,7 @@ typeset -r root_dir=${0:A:h:h}
 typeset -r homebrew_prefix=${HOMEBREW_PREFIX:-/opt/homebrew}
 typeset -r deps_prefix=${DEPS_PREFIX:-$root_dir/.build/deps/arm64e/prefix}
 typeset -r boost_prefix=${BOOST_PREFIX:-$deps_prefix}
-typeset -r openssl_prefix=${OPENSSL_PREFIX:-$deps_prefix}
+typeset -r boringssl_prefix=${BORINGSSL_PREFIX:-$deps_prefix}
 typeset -r native_deps_build_id=$("$root_dir/Scripts/native-deps-build-id.zsh")
 typeset clang_tidy=${CLANG_TIDY:-$homebrew_prefix/opt/llvm/bin/clang-tidy}
 
@@ -84,7 +84,7 @@ typeset -a compiler_args=(
     -I "$root_dir/Sources/TorrentBridge/include"
     -isystem "$deps_prefix/include"
     -isystem "$boost_prefix/include"
-    -isystem "$openssl_prefix/include"
+    -isystem "$boringssl_prefix/include"
     -fexceptions
     -Wall
     -Wextra
@@ -165,11 +165,6 @@ typeset -a compiler_args=(
     -DTORRENT_USE_OPENSSL
     -DTORRENT_USE_LIBCRYPTO
     -DTORRENT_SSL_PEERS
-    -DOPENSSL_NO_SSL2
-    -DOPENSSL_NO_SSL3
-    -DOPENSSL_NO_TLS1
-    -DOPENSSL_NO_TLS1_1
-    -DOPENSSL_NO_DTLS1
 )
 
 "$clang_tidy" --checks="$checks_csv" --verify-config

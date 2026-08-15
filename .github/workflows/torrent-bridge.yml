@@ -13,7 +13,6 @@ on:
       - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/native-deps-build-id.zsh"
       - "Scripts/verify-xcode.zsh"
-      - "Scripts/keys/**"
       - "Scripts/patches/**"
       - "Scripts/test-bridge.zsh"
       - "Scripts/test-boost-asio-pac.zsh"
@@ -41,7 +40,6 @@ on:
       - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/native-deps-build-id.zsh"
       - "Scripts/verify-xcode.zsh"
-      - "Scripts/keys/**"
       - "Scripts/patches/**"
       - "Scripts/test-bridge.zsh"
       - "Scripts/test-boost-asio-pac.zsh"
@@ -100,7 +98,7 @@ jobs:
         shell: zsh {0}
         run: |
           set -euo pipefail
-          brew install cmake ninja gnupg llvm
+          brew install cmake ninja llvm
 
       - name: Restore dependency cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -108,7 +106,7 @@ jobs:
           path: |
             .build/deps/source-cache
             .build/deps/arm64e
-          key: deps-arm64e-${{ env.XCODE_CACHE_KEY }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/boost-patch-series.sh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/verify-xcode.zsh', 'Scripts/keys/**', 'Scripts/patches/**') }}
+          key: deps-arm64e-${{ env.XCODE_CACHE_KEY }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/boost-patch-series.sh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/verify-xcode.zsh', 'Scripts/patches/**') }}
       - name: Build pinned dependencies
         shell: zsh {0}
         run: |

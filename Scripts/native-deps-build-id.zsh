@@ -13,23 +13,23 @@ typeset deps_profile=arm64e
 [[ -z $sanitizer_profile ]] || deps_profile="arm64e-$sanitizer_profile"
 typeset -r deps_prefix=${DEPS_PREFIX:-$root_dir/.build/deps/$deps_profile/prefix}
 typeset -r boost_prefix=${BOOST_PREFIX:-$deps_prefix}
-typeset -r openssl_prefix=${OPENSSL_PREFIX:-$deps_prefix}
+typeset -r boringssl_prefix=${BORINGSSL_PREFIX:-$deps_prefix}
 
 typeset -a labels=(
     boost-headers-stamp
-    openssl-build-stamp
+    boringssl-build-stamp
     libtorrent-build-stamp
     libtorrent-archive
-    openssl-ssl-archive
-    openssl-crypto-archive
+    boringssl-ssl-archive
+    boringssl-crypto-archive
 )
 typeset -a paths=(
     "$boost_prefix/.torrent-app-boost-headers"
-    "$deps_prefix/.torrent-app-openssl-build"
+    "$deps_prefix/.torrent-app-boringssl-build"
     "$deps_prefix/.torrent-app-libtorrent-build"
     "$deps_prefix/lib/libtorrent-rasterbar.a"
-    "$openssl_prefix/lib/libssl.a"
-    "$openssl_prefix/lib/libcrypto.a"
+    "$boringssl_prefix/lib/libssl.a"
+    "$boringssl_prefix/lib/libcrypto.a"
 )
 
 typeset manifest=

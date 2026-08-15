@@ -11,7 +11,6 @@ on:
       - "Scripts/boost-patch-series.sh"
       - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/verify-xcode.zsh"
-      - "Scripts/keys/**"
       - "Scripts/patches/**"
       - "Sources/TorrentBridge/**"
       - "Tools/BridgeFuzzing/**"
@@ -28,7 +27,6 @@ on:
       - "Scripts/boost-patch-series.sh"
       - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/verify-xcode.zsh"
-      - "Scripts/keys/**"
       - "Scripts/patches/**"
       - "Sources/TorrentBridge/**"
       - "Tools/BridgeFuzzing/**"
@@ -83,7 +81,7 @@ jobs:
         shell: zsh {0}
         run: |
           set -euo pipefail
-          brew install cmake ninja gnupg llvm
+          brew install cmake ninja llvm
 
       - name: Restore app dependency cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -91,7 +89,7 @@ jobs:
           path: |
             .build/deps/source-cache
             .build/deps/arm64e
-          key: deps-arm64e-${{ env.XCODE_CACHE_KEY }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/boost-patch-series.sh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/verify-xcode.zsh', 'Scripts/keys/**', 'Scripts/patches/**') }}
+          key: deps-arm64e-${{ env.XCODE_CACHE_KEY }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/boost-patch-series.sh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/verify-xcode.zsh', 'Scripts/patches/**') }}
       - name: Build pinned app dependencies
         shell: zsh {0}
         run: |

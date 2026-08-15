@@ -12,17 +12,15 @@ typeset -r TARGET_ARCH=${TARGET_ARCH:-arm64e}
 typeset -r MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-26.0}
 typeset -r TARGET_TRIPLE="${TARGET_ARCH}-apple-macosx${MACOSX_DEPLOYMENT_TARGET}"
 typeset -r SDK_PATH=$(/usr/bin/xcrun --sdk macosx --show-sdk-path)
-typeset -r HOMEBREW_PREFIX=${HOMEBREW_PREFIX:-/opt/homebrew}
-typeset -r GPG=${GPG:-$HOMEBREW_PREFIX/bin/gpg}
 typeset -r APPLE_CC=$(/usr/bin/xcrun --find clang)
 typeset -r APPLE_CXX=$(/usr/bin/xcrun --find clang++)
 typeset -r APPLE_AR=$(/usr/bin/xcrun --find ar)
 typeset -r APPLE_RANLIB=$(/usr/bin/xcrun --find ranlib)
 typeset -r APPLE_LIPO=$(/usr/bin/xcrun --find lipo)
-typeset -r OPENSSL_CC=$APPLE_CC
-typeset -r OPENSSL_CXX=$APPLE_CXX
-typeset -r OPENSSL_AR=$APPLE_AR
-typeset -r OPENSSL_RANLIB=$APPLE_RANLIB
+typeset -r BORINGSSL_CC=$APPLE_CC
+typeset -r BORINGSSL_CXX=$APPLE_CXX
+typeset -r BORINGSSL_AR=$APPLE_AR
+typeset -r BORINGSSL_RANLIB=$APPLE_RANLIB
 typeset -r LIBTORRENT_CC=$APPLE_CC
 typeset -r LIBTORRENT_CXX=$APPLE_CXX
 typeset -r LIBTORRENT_AR=$APPLE_AR
@@ -62,105 +60,21 @@ typeset -r BOOST_SOURCE_STAMP="$BOOST_SOURCE_DIR/.torrent-app-source"
 typeset -r BOOST_HEADERS_STAMP="$BOOST_PREFIX/.torrent-app-boost-headers"
 typeset -r BOOST_PATCH_HELPER="$ROOT_DIR/Scripts/boost-patch-series.sh"
 typeset -r BOOST_RECYCLER_VERIFIER="$ROOT_DIR/Scripts/verify-boost-asio-recycling-allocator.zsh"
-typeset -r OPENSSL_VERSION=${OPENSSL_VERSION:-3.5.7}
-typeset -r OPENSSL_SHA256=${OPENSSL_SHA256:-a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8}
-typeset -r OPENSSL_TARBALL_URL=${OPENSSL_TARBALL_URL:-https://github.com/openssl/openssl/releases/download/openssl-$OPENSSL_VERSION/openssl-$OPENSSL_VERSION.tar.gz}
-typeset -r OPENSSL_SIGNATURE_URL=${OPENSSL_SIGNATURE_URL:-$OPENSSL_TARBALL_URL.asc}
-typeset -r OPENSSL_RELEASE_KEYS="$ROOT_DIR/Scripts/keys/openssl-release-pubkeys.asc"
-# OpenSSL 3.5.7 is signed by this OpenSSL release key. Keep this exact
-# fingerprint pinned so a future signer rotation requires an explicit update.
-typeset -r OPENSSL_SIGNING_FINGERPRINT=${OPENSSL_SIGNING_FINGERPRINT:-BA5473A2B0587B07FB27CF2D216094DFD0CB81EF}
-typeset -r OPENSSL_TARBALL="$ARCHIVE_CACHE_DIR/openssl-$OPENSSL_VERSION.tar.gz"
-typeset -r OPENSSL_SIGNATURE="$OPENSSL_TARBALL.asc"
-typeset -r OPENSSL_SOURCE_DIR="$SOURCE_ROOT/openssl-$OPENSSL_VERSION"
-typeset -r OPENSSL_BUILD_DIR="$BUILD_ROOT/openssl-$OPENSSL_VERSION"
-typeset -r OPENSSL_BUILD_STAMP="$DEPS_PREFIX/.torrent-app-openssl-build"
-typeset -r OPENSSL_CONFIGURE_TARGET=torrent-app-darwin64-arm64e
-typeset -r OPENSSL_CONFIG_FILE="$OPENSSL_BUILD_DIR/torrent-app-openssl.conf"
-# Keep stdio/posix file APIs: libtorrent uses OpenSSL-backed file APIs
-# for trust paths and SSL torrent certificate/key/DH files.
-typeset -a OPENSSL_CONFIGURE_OPTIONS=(
-    no-shared
-    no-pinshared
-    no-module
-    no-tests
-    no-apps
-    no-docs
-    no-asm
-    no-comp
-    no-ssl3
-    no-tls1
-    no-tls1_1
-    no-tls1-method
-    no-tls1_1-method
-    no-dtls
-    no-dtls1
-    no-dtls1_2
-    no-dtls1-method
-    no-dtls1_2-method
-    no-dgram
-    no-async
-    no-atexit
-    no-autoerrinit
-    no-autoload-config
-    no-cmp
-    no-cms
-    no-ct
-    no-dso
-    no-engine
-    no-dynamic-engine
-    no-filenames
-    no-http
-    no-integrity-only-ciphers
-    no-legacy
-    no-multiblock
-    no-nextprotoneg
-    no-ocsp
-    no-psk
-    no-rfc3779
-    no-sock
-    no-srp
-    no-srtp
-    no-thread-pool
-    no-default-thread-pool
-    no-ts
-    no-ui-console
-    no-quic
-    no-ml-kem
-    no-ml-dsa
-    no-slh-dsa
-    no-tls-deprecated-ec
-    no-afalgeng
-    no-capieng
-    no-padlockeng
-    no-gost
-    no-aria
-    no-bf
-    no-blake2
-    no-camellia
-    no-cast
-    no-cmac
-    no-des
-    no-dsa
-    no-ec2m
-    no-idea
-    no-md4
-    no-mdc2
-    no-ocb
-    no-rc2
-    no-rc4
-    no-rmd160
-    no-scrypt
-    no-seed
-    no-siphash
-    no-siv
-    no-sm2
-    no-sm2-precomp
-    no-sm3
-    no-sm4
-    no-whirlpool
-    no-ssl-trace
-    no-weak-ssl-ciphers
+typeset -r BORINGSSL_REPO=${BORINGSSL_REPO:-https://boringssl.googlesource.com/boringssl}
+typeset -r BORINGSSL_COMMIT=${BORINGSSL_COMMIT:-b0760837957bf86bd2014d258a948ee76f43c83f}
+typeset -r BORINGSSL_TREE=${BORINGSSL_TREE:-8934bb26100bb063ecfaf9314ed169df37c4d44e}
+typeset -r BORINGSSL_ARCHIVE_SHA256=${BORINGSSL_ARCHIVE_SHA256:-ecfd93ea2b8b10c2c93fffbba2c1d7aa0e1856faa65d1cf1b670205f42e1408f}
+typeset -r BORINGSSL_MIRROR_DIR="$GIT_CACHE_DIR/boringssl.git"
+typeset -r BORINGSSL_SOURCE_ROOT=${BORINGSSL_SOURCE_ROOT:-$SOURCE_CACHE_DIR/boringssl}
+typeset -r BORINGSSL_SOURCE_DIR="$BORINGSSL_SOURCE_ROOT/source"
+typeset -r BORINGSSL_BUILD_DIR="$BUILD_ROOT/boringssl"
+typeset -r BORINGSSL_BUILD_STAMP="$DEPS_PREFIX/.torrent-app-boringssl-build"
+typeset -ar BORINGSSL_CMAKE_OPTIONS=(
+    -DBUILD_SHARED_LIBS=OFF
+    -DBUILD_TESTING=OFF
+    -DOPENSSL_NO_ASM=ON
+    -DOPENSSL_SMALL=ON
+    -DFIPS=OFF
 )
 typeset -r LIBTORRENT_SOURCE_DIR="$SOURCE_ROOT/libtorrent"
 typeset -r LIBTORRENT_BUILD_DIR="$BUILD_ROOT/libtorrent"
@@ -228,40 +142,36 @@ typeset -r LIBTORRENT_TRAP_ONLY_SANITIZERS="undefined,local-bounds"
 typeset LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE
 # Keep fortify out of sanitizer profiles so it cannot obscure reports.
 typeset FORTIFY_FLAGS="-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3"
-typeset OPENSSL_STRICT_OVERFLOW_FLAGS="$NO_STRICT_OVERFLOW_FLAG"
-typeset OPENSSL_SANITIZER_FLAGS=
+typeset BORINGSSL_STRICT_OVERFLOW_FLAGS="$NO_STRICT_OVERFLOW_FLAG"
+typeset BORINGSSL_SANITIZER_FLAGS=
 typeset LIBTORRENT_SANITIZER_FLAGS="-fsanitize=$LIBTORRENT_TRAP_ONLY_SANITIZERS -fsanitize-trap=$LIBTORRENT_TRAP_ONLY_SANITIZERS -fno-sanitize-recover=$LIBTORRENT_TRAP_ONLY_SANITIZERS"
 case "$SANITIZER_PROFILE" in
     address)
-        OPENSSL_SANITIZER_FLAGS="-g -fno-omit-frame-pointer -fsanitize=address -fsanitize-address-use-after-scope"
+        BORINGSSL_SANITIZER_FLAGS="-g -fno-omit-frame-pointer -fsanitize=address -fsanitize-address-use-after-scope"
         LIBTORRENT_SANITIZER_FLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined,local-bounds -fsanitize-address-use-after-scope -fno-sanitize-recover=undefined,local-bounds"
         ;;
     thread)
-        OPENSSL_SANITIZER_FLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=thread"
+        BORINGSSL_SANITIZER_FLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=thread"
         LIBTORRENT_SANITIZER_FLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=thread,undefined,local-bounds -fno-sanitize-recover=undefined,local-bounds"
         ;;
 esac
 if [[ -n "$SANITIZER_PROFILE" ]]; then
     LIBCPP_HARDENING_MODE="_LIBCPP_HARDENING_MODE_DEBUG"
     FORTIFY_FLAGS="-U_FORTIFY_SOURCE"
-    # Do not impose defined signed-overflow semantics in diagnostic OpenSSL
+    # Do not impose defined signed-overflow semantics in diagnostic BoringSSL
     # builds, preserving instrumentation opportunities for combined profiles.
-    OPENSSL_STRICT_OVERFLOW_FLAGS=
+    BORINGSSL_STRICT_OVERFLOW_FLAGS=
 fi
 typeset -r HARDENED_COMMON_PREFIX="-Wformat -Wformat-security -Werror=format-security -fstack-protector-strong $FORTIFY_FLAGS -fPIE -ftrivial-auto-var-init=zero $RETAIN_NULL_POINTER_CHECKS_FLAG"
 typeset -r HARDENED_COMMON_SUFFIX="$NO_STRICT_ALIASING_FLAG -fvisibility=hidden -faarch64-jump-table-hardening $STRICT_FLEX_ARRAYS_FLAG $BRANCH_TARGET_IDENTIFICATION_FLAG $SLS_HARDENING_FLAG $ZERO_CALL_USED_REGS_FLAG $PTRAUTH_C_FLAGS"
-typeset -r OPENSSL_HARDENED_COMMON_FLAGS="$HARDENED_COMMON_PREFIX $OPENSSL_STRICT_OVERFLOW_FLAGS $HARDENED_COMMON_SUFFIX"
+typeset -r BORINGSSL_HARDENED_COMMON_FLAGS="$HARDENED_COMMON_PREFIX $BORINGSSL_STRICT_OVERFLOW_FLAGS $HARDENED_COMMON_SUFFIX"
 typeset -r LIBTORRENT_HARDENED_COMMON_FLAGS="$HARDENED_COMMON_PREFIX $HARDENED_COMMON_SUFFIX"
 typeset -r LIBTORRENT_HARDENED_C_FLAGS="$LIBTORRENT_HARDENED_COMMON_FLAGS $TYPED_ALLOCATOR_C_FLAGS"
-typeset -r OPENSSL_HARDENED_C_FLAGS="$OPENSSL_HARDENED_COMMON_FLAGS $TYPED_ALLOCATOR_C_FLAGS"
-typeset -r OPENSSL_HARDENED_CXX_FLAGS="$OPENSSL_HARDENED_COMMON_FLAGS $PTRAUTH_CXX_FLAGS $TYPED_ALLOCATOR_CXX_FLAGS -D_LIBCPP_HARDENING_MODE=$LIBCPP_HARDENING_MODE -fvisibility-inlines-hidden"
+typeset -r BORINGSSL_HARDENED_C_FLAGS="$BORINGSSL_HARDENED_COMMON_FLAGS $TYPED_ALLOCATOR_C_FLAGS"
+typeset -r BORINGSSL_HARDENED_CXX_FLAGS="$BORINGSSL_HARDENED_COMMON_FLAGS $PTRAUTH_CXX_FLAGS $TYPED_ALLOCATOR_CXX_FLAGS -D_LIBCPP_HARDENING_MODE=$LIBCPP_HARDENING_MODE -fvisibility-inlines-hidden"
 typeset -r LIBTORRENT_HARDENED_CXX_FLAGS="$LIBTORRENT_HARDENED_COMMON_FLAGS $PTRAUTH_CXX_FLAGS $TYPED_ALLOCATOR_CXX_FLAGS -D_LIBCPP_HARDENING_MODE=$LIBCPP_HARDENING_MODE -fvisibility-inlines-hidden"
-# OpenSSL 3.5.7 extends one-element trailing arrays with larger allocations in
-# its property parser. Clang's extra local-bounds group rejects that upstream
-# representation, so OpenSSL keeps the primary sanitizer while libtorrent and
-# the owned Bridge also use UBSan and local-bounds.
-typeset -r OPENSSL_CFLAGS="$OPENSSL_HARDENED_C_FLAGS $OPENSSL_SANITIZER_FLAGS -isysroot $SDK_PATH -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
-typeset -r OPENSSL_CXXFLAGS="$OPENSSL_HARDENED_CXX_FLAGS $OPENSSL_SANITIZER_FLAGS -isysroot $SDK_PATH -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
+typeset -r BORINGSSL_CFLAGS="$BORINGSSL_HARDENED_C_FLAGS $BORINGSSL_SANITIZER_FLAGS -isysroot $SDK_PATH -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
+typeset -r BORINGSSL_CXXFLAGS="$BORINGSSL_HARDENED_CXX_FLAGS $BORINGSSL_SANITIZER_FLAGS -isysroot $SDK_PATH -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
 typeset LIBTORRENT_C_FLAGS="$LIBTORRENT_HARDENED_C_FLAGS $LIBTORRENT_SANITIZER_FLAGS"
 typeset LIBTORRENT_CXX_FLAGS="$LIBTORRENT_HARDENED_CXX_FLAGS $LIBTORRENT_SANITIZER_FLAGS"
 LIBTORRENT_C_FLAGS="$LIBTORRENT_C_FLAGS $LIBTORRENT_EXTRA_DEFINES"
@@ -408,38 +318,6 @@ seed_archive_from_existing_profiles() {
     return 1
 }
 
-seed_openssl_signature_from_existing_profiles() {
-    local output="$1"
-    local basename="$2"
-    local candidate
-    local tmp
-    local -a candidates=()
-
-    if [[ -n $SOURCE_CACHE_SEED_DIR ]]; then
-        candidates+=("$SOURCE_CACHE_SEED_DIR/archives/$basename")
-    fi
-    candidates+=(
-        "$DEPS_DIR/src/$basename"
-        "$DEFAULT_DEPS_DIR/$TARGET_ARCH/src/$basename"
-        "$DEFAULT_DEPS_DIR/$TARGET_ARCH-address/src/$basename"
-        "$DEFAULT_DEPS_DIR/$TARGET_ARCH-thread/src/$basename"
-    )
-
-    for candidate in "${candidates[@]}"; do
-        if [[ "$candidate" == "$output" || ! -f "$candidate" ]]; then
-            continue
-        fi
-
-        make_temporary_file "$output"
-        tmp=$REPLY
-        /bin/cp "$candidate" "$tmp"
-        /bin/mv -fh "$tmp" "$output"
-        return 0
-    done
-
-    return 1
-}
-
 stamp_matches() {
     local stamp="$1"
     local generator="$2"
@@ -509,8 +387,8 @@ write_stamp() {
     fi
 }
 
-openssl_configure_options_text() {
-    print -r -- "${(j: :)OPENSSL_CONFIGURE_OPTIONS}"
+boringssl_cmake_options_text() {
+    print -r -- "${(j: :)BORINGSSL_CMAKE_OPTIONS}"
 }
 
 libtorrent_cmake_options_text() {
@@ -534,44 +412,28 @@ boost-source-stamp-sha256=$(file_sha256 "$BOOST_SOURCE_STAMP")
 EOF
 }
 
-openssl_build_manifest() {
+boringssl_build_manifest() {
     cat <<EOF
-openssl-version=$OPENSSL_VERSION
-openssl-sha256=$OPENSSL_SHA256
-openssl-signature-url=$OPENSSL_SIGNATURE_URL
-openssl-signing-fingerprint=$OPENSSL_SIGNING_FINGERPRINT
-openssl-release-keys-sha256=$(file_sha256 "$OPENSSL_RELEASE_KEYS")
+boringssl-repo=$BORINGSSL_REPO
+boringssl-commit=$BORINGSSL_COMMIT
+boringssl-tree=$BORINGSSL_TREE
+boringssl-archive-sha256=$BORINGSSL_ARCHIVE_SHA256
 target-arch=$TARGET_ARCH
 target-triple=$TARGET_TRIPLE
 deployment-target=$MACOSX_DEPLOYMENT_TARGET
 sanitizer-profile=${SANITIZER_PROFILE:-none}
 sdk=$SDK_PATH
-configure-target=$OPENSSL_CONFIGURE_TARGET
-configure-options=$(openssl_configure_options_text)
-compiler-c=$OPENSSL_CC
-compiler-c-sha256=$(file_sha256 "$OPENSSL_CC")
-compiler-cxx=$OPENSSL_CXX
-compiler-cxx-sha256=$(file_sha256 "$OPENSSL_CXX")
-ar=$OPENSSL_AR
-ar-sha256=$(file_sha256 "$OPENSSL_AR")
-ranlib=$OPENSSL_RANLIB
-ranlib-sha256=$(file_sha256 "$OPENSSL_RANLIB")
-cflags=$OPENSSL_CFLAGS
-cxxflags=$OPENSSL_CXXFLAGS
-EOF
-}
-
-write_openssl_config() {
-    cat >"$OPENSSL_CONFIG_FILE" <<'EOF'
-my %targets = (
-    "torrent-app-darwin64-arm64e" => {
-        inherit_from     => [ "darwin-common" ],
-        CFLAGS           => add("-Wall"),
-        cflags           => add("-arch arm64e"),
-        lib_cppflags     => add("-DL_ENDIAN"),
-        bn_ops           => "SIXTY_FOUR_BIT_LONG",
-    },
-);
+cmake-options=$(boringssl_cmake_options_text)
+compiler-c=$BORINGSSL_CC
+compiler-c-sha256=$(file_sha256 "$BORINGSSL_CC")
+compiler-cxx=$BORINGSSL_CXX
+compiler-cxx-sha256=$(file_sha256 "$BORINGSSL_CXX")
+ar=$BORINGSSL_AR
+ar-sha256=$(file_sha256 "$BORINGSSL_AR")
+ranlib=$BORINGSSL_RANLIB
+ranlib-sha256=$(file_sha256 "$BORINGSSL_RANLIB")
+cflags=$BORINGSSL_CFLAGS
+cxxflags=$BORINGSSL_CXXFLAGS
 EOF
 }
 
@@ -597,9 +459,9 @@ ranlib-sha256=$(file_sha256 "$LIBTORRENT_RANLIB")
 c-flags=$LIBTORRENT_C_FLAGS
 cxx-flags=$LIBTORRENT_CXX_FLAGS
 cmake-options=$(libtorrent_cmake_options_text)
-openssl-prefix=$DEPS_PREFIX
-openssl-build-stamp-sha256=$(file_sha256 "$OPENSSL_BUILD_STAMP")
-openssl-configure-options=$(openssl_configure_options_text)
+boringssl-prefix=$DEPS_PREFIX
+boringssl-build-stamp-sha256=$(file_sha256 "$BORINGSSL_BUILD_STAMP")
+boringssl-cmake-options=$(boringssl_cmake_options_text)
 boost-version=$BOOST_VERSION
 boost-sha256=$BOOST_SHA256
 boost-prefix=$BOOST_PREFIX
@@ -827,142 +689,6 @@ verify_libtorrent_indirect_operation_pac() {
         "libtorrent has no address-diversified heterogeneous-queue move callback branch"
 }
 
-thin_archive_arch() {
-    local archive="$1"
-    local arch="$2"
-    local info
-    local tmp
-
-    require_path "$archive" "static archive"
-    info="$("$ARCH_LIPO" -info "$archive")"
-    if [[ "$info" == *"architecture: $arch"* ]]; then
-        return
-    fi
-
-    if [[ "$info" != *" $arch"* ]]; then
-        print -ru2 -- "Archive does not contain $arch slice: $archive"
-        print -ru2 -- "$info"
-        exit 1
-    fi
-
-    make_temporary_file "$archive"
-    tmp=$REPLY
-    "$ARCH_LIPO" "$archive" -thin "$arch" -output "$tmp"
-    /bin/mv -fh "$tmp" "$archive"
-    /usr/bin/xcrun ranlib "$archive"
-}
-
-download_openssl_signature() {
-    if [[ -f "$OPENSSL_SIGNATURE" ]]; then
-        return
-    fi
-
-    if seed_openssl_signature_from_existing_profiles "$OPENSSL_SIGNATURE" "openssl-$OPENSSL_VERSION.tar.gz.asc"; then
-        return
-    fi
-
-    local tmp
-    make_temporary_file "$OPENSSL_SIGNATURE"
-    tmp=$REPLY
-    curl \
-        --fail \
-        --location \
-        --proto '=https' \
-        --proto-redir '=https' \
-        --retry 3 \
-        --show-error \
-        --output "$tmp" \
-        "$OPENSSL_SIGNATURE_URL"
-
-    /bin/mv -fh "$tmp" "$OPENSSL_SIGNATURE"
-}
-
-verify_openssl_signature() {
-    local archive="${1:-$OPENSSL_TARBALL}"
-    local signature="${2:-$OPENSSL_SIGNATURE}"
-    local tmpdir
-    local gnupg_home
-    local status_file
-    local verify_log
-    local valid_signature_fingerprint
-    local key_fingerprint
-
-    require_path "$OPENSSL_RELEASE_KEYS" "OpenSSL release-signing public keys"
-    require_path "$signature" "OpenSSL detached signature"
-    require_path "$archive" "OpenSSL source archive"
-
-    tmpdir="$(/usr/bin/mktemp -d)"
-    gnupg_home="$tmpdir/gnupg"
-    status_file="$tmpdir/status"
-    verify_log="$tmpdir/verify.log"
-    mkdir -m 700 "$gnupg_home"
-
-    if ! "$GPG" --homedir "$gnupg_home" --batch --quiet --import "$OPENSSL_RELEASE_KEYS" >"$verify_log" 2>&1; then
-        cat "$verify_log" >&2
-        rm -rf "$tmpdir"
-        exit 1
-    fi
-
-    key_fingerprint="$("$GPG" --homedir "$gnupg_home" --batch --with-colons --fingerprint "$OPENSSL_SIGNING_FINGERPRINT" | awk -F: '$1 == "fpr" { print $10; exit }')"
-    if [[ "$key_fingerprint" != "$OPENSSL_SIGNING_FINGERPRINT" ]]; then
-        print -ru2 -- "OpenSSL release keyring does not contain expected signing fingerprint: $OPENSSL_SIGNING_FINGERPRINT"
-        rm -rf "$tmpdir"
-        exit 1
-    fi
-
-    if ! "$GPG" --homedir "$gnupg_home" --batch --status-fd 3 --verify "$signature" "$archive" >"$verify_log" 2>&1 3>"$status_file"; then
-        cat "$verify_log" >&2
-        rm -rf "$tmpdir"
-        exit 1
-    fi
-
-    valid_signature_fingerprint="$(awk '$1 == "[GNUPG:]" && $2 == "VALIDSIG" { print $3; exit }' "$status_file")"
-    if [[ "$valid_signature_fingerprint" != "$OPENSSL_SIGNING_FINGERPRINT" ]]; then
-        print -ru2 -- "OpenSSL signature signer mismatch for $archive"
-        print -ru2 -- "Expected signer: $OPENSSL_SIGNING_FINGERPRINT"
-        print -ru2 -- "Actual signer:   ${valid_signature_fingerprint:-none}"
-        rm -rf "$tmpdir"
-        exit 1
-    fi
-
-    rm -rf "$tmpdir"
-}
-
-download_openssl() {
-    mkdir -p "$ARCHIVE_CACHE_DIR"
-
-    if [[ -f "$OPENSSL_TARBALL" ]]; then
-        verify_sha256 "$OPENSSL_TARBALL" "$OPENSSL_SHA256"
-        download_openssl_signature
-        verify_openssl_signature
-        return
-    fi
-
-    if seed_archive_from_existing_profiles "$OPENSSL_TARBALL" "openssl-$OPENSSL_VERSION.tar.gz" "$OPENSSL_SHA256"; then
-        download_openssl_signature
-        verify_openssl_signature
-        return
-    fi
-
-    local tmp
-    make_temporary_file "$OPENSSL_TARBALL"
-    tmp=$REPLY
-    curl \
-        --fail \
-        --location \
-        --proto '=https' \
-        --proto-redir '=https' \
-        --retry 3 \
-        --show-error \
-        --output "$tmp" \
-        "$OPENSSL_TARBALL_URL"
-
-    verify_sha256 "$tmp" "$OPENSSL_SHA256"
-    download_openssl_signature
-    verify_openssl_signature "$tmp" "$OPENSSL_SIGNATURE"
-    /bin/mv -fh "$tmp" "$OPENSSL_TARBALL"
-}
-
 download_boost() {
     mkdir -p "$ARCHIVE_CACHE_DIR"
 
@@ -1050,60 +776,6 @@ install_boost_headers() {
     "$BOOST_PATCH_HELPER" verify "$BOOST_PREFIX/include"
 }
 
-extract_openssl() {
-    local stamp="$OPENSSL_SOURCE_DIR/.torrent-app-sha256"
-
-    if [[ -d "$OPENSSL_SOURCE_DIR" && -f "$stamp" && "$(cat "$stamp")" == "$OPENSSL_SHA256" ]]; then
-        return
-    fi
-
-    remove_dependency_path "$OPENSSL_SOURCE_DIR"
-    mkdir -p "$SOURCE_ROOT"
-    tar -xzf "$OPENSSL_TARBALL" -C "$SOURCE_ROOT"
-    print -r -- "$OPENSSL_SHA256" >"$stamp"
-    require_path "$OPENSSL_SOURCE_DIR/Configure" "OpenSSL configure script"
-}
-
-build_openssl() {
-    if [[ -f "$DEPS_PREFIX/lib/libssl.a" && -f "$DEPS_PREFIX/lib/libcrypto.a" ]] && stamp_matches "$OPENSSL_BUILD_STAMP" openssl_build_manifest "$DEPS_PREFIX"; then
-        thin_archive_arch "$DEPS_PREFIX/lib/libssl.a" "$TARGET_ARCH"
-        thin_archive_arch "$DEPS_PREFIX/lib/libcrypto.a" "$TARGET_ARCH"
-        verify_archive_arch "$DEPS_PREFIX/lib/libssl.a" "$TARGET_ARCH"
-        verify_archive_arch "$DEPS_PREFIX/lib/libcrypto.a" "$TARGET_ARCH"
-        return
-    fi
-
-    remove_dependency_path "$OPENSSL_BUILD_DIR"
-    mkdir -p "$OPENSSL_BUILD_DIR" "$DEPS_PREFIX"
-    rm -f "$DEPS_PREFIX/lib/libssl.a" "$DEPS_PREFIX/lib/libcrypto.a" "$OPENSSL_BUILD_STAMP"
-    write_openssl_config
-
-    (
-        cd "$OPENSSL_BUILD_DIR"
-        CC="$OPENSSL_CC -target $TARGET_TRIPLE" \
-        CXX="$OPENSSL_CXX -target $TARGET_TRIPLE" \
-        CFLAGS="$OPENSSL_CFLAGS" \
-        CXXFLAGS="$OPENSSL_CXXFLAGS" \
-        AR="$OPENSSL_AR" \
-        RANLIB="$OPENSSL_RANLIB" \
-        "$OPENSSL_SOURCE_DIR/Configure" \
-            --config="$OPENSSL_CONFIG_FILE" \
-            "$OPENSSL_CONFIGURE_TARGET" \
-            --prefix="$DEPS_PREFIX" \
-            --openssldir="$DEPS_PREFIX/ssl" \
-            "${OPENSSL_CONFIGURE_OPTIONS[@]}"
-
-        make -j"${JOBS:-$(sysctl -n hw.ncpu)}"
-        make install_sw
-    )
-
-    thin_archive_arch "$DEPS_PREFIX/lib/libssl.a" "$TARGET_ARCH"
-    thin_archive_arch "$DEPS_PREFIX/lib/libcrypto.a" "$TARGET_ARCH"
-    verify_archive_arch "$DEPS_PREFIX/lib/libssl.a" "$TARGET_ARCH"
-    verify_archive_arch "$DEPS_PREFIX/lib/libcrypto.a" "$TARGET_ARCH"
-    write_stamp "$OPENSSL_BUILD_STAMP" openssl_build_manifest "$DEPS_PREFIX"
-}
-
 ensure_git_mirror() {
     local repo_url="$1"
     local mirror_dir="$2"
@@ -1111,6 +783,7 @@ ensure_git_mirror() {
     local seed_checkout="${4:-}"
     local expected_commit="${5:-}"
     local seed_mirror="${6:-}"
+    local shallow="${7:-0}"
 
     if [[ -e "$mirror_dir" ]] && ! git -C "$mirror_dir" rev-parse --is-bare-repository >/dev/null 2>&1; then
         remove_dependency_path "$mirror_dir"
@@ -1119,10 +792,20 @@ ensure_git_mirror() {
     if [[ ! -d "$mirror_dir" ]]; then
         mkdir -p "$(dirname "$mirror_dir")"
         if [[ -n "$seed_mirror" ]] && is_usable_git_mirror "$seed_mirror" "$expected_commit"; then
-            git clone --mirror --no-hardlinks "$seed_mirror" "$mirror_dir"
+            if [[ "$shallow" == "1" ]]; then
+                git clone --bare --depth=1 --no-local "$seed_mirror" "$mirror_dir"
+            else
+                git clone --mirror --no-hardlinks "$seed_mirror" "$mirror_dir"
+            fi
             git -C "$mirror_dir" fsck --full --strict
         elif [[ -n "$seed_checkout" ]] && is_exact_git_checkout "$seed_checkout"; then
-            git clone --mirror "$seed_checkout" "$mirror_dir"
+            if [[ "$shallow" == "1" ]]; then
+                git clone --bare --depth=1 --no-local "$seed_checkout" "$mirror_dir"
+            else
+                git clone --mirror "$seed_checkout" "$mirror_dir"
+            fi
+        elif [[ "$shallow" == "1" ]]; then
+            git clone --bare --depth=1 "$repo_url" "$mirror_dir"
         else
             git clone --mirror "$repo_url" "$mirror_dir"
         fi
@@ -1131,12 +814,199 @@ ensure_git_mirror() {
     git -C "$mirror_dir" remote set-url origin "$repo_url"
 
     if [[ -n "$expected_commit" ]] && ! git -C "$mirror_dir" rev-parse --verify "$expected_commit^{commit}" >/dev/null 2>&1; then
-        git -C "$mirror_dir" fetch --tags --prune origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'
+        if [[ "$shallow" == "1" ]]; then
+            git -C "$mirror_dir" fetch --depth=1 origin "$expected_commit"
+        else
+            git -C "$mirror_dir" fetch --tags --prune origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'
+        fi
     fi
 
     if [[ -n "$expected_commit" ]] && ! git -C "$mirror_dir" rev-parse --verify "$expected_commit^{commit}" >/dev/null 2>&1; then
         fail "$label mirror does not contain expected commit: $expected_commit"
     fi
+}
+
+boringssl_checkout_status() {
+    git -C "$BORINGSSL_SOURCE_DIR" status --porcelain=v1 --untracked-files=all
+}
+
+verify_boringssl_source() {
+    local current_commit
+    local current_tree
+    local archive_sha256
+
+    current_commit="$(git -C "$BORINGSSL_SOURCE_DIR" rev-parse HEAD)"
+    current_tree="$(git -C "$BORINGSSL_SOURCE_DIR" rev-parse 'HEAD^{tree}')"
+    archive_sha256="$(git -C "$BORINGSSL_SOURCE_DIR" archive HEAD | shasum -a 256 | awk '{print $1}')"
+
+    [[ "$current_commit" == "$BORINGSSL_COMMIT" ]] \
+        || fail "BoringSSL checkout mismatch: expected $BORINGSSL_COMMIT, got $current_commit"
+    [[ "$current_tree" == "$BORINGSSL_TREE" ]] \
+        || fail "BoringSSL tree mismatch: expected $BORINGSSL_TREE, got $current_tree"
+    [[ "$archive_sha256" == "$BORINGSSL_ARCHIVE_SHA256" ]] \
+        || fail "BoringSSL source archive mismatch: expected $BORINGSSL_ARCHIVE_SHA256, got $archive_sha256"
+    [[ -z "$(boringssl_checkout_status)" ]] \
+        || fail "BoringSSL checkout has local changes: $BORINGSSL_SOURCE_DIR"
+    [[ ! -e "$BORINGSSL_SOURCE_DIR/.gitmodules" ]] \
+        || fail "Pinned BoringSSL unexpectedly contains submodules"
+    require_path "$BORINGSSL_SOURCE_DIR/CMakeLists.txt" "BoringSSL CMake project"
+    require_path "$BORINGSSL_SOURCE_DIR/LICENSE" "BoringSSL license"
+}
+
+clone_boringssl() {
+    local seed_mirror=""
+    local current
+    local checkout_status
+
+    if [[ -n "$SOURCE_CACHE_SEED_DIR" ]]; then
+        seed_mirror="$SOURCE_CACHE_SEED_DIR/git/boringssl.git"
+    fi
+    ensure_git_mirror "$BORINGSSL_REPO" "$BORINGSSL_MIRROR_DIR" "BoringSSL" \
+        "$BORINGSSL_SOURCE_DIR" "$BORINGSSL_COMMIT" "$seed_mirror" 1
+
+    mkdir -p "$BORINGSSL_SOURCE_ROOT"
+    if [[ -d "$BORINGSSL_SOURCE_DIR/.git" ]]; then
+        current="$(git -C "$BORINGSSL_SOURCE_DIR" rev-parse HEAD 2>/dev/null || true)"
+        checkout_status="$(boringssl_checkout_status)"
+        if [[ "$current" != "$BORINGSSL_COMMIT" ]]; then
+            [[ -z "$checkout_status" ]] \
+                || fail "Refusing to replace a BoringSSL checkout with local changes: $BORINGSSL_SOURCE_DIR"
+            remove_dependency_path "$BORINGSSL_SOURCE_DIR"
+        elif [[ -n "$checkout_status" ]]; then
+            fail "BoringSSL checkout has local changes: $BORINGSSL_SOURCE_DIR"
+        fi
+    elif [[ -e "$BORINGSSL_SOURCE_DIR" ]]; then
+        remove_dependency_path "$BORINGSSL_SOURCE_DIR"
+    fi
+
+    if [[ ! -d "$BORINGSSL_SOURCE_DIR/.git" ]]; then
+        git clone --no-checkout "$BORINGSSL_MIRROR_DIR" "$BORINGSSL_SOURCE_DIR"
+        git -C "$BORINGSSL_SOURCE_DIR" remote set-url origin "$BORINGSSL_REPO"
+        git -C "$BORINGSSL_SOURCE_DIR" checkout --detach "$BORINGSSL_COMMIT"
+    else
+        git -C "$BORINGSSL_SOURCE_DIR" remote set-url origin "$BORINGSSL_REPO"
+    fi
+    verify_boringssl_source
+}
+
+verify_boringssl_build() {
+    local compile_commands="$BORINGSSL_BUILD_DIR/compile_commands.json"
+    local compile_count
+    local hardened_count
+    local artifact
+
+    require_path "$DEPS_PREFIX/include/openssl/base.h" "BoringSSL public headers"
+    require_path "$DEPS_PREFIX/share/licenses/boringssl/LICENSE" "BoringSSL license"
+    require_path "$compile_commands" "BoringSSL compile database"
+    grep -q '^#define OPENSSL_IS_BORINGSSL' "$DEPS_PREFIX/include/openssl/base.h" \
+        || fail "Installed TLS headers are not BoringSSL"
+    grep -q '^OPENSSL_NO_ASM:.*=ON$' "$BORINGSSL_BUILD_DIR/CMakeCache.txt" \
+        || fail "BoringSSL was not configured with OPENSSL_NO_ASM=ON"
+    grep -q '^OPENSSL_SMALL:.*=ON$' "$BORINGSSL_BUILD_DIR/CMakeCache.txt" \
+        || fail "BoringSSL was not configured with OPENSSL_SMALL=ON"
+    grep -q '^BUILD_TESTING:BOOL=OFF$' "$BORINGSSL_BUILD_DIR/CMakeCache.txt" \
+        || fail "BoringSSL tests were not disabled"
+    if grep -Eq '"file": ".*\.(S|s|asm)"' "$compile_commands"; then
+        fail "BoringSSL compile database contains assembly sources"
+    fi
+    compile_count="$(grep -c '"file":' "$compile_commands")"
+    hardened_count="$(grep -c '"command":.*-DOPENSSL_NO_ASM.*-DOPENSSL_SMALL' "$compile_commands")"
+    [[ "$compile_count" -gt 0 && "$hardened_count" == "$compile_count" ]] \
+        || fail "BoringSSL compile commands do not consistently disable assembly and enable OPENSSL_SMALL"
+
+    for artifact in \
+        "$DEPS_PREFIX/lib/libdecrepit.a" \
+        "$DEPS_PREFIX/lib/libpki.a" \
+        "$DEPS_PREFIX/bin/bssl"; do
+        [[ ! -e "$artifact" ]] || fail "Unexpected BoringSSL artifact was installed: $artifact"
+    done
+
+    verify_archive_arch "$DEPS_PREFIX/lib/libssl.a" "$TARGET_ARCH"
+    verify_archive_arch "$DEPS_PREFIX/lib/libcrypto.a" "$TARGET_ARCH"
+}
+
+purge_superseded_tls_metadata() {
+    remove_dependency_path "$DEPS_PREFIX/share/licenses/openssl"
+    remove_dependency_path "$DEPS_PREFIX/ssl"
+    remove_dependency_path "$DEPS_PREFIX/lib/ossl-modules"
+    remove_dependency_path "$DEPS_PREFIX/lib/engines-3"
+    remove_dependency_path "$DEPS_PREFIX/lib/cmake/OpenSSL"
+    rm -f \
+        "$DEPS_PREFIX/bin/openssl" \
+        "$DEPS_PREFIX/lib/pkgconfig/openssl.pc" \
+        "$DEPS_PREFIX/lib/pkgconfig/libssl.pc" \
+        "$DEPS_PREFIX/lib/pkgconfig/libcrypto.pc" \
+        "$DEPS_PREFIX/.torrent-app-openssl-build" \
+        "$DEPS_PREFIX/.swiftui-torrent-openssl-build"
+}
+
+build_boringssl() {
+    local -a cmake_generator_args=()
+
+    purge_superseded_tls_metadata
+
+    if [[ -f "$DEPS_PREFIX/lib/libssl.a" \
+        && -f "$DEPS_PREFIX/lib/libcrypto.a" \
+        && -f "$BORINGSSL_BUILD_DIR/compile_commands.json" ]] \
+        && stamp_matches "$BORINGSSL_BUILD_STAMP" boringssl_build_manifest "$DEPS_PREFIX"; then
+        verify_boringssl_build
+        return
+    fi
+
+    remove_dependency_path "$BORINGSSL_BUILD_DIR"
+    remove_dependency_path "$DEPS_PREFIX/include/openssl"
+    remove_dependency_path "$DEPS_PREFIX/share/licenses/boringssl"
+    rm -f \
+        "$DEPS_PREFIX/lib/libssl.a" \
+        "$DEPS_PREFIX/lib/libcrypto.a" \
+        "$BORINGSSL_BUILD_STAMP"
+    mkdir -p \
+        "$BORINGSSL_BUILD_DIR" \
+        "$DEPS_PREFIX/include" \
+        "$DEPS_PREFIX/lib" \
+        "$DEPS_PREFIX/share/licenses/boringssl"
+
+    if [[ -n ${CMAKE_GENERATOR:-} ]]; then
+        cmake_generator_args=(-G "$CMAKE_GENERATOR")
+    elif [[ -n ${commands[ninja]:-} ]]; then
+        cmake_generator_args=(-G Ninja)
+    fi
+
+    cmake \
+        -S "$BORINGSSL_SOURCE_DIR" \
+        -B "$BORINGSSL_BUILD_DIR" \
+        "${cmake_generator_args[@]}" \
+        -Wno-author \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
+        -DCMAKE_C_COMPILER="$BORINGSSL_CC" \
+        -DCMAKE_CXX_COMPILER="$BORINGSSL_CXX" \
+        -DCMAKE_AR="$BORINGSSL_AR" \
+        -DCMAKE_RANLIB="$BORINGSSL_RANLIB" \
+        -DCMAKE_OSX_ARCHITECTURES="$TARGET_ARCH" \
+        -DCMAKE_OSX_SYSROOT="$SDK_PATH" \
+        -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET" \
+        -DCMAKE_C_COMPILER_TARGET="$TARGET_TRIPLE" \
+        -DCMAKE_CXX_COMPILER_TARGET="$TARGET_TRIPLE" \
+        -DCMAKE_C_FLAGS="$BORINGSSL_CFLAGS" \
+        -DCMAKE_CXX_FLAGS="$BORINGSSL_CXXFLAGS" \
+        -DCMAKE_C_VISIBILITY_PRESET=hidden \
+        -DCMAKE_CXX_VISIBILITY_PRESET=hidden \
+        -DCMAKE_VISIBILITY_INLINES_HIDDEN=ON \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+        "${BORINGSSL_CMAKE_OPTIONS[@]}"
+
+    cmake --build "$BORINGSSL_BUILD_DIR" \
+        --target crypto ssl \
+        --parallel "${JOBS:-$(sysctl -n hw.ncpu)}"
+
+    cp -R "$BORINGSSL_SOURCE_DIR/include/openssl" "$DEPS_PREFIX/include/"
+    cp "$BORINGSSL_BUILD_DIR/libssl.a" "$DEPS_PREFIX/lib/libssl.a"
+    cp "$BORINGSSL_BUILD_DIR/libcrypto.a" "$DEPS_PREFIX/lib/libcrypto.a"
+    cp "$BORINGSSL_SOURCE_DIR/LICENSE" "$DEPS_PREFIX/share/licenses/boringssl/LICENSE"
+
+    verify_boringssl_build
+    write_stamp "$BORINGSSL_BUILD_STAMP" boringssl_build_manifest "$DEPS_PREFIX"
 }
 
 setup_libtorrent_submodule_mirrors() {
@@ -1263,6 +1133,7 @@ build_libtorrent() {
         cmake_generator_args=(-G Ninja)
     fi
 
+    # FindOpenSSL is also BoringSSL's supported CMake compatibility surface.
     cmake \
         -S "$LIBTORRENT_SOURCE_DIR" \
         -B "$LIBTORRENT_BUILD_DIR" \
@@ -1310,19 +1181,16 @@ build_libtorrent() {
 require_tool cmake
 require_tool curl
 require_tool git
-require_tool make
-require_tool perl
 require_tool shasum
 require_tool tar
-require_path "$GPG" "GnuPG verifier"
 require_path "$BOOST_PATCH_HELPER" "Boost patch-series helper"
 require_path "$BOOST_RECYCLER_VERIFIER" "Boost.Asio recycler verifier"
 [[ "$("$BOOST_PATCH_HELPER" version)" == "$BOOST_VERSION" ]] \
     || fail "Boost patch-series version does not match BOOST_VERSION=$BOOST_VERSION"
-require_path "$OPENSSL_CC" "OpenSSL C compiler"
-require_path "$OPENSSL_CXX" "OpenSSL C++ compiler"
-require_path "$OPENSSL_AR" "OpenSSL archiver"
-require_path "$OPENSSL_RANLIB" "OpenSSL ranlib"
+require_path "$BORINGSSL_CC" "BoringSSL C compiler"
+require_path "$BORINGSSL_CXX" "BoringSSL C++ compiler"
+require_path "$BORINGSSL_AR" "BoringSSL archiver"
+require_path "$BORINGSSL_RANLIB" "BoringSSL ranlib"
 require_path "$LIBTORRENT_CC" "libtorrent C compiler"
 require_path "$LIBTORRENT_CXX" "libtorrent C++ compiler"
 require_path "$LIBTORRENT_AR" "libtorrent archiver"
@@ -1332,9 +1200,8 @@ require_path "$ARCH_LIPO" "architecture inspection tool"
 download_boost
 extract_boost
 install_boost_headers
-download_openssl
-extract_openssl
-build_openssl
+clone_boringssl
+build_boringssl
 clone_libtorrent
 build_libtorrent
 

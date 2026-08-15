@@ -91,7 +91,7 @@ jobs:
         shell: zsh {0}
         run: |
           set -euo pipefail
-          brew install cmake ninja gnupg
+          brew install cmake ninja
 
       - name: Restore sanitizer dependency cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -99,7 +99,7 @@ jobs:
           path: |
             .build/deps/source-cache
             .build/deps/arm64e-${{ matrix.profile }}
-          key: deps-arm64e-${{ matrix.profile }}-${{ env.XCODE_CACHE_KEY }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/boost-patch-series.sh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/verify-xcode.zsh', 'Scripts/keys/**', 'Scripts/patches/**') }}
+          key: deps-arm64e-${{ matrix.profile }}-${{ env.XCODE_CACHE_KEY }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/boost-patch-series.sh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/verify-xcode.zsh', 'Scripts/patches/**') }}
 
       - name: Build fully instrumented dependencies
         shell: zsh {0}

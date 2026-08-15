@@ -16,7 +16,7 @@ PREFIX="$DEPS_ROOT/prefix"
 BUILD_ROOT="$DEPS_ROOT/build"
 OWNERSHIP_MARKER="$DEPS_ROOT/.torrent7-libfuzzer-deps-root"
 OWNERSHIP_MARKER_CONTENT="torrent7-libfuzzer-deps-v1"
-OPENSSL_SOURCE="${OPENSSL_SOURCE:-$ROOT_DIR/.build/deps/arm64e/src/openssl-3.5.7}"
+BORINGSSL_SOURCE="${BORINGSSL_SOURCE:-$ROOT_DIR/.build/deps/source-cache/boringssl/source}"
 LIBTORRENT_SOURCE="${LIBTORRENT_SOURCE:-$ROOT_DIR/.build/deps/arm64e/src/libtorrent}"
 LIBTORRENT_PATCH_HELPER="$ROOT_DIR/Scripts/libtorrent-patch-series.sh"
 BOOST_SOURCE="${BOOST_SOURCE:-$ROOT_DIR/.build/deps/source-cache/boost/boost_1_92_0}"
@@ -29,7 +29,7 @@ RANLIB="${RANLIB:-$LLVM_PREFIX/bin/llvm-ranlib}"
 SDK_PATH="${SDK_PATH:-$(xcrun --sdk macosx --show-sdk-path)}"
 TARGET_TRIPLE="${TARGET_TRIPLE:-arm64-apple-macosx26.0}"
 JOBS="${JOBS:-$(sysctl -n hw.ncpu)}"
-OPENSSL_SANITIZERS="${OPENSSL_SANITIZERS:-address}"
+BORINGSSL_SANITIZERS="${BORINGSSL_SANITIZERS:-address}"
 LIBTORRENT_SANITIZERS="${LIBTORRENT_SANITIZERS:-fuzzer-no-link,address,undefined,local-bounds}"
 
 require_path() {
@@ -144,7 +144,8 @@ require_path "$CC" "LLVM clang"
 require_path "$CXX" "LLVM clang++"
 require_path "$AR" "LLVM llvm-ar"
 require_path "$RANLIB" "LLVM llvm-ranlib"
-require_path "$OPENSSL_SOURCE/Configure" "OpenSSL source"
+require_path "$BORINGSSL_SOURCE/CMakeLists.txt" "BoringSSL source"
+require_path "$BORINGSSL_SOURCE/LICENSE" "BoringSSL license"
 require_path "$LIBTORRENT_SOURCE/CMakeLists.txt" "libtorrent source"
 require_path "$LIBTORRENT_SOURCE/deps/try_signal/try_signal.cpp" "libtorrent try_signal source"
 require_path "$LIBTORRENT_PATCH_HELPER" "libtorrent patch-series helper"
@@ -162,6 +163,12 @@ RANLIB_SHA256="$(shasum -a 256 "$RANLIB" | awk '{print $1}')"
 LIBTORRENT_PATCH_MANIFEST="$("$LIBTORRENT_PATCH_HELPER" manifest "$LIBTORRENT_SOURCE")"
 "$BOOST_PATCH_HELPER" verify "$BOOST_SOURCE"
 BOOST_PATCH_MANIFEST="$("$BOOST_PATCH_HELPER" manifest "$BOOST_SOURCE")"
+BORINGSSL_COMMIT="$(git -C "$BORINGSSL_SOURCE" rev-parse HEAD)"
+BORINGSSL_TREE="$(git -C "$BORINGSSL_SOURCE" rev-parse 'HEAD^{tree}')"
+if [[ -n "$(git -C "$BORINGSSL_SOURCE" status --porcelain=v1 --untracked-files=all)" ]]; then
+    echo "BoringSSL checkout is dirty" >&2
+    exit 1
+fi
 LIBTORRENT_TRY_SIGNAL_COMMIT="$(git -C "$LIBTORRENT_SOURCE/deps/try_signal" rev-parse HEAD)"
 LIBTORRENT_TRY_SIGNAL_EXPECTED_COMMIT="$(git -C "$LIBTORRENT_SOURCE" ls-tree HEAD deps/try_signal | awk '{print $3}')"
 if [[ "$LIBTORRENT_TRY_SIGNAL_COMMIT" != "$LIBTORRENT_TRY_SIGNAL_EXPECTED_COMMIT" ]]; then
@@ -189,13 +196,15 @@ ar=$AR
 ar_sha256=$AR_SHA256
 ranlib=$RANLIB
 ranlib_sha256=$RANLIB_SHA256
-openssl_source=$OPENSSL_SOURCE
+boringssl_source=$BORINGSSL_SOURCE
+boringssl_commit=$BORINGSSL_COMMIT
+boringssl_tree=$BORINGSSL_TREE
 libtorrent_source=$LIBTORRENT_SOURCE
 $LIBTORRENT_PATCH_MANIFEST
 libtorrent_try_signal_commit=$LIBTORRENT_TRY_SIGNAL_COMMIT
 boost_source=$BOOST_SOURCE
 $BOOST_PATCH_MANIFEST
-openssl_sanitizers=$OPENSSL_SANITIZERS
+boringssl_sanitizers=$BORINGSSL_SANITIZERS
 libtorrent_sanitizers=$LIBTORRENT_SANITIZERS
 EOF
 )"
@@ -233,123 +242,89 @@ base_flags=(
     -fvisibility=hidden
 )
 
-openssl_flags=(
+boringssl_flags=(
     "${base_flags[@]}"
-    -fsanitize="$OPENSSL_SANITIZERS"
+    -fsanitize="$BORINGSSL_SANITIZERS"
     -fsanitize-address-use-after-scope
 )
 
-openssl_options=(
-    no-shared
-    no-pinshared
-    no-module
-    no-tests
-    no-apps
-    no-docs
-    no-asm
-    no-comp
-    no-ssl3
-    no-tls1
-    no-tls1_1
-    no-tls1-method
-    no-tls1_1-method
-    no-dtls
-    no-dtls1
-    no-dtls1_2
-    no-dtls1-method
-    no-dtls1_2-method
-    no-dgram
-    no-async
-    no-atexit
-    no-autoerrinit
-    no-autoload-config
-    no-cmp
-    no-cms
-    no-ct
-    no-dso
-    no-engine
-    no-dynamic-engine
-    no-filenames
-    no-http
-    no-integrity-only-ciphers
-    no-legacy
-    no-multiblock
-    no-nextprotoneg
-    no-ocsp
-    no-psk
-    no-rfc3779
-    no-sock
-    no-srp
-    no-srtp
-    no-thread-pool
-    no-default-thread-pool
-    no-ts
-    no-ui-console
-    no-quic
-    no-cached-fetch
-    no-egd
-    no-external-tests
-    no-fips
-    no-fips-securitychecks
-    no-md2
-    no-msan
-    no-sctp
-    no-tfo
-    no-uplink
-    no-bf
-    no-blake2
-    no-camellia
-    no-cast
-    no-cmac
-    no-des
-    no-dsa
-    no-ec2m
-    no-idea
-    no-md4
-    no-mdc2
-    no-ocb
-    no-rc2
-    no-rc4
-    no-rmd160
-    no-scrypt
-    no-seed
-    no-siphash
-    no-siv
-    no-sm2
-    no-sm2-precomp
-    no-sm3
-    no-sm4
-    no-whirlpool
-    no-ssl-trace
-    no-weak-ssl-ciphers
-)
+verify_boringssl() {
+    local build_dir="$BUILD_ROOT/boringssl"
+    local compile_commands="$build_dir/compile_commands.json"
+    local compile_count
+    local hardened_count
 
-build_openssl() {
+    require_path "$PREFIX/include/openssl/base.h" "BoringSSL headers"
+    require_path "$PREFIX/lib/libssl.a" "BoringSSL TLS archive"
+    require_path "$PREFIX/lib/libcrypto.a" "BoringSSL crypto archive"
+    require_path "$compile_commands" "BoringSSL compile database"
+    grep -q '^#define OPENSSL_IS_BORINGSSL' "$PREFIX/include/openssl/base.h" \
+        || fail "Installed fuzz TLS headers are not BoringSSL"
+    grep -q '^OPENSSL_NO_ASM:.*=ON$' "$build_dir/CMakeCache.txt" \
+        || fail "Fuzz BoringSSL was not configured without assembly"
+    grep -q '^OPENSSL_SMALL:.*=ON$' "$build_dir/CMakeCache.txt" \
+        || fail "Fuzz BoringSSL was not configured with OPENSSL_SMALL"
+    if grep -Eq '"file": ".*\.(S|s|asm)"' "$compile_commands"; then
+        fail "Fuzz BoringSSL compile database contains assembly sources"
+    fi
+    compile_count="$(grep -c '"file":' "$compile_commands")"
+    hardened_count="$(grep -c '"command":.*-DOPENSSL_NO_ASM.*-DOPENSSL_SMALL' "$compile_commands")"
+    [[ "$compile_count" -gt 0 && "$hardened_count" == "$compile_count" ]] \
+        || fail "Fuzz BoringSSL compile commands do not consistently disable assembly"
+    [[ ! -e "$PREFIX/lib/libdecrepit.a" \
+        && ! -e "$PREFIX/lib/libpki.a" \
+        && ! -e "$PREFIX/bin/bssl" ]] \
+        || fail "Unexpected BoringSSL target was installed into the fuzz prefix"
+}
+
+build_boringssl() {
     if [[ -f "$PREFIX/lib/libssl.a" && -f "$PREFIX/lib/libcrypto.a" ]]; then
+        verify_boringssl
         return
     fi
 
-    local build_dir="$BUILD_ROOT/openssl"
+    local build_dir="$BUILD_ROOT/boringssl"
+    local -a generator_args=()
     rm -rf "$build_dir"
-    mkdir -p "$build_dir"
+    mkdir -p "$build_dir" "$PREFIX/include" "$PREFIX/lib" \
+        "$PREFIX/share/licenses/boringssl"
+    if command -v ninja >/dev/null 2>&1; then
+        generator_args=(-G Ninja)
+    fi
 
-    (
-        cd "$build_dir"
-        CC="$CC" \
-        CXX="$CXX" \
-        AR="$AR" \
-        RANLIB="$RANLIB" \
-        CFLAGS="${openssl_flags[*]}" \
-        CXXFLAGS="${openssl_flags[*]} -std=c++23" \
-        "$OPENSSL_SOURCE/Configure" \
-            darwin64-arm64-cc \
-            --prefix="$PREFIX" \
-            --openssldir="$PREFIX/ssl" \
-            "${openssl_options[@]}"
+    cmake \
+        -S "$BORINGSSL_SOURCE" \
+        -B "$build_dir" \
+        "${generator_args[@]}" \
+        -Wno-author \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_COMPILER="$CC" \
+        -DCMAKE_CXX_COMPILER="$CXX" \
+        -DCMAKE_AR="$AR" \
+        -DCMAKE_RANLIB="$RANLIB" \
+        -DCMAKE_OSX_ARCHITECTURES=arm64 \
+        -DCMAKE_OSX_SYSROOT="$SDK_PATH" \
+        -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0 \
+        -DCMAKE_C_COMPILER_TARGET="$TARGET_TRIPLE" \
+        -DCMAKE_CXX_COMPILER_TARGET="$TARGET_TRIPLE" \
+        -DCMAKE_C_FLAGS="${boringssl_flags[*]}" \
+        -DCMAKE_CXX_FLAGS="${boringssl_flags[*]}" \
+        -DCMAKE_C_VISIBILITY_PRESET=hidden \
+        -DCMAKE_CXX_VISIBILITY_PRESET=hidden \
+        -DCMAKE_VISIBILITY_INLINES_HIDDEN=ON \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+        -DBUILD_SHARED_LIBS=OFF \
+        -DBUILD_TESTING=OFF \
+        -DOPENSSL_NO_ASM=ON \
+        -DOPENSSL_SMALL=ON \
+        -DFIPS=OFF
 
-        make -j"$JOBS"
-        make install_sw
-    )
+    cmake --build "$build_dir" --target crypto ssl --parallel "$JOBS"
+    cp -R "$BORINGSSL_SOURCE/include/openssl" "$PREFIX/include/"
+    cp "$build_dir/libssl.a" "$PREFIX/lib/libssl.a"
+    cp "$build_dir/libcrypto.a" "$PREFIX/lib/libcrypto.a"
+    cp "$BORINGSSL_SOURCE/LICENSE" "$PREFIX/share/licenses/boringssl/LICENSE"
+    verify_boringssl
 }
 
 build_libtorrent() {
@@ -370,6 +345,7 @@ build_libtorrent() {
         generator_args=(-G Ninja)
     fi
 
+    # Libtorrent discovers BoringSSL through CMake's OpenSSL-compatible API.
     cmake \
         -S "$LIBTORRENT_SOURCE" \
         -B "$build_dir" \
@@ -424,7 +400,7 @@ build_libtorrent() {
     cmake --build "$build_dir" --target install --parallel "$JOBS"
 }
 
-build_openssl
+build_boringssl
 build_libtorrent
 
 lipo "$PREFIX/lib/libssl.a" -verify_arch arm64

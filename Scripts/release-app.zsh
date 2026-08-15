@@ -82,7 +82,7 @@ typeset -a build_environment=(
     "DEPS_PREFIX=$release_deps_prefix"
     "BOOST_PREFIX=$release_deps_prefix"
     "BOOST_SOURCE_ROOT=$release_deps_dir/src"
-    "OPENSSL_PREFIX=$release_deps_prefix"
+    "BORINGSSL_PREFIX=$release_deps_prefix"
     "SOURCE_CACHE_DIR=$private_source_cache_dir"
     "SOURCE_CACHE_SEED_DIR=$shared_source_cache_dir"
     "SWIFT_BUILD_DIR=$swift_build_dir"
@@ -116,7 +116,7 @@ typeset -r notarization_status=$(/usr/bin/plutil -extract status raw -o - "$nota
     "DEVELOPER_DIR=$selected_developer_dir" \
     "DEPS_PREFIX=$release_deps_prefix" \
     "BOOST_PREFIX=$release_deps_prefix" \
-    "OPENSSL_PREFIX=$release_deps_prefix" \
+    "BORINGSSL_PREFIX=$release_deps_prefix" \
     "$root_dir/Scripts/verify-app.zsh" \
     --mode distribution \
     --team-id "$expected_team_id" \

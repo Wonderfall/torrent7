@@ -134,7 +134,7 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
   longer cleanup watchdogs cover pre-authority startup, native restart, explicit
   shutdown, disconnect, and scope cleanup, terminating only the helper if native
   progress stalls.
-- **Static dependencies:** libtorrent and OpenSSL are linked statically. The final
+- **Static dependencies:** libtorrent and BoringSSL are linked statically. The final
   app bundle contains no third-party dylibs and exactly two Mach-O executables:
   the GUI and its engine extension.
 - **Signing:** both executables use hardened runtime, `restrict`, library
@@ -195,12 +195,15 @@ The production app builds pinned dependencies into local static artifacts:
 | Dependency | Version | Use |
 | --- | --- | --- |
 | libtorrent-rasterbar | 2.1.1 | Torrent engine |
-| OpenSSL | 3.5.7 LTS | TLS support for libtorrent |
+| BoringSSL | `b0760837957bf86bd2014d258a948ee76f43c83f` | TLS support for libtorrent |
 | Boost | 1.92.0 headers | Header-only Boost pieces used by libtorrent |
 
 Homebrew supplies build tools only; it is not a runtime dependency source for the
-app bundle. OpenSSL archives are verified with SHA-256 and a pinned upstream PGP
-signing fingerprint. Boost is verified by SHA-256, then receives an ordered,
+app bundle. BoringSSL is fetched from its official repository at an exact commit
+and tree, with a reproducible source-archive digest. Its build compiles only the
+static `crypto` and `ssl` targets with assembly and tests disabled and
+`OPENSSL_SMALL` enabled; tools, shared libraries, and the `decrepit` and `pki`
+library targets are not staged. Boost is verified by SHA-256, then receives an ordered,
 hashed patch series that authenticates the active Asio scheduler and reactor
 operation callbacks, owning and non-owning executor callbacks and contexts,
 polymorphic executor dispatch and carrier state, and service teardown with
@@ -226,7 +229,7 @@ Requirements:
 Install build tools:
 
 ```sh
-brew install cmake ninja gnupg
+brew install cmake ninja
 ```
 
 Verify the selected Xcode, macOS SDK, and Swift toolchain:
@@ -390,7 +393,7 @@ Scripts/build-all-apps.zsh
 
 Sanitizer profiles use separate dependency and Swift build directories, disable
 fortify, enable libc++ debug hardening, and apply the selected primary sanitizer
-to OpenSSL, libtorrent, and the Bridge. Libtorrent and the Bridge additionally
+to BoringSSL, libtorrent, and the Bridge. Libtorrent and the Bridge additionally
 retain the supported undefined-behavior checks. The apps have distinct bundle
 identities and can coexist with production and each other:
 
