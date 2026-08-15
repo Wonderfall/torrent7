@@ -32,6 +32,7 @@ typeset -ra test_targets=(
     test_http_parser
     test_ip_voter
     test_pe_crypto
+    test_ssl
     test_storage
     test_torrent
     test_tracker_list
@@ -77,6 +78,12 @@ restore_configuration=0
         "$source_dir/test/test_pe_crypto.cpp.diffie_hellman"
     ./test_pe_crypto --no-redirect \
         "$source_dir/test/test_pe_crypto.cpp.diffie_hellman_degenerate_key"
+    ./test_ssl --no-redirect \
+        "$source_dir/test/test_ssl.cpp.malicious_peer"
+    ./test_ssl --no-redirect \
+        "$source_dir/test/test_ssl.cpp.ssl_magnet_both_certs"
+    ./test_ssl --no-redirect \
+        "$source_dir/test/test_ssl.cpp.ssl_magnet_no_seed_cert"
     ./test_enum_net --no-redirect \
         "$source_dir/test/test_enum_net.cpp.is_global_addresses"
     ./test_enum_net --no-redirect \

@@ -1,0 +1,83 @@
+diff --git a/src/pe_crypto.cpp b/src/pe_crypto.cpp
+index 0665515e5..b927f4521 100644
+--- a/src/pe_crypto.cpp
++++ b/src/pe_crypto.cpp
+@@ -139,7 +139,7 @@ namespace libtorrent::aux {
+ 	{
+ 		std::array<char, 96> ret;
+ 		auto* begin = reinterpret_cast<unsigned char*>(ret.data());
+-		int const len = BN_bn2bin(k.get(), begin);
++		auto const len = BN_bn2bin(k.get(), begin);
+ 
+ 		// TODO: it would be nice to be able to export to a fixed width field, so
+ 		// we wouldn't have to shift it later
+diff --git a/src/random.cpp b/src/random.cpp
+index e321ab823..d65bfd1cc 100644
+--- a/src/random.cpp
++++ b/src/random.cpp
+@@ -118,7 +118,11 @@ namespace libtorrent::aux {
+ 
+ 			// openssl
+ 			int r = RAND_bytes(reinterpret_cast<unsigned char*>(buffer.data())
++#ifdef OPENSSL_IS_BORINGSSL
++				, static_cast<std::size_t>(buffer.size()));
++#else
+ 				, int(buffer.size()));
++#endif
+ 			if (r != 1) aux::throw_ex<system_error>(errors::no_entropy);
+ #elif TORRENT_USE_GETRANDOM
+ 			ssize_t const r = ::getrandom(buffer.data(), static_cast<std::size_t>(buffer.size()), 0);
+diff --git a/src/torrent.cpp b/src/torrent.cpp
+index e6387b747..7b9a3d039 100644
+--- a/src/torrent.cpp
++++ b/src/torrent.cpp
+@@ -1715,7 +1715,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 		auto* gens = static_cast<GENERAL_NAMES*>(
+ 			X509_get_ext_d2i(cert, NID_subject_alt_name, nullptr, nullptr));
+ 
+-		for (int i = 0; i < sk_GENERAL_NAME_num(gens); ++i)
++		auto const num_names = sk_GENERAL_NAME_num(gens);
++		for (auto i = decltype(sk_GENERAL_NAME_num(gens)){0}; i < num_names; ++i)
+ 		{
+ 			GENERAL_NAME* gen = sk_GENERAL_NAME_value(gens, i);
+ 			if (gen->type != GEN_DNS) continue;
+@@ -6382,6 +6383,7 @@ namespace {
+ 		if (should_log())
+ 			debug_log("*** use private key file: %s", ec.message().c_str());
+ #endif
++#ifndef OPENSSL_IS_BORINGSSL
+ 		m_ssl_ctx->use_tmp_dh_file(dh_params, ec);
+ 		if (ec)
+ 		{
+@@ -6391,6 +6393,11 @@ namespace {
+ #ifndef TORRENT_DISABLE_LOGGING
+ 		if (should_log())
+ 			debug_log("*** use DH file: %s", ec.message().c_str());
++#endif
++#else
++		// BoringSSL uses built-in ephemeral ECDHE groups and its temporary-DH
++		// setter is a no-op. Do not expose its legacy DH parameter parser.
++		static_cast<void>(dh_params);
+ #endif
+ 	}
+ 
+@@ -6418,6 +6425,7 @@ namespace {
+ 				alerts().emplace_alert<torrent_error_alert>(get_handle(), ec, "[private key]");
+ 		}
+ 
++#ifndef OPENSSL_IS_BORINGSSL
+ 		boost::asio::const_buffer dh_params_buf(dh_params.c_str(), dh_params.size());
+ 		m_ssl_ctx->use_tmp_dh(dh_params_buf, ec);
+ 		if (ec)
+@@ -6425,6 +6433,11 @@ namespace {
+ 			if (alerts().should_post<torrent_error_alert>())
+ 				alerts().emplace_alert<torrent_error_alert>(get_handle(), ec, "[dh params]");
+ 		}
++#else
++		// See set_ssl_cert(): parsing temporary DH parameters has no effect in
++		// BoringSSL, so avoid retaining that legacy parser attack surface.
++		static_cast<void>(dh_params);
++#endif
+ 	}
+ 
+ #endif
