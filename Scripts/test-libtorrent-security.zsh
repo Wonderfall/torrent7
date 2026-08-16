@@ -32,7 +32,6 @@ typeset -ra test_targets=(
     test_http_parser
     test_ip_voter
     test_pe_crypto
-    test_ssl
     test_storage
     test_torrent
     test_tracker_list
@@ -57,6 +56,8 @@ fi
 [[ -f "$build_dir/CMakeCache.txt" ]] \
     || fail "Missing configured libtorrent build: $build_dir"
 "$patch_helper" verify "$source_dir"
+"$root_dir/Scripts/verify-libtorrent-boringssl-tls.zsh" \
+    "$deps_dir/prefix/lib/libtorrent-rasterbar.a"
 SKIP_BUILD_DEPS=1 "$root_dir/Scripts/test-boost-asio-pac.zsh"
 SKIP_BUILD_DEPS=1 "$root_dir/Scripts/test-boost-asio-recycling-allocator.zsh"
 SKIP_BUILD_DEPS=1 "$root_dir/Scripts/test-libtorrent-indirect-operation-pac.zsh"
@@ -78,12 +79,6 @@ restore_configuration=0
         "$source_dir/test/test_pe_crypto.cpp.diffie_hellman"
     ./test_pe_crypto --no-redirect \
         "$source_dir/test/test_pe_crypto.cpp.diffie_hellman_degenerate_key"
-    ./test_ssl --no-redirect \
-        "$source_dir/test/test_ssl.cpp.malicious_peer"
-    ./test_ssl --no-redirect \
-        "$source_dir/test/test_ssl.cpp.ssl_magnet_both_certs"
-    ./test_ssl --no-redirect \
-        "$source_dir/test/test_ssl.cpp.ssl_magnet_no_seed_cert"
     ./test_enum_net --no-redirect \
         "$source_dir/test/test_enum_net.cpp.is_global_addresses"
     ./test_enum_net --no-redirect \
@@ -116,6 +111,10 @@ restore_configuration=0
     ./test_tracker_manager --no-redirect \
         "$source_dir/test/test_tracker_manager.cpp.protocol_dispatch_is_case_insensitive"
     ./test_http_connection --no-redirect \
+        "$source_dir/test/test_http_connection.cpp.boringssl_client_policy"
+    ./test_http_connection --no-redirect \
+        "$source_dir/test/test_http_connection.cpp.system_trust_rejects_untrusted_certificate"
+    ./test_http_connection --no-redirect \
         "$source_dir/test/test_http_connection.cpp.no_proxy_ssl"
     ./test_http_connection --no-redirect \
         "$source_dir/test/test_http_connection.cpp.endpoint_filter_rechecks_redirect_target"
@@ -127,7 +126,7 @@ restore_configuration=0
     ./test_web_seed_redirect --no-redirect \
         "$source_dir/test/test_web_seed_redirect.cpp.web_seed_proxy_request_uses_vetted_endpoint"
     ./test_web_seed_redirect --no-redirect \
-        "$source_dir/test/test_web_seed_redirect.cpp.web_seed_https_redirect_downgrade"
+        "$source_dir/test/test_web_seed_redirect.cpp.web_seed_https_validation_cannot_be_disabled"
     ./test_web_seed_redirect --no-redirect \
         "$source_dir/test/test_web_seed_redirect.cpp.web_seed_ssrf_blocks_non_global_endpoint"
     ./test_web_seed_redirect --no-redirect \

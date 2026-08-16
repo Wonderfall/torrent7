@@ -96,7 +96,6 @@ cxx_flags=(
     -DTORRENT_DISABLE_PREDICTIVE_PIECES
     -DTORRENT_USE_OPENSSL
     -DTORRENT_USE_LIBCRYPTO
-    -DTORRENT_SSL_PEERS
     -I"$TOOLS_DIR/harnesses"
     -I"$ROOT_DIR/Sources/TorrentBridge/include"
     -I"$DEPS_PREFIX/include"
@@ -108,6 +107,7 @@ link_flags=(
     "$DEPS_PREFIX/lib/libssl.a"
     "$DEPS_PREFIX/lib/libcrypto.a"
     -framework CoreFoundation
+    -framework Security
     -framework SystemConfiguration
 )
 

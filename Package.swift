@@ -182,8 +182,7 @@ let bridgeDefines: [CXXSetting] = [
     // Libtorrent uses these names for its OpenSSL-compatible TLS API backend;
     // the linked implementation is the pinned BoringSSL build.
     .define("TORRENT_USE_OPENSSL"),
-    .define("TORRENT_USE_LIBCRYPTO"),
-    .define("TORRENT_SSL_PEERS")
+    .define("TORRENT_USE_LIBCRYPTO")
 ] + (enableDiagnostics ? [
     // Sanitizer dependencies use libtorrent's CMake Debug configuration,
     // whose public assertion mode changes internal C++ object layouts.
@@ -401,6 +400,7 @@ let package = Package(
             ] + bridgeWarnings + bridgeTargetWarnings + bridgeDefines,
             linkerSettings: [
                 .linkedFramework("CoreFoundation"),
+                .linkedFramework("Security"),
                 .linkedFramework("SystemConfiguration"),
                 .unsafeFlags(bridgeStaticLibraryFlags + bridgeLinkerHardeningFlags)
             ]
@@ -508,6 +508,7 @@ let package = Package(
             ] + bridgeWarnings + bridgeDefines,
             linkerSettings: [
                 .linkedFramework("CoreFoundation"),
+                .linkedFramework("Security"),
                 .linkedFramework("SystemConfiguration"),
                 .unsafeFlags(bridgeStaticLibraryFlags + bridgeLinkerHardeningFlags)
             ]

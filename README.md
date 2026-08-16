@@ -137,6 +137,11 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
 - **Static dependencies:** libtorrent and BoringSSL are linked statically. The final
   app bundle contains no third-party dylibs and exactly two Mach-O executables:
   the GUI and its engine extension.
+- **Narrow TLS surface:** HTTPS uses BoringSSL's buffer-only client method and
+  macOS system trust with strict hostname binding and network certificate fetching
+  disabled. TLS 1.0/1.1, 0-RTT, legacy TLS 1.2 ciphers, and unused SSL-torrent
+  peers are disabled; UPnP's encryption-only HTTPS context remains isolated from
+  authenticated tracker and web-seed traffic.
 - **Signing:** both executables use hardened runtime, `restrict`, library
   validation, and separately reviewed sandbox entitlements. Identified builds
   require valid matching Team IDs.
@@ -214,7 +219,9 @@ from a pinned tag and commit through a local source cache, then receives its own
 ordered, hashed patch series for Xcode compatibility, network boundaries, storage
 confinement, bounded pread recheck hashing, and complete typed-allocation
 coverage. WebTorrent support stays
-disabled to avoid adding its unused protocol and dependency surface.
+disabled to avoid adding its unused protocol and dependency surface. SSL-torrent
+peers are likewise disabled because the application has no certificate-control
+workflow for them.
 The app bundle also contains `ThirdPartyNotices.txt`; release verification requires
 it to exactly match the reviewed notices in `Packaging/ThirdPartyNotices.txt`.
 

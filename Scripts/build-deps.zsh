@@ -81,6 +81,7 @@ typeset -r LIBTORRENT_BUILD_DIR="$BUILD_ROOT/libtorrent"
 typeset -r LIBTORRENT_BUILD_STAMP="$DEPS_PREFIX/.torrent-app-libtorrent-build"
 typeset -r LIBTORRENT_PROVENANCE="$DEPS_PREFIX/share/torrent7/libtorrent-provenance.txt"
 typeset -r LIBTORRENT_PATCH_HELPER="$ROOT_DIR/Scripts/libtorrent-patch-series.sh"
+typeset -r LIBTORRENT_TLS_VERIFIER="$ROOT_DIR/Scripts/verify-libtorrent-boringssl-tls.zsh"
 typeset -r LIBTORRENT_REPO=${LIBTORRENT_REPO:-https://github.com/arvidn/libtorrent.git}
 typeset -r LIBTORRENT_TAG=${LIBTORRENT_TAG:-v2.1.1}
 typeset -r LIBTORRENT_COMMIT=$("$LIBTORRENT_PATCH_HELPER" commit)
@@ -101,6 +102,7 @@ typeset -a LIBTORRENT_CMAKE_OPTIONS=(
     -Ddht=ON
     -Ddeprecated-functions=OFF
     -Dencryption=ON
+    -Dssl-torrents=OFF
     -Dexceptions=ON
     -Dgnutls=OFF
     -Dextensions=ON
@@ -1113,6 +1115,7 @@ build_libtorrent() {
         "$BOOST_RECYCLER_VERIFIER" "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
         verify_libtorrent_trap_only_ubsan "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
         verify_libtorrent_indirect_operation_pac "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
+        "$LIBTORRENT_TLS_VERIFIER" "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
         write_stamp "$LIBTORRENT_PROVENANCE" libtorrent_build_manifest "$DEPS_PREFIX"
         return
     fi
@@ -1174,6 +1177,7 @@ build_libtorrent() {
     "$BOOST_RECYCLER_VERIFIER" "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
     verify_libtorrent_trap_only_ubsan "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
     verify_libtorrent_indirect_operation_pac "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
+    "$LIBTORRENT_TLS_VERIFIER" "$DEPS_PREFIX/lib/libtorrent-rasterbar.a"
     write_stamp "$LIBTORRENT_BUILD_STAMP" libtorrent_build_manifest "$DEPS_PREFIX"
     write_stamp "$LIBTORRENT_PROVENANCE" libtorrent_build_manifest "$DEPS_PREFIX"
 }
@@ -1185,6 +1189,7 @@ require_tool shasum
 require_tool tar
 require_path "$BOOST_PATCH_HELPER" "Boost patch-series helper"
 require_path "$BOOST_RECYCLER_VERIFIER" "Boost.Asio recycler verifier"
+require_path "$LIBTORRENT_TLS_VERIFIER" "libtorrent BoringSSL TLS verifier"
 [[ "$("$BOOST_PATCH_HELPER" version)" == "$BOOST_VERSION" ]] \
     || fail "Boost patch-series version does not match BOOST_VERSION=$BOOST_VERSION"
 require_path "$BORINGSSL_CC" "BoringSSL C compiler"

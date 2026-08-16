@@ -448,6 +448,15 @@ allocation metadata across libtorrent's pool and disk-buffer wrappers instead
 of disabling allocator-wrapper diagnostics for the dependency. Application
 source policy separately controls allowed tracker and web-seed schemes.
 
+Authenticated HTTPS contexts use BoringSSL's buffer-only TLS method, keep the
+expected hostname in connection-owned ex-data, and validate the peer's DER chain
+with macOS Security.framework. Trust evaluation is fail-closed and cannot fetch
+missing certificates over the network. A separate buffer-only UPnP context
+preserves UPnP's existing encryption-only semantics without weakening tracker or
+web-seed authentication. SSL-torrent peer support is not compiled because the
+application does not expose the certificate alerts or credential APIs needed to
+operate it safely.
+
 Boost.Asio's small-block recycler also preserves each concrete allocation type
 instead of erasing it to `void *`. Its per-thread cache records the matching
 type descriptor and never returns a block under a different allocation class.

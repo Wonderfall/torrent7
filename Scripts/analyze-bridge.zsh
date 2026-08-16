@@ -164,7 +164,6 @@ typeset -a compiler_args=(
     -DTORRENT_DISABLE_PREDICTIVE_PIECES
     -DTORRENT_USE_OPENSSL
     -DTORRENT_USE_LIBCRYPTO
-    -DTORRENT_SSL_PEERS
 )
 
 "$clang_tidy" --checks="$checks_csv" --verify-config

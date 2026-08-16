@@ -542,6 +542,27 @@ reject_match "com\\.apple\\.security\\.files\\.(bookmarks|user-selected)" "$engi
 /usr/bin/xcrun otool -tvV "$engine_extension_executable" >"$engine_text_output"
 /usr/bin/xcrun nm -m "$executable" >"$app_symbol_output"
 /usr/bin/xcrun nm -m "$engine_extension_executable" >"$engine_symbol_output"
+
+typeset tls_symbol
+for tls_symbol in \
+    _TLS_with_buffers_method \
+    _SSL_CTX_set_custom_verify \
+    _SSL_CTX_set1_buffer_pool \
+    _SSL_get0_peer_certificates \
+    _SecCertificateCreateWithData \
+    _SecPolicyCreateSSL \
+    _SecTrustCreateWithCertificates \
+    _SecTrustSetNetworkFetchAllowed \
+    _SecTrustEvaluateWithError; do
+    require_match "[[:space:]]${tls_symbol}([[:space:]]|$)" "$engine_symbol_output" \
+        "Engine extension lacks required buffer-only TLS symbol: $tls_symbol"
+done
+reject_match "[[:space:]]_(TLS_method|TLS_client_method|SSL_CTX_set_verify|SSL_set_verify)([[:space:]]|$)" \
+    "$engine_symbol_output" \
+    "Engine extension retains a legacy BoringSSL TLS/X.509 entry point"
+reject_match "[[:space:]]_(X509|d2i_X509|i2d_X509|ASN1_|PEM_)[^[:space:]]*([[:space:]]|$)" \
+    "$engine_symbol_output" \
+    "Engine extension retains BoringSSL X.509/ASN.1/PEM code"
 /usr/bin/strings -a "$engine_extension_executable" >"$engine_strings_output"
 
 # The GUI is now pure Swift. Swift arm64e emits PAC but has no BTI codegen

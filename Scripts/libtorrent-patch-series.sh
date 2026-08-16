@@ -19,6 +19,7 @@ readonly -a LIBTORRENT_PATCHES=(
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-complete-typed-allocation.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-indirect-operation-pac.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-boringssl-compatibility.patch"
+    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-boringssl-system-trust.patch"
 )
 
 fail() {

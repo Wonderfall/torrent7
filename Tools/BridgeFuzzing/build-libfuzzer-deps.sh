@@ -19,6 +19,7 @@ OWNERSHIP_MARKER_CONTENT="torrent7-libfuzzer-deps-v1"
 BORINGSSL_SOURCE="${BORINGSSL_SOURCE:-$ROOT_DIR/.build/deps/source-cache/boringssl/source}"
 LIBTORRENT_SOURCE="${LIBTORRENT_SOURCE:-$ROOT_DIR/.build/deps/arm64e/src/libtorrent}"
 LIBTORRENT_PATCH_HELPER="$ROOT_DIR/Scripts/libtorrent-patch-series.sh"
+LIBTORRENT_TLS_VERIFIER="$ROOT_DIR/Scripts/verify-libtorrent-boringssl-tls.zsh"
 BOOST_SOURCE="${BOOST_SOURCE:-$ROOT_DIR/.build/deps/source-cache/boost/boost_1_92_0}"
 BOOST_PATCH_HELPER="$ROOT_DIR/Scripts/boost-patch-series.sh"
 LLVM_PREFIX="${LLVM_PREFIX:-$(brew --prefix llvm 2>/dev/null || true)}"
@@ -149,6 +150,7 @@ require_path "$BORINGSSL_SOURCE/LICENSE" "BoringSSL license"
 require_path "$LIBTORRENT_SOURCE/CMakeLists.txt" "libtorrent source"
 require_path "$LIBTORRENT_SOURCE/deps/try_signal/try_signal.cpp" "libtorrent try_signal source"
 require_path "$LIBTORRENT_PATCH_HELPER" "libtorrent patch-series helper"
+require_path "$LIBTORRENT_TLS_VERIFIER" "libtorrent BoringSSL TLS verifier"
 require_path "$BOOST_SOURCE/boost" "Boost headers"
 require_path "$BOOST_PATCH_HELPER" "Boost patch-series helper"
 
@@ -329,6 +331,7 @@ build_boringssl() {
 
 build_libtorrent() {
     if [[ -f "$PREFIX/lib/libtorrent-rasterbar.a" ]]; then
+        "$LIBTORRENT_TLS_VERIFIER" "$PREFIX/lib/libtorrent-rasterbar.a"
         return
     fi
 
@@ -377,6 +380,7 @@ build_libtorrent() {
         -Ddht=ON \
         -Ddeprecated-functions=OFF \
         -Dencryption=ON \
+        -Dssl-torrents=OFF \
         -Dexceptions=ON \
         -Dgnutls=OFF \
         -Dextensions=ON \
@@ -398,6 +402,7 @@ build_libtorrent() {
         -DCMAKE_PREFIX_PATH="$PREFIX;$BOOST_SOURCE"
 
     cmake --build "$build_dir" --target install --parallel "$JOBS"
+    "$LIBTORRENT_TLS_VERIFIER" "$PREFIX/lib/libtorrent-rasterbar.a"
 }
 
 build_boringssl
