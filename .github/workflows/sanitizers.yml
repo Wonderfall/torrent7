@@ -120,6 +120,9 @@ jobs:
             xcrun nm "$archive" \
               | awk -v symbol="$RUNTIME_SYMBOL" 'index($0, symbol) { found=1 } END { exit !found }' \
               || { print -ru2 -- "Missing $SANITIZER_PROFILE sanitizer instrumentation: $archive"; exit 1; }
+            xcrun nm "$archive" \
+              | awk 'index($0, "___ubsan_handle_") { found=1 } END { exit !found }' \
+              || { print -ru2 -- "Missing UBSan instrumentation: $archive"; exit 1; }
           done
 
       - name: Run libtorrent security regressions

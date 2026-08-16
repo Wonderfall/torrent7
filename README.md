@@ -154,8 +154,8 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
   hidden visibility, pointer authentication, branch target identification,
   straight-line speculation hardening, jump-table hardening, typed allocation
   hardening, libc++ hardening, trap-only undefined-behavior and local-bounds
-  checks for release libtorrent code, and the extended trap-only sanitizer set
-  for release bridge code.
+  checks for release BoringSSL and libtorrent code, and the extended trap-only
+  sanitizer set for release bridge code.
   Stored bridge callbacks and their long-lived opaque contexts use role- and
   address-diversified authentication. The dependency build also rejects raw C
   allocation and untyped global C++ allocation imports in the final libtorrent

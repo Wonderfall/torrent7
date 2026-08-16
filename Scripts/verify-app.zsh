@@ -642,6 +642,10 @@ require_literal_line \
     "$engine_strings_output" \
     "Engine extension does not match the current native dependencies"
 if [[ $expected_sanitizer == none ]]; then
+    require_match \
+        $'[[:space:]]brk[[:space:]]+#0x55[0-9a-f]+' \
+        "$boringssl_handshake_output" \
+        "Engine extension lacks trap-only checks in BoringSSL handshake code"
     typeset -r libtorrent_trap_output="$temporary_dir/libtorrent-trap-only.txt"
     extract_disassembly_function \
         "$engine_text_output" \

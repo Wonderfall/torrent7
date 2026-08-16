@@ -139,38 +139,34 @@ typeset -r BRANCH_TARGET_IDENTIFICATION_FLAG="-fbranch-target-identification"
 typeset -r SLS_HARDENING_FLAG="-mharden-sls=all"
 typeset -r ZERO_CALL_USED_REGS_FLAG="-fzero-call-used-regs=used-gpr"
 typeset -r RETAIN_NULL_POINTER_CHECKS_FLAG="-fno-delete-null-pointer-checks"
-typeset -r NO_STRICT_OVERFLOW_FLAG="-fno-strict-overflow"
 typeset -r NO_STRICT_ALIASING_FLAG="-fno-strict-aliasing"
-# Libtorrent and its template dependencies intentionally use unsigned modular
-# arithmetic and narrowing. Reserve those extra traps for the owned Bridge;
-# keep the dependency's production profile focused on actual UB and bounds.
-typeset -r LIBTORRENT_TRAP_ONLY_SANITIZERS="undefined,local-bounds"
+# BoringSSL and libtorrent intentionally use unsigned modular arithmetic and
+# narrowing. Reserve those extra traps for the owned Bridge; keep dependency
+# production profiles focused on actual UB and bounds.
+typeset -r DEPENDENCY_TRAP_ONLY_SANITIZERS="undefined,local-bounds"
+typeset -r DEPENDENCY_TRAP_ONLY_FLAGS="-fsanitize=$DEPENDENCY_TRAP_ONLY_SANITIZERS -fsanitize-trap=$DEPENDENCY_TRAP_ONLY_SANITIZERS -fno-sanitize-recover=$DEPENDENCY_TRAP_ONLY_SANITIZERS"
 typeset LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE
 # Keep fortify out of sanitizer profiles so it cannot obscure reports.
 typeset FORTIFY_FLAGS="-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3"
-typeset BORINGSSL_STRICT_OVERFLOW_FLAGS="$NO_STRICT_OVERFLOW_FLAG"
-typeset BORINGSSL_SANITIZER_FLAGS=
-typeset LIBTORRENT_SANITIZER_FLAGS="-fsanitize=$LIBTORRENT_TRAP_ONLY_SANITIZERS -fsanitize-trap=$LIBTORRENT_TRAP_ONLY_SANITIZERS -fno-sanitize-recover=$LIBTORRENT_TRAP_ONLY_SANITIZERS"
+typeset BORINGSSL_SANITIZER_FLAGS="$DEPENDENCY_TRAP_ONLY_FLAGS"
+typeset LIBTORRENT_SANITIZER_FLAGS="$DEPENDENCY_TRAP_ONLY_FLAGS"
 case "$SANITIZER_PROFILE" in
     address)
-        BORINGSSL_SANITIZER_FLAGS="-g -fno-omit-frame-pointer -fsanitize=address -fsanitize-address-use-after-scope"
+        BORINGSSL_SANITIZER_FLAGS="-g -fno-omit-frame-pointer -fsanitize=address,undefined,local-bounds -fsanitize-address-use-after-scope -fno-sanitize-recover=undefined,local-bounds"
         LIBTORRENT_SANITIZER_FLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined,local-bounds -fsanitize-address-use-after-scope -fno-sanitize-recover=undefined,local-bounds"
         ;;
     thread)
-        BORINGSSL_SANITIZER_FLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=thread"
+        BORINGSSL_SANITIZER_FLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=thread,undefined,local-bounds -fno-sanitize-recover=undefined,local-bounds"
         LIBTORRENT_SANITIZER_FLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=thread,undefined,local-bounds -fno-sanitize-recover=undefined,local-bounds"
         ;;
 esac
 if [[ -n "$SANITIZER_PROFILE" ]]; then
     LIBCPP_HARDENING_MODE="_LIBCPP_HARDENING_MODE_DEBUG"
     FORTIFY_FLAGS="-U_FORTIFY_SOURCE"
-    # Do not impose defined signed-overflow semantics in diagnostic BoringSSL
-    # builds, preserving instrumentation opportunities for combined profiles.
-    BORINGSSL_STRICT_OVERFLOW_FLAGS=
 fi
 typeset -r HARDENED_COMMON_PREFIX="-Wformat -Wformat-security -Werror=format-security -fstack-protector-strong $FORTIFY_FLAGS -fPIE -ftrivial-auto-var-init=zero $RETAIN_NULL_POINTER_CHECKS_FLAG"
 typeset -r HARDENED_COMMON_SUFFIX="$NO_STRICT_ALIASING_FLAG -fvisibility=hidden -faarch64-jump-table-hardening $STRICT_FLEX_ARRAYS_FLAG $BRANCH_TARGET_IDENTIFICATION_FLAG $SLS_HARDENING_FLAG $ZERO_CALL_USED_REGS_FLAG $PTRAUTH_C_FLAGS"
-typeset -r BORINGSSL_HARDENED_COMMON_FLAGS="$HARDENED_COMMON_PREFIX $BORINGSSL_STRICT_OVERFLOW_FLAGS $HARDENED_COMMON_SUFFIX"
+typeset -r BORINGSSL_HARDENED_COMMON_FLAGS="$HARDENED_COMMON_PREFIX $HARDENED_COMMON_SUFFIX"
 typeset -r LIBTORRENT_HARDENED_COMMON_FLAGS="$HARDENED_COMMON_PREFIX $HARDENED_COMMON_SUFFIX"
 typeset -r LIBTORRENT_HARDENED_C_FLAGS="$LIBTORRENT_HARDENED_COMMON_FLAGS $TYPED_ALLOCATOR_C_FLAGS"
 typeset -r BORINGSSL_HARDENED_C_FLAGS="$BORINGSSL_HARDENED_COMMON_FLAGS $TYPED_ALLOCATOR_C_FLAGS"

@@ -28,10 +28,10 @@ typeset -a sanitizer_flags=()
 case ${SANITIZER_PROFILE:-} in
     "") ;;
     address)
-        sanitizer_flags=(-fsanitize=address,undefined -fno-sanitize-recover=undefined)
+        sanitizer_flags=(-fsanitize=address,undefined,local-bounds -fno-sanitize-recover=undefined,local-bounds)
         ;;
     thread)
-        sanitizer_flags=(-fsanitize=thread,undefined -fno-sanitize-recover=undefined)
+        sanitizer_flags=(-fsanitize=thread,undefined,local-bounds -fno-sanitize-recover=undefined,local-bounds)
         ;;
     *) fail "SANITIZER_PROFILE must be address or thread" ;;
 esac
