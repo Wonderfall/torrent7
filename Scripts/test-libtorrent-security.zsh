@@ -113,6 +113,8 @@ restore_configuration=0
     ./test_http_connection --no-redirect \
         "$source_dir/test/test_http_connection.cpp.boringssl_client_policy"
     ./test_http_connection --no-redirect \
+        "$source_dir/test/test_http_connection.cpp.boringssl_certificate_chain_limits"
+    ./test_http_connection --no-redirect \
         "$source_dir/test/test_http_connection.cpp.system_trust_rejects_untrusted_certificate"
     ./test_http_connection --no-redirect \
         "$source_dir/test/test_http_connection.cpp.no_proxy_ssl"

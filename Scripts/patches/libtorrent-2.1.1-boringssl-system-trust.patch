@@ -49,7 +49,7 @@ index 63f903ca9..0c637c814 100644
  			$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/deps/asio-gnutls/include>
              $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 diff --git a/include/libtorrent/aux_/ssl.hpp b/include/libtorrent/aux_/ssl.hpp
-index cb30e4391..590876e45 100644
+index cb30e4391..e17d7b14a 100644
 --- a/include/libtorrent/aux_/ssl.hpp
 +++ b/include/libtorrent/aux_/ssl.hpp
 @@ -57,6 +57,7 @@ see LICENSE file.
@@ -107,7 +107,7 @@ index cb30e4391..590876e45 100644
  
  // GnuTLS only exposes options to disable SSLv2 and SSLv3, since it never
  // negotiates anything older than TLS 1.0 to begin with
-@@ -126,6 +137,14 @@ using boost::asio::gnutls::error::get_stream_category;
+@@ -126,6 +137,19 @@ using boost::asio::gnutls::error::get_stream_category;
  
  }
  
@@ -119,10 +119,15 @@ index cb30e4391..590876e45 100644
 +
 +TORRENT_EXTRA_EXPORT context make_client_context(client_context_authentication authentication);
 +
++#ifdef OPENSSL_IS_BORINGSSL
++TORRENT_EXTRA_EXPORT bool peer_certificate_chain_within_limits(
++	STACK_OF(CRYPTO_BUFFER) const* chain) noexcept;
++#endif
++
  inline context_handle_type get_handle(context &c)
  {
  #if defined TORRENT_USE_OPENSSL
-@@ -155,14 +174,15 @@ context_handle_type get_context_handle(stream<T>& s)
+@@ -155,14 +179,15 @@ context_handle_type get_context_handle(stream<T>& s)
  #endif
  }
  
@@ -252,10 +257,10 @@ index afdacf1c0..d8e47ff5c 100644
  			ssl::set_host_name(visitor.ssl_, hostname, ec);
  #else
 diff --git a/src/ssl.cpp b/src/ssl.cpp
-index 1fd23762c..4615e4910 100644
+index 1fd23762c..929a3c3ec 100644
 --- a/src/ssl.cpp
 +++ b/src/ssl.cpp
-@@ -11,19 +11,264 @@ see LICENSE file.
+@@ -11,19 +11,283 @@ see LICENSE file.
  */
  
  #include "libtorrent/aux_/ssl.hpp"
@@ -289,9 +294,9 @@ index 1fd23762c..4615e4910 100644
 +#ifdef OPENSSL_IS_BORINGSSL
 +namespace {
 +
-+	constexpr std::size_t max_certificate_chain_size = 32;
-+	constexpr std::size_t max_certificate_size = 1024 * 1024;
-+	constexpr std::size_t max_certificate_list_size = 4 * 1024 * 1024;
++	constexpr std::size_t max_certificate_chain_size = 8;
++	constexpr std::size_t max_certificate_list_size = SSL_MAX_CERT_LIST_DEFAULT;
++	static_assert(max_certificate_list_size == 100 * 1024);
 +
 +	constexpr char tls12_cipher_list[] =
 +		"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:"
@@ -375,7 +380,7 @@ index 1fd23762c..4615e4910 100644
 +	bool append_certificate(CFMutableArrayRef certificates, CRYPTO_BUFFER const* buffer)
 +	{
 +		auto const size = CRYPTO_BUFFER_len(buffer);
-+		if (size == 0 || size > max_certificate_size
++		if (size == 0 || size > max_certificate_list_size
 +			|| size > static_cast<std::size_t>(std::numeric_limits<CFIndex>::max()))
 +			return false;
 +
@@ -410,8 +415,8 @@ index 1fd23762c..4615e4910 100644
 +		}
 +
 +		auto const* chain = SSL_get0_peer_certificates(stream);
-+		auto const chain_size = chain == nullptr ? 0 : sk_CRYPTO_BUFFER_num(chain);
-+		if (chain_size == 0 || chain_size > max_certificate_chain_size) return ssl_verify_invalid;
++		if (!peer_certificate_chain_within_limits(chain)) return ssl_verify_invalid;
++		auto const chain_size = sk_CRYPTO_BUFFER_num(chain);
 +
 +		cf_handle<CFMutableArrayRef> const certificates(CFArrayCreateMutable(
 +			kCFAllocatorDefault, static_cast<CFIndex>(chain_size), &kCFTypeArrayCallBacks));
@@ -481,6 +486,25 @@ index 1fd23762c..4615e4910 100644
 +	}
 +
 +} // anonymous namespace
++
++bool peer_certificate_chain_within_limits(
++	STACK_OF(CRYPTO_BUFFER) const* const chain) noexcept
++{
++	if (chain == nullptr) return false;
++	auto const chain_size = sk_CRYPTO_BUFFER_num(chain);
++	if (chain_size == 0 || chain_size > max_certificate_chain_size) return false;
++
++	std::size_t total_size = 0;
++	for (std::size_t i = 0; i < chain_size; ++i)
++	{
++		auto const* const certificate = sk_CRYPTO_BUFFER_value(chain, i);
++		if (certificate == nullptr) return false;
++		auto const size = CRYPTO_BUFFER_len(certificate);
++		if (size == 0 || size > max_certificate_list_size - total_size) return false;
++		total_size += size;
++	}
++	return true;
++}
 +#endif
 +
 +context make_client_context(client_context_authentication const authentication)
@@ -521,7 +545,7 @@ index 1fd23762c..4615e4910 100644
  void set_trust_certificate(native_context_type nc, string_view pem, error_code &ec)
  {
  #if defined TORRENT_USE_OPENSSL
-@@ -98,26 +343,103 @@ void set_server_name_callback(context_handle_type c, server_name_callback_type c
+@@ -98,26 +362,103 @@ void set_server_name_callback(context_handle_type c, server_name_callback_type c
  		c->set_server_name_callback(nullptr);
  #endif
  }
@@ -627,7 +651,7 @@ index 1fd23762c..4615e4910 100644
  void set_context(stream_handle_type s, context_handle_type c)
  {
  #if defined TORRENT_USE_OPENSSL
-@@ -148,8 +470,9 @@ context_handle_type get_context(stream_handle_type s)
+@@ -148,8 +489,9 @@ context_handle_type get_context(stream_handle_type s)
  	return &s->get_context();
  #endif
  }
@@ -660,20 +684,26 @@ index 834809d59..7ccbe66b2 100644
  
  void upnp::start()
 diff --git a/test/test_http_connection.cpp b/test/test_http_connection.cpp
-index 540b81252..f57aa83d1 100644
+index 540b81252..b0284c7bd 100644
 --- a/test/test_http_connection.cpp
 +++ b/test/test_http_connection.cpp
-@@ -22,7 +22,9 @@ see LICENSE file.
+@@ -22,8 +22,15 @@ see LICENSE file.
  #include "libtorrent/aux_/storage_utils.hpp"
  #include "libtorrent/aux_/random.hpp"
  
++#ifdef OPENSSL_IS_BORINGSSL
++#include <openssl/pool.h>
++#endif
++
 +#include <array>
  #include <iostream>
 +#include <memory>
  #include <optional>
++#include <vector>
  
  using namespace lt;
-@@ -90,7 +92,9 @@ void reset_globals()
+
+@@ -90,7 +97,9 @@ void reset_globals()
  
  void run_test(std::string const& url, int size, int status, int connected
  	, std::optional<error_code> ec, aux::proxy_settings const& ps
@@ -684,7 +714,7 @@ index 540b81252..f57aa83d1 100644
  {
  	reset_globals();
  
-@@ -103,9 +107,7 @@ void run_test(std::string const& url, int size, int status, int connected
+@@ -103,9 +112,7 @@ void run_test(std::string const& url, int size, int status, int connected
  		<< " error: " << (ec?ec->message():"no error") << std::endl;
  
  #if TORRENT_USE_SSL
@@ -695,7 +725,7 @@ index 540b81252..f57aa83d1 100644
  #endif
  
  	std::shared_ptr<aux::http_connection> h = std::make_shared<aux::http_connection>(ios
-@@ -127,7 +129,7 @@ void run_test(std::string const& url, int size, int status, int connected
+@@ -127,7 +134,7 @@ void run_test(std::string const& url, int size, int status, int connected
  	std::cout << n << " size: " << data_size << std::endl;
  	std::cout << n << " expected-size: " << size << std::endl;
  	std::cout << n << " error_code: " << g_error_code.message() << std::endl;
@@ -704,7 +734,7 @@ index 540b81252..f57aa83d1 100644
  	TEST_CHECK(handler_called == 1);
  	TEST_CHECK(data_size == size || size == -1);
  	TEST_CHECK(!ec || g_error_code == *ec);
-@@ -241,6 +243,72 @@ TORRENT_TEST(socks5_pw_proxy_ssl) { run_suite("https", settings_pack::socks5_pw)
+@@ -241,6 +248,104 @@ TORRENT_TEST(socks5_pw_proxy_ssl) { run_suite("https", settings_pack::socks5_pw)
  TORRENT_TEST(https_connect_without_host_header) { run_suite("https", settings_pack::http, flag_keepalive); }
  // When send_host_in_connect=true: CONNECT should use hostname:port and Host header should contain hostname:port
  TORRENT_TEST(https_connect_with_host_header) { run_suite("https", settings_pack::http, flag_keepalive | flag_send_host); }
@@ -716,7 +746,7 @@ index 540b81252..f57aa83d1 100644
 +		aux::ssl::client_context_authentication::system_trust);
 +	auto* const native_context = context.native_handle();
 +	TEST_EQUAL(SSL_CTX_get_min_proto_version(native_context), TLS1_2_VERSION);
-+	TEST_EQUAL(SSL_CTX_get_max_cert_list(native_context), 4 * 1024 * 1024);
++	TEST_EQUAL(SSL_CTX_get_max_cert_list(native_context), 100 * 1024);
 +	TEST_EQUAL(SSL_CTX_get_verify_mode(native_context), SSL_VERIFY_PEER);
 +	auto const expected_ciphers = std::array{
 +		"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
@@ -759,6 +789,38 @@ index 540b81252..f57aa83d1 100644
 +	TEST_CHECK(ec == error_code(errors::invalid_hostname));
 +	aux::ssl::set_host_name(ip_stream.get(), "invalid_name.example", ec);
 +	TEST_CHECK(ec == error_code(errors::invalid_hostname));
++}
++
++TORRENT_TEST(boringssl_certificate_chain_limits)
++{
++	auto const make_chain = [](std::size_t const count, std::size_t const certificate_size)
++		-> bssl::UniquePtr<STACK_OF(CRYPTO_BUFFER)>
++	{
++		bssl::UniquePtr<STACK_OF(CRYPTO_BUFFER)> chain(sk_CRYPTO_BUFFER_new_null());
++		if (!chain) return nullptr;
++		std::vector<std::uint8_t> const certificate(certificate_size, 0x30);
++		for (std::size_t i = 0; i < count; ++i)
++		{
++			bssl::UniquePtr<CRYPTO_BUFFER> buffer(CRYPTO_BUFFER_new(
++				certificate.data(), certificate.size(), nullptr));
++			if (!buffer || !sk_CRYPTO_BUFFER_push(chain.get(), buffer.get())) return nullptr;
++			static_cast<void>(buffer.release());
++		}
++		return chain;
++	};
++
++	auto maximum_count = make_chain(8, 1);
++	TEST_CHECK(maximum_count != nullptr);
++	TEST_CHECK(aux::ssl::peer_certificate_chain_within_limits(maximum_count.get()));
++	auto excessive_count = make_chain(9, 1);
++	TEST_CHECK(excessive_count != nullptr);
++	TEST_CHECK(!aux::ssl::peer_certificate_chain_within_limits(excessive_count.get()));
++	auto maximum_size = make_chain(1, 100 * 1024);
++	TEST_CHECK(maximum_size != nullptr);
++	TEST_CHECK(aux::ssl::peer_certificate_chain_within_limits(maximum_size.get()));
++	auto excessive_size = make_chain(1, 100 * 1024 + 1);
++	TEST_CHECK(excessive_size != nullptr);
++	TEST_CHECK(!aux::ssl::peer_certificate_chain_within_limits(excessive_size.get()));
 +}
 +
 +TORRENT_TEST(system_trust_rejects_untrusted_certificate)
