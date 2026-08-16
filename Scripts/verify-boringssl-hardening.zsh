@@ -58,6 +58,10 @@ imported_typed_allocators=$(print -r -- "$symbols" \
     | /usr/bin/sort -u)
 [[ $imported_typed_allocators == $'_malloc_type_free\n_malloc_type_malloc' ]] \
     || fail "BoringSSL does not use matched typed malloc/free entry points"
+/usr/bin/grep -Fq \
+    '::new (ptr) OpenSSLAllocationHeader{size, type_id};' \
+    "$source_dir/crypto/mem.cc" \
+    || fail "BoringSSL does not explicitly begin its allocation-header lifetime"
 
 for role in \
     boringssl.ssl.custom-verify \

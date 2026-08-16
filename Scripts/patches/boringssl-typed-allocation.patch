@@ -1,8 +1,17 @@
 diff --git a/crypto/mem.cc b/crypto/mem.cc
-index faedd53..6432c1e 100644
+index faedd53..934eb61 100644
 --- a/crypto/mem.cc
 +++ b/crypto/mem.cc
-@@ -38,8 +38,19 @@
+@@ -21,6 +21,8 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ 
++#include <new>
++
+ #include <openssl/err.h>
+ 
+ #if defined(OPENSSL_WINDOWS)
+@@ -38,8 +40,19 @@
  
  using namespace bssl;
  
@@ -22,7 +31,7 @@ index faedd53..6432c1e 100644
  
  #if defined(OPENSSL_ASAN)
  extern "C" {
-@@ -180,8 +191,15 @@ void bssl::OPENSSL_enable_malloc_failures_for_testing() {
+@@ -180,7 +193,11 @@ void bssl::OPENSSL_enable_malloc_failures_for_testing() {
  static int should_fail_allocation() { return 0; }
  #endif
  
@@ -33,13 +42,9 @@ index faedd53..6432c1e 100644
 +#endif
 +) {
    void *ptr = nullptr;
-+#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
-+  OpenSSLAllocationHeader *header = nullptr;
-+#endif
    if (should_fail_allocation()) {
      goto err;
-   }
-@@ -200,12 +218,22 @@ void *OPENSSL_malloc(size_t size) {
+@@ -200,12 +217,20 @@ void *OPENSSL_malloc(size_t size) {
      goto err;
    }
  
@@ -53,16 +58,14 @@ index faedd53..6432c1e 100644
    }
  
 +#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
-+  header = static_cast<OpenSSLAllocationHeader *>(ptr);
-+  header->requested_size = size;
-+  header->type_id = type_id;
++  ::new (ptr) OpenSSLAllocationHeader{size, type_id};
 +#else
    *(size_t *)ptr = size;
 +#endif
  
    __asan_poison_memory_region(ptr, OPENSSL_MALLOC_PREFIX);
    return ((uint8_t *)ptr) + OPENSSL_MALLOC_PREFIX;
-@@ -216,21 +244,65 @@ err:
+@@ -216,21 +241,65 @@ err:
    return nullptr;
  }
  
@@ -128,7 +131,7 @@ index faedd53..6432c1e 100644
  }
  
  void OPENSSL_free(void *orig_ptr) {
-@@ -246,13 +318,30 @@ void OPENSSL_free(void *orig_ptr) {
+@@ -246,13 +315,30 @@ void OPENSSL_free(void *orig_ptr) {
    void *ptr = ((uint8_t *)orig_ptr) - OPENSSL_MALLOC_PREFIX;
    __asan_unpoison_memory_region(ptr, OPENSSL_MALLOC_PREFIX);
  
@@ -159,7 +162,7 @@ index faedd53..6432c1e 100644
  #else
    if (sdallocx) {
      sdallocx(ptr, size + OPENSSL_MALLOC_PREFIX, 0 /* flags */);
-@@ -260,11 +349,21 @@ void OPENSSL_free(void *orig_ptr) {
+@@ -260,11 +346,21 @@ void OPENSSL_free(void *orig_ptr) {
      free(ptr);
    }
  #endif
@@ -182,7 +185,7 @@ index faedd53..6432c1e 100644
    }
  
    size_t old_size;
-@@ -273,11 +372,26 @@ void *OPENSSL_realloc(void *orig_ptr, size_t new_size) {
+@@ -273,11 +369,26 @@ void *OPENSSL_realloc(void *orig_ptr, size_t new_size) {
    } else {
      void *ptr = ((uint8_t *)orig_ptr) - OPENSSL_MALLOC_PREFIX;
      __asan_unpoison_memory_region(ptr, OPENSSL_MALLOC_PREFIX);
@@ -209,7 +212,7 @@ index faedd53..6432c1e 100644
    if (ret == nullptr) {
      return nullptr;
    }
-@@ -293,6 +407,21 @@ void *OPENSSL_realloc(void *orig_ptr, size_t new_size) {
+@@ -293,6 +404,21 @@ void *OPENSSL_realloc(void *orig_ptr, size_t new_size) {
    return ret;
  }
  
