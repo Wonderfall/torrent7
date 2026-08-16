@@ -11,6 +11,8 @@ on:
       - "Packaging/**"
       - "Scripts/build-app.zsh"
       - "Scripts/build-deps.zsh"
+      - "Scripts/boringssl-patch-series.sh"
+      - "Scripts/verify-boringssl-hardening.zsh"
       - "Scripts/boost-patch-series.sh"
       - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/native-deps-build-id.zsh"
@@ -40,6 +42,8 @@ on:
       - "Packaging/**"
       - "Scripts/build-app.zsh"
       - "Scripts/build-deps.zsh"
+      - "Scripts/boringssl-patch-series.sh"
+      - "Scripts/verify-boringssl-hardening.zsh"
       - "Scripts/boost-patch-series.sh"
       - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/native-deps-build-id.zsh"
@@ -110,7 +114,7 @@ jobs:
           path: |
             .build/deps/source-cache
             .build/deps/arm64e
-          key: deps-arm64e-${{ env.XCODE_CACHE_KEY }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/boost-patch-series.sh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/verify-xcode.zsh', 'Scripts/patches/**') }}
+          key: deps-arm64e-${{ env.XCODE_CACHE_KEY }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/boringssl-patch-series.sh', 'Scripts/boost-patch-series.sh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/verify-boringssl-hardening.zsh', 'Scripts/verify-xcode.zsh', 'Scripts/patches/**') }}
       - name: Build pinned dependencies
         shell: zsh {0}
         run: |

@@ -9,17 +9,20 @@ on:
       - "Package.swift"
       - "Scripts/analyze-bridge.zsh"
       - "Scripts/build-deps.zsh"
+      - "Scripts/boringssl-patch-series.sh"
       - "Scripts/boost-patch-series.sh"
       - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/native-deps-build-id.zsh"
       - "Scripts/verify-xcode.zsh"
       - "Scripts/patches/**"
       - "Scripts/test-bridge.zsh"
+      - "Scripts/test-boringssl-hardening.zsh"
       - "Scripts/test-boost-asio-pac.zsh"
       - "Scripts/test-boost-asio-recycling-allocator.zsh"
       - "Scripts/test-libtorrent-indirect-operation-pac.zsh"
       - "Scripts/test-libtorrent-security.zsh"
       - "Scripts/verify-boost-asio-recycling-allocator.zsh"
+      - "Scripts/verify-boringssl-hardening.zsh"
       - "Scripts/verify-bridge-pac.zsh"
       - "Scripts/verify-libtorrent-boringssl-tls.zsh"
       - "Sources/TorrentBridge/**"
@@ -37,17 +40,20 @@ on:
       - "Package.swift"
       - "Scripts/analyze-bridge.zsh"
       - "Scripts/build-deps.zsh"
+      - "Scripts/boringssl-patch-series.sh"
       - "Scripts/boost-patch-series.sh"
       - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/native-deps-build-id.zsh"
       - "Scripts/verify-xcode.zsh"
       - "Scripts/patches/**"
       - "Scripts/test-bridge.zsh"
+      - "Scripts/test-boringssl-hardening.zsh"
       - "Scripts/test-boost-asio-pac.zsh"
       - "Scripts/test-boost-asio-recycling-allocator.zsh"
       - "Scripts/test-libtorrent-indirect-operation-pac.zsh"
       - "Scripts/test-libtorrent-security.zsh"
       - "Scripts/verify-boost-asio-recycling-allocator.zsh"
+      - "Scripts/verify-boringssl-hardening.zsh"
       - "Scripts/verify-bridge-pac.zsh"
       - "Scripts/verify-libtorrent-boringssl-tls.zsh"
       - "Sources/TorrentBridge/**"
@@ -108,7 +114,7 @@ jobs:
           path: |
             .build/deps/source-cache
             .build/deps/arm64e
-          key: deps-arm64e-${{ env.XCODE_CACHE_KEY }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/boost-patch-series.sh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/verify-xcode.zsh', 'Scripts/patches/**') }}
+          key: deps-arm64e-${{ env.XCODE_CACHE_KEY }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/boringssl-patch-series.sh', 'Scripts/boost-patch-series.sh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/verify-boringssl-hardening.zsh', 'Scripts/verify-xcode.zsh', 'Scripts/patches/**') }}
       - name: Build pinned dependencies
         shell: zsh {0}
         run: |

@@ -1,0 +1,319 @@
+diff --git a/crypto/mem.cc b/crypto/mem.cc
+index faedd53..6432c1e 100644
+--- a/crypto/mem.cc
++++ b/crypto/mem.cc
+@@ -38,8 +38,19 @@
+ 
+ using namespace bssl;
+ 
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++struct alignas(max_align_t) OpenSSLAllocationHeader {
++  size_t requested_size;
++  malloc_type_id_t type_id;
++};
++
++#define OPENSSL_MALLOC_PREFIX sizeof(OpenSSLAllocationHeader)
++static_assert(OPENSSL_MALLOC_PREFIX % alignof(max_align_t) == 0,
++              "allocation prefix must preserve malloc alignment");
++#else
+ #define OPENSSL_MALLOC_PREFIX 8
+ static_assert(OPENSSL_MALLOC_PREFIX >= sizeof(size_t), "size_t too large");
++#endif
+ 
+ #if defined(OPENSSL_ASAN)
+ extern "C" {
+@@ -180,8 +191,15 @@ void bssl::OPENSSL_enable_malloc_failures_for_testing() {
+ static int should_fail_allocation() { return 0; }
+ #endif
+ 
+-void *OPENSSL_malloc(size_t size) {
++static void *openssl_malloc_impl(size_t size
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++                                 , malloc_type_id_t type_id
++#endif
++) {
+   void *ptr = nullptr;
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++  OpenSSLAllocationHeader *header = nullptr;
++#endif
+   if (should_fail_allocation()) {
+     goto err;
+   }
+@@ -200,12 +218,22 @@ void *OPENSSL_malloc(size_t size) {
+     goto err;
+   }
+ 
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++  ptr = malloc_type_malloc(size + OPENSSL_MALLOC_PREFIX, type_id);
++#else
+   ptr = malloc(size + OPENSSL_MALLOC_PREFIX);
++#endif
+   if (ptr == nullptr) {
+     goto err;
+   }
+ 
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++  header = static_cast<OpenSSLAllocationHeader *>(ptr);
++  header->requested_size = size;
++  header->type_id = type_id;
++#else
+   *(size_t *)ptr = size;
++#endif
+ 
+   __asan_poison_memory_region(ptr, OPENSSL_MALLOC_PREFIX);
+   return ((uint8_t *)ptr) + OPENSSL_MALLOC_PREFIX;
+@@ -216,21 +244,65 @@ err:
+   return nullptr;
+ }
+ 
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++void *OPENSSL_malloc_type(size_t size, malloc_type_id_t type_id) {
++  return openssl_malloc_impl(size, type_id);
++}
++#endif
++
++void *OPENSSL_malloc(size_t size) {
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++  return openssl_malloc_impl(size, 0);
++#else
++  return openssl_malloc_impl(size);
++#endif
++}
++
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++void *OPENSSL_zalloc_type(size_t size, malloc_type_id_t type_id) {
++  void *ret = OPENSSL_malloc_type(size, type_id);
++  if (ret != nullptr) {
++    OPENSSL_memset(ret, 0, size);
++  }
++  return ret;
++}
++#endif
++
+ void *OPENSSL_zalloc(size_t size) {
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++  return OPENSSL_zalloc_type(size, 0);
++#else
+   void *ret = OPENSSL_malloc(size);
+   if (ret != nullptr) {
+     OPENSSL_memset(ret, 0, size);
+   }
+   return ret;
++#endif
++}
++
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++void *OPENSSL_calloc_type(size_t num, size_t size,
++                          malloc_type_id_t type_id) {
++  if (size != 0 && num > SIZE_MAX / size) {
++    OPENSSL_PUT_ERROR(CRYPTO, ERR_R_OVERFLOW);
++    return nullptr;
++  }
++
++  return OPENSSL_zalloc_type(num * size, type_id);
+ }
++#endif
+ 
+ void *OPENSSL_calloc(size_t num, size_t size) {
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++  return OPENSSL_calloc_type(num, size, 0);
++#else
+   if (size != 0 && num > SIZE_MAX / size) {
+     OPENSSL_PUT_ERROR(CRYPTO, ERR_R_OVERFLOW);
+     return nullptr;
+   }
+ 
+   return OPENSSL_zalloc(num * size);
++#endif
+ }
+ 
+ void OPENSSL_free(void *orig_ptr) {
+@@ -246,13 +318,30 @@ void OPENSSL_free(void *orig_ptr) {
+   void *ptr = ((uint8_t *)orig_ptr) - OPENSSL_MALLOC_PREFIX;
+   __asan_unpoison_memory_region(ptr, OPENSSL_MALLOC_PREFIX);
+ 
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++  const auto *header = static_cast<const OpenSSLAllocationHeader *>(ptr);
++  const size_t size = header->requested_size;
++  const malloc_type_id_t type_id = header->type_id;
++  const size_t actual_size = malloc_size(ptr);
++  BSSL_CHECK(actual_size >= OPENSSL_MALLOC_PREFIX);
++  BSSL_CHECK(size <= actual_size - OPENSSL_MALLOC_PREFIX);
++#else
+   size_t size = *(size_t *)ptr;
++#endif
+   OPENSSL_cleanse(ptr, size + OPENSSL_MALLOC_PREFIX);
+ 
+ // ASan knows to intercept malloc and free, but not sdallocx.
+ #if defined(OPENSSL_ASAN)
+   (void)sdallocx;
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++  malloc_type_free(ptr, type_id);
++#else
+   free(ptr);
++#endif
++#else
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++  (void)sdallocx;
++  malloc_type_free(ptr, type_id);
+ #else
+   if (sdallocx) {
+     sdallocx(ptr, size + OPENSSL_MALLOC_PREFIX, 0 /* flags */);
+@@ -260,11 +349,21 @@ void OPENSSL_free(void *orig_ptr) {
+     free(ptr);
+   }
+ #endif
++#endif
+ }
+ 
+-void *OPENSSL_realloc(void *orig_ptr, size_t new_size) {
++static void *openssl_realloc_impl(void *orig_ptr, size_t new_size
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++                                  , malloc_type_id_t type_id,
++                                  bool preserve_recorded_type
++#endif
++) {
+   if (orig_ptr == nullptr) {
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++    return OPENSSL_malloc_type(new_size, type_id);
++#else
+     return OPENSSL_malloc(new_size);
++#endif
+   }
+ 
+   size_t old_size;
+@@ -273,11 +372,26 @@ void *OPENSSL_realloc(void *orig_ptr, size_t new_size) {
+   } else {
+     void *ptr = ((uint8_t *)orig_ptr) - OPENSSL_MALLOC_PREFIX;
+     __asan_unpoison_memory_region(ptr, OPENSSL_MALLOC_PREFIX);
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++    const auto *header = static_cast<const OpenSSLAllocationHeader *>(ptr);
++    const size_t actual_size = malloc_size(ptr);
++    BSSL_CHECK(actual_size >= OPENSSL_MALLOC_PREFIX);
++    BSSL_CHECK(header->requested_size <= actual_size - OPENSSL_MALLOC_PREFIX);
++    old_size = header->requested_size;
++    if (preserve_recorded_type) {
++      type_id = header->type_id;
++    }
++#else
+     old_size = *(size_t *)ptr;
++#endif
+     __asan_poison_memory_region(ptr, OPENSSL_MALLOC_PREFIX);
+   }
+ 
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++  void *ret = OPENSSL_malloc_type(new_size, type_id);
++#else
+   void *ret = OPENSSL_malloc(new_size);
++#endif
+   if (ret == nullptr) {
+     return nullptr;
+   }
+@@ -293,6 +407,21 @@ void *OPENSSL_realloc(void *orig_ptr, size_t new_size) {
+   return ret;
+ }
+ 
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++void *OPENSSL_realloc_type(void *orig_ptr, size_t new_size,
++                           malloc_type_id_t type_id) {
++  return openssl_realloc_impl(orig_ptr, new_size, type_id, false);
++}
++#endif
++
++void *OPENSSL_realloc(void *orig_ptr, size_t new_size) {
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++  return openssl_realloc_impl(orig_ptr, new_size, 0, true);
++#else
++  return openssl_realloc_impl(orig_ptr, new_size);
++#endif
++}
++
+ void OPENSSL_cleanse(void *ptr, size_t len) {
+ #if defined(OPENSSL_WINDOWS)
+   SecureZeroMemory(ptr, len);
+diff --git a/crypto/mem_internal.h b/crypto/mem_internal.h
+index d58b7f3..c403a21 100644
+--- a/crypto/mem_internal.h
++++ b/crypto/mem_internal.h
+@@ -53,7 +53,7 @@ BSSL_NAMESPACE_BEGIN
+ // Note: unlike `new`, this does not support non-public constructors.
+ template <typename T, typename... Args>
+ T *New(Args &&...args) {
+-  void *t = OPENSSL_malloc(sizeof(T));
++  T *t = static_cast<T *>(OPENSSL_malloc(sizeof(T)));
+   if (t == nullptr) {
+     return nullptr;
+   }
+diff --git a/include/openssl/mem.h b/include/openssl/mem.h
+index ca265d0..556f8b4 100644
+--- a/include/openssl/mem.h
++++ b/include/openssl/mem.h
+@@ -20,6 +20,10 @@
+ #include <stdarg.h>
+ #include <stdlib.h>
+ 
++#if defined(__APPLE__)
++#include <malloc/malloc.h>
++#endif
++
+ #if defined(__cplusplus)
+ extern "C" {
+ #endif
+@@ -34,26 +38,53 @@ extern "C" {
+ 
+ 
+ #ifndef _BORINGSSL_PROHIBIT_OPENSSL_MALLOC
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++OPENSSL_EXPORT void *OPENSSL_malloc_type(size_t size,
++                                         malloc_type_id_t type_id);
++OPENSSL_EXPORT void *OPENSSL_zalloc_type(size_t size,
++                                         malloc_type_id_t type_id);
++OPENSSL_EXPORT void *OPENSSL_calloc_type(size_t num, size_t size,
++                                         malloc_type_id_t type_id);
++OPENSSL_EXPORT void *OPENSSL_realloc_type(void *ptr, size_t new_size,
++                                          malloc_type_id_t type_id);
++#endif
++
+ // OPENSSL_malloc is similar to a regular `malloc`, but allocates additional
+ // private data. The resulting pointer must be freed with `OPENSSL_free`. In
+ // the case of a malloc failure, prior to returning NULL `OPENSSL_malloc` will
+ // push `ERR_R_MALLOC_FAILURE` onto the openssl error stack.
+-OPENSSL_EXPORT void *OPENSSL_malloc(size_t size);
++OPENSSL_EXPORT void *OPENSSL_malloc(size_t size)
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++    _MALLOC_TYPED(OPENSSL_malloc_type, 1)
++#endif
++    ;
+ 
+ // OPENSSL_zalloc behaves like `OPENSSL_malloc` except it also initializes the
+ // resulting memory to zero.
+-OPENSSL_EXPORT void *OPENSSL_zalloc(size_t size);
++OPENSSL_EXPORT void *OPENSSL_zalloc(size_t size)
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++    _MALLOC_TYPED(OPENSSL_zalloc_type, 1)
++#endif
++    ;
+ 
+ // OPENSSL_calloc is similar to a regular `calloc`, but allocates data with
+ // `OPENSSL_malloc`. On overflow, it will push `ERR_R_OVERFLOW` onto the error
+ // queue.
+-OPENSSL_EXPORT void *OPENSSL_calloc(size_t num, size_t size);
++OPENSSL_EXPORT void *OPENSSL_calloc(size_t num, size_t size)
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++    _MALLOC_TYPED(OPENSSL_calloc_type, 2)
++#endif
++    ;
+ 
+ // OPENSSL_realloc returns a pointer to a buffer of `new_size` bytes that
+ // contains the contents of `ptr`. Unlike `realloc`, a new buffer is always
+ // allocated and the data at `ptr` is always wiped and freed. Memory is
+ // allocated with `OPENSSL_malloc` and must be freed with `OPENSSL_free`.
+-OPENSSL_EXPORT void *OPENSSL_realloc(void *ptr, size_t new_size);
++OPENSSL_EXPORT void *OPENSSL_realloc(void *ptr, size_t new_size)
++#if defined(_MALLOC_TYPE_ENABLED) && _MALLOC_TYPE_ENABLED
++    _MALLOC_TYPED(OPENSSL_realloc_type, 2)
++#endif
++    ;
+ #endif  // !_BORINGSSL_PROHIBIT_OPENSSL_MALLOC
+ 
+ // OPENSSL_free does nothing if `ptr` is NULL. Otherwise it zeros out the

@@ -58,6 +58,7 @@ fi
 "$patch_helper" verify "$source_dir"
 "$root_dir/Scripts/verify-libtorrent-boringssl-tls.zsh" \
     "$deps_dir/prefix/lib/libtorrent-rasterbar.a"
+SKIP_BUILD_DEPS=1 "$root_dir/Scripts/test-boringssl-hardening.zsh"
 SKIP_BUILD_DEPS=1 "$root_dir/Scripts/test-boost-asio-pac.zsh"
 SKIP_BUILD_DEPS=1 "$root_dir/Scripts/test-boost-asio-recycling-allocator.zsh"
 SKIP_BUILD_DEPS=1 "$root_dir/Scripts/test-libtorrent-indirect-operation-pac.zsh"

@@ -9,9 +9,11 @@ on:
     paths:
       - ".github/workflows/dependencies.yml"
       - "Scripts/build-deps.zsh"
+      - "Scripts/boringssl-patch-series.sh"
       - "Scripts/boost-patch-series.sh"
       - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/verify-boost-asio-recycling-allocator.zsh"
+      - "Scripts/verify-boringssl-hardening.zsh"
       - "Scripts/verify-libtorrent-boringssl-tls.zsh"
       - "Scripts/verify-xcode.zsh"
       - "Scripts/patches/**"
@@ -25,9 +27,11 @@ on:
     paths:
       - ".github/workflows/dependencies.yml"
       - "Scripts/build-deps.zsh"
+      - "Scripts/boringssl-patch-series.sh"
       - "Scripts/boost-patch-series.sh"
       - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/verify-boost-asio-recycling-allocator.zsh"
+      - "Scripts/verify-boringssl-hardening.zsh"
       - "Scripts/verify-libtorrent-boringssl-tls.zsh"
       - "Scripts/verify-xcode.zsh"
       - "Scripts/patches/**"

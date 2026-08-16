@@ -16,7 +16,8 @@ PREFIX="$DEPS_ROOT/prefix"
 BUILD_ROOT="$DEPS_ROOT/build"
 OWNERSHIP_MARKER="$DEPS_ROOT/.torrent7-libfuzzer-deps-root"
 OWNERSHIP_MARKER_CONTENT="torrent7-libfuzzer-deps-v1"
-BORINGSSL_SOURCE="${BORINGSSL_SOURCE:-$ROOT_DIR/.build/deps/source-cache/boringssl/source}"
+BORINGSSL_SOURCE="${BORINGSSL_SOURCE:-$ROOT_DIR/.build/deps/arm64e/src/boringssl}"
+BORINGSSL_PATCH_HELPER="$ROOT_DIR/Scripts/boringssl-patch-series.sh"
 LIBTORRENT_SOURCE="${LIBTORRENT_SOURCE:-$ROOT_DIR/.build/deps/arm64e/src/libtorrent}"
 LIBTORRENT_PATCH_HELPER="$ROOT_DIR/Scripts/libtorrent-patch-series.sh"
 LIBTORRENT_TLS_VERIFIER="$ROOT_DIR/Scripts/verify-libtorrent-boringssl-tls.zsh"
@@ -147,6 +148,7 @@ require_path "$AR" "LLVM llvm-ar"
 require_path "$RANLIB" "LLVM llvm-ranlib"
 require_path "$BORINGSSL_SOURCE/CMakeLists.txt" "BoringSSL source"
 require_path "$BORINGSSL_SOURCE/LICENSE" "BoringSSL license"
+require_path "$BORINGSSL_PATCH_HELPER" "BoringSSL patch-series helper"
 require_path "$LIBTORRENT_SOURCE/CMakeLists.txt" "libtorrent source"
 require_path "$LIBTORRENT_SOURCE/deps/try_signal/try_signal.cpp" "libtorrent try_signal source"
 require_path "$LIBTORRENT_PATCH_HELPER" "libtorrent patch-series helper"
@@ -155,6 +157,7 @@ require_path "$BOOST_SOURCE/boost" "Boost headers"
 require_path "$BOOST_PATCH_HELPER" "Boost patch-series helper"
 
 BUILDER_SHA256="$(shasum -a 256 "$TOOLS_DIR/build-libfuzzer-deps.sh" | awk '{print $1}')"
+BORINGSSL_PATCH_HELPER_SHA256="$(shasum -a 256 "$BORINGSSL_PATCH_HELPER" | awk '{print $1}')"
 LIBTORRENT_PATCH_HELPER_SHA256="$(shasum -a 256 "$LIBTORRENT_PATCH_HELPER" | awk '{print $1}')"
 BOOST_PATCH_HELPER_SHA256="$(shasum -a 256 "$BOOST_PATCH_HELPER" | awk '{print $1}')"
 CC_SHA256="$(shasum -a 256 "$CC" | awk '{print $1}')"
@@ -165,12 +168,8 @@ RANLIB_SHA256="$(shasum -a 256 "$RANLIB" | awk '{print $1}')"
 LIBTORRENT_PATCH_MANIFEST="$("$LIBTORRENT_PATCH_HELPER" manifest "$LIBTORRENT_SOURCE")"
 "$BOOST_PATCH_HELPER" verify "$BOOST_SOURCE"
 BOOST_PATCH_MANIFEST="$("$BOOST_PATCH_HELPER" manifest "$BOOST_SOURCE")"
-BORINGSSL_COMMIT="$(git -C "$BORINGSSL_SOURCE" rev-parse HEAD)"
-BORINGSSL_TREE="$(git -C "$BORINGSSL_SOURCE" rev-parse 'HEAD^{tree}')"
-if [[ -n "$(git -C "$BORINGSSL_SOURCE" status --porcelain=v1 --untracked-files=all)" ]]; then
-    echo "BoringSSL checkout is dirty" >&2
-    exit 1
-fi
+"$BORINGSSL_PATCH_HELPER" verify "$BORINGSSL_SOURCE"
+BORINGSSL_PATCH_MANIFEST="$("$BORINGSSL_PATCH_HELPER" manifest "$BORINGSSL_SOURCE")"
 LIBTORRENT_TRY_SIGNAL_COMMIT="$(git -C "$LIBTORRENT_SOURCE/deps/try_signal" rev-parse HEAD)"
 LIBTORRENT_TRY_SIGNAL_EXPECTED_COMMIT="$(git -C "$LIBTORRENT_SOURCE" ls-tree HEAD deps/try_signal | awk '{print $3}')"
 if [[ "$LIBTORRENT_TRY_SIGNAL_COMMIT" != "$LIBTORRENT_TRY_SIGNAL_EXPECTED_COMMIT" ]]; then
@@ -184,6 +183,7 @@ fi
 expected_config="$(
     cat <<EOF
 builder_sha256=$BUILDER_SHA256
+boringssl_patch_helper_sha256=$BORINGSSL_PATCH_HELPER_SHA256
 libtorrent_patch_helper_sha256=$LIBTORRENT_PATCH_HELPER_SHA256
 boost_patch_helper_sha256=$BOOST_PATCH_HELPER_SHA256
 target=$TARGET_TRIPLE
@@ -199,8 +199,7 @@ ar_sha256=$AR_SHA256
 ranlib=$RANLIB
 ranlib_sha256=$RANLIB_SHA256
 boringssl_source=$BORINGSSL_SOURCE
-boringssl_commit=$BORINGSSL_COMMIT
-boringssl_tree=$BORINGSSL_TREE
+$BORINGSSL_PATCH_MANIFEST
 libtorrent_source=$LIBTORRENT_SOURCE
 $LIBTORRENT_PATCH_MANIFEST
 libtorrent_try_signal_commit=$LIBTORRENT_TRY_SIGNAL_COMMIT

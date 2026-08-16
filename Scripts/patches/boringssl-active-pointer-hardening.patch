@@ -1,0 +1,580 @@
+diff --git a/crypto/bio/internal.h b/crypto/bio/internal.h
+index ed00e25..055f0a9 100644
+--- a/crypto/bio/internal.h
++++ b/crypto/bio/internal.h
+@@ -58,7 +58,10 @@ class Bio : public bio_st, public RefCounted<Bio> {
+  public:
+   explicit Bio(const BIO_METHOD *m);
+ 
+-  const BIO_METHOD *method;
++  using StoredMethod = const BIO_METHOD *BSSL_PTRAUTH_DATA_POINTER(
++      "boringssl.bio.method");
++
++  StoredMethod method;
+   CRYPTO_EX_DATA ex_data;
+ 
+   // TODO(crbug.com/412269080): `init` and `shutdown` could be bitfields, or
+diff --git a/crypto/evp/internal.h b/crypto/evp/internal.h
+index 6692c58..b69980f 100644
+--- a/crypto/evp/internal.h
++++ b/crypto/evp/internal.h
+@@ -144,12 +144,17 @@ class EvpPkey : public evp_pkey_st, public RefCounted<EvpPkey> {
+  public:
+   EvpPkey();
+ 
++  using StoredPkey = void *BSSL_PTRAUTH_DATA_POINTER(
++      "boringssl.evp-pkey.object");
++  using StoredMethod = const bssl::EVP_PKEY_ASN1_METHOD
++      *BSSL_PTRAUTH_DATA_POINTER("boringssl.evp-pkey.method");
++
+   // pkey contains a pointer to a structure dependent on `ameth`.
+-  void *pkey = nullptr;
++  StoredPkey pkey = nullptr;
+ 
+   // ameth contains a pointer to a method table that determines the key type, or
+   // nullptr if the key is empty.
+-  const bssl::EVP_PKEY_ASN1_METHOD *ameth = nullptr;
++  StoredMethod ameth = nullptr;
+ 
+  private:
+   ~EvpPkey();
+@@ -244,8 +249,13 @@ class EvpPkeyCtx : public evp_pkey_ctx_st {
+   virtual ~EvpPkeyCtx();
+ #endif
+ 
++  using StoredMethod = const bssl::EVP_PKEY_CTX_METHOD
++      *BSSL_PTRAUTH_DATA_POINTER("boringssl.evp-pkey-context.method");
++  using StoredData = void *BSSL_PTRAUTH_DATA_POINTER(
++      "boringssl.evp-pkey-context.data");
++
+   // Method associated with this operation
+-  const bssl::EVP_PKEY_CTX_METHOD *pmeth = nullptr;
++  StoredMethod pmeth = nullptr;
+   // Key: may be nullptr
+   bssl::UniquePtr<EvpPkey> pkey;
+   // Peer key for key agreement, may be nullptr
+@@ -256,7 +266,7 @@ class EvpPkeyCtx : public evp_pkey_ctx_st {
+   // TODO(crbug.com/487376811): Since a `EVP_PKEY_CTX` never has its type change
+   // after creation, this should instead be a base class, with the
+   // algorithm-specific data on the subclass, coming from the same allocation.
+-  void *data = nullptr;
++  StoredData data = nullptr;
+ };
+ 
+ struct evp_pkey_ctx_method_st {
+diff --git a/crypto/ex_data.cc b/crypto/ex_data.cc
+index 4614065..3964b8f 100644
+--- a/crypto/ex_data.cc
++++ b/crypto/ex_data.cc
+@@ -30,9 +30,12 @@
+ BSSL_NAMESPACE_BEGIN
+ 
+ struct ExDataFuncs {
++  using StoredFreeFunction = CRYPTO_EX_free *BSSL_PTRAUTH_FUNCTION_POINTER(
++      "boringssl.ex-data.free");
++
+   long argl;   // Arbitrary long
+   void *argp;  // Arbitrary void pointer
+-  CRYPTO_EX_free *free_func;
++  StoredFreeFunction free_func;
+   // next points to the next `ExDataFuncs` or NULL if this is the last
+   // one. It may only be read if synchronized with a read from `num_funcs`.
+   ExDataFuncs *next;
+diff --git a/crypto/fipsmodule/aes/gcm.cc.inc b/crypto/fipsmodule/aes/gcm.cc.inc
+index 0e6f771..7d7a00a 100644
+--- a/crypto/fipsmodule/aes/gcm.cc.inc
++++ b/crypto/fipsmodule/aes/gcm.cc.inc
+@@ -263,18 +263,28 @@ void bssl::CRYPTO_gcm128_init_aes_key(GCM128_KEY *gcm_key, const uint8_t *key,
+   }
+ 
+   OPENSSL_memset(gcm_key, 0, sizeof(*gcm_key));
++#if defined(OPENSSL_NO_ASM)
++  aes_nohw_set_encrypt_key(key, static_cast<int>(key_bytes * 8),
++                           &gcm_key->aes);
++#else
+   int is_hwaes;
+   gcm_key->ctr = aes_ctr_set_key(&gcm_key->aes, &is_hwaes, &gcm_key->block, key,
+                                  key_bytes);
++#endif
+ 
+   uint8_t ghash_key[16];
+   OPENSSL_memset(ghash_key, 0, sizeof(ghash_key));
++#if defined(OPENSSL_NO_ASM)
++  aes_nohw_encrypt(ghash_key, ghash_key, &gcm_key->aes);
++  const uint64_t H[2] = {CRYPTO_load_u64_be(ghash_key),
++                         CRYPTO_load_u64_be(ghash_key + 8)};
++  gcm_init_nohw(gcm_key->Htable, H);
++#else
+   gcm_key->block(ghash_key, ghash_key, &gcm_key->aes);
+ 
+   CRYPTO_ghash_init(&gcm_key->gmult, &gcm_key->ghash, gcm_key->Htable,
+                     ghash_key);
+ 
+-#if !defined(OPENSSL_NO_ASM)
+ #if defined(OPENSSL_X86_64)
+   if (gcm_key->ghash == gcm_ghash_vpclmulqdq_avx512 &&
+       CRYPTO_is_VAES_capable()) {
+@@ -338,7 +348,11 @@ void bssl::CRYPTO_gcm128_init_ctx(const GCM128_KEY *key, GCM128_CONTEXT *ctx,
+     ctr = CRYPTO_load_u32_be(ctx->Yi + 12);
+   }
+ 
++#if defined(OPENSSL_NO_ASM)
++  aes_nohw_encrypt(ctx->Yi, ctx->EK0, &key->aes);
++#else
+   key->block(ctx->Yi, ctx->EK0, &key->aes);
++#endif
+   ++ctr;
+   CRYPTO_store_u32_be(ctx->Yi + 12, ctr);
+ }
+@@ -446,7 +460,11 @@ int bssl::CRYPTO_gcm128_encrypt(const GCM128_KEY *key, GCM128_CONTEXT *ctx,
+ #endif
+ 
+   uint32_t ctr = CRYPTO_load_u32_be(ctx->Yi + 12);
+-  ctr128_f stream = key->ctr;
++#if defined(OPENSSL_NO_ASM)
++  const ctr128_f stream = aes_nohw_ctr32_encrypt_blocks;
++#else
++  const ctr128_f stream = key->ctr;
++#endif
+   while (len >= GHASH_CHUNK) {
+     (*stream)(in, out, GHASH_CHUNK / 16, &key->aes, ctx->Yi);
+     ctr += GHASH_CHUNK / 16;
+@@ -470,7 +488,11 @@ int bssl::CRYPTO_gcm128_encrypt(const GCM128_KEY *key, GCM128_CONTEXT *ctx,
+   }
+ 
+   if (len) {
++#if defined(OPENSSL_NO_ASM)
++    aes_nohw_encrypt(ctx->Yi, ctx->EKi, &key->aes);
++#else
+     key->block(ctx->Yi, ctx->EKi, &key->aes);
++#endif
+     ++ctr;
+     CRYPTO_store_u32_be(ctx->Yi + 12, ctr);
+     while (len--) {
+@@ -534,7 +556,11 @@ int bssl::CRYPTO_gcm128_decrypt(const GCM128_KEY *key, GCM128_CONTEXT *ctx,
+ #endif
+ 
+   uint32_t ctr = CRYPTO_load_u32_be(ctx->Yi + 12);
+-  ctr128_f stream = key->ctr;
++#if defined(OPENSSL_NO_ASM)
++  const ctr128_f stream = aes_nohw_ctr32_encrypt_blocks;
++#else
++  const ctr128_f stream = key->ctr;
++#endif
+   while (len >= GHASH_CHUNK) {
+     GHASH(key, ctx, in, GHASH_CHUNK);
+     (*stream)(in, out, GHASH_CHUNK / 16, &key->aes, ctx->Yi);
+@@ -558,7 +584,11 @@ int bssl::CRYPTO_gcm128_decrypt(const GCM128_KEY *key, GCM128_CONTEXT *ctx,
+   }
+ 
+   if (len) {
++#if defined(OPENSSL_NO_ASM)
++    aes_nohw_encrypt(ctx->Yi, ctx->EKi, &key->aes);
++#else
+     key->block(ctx->Yi, ctx->EKi, &key->aes);
++#endif
+     ++ctr;
+     CRYPTO_store_u32_be(ctx->Yi + 12, ctr);
+     while (len--) {
+diff --git a/crypto/fipsmodule/aes/internal.h b/crypto/fipsmodule/aes/internal.h
+index 3ee356c..825b8a5 100644
+--- a/crypto/fipsmodule/aes/internal.h
++++ b/crypto/fipsmodule/aes/internal.h
+@@ -324,12 +324,16 @@ typedef void (*ghash_func)(uint8_t Xi[16], const u128 Htable[16],
+ 
+ typedef struct gcm128_key_st {
+   u128 Htable[16];
++#if !defined(OPENSSL_NO_ASM)
+   gmult_func gmult;
+   ghash_func ghash;
++#endif
+   AES_KEY aes;
+ 
++#if !defined(OPENSSL_NO_ASM)
+   ctr128_f ctr;
+   block128_f block;
++#endif
+   enum gcm_impl_t impl;
+ } GCM128_KEY;
+ 
+diff --git a/crypto/fipsmodule/digest/digest.cc.inc b/crypto/fipsmodule/digest/digest.cc.inc
+index a7c6317..28f1e71 100644
+--- a/crypto/fipsmodule/digest/digest.cc.inc
++++ b/crypto/fipsmodule/digest/digest.cc.inc
+@@ -128,12 +128,10 @@ int EVP_MD_CTX_copy_ex(EVP_MD_CTX *out, const EVP_MD_CTX *in) {
+ 
+ void EVP_MD_CTX_move(EVP_MD_CTX *out, EVP_MD_CTX *in) {
+   EVP_MD_CTX_cleanup(out);
+-  // While not guaranteed, `EVP_MD_CTX` is currently safe to move with `memcpy`.
+-  // bssl-crypto currently relies on this, however, so if we change this, we
+-  // need to box the `HMAC_CTX`. (Relying on this is only fine because we assume
+-  // BoringSSL and bssl-crypto will always be updated atomically. We do not
+-  // allow any version skew between the two.)
+-  OPENSSL_memcpy(out, in, sizeof(EVP_MD_CTX));
++  OPENSSL_memcpy(out->md_data, in->md_data, sizeof(out->md_data));
++  out->digest = in->digest;
++  out->pctx = in->pctx;
++  out->pctx_ops = in->pctx_ops;
+   EVP_MD_CTX_init(in);
+ }
+ 
+diff --git a/crypto/fipsmodule/ec/internal.h b/crypto/fipsmodule/ec/internal.h
+index 2261f20..10d8abe 100644
+--- a/crypto/fipsmodule/ec/internal.h
++++ b/crypto/fipsmodule/ec/internal.h
+@@ -553,7 +553,7 @@ struct ec_point_st {
+ } /* EC_POINT */;
+ 
+ struct ec_group_st {
+-  const EC_METHOD *meth;
++  const EC_METHOD *BSSL_PTRAUTH_DATA_POINTER("boringssl.ec-group.method") meth;
+ 
+   // Unlike all other `EC_POINT`s, `generator` does not own `generator->group`
+   // to avoid a reference cycle. Additionally, Z is guaranteed to be one, so X
+diff --git a/crypto/fipsmodule/rand/ctrdrbg.cc.inc b/crypto/fipsmodule/rand/ctrdrbg.cc.inc
+index 8aa034c..3e03bcd 100644
+--- a/crypto/fipsmodule/rand/ctrdrbg.cc.inc
++++ b/crypto/fipsmodule/rand/ctrdrbg.cc.inc
+@@ -230,8 +230,12 @@ int bssl::CTR_DRBG_init(CTR_DRBG_STATE *drbg, int df, const uint8_t *entropy,
+   }
+ 
+   drbg->df = df;
++#if defined(OPENSSL_NO_ASM)
++  aes_nohw_set_encrypt_key(seed_material, 256, &drbg->ks);
++#else
+   drbg->ctr =
+       aes_ctr_set_key(&drbg->ks, nullptr, &drbg->block, seed_material, 32);
++#endif
+   OPENSSL_memcpy(drbg->counter, seed_material + 32, 16);
+   drbg->reseed_counter = 1;
+ 
+@@ -253,14 +257,22 @@ static int ctr_drbg_update(CTR_DRBG_STATE *drbg,
+   uint8_t temp[CTR_DRBG_SEED_LEN];
+   for (size_t i = 0; i < CTR_DRBG_SEED_LEN; i += AES_BLOCK_SIZE) {
+     ctr32_add(drbg, 1);
++#if defined(OPENSSL_NO_ASM)
++    aes_nohw_encrypt(drbg->counter, temp + i, &drbg->ks);
++#else
+     drbg->block(drbg->counter, temp + i, &drbg->ks);
++#endif
+   }
+ 
+   for (size_t i = 0; i < CTR_DRBG_SEED_LEN; i++) {
+     temp[i] ^= data[i];
+   }
+ 
++#if defined(OPENSSL_NO_ASM)
++  aes_nohw_set_encrypt_key(temp, 256, &drbg->ks);
++#else
+   drbg->ctr = aes_ctr_set_key(&drbg->ks, nullptr, &drbg->block, temp, 32);
++#endif
+   OPENSSL_memcpy(drbg->counter, temp + 32, 16);
+ 
+   return 1;
+@@ -372,7 +384,12 @@ int CTR_DRBG_generate(CTR_DRBG_STATE *drbg, uint8_t *out, size_t out_len,
+ 
+     OPENSSL_memset(out, 0, todo);
+     ctr32_add(drbg, 1);
++#if defined(OPENSSL_NO_ASM)
++    aes_nohw_ctr32_encrypt_blocks(out, out, num_blocks, &drbg->ks,
++                                 drbg->counter);
++#else
+     drbg->ctr(out, out, num_blocks, &drbg->ks, drbg->counter);
++#endif
+     ctr32_add(drbg, (uint32_t)(num_blocks - 1));
+ 
+     out += todo;
+@@ -382,7 +399,11 @@ int CTR_DRBG_generate(CTR_DRBG_STATE *drbg, uint8_t *out, size_t out_len,
+   if (out_len > 0) {
+     uint8_t block[AES_BLOCK_SIZE];
+     ctr32_add(drbg, 1);
++#if defined(OPENSSL_NO_ASM)
++    aes_nohw_encrypt(drbg->counter, block, &drbg->ks);
++#else
+     drbg->block(drbg->counter, block, &drbg->ks);
++#endif
+ 
+     OPENSSL_memcpy(out, block, out_len);
+   }
+diff --git a/crypto/fipsmodule/rand/internal.h b/crypto/fipsmodule/rand/internal.h
+index 8895b96..028676b 100644
+--- a/crypto/fipsmodule/rand/internal.h
++++ b/crypto/fipsmodule/rand/internal.h
+@@ -34,8 +34,10 @@ BSSL_NAMESPACE_END
+ // 800-90Ar1.
+ struct ctr_drbg_state_st {
+   AES_KEY ks;
++#if !defined(OPENSSL_NO_ASM)
+   bssl::block128_f block;
+   bssl::ctr128_f ctr;
++#endif
+   uint8_t counter[16];
+   uint64_t reseed_counter;
+   int df;
+diff --git a/crypto/lhash/lhash.cc b/crypto/lhash/lhash.cc
+index 77a0c87..b725396 100644
+--- a/crypto/lhash/lhash.cc
++++ b/crypto/lhash/lhash.cc
+@@ -44,6 +44,11 @@ struct LHASH_ITEM {
+ };
+ 
+ struct _LHASH {
++  using StoredCompare = lhash_cmp_func BSSL_PTRAUTH_FUNCTION_POINTER(
++      "boringssl.lhash.compare");
++  using StoredHash = lhash_hash_func BSSL_PTRAUTH_FUNCTION_POINTER(
++      "boringssl.lhash.hash");
++
+   // num_items contains the total number of items in the hash table.
+   size_t num_items = 0;
+   // buckets is an array of `num_buckets` pointers. Each points to the head of
+@@ -58,8 +63,8 @@ struct _LHASH {
+   // which would otherwise disrupt the iteration.
+   unsigned callback_depth = 0;
+ 
+-  lhash_cmp_func comp = nullptr;
+-  lhash_hash_func hash = nullptr;
++  StoredCompare comp = nullptr;
++  StoredHash hash = nullptr;
+ };
+ 
+ _LHASH *OPENSSL_lh_new(lhash_hash_func hash, lhash_cmp_func comp) {
+diff --git a/crypto/thread_pthread.cc b/crypto/thread_pthread.cc
+index 4e132fb..b939325 100644
+--- a/crypto/thread_pthread.cc
++++ b/crypto/thread_pthread.cc
+@@ -47,7 +47,9 @@ void CRYPTO_once(CRYPTO_once_t *once, void (*init)()) {
+ }
+ 
+ static pthread_mutex_t g_destructors_lock = PTHREAD_MUTEX_INITIALIZER;
+-static thread_local_destructor_t g_destructors[NUM_OPENSSL_THREAD_LOCALS];
++using StoredThreadLocalDestructor = thread_local_destructor_t
++    BSSL_PTRAUTH_FUNCTION_POINTER("boringssl.thread-local.destructor");
++static StoredThreadLocalDestructor g_destructors[NUM_OPENSSL_THREAD_LOCALS];
+ 
+ // thread_local_destructor is called when a thread exits. It releases thread
+ // local data for that thread only.
+@@ -56,11 +58,13 @@ static void thread_local_destructor(void *arg) {
+     return;
+   }
+ 
+-  thread_local_destructor_t destructors[NUM_OPENSSL_THREAD_LOCALS];
++  StoredThreadLocalDestructor destructors[NUM_OPENSSL_THREAD_LOCALS];
+   if (pthread_mutex_lock(&g_destructors_lock) != 0) {
+     return;
+   }
+-  OPENSSL_memcpy(destructors, g_destructors, sizeof(destructors));
++  for (size_t i = 0; i < NUM_OPENSSL_THREAD_LOCALS; i++) {
++    destructors[i] = g_destructors[i];
++  }
+   pthread_mutex_unlock(&g_destructors_lock);
+ 
+   unsigned i;
+diff --git a/include/openssl/aead.h b/include/openssl/aead.h
+index 6b8ad57..3ed34b6 100644
+--- a/include/openssl/aead.h
++++ b/include/openssl/aead.h
+@@ -227,7 +227,7 @@ union evp_aead_ctx_st_state {
+ // An evp_aead_ctx_st (typedefed as `EVP_AEAD_CTX` in base.h) represents an AEAD
+ // algorithm configured with a specific key and message-independent IV.
+ struct evp_aead_ctx_st {
+-  const EVP_AEAD *aead;
++  const EVP_AEAD *BSSL_PTRAUTH_DATA_POINTER("boringssl.evp-aead.method") aead;
+   union evp_aead_ctx_st_state state;
+   // tag_len may contain the actual length of the authentication tag if it is
+   // known at initialization time.
+diff --git a/include/openssl/base.h b/include/openssl/base.h
+index fec3237..6588177 100644
+--- a/include/openssl/base.h
++++ b/include/openssl/base.h
+@@ -34,6 +34,19 @@
+ #include <TargetConditionals.h>
+ #endif
+ 
++#if defined(__APPLE__) && defined(__arm64e__)
++#include <ptrauth.h>
++#define BSSL_PTRAUTH_FUNCTION_POINTER(role)                                  \
++  __ptrauth(ptrauth_key_function_pointer, 1,                                \
++            ptrauth_string_discriminator(role))
++#define BSSL_PTRAUTH_DATA_POINTER(role)                                      \
++  __ptrauth(ptrauth_key_process_dependent_data, 1,                          \
++            ptrauth_string_discriminator(role))
++#else
++#define BSSL_PTRAUTH_FUNCTION_POINTER(role)
++#define BSSL_PTRAUTH_DATA_POINTER(role)
++#endif
++
+ // Include a BoringSSL-only header so consumers including this header without
+ // setting up include paths do not accidentally pick up the system
+ // opensslconf.h.
+diff --git a/include/openssl/digest.h b/include/openssl/digest.h
+index d9f46d6..89ea4e6 100644
+--- a/include/openssl/digest.h
++++ b/include/openssl/digest.h
+@@ -359,15 +359,17 @@ struct env_md_ctx_st {
+   };
+ 
+   // digest is the underlying digest function, or NULL if not set.
+-  const EVP_MD *digest;
++  const EVP_MD *BSSL_PTRAUTH_DATA_POINTER("boringssl.evp-md.digest") digest;
+ 
+   // pctx is an opaque (at this layer) pointer to additional context that
+   // EVP_PKEY functions may store in this object.
+-  EVP_PKEY_CTX *pctx;
++  EVP_PKEY_CTX *BSSL_PTRAUTH_DATA_POINTER("boringssl.evp-md.pkey-context")
++      pctx;
+ 
+   // pctx_ops, if not NULL, points to a vtable that contains functions to
+   // manipulate `pctx`.
+-  const struct evp_md_pctx_ops *pctx_ops;
++  const struct evp_md_pctx_ops *BSSL_PTRAUTH_DATA_POINTER(
++      "boringssl.evp-md.pkey-operations") pctx_ops;
+ } /* EVP_MD_CTX */;
+ 
+ 
+diff --git a/ssl/internal.h b/ssl/internal.h
+index 96f6d3d..8f60720 100644
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -562,6 +562,9 @@ class SSLAEADContext {
+   bool GetIV(const uint8_t **out_iv, size_t *out_iv_len) const;
+ 
+  private:
++  using StoredCipher = const SSL_CIPHER *BSSL_PTRAUTH_DATA_POINTER(
++      "boringssl.ssl-record.cipher");
++
+   // GetAdditionalData returns the additional data, writing into `storage` if
+   // necessary.
+   Span<const uint8_t> GetAdditionalData(uint8_t storage[13], uint8_t type,
+@@ -569,7 +572,7 @@ class SSLAEADContext {
+                                         uint64_t seqnum, size_t plaintext_len,
+                                         Span<const uint8_t> header);
+ 
+-  const SSL_CIPHER *cipher_;
++  StoredCipher cipher_;
+   ScopedEVP_AEAD_CTX ctx_;
+   // fixed_nonce_ contains any bytes of the nonce that are fixed for all
+   // records.
+@@ -1997,8 +2000,11 @@ struct SSL_HANDSHAKE {
+   // will be initialized.
+   UniquePtr<ECHConfig> selected_ech_config;
+ 
++  using StoredNegotiatedCipher = const SSL_CIPHER
++      *BSSL_PTRAUTH_DATA_POINTER("boringssl.ssl-handshake.cipher");
++
+   // new_cipher is the cipher being negotiated in this handshake.
+-  const SSL_CIPHER *new_cipher = nullptr;
++  StoredNegotiatedCipher new_cipher = nullptr;
+ 
+   // key_block is the record-layer key block for TLS 1.2 and earlier.
+   Array<uint8_t> key_block;
+@@ -2572,7 +2578,10 @@ struct CERT {
+ 
+   // x509_method contains pointers to functions that might deal with `X509`
+   // compatibility, or might be a no-op, depending on the application.
+-  const SSL_X509_METHOD *x509_method = nullptr;
++  using StoredX509Method = const SSL_X509_METHOD *BSSL_PTRAUTH_DATA_POINTER(
++      "boringssl.ssl.x509-method");
++
++  StoredX509Method x509_method = nullptr;
+ 
+   // x509_chain may contain a parsed copy of `chain[1..]` from the legacy
+   // credential. This is only used as a cache in order to implement “get0”
+@@ -3397,6 +3406,11 @@ struct ALPSConfig {
+ //
+ // See SSL_shed_handshake_config() for more about the conditions under which
+ // configuration can be shed.
++using CustomVerifyCallback = ssl_verify_result_t (*)(SSL *ssl,
++                                                      uint8_t *out_alert);
++using StoredCustomVerifyCallback = CustomVerifyCallback
++    BSSL_PTRAUTH_FUNCTION_POINTER("boringssl.ssl.custom-verify");
++
+ struct SSL_CONFIG {
+   static constexpr bool kAllowUniquePtr = true;
+ 
+@@ -3429,8 +3443,7 @@ struct SSL_CONFIG {
+                          X509_STORE_CTX *ctx) =
+       nullptr;  // fail if callback returns 0
+ 
+-  enum ssl_verify_result_t (*custom_verify_callback)(
+-      SSL *ssl, uint8_t *out_alert) = nullptr;
++  StoredCustomVerifyCallback custom_verify_callback = nullptr;
+   // Server-only: psk_identity_hint is the identity hint to send in
+   // PSK-based key exchanges.
+   UniquePtr<char> psk_identity_hint;
+@@ -3940,8 +3953,13 @@ class SSLContext : public ssl_ctx_st, public RefCounted<SSLContext> {
+   SSLContext(const SSLContext &) = delete;
+   SSLContext &operator=(const SSLContext &) = delete;
+ 
+-  const SSL_PROTOCOL_METHOD *method = nullptr;
+-  const SSL_X509_METHOD *x509_method = nullptr;
++  using StoredProtocolMethod = const SSL_PROTOCOL_METHOD
++      *BSSL_PTRAUTH_DATA_POINTER("boringssl.ssl.protocol-method");
++  using StoredX509Method = const SSL_X509_METHOD *BSSL_PTRAUTH_DATA_POINTER(
++      "boringssl.ssl.x509-method");
++
++  StoredProtocolMethod method = nullptr;
++  StoredX509Method x509_method = nullptr;
+ 
+   // lock is used to protect various operations on this object.
+   mutable Mutex lock;
+@@ -4009,8 +4027,7 @@ class SSLContext : public ssl_ctx_st, public RefCounted<SSLContext> {
+   int (*app_verify_callback)(X509_STORE_CTX *store_ctx, void *arg) = nullptr;
+   void *app_verify_arg = nullptr;
+ 
+-  ssl_verify_result_t (*custom_verify_callback)(SSL *ssl,
+-                                                uint8_t *out_alert) = nullptr;
++  StoredCustomVerifyCallback custom_verify_callback = nullptr;
+ 
+   // Default password callback.
+   pem_password_cb *default_passwd_callback = nullptr;
+@@ -4275,9 +4292,15 @@ class SSLImpl : public ssl_st {
+   SSLImpl &operator=(const SSLImpl &) = delete;
+   ~SSLImpl();
+ 
++  using StoredProtocolMethod = const SSL_PROTOCOL_METHOD
++      *BSSL_PTRAUTH_DATA_POINTER("boringssl.ssl.protocol-method");
++  using HandshakeFunction = ssl_hs_wait_t (*)(SSL_HANDSHAKE *hs);
++  using StoredHandshakeFunction = HandshakeFunction
++      BSSL_PTRAUTH_FUNCTION_POINTER("boringssl.ssl.handshake");
++
+   // method is the method table corresponding to the current protocol (DTLS or
+   // TLS).
+-  const SSL_PROTOCOL_METHOD *method = nullptr;
++  StoredProtocolMethod method = nullptr;
+ 
+   // config is a container for handshake configuration.  Accesses to this field
+   // should check for nullptr, since configuration may be shed after the
+@@ -4296,7 +4319,7 @@ class SSLImpl : public ssl_st {
+   // do_handshake runs the handshake. On completion, it returns `ssl_hs_ok`.
+   // Otherwise, it returns a value corresponding to what operation is needed to
+   // progress.
+-  ssl_hs_wait_t (*do_handshake)(SSL_HANDSHAKE *hs) = nullptr;
++  StoredHandshakeFunction do_handshake = nullptr;
+ 
+   SSL3_STATE *s3 = nullptr;   // TLS variables
+   DTLS1_STATE *d1 = nullptr;  // DTLS variables
+@@ -4393,7 +4416,10 @@ struct ssl_session_st : public bssl::RefCounted<ssl_session_st> {
+   // certificate. This must be null if `peer_raw_public_key` is non-null.
+   bssl::UniquePtr<STACK_OF(CRYPTO_BUFFER)> certs;
+ 
+-  const bssl::SSL_X509_METHOD *x509_method = nullptr;
++  using StoredX509Method = const bssl::SSL_X509_METHOD
++      *BSSL_PTRAUTH_DATA_POINTER("boringssl.ssl.x509-method");
++
++  StoredX509Method x509_method = nullptr;
+ 
+   // x509_peer is the peer's certificate. This must be null if
+   // `peer_raw_public_key` is non-null.
+@@ -4429,8 +4455,11 @@ struct ssl_session_st : public bssl::RefCounted<ssl_session_st> {
+   // epoch.
+   uint64_t time = 0;
+ 
+-  const SSL_CIPHER *cipher = nullptr;
++  using StoredCipher = const SSL_CIPHER *BSSL_PTRAUTH_DATA_POINTER(
++      "boringssl.ssl-session.cipher");
++
++  StoredCipher cipher = nullptr;
+ 
+   CRYPTO_EX_DATA ex_data;  // application specific data
+ 
+   // These are used to make removal of session-ids more efficient and to

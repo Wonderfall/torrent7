@@ -460,6 +460,18 @@ web-seed authentication. SSL-torrent peer support is not compiled because the
 application does not expose the certificate alerts or credential APIs needed to
 operate it safely.
 
+BoringSSL is authenticated as a pristine pinned checkout before an ordered,
+hashed downstream patch series is applied in a profile-local build worktree. In
+the permanent no-assembly configuration, the patch removes unused AES runtime
+dispatch pointers and calls the portable implementations directly. Active TLS,
+cipher, digest, public-key, BIO, and EC method roots use storage-address and role
+diversification on arm64e. BoringSSL's cleansing allocation boundary forwards
+compiler type descriptors to matched `malloc_type_malloc`/`malloc_type_free`
+calls while retaining allocation size and type out of band for checked cleanup
+and realloc. Build verification checks the exact patch tree, compiler flags, and
+archive symbols; focused code-generation and forked replay tests exercise both
+function- and data-pointer PAC plus allocator semantics.
+
 Boost.Asio's small-block recycler also preserves each concrete allocation type
 instead of erasing it to `void *`. Its per-thread cache records the matching
 type descriptor and never returns a block under a different allocation class.

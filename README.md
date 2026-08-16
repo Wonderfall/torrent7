@@ -208,7 +208,12 @@ app bundle. BoringSSL is fetched from its official repository at an exact commit
 and tree, with a reproducible source-archive digest. Its build compiles only the
 static `crypto` and `ssl` targets with assembly and tests disabled and
 `OPENSSL_SMALL` enabled; tools, shared libraries, and the `decrepit` and `pki`
-library targets are not staged. Boost is verified by SHA-256, then receives an ordered,
+library targets are not staged. An ordered, hashed BoringSSL patch series removes
+the remaining no-assembly runtime dispatch, authenticates active TLS, cipher,
+digest, key, BIO, and EC method state with address-and-role-diversified PAC, and
+preserves concrete allocation classes through BoringSSL's cleansing allocator.
+The authenticated pristine checkout remains separate from each profile's patched
+build worktree. Boost is verified by SHA-256, then receives an ordered,
 hashed patch series that authenticates the active Asio scheduler and reactor
 operation callbacks, owning and non-owning executor callbacks and contexts,
 polymorphic executor dispatch and carrier state, and service teardown with
@@ -336,10 +341,11 @@ Run the focused libtorrent network and storage security regressions:
 Scripts/test-libtorrent-security.zsh
 ```
 
-That suite also runs the focused Boost.Asio PAC code-generation, callback replay,
-and typed-recycler tests. They can be invoked directly with:
+That suite also runs focused BoringSSL and Boost.Asio PAC code-generation,
+callback replay, and typed-allocation tests. They can be invoked directly with:
 
 ```sh
+Scripts/test-boringssl-hardening.zsh
 Scripts/test-boost-asio-pac.zsh
 Scripts/test-boost-asio-recycling-allocator.zsh
 ```

@@ -65,10 +65,14 @@ typeset -r BORINGSSL_COMMIT=${BORINGSSL_COMMIT:-b0760837957bf86bd2014d258a948ee7
 typeset -r BORINGSSL_TREE=${BORINGSSL_TREE:-8934bb26100bb063ecfaf9314ed169df37c4d44e}
 typeset -r BORINGSSL_ARCHIVE_SHA256=${BORINGSSL_ARCHIVE_SHA256:-ecfd93ea2b8b10c2c93fffbba2c1d7aa0e1856faa65d1cf1b670205f42e1408f}
 typeset -r BORINGSSL_MIRROR_DIR="$GIT_CACHE_DIR/boringssl.git"
-typeset -r BORINGSSL_SOURCE_ROOT=${BORINGSSL_SOURCE_ROOT:-$SOURCE_CACHE_DIR/boringssl}
-typeset -r BORINGSSL_SOURCE_DIR="$BORINGSSL_SOURCE_ROOT/source"
+typeset -r BORINGSSL_PRISTINE_ROOT=${BORINGSSL_SOURCE_ROOT:-$SOURCE_CACHE_DIR/boringssl}
+typeset -r BORINGSSL_PRISTINE_DIR="$BORINGSSL_PRISTINE_ROOT/source"
+typeset -r BORINGSSL_SOURCE_DIR="$SOURCE_ROOT/boringssl"
 typeset -r BORINGSSL_BUILD_DIR="$BUILD_ROOT/boringssl"
 typeset -r BORINGSSL_BUILD_STAMP="$DEPS_PREFIX/.torrent-app-boringssl-build"
+typeset -r BORINGSSL_PROVENANCE="$DEPS_PREFIX/share/torrent7/boringssl-provenance.txt"
+typeset -r BORINGSSL_PATCH_HELPER="$ROOT_DIR/Scripts/boringssl-patch-series.sh"
+typeset -r BORINGSSL_HARDENING_VERIFIER="$ROOT_DIR/Scripts/verify-boringssl-hardening.zsh"
 typeset -ar BORINGSSL_CMAKE_OPTIONS=(
     -DBUILD_SHARED_LIBS=OFF
     -DBUILD_TESTING=OFF
@@ -417,9 +421,10 @@ EOF
 boringssl_build_manifest() {
     cat <<EOF
 boringssl-repo=$BORINGSSL_REPO
-boringssl-commit=$BORINGSSL_COMMIT
-boringssl-tree=$BORINGSSL_TREE
+boringssl-base-tree=$BORINGSSL_TREE
 boringssl-archive-sha256=$BORINGSSL_ARCHIVE_SHA256
+boringssl-patch-helper-sha256=$(file_sha256 "$BORINGSSL_PATCH_HELPER")
+$("$BORINGSSL_PATCH_HELPER" manifest "$BORINGSSL_SOURCE_DIR")
 target-arch=$TARGET_ARCH
 target-triple=$TARGET_TRIPLE
 deployment-target=$MACOSX_DEPLOYMENT_TARGET
@@ -829,17 +834,18 @@ ensure_git_mirror() {
 }
 
 boringssl_checkout_status() {
-    git -C "$BORINGSSL_SOURCE_DIR" status --porcelain=v1 --untracked-files=all
+    local source="$1"
+    git -C "$source" status --porcelain=v1 --untracked-files=all
 }
 
-verify_boringssl_source() {
+verify_pristine_boringssl_source() {
     local current_commit
     local current_tree
     local archive_sha256
 
-    current_commit="$(git -C "$BORINGSSL_SOURCE_DIR" rev-parse HEAD)"
-    current_tree="$(git -C "$BORINGSSL_SOURCE_DIR" rev-parse 'HEAD^{tree}')"
-    archive_sha256="$(git -C "$BORINGSSL_SOURCE_DIR" archive HEAD | shasum -a 256 | awk '{print $1}')"
+    current_commit="$(git -C "$BORINGSSL_PRISTINE_DIR" rev-parse HEAD)"
+    current_tree="$(git -C "$BORINGSSL_PRISTINE_DIR" rev-parse 'HEAD^{tree}')"
+    archive_sha256="$(git -C "$BORINGSSL_PRISTINE_DIR" archive HEAD | shasum -a 256 | awk '{print $1}')"
 
     [[ "$current_commit" == "$BORINGSSL_COMMIT" ]] \
         || fail "BoringSSL checkout mismatch: expected $BORINGSSL_COMMIT, got $current_commit"
@@ -847,15 +853,15 @@ verify_boringssl_source() {
         || fail "BoringSSL tree mismatch: expected $BORINGSSL_TREE, got $current_tree"
     [[ "$archive_sha256" == "$BORINGSSL_ARCHIVE_SHA256" ]] \
         || fail "BoringSSL source archive mismatch: expected $BORINGSSL_ARCHIVE_SHA256, got $archive_sha256"
-    [[ -z "$(boringssl_checkout_status)" ]] \
-        || fail "BoringSSL checkout has local changes: $BORINGSSL_SOURCE_DIR"
-    [[ ! -e "$BORINGSSL_SOURCE_DIR/.gitmodules" ]] \
+    [[ -z "$(boringssl_checkout_status "$BORINGSSL_PRISTINE_DIR")" ]] \
+        || fail "Pristine BoringSSL checkout has local changes: $BORINGSSL_PRISTINE_DIR"
+    [[ ! -e "$BORINGSSL_PRISTINE_DIR/.gitmodules" ]] \
         || fail "Pinned BoringSSL unexpectedly contains submodules"
-    require_path "$BORINGSSL_SOURCE_DIR/CMakeLists.txt" "BoringSSL CMake project"
-    require_path "$BORINGSSL_SOURCE_DIR/LICENSE" "BoringSSL license"
+    require_path "$BORINGSSL_PRISTINE_DIR/CMakeLists.txt" "BoringSSL CMake project"
+    require_path "$BORINGSSL_PRISTINE_DIR/LICENSE" "BoringSSL license"
 }
 
-clone_boringssl() {
+prepare_boringssl_source() {
     local seed_mirror=""
     local current
     local checkout_status
@@ -864,18 +870,40 @@ clone_boringssl() {
         seed_mirror="$SOURCE_CACHE_SEED_DIR/git/boringssl.git"
     fi
     ensure_git_mirror "$BORINGSSL_REPO" "$BORINGSSL_MIRROR_DIR" "BoringSSL" \
-        "$BORINGSSL_SOURCE_DIR" "$BORINGSSL_COMMIT" "$seed_mirror" 1
+        "$BORINGSSL_PRISTINE_DIR" "$BORINGSSL_COMMIT" "$seed_mirror" 1
 
-    mkdir -p "$BORINGSSL_SOURCE_ROOT"
-    if [[ -d "$BORINGSSL_SOURCE_DIR/.git" ]]; then
-        current="$(git -C "$BORINGSSL_SOURCE_DIR" rev-parse HEAD 2>/dev/null || true)"
-        checkout_status="$(boringssl_checkout_status)"
+    mkdir -p "$BORINGSSL_PRISTINE_ROOT"
+    if [[ -d "$BORINGSSL_PRISTINE_DIR/.git" ]]; then
+        current="$(git -C "$BORINGSSL_PRISTINE_DIR" rev-parse HEAD 2>/dev/null || true)"
+        checkout_status="$(boringssl_checkout_status "$BORINGSSL_PRISTINE_DIR")"
         if [[ "$current" != "$BORINGSSL_COMMIT" ]]; then
             [[ -z "$checkout_status" ]] \
-                || fail "Refusing to replace a BoringSSL checkout with local changes: $BORINGSSL_SOURCE_DIR"
-            remove_dependency_path "$BORINGSSL_SOURCE_DIR"
+                || fail "Refusing to replace a pristine BoringSSL checkout with local changes: $BORINGSSL_PRISTINE_DIR"
+            remove_dependency_path "$BORINGSSL_PRISTINE_DIR"
         elif [[ -n "$checkout_status" ]]; then
-            fail "BoringSSL checkout has local changes: $BORINGSSL_SOURCE_DIR"
+            fail "Pristine BoringSSL checkout has local changes: $BORINGSSL_PRISTINE_DIR"
+        fi
+    elif [[ -e "$BORINGSSL_PRISTINE_DIR" ]]; then
+        remove_dependency_path "$BORINGSSL_PRISTINE_DIR"
+    fi
+
+    if [[ ! -d "$BORINGSSL_PRISTINE_DIR/.git" ]]; then
+        git clone --no-checkout "$BORINGSSL_MIRROR_DIR" "$BORINGSSL_PRISTINE_DIR"
+        git -C "$BORINGSSL_PRISTINE_DIR" remote set-url origin "$BORINGSSL_REPO"
+        git -C "$BORINGSSL_PRISTINE_DIR" checkout --detach "$BORINGSSL_COMMIT"
+    else
+        git -C "$BORINGSSL_PRISTINE_DIR" remote set-url origin "$BORINGSSL_REPO"
+    fi
+    verify_pristine_boringssl_source
+
+    mkdir -p "$SOURCE_ROOT"
+    if [[ -d "$BORINGSSL_SOURCE_DIR/.git" ]]; then
+        current="$(git -C "$BORINGSSL_SOURCE_DIR" rev-parse HEAD 2>/dev/null || true)"
+        checkout_status="$(boringssl_checkout_status "$BORINGSSL_SOURCE_DIR")"
+        if [[ "$current" != "$BORINGSSL_COMMIT" ]]; then
+            [[ -z "$checkout_status" ]] \
+                || fail "Refusing to replace a patched BoringSSL checkout with unexpected local changes: $BORINGSSL_SOURCE_DIR"
+            remove_dependency_path "$BORINGSSL_SOURCE_DIR"
         fi
     elif [[ -e "$BORINGSSL_SOURCE_DIR" ]]; then
         remove_dependency_path "$BORINGSSL_SOURCE_DIR"
@@ -885,10 +913,16 @@ clone_boringssl() {
         git clone --no-checkout "$BORINGSSL_MIRROR_DIR" "$BORINGSSL_SOURCE_DIR"
         git -C "$BORINGSSL_SOURCE_DIR" remote set-url origin "$BORINGSSL_REPO"
         git -C "$BORINGSSL_SOURCE_DIR" checkout --detach "$BORINGSSL_COMMIT"
+        [[ "$(git -C "$BORINGSSL_SOURCE_DIR" rev-parse 'HEAD^{tree}')" == "$BORINGSSL_TREE" ]] \
+            || fail "BoringSSL build checkout does not match the authenticated base tree"
+        [[ -z "$(boringssl_checkout_status "$BORINGSSL_SOURCE_DIR")" ]] \
+            || fail "New BoringSSL build checkout is unexpectedly dirty"
     else
         git -C "$BORINGSSL_SOURCE_DIR" remote set-url origin "$BORINGSSL_REPO"
     fi
-    verify_boringssl_source
+
+    "$BORINGSSL_PATCH_HELPER" apply "$BORINGSSL_SOURCE_DIR"
+    "$BORINGSSL_PATCH_HELPER" verify "$BORINGSSL_SOURCE_DIR"
 }
 
 verify_boringssl_build() {
@@ -925,6 +959,11 @@ verify_boringssl_build() {
 
     verify_archive_arch "$DEPS_PREFIX/lib/libssl.a" "$TARGET_ARCH"
     verify_archive_arch "$DEPS_PREFIX/lib/libcrypto.a" "$TARGET_ARCH"
+    "$BORINGSSL_PATCH_HELPER" verify "$BORINGSSL_SOURCE_DIR"
+    "$BORINGSSL_HARDENING_VERIFIER" \
+        "$BORINGSSL_SOURCE_DIR" \
+        "$BORINGSSL_BUILD_DIR" \
+        "$DEPS_PREFIX"
 }
 
 purge_superseded_tls_metadata() {
@@ -952,6 +991,7 @@ build_boringssl() {
         && -f "$BORINGSSL_BUILD_DIR/compile_commands.json" ]] \
         && stamp_matches "$BORINGSSL_BUILD_STAMP" boringssl_build_manifest "$DEPS_PREFIX"; then
         verify_boringssl_build
+        write_stamp "$BORINGSSL_PROVENANCE" boringssl_build_manifest "$DEPS_PREFIX"
         return
     fi
 
@@ -961,7 +1001,8 @@ build_boringssl() {
     rm -f \
         "$DEPS_PREFIX/lib/libssl.a" \
         "$DEPS_PREFIX/lib/libcrypto.a" \
-        "$BORINGSSL_BUILD_STAMP"
+        "$BORINGSSL_BUILD_STAMP" \
+        "$BORINGSSL_PROVENANCE"
     mkdir -p \
         "$BORINGSSL_BUILD_DIR" \
         "$DEPS_PREFIX/include" \
@@ -1009,6 +1050,7 @@ build_boringssl() {
 
     verify_boringssl_build
     write_stamp "$BORINGSSL_BUILD_STAMP" boringssl_build_manifest "$DEPS_PREFIX"
+    write_stamp "$BORINGSSL_PROVENANCE" boringssl_build_manifest "$DEPS_PREFIX"
 }
 
 setup_libtorrent_submodule_mirrors() {
@@ -1189,9 +1231,13 @@ require_tool shasum
 require_tool tar
 require_path "$BOOST_PATCH_HELPER" "Boost patch-series helper"
 require_path "$BOOST_RECYCLER_VERIFIER" "Boost.Asio recycler verifier"
+require_path "$BORINGSSL_PATCH_HELPER" "BoringSSL patch-series helper"
+require_path "$BORINGSSL_HARDENING_VERIFIER" "BoringSSL hardening verifier"
 require_path "$LIBTORRENT_TLS_VERIFIER" "libtorrent BoringSSL TLS verifier"
 [[ "$("$BOOST_PATCH_HELPER" version)" == "$BOOST_VERSION" ]] \
     || fail "Boost patch-series version does not match BOOST_VERSION=$BOOST_VERSION"
+[[ "$("$BORINGSSL_PATCH_HELPER" commit)" == "$BORINGSSL_COMMIT" ]] \
+    || fail "BoringSSL patch-series commit does not match BORINGSSL_COMMIT=$BORINGSSL_COMMIT"
 require_path "$BORINGSSL_CC" "BoringSSL C compiler"
 require_path "$BORINGSSL_CXX" "BoringSSL C++ compiler"
 require_path "$BORINGSSL_AR" "BoringSSL archiver"
@@ -1205,7 +1251,7 @@ require_path "$ARCH_LIPO" "architecture inspection tool"
 download_boost
 extract_boost
 install_boost_headers
-clone_boringssl
+prepare_boringssl_source
 build_boringssl
 clone_libtorrent
 build_libtorrent

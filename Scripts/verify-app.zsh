@@ -617,6 +617,20 @@ verify_nearby_pac_instruction \
     asio.any-executor.target-fns "$engine_text_output" 0x380f data 4
 verify_nearby_pac_instruction \
     asio.any-executor.property-fns "$engine_text_output" 0xed97 data 4
+typeset -r boringssl_verify_output="$temporary_dir/boringssl-verify-peer.txt"
+typeset -r boringssl_handshake_output="$temporary_dir/boringssl-run-handshake.txt"
+extract_disassembly_function \
+    "$engine_text_output" \
+    "__ZN4bssl20ssl_verify_peer_certEPNS_13SSL_HANDSHAKEE" \
+    "$boringssl_verify_output"
+verify_nearby_pac_instruction \
+    boringssl.ssl.custom-verify "$boringssl_verify_output" 0x5b45 callback 4
+extract_disassembly_function \
+    "$engine_text_output" \
+    "__ZN4bssl17ssl_run_handshakeEPNS_13SSL_HANDSHAKEEPb" \
+    "$boringssl_handshake_output"
+verify_nearby_pac_instruction \
+    boringssl.ssl.protocol-method "$boringssl_handshake_output" 0xcc6f data 4
 typeset native_deps_sanitizer_profile=$expected_sanitizer
 [[ $native_deps_sanitizer_profile != none ]] || native_deps_sanitizer_profile=
 typeset -r expected_native_deps_build_id=$(
@@ -642,6 +656,16 @@ if [[ $expected_sanitizer == none ]]; then
 fi
 require_match "_malloc_type_malloc" "$engine_symbol_output" \
     "Engine extension has no typed malloc symbol"
+for typed_allocator in \
+    _OPENSSL_malloc_type \
+    _OPENSSL_zalloc_type \
+    _OPENSSL_calloc_type \
+    _OPENSSL_realloc_type \
+    _malloc_type_free; do
+    require_match "[[:space:]]${typed_allocator}([[:space:]]|$)" \
+        "$engine_symbol_output" \
+        "Engine extension lacks BoringSSL typed allocator symbol: $typed_allocator"
+done
 require_match "__ZnwmSt19__type_descriptor_t" "$engine_symbol_output" \
     "Engine extension has no typed C++ operator new symbol"
 [[ -x $boost_recycler_verifier ]] \
