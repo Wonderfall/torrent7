@@ -1109,6 +1109,7 @@ TEST_CASE("DHT security settings are explicit")
 {
     lt::settings_pack const settings = make_settings();
 
+    CHECK_FALSE(settings.get_bool(lt::settings_pack::dht_read_only));
     CHECK(settings.get_bool(lt::settings_pack::dht_enforce_node_id));
     CHECK(settings.get_bool(lt::settings_pack::dht_prefer_verified_node_ids));
     CHECK(settings.get_bool(lt::settings_pack::dht_restrict_routing_ips));

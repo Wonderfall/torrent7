@@ -83,6 +83,18 @@ struct TorrentSettingsTests {
         #expect(settings.effectiveUseLocalServiceDiscoveryByDefault == false)
     }
 
+    @Test("Reduced DHT contribution is opt-in and persisted")
+    func reducedDHTContributionIsOptInAndPersisted() throws {
+        var settings = TorrentSettings()
+        #expect(settings.reduceDHTContribution == false)
+
+        settings.reduceDHTContribution = true
+        let data = try JSONEncoder().encode(settings)
+        let decoded = try JSONDecoder().decode(TorrentSettings.self, from: data)
+
+        #expect(decoded.reduceDHTContribution == true)
+    }
+
     @Test("Completion notifications hide torrent names by default")
     func completionNotificationsHideTorrentNamesByDefault() {
         let settings = TorrentSettings()

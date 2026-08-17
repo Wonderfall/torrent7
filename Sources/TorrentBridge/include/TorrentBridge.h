@@ -308,6 +308,7 @@ typedef struct TTorrentSessionSettings {
     uint8_t enable_port_forwarding;
     uint8_t enable_dht;
     uint8_t use_dht_by_default;
+    uint8_t dht_read_only;
     uint8_t enable_lsd;
     uint8_t use_lsd_by_default;
     uint8_t use_pex_by_default;

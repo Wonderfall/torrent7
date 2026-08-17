@@ -662,6 +662,7 @@ package enum TorrentAddError: LocalizedError, Sendable {
             bridgeSettings.enable_port_forwarding = settings.effectiveUsePortForwarding.bridgeFlag
             bridgeSettings.enable_dht = settings.enableDHTNetwork.bridgeFlag
             bridgeSettings.use_dht_by_default = settings.effectiveUseDHTByDefault.bridgeFlag
+            bridgeSettings.dht_read_only = settings.reduceDHTContribution.bridgeFlag
             bridgeSettings.enable_lsd = settings.effectiveEnableLocalServiceDiscovery.bridgeFlag
             bridgeSettings.use_lsd_by_default = settings.effectiveUseLocalServiceDiscoveryByDefault.bridgeFlag
             bridgeSettings.use_pex_by_default = settings.effectiveUsePeerExchangeByDefault.bridgeFlag

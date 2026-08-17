@@ -388,6 +388,14 @@ struct TorrentSettingsView: View {
             .help(state.settings.enableDHTNetwork
                   ? "Eligible torrents use DHT unless disabled by the torrent or per-torrent policy."
                   : "Enable the DHT network first.")
+
+            Toggle(isOn: setting(\.reduceDHTContribution)) {
+                disabledAwareLabel("Reduce DHT contribution", isDisabled: !state.settings.enableDHTNetwork)
+            }
+            .disabled(!state.settings.enableDHTNetwork)
+            .help(state.settings.enableDHTNetwork
+                  ? "Use DHT for peer discovery without answering other nodes' DHT queries or remaining in their routing tables."
+                  : "Enable the DHT network first.")
         }
     }
 

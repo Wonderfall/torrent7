@@ -50,6 +50,7 @@ package struct TorrentSettings: Codable, Equatable, Sendable {
     package var usePortForwarding = false
     package var enableDHTNetwork = true
     package var useDHTByDefault = true
+    package var reduceDHTContribution = false
     package var enablePeerExchangePlugin = true
     package var usePeerExchangeByDefault = true
     package var useHTTPSTrackersOnly = false
@@ -81,6 +82,7 @@ package struct TorrentSettings: Codable, Equatable, Sendable {
         case usePortForwarding
         case enableDHTNetwork
         case useDHTByDefault
+        case reduceDHTContribution
         case enablePeerExchangePlugin
         case usePeerExchangeByDefault
         case useHTTPSTrackersOnly
@@ -113,6 +115,7 @@ package struct TorrentSettings: Codable, Equatable, Sendable {
         settings.usePortForwarding = try values.decodeIfPresent(Bool.self, forKey: .usePortForwarding) ?? settings.usePortForwarding
         settings.enableDHTNetwork = try values.decodeIfPresent(Bool.self, forKey: .enableDHTNetwork) ?? settings.enableDHTNetwork
         settings.useDHTByDefault = try values.decodeIfPresent(Bool.self, forKey: .useDHTByDefault) ?? settings.useDHTByDefault
+        settings.reduceDHTContribution = try values.decodeIfPresent(Bool.self, forKey: .reduceDHTContribution) ?? settings.reduceDHTContribution
         settings.enablePeerExchangePlugin = try values.decodeIfPresent(Bool.self, forKey: .enablePeerExchangePlugin) ?? settings.enablePeerExchangePlugin
         settings.usePeerExchangeByDefault = try values.decodeIfPresent(Bool.self, forKey: .usePeerExchangeByDefault) ?? settings.usePeerExchangeByDefault
         settings.useHTTPSTrackersOnly = try values.decodeIfPresent(Bool.self, forKey: .useHTTPSTrackersOnly) ?? settings.useHTTPSTrackersOnly

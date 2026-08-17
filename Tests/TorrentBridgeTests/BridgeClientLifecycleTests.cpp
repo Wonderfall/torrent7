@@ -3704,6 +3704,39 @@ TEST_CASE("DHT privacy lookups follow effective DHT availability")
     }));
 }
 
+TEST_CASE("settings apply toggles reduced DHT contribution")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+
+    TTorrentSessionSettings settings = unblocked_session_settings();
+    settings.enable_dht = bridge_bool(true);
+    settings.dht_read_only = bridge_bool(true);
+    char error[512]{};
+
+    REQUIRE(apply_settings(
+        &client,
+        settings,
+        error,
+        static_cast<int32_t>(sizeof(error))
+    ) == 0);
+    CHECK(eventually([&] {
+        return client.session.get_settings().get_bool(lt::settings_pack::dht_read_only);
+    }));
+
+    settings.dht_read_only = bridge_bool(false);
+    REQUIRE(apply_settings(
+        &client,
+        settings,
+        error,
+        static_cast<int32_t>(sizeof(error))
+    ) == 0);
+    CHECK(eventually([&] {
+        return !client.session.get_settings().get_bool(lt::settings_pack::dht_read_only);
+    }));
+}
+
 TEST_CASE("settings apply enforces HTTPS-only source policy on loaded torrents")
 {
     bridge_tests::TemporaryDirectory temporary_directory;

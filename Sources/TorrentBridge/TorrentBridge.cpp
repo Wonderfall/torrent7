@@ -3440,6 +3440,7 @@ extern "C" int32_t TorrentClientApplySettings(
         bool const enable_port_forwarding = bridge_bool(requested.enable_port_forwarding);
         bool const enable_dht = bridge_bool(requested.enable_dht);
         bool const use_dht_by_default = bridge_bool(requested.use_dht_by_default);
+        bool const dht_read_only = bridge_bool(requested.dht_read_only);
         bool const enable_lsd = bridge_bool(requested.enable_lsd);
         bool const use_lsd_by_default = bridge_bool(requested.use_lsd_by_default);
         bool const use_pex_by_default = bridge_bool(requested.use_pex_by_default);
@@ -3500,6 +3501,7 @@ extern "C" int32_t TorrentClientApplySettings(
         settings.set_bool(lt::settings_pack::enable_upnp, !network_blocked && enable_port_forwarding);
         settings.set_bool(lt::settings_pack::enable_natpmp, !network_blocked && enable_port_forwarding);
         settings.set_bool(lt::settings_pack::enable_dht, !network_blocked && enable_dht);
+        settings.set_bool(lt::settings_pack::dht_read_only, dht_read_only);
         settings.set_bool(lt::settings_pack::enable_lsd, !network_blocked && enable_lsd);
         settings.set_bool(lt::settings_pack::enable_outgoing_tcp, !network_blocked);
         settings.set_bool(lt::settings_pack::enable_incoming_tcp, !network_blocked && accept_incoming_connections);
