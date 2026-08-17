@@ -1,0 +1,195 @@
+diff --git a/include/libtorrent/aux_/torrent.hpp b/include/libtorrent/aux_/torrent.hpp
+index 4b2bba2b62e3a6f307465ec85c0fdfa44e0b5e63..1d791bc850fc1ef1db6124aa272be04db0136bb0 100644
+--- a/include/libtorrent/aux_/torrent.hpp
++++ b/include/libtorrent/aux_/torrent.hpp
+@@ -105,6 +105,12 @@ namespace libtorrent::aux {
+ 
+ 	TORRENT_EXTRA_EXPORT std::int64_t calc_bytes(file_storage const& fs, piece_count const& pc);
+ 
++	constexpr bool can_announce_dht_peer(bool const incoming_tcp
++		, bool const incoming_utp, int const announce_port) noexcept
++	{
++		return incoming_tcp || incoming_utp || announce_port != 0;
++	}
++
+ #ifndef TORRENT_DISABLE_STREAMING
+ 	struct time_critical_piece
+ 	{
+diff --git a/include/libtorrent/kademlia/dht_tracker.hpp b/include/libtorrent/kademlia/dht_tracker.hpp
+index 2e6ed833766af16740fbcfd56fe3861cc28a1d9f..e825527e066c36aec1f33e7506335cb9d9f1f6d4 100644
+--- a/include/libtorrent/kademlia/dht_tracker.hpp
++++ b/include/libtorrent/kademlia/dht_tracker.hpp
+@@ -89,7 +89,8 @@ namespace libtorrent::dht {
+ 		dht_state state() const;
+ 
+ 		void get_peers(sha1_hash const& ih
+-			, std::function<void(std::vector<tcp::endpoint> const&)> f);
++			, std::function<void(std::vector<tcp::endpoint> const&)> f
++			, announce_flags_t flags = {});
+ 		void announce(sha1_hash const& ih, int listen_port, announce_flags_t flags
+ 			, std::function<void(std::vector<tcp::endpoint> const&)> f);
+ 
+diff --git a/src/kademlia/dht_tracker.cpp b/src/kademlia/dht_tracker.cpp
+index e045717a15865d7ffaba93577cffb2494122ebb7..976db28d16d5730f49921d82cf638bc2ac495d5f 100644
+--- a/src/kademlia/dht_tracker.cpp
++++ b/src/kademlia/dht_tracker.cpp
+@@ -300,10 +300,11 @@ namespace libtorrent::dht {
+ 	}
+ 
+ 	void dht_tracker::get_peers(sha1_hash const& ih
+-		, std::function<void(std::vector<tcp::endpoint> const&)> f)
++		, std::function<void(std::vector<tcp::endpoint> const&)> f
++		, announce_flags_t const flags)
+ 	{
+ 		for (auto& n : m_nodes)
+-			n.second.dht.get_peers(ih, f, {}, {});
++			n.second.dht.get_peers(ih, f, {}, flags);
+ 	}
+ 
+ 	void dht_tracker::announce(sha1_hash const& ih, int listen_port
+diff --git a/src/torrent.cpp b/src/torrent.cpp
+index 7b9a3d039931bc45279a6d6b7413534bdb5adf4a..4195ccc1f9d247adb59876b25b21d41f4bc48aec 100644
+--- a/src/torrent.cpp
++++ b/src/torrent.cpp
+@@ -2994,6 +2994,10 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 		// our source port in the packet as our listen port, which is
+ 		// likely more accurate when behind a NAT
+ 		const auto announce_port = std::uint16_t(settings().get_int(settings_pack::announce_port));
++		bool const announce_peer = can_announce_dht_peer(
++			settings().get_bool(settings_pack::enable_incoming_tcp)
++			, settings().get_bool(settings_pack::enable_incoming_utp)
++			, announce_port);
+ 		if (is_ssl_torrent())
+ 		{
+ 			flags |= dht::announce::ssl_torrent;
+@@ -3006,8 +3010,12 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 		std::weak_ptr<torrent> self(shared_from_this());
+ 		m_torrent_file->info_hashes().for_each([&](sha1_hash const& ih, protocol_version v)
+ 		{
+-			m_ses.dht()->announce(ih, announce_port, flags
+-				, std::bind(&torrent::on_dht_announce_response_disp, self, v, _1));
++			auto const on_peers = std::bind(
++				&torrent::on_dht_announce_response_disp, self, v, _1);
++			if (announce_peer)
++				m_ses.dht()->announce(ih, announce_port, flags, on_peers);
++			else
++				m_ses.dht()->get_peers(ih, on_peers, flags);
+ 		});
+ 	}
+ 
+diff --git a/test/test_dht.cpp b/test/test_dht.cpp
+index 3a1751a5d33165b43529b8db085104e76d01c53a..905939465b2bd8400d8314b5231dc57e3a5980c8 100644
+--- a/test/test_dht.cpp
++++ b/test/test_dht.cpp
+@@ -1997,7 +1997,7 @@ TORRENT_TEST(short_nodes_v6)
+ 
+ namespace {
+ 
+-void test_get_peers(address(&rand_addr)())
++void test_get_peers(address(&rand_addr)(), bool const announce_peer)
+ {
+ 	dht_test_setup t(udp::endpoint(rand_addr(), 20));
+ 	bdecode_node response;
+@@ -2009,10 +2009,12 @@ void test_get_peers(address(&rand_addr)())
+ 		{"q", bdecode_node::string_t, 9, 0},
+ 		{"a", bdecode_node::dict_t, 0, key_desc_t::parse_children},
+ 			{"id", bdecode_node::string_t, 20, 0},
+-			{"info_hash", bdecode_node::string_t, 20, key_desc_t::last_child},
++			{"info_hash", bdecode_node::string_t, 20, 0},
++			{"noseed", bdecode_node::int_t, 0
++				, key_desc_t::optional | key_desc_t::last_child},
+ 	};
+ 
+-	bdecode_node get_peers_keys[6];
++	bdecode_node get_peers_keys[7];
+ 
+ 	// get_peers
+ 
+@@ -2024,7 +2026,10 @@ void test_get_peers(address(&rand_addr)())
+ 	dht::node_id const initial_node_id = to_hash("1111111111222222222233333333334444444444");
+ 	t.dht_node.m_table.add_node(node_entry{initial_node_id, initial_node, 10, true});
+ 
+-	t.dht_node.announce(target, 1234, {}, get_peers_cb);
++	if (announce_peer)
++		t.dht_node.announce(target, 1234, dht::announce::seed, get_peers_cb);
++	else
++		t.dht_node.get_peers(target, get_peers_cb, {}, dht::announce::seed);
+ 
+ 	TEST_EQUAL(g_sent_packets.size(), 1);
+ 	if (g_sent_packets.empty()) return;
+@@ -2037,6 +2042,7 @@ void test_get_peers(address(&rand_addr)())
+ 		TEST_EQUAL(get_peers_keys[0].string_value(), "q");
+ 		TEST_EQUAL(get_peers_keys[2].string_value(), "get_peers");
+ 		TEST_EQUAL(get_peers_keys[5].string_value(), target.to_string());
++		TEST_EQUAL(get_peers_keys[6].int_value(), 1);
+ 		if (get_peers_keys[0].string_value() != "q"
+ 			|| get_peers_keys[2].string_value() != "get_peers")
+ 			return;
+@@ -2099,12 +2105,17 @@ void test_get_peers(address(&rand_addr)())
+ 	send_dht_response(t.dht_node, response, next_node
+ 		, msg_args().token("11").port(1234).peers(peers[1]));
+ 
+-	for (auto const& p : g_sent_packets)
++	if (announce_peer)
+ 	{
+-//		std::printf(" %s:%d: %s\n", i->first.address().to_string(ec).c_str()
+-//			, i->first.port(), i->second.to_string().c_str());
+-		TEST_EQUAL(p.second["q"].string(), "announce_peer");
++		for (auto const& p : g_sent_packets)
++		{
++//			std::printf(" %s:%d: %s\n", i->first.address().to_string(ec).c_str()
++//				, i->first.port(), i->second.to_string().c_str());
++			TEST_EQUAL(p.second["q"].string(), "announce_peer");
++		}
+ 	}
++	else
++		TEST_EQUAL(g_sent_packets.size(), 0);
+ 
+ 	g_sent_packets.clear();
+ 
+@@ -2122,13 +2133,24 @@ void test_get_peers(address(&rand_addr)())
+ 
+ TORRENT_TEST(get_peers_v4)
+ {
+-	test_get_peers(rand_v4);
++	test_get_peers(rand_v4, true);
+ }
+ 
+ TORRENT_TEST(get_peers_v6)
+ {
+ 	if (supports_ipv6())
+-		test_get_peers(rand_v6);
++		test_get_peers(rand_v6, true);
++}
++
++TORRENT_TEST(get_peers_without_announce_v4)
++{
++	test_get_peers(rand_v4, false);
++}
++
++TORRENT_TEST(get_peers_without_announce_v6)
++{
++	if (supports_ipv6())
++		test_get_peers(rand_v6, false);
+ }
+ 
+ namespace {
+diff --git a/test/test_torrent.cpp b/test/test_torrent.cpp
+index 19396370f4615ebc5206045f1530843c00eea628..5d505054470db790b8f7156d3aede7016c6ab12d 100644
+--- a/test/test_torrent.cpp
++++ b/test/test_torrent.cpp
+@@ -44,6 +44,14 @@ see LICENSE file.
+ using namespace lt;
+ using namespace std::chrono_literals;
+ 
++TORRENT_TEST(dht_announce_peer_requires_reachable_port)
++{
++	TEST_CHECK(!aux::can_announce_dht_peer(false, false, 0));
++	TEST_CHECK(aux::can_announce_dht_peer(true, false, 0));
++	TEST_CHECK(aux::can_announce_dht_peer(false, true, 0));
++	TEST_CHECK(aux::can_announce_dht_peer(false, false, 6881));
++}
++
+ namespace {
+ 
+ bool wait_priority(torrent_handle const& h, aux::vector<download_priority_t, file_index_t> const& prio)

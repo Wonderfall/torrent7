@@ -26,6 +26,7 @@ typeset -ra test_targets=(
     test_buffer
     test_enum_net
     test_disk_io
+    test_dht
     test_file
     test_heterogeneous_queue
     test_http_connection
@@ -108,6 +109,10 @@ restore_configuration=0
         "$source_dir/test/test_tracker_manager.cpp.nat64_preflight_is_bounded_by_tracker_operation_timeout"
     ./test_torrent --no-redirect \
         "$source_dir/test/test_torrent.cpp.non_global_discovery_peers_are_temporarily_blocked"
+    ./test_torrent --no-redirect \
+        "$source_dir/test/test_torrent.cpp.dht_announce_peer_requires_reachable_port"
+    ./test_dht --no-redirect \
+        "$source_dir/test/test_dht.cpp.get_peers_without_announce_v4"
     ./test_tracker_list --no-redirect
     ./test_tracker_manager --no-redirect \
         "$source_dir/test/test_tracker_manager.cpp.protocol_dispatch_is_case_insensitive"
