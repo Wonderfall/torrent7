@@ -83,6 +83,21 @@ struct TorrentSettingsTests {
         #expect(settings.effectiveUseLocalServiceDiscoveryByDefault == false)
     }
 
+    @Test("Network exposure defaults are hardened")
+    func networkExposureDefaultsAreHardened() throws {
+        let settings = TorrentSettings()
+        let decoded = try JSONDecoder().decode(TorrentSettings.self, from: Data("{}".utf8))
+
+        for candidate in [settings, decoded] {
+            #expect(candidate.acceptIncomingConnections == false)
+            #expect(candidate.effectiveUsePortForwarding == false)
+            #expect(candidate.enablePeerExchangePlugin == false)
+            #expect(candidate.usePeerExchangeByDefault == false)
+            #expect(candidate.effectiveUsePeerExchangeByDefault == false)
+            #expect(candidate.useHTTPSWebSeedsOnly == true)
+        }
+    }
+
     @Test("Reduced DHT contribution is opt-in and persisted")
     func reducedDHTContributionIsOptInAndPersisted() throws {
         var settings = TorrentSettings()

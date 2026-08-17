@@ -143,7 +143,7 @@ struct TorrentStoreIntegrationTests {
         weakStartupAccess = startupAccess
         harness.accessStore.capabilityAdditionalAccesses = [try #require(startupAccess)]
         harness.store.startProductionEngine(
-            enablePeerExchangePlugin: true
+            enablePeerExchangePlugin: false
         )
         while !capture.withLock({ $0.didEnter }) {
             await Task.yield()
@@ -172,14 +172,14 @@ struct TorrentStoreIntegrationTests {
 
         await harness.store.saveAll()
 
-        #expect(capture.withLock { $0.enablePeerExchangePlugin })
+        #expect(!capture.withLock { $0.enablePeerExchangePlugin })
         #expect(capture.withLock { $0.ranOffMainThread })
         #expect(capture.withLock { $0.authorizedSavePaths } == ["/Downloads/Initial"])
         #expect(await harness.engine.shutdownCount == 1)
         #expect(harness.store.settings == TorrentSettings())
         #expect(harness.store.downloadFolder == nil)
         #expect(harness.accessStore.clearDefaultCalls.count == 1)
-        #expect(await installedEngine.appliedSettings.last?.settings.enablePeerExchangePlugin == true)
+        #expect(await installedEngine.appliedSettings.last?.settings.enablePeerExchangePlugin == false)
         #expect(await installedEngine.restartAuthorizedSavePathSnapshots.isEmpty)
         #expect(weakStartupAccess == nil)
     }
@@ -1515,7 +1515,7 @@ struct TorrentStoreIntegrationTests {
         ]
         await harness.engine.suspendNextRestart()
         var settings = harness.store.settings
-        settings.enablePeerExchangePlugin = false
+        settings.enablePeerExchangePlugin = true
 
         harness.store.updateSettings(settings)
         await harness.engine.waitForSuspendedRestart()
@@ -1539,7 +1539,7 @@ struct TorrentStoreIntegrationTests {
         await harness.store.saveAll()
 
         #expect(await harness.engine.blockNetworkCount >= 1)
-        #expect(await harness.engine.restartPeerExchangePluginValues == [false, true])
+        #expect(await harness.engine.restartPeerExchangePluginValues == [true, false])
         #expect(await harness.engine.restartAuthorizedSavePathSnapshots == [
             ["/Downloads/Existing", "/Downloads/New"],
             [],
@@ -1547,7 +1547,7 @@ struct TorrentStoreIntegrationTests {
         #expect(harness.store.settings == TorrentSettings())
         #expect(harness.store.downloadFolder == nil)
         #expect(harness.accessStore.clearDefaultCalls.count == 1)
-        #expect(await harness.engine.appliedSettings.last?.settings.enablePeerExchangePlugin == true)
+        #expect(await harness.engine.appliedSettings.last?.settings.enablePeerExchangePlugin == false)
         #expect(weakRestartAccess == nil)
     }
 
@@ -1905,6 +1905,7 @@ struct TorrentStoreIntegrationTests {
         var settings = TorrentSettings()
         settings.requireNetworkInterface = true
         settings.requiredNetworkInterfaceName = "en0"
+        settings.acceptIncomingConnections = true
         settings.usePortForwarding = true
         settings.enableLocalServiceDiscovery = true
         settings.anonymousMode = false
