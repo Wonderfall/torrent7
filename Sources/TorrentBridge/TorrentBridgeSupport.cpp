@@ -4,6 +4,7 @@
 #include <libtorrent/extensions/smart_ban.hpp>
 #include <libtorrent/extensions/ut_metadata.hpp>
 #include <libtorrent/extensions/ut_pex.hpp>
+#include <libtorrent/aux_/ip_helpers.hpp>
 #include <libtorrent/pread_disk_io.hpp>
 
 namespace torrent_bridge::internal {
@@ -2063,6 +2064,16 @@ TorrentLoadResult parse_sanitized_magnet(std::string_view const magnet)
 void sanitize_resume_endpoint_hints(lt::add_torrent_params &params) noexcept
 {
     params.dht_nodes.clear();
+    if (params.ti && params.ti->is_valid() && params.ti->priv()) {
+        strip_resume_peer_cache(params);
+        return;
+    }
+
+    auto const is_non_global = [](lt::tcp::endpoint const &peer) {
+        return !lt::aux::is_global(peer.address());
+    };
+    std::erase_if(params.peers, is_non_global);
+    std::erase_if(params.banned_peers, is_non_global);
 }
 
 lt::settings_pack make_settings()
@@ -2134,6 +2145,7 @@ void prepare_add_params(
     params.flags |= lt::torrent_flags::duplicate_is_error;
     params.flags |= lt::torrent_flags::paused;
     params.flags |= lt::torrent_flags::update_subscribe;
+    params.flags |= lt::torrent_flags::block_non_global_peers;
     if (!enable_peer_exchange) {
         params.flags |= lt::torrent_flags::disable_pex;
     }

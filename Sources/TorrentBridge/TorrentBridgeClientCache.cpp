@@ -1722,7 +1722,6 @@ BridgeResult TTorrentClient::validate_or_remove_loaded_metadata(lt::torrent_hand
             }
         }
         if (was_pending) {
-            handle.unset_flags(lt::torrent_flags::block_non_global_peers);
             metadata_validation_pending.erase(identity);
             identity->allow_pre_metadata_dht = false;
             identity->intended_default_dont_download = false;

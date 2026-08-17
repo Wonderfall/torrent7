@@ -1960,7 +1960,6 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         if (metadata_pending) {
             params.file_priorities.clear();
             params.flags |= lt::torrent_flags::default_dont_download;
-            params.flags |= lt::torrent_flags::block_non_global_peers;
         }
         prepare_add_params(
             params,

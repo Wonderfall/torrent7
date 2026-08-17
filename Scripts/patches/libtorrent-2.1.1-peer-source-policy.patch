@@ -1,0 +1,535 @@
+diff --git a/include/libtorrent/aux_/session_impl.hpp b/include/libtorrent/aux_/session_impl.hpp
+index 1d95dd538..6635cc30b 100644
+--- a/include/libtorrent/aux_/session_impl.hpp
++++ b/include/libtorrent/aux_/session_impl.hpp
+@@ -851,6 +851,7 @@ namespace aux {
+ 				, dht::msg const& request, entry& response) override;
+ 			ip_filter const* get_dht_ip_filter() const override;
+ 			bool is_dht_address_global(address const& addr) const override;
++			bool is_peer_address_global(address const& addr) const override;
+ 
+ 			void set_external_address(tcp::endpoint const& local_endpoint
+ 				, address const& ip
+diff --git a/include/libtorrent/aux_/session_interface.hpp b/include/libtorrent/aux_/session_interface.hpp
+index 7022964ec..0a4c7a66e 100644
+--- a/include/libtorrent/aux_/session_interface.hpp
++++ b/include/libtorrent/aux_/session_interface.hpp
+@@ -200,6 +200,7 @@ namespace libtorrent::aux {
+ 
+ 		virtual void apply_settings_pack(std::shared_ptr<settings_pack> pack) = 0;
+ 		virtual session_settings const& settings() const = 0;
++		virtual bool is_peer_address_global(address const& addr) const = 0;
+ 
+ 		virtual void queue_tracker_request(aux::tracker_request req
+ 			, std::weak_ptr<aux::request_callback> c) = 0;
+diff --git a/include/libtorrent/aux_/torrent.hpp b/include/libtorrent/aux_/torrent.hpp
+index 693efb684..d3ae41f6d 100644
+--- a/include/libtorrent/aux_/torrent.hpp
++++ b/include/libtorrent/aux_/torrent.hpp
+@@ -461,6 +461,9 @@ namespace libtorrent::aux {
+ 		// find the peer that introduced us to the given endpoint. This is
+ 		// used when trying to holepunch. We need the introducer so that we
+ 		// can send a rendezvous connect message
++		bool allows_peer_exchange() const;
++		bool peer_endpoint_policy_enabled() const { return m_block_non_global_peers; }
++		bool is_peer_address_global(address const& addr) const;
+ 		bt_peer_connection* find_introducer(tcp::endpoint const& ep) const;
+ 
+ 		// if we're connected to a peer at ep, return its peer connection
+@@ -1787,8 +1790,7 @@ namespace libtorrent::aux {
+ 		bool m_disable_v1_hashes:1;
+ 		// ----
+ 
+-		// reject non-global tracker, DHT and PEX peer endpoints while an
+-		// application validates metadata obtained from an untrusted source
++		// enforce the application-owned peer source and endpoint policy
+ 		bool m_block_non_global_peers;
+ 
+ 		// the maximum number of uploads for this torrent
+diff --git a/include/libtorrent/torrent_flags.hpp b/include/libtorrent/torrent_flags.hpp
+index c196f8707..afd9cd0e0 100644
+--- a/include/libtorrent/torrent_flags.hpp
++++ b/include/libtorrent/torrent_flags.hpp
+@@ -301,10 +301,12 @@ namespace torrent_flags {
+ 	// torrents. Cannot be changed after the torrent is added.
+ 	constexpr torrent_flags_t disable_v1_hashes = 25_bit;
+ 
+-	// Reject non-globally-routable peer endpoints learned from trackers, the DHT
+-	// or peer exchange. This is a temporary guard while an application validates
+-	// metadata from an untrusted magnet. The standard resume-data encoder does
+-	// not serialize this application-owned state.
++	// Reject non-globally-routable peer endpoints learned from trackers, the DHT,
++	// peer exchange or resume data, while leaving Local Service Discovery as an
++	// explicit LAN-only path. The policy also prevents private torrents from
++	// replaying resume peers and suppresses non-global PEX and holepunch endpoints.
++	// The standard resume-data encoder does not serialize this application-owned
++	// state.
+ 	constexpr torrent_flags_t block_non_global_peers = 26_bit;
+ 
+ 	// all torrent flags combined. Can conveniently be used when creating masks
+diff --git a/src/bt_peer_connection.cpp b/src/bt_peer_connection.cpp
+index dab91bab0..ef738300f 100644
+--- a/src/bt_peer_connection.cpp
++++ b/src/bt_peer_connection.cpp
+@@ -1569,6 +1569,10 @@ namespace {
+ 
+ 		auto t = associated_torrent().lock();
+ 		if (!t) return;
++		if (!t->allows_peer_exchange()) return;
++		if (t->peer_endpoint_policy_enabled()
++			&& (!t->is_peer_address_global(remote().address())
++				|| !t->is_peer_address_global(ep.address()))) return;
+ 
+ 		switch (msg_type)
+ 		{
+@@ -1707,6 +1711,12 @@ namespace {
+ 	void bt_peer_connection::write_holepunch_msg(hp_message const type
+ 		, tcp::endpoint const& ep, hp_error const error)
+ 	{
++		auto const t = associated_torrent().lock();
++		if (!t || !t->allows_peer_exchange()) return;
++		if (t->peer_endpoint_policy_enabled()
++			&& (!t->is_peer_address_global(remote().address())
++				|| !t->is_peer_address_global(ep.address()))) return;
++
+ 		char buf[35];
+ 		char* ptr = buf + 6;
+ 		aux::write_uint8(type, ptr);
+@@ -2051,7 +2061,11 @@ namespace {
+ 		if (bdecode_node const m = root.dict_find_dict("m"))
+ 		{
+ 			m_upload_only_id = std::uint8_t(m.dict_find_int_value("upload_only", 0));
+-			m_holepunch_id = std::uint8_t(m.dict_find_int_value("ut_holepunch", 0));
++			m_holepunch_id = t->allows_peer_exchange()
++				&& (!t->peer_endpoint_policy_enabled()
++					|| t->is_peer_address_global(remote().address()))
++				? std::uint8_t(m.dict_find_int_value("ut_holepunch", 0))
++				: 0;
+ 			m_dont_have_id = std::uint8_t(m.dict_find_int_value("lt_donthave", 0));
+ 		}
+ 
+@@ -2472,7 +2486,10 @@ namespace {
+ 		handshake["reqq"] = m_settings.get_int(settings_pack::max_allowed_in_request_queue);
+ 
+ 		m["upload_only"] = upload_only_msg;
+-		m["ut_holepunch"] = holepunch_msg;
++		if (t->allows_peer_exchange()
++			&& (!t->peer_endpoint_policy_enabled()
++				|| t->is_peer_address_global(remote().address())))
++			m["ut_holepunch"] = holepunch_msg;
+ #ifndef TORRENT_DISABLE_SHARE_MODE
+ 		if (m_settings.get_bool(settings_pack::support_share_mode))
+ 			m["share_mode"] = share_mode_msg;
+diff --git a/src/session_impl.cpp b/src/session_impl.cpp
+index f2441be6f..b43190a4c 100644
+--- a/src/session_impl.cpp
++++ b/src/session_impl.cpp
+@@ -7448,6 +7448,15 @@ retry:
+ #endif
+ 	}
+ 
++	bool session_impl::is_peer_address_global(address const& addr) const
++	{
++#ifndef TORRENT_DISABLE_DHT
++		if (m_dht_nat64_state.discovery.valid)
++			return is_global(addr, m_dht_nat64_state.discovery);
++#endif
++		return is_global(addr);
++	}
++
+ 	void session_impl::set_external_address(
+ 		tcp::endpoint const& local_endpoint, address const& ip
+ 		, ip_source_t const source_type, address const& source)
+diff --git a/src/torrent.cpp b/src/torrent.cpp
+index 9b6374a16..c739c79e1 100644
+--- a/src/torrent.cpp
++++ b/src/torrent.cpp
+@@ -2178,9 +2178,23 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 		m_torrent_initialized = true;
+ 	}
+ 
++	bool torrent::allows_peer_exchange() const
++	{
++		return m_enable_pex
++			&& !(m_torrent_file->is_valid() && m_torrent_file->priv());
++	}
++
++	bool torrent::is_peer_address_global(address const& addr) const
++	{
++		return m_ses.is_peer_address_global(addr);
++	}
++
+ 	bt_peer_connection* torrent::find_introducer(tcp::endpoint const& ep) const
+ 	{
+ #ifndef TORRENT_DISABLE_EXTENSIONS
++		if (!allows_peer_exchange()) return nullptr;
++		if (m_block_non_global_peers && !is_peer_address_global(ep.address()))
++			return nullptr;
+ 		for (auto* pe : m_connections)
+ 		{
+ 			TORRENT_INCREMENT(m_iterating_connections);
+@@ -8425,9 +8439,19 @@ namespace {
+ 		inc_stats_counter(counters::num_total_pieces_added
+ 			, m_torrent_file->num_pieces());
+ 
+-		// disconnect redundant peers
+-		for (auto* p : m_connections)
+-			p->disconnect_if_redundant();
++		// A private swarm may only bootstrap peers from its tracker. Peers learned
++		// while metadata was unavailable have no trustworthy source association,
++		// so discard them and let the private tracker repopulate the peer list.
++		if (m_block_non_global_peers && m_torrent_file->priv())
++		{
++			clear_peers();
++		}
++		else
++		{
++			// disconnect redundant peers
++			for (auto* p : m_connections)
++				p->disconnect_if_redundant();
++		}
+ 
+ 		set_need_save_resume(torrent_handle::if_metadata_changed);
+ 
+@@ -11809,12 +11833,15 @@ namespace {
+ 
+ 		TORRENT_ASSERT(info_hash().has_v2() || !(flags & pex_lt_v2));
+ 
+-		bool const untrusted_discovery_source = bool(source & peer_info::tracker)
++		bool const restricted_peer_source = bool(source & peer_info::tracker)
+ 			|| bool(source & peer_info::dht)
+-			|| bool(source & peer_info::pex);
++			|| bool(source & peer_info::pex)
++			|| bool(source & peer_info::resume_data);
++		bool const private_resume_peer = bool(source & peer_info::resume_data)
++			&& torrent_file().is_valid() && torrent_file().priv();
+ 		if (m_block_non_global_peers
+-			&& untrusted_discovery_source
+-			&& !is_global(adr.address()))
++			&& restricted_peer_source
++			&& (private_resume_peer || !is_peer_address_global(adr.address())))
+ 		{
+ 			if (alerts().should_post<peer_blocked_alert>())
+ 				alerts().emplace_alert<peer_blocked_alert>(get_handle()
+diff --git a/src/ut_pex.cpp b/src/ut_pex.cpp
+index dc5ee2001..466dbcb1b 100644
+--- a/src/ut_pex.cpp
++++ b/src/ut_pex.cpp
+@@ -39,7 +39,7 @@ namespace libtorrent { namespace {
+ 		max_peer_entries = 100
+ 	};
+ 
+-	bool send_peer(aux::peer_connection const& p)
++	bool send_peer(aux::torrent const& t, aux::peer_connection const& p)
+ 	{
+ 		// don't send out those peers that we haven't connected to
+ 		// (that have connected to us) and that aren't sharing their
+@@ -49,6 +49,8 @@ namespace libtorrent { namespace {
+ 		if (p.is_connecting()) return false;
+ 		if (p.in_handshake()) return false;
+ 		if (p.type() != connection_type::bittorrent) return false;
++		if (t.peer_endpoint_policy_enabled()
++			&& !t.is_peer_address_global(p.remote().address())) return false;
+ 		return true;
+ 	}
+ 
+@@ -86,7 +88,7 @@ namespace libtorrent { namespace {
+ 		// max_peer_entries limits the packet size
+ 		void tick() override
+ 		{
+-			if (m_torrent.flags() & torrent_flags::disable_pex) return;
++			if (!m_torrent.allows_peer_exchange()) return;
+ 
+ 			time_point const now = aux::time_now();
+ 			if (now - seconds(60) < m_last_msg) return;
+@@ -115,7 +117,7 @@ namespace libtorrent { namespace {
+ 			int num_added = 0;
+ 			for (auto const* peer : m_torrent)
+ 			{
+-				if (!send_peer(*peer)) continue;
++				if (!send_peer(m_torrent, *peer)) continue;
+ 
+ 				tcp::endpoint remote = peer->remote();
+ 				m_old_peers.insert(remote);
+@@ -180,6 +182,8 @@ namespace libtorrent { namespace {
+ 
+ 			for (auto const& i : dropped)
+ 			{
++				if (m_torrent.peer_endpoint_policy_enabled()
++					&& !m_torrent.is_peer_address_global(i.address())) continue;
+ 				if (aux::is_v4(i))
+ 					aux::write_endpoint(i, pld_out);
+ 				else
+@@ -221,6 +225,7 @@ namespace libtorrent { namespace {
+ 
+ 		void add_handshake(entry& h) override
+ 		{
++			if (!m_torrent.allows_peer_exchange()) return;
+ 			entry& messages = h["m"];
+ 			messages[extension_name] = extension_index;
+ 		}
+@@ -243,7 +248,7 @@ namespace libtorrent { namespace {
+ 			if (msg != extension_index) return false;
+ 			if (m_message_index == 0) return false;
+ 
+-			if (m_torrent.flags() & torrent_flags::disable_pex) return true;
++			if (!m_torrent.allows_peer_exchange()) return true;
+ 
+ 			if (length > 500 * 1024)
+ 			{
+@@ -314,6 +319,8 @@ namespace libtorrent { namespace {
+ 				{
+ 					auto const adr = aux::read_v4_endpoint<tcp::endpoint>(in);
+ 					pex_flags_t flags(static_cast<std::uint8_t>(*fin++));
++					if (m_torrent.peer_endpoint_policy_enabled()
++						&& !m_torrent.is_peer_address_global(adr.address())) continue;
+ 
+ 					// this is an internal flag. disregard it from the internet
+ 					flags &= ~pex_lt_v2;
+@@ -367,6 +374,8 @@ namespace libtorrent { namespace {
+ 				{
+ 					auto const adr = aux::read_v6_endpoint<tcp::endpoint>(in);
+ 					pex_flags_t flags(static_cast<std::uint8_t>(*fin++));
++					if (m_torrent.peer_endpoint_policy_enabled()
++						&& !m_torrent.is_peer_address_global(adr.address())) continue;
+ 
+ 					// this is an internal flag. disregard it from the internet
+ 					flags &= ~pex_lt_v2;
+@@ -430,7 +439,7 @@ namespace libtorrent { namespace {
+ 
+ 		void send_ut_peer_diff()
+ 		{
+-			if (m_torrent.flags() & torrent_flags::disable_pex) return;
++			if (!m_torrent.allows_peer_exchange()) return;
+ 
+ 			// if there's no change in our peer set, don't send anything
+ 			if (m_tp.peers_in_msg() == 0) return;
+@@ -476,7 +485,7 @@ namespace libtorrent { namespace {
+ 
+ 		void send_ut_peer_list()
+ 		{
+-			if (m_torrent.flags() & torrent_flags::disable_pex) return;
++			if (!m_torrent.allows_peer_exchange()) return;
+ 
+ 			entry pex;
+ 			// leave the dropped string empty
+@@ -495,7 +504,7 @@ namespace libtorrent { namespace {
+ 			int num_added = 0;
+ 			for (auto const* peer : m_torrent)
+ 			{
+-				if (!send_peer(*peer)) continue;
++				if (!send_peer(m_torrent, *peer)) continue;
+ 
+ 				// don't write too big of a package
+ 				if (num_added >= max_peer_entries) break;
+diff --git a/test/session_mock.hpp b/test/session_mock.hpp
+index ca1a03ce9..f6cf2603f 100644
+--- a/test/session_mock.hpp
++++ b/test/session_mock.hpp
+@@ -11,6 +11,7 @@ see LICENSE file.
+ 
+ #include "libtorrent/config.hpp"
+ #include "libtorrent/aux_/session_interface.hpp"
++#include "libtorrent/aux_/ip_helpers.hpp"
+ #include "libtorrent/aux_/alert_manager.hpp"
+ #include "libtorrent/aux_/resolver.hpp"
+ #include "libtorrent/aux_/session_settings.hpp"
+@@ -113,6 +114,8 @@ struct session_mock : aux::session_interface
+ 
+ 	void apply_settings_pack(std::shared_ptr<settings_pack>) override {}
+ 	aux::session_settings const& settings() const override { return _session_settings; }
++	bool is_peer_address_global(address const& addr) const override
++	{ return aux::is_global(addr); }
+ 
+ 	void queue_tracker_request(aux::tracker_request, std::weak_ptr<aux::request_callback>) override {}
+ 
+diff --git a/test/setup_transfer.cpp b/test/setup_transfer.cpp
+index 4071ebd4d..fd85278cc 100644
+--- a/test/setup_transfer.cpp
++++ b/test/setup_transfer.cpp
+@@ -961,7 +961,8 @@ std::vector<lt::create_file_entry> create_random_files(std::string const& path,
+ add_torrent_params create_torrent(std::ostream* file
+ 	, char const* name, int piece_size
+ 	, int num_pieces, bool add_tracker, lt::create_flags_t const flags
+-	, std::string ssl_certificate, bool const bad_v1_hashes)
++	, std::string ssl_certificate, bool const bad_v1_hashes
++	, bool const private_torrent)
+ {
+ 	// exercise the path when encountering invalid urls
+ 	char const* invalid_tracker_url = "http:";
+@@ -974,6 +975,7 @@ add_torrent_params create_torrent(std::ostream* file
+ 	int total_size = piece_size * num_pieces;
+ 	fs.emplace_back(name, total_size);
+ 	lt::create_torrent t(std::move(fs), piece_size, flags);
++	t.set_priv(private_torrent);
+ 	if (add_tracker)
+ 	{
+ 		// invalid tracker urls won't be included in the generated magnet link
+diff --git a/test/setup_transfer.hpp b/test/setup_transfer.hpp
+index 86ca97ac5..6c9e21164 100644
+--- a/test/setup_transfer.hpp
++++ b/test/setup_transfer.hpp
+@@ -83,7 +83,7 @@ EXPORT std::vector<lt::create_file_entry> create_random_files(std::string const&
+ EXPORT lt::add_torrent_params create_torrent(std::ostream* file = nullptr
+ 	, char const* name = "temporary", int piece_size = 16 * 1024, int num_pieces = 13
+ 	, bool add_tracker = true, lt::create_flags_t flags = {}, std::string ssl_certificate = ""
+-	, bool bad_v1_hashes = false);
++	, bool bad_v1_hashes = false, bool private_torrent = false);
+ 
+ EXPORT std::tuple<lt::torrent_handle
+ 	, lt::torrent_handle
+diff --git a/test/test_fast_extension.cpp b/test/test_fast_extension.cpp
+index 0f9107a7d..f5dae02e3 100644
+--- a/test/test_fast_extension.cpp
++++ b/test/test_fast_extension.cpp
+@@ -459,7 +459,7 @@ std::shared_ptr<torrent_info const> setup_peer(tcp::socket& s, io_context& ioc
+ 	, std::shared_ptr<lt::session>& ses, bool incoming = true
+ 	, bool const magnet_link = false, bool const dht = false
+ 	, torrent_flags_t const flags = torrent_flags_t{}
+-	, torrent_handle* th = nullptr)
++	, torrent_handle* th = nullptr, bool const private_torrent = false)
+ {
+ 	std::ofstream out_file;
+ 	std::ofstream* file = nullptr;
+@@ -477,7 +477,8 @@ std::shared_ptr<torrent_info const> setup_peer(tcp::socket& s, io_context& ioc
+ 		if (ec) log("remove(): %s", ec.message().c_str());
+ 	}
+ 
+-	add_torrent_params p = ::create_torrent(file);
++	add_torrent_params p = ::create_torrent(file, "temporary", 16 * 1024, 13
++		, true, {}, "", false, private_torrent);
+ 	out_file.close();
+ 	ih = p.ti->info_hashes();
+ 	auto const ti = p.ti;
+@@ -1177,6 +1178,35 @@ TORRENT_TEST(extension_handshake)
+ #endif
+ }
+ 
++TORRENT_TEST(peer_exchange_and_holepunch_respect_source_policy)
++{
++	auto const check_omitted = [](torrent_flags_t const flags
++		, bool const private_torrent, bool const expect_pex)
++	{
++		info_hash_t ih;
++		std::shared_ptr<lt::session> ses;
++		io_context ios;
++		tcp::socket s(ios);
++		setup_peer(s, ios, ih, ses, true, false, false, flags, nullptr, private_torrent);
++
++		char recv_buffer[1000];
++		do_handshake(s, ih, recv_buffer);
++		send_have_all(s);
++
++		entry extensions;
++		send_extension_handshake(s, extensions);
++		extensions = read_extension_handshake(s, recv_buffer);
++
++		auto const& messages = extensions["m"].dict();
++		TEST_EQUAL(messages.count("ut_holepunch"), 0);
++		TEST_EQUAL(messages.count("ut_pex"), expect_pex ? 1 : 0);
++	};
++
++	check_omitted(torrent_flags::disable_pex, false, false);
++	check_omitted(torrent_flags_t{}, true, false);
++	check_omitted(torrent_flags::block_non_global_peers, false, true);
++}
++
+ #ifndef TORRENT_DISABLE_EXTENSIONS
+ // TEST metadata extension messages and edge cases
+ 
+diff --git a/test/test_torrent.cpp b/test/test_torrent.cpp
+index f45289eb3..6512c30e0 100644
+--- a/test/test_torrent.cpp
++++ b/test/test_torrent.cpp
+@@ -304,7 +304,7 @@ TORRENT_TEST(added_peers)
+ 	if (ra) TEST_EQUAL(ra->params.peers.size(), 2);
+ }
+ 
+-TORRENT_TEST(non_global_discovery_peers_are_temporarily_blocked)
++TORRENT_TEST(global_peer_policy_filters_remote_sources)
+ {
+ 	std::vector<lt::create_file_entry> fs;
+ 	fs.emplace_back("test_torrent_dir4/tmp1", 1024);
+@@ -332,17 +332,22 @@ TORRENT_TEST(non_global_discovery_peers_are_temporarily_blocked)
+ 	tcp::endpoint const private_pex{make_address("192.168.1.1"), 48083};
+ 	tcp::endpoint const private_mixed{make_address("172.16.0.1"), 48087};
+ 	tcp::endpoint const private_nat64{make_address("64:ff9b::a00:1"), 48088};
++	tcp::endpoint const private_resume{make_address("169.254.1.1"), 48089};
++	tcp::endpoint const private_lsd{make_address("192.168.1.2"), 48090};
+ 	tcp::endpoint const public_tracker{make_address("8.8.8.8"), 48084};
+ 	tcp::endpoint const public_dht{make_address("2606:4700:4700::1111"), 48085};
+-	tcp::endpoint const accepted_private_tracker{make_address("10.0.0.2"), 48086};
++	tcp::endpoint const public_resume{make_address("1.1.1.1"), 48086};
+ 
+ 	h.connect_peer(private_tracker, peer_info::tracker);
+ 	h.connect_peer(private_dht, peer_info::dht);
+ 	h.connect_peer(private_pex, peer_info::pex);
+ 	h.connect_peer(private_mixed, peer_info::tracker | peer_info::pex);
+ 	h.connect_peer(private_nat64, peer_info::tracker);
++	h.connect_peer(private_resume, peer_info::resume_data);
++	h.connect_peer(private_lsd, peer_info::lsd);
+ 	h.connect_peer(public_tracker, peer_info::tracker);
+ 	h.connect_peer(public_dht, peer_info::dht);
++	h.connect_peer(public_resume, peer_info::resume_data);
+ 	h.save_resume_data();
+ 
+ 	auto const *saved = alert_cast<save_resume_data_alert>(
+@@ -360,29 +365,46 @@ TORRENT_TEST(non_global_discovery_peers_are_temporarily_blocked)
+ 		TEST_CHECK(!contains(private_pex));
+ 		TEST_CHECK(!contains(private_mixed));
+ 		TEST_CHECK(!contains(private_nat64));
++		TEST_CHECK(!contains(private_resume));
++		TEST_CHECK(contains(private_lsd));
+ 		TEST_CHECK(contains(public_tracker));
+ 		TEST_CHECK(contains(public_dht));
++		TEST_CHECK(contains(public_resume));
+ 		TEST_CHECK(bool(saved->params.flags & torrent_flags::block_non_global_peers));
+ 		auto const restored = read_resume_data(write_resume_data_buf(saved->params));
+ 		TEST_CHECK(!bool(restored.flags & torrent_flags::block_non_global_peers));
+ 	}
++}
+ 
+-	h.unset_flags(torrent_flags::block_non_global_peers);
+-	h.connect_peer(accepted_private_tracker, peer_info::tracker);
+-	h.connect_peer(private_pex, peer_info::pex);
++TORRENT_TEST(global_peer_policy_does_not_replay_private_resume_peers)
++{
++	std::vector<lt::create_file_entry> fs;
++	fs.emplace_back("test_private_resume/tmp1", 1024);
++	lt::create_torrent metadata(std::move(fs), 1024);
++	metadata.set_hash(0_piece, sha1_hash::max());
++	metadata.set_priv(true);
++	std::vector<char> const encoded = bencode(metadata.generate());
++	auto info = load_torrent_buffer(encoded).ti;
++
++	settings_pack pack = settings();
++	pack.set_str(settings_pack::listen_interfaces, test_listen_interface());
++	pack.set_int(settings_pack::max_retry_port_bind, 10);
++	lt::session ses(pack);
++
++	add_torrent_params p;
++	p.ti = info;
++	p.save_path = ".";
++	p.flags |= torrent_flags::block_non_global_peers;
++	p.flags |= torrent_flags::paused;
++	p.flags &= ~torrent_flags::auto_managed;
++	p.peers.emplace_back(make_address("8.8.8.8"), 48100);
++	torrent_handle h = ses.add_torrent(std::move(p));
+ 	h.save_resume_data();
+ 
+-	saved = alert_cast<save_resume_data_alert>(
++	auto const* saved = alert_cast<save_resume_data_alert>(
+ 		wait_for_alert(ses, save_resume_data_alert::alert_type));
+ 	TEST_CHECK(saved);
+-	if (saved)
+-	{
+-		TEST_CHECK(std::find(saved->params.peers.begin(), saved->params.peers.end()
+-			, accepted_private_tracker) != saved->params.peers.end());
+-		TEST_CHECK(std::find(saved->params.peers.begin(), saved->params.peers.end()
+-			, private_pex) != saved->params.peers.end());
+-		TEST_CHECK(!bool(saved->params.flags & torrent_flags::block_non_global_peers));
+-	}
++	if (saved) TEST_CHECK(saved->params.peers.empty());
+ }
+ 
+ TORRENT_TEST(mismatching_info_hash)

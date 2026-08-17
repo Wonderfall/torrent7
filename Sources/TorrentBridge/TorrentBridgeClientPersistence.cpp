@@ -1343,10 +1343,10 @@ void TTorrentClient::load_resume_data()
         } else if (lsd_enabled_by_user) {
             params.flags &= ~lt::torrent_flags::disable_lsd;
         }
+        params.flags |= lt::torrent_flags::block_non_global_peers;
         if (metadata_pending) {
             params.file_priorities.clear();
             params.flags |= lt::torrent_flags::default_dont_download;
-            params.flags |= lt::torrent_flags::block_non_global_peers;
         }
         if (!metadata_pending && should_strip_resume_peer_cache(params, nullptr, app_disabled_dht)) {
             strip_resume_peer_cache(params);

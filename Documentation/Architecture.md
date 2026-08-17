@@ -441,9 +441,13 @@ Tracker DNS resolution, redirects, proxy target selection, UDP sends, peer
 discovery, and storage path resolution happen inside libtorrent. The application
 cannot reliably secure those paths after the fact, so the pinned dependency
 patch series validates destinations at every relevant transition, blocks
-non-global peers during untrusted magnet metadata discovery, confines storage,
-revalidates redirect and send targets, and keeps pread recheck buffers within
-the configured checking-memory budget. The series also preserves Apple's typed
+non-global tracker, DHT, PEX, and resume peer endpoints for each torrent's
+lifetime, confines storage, revalidates redirect and send targets, and keeps
+pread recheck buffers within the configured checking-memory budget. Private
+torrents discard pre-metadata and persisted peer caches and repopulate only from
+their tracker. PEX never advertises LAN endpoints, and `ut_holepunch` follows
+the same PEX/private-torrent policy; explicitly enabled LSD remains the sole
+intentional local-peer discovery path. The series also preserves Apple's typed
 allocation metadata across libtorrent's pool and disk-buffer wrappers instead
 of disabling allocator-wrapper diagnostics for the dependency. Application
 source policy separately controls allowed tracker and web-seed schemes.

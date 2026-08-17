@@ -27,6 +27,7 @@ typeset -ra test_targets=(
     test_enum_net
     test_disk_io
     test_dht
+    test_fast_extension
     test_file
     test_heterogeneous_queue
     test_http_connection
@@ -108,7 +109,11 @@ restore_configuration=0
     ./test_tracker_manager --no-redirect \
         "$source_dir/test/test_tracker_manager.cpp.nat64_preflight_is_bounded_by_tracker_operation_timeout"
     ./test_torrent --no-redirect \
-        "$source_dir/test/test_torrent.cpp.non_global_discovery_peers_are_temporarily_blocked"
+        "$source_dir/test/test_torrent.cpp.global_peer_policy_filters_remote_sources"
+    ./test_torrent --no-redirect \
+        "$source_dir/test/test_torrent.cpp.global_peer_policy_does_not_replay_private_resume_peers"
+    ./test_fast_extension --no-redirect \
+        "$source_dir/test/test_fast_extension.cpp.peer_exchange_and_holepunch_respect_source_policy"
     ./test_torrent --no-redirect \
         "$source_dir/test/test_torrent.cpp.dht_announce_peer_requires_incoming_transport"
     ./test_dht --no-redirect \

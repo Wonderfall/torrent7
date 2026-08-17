@@ -15,7 +15,7 @@
 
 namespace {
 
-[[nodiscard]] lt::add_torrent_params make_source_torrent_params()
+[[nodiscard]] lt::add_torrent_params make_source_torrent_params(bool const private_torrent = false)
 {
     std::vector<lt::create_file_entry> files;
     files.emplace_back("source-test.bin", 4);
@@ -25,6 +25,7 @@ namespace {
         16 * 1024,
         lt::create_torrent::v1_only | lt::create_torrent::symlinks
     );
+    creator.set_priv(private_torrent);
     creator.set_hash(lt::piece_index_t(0), bridge_tests::sha1_hash_from_seed(12U));
     creator.add_tracker("http://tracker.example/announce", 0);
     creator.add_tracker("https://secure-tracker.example/announce", 1);
@@ -591,15 +592,18 @@ TEST_CASE("add params map peer exchange preference to torrent flags")
     lt::add_torrent_params enabled = bridge_tests::add_params_with_hashes();
     prepare_add_params(enabled, "/tmp", false, true);
     CHECK_FALSE(static_cast<bool>(enabled.flags & lt::torrent_flags::disable_pex));
+    CHECK(static_cast<bool>(enabled.flags & lt::torrent_flags::block_non_global_peers));
 
     lt::add_torrent_params already_disabled = bridge_tests::add_params_with_hashes();
     already_disabled.flags |= lt::torrent_flags::disable_pex;
     prepare_add_params(already_disabled, "/tmp", false, true);
     CHECK(static_cast<bool>(already_disabled.flags & lt::torrent_flags::disable_pex));
+    CHECK(static_cast<bool>(already_disabled.flags & lt::torrent_flags::block_non_global_peers));
 
     lt::add_torrent_params disabled = bridge_tests::add_params_with_hashes();
     prepare_add_params(disabled, "/tmp", false, false);
     CHECK(static_cast<bool>(disabled.flags & lt::torrent_flags::disable_pex));
+    CHECK(static_cast<bool>(disabled.flags & lt::torrent_flags::block_non_global_peers));
 }
 
 TEST_CASE("add params apply file priority classes")
@@ -1023,6 +1027,41 @@ TEST_CASE("restricted DHT policy keeps resume peer cache when trackers remain")
     REQUIRE_FALSE(error);
     REQUIRE(decoded.peers.size() == 1U);
     CHECK(decoded.peers.front().port() == 6881);
+}
+
+TEST_CASE("resume endpoint sanitization keeps only global public-torrent peers")
+{
+    lt::add_torrent_params params = bridge_tests::add_params_with_hashes();
+    params.peers = {
+        {lt::make_address("8.8.8.8"), 6881},
+        {lt::make_address("192.168.1.1"), 6882},
+        {lt::make_address("::ffff:10.0.0.1"), 6883},
+    };
+    params.banned_peers = {
+        {lt::make_address("2606:4700:4700::1111"), 6884},
+        {lt::make_address("fd00::1"), 6885},
+    };
+    params.dht_nodes.emplace_back("router.example", 6886);
+
+    sanitize_resume_endpoint_hints(params);
+
+    REQUIRE(params.peers.size() == 1U);
+    CHECK(params.peers.front().address() == lt::make_address("8.8.8.8"));
+    REQUIRE(params.banned_peers.size() == 1U);
+    CHECK(params.banned_peers.front().address() == lt::make_address("2606:4700:4700::1111"));
+    CHECK(params.dht_nodes.empty());
+}
+
+TEST_CASE("resume endpoint sanitization strips private-torrent peers")
+{
+    lt::add_torrent_params params = make_source_torrent_params(true);
+    params.peers.emplace_back(lt::make_address("8.8.8.8"), 6881);
+    params.banned_peers.emplace_back(lt::make_address("1.1.1.1"), 6882);
+
+    sanitize_resume_endpoint_hints(params);
+
+    CHECK(params.peers.empty());
+    CHECK(params.banned_peers.empty());
 }
 
 TEST_CASE("resume encoding uses captured source policy snapshot")

@@ -5156,7 +5156,7 @@ TEST_CASE("metadata resolution owns peer exchange pending policy")
     CHECK_FALSE(static_cast<bool>(public_handle.flags() & lt::torrent_flags::disable_dht));
     CHECK_FALSE(static_cast<bool>(public_handle.flags() & lt::torrent_flags::disable_pex));
     CHECK_FALSE(static_cast<bool>(public_handle.flags() & lt::torrent_flags::disable_lsd));
-    CHECK_FALSE(static_cast<bool>(public_handle.flags() & lt::torrent_flags::block_non_global_peers));
+    CHECK(static_cast<bool>(public_handle.flags() & lt::torrent_flags::block_non_global_peers));
     CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(
         client,
         client.metadata_validation_pending.contains(public_identity)
