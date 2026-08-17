@@ -2083,6 +2083,12 @@ lt::settings_pack make_settings()
     settings.set_bool(lt::settings_pack::enable_incoming_utp, false);
     settings.set_bool(lt::settings_pack::anonymous_mode, true);
     settings.set_bool(lt::settings_pack::dht_privacy_lookups, true);
+    settings.set_bool(lt::settings_pack::dht_enforce_node_id, true);
+    settings.set_bool(lt::settings_pack::dht_prefer_verified_node_ids, true);
+    settings.set_bool(lt::settings_pack::dht_restrict_routing_ips, true);
+    settings.set_bool(lt::settings_pack::dht_restrict_search_ips, true);
+    settings.set_bool(lt::settings_pack::dht_ignore_dark_internet, true);
+    settings.set_bool(lt::settings_pack::apply_filter_to_dht, true);
     settings.set_bool(lt::settings_pack::announce_to_all_trackers, false);
     settings.set_bool(lt::settings_pack::announce_to_all_tiers, false);
     settings.set_bool(lt::settings_pack::prefer_udp_trackers, false);

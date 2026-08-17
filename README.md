@@ -161,8 +161,9 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
   allocation and untyped global C++ allocation imports in the final libtorrent
   archive.
 - **Network privacy defaults:** a coarse libtorrent client identity is used, anonymous
-  mode is enabled by default, DHT privacy lookups are enabled, and local discovery
-  is disabled by default.
+  mode and DHT privacy lookups are enabled by default, strict BEP 42 node-ID
+  enforcement and DHT routing/search IP-diversity restrictions are pinned on,
+  and local discovery is disabled by default.
 
 Torrent 7 can bind libtorrent connections to a selected interface and can use VPN
 interfaces only, but hostname lookup still uses macOS system DNS. This is app-level

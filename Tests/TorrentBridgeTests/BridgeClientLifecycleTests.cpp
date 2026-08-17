@@ -3595,7 +3595,7 @@ TEST_CASE("network unblock waits for libtorrent executor acknowledgement")
     CHECK_FALSE(client.session.is_paused());
 }
 
-TEST_CASE("privacy-sensitive tracker settings are explicit")
+TEST_CASE("privacy-sensitive tracker and DHT settings are explicit")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
     TTorrentClient client((temporary_directory.path() / "State").string());
@@ -3604,6 +3604,12 @@ TEST_CASE("privacy-sensitive tracker settings are explicit")
     lt::settings_pack initial = client.session.get_settings();
     CHECK(initial.get_bool(lt::settings_pack::anonymous_mode));
     CHECK(initial.get_bool(lt::settings_pack::dht_privacy_lookups));
+    CHECK(initial.get_bool(lt::settings_pack::dht_enforce_node_id));
+    CHECK(initial.get_bool(lt::settings_pack::dht_prefer_verified_node_ids));
+    CHECK(initial.get_bool(lt::settings_pack::dht_restrict_routing_ips));
+    CHECK(initial.get_bool(lt::settings_pack::dht_restrict_search_ips));
+    CHECK(initial.get_bool(lt::settings_pack::dht_ignore_dark_internet));
+    CHECK(initial.get_bool(lt::settings_pack::apply_filter_to_dht));
     CHECK_FALSE(initial.get_bool(lt::settings_pack::announce_to_all_trackers));
     CHECK_FALSE(initial.get_bool(lt::settings_pack::announce_to_all_tiers));
     CHECK_FALSE(initial.get_bool(lt::settings_pack::prefer_udp_trackers));
@@ -3632,6 +3638,12 @@ TEST_CASE("privacy-sensitive tracker settings are explicit")
         lt::settings_pack const current = client.session.get_settings();
         return !current.get_bool(lt::settings_pack::anonymous_mode)
             && current.get_bool(lt::settings_pack::dht_privacy_lookups)
+            && current.get_bool(lt::settings_pack::dht_enforce_node_id)
+            && current.get_bool(lt::settings_pack::dht_prefer_verified_node_ids)
+            && current.get_bool(lt::settings_pack::dht_restrict_routing_ips)
+            && current.get_bool(lt::settings_pack::dht_restrict_search_ips)
+            && current.get_bool(lt::settings_pack::dht_ignore_dark_internet)
+            && current.get_bool(lt::settings_pack::apply_filter_to_dht)
             && !current.get_bool(lt::settings_pack::announce_to_all_trackers)
             && !current.get_bool(lt::settings_pack::announce_to_all_tiers)
             && !current.get_bool(lt::settings_pack::prefer_udp_trackers)

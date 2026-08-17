@@ -1105,6 +1105,18 @@ TEST_CASE("network client identity is generic and coarse")
     CHECK(settings.get_int(lt::settings_pack::alert_queue_size) == kLibtorrentAlertQueueSize);
 }
 
+TEST_CASE("DHT security settings are explicit")
+{
+    lt::settings_pack const settings = make_settings();
+
+    CHECK(settings.get_bool(lt::settings_pack::dht_enforce_node_id));
+    CHECK(settings.get_bool(lt::settings_pack::dht_prefer_verified_node_ids));
+    CHECK(settings.get_bool(lt::settings_pack::dht_restrict_routing_ips));
+    CHECK(settings.get_bool(lt::settings_pack::dht_restrict_search_ips));
+    CHECK(settings.get_bool(lt::settings_pack::dht_ignore_dark_internet));
+    CHECK(settings.get_bool(lt::settings_pack::apply_filter_to_dht));
+}
+
 TEST_CASE("untrusted magnet endpoint hints are discarded")
 {
     lt::add_torrent_params params = bridge_tests::add_params_with_hashes();
