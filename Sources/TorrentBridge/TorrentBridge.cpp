@@ -385,6 +385,7 @@ struct NativeNetworkStateExpectation {
     bool enable_outgoing_utp;
     bool enable_incoming_utp;
     bool dht_privacy_lookups;
+    std::optional<bool> dht_read_only;
     bool session_paused;
 };
 
@@ -410,6 +411,8 @@ BridgeResult acknowledge_network_state_locked(
         || current.get_bool(lt::settings_pack::enable_outgoing_utp) != expected.enable_outgoing_utp
         || current.get_bool(lt::settings_pack::enable_incoming_utp) != expected.enable_incoming_utp
         || current.get_bool(lt::settings_pack::dht_privacy_lookups) != expected.dht_privacy_lookups
+        || (expected.dht_read_only
+            && current.get_bool(lt::settings_pack::dht_read_only) != *expected.dht_read_only)
         || session_paused != expected.session_paused) {
         return bridge_error(2, std::string(failure_message));
     }
@@ -452,6 +455,7 @@ BridgeResult block_network_locked(
             .enable_outgoing_utp = false,
             .enable_incoming_utp = false,
             .dht_privacy_lookups = false,
+            .dht_read_only = std::nullopt,
             .session_paused = true,
         },
         "Native network containment could not be confirmed."
@@ -3547,6 +3551,7 @@ extern "C" int32_t TorrentClientApplySettings(
                 .enable_outgoing_utp = !network_blocked,
                 .enable_incoming_utp = !network_blocked && accept_incoming_connections,
                 .dht_privacy_lookups = !network_blocked && enable_dht,
+                .dht_read_only = dht_read_only,
                 .session_paused = expected_session_paused,
             },
             network_blocked

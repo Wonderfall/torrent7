@@ -3567,6 +3567,7 @@ TEST_CASE("network unblock waits for libtorrent executor acknowledgement")
     client.set_session_shutdown_asynchronous(false);
 
     TTorrentSessionSettings settings = unblocked_session_settings();
+    settings.dht_read_only = bridge_bool(true);
     std::array<char, 512> error{};
     SessionExecutorGate executor_gate(client);
     std::promise<int32_t> result_promise;
@@ -3592,6 +3593,7 @@ TEST_CASE("network unblock waits for libtorrent executor acknowledgement")
     CHECK_FALSE(current.get_bool(lt::settings_pack::enable_incoming_tcp));
     CHECK(current.get_bool(lt::settings_pack::enable_outgoing_utp));
     CHECK_FALSE(current.get_bool(lt::settings_pack::enable_incoming_utp));
+    CHECK(current.get_bool(lt::settings_pack::dht_read_only));
     CHECK_FALSE(client.session.is_paused());
 }
 

@@ -110,7 +110,7 @@ restore_configuration=0
     ./test_torrent --no-redirect \
         "$source_dir/test/test_torrent.cpp.non_global_discovery_peers_are_temporarily_blocked"
     ./test_torrent --no-redirect \
-        "$source_dir/test/test_torrent.cpp.dht_announce_peer_requires_reachable_port"
+        "$source_dir/test/test_torrent.cpp.dht_announce_peer_requires_incoming_transport"
     ./test_dht --no-redirect \
         "$source_dir/test/test_dht.cpp.get_peers_without_announce_v4"
     ./test_tracker_list --no-redirect

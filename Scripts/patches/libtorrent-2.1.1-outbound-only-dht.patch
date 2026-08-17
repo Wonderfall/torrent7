@@ -1,5 +1,5 @@
 diff --git a/include/libtorrent/aux_/torrent.hpp b/include/libtorrent/aux_/torrent.hpp
-index 4b2bba2b62e3a6f307465ec85c0fdfa44e0b5e63..1d791bc850fc1ef1db6124aa272be04db0136bb0 100644
+index 4b2bba2b62e3a6f307465ec85c0fdfa44e0b5e63..693efb684e232a52f6601e05af3594a7ec5c7c33 100644
 --- a/include/libtorrent/aux_/torrent.hpp
 +++ b/include/libtorrent/aux_/torrent.hpp
 @@ -105,6 +105,12 @@ namespace libtorrent::aux {
@@ -7,9 +7,9 @@ index 4b2bba2b62e3a6f307465ec85c0fdfa44e0b5e63..1d791bc850fc1ef1db6124aa272be04d
  	TORRENT_EXTRA_EXPORT std::int64_t calc_bytes(file_storage const& fs, piece_count const& pc);
  
 +	constexpr bool can_announce_dht_peer(bool const incoming_tcp
-+		, bool const incoming_utp, int const announce_port) noexcept
++		, bool const incoming_utp) noexcept
 +	{
-+		return incoming_tcp || incoming_utp || announce_port != 0;
++		return incoming_tcp || incoming_utp;
 +	}
 +
  #ifndef TORRENT_DISABLE_STREAMING
@@ -48,21 +48,20 @@ index e045717a15865d7ffaba93577cffb2494122ebb7..976db28d16d5730f49921d82cf638bc2
  
  	void dht_tracker::announce(sha1_hash const& ih, int listen_port
 diff --git a/src/torrent.cpp b/src/torrent.cpp
-index 7b9a3d039931bc45279a6d6b7413534bdb5adf4a..4195ccc1f9d247adb59876b25b21d41f4bc48aec 100644
+index 7b9a3d039931bc45279a6d6b7413534bdb5adf4a..9b6374a16b462ee5e47b2ab92c2fce1d65dc6419 100644
 --- a/src/torrent.cpp
 +++ b/src/torrent.cpp
-@@ -2994,6 +2994,10 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -2994,6 +2994,9 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  		// our source port in the packet as our listen port, which is
  		// likely more accurate when behind a NAT
  		const auto announce_port = std::uint16_t(settings().get_int(settings_pack::announce_port));
 +		bool const announce_peer = can_announce_dht_peer(
 +			settings().get_bool(settings_pack::enable_incoming_tcp)
-+			, settings().get_bool(settings_pack::enable_incoming_utp)
-+			, announce_port);
++			, settings().get_bool(settings_pack::enable_incoming_utp));
  		if (is_ssl_torrent())
  		{
  			flags |= dht::announce::ssl_torrent;
-@@ -3006,8 +3010,12 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -3006,8 +3009,12 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  		std::weak_ptr<torrent> self(shared_from_this());
  		m_torrent_file->info_hashes().for_each([&](sha1_hash const& ih, protocol_version v)
  		{
@@ -175,19 +174,18 @@ index 3a1751a5d33165b43529b8db085104e76d01c53a..905939465b2bd8400d8314b5231dc57e
  
  namespace {
 diff --git a/test/test_torrent.cpp b/test/test_torrent.cpp
-index 19396370f4615ebc5206045f1530843c00eea628..5d505054470db790b8f7156d3aede7016c6ab12d 100644
+index 19396370f4615ebc5206045f1530843c00eea628..f45289eb39f379ae2517ec0f750a5b94173959de 100644
 --- a/test/test_torrent.cpp
 +++ b/test/test_torrent.cpp
-@@ -44,6 +44,14 @@ see LICENSE file.
+@@ -44,6 +44,13 @@ see LICENSE file.
  using namespace lt;
  using namespace std::chrono_literals;
  
-+TORRENT_TEST(dht_announce_peer_requires_reachable_port)
++TORRENT_TEST(dht_announce_peer_requires_incoming_transport)
 +{
-+	TEST_CHECK(!aux::can_announce_dht_peer(false, false, 0));
-+	TEST_CHECK(aux::can_announce_dht_peer(true, false, 0));
-+	TEST_CHECK(aux::can_announce_dht_peer(false, true, 0));
-+	TEST_CHECK(aux::can_announce_dht_peer(false, false, 6881));
++	TEST_CHECK(!aux::can_announce_dht_peer(false, false));
++	TEST_CHECK(aux::can_announce_dht_peer(true, false));
++	TEST_CHECK(aux::can_announce_dht_peer(false, true));
 +}
 +
  namespace {
