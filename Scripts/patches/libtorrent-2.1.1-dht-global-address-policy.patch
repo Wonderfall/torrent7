@@ -1,0 +1,707 @@
+diff --git a/include/libtorrent/aux_/session_impl.hpp b/include/libtorrent/aux_/session_impl.hpp
+index 1fb4ad7f4e7067c771ed85ef5f7f92b476490fcb..1d95dd53866d73c9b9654906a6fcd30c5bf2a595 100644
+--- a/include/libtorrent/aux_/session_impl.hpp
++++ b/include/libtorrent/aux_/session_impl.hpp
+@@ -35,6 +35,7 @@ see LICENSE file.
+ 
+ #include "libtorrent/session.hpp" // for user_load_function_t
+ #include "libtorrent/aux_/ip_voter.hpp"
++#include "libtorrent/aux_/ip_helpers.hpp"
+ #include "libtorrent/entry.hpp"
+ #include "libtorrent/socket.hpp"
+ #include "libtorrent/peer_id.hpp"
+@@ -127,6 +128,50 @@ namespace aux {
+ 		{ return lhs < rhs.get(); }
+ 	};
+ 
++#ifndef TORRENT_DISABLE_DHT
++	struct dht_nat64_discovery_state
++	{
++		std::uint64_t start_lookup()
++		{
++			pending = true;
++			return ++generation;
++		}
++
++		bool lookup_completed(std::uint64_t const lookup_generation
++			, nat64_discovery_result result)
++		{
++			if (!pending || lookup_generation != generation) return false;
++			discovery = std::move(result);
++			complete = true;
++			pending = false;
++			return true;
++		}
++
++		bool lookup_timed_out(std::uint64_t const lookup_generation)
++		{
++			if (!pending || lookup_generation != generation) return false;
++			++generation;
++			discovery = {};
++			complete = true;
++			pending = false;
++			return true;
++		}
++
++		void reset()
++		{
++			++generation;
++			discovery = {};
++			complete = false;
++			pending = false;
++		}
++
++		nat64_discovery_result discovery;
++		std::uint64_t generation = 0;
++		bool complete = false;
++		bool pending = false;
++	};
++#endif
++
+ 	using listen_socket_flags_t = flags::bitfield_flag<std::uint8_t, struct listen_socket_flags_tag>;
+ 
+ 	struct listen_port_mapping
+@@ -534,6 +579,12 @@ namespace aux {
+ 				, std::vector<address> const& addresses, int port);
+ 			void on_dht_router_name_lookup(error_code const& e
+ 				, std::vector<address> const& addresses, int port);
++			bool ensure_dht_global_address_policy();
++			void refresh_dht_global_address_policy();
++			void on_dht_nat64_name_lookup(error_code const& e
++				, std::vector<address> addresses, std::uint64_t generation);
++			void on_dht_nat64_timeout(error_code const& e
++				, std::uint64_t generation);
+ #endif
+ 
+ #if !defined TORRENT_DISABLE_ENCRYPTION
+@@ -799,6 +850,7 @@ namespace aux {
+ 			bool on_dht_request(string_view query
+ 				, dht::msg const& request, entry& response) override;
+ 			ip_filter const* get_dht_ip_filter() const override;
++			bool is_dht_address_global(address const& addr) const override;
+ 
+ 			void set_external_address(tcp::endpoint const& local_endpoint
+ 				, address const& ip
+@@ -1183,6 +1235,9 @@ namespace aux {
+ 			std::shared_ptr<dht::dht_tracker> m_dht;
+ 			dht::dht_storage_constructor_type m_dht_storage_constructor
+ 				= dht::dht_default_storage_constructor;
++			tcp::resolver m_dht_nat64_resolver;
++			deadline_timer m_dht_nat64_timer;
++			dht_nat64_discovery_state m_dht_nat64_state;
+ 
+ 			// these are used when starting the DHT
+ 			// (and bootstrapping it), and then erased
+diff --git a/include/libtorrent/kademlia/dht_observer.hpp b/include/libtorrent/kademlia/dht_observer.hpp
+index cae3756f739018f7ab7b9fe1a2ff17e9111c208b..173e68e045f0785242d2d7241e10d2fdf309a274 100644
+--- a/include/libtorrent/kademlia/dht_observer.hpp
++++ b/include/libtorrent/kademlia/dht_observer.hpp
+@@ -72,6 +72,10 @@ namespace dht {
+ 		// returns the session's IP filter, or nullptr if none is set
+ 		virtual ip_filter const* get_dht_ip_filter() const = 0;
+ 
++		// returns whether an address is globally reachable under the
++		// session's DHT-specific address policy
++		virtual bool is_dht_address_global(address const& addr) const = 0;
++
+ 	protected:
+ 		~dht_observer() = default;
+ 	};
+diff --git a/src/ip_helpers.cpp b/src/ip_helpers.cpp
+index 8673121bf4724d940669d4f54a6f5e485093edfb..a51394515b319ba0d717e925915720653e608bd6 100644
+--- a/src/ip_helpers.cpp
++++ b/src/ip_helpers.cpp
+@@ -150,6 +150,9 @@ namespace aux {
+ 
+ 		bool is_global_v6(address_v6 const& address)
+ 		{
++			if (address.is_v4_mapped())
++				return is_global_v4(make_address_v4(v4_mapped, address));
++
+ 			auto const bytes = address.to_bytes();
+ 
+ 			// The well-known NAT64 prefix is globally reachable, but the
+diff --git a/src/kademlia/dht_tracker.cpp b/src/kademlia/dht_tracker.cpp
+index 976db28d16d5730f49921d82cf638bc2ac495d5f..8359ae20aaac97dd495bac79c9d5f50dde9b6dba 100644
+--- a/src/kademlia/dht_tracker.cpp
++++ b/src/kademlia/dht_tracker.cpp
+@@ -494,6 +494,13 @@ namespace libtorrent::dht {
+ 		m_counters.inc_stats_counter(counters::recv_ip_overhead_bytes
+ 			, aux::is_v6(ep) ? 48 : 28);
+ 		m_counters.inc_stats_counter(counters::dht_messages_in);
++		if (m_log != nullptr
++			? !m_log->is_dht_address_global(ep.address())
++			: !aux::is_global(ep.address()))
++		{
++			m_counters.inc_stats_counter(counters::dht_messages_in_dropped);
++			return true;
++		}
+ 
+ 		if (m_settings.get_bool(settings_pack::dht_ignore_dark_internet) && aux::is_v4(ep))
+ 		{
+diff --git a/src/kademlia/get_peers.cpp b/src/kademlia/get_peers.cpp
+index dab4e4d64c1cc4baaceb898918760ae26a1e84ba..36521b4761460a599a44f680b724cea94549f760 100644
+--- a/src/kademlia/get_peers.cpp
++++ b/src/kademlia/get_peers.cpp
+@@ -19,6 +19,9 @@ see LICENSE file.
+ #include <libtorrent/performance_counters.hpp>
+ #include <libtorrent/aux_/ip_helpers.hpp> // for is_v4
+ 
++#include <algorithm>
++#include <iterator>
++
+ #ifndef TORRENT_DISABLE_LOGGING
+ #include <libtorrent/hex.hpp> // to_hex
+ #endif
+@@ -93,7 +96,16 @@ void get_peers_observer::log_peers(msg const& m, bdecode_node const& r, int cons
+ #endif
+ void get_peers::got_peers(std::vector<tcp::endpoint> const& peers)
+ {
+-	if (m_data_callback) m_data_callback(peers);
++	if (!m_data_callback) return;
++
++	std::vector<tcp::endpoint> filtered_peers;
++	filtered_peers.reserve(peers.size());
++	std::copy_if(peers.begin(), peers.end(), std::back_inserter(filtered_peers)
++		, [this](tcp::endpoint const& peer)
++		{
++			return !filtered(udp::endpoint(peer.address(), peer.port()));
++		});
++	m_data_callback(filtered_peers);
+ }
+ 
+ get_peers::get_peers(
+diff --git a/src/kademlia/node.cpp b/src/kademlia/node.cpp
+index a12e8903d7b6bc1e3e2b915ee29327eaba7a1456..c760478a6d64b55209e2cd557bf0289eddcb2c11 100644
+--- a/src/kademlia/node.cpp
++++ b/src/kademlia/node.cpp
+@@ -393,6 +393,11 @@ namespace {
+ 
+ void node::add_router_node(udp::endpoint const& router)
+ {
++	if (m_observer != nullptr
++		? !m_observer->is_dht_address_global(router.address())
++		: !aux::is_global(router.address()))
++		return;
++
+ #ifndef TORRENT_DISABLE_LOGGING
+ 	if (m_observer != nullptr && m_observer->should_log(dht_logger::node))
+ 	{
+@@ -406,6 +411,10 @@ void node::add_router_node(udp::endpoint const& router)
+ void node::add_node(udp::endpoint const& node)
+ {
+ 	if (!native_address(node)) return;
++	if (m_observer != nullptr
++		? !m_observer->is_dht_address_global(node.address())
++		: !aux::is_global(node.address()))
++		return;
+ 
+ 	if (m_observer != nullptr && m_settings.get_bool(settings_pack::apply_filter_to_dht))
+ 	{
+diff --git a/src/kademlia/routing_table.cpp b/src/kademlia/routing_table.cpp
+index a882cdefbecf72efb895db31486c7e6c90c69d3a..66bdaa1611cb7c5facdca6720af300237121f7d9 100644
+--- a/src/kademlia/routing_table.cpp
++++ b/src/kademlia/routing_table.cpp
+@@ -34,6 +34,7 @@ see LICENSE file.
+ #include "libtorrent/alert_types.hpp" // for dht_routing_bucket
+ #include "libtorrent/aux_/socket_io.hpp" // for print_endpoint
+ #include "libtorrent/aux_/invariant_check.hpp"
++#include "libtorrent/aux_/ip_helpers.hpp"
+ #include "libtorrent/address.hpp"
+ #include "libtorrent/aux_/array.hpp"
+ #include "libtorrent/ip_filter.hpp"
+@@ -600,6 +601,10 @@ routing_table::add_node_status_t routing_table::add_node_impl(node_entry e)
+ 	// don't add if the address isn't the right type
+ 	if (!native_endpoint(e.ep()))
+ 		return failed_to_add;
++	if (m_log != nullptr
++		? !m_log->is_dht_address_global(e.addr())
++		: !aux::is_global(e.addr()))
++		return failed_to_add;
+ 
+ 	if (m_log != nullptr && m_settings.get_bool(settings_pack::apply_filter_to_dht))
+ 	{
+diff --git a/src/kademlia/sample_infohashes.cpp b/src/kademlia/sample_infohashes.cpp
+index 7c688faf622d9bf4c50820f0146b54a0915fbee4..dce848f4a51b8686a18ce6034d0afbe9b5b3e9ba 100644
+--- a/src/kademlia/sample_infohashes.cpp
++++ b/src/kademlia/sample_infohashes.cpp
+@@ -73,7 +73,8 @@ void sample_infohashes_observer::reply(msg const& m)
+ 		while (end - ptr >= 20 + protocol_size + 2)
+ 		{
+ 			node_endpoint nep = read_node_endpoint(protocol, ptr);
+-			nodes.emplace_back(nep.id, nep.ep);
++			if (!algorithm()->filtered(nep.ep))
++				nodes.emplace_back(nep.id, nep.ep);
+ 		}
+ 	}
+ 
+diff --git a/src/kademlia/traversal_algorithm.cpp b/src/kademlia/traversal_algorithm.cpp
+index 730aacd3b13ccfd894c3ed93c58aa6b85620d740..28bbeba28b82d905edb2ec4ea34e4213eb56b34a 100644
+--- a/src/kademlia/traversal_algorithm.cpp
++++ b/src/kademlia/traversal_algorithm.cpp
+@@ -20,6 +20,7 @@ see LICENSE file.
+ #include <libtorrent/aux_/socket_io.hpp> // for read_*_endpoint
+ #include <libtorrent/alert_types.hpp> // for dht_lookup
+ #include <libtorrent/aux_/time.hpp>
++#include <libtorrent/aux_/ip_helpers.hpp>
+ #include <libtorrent/ip_filter.hpp>
+ 
+ #ifndef TORRENT_DISABLE_LOGGING
+@@ -299,11 +300,15 @@ void traversal_algorithm::traverse(node_id const& id, udp::endpoint const& addr)
+ 
+ bool traversal_algorithm::filtered(udp::endpoint const& addr) const
+ {
+-	if (m_node.observer() == nullptr)
+-		return false;
++	dht_observer const* const observer = m_node.observer();
++	if (observer != nullptr
++		? !observer->is_dht_address_global(addr.address())
++		: !aux::is_global(addr.address()))
++		return true;
++	if (observer == nullptr) return false;
+ 	if (!m_node.settings().get_bool(settings_pack::apply_filter_to_dht))
+ 		return false;
+-	ip_filter const* filter = m_node.observer()->get_dht_ip_filter();
++	ip_filter const* filter = observer->get_dht_ip_filter();
+ 	return filter != nullptr && filter->access(addr.address()) == ip_filter::blocked;
+ }
+ 
+diff --git a/src/session_impl.cpp b/src/session_impl.cpp
+index 04807a96f88a324db713c21505bb34d3da916ff2..f2441be6fd9cf59a00c3ee0330d3f4eb8e68f695 100644
+--- a/src/session_impl.cpp
++++ b/src/session_impl.cpp
+@@ -163,6 +163,10 @@ namespace boost {
+ 
+ namespace libtorrent::aux {
+ 
++	namespace {
++		constexpr seconds dht_nat64_discovery_timeout{5};
++	}
++
+ #if defined TORRENT_ASIO_DEBUGGING
+ 	std::map<std::string, async_t> _async_ops;
+ 	std::deque<wakeup_t> _wakeups;
+@@ -522,6 +526,8 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
+ 		, m_last_choke(m_created)
+ 		, m_last_auto_manage(m_created)
+ #ifndef TORRENT_DISABLE_DHT
++		, m_dht_nat64_resolver(m_io_context)
++		, m_dht_nat64_timer(m_io_context)
+ 		, m_dht_announce_timer(m_io_context)
+ #endif
+ 		, m_utp_socket_manager(
+@@ -1059,6 +1065,9 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
+ 		stop_upnp();
+ 		stop_natpmp();
+ #ifndef TORRENT_DISABLE_DHT
++		m_dht_nat64_state.reset();
++		m_dht_nat64_resolver.cancel();
++		m_dht_nat64_timer.cancel();
+ 		stop_dht();
+ 		m_dht_announce_timer.cancel();
+ #endif
+@@ -2033,6 +2042,10 @@ retry:
+ 		if (ec || m_abort || !m_ip_notifier) return;
+ 		m_ip_notifier->async_wait([this] (error_code const& e)
+ 			{ wrap(&session_impl::on_ip_change, e); });
++#ifndef TORRENT_DISABLE_DHT
++		if (m_settings.get_bool(settings_pack::enable_dht))
++			refresh_dht_global_address_policy();
++#endif
+ 		reopen_network_sockets({});
+ 	}
+ 
+@@ -5703,6 +5716,8 @@ retry:
+ #ifndef TORRENT_DISABLE_DHT
+ 		if (m_settings.get_bool(settings_pack::enable_dht))
+ 		{
++			if (!ensure_dht_global_address_policy()) return;
++
+ 			if (!m_settings.get_str(settings_pack::dht_bootstrap_nodes).empty()
+ 				&& m_dht_router_nodes.empty())
+ 			{
+@@ -5717,9 +5732,83 @@ retry:
+ 			}
+ 		}
+ 		else
++		{
++			m_dht_nat64_state.reset();
++			m_dht_nat64_resolver.cancel();
++			m_dht_nat64_timer.cancel();
+ 			stop_dht();
++		}
++#endif
++	}
++
++#ifndef TORRENT_DISABLE_DHT
++	bool session_impl::ensure_dht_global_address_policy()
++	{
++		if (m_dht_nat64_state.complete) return true;
++		if (m_dht_nat64_state.pending) return false;
++
++		std::uint64_t const generation = m_dht_nat64_state.start_lookup();
++		ADD_OUTSTANDING_ASYNC("session_impl::on_dht_nat64_timeout");
++		m_dht_nat64_timer.expires_after(dht_nat64_discovery_timeout);
++		m_dht_nat64_timer.async_wait([this, generation](error_code const& error)
++			{ wrap(&session_impl::on_dht_nat64_timeout, error, generation); });
++		ADD_OUTSTANDING_ASYNC("session_impl::on_dht_nat64_name_lookup");
++		m_dht_nat64_resolver.async_resolve("ipv4only.arpa", "80"
++			, [this, generation](error_code const& error, tcp::resolver::results_type results)
++			{
++				std::vector<address> addresses;
++				addresses.reserve(results.size());
++				for (auto const& result : results)
++					addresses.push_back(result.endpoint().address());
++				wrap(&session_impl::on_dht_nat64_name_lookup
++					, error, std::move(addresses), generation);
++			});
++		return false;
++	}
++
++	void session_impl::refresh_dht_global_address_policy()
++	{
++		m_dht_nat64_state.reset();
++		m_dht_nat64_resolver.cancel();
++		m_dht_nat64_timer.cancel();
++		if (m_dht) m_dht_state = m_dht->state();
++		m_dht_router_nodes.clear();
++		stop_dht();
++		ensure_dht_global_address_policy();
++	}
++
++	void session_impl::on_dht_nat64_name_lookup(error_code const& error
++		, std::vector<address> addresses, std::uint64_t const generation)
++	{
++		COMPLETE_ASYNC("session_impl::on_dht_nat64_name_lookup");
++		nat64_discovery_result discovery = error
++			? nat64_discovery_result{}
++			: discover_nat64_prefixes(addresses);
++		if (!m_dht_nat64_state.lookup_completed(generation, std::move(discovery)))
++			return;
++		m_dht_nat64_timer.cancel();
++
++#ifndef TORRENT_DISABLE_LOGGING
++		if (error || !m_dht_nat64_state.discovery.valid)
++			session_log("DHT NAT64 discovery failed closed for IPv6 endpoints");
++#endif
++		if (!m_abort) update_dht();
++	}
++
++	void session_impl::on_dht_nat64_timeout(error_code const& error
++		, std::uint64_t const generation)
++	{
++		COMPLETE_ASYNC("session_impl::on_dht_nat64_timeout");
++		if (error == boost::asio::error::operation_aborted) return;
++		if (!m_dht_nat64_state.lookup_timed_out(generation)) return;
++
++		m_dht_nat64_resolver.cancel();
++#ifndef TORRENT_DISABLE_LOGGING
++		session_log("DHT NAT64 discovery timed out; continuing with IPv4 only");
+ #endif
++		if (!m_abort) update_dht();
+ 	}
++#endif
+ 
+ 	void session_impl::update_dht_bootstrap_nodes()
+ 	{
+@@ -6099,9 +6188,14 @@ retry:
+ 	{
+ 		INVARIANT_CHECK;
+ 
+-		stop_dht();
+-
+ 		if (!m_settings.get_bool(settings_pack::enable_dht)) return;
++		if (!ensure_dht_global_address_policy())
++		{
++			stop_dht();
++			return;
++		}
++
++		stop_dht();
+ 
+ 		// postpone starting the DHT if we're still resolving the DHT router
+ 		if (m_outstanding_router_lookups > 0)
+@@ -6309,6 +6403,8 @@ retry:
+ 
+ 		for (auto const& addr : addresses)
+ 		{
++			if (m_dht_nat64_state.complete && !is_dht_address_global(addr))
++				continue;
+ 			udp::endpoint ep(addr, std::uint16_t(port));
+ 			add_dht_node(ep);
+ 		}
+@@ -6342,6 +6438,7 @@ retry:
+ 
+ 		for (auto const& addr : addresses)
+ 		{
++			if (!is_dht_address_global(addr)) continue;
+ 			// router nodes should be added before the DHT is started (and bootstrapped)
+ 			udp::endpoint ep(addr, std::uint16_t(port));
+ 			if (m_dht) m_dht->add_router_node(ep);
+@@ -7342,6 +7439,14 @@ retry:
+ 	}
+ 
+ 	ip_filter const* session_impl::get_dht_ip_filter() const { return m_ip_filter.get(); }
++	bool session_impl::is_dht_address_global(address const& addr) const
++	{
++#ifndef TORRENT_DISABLE_DHT
++		return is_global(addr, m_dht_nat64_state.discovery);
++#else
++		return is_global(addr);
++#endif
++	}
+ 
+ 	void session_impl::set_external_address(
+ 		tcp::endpoint const& local_endpoint, address const& ip
+diff --git a/test/test_dht.cpp b/test/test_dht.cpp
+index 905939465b2bd8400d8314b5231dc57e3a5980c8..c78a5bfe947c5a9dd6532ad5f5ff133a185d6b13 100644
+--- a/test/test_dht.cpp
++++ b/test/test_dht.cpp
+@@ -39,6 +39,7 @@ see LICENSE file.
+ #include "libtorrent/kademlia/item.hpp"
+ #include "libtorrent/kademlia/dht_observer.hpp"
+ #include "libtorrent/kademlia/dht_tracker.hpp"
++#include "libtorrent/kademlia/get_peers.hpp"
+ 
+ #include <numeric>
+ #include <cstdarg>
+@@ -559,6 +560,11 @@ struct obs : dht::dht_observer
+ 		, dht::msg const&, entry&) override { return false; }
+ 
+ 	ip_filter const* get_dht_ip_filter() const override { return m_ip_filter; }
++	bool is_dht_address_global(address const& addr) const override
++	{
++		return !m_enforce_global_addresses
++			|| aux::is_global(addr, m_nat64_discovery);
++	}
+ 
+ 	virtual ~obs() = default;
+ 
+@@ -566,8 +572,19 @@ struct obs : dht::dht_observer
+ 	std::vector<std::string> m_log;
+ #endif
+ 	ip_filter const* m_ip_filter = nullptr;
++	aux::nat64_discovery_result m_nat64_discovery;
++	bool m_enforce_global_addresses = false;
+ };
+ 
++void enforce_dht_global_addresses(obs& observer)
++{
++	std::array<address, 1> const answers = {{
++		make_address("2001:4860:abcd:ef01::c000:aa")}};
++	observer.m_nat64_discovery = aux::discover_nat64_prefixes(answers);
++	TEST_CHECK(observer.m_nat64_discovery.valid);
++	observer.m_enforce_global_addresses = true;
++}
++
+ aux::session_settings test_settings()
+ {
+ 	aux::session_settings sett;
+@@ -601,6 +618,16 @@ struct dht_test_setup
+ 	char error_string[200];
+ };
+ 
++struct global_policy_test_algo : dht::traversal_algorithm
++{
++	global_policy_test_algo(node& dht_node, node_id const& target)
++		: traversal_algorithm(dht_node, target)
++	{}
++
++	void done() override { this->dht::traversal_algorithm::done(); }
++	std::vector<observer_ptr> const& results() const { return m_results; }
++};
++
+ dht::key_desc_t const err_desc[] = {
+ 	{"y", bdecode_node::string_t, 1, 0},
+ 	{"e", bdecode_node::list_t, 2, 0}
+@@ -3666,6 +3693,146 @@ TORRENT_TEST(dht_tracker_ip_filter)
+ 	TEST_EQUAL(sent, true);
+ }
+ 
++TORRENT_TEST(dht_global_address_policy)
++{
++	// Incoming DHT UDP packets are rejected before parsing or dispatch.
++	{
++		io_context ios;
++		obs observer;
++		enforce_dht_global_addresses(observer);
++		aux::session_settings const sett = test_settings();
++		counters cnt;
++		auto dht_storage = dht_default_storage_constructor(sett);
++		dht_state state;
++		bool sent = false;
++		dht_tracker::send_fun_t const send = [&sent](aux::listen_socket_handle const&,
++			udp::endpoint const&, span<char const>, error_code&,
++			aux::udp_send_flags_t) { sent = true; };
++		dht_tracker dht(&observer, ios, send, sett, cnt, *dht_storage, std::move(state));
++		auto ls = dummy_listen_socket(udp::endpoint(addr("10.0.0.1"), 6881));
++		aux::listen_socket_handle const handle(ls);
++		dht.new_socket(handle);
++
++		entry e;
++		e["y"] = "q";
++		e["q"] = "ping";
++		e["t"] = "aa";
++		e["a"]["id"] = std::string(20, 'a');
++		std::vector<char> buf;
++		bencode(std::back_inserter(buf), e);
++
++		std::array<udp::endpoint, 3> const blocked_sources = {{
++			udp::endpoint(addr("10.0.0.1"), 4),
++			udp::endpoint(addr("::ffff:10.0.0.1"), 4),
++			udp::endpoint(addr("2001:4860:abcd:ef01::a00:1"), 4),
++		}};
++		for (auto const& source : blocked_sources)
++		{
++			std::int64_t const dropped_before = cnt[counters::dht_messages_in_dropped];
++			dht.incoming_packet(handle, source, {buf.data(), int(buf.size())});
++			TEST_EQUAL(cnt[counters::dht_messages_in_dropped], dropped_before + 1);
++			TEST_EQUAL(sent, false);
++		}
++
++		dht.incoming_packet(handle, udp::endpoint(addr("8.8.8.8"), 4)
++			, {buf.data(), int(buf.size())});
++		TEST_EQUAL(sent, true);
++	}
++
++	// Session/DNS router contacts and direct node additions share the same
++	// policy before they can enter a routing table or trigger a query.
++	{
++		dht_test_setup t(udp::endpoint(rand_v4(), 20));
++		enforce_dht_global_addresses(t.observer);
++		t.dht_node.add_router_node(udp::endpoint(addr("192.168.0.1"), 6881));
++		TEST_CHECK(t.dht_node.m_table.begin() == t.dht_node.m_table.end());
++		t.dht_node.add_router_node(udp::endpoint(addr("8.8.8.8"), 6881));
++		TEST_EQUAL(std::distance(t.dht_node.m_table.begin(), t.dht_node.m_table.end()), 1);
++
++		g_sent_packets.clear();
++		t.dht_node.add_node(udp::endpoint(addr("192.168.0.1"), 6881));
++		TEST_CHECK(g_sent_packets.empty());
++		t.dht_node.add_node(udp::endpoint(addr("8.8.4.4"), 6881));
++		TEST_EQUAL(g_sent_packets.size(), 1);
++	}
++
++	// Persisted bootstrap contacts are filtered before being scheduled.
++	{
++		dht_test_setup t(udp::endpoint(rand_v4(), 20));
++		enforce_dht_global_addresses(t.observer);
++		std::vector<udp::endpoint> const nodes = {
++			udp::endpoint(addr("169.254.1.1"), 6881),
++			udp::endpoint(addr("1.1.1.1"), 6881),
++		};
++		g_sent_packets.clear();
++		t.dht_node.bootstrap(nodes, std::bind(&nop_node));
++		TEST_EQUAL(g_sent_packets.size(), 1);
++		TEST_CHECK(find_packet(nodes[1]) != g_sent_packets.end());
++	}
++
++	// Nodes learned from responses are filtered before traversal and routing.
++	{
++		dht_test_setup t(udp::endpoint(rand_v4(), 20));
++		enforce_dht_global_addresses(t.observer);
++		auto algo = std::make_shared<global_policy_test_algo>(t.dht_node, t.dht_node.nid());
++		algo->traverse(generate_random_id(), udp::endpoint(addr("192.0.2.1"), 6881));
++		TEST_CHECK(algo->results().empty());
++		algo->traverse(generate_random_id(), udp::endpoint(addr("9.9.9.9"), 6881));
++		TEST_EQUAL(algo->results().size(), 1);
++		algo->done();
++	}
++
++	// Peer endpoints returned by get_peers are filtered before the torrent
++	// callback sees them, including mapped and NAT64 representations.
++	{
++		dht_test_setup t(udp::endpoint(rand_v4(), 20));
++		enforce_dht_global_addresses(t.observer);
++		std::vector<tcp::endpoint> accepted;
++		auto lookup = std::make_shared<dht::get_peers>(t.dht_node, generate_random_id()
++			, [&accepted](std::vector<tcp::endpoint> const& peers) { accepted = peers; }
++			, find_data::nodes_callback{}, false);
++		lookup->got_peers({
++			tcp::endpoint(addr("8.8.8.8"), 1),
++			tcp::endpoint(addr("10.0.0.1"), 2),
++			tcp::endpoint(addr("::ffff:10.0.0.1"), 3),
++			tcp::endpoint(addr("2001:4860:abcd:ef01::a00:1"), 4),
++			tcp::endpoint(addr("2001:4860:abcd:ef01::808:808"), 5),
++			tcp::endpoint(addr("2001:db8::1"), 6),
++		});
++		TEST_EQUAL(accepted.size(), 2);
++		TEST_EQUAL(accepted[0], tcp::endpoint(addr("8.8.8.8"), 1));
++		TEST_EQUAL(accepted[1]
++			, tcp::endpoint(addr("2001:4860:abcd:ef01::808:808"), 5));
++	}
++}
++
++TORRENT_TEST(dht_nat64_discovery_timeout_state)
++{
++	aux::dht_nat64_discovery_state state;
++	std::uint64_t const timed_out_generation = state.start_lookup();
++	TEST_CHECK(state.pending);
++	TEST_CHECK(state.lookup_timed_out(timed_out_generation));
++	TEST_CHECK(state.complete);
++	TEST_CHECK(!state.pending);
++	TEST_CHECK(!state.discovery.valid);
++	TEST_CHECK(state.generation != timed_out_generation);
++	TEST_CHECK(aux::is_global(addr("8.8.8.8"), state.discovery));
++	TEST_CHECK(!aux::is_global(addr("2606:4700:4700::1111"), state.discovery));
++
++	aux::nat64_discovery_result late_success;
++	late_success.valid = true;
++	TEST_CHECK(!state.lookup_completed(timed_out_generation, std::move(late_success)));
++	TEST_CHECK(!state.discovery.valid);
++
++	state.reset();
++	std::uint64_t const completed_generation = state.start_lookup();
++	aux::nat64_discovery_result success;
++	success.valid = true;
++	TEST_CHECK(state.lookup_completed(completed_generation, std::move(success)));
++	TEST_CHECK(state.discovery.valid);
++	TEST_CHECK(!state.lookup_timed_out(completed_generation));
++}
++
+ TORRENT_TEST(dht_node_add_node_ip_filter)
+ {
+ 	ip_filter filter;
+diff --git a/test/test_enum_net.cpp b/test/test_enum_net.cpp
+index 51b15730b54e320f5a904aca29cd0a0c3c780cff..038a63b6d8e53953e8395cb76fcd0ec24e58ea84 100644
+--- a/test/test_enum_net.cpp
++++ b/test/test_enum_net.cpp
+@@ -40,13 +40,19 @@ TORRENT_TEST(is_global_addresses)
+ 	TEST_CHECK(is_global(make_address("8.8.8.8")));
+ 	TEST_CHECK(is_global(make_address("192.0.0.9")));
+ 	TEST_CHECK(is_global(make_address("192.31.196.1")));
++	TEST_CHECK(!is_global(make_address("0.0.0.0")));
+ 	TEST_CHECK(!is_global(make_address("0.0.0.1")));
++	TEST_CHECK(!is_global(make_address("10.0.0.1")));
++	TEST_CHECK(!is_global(make_address("169.254.1.1")));
++	TEST_CHECK(!is_global(make_address("172.16.0.1")));
++	TEST_CHECK(!is_global(make_address("192.168.0.1")));
+ 	TEST_CHECK(!is_global(make_address("192.0.0.1")));
+ 	TEST_CHECK(!is_global(make_address("192.0.2.1")));
+ 	TEST_CHECK(!is_global(make_address("192.88.99.2")));
+ 	TEST_CHECK(!is_global(make_address("198.18.0.1")));
+ 	TEST_CHECK(!is_global(make_address("198.51.100.1")));
+ 	TEST_CHECK(!is_global(make_address("203.0.113.1")));
++	TEST_CHECK(!is_global(make_address("239.1.1.1")));
+ 	TEST_CHECK(!is_global(make_address("240.0.0.1")));
+ 
+ 	TEST_CHECK(is_global(make_address("2606:4700:4700::1111")));
+@@ -61,12 +67,19 @@ TORRENT_TEST(is_global_addresses)
+ 	TEST_CHECK(!is_global(make_address("2001:db8::1")));
+ 	TEST_CHECK(!is_global(make_address("2002:808:808::1")));
+ 	TEST_CHECK(!is_global(make_address("3fff::1")));
++	TEST_CHECK(!is_global(make_address("::")));
++	TEST_CHECK(!is_global(make_address("fe80::1")));
++	TEST_CHECK(!is_global(make_address("fd00::1")));
++	TEST_CHECK(!is_global(make_address("ff02::1")));
+ 
+ 	TEST_CHECK(is_global(make_address("64:ff9b::808:808")));
+ 	TEST_CHECK(!is_global(make_address("64:ff9b::7f00:1")));
+ 	TEST_CHECK(!is_global(make_address("64:ff9b::a00:1")));
+ 	TEST_CHECK(!is_global(make_address("64:ff9b::c000:201")));
+ 	TEST_CHECK(!is_global(make_address("64:ff9b:1::808:808")));
++	TEST_CHECK(is_global(make_address("::ffff:8.8.8.8")));
++	TEST_CHECK(!is_global(make_address("::ffff:10.0.0.1")));
++	TEST_CHECK(!is_global(make_address("::ffff:192.0.2.1")));
+ }
+ 
+ TORRENT_TEST(nat64_prefix_discovery)

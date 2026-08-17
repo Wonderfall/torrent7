@@ -113,6 +113,10 @@ restore_configuration=0
         "$source_dir/test/test_torrent.cpp.dht_announce_peer_requires_incoming_transport"
     ./test_dht --no-redirect \
         "$source_dir/test/test_dht.cpp.get_peers_without_announce_v4"
+    ./test_dht --no-redirect \
+        "$source_dir/test/test_dht.cpp.dht_global_address_policy"
+    ./test_dht --no-redirect \
+        "$source_dir/test/test_dht.cpp.dht_nat64_discovery_timeout_state"
     ./test_tracker_list --no-redirect
     ./test_tracker_manager --no-redirect \
         "$source_dir/test/test_tracker_manager.cpp.protocol_dispatch_is_case_insensitive"
