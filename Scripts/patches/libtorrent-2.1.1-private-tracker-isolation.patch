@@ -1,0 +1,547 @@
+diff --git a/include/libtorrent/aux_/announce_entry.hpp b/include/libtorrent/aux_/announce_entry.hpp
+index dddda3de1..c8e81fcb3 100644
+--- a/include/libtorrent/aux_/announce_entry.hpp
++++ b/include/libtorrent/aux_/announce_entry.hpp
+@@ -53,6 +53,10 @@ namespace aux {
+ 		// no announces before this time
+ 		time_point32 min_announce = (time_point32::min)();
+ 
++		// Identifies the private-tracker generation that owns the in-flight
++		// update flag. Zero is the generation for non-private torrents.
++		std::uint64_t private_tracker_generation = 0;
++
+ 		// TODO: include the number of peers received from this tracker, at last
+ 		// announce
+ 
+@@ -99,6 +103,20 @@ namespace aux {
+ 		// This is called when the tracker announce fails.
+ 		void failed(int backoff_ratio, seconds32 retry_interval = seconds32(0));
+ 
++		void begin_tracker_request(std::uint64_t generation)
++		{
++			private_tracker_generation = generation;
++			updating = true;
++		}
++
++		bool complete_tracker_request(std::uint64_t const generation)
++		{
++			if (!updating || private_tracker_generation != generation) return false;
++			private_tracker_generation = 0;
++			updating = false;
++			return true;
++		}
++
+ 		// returns true if we can announce to this tracker now.
+ 		// The current time is passed in as ``now``. The ``is_seed``
+ 		// argument is necessary because once we become a seed, we
+@@ -210,4 +228,3 @@ namespace aux {
+ }
+ 
+ #endif
+-
+diff --git a/include/libtorrent/aux_/torrent.hpp b/include/libtorrent/aux_/torrent.hpp
+index 7cc78745d..9b3791a6e 100644
+--- a/include/libtorrent/aux_/torrent.hpp
++++ b/include/libtorrent/aux_/torrent.hpp
+@@ -111,6 +111,79 @@ namespace libtorrent::aux {
+ 		return incoming_tcp || incoming_utp;
+ 	}
+ 
++	enum class private_tracker_request_result
++	{
++		rejected,
++		current,
++		switched,
++	};
++
++	struct private_tracker_state
++	{
++		private_tracker_request_result authorize(std::string const& url
++			, bool const active_tracker_exists, bool const stopped
++			, std::uint64_t& request_generation)
++		{
++			if (stopped)
++			{
++				if (active_url.empty() || url != active_url)
++					return private_tracker_request_result::rejected;
++				request_generation = generation;
++				return private_tracker_request_result::current;
++			}
++
++			if (active_url.empty() || failed || !active_tracker_exists)
++			{
++				bool const switched = !active_url.empty();
++				active_url = url;
++				failed = false;
++				advance_generation();
++				request_generation = generation;
++				return switched
++					? private_tracker_request_result::switched
++					: private_tracker_request_result::current;
++			}
++
++			if (url != active_url)
++				return private_tracker_request_result::rejected;
++			request_generation = generation;
++			return private_tracker_request_result::current;
++		}
++
++		bool accepts(std::string const& url
++			, std::uint64_t const request_generation) const
++		{
++			return !failed && !active_url.empty() && url == active_url
++				&& request_generation != 0 && request_generation == generation;
++		}
++
++		bool mark_failed(std::string const& url
++			, std::uint64_t const request_generation)
++		{
++			if (!accepts(url, request_generation)) return false;
++			failed = true;
++			return true;
++		}
++
++		void reset()
++		{
++			advance_generation();
++			active_url.clear();
++			failed = false;
++		}
++
++		std::string active_url;
++		std::uint64_t generation = 0;
++		bool failed = false;
++
++	private:
++		void advance_generation()
++		{
++			++generation;
++			if (generation == 0) ++generation;
++		}
++	};
++
+ #ifndef TORRENT_DISABLE_STREAMING
+ 	struct time_critical_piece
+ 	{
+@@ -889,13 +962,17 @@ namespace libtorrent::aux {
+ 		// (updating, next_announce, min_announce) and posts the
+ 		// tracker_announce_alert. Does not touch any tier-selection state;
+ 		// callers that have one (announce_with_tracker) update it themselves.
+-		void send_tracker_request(tracker_request& req,
++		bool send_tracker_request(tracker_request& req,
+ 			aux::announce_endpoint& aep,
+ 			aux::announce_infohash& a,
+ 			protocol_version ih,
+ 			event_t e,
+ 			bool high_priority,
+ 			time_point32 now);
++		bool prepare_private_tracker_request(tracker_request& req);
++		bool accepts_private_tracker_result(std::string const& url
++			, std::uint64_t generation) const;
++		void cancel_stale_private_tracker_request(tracker_request const& req);
+ 
+ #ifndef TORRENT_DISABLE_DHT
+ 		void dht_announce();
+@@ -1052,7 +1129,9 @@ namespace libtorrent::aux {
+ 		void completed();
+ 
+ #if TORRENT_USE_I2P
+-		void on_i2p_resolve(error_code const& ec, char const* dest, peer_source_flags_t const source);
++		void on_i2p_resolve(error_code const& ec, char const* dest
++			, peer_source_flags_t source, std::string tracker_url = {}
++			, std::uint64_t private_tracker_generation = 0);
+ 		void add_i2p_peer(sha256_hash const& dest, peer_source_flags_t source);
+ 		bool is_i2p() const { return m_i2p; }
+ 
+@@ -1072,7 +1151,9 @@ namespace libtorrent::aux {
+ 		void on_peer_name_lookup(error_code const&
+ 			, std::vector<address> const&
+ 			, int port
+-			, protocol_version);
++			, protocol_version
++			, std::string tracker_url
++			, std::uint64_t private_tracker_generation);
+ 
+ 		// this is the asio callback that is called when a name
+ 		// lookup for a WEB SEED is completed.
+@@ -1525,6 +1606,7 @@ namespace libtorrent::aux {
+ 		aux::suggest_piece m_suggest_pieces;
+ 
+ 		aux::tracker_list m_trackers;
++		private_tracker_state m_private_tracker;
+ 
+ #ifndef TORRENT_DISABLE_STREAMING
+ 		// this list is sorted by time_critical_piece::deadline
+diff --git a/include/libtorrent/aux_/tracker_manager.hpp b/include/libtorrent/aux_/tracker_manager.hpp
+index ec30d77cf..de21ee519 100644
+--- a/include/libtorrent/aux_/tracker_manager.hpp
++++ b/include/libtorrent/aux_/tracker_manager.hpp
+@@ -107,6 +107,9 @@ using tracker_request_flags_t = flags::bitfield_flag<std::uint8_t, struct tracke
+ 		tracker_request_flags_t kind = {};
+ 
+ 		std::uint32_t key = 0;
++		// Non-zero only for private-torrent announces. This binds asynchronous
++		// responses to the single tracker generation that authorized them.
++		std::uint64_t private_tracker_generation = 0;
+ 		int num_want = 0;
+ 		std::vector<address_v6> ipv6;
+ 		std::vector<address_v4> ipv4;
+diff --git a/src/announce_entry.cpp b/src/announce_entry.cpp
+index 7ed2ef753..d0dbb1b73 100644
+--- a/src/announce_entry.cpp
++++ b/src/announce_entry.cpp
+@@ -221,6 +221,7 @@ namespace aux {
+ 		start_sent = false;
+ 		next_announce = time_point32::min();
+ 		min_announce = time_point32::min();
++		private_tracker_generation = 0;
+ 	}
+ 
+ 	void announce_infohash::failed(int const backoff_ratio, seconds32 const retry_interval)
+@@ -238,6 +239,7 @@ namespace aux {
+ 					+ fail_square * tracker_retry_delay_min * backoff_ratio / 100
+ 			));
+ 		if (!is_working()) next_announce = aux::time_now32() + delay;
++		private_tracker_generation = 0;
+ 		updating = false;
+ 	}
+ 
+diff --git a/src/torrent.cpp b/src/torrent.cpp
+index 210d1b07b..436ad5da9 100644
+--- a/src/torrent.cpp
++++ b/src/torrent.cpp
+@@ -3384,7 +3384,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 						continue;
+ 					}
+ 
+-					send_tracker_request(req, aep, a, ih, e, high_priority, now);
++					if (!send_tracker_request(req, aep, a, ih, e, high_priority, now))
++						continue;
+ 
+ 					state.sent_announce = true;
+ 					if (a.is_working()
+@@ -3490,7 +3491,65 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 		return req;
+ 	}
+ 
+-	void torrent::send_tracker_request(tracker_request& req,
++	bool torrent::prepare_private_tracker_request(tracker_request& req)
++	{
++		if (!m_torrent_file || !m_torrent_file->is_valid()
++			|| !m_torrent_file->priv())
++		{
++			req.private_tracker_generation = 0;
++			return true;
++		}
++
++		bool const active_tracker_exists = m_private_tracker.active_url.empty()
++			|| m_trackers.find_tracker(m_private_tracker.active_url) != nullptr;
++		private_tracker_request_result const result = m_private_tracker.authorize(
++			req.url, active_tracker_exists, req.event == event_t::stopped
++			, req.private_tracker_generation);
++		if (result == private_tracker_request_result::rejected)
++		{
++#ifndef TORRENT_DISABLE_LOGGING
++			if (should_log())
++				debug_log("private tracker request rejected while %s is active: %s"
++					, m_private_tracker.active_url.c_str(), req.url.c_str());
++#endif
++			return false;
++		}
++
++		if (result == private_tracker_request_result::switched)
++		{
++#ifndef TORRENT_DISABLE_LOGGING
++			if (should_log())
++				debug_log("private tracker switched to %s; clearing peer state"
++					, req.url.c_str());
++#endif
++			clear_peers();
++		}
++		return true;
++	}
++
++	bool torrent::accepts_private_tracker_result(std::string const& url
++		, std::uint64_t const generation) const
++	{
++		return !m_torrent_file || !m_torrent_file->is_valid()
++			|| !m_torrent_file->priv()
++			|| m_private_tracker.accepts(url, generation);
++	}
++
++	void torrent::cancel_stale_private_tracker_request(tracker_request const& req)
++	{
++		aux::announce_entry* const ae = m_trackers.find_tracker(req.url);
++		if (ae == nullptr) return;
++		aux::announce_endpoint* const aep = ae->find_endpoint(req.outgoing_socket);
++		if (aep == nullptr) return;
++
++		protocol_version const version = req.info_hash == m_info_hash.v1
++			? protocol_version::V1 : protocol_version::V2;
++		if (!aep->info_hashes[version].complete_tracker_request(
++			req.private_tracker_generation)) return;
++		update_tracker_timer(aux::time_now32());
++	}
++
++	bool torrent::send_tracker_request(tracker_request& req,
+ 		aux::announce_endpoint& aep,
+ 		aux::announce_infohash& a,
+ 		protocol_version const ih,
+@@ -3509,6 +3568,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 			}
+ 		}
+ 
++		if (!prepare_private_tracker_request(req)) return false;
++
+ 		req.triggered_manually = a.triggered_manually;
+ 		a.triggered_manually = false;
+ 
+@@ -3559,7 +3620,7 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 			m_ses.queue_tracker_request(req, shared_from_this());
+ 		}
+ 
+-		a.updating = true;
++		a.begin_tracker_request(req.private_tracker_generation);
+ 		a.next_announce = now;
+ 		a.min_announce = now;
+ 
+@@ -3568,6 +3629,7 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 			m_ses.alerts().emplace_alert<tracker_announce_alert>(
+ 				get_handle(), aep.local_endpoint, req.url, ih, req.event);
+ 		}
++		return true;
+ 	}
+ 
+ 	// unlike announce_with_tracker(), this only considers a single,
+@@ -3807,6 +3869,16 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 
+ 		INVARIANT_CHECK;
+ 		TORRENT_ASSERT(!(r.kind & tracker_request::scrape_request));
++		if (!accepts_private_tracker_result(r.url, r.private_tracker_generation))
++		{
++			cancel_stale_private_tracker_request(r);
++#ifndef TORRENT_DISABLE_LOGGING
++			if (should_log())
++				debug_log("ignoring stale private tracker response from %s"
++					, r.url.c_str());
++#endif
++			return;
++		}
+ 
+ 		// if the tracker told us what our external IP address is, record it with
+ 		// out external IP counter (and pass along the IP of the tracker to know
+@@ -3831,6 +3903,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 			if (aep)
+ 			{
+ 				auto& a = aep->info_hashes[v];
++				if (!a.complete_tracker_request(r.private_tracker_generation))
++					return;
+ 
+ 				local_endpoint = aep->local_endpoint;
+ 				if (resp.incomplete >= 0) a.scrape_incomplete = resp.incomplete;
+@@ -3849,7 +3923,6 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 				ae->verified = true;
+ 				a.next_announce = now + resp.interval;
+ 				a.min_announce = now + resp.min_interval;
+-				a.updating = false;
+ 				a.fails = 0;
+ 				a.last_error.clear();
+ 				a.message = !resp.warning_message.empty() ? resp.warning_message : std::string();
+@@ -3910,8 +3983,13 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 				{
+ 					ADD_OUTSTANDING_ASYNC("torrent::on_i2p_resolve");
+ 					r.i2pconn->async_name_lookup(i.hostname.c_str()
+-						, [self = shared_from_this()] (error_code const& ec, char const* dest)
+-						{ self->torrent::on_i2p_resolve(ec, dest, peer_info::tracker); });
++						, [self = shared_from_this(), tracker_url = r.url
++							, generation = r.private_tracker_generation]
++						(error_code const& ec, char const* dest)
++						{
++							self->torrent::on_i2p_resolve(ec, dest, peer_info::tracker
++								, tracker_url, generation);
++						});
+ 				}
+ 				else
+ 				{
+@@ -3930,7 +4008,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 			{
+ 				ADD_OUTSTANDING_ASYNC("torrent::on_peer_name_lookup");
+ 				m_ses.get_resolver().async_resolve(i.hostname, aux::resolver_interface::abort_on_shutdown
+-					, std::bind(&torrent::on_peer_name_lookup, shared_from_this(), _1, _2, i.port, v));
++					, std::bind(&torrent::on_peer_name_lookup, shared_from_this()
++						, _1, _2, i.port, v, r.url, r.private_tracker_generation));
+ 			}
+ 		}
+ 
+@@ -4255,7 +4334,9 @@ namespace {
+ 			{ self->torrent::on_i2p_resolve(ec, d, source); });
+ 	}
+ 
+-	void torrent::on_i2p_resolve(error_code const& ec, char const* dest, peer_source_flags_t const source) try
++	void torrent::on_i2p_resolve(error_code const& ec, char const* dest
++		, peer_source_flags_t const source, std::string tracker_url
++		, std::uint64_t const private_tracker_generation) try
+ 	{
+ 		TORRENT_ASSERT(is_single_thread());
+ 
+@@ -4267,6 +4348,9 @@ namespace {
+ 			debug_log("i2p_resolve error: %s", ec.message().c_str());
+ #endif
+ 		if (ec || m_abort || m_ses.is_aborted()) return;
++		if (bool(source & peer_info::tracker)
++			&& !accepts_private_tracker_result(tracker_url
++				, private_tracker_generation)) return;
+ 
+ 		need_peer_list();
+ 		torrent_state st = get_peer_list_state();
+@@ -4281,7 +4365,8 @@ namespace {
+ 
+ 	void torrent::on_peer_name_lookup(error_code const& e
+ 		, std::vector<address> const& host_list, int const port
+-		, protocol_version const v) try
++		, protocol_version const v, std::string tracker_url
++		, std::uint64_t const private_tracker_generation) try
+ 	{
+ 		TORRENT_ASSERT(is_single_thread());
+ 
+@@ -4295,6 +4380,8 @@ namespace {
+ #endif
+ 
+ 		if (e || m_abort || host_list.empty() || m_ses.is_aborted()) return;
++		if (!accepts_private_tracker_result(tracker_url
++			, private_tracker_generation)) return;
+ 
+ 		// TODO: add one peer per IP the hostname resolves to
+ 		tcp::endpoint host(host_list.front(), std::uint16_t(port));
+@@ -6293,6 +6380,14 @@ namespace {
+ 	void torrent::replace_trackers(std::vector<lt::announce_entry> const& urls)
+ 	{
+ 		m_trackers.replace(urls);
++		if (m_torrent_file && m_torrent_file->is_valid()
++			&& m_torrent_file->priv()
++			&& !m_private_tracker.active_url.empty()
++			&& m_trackers.find_tracker(m_private_tracker.active_url) == nullptr)
++		{
++			m_private_tracker.reset();
++			clear_peers();
++		}
+ 
+ 		if (settings().get_bool(settings_pack::prefer_udp_trackers))
+ 			m_trackers.prioritize_udp_trackers();
+@@ -8462,10 +8557,9 @@ namespace {
+ 		// A private swarm may only bootstrap peers from its tracker. Peers learned
+ 		// while metadata was unavailable have no trustworthy source association,
+ 		// so discard them and let the private tracker repopulate the peer list.
++		if (m_torrent_file->priv()) m_private_tracker.reset();
+ 		if (m_block_non_global_peers && m_torrent_file->priv())
+-		{
+ 			clear_peers();
+-		}
+ 		else
+ 		{
+ 			// disconnect redundant peers
+@@ -12881,6 +12975,18 @@ namespace {
+ 		TORRENT_ASSERT(is_single_thread());
+ 
+ 		INVARIANT_CHECK;
++		if (!(r.kind & tracker_request::scrape_request)
++			&& !accepts_private_tracker_result(r.url
++				, r.private_tracker_generation))
++		{
++			cancel_stale_private_tracker_request(r);
++#ifndef TORRENT_DISABLE_LOGGING
++			if (should_log())
++				debug_log("ignoring stale private tracker failure from %s"
++					, r.url.c_str());
++#endif
++			return;
++		}
+ 
+ // some older versions of clang had a bug where it would fire this warning here
+ #ifdef __clang__
+@@ -12961,6 +13067,14 @@ namespace {
+ 						return true;
+ 					}))
+ 				{
++					if (m_torrent_file && m_torrent_file->is_valid()
++						&& m_torrent_file->priv())
++					{
++						bool const marked = m_private_tracker.mark_failed(
++							r.url, r.private_tracker_generation);
++						TORRENT_ASSERT(marked);
++						TORRENT_UNUSED(marked);
++					}
+ 					m_trackers.deprioritize_tracker(ae);
+ 				}
+ 			}
+diff --git a/test/test_torrent.cpp b/test/test_torrent.cpp
+index 40c999c18..37ea620d7 100644
+--- a/test/test_torrent.cpp
++++ b/test/test_torrent.cpp
+@@ -51,6 +51,66 @@ TORRENT_TEST(dht_announce_peer_requires_incoming_transport)
+ 	TEST_CHECK(aux::can_announce_dht_peer(false, true));
+ }
+ 
++TORRENT_TEST(private_tracker_generation_isolation)
++{
++	aux::private_tracker_state state;
++	std::uint64_t first_generation = 0;
++	TEST_CHECK(state.authorize("https://tracker-a.example/announce", true, false
++		, first_generation) == aux::private_tracker_request_result::current);
++	TEST_CHECK(first_generation != 0);
++	TEST_CHECK(state.accepts("https://tracker-a.example/announce"
++		, first_generation));
++
++	std::uint64_t rejected_generation = 0;
++	TEST_CHECK(state.authorize("https://tracker-b.example/announce", true, false
++		, rejected_generation) == aux::private_tracker_request_result::rejected);
++	TEST_EQUAL(rejected_generation, 0);
++	TEST_CHECK(!state.mark_failed("https://tracker-a.example/announce"
++		, first_generation + 1));
++	TEST_CHECK(state.mark_failed("https://tracker-a.example/announce"
++		, first_generation));
++	TEST_CHECK(!state.accepts("https://tracker-a.example/announce"
++		, first_generation));
++
++	std::uint64_t second_generation = 0;
++	TEST_CHECK(state.authorize("https://tracker-b.example/announce", true, false
++		, second_generation) == aux::private_tracker_request_result::switched);
++	TEST_CHECK(second_generation != first_generation);
++	TEST_CHECK(!state.accepts("https://tracker-a.example/announce"
++		, first_generation));
++	TEST_CHECK(state.accepts("https://tracker-b.example/announce"
++		, second_generation));
++
++	aux::announce_infohash request_state;
++	request_state.begin_tracker_request(first_generation);
++	request_state.begin_tracker_request(second_generation);
++	TEST_CHECK(!request_state.complete_tracker_request(first_generation));
++	TEST_CHECK(request_state.updating);
++	TEST_EQUAL(request_state.private_tracker_generation, second_generation);
++	TEST_CHECK(request_state.complete_tracker_request(second_generation));
++	TEST_CHECK(!request_state.updating);
++	TEST_EQUAL(request_state.private_tracker_generation, 0);
++
++	std::uint64_t stopped_generation = 0;
++	TEST_CHECK(state.authorize("https://tracker-a.example/announce", true, true
++		, stopped_generation) == aux::private_tracker_request_result::rejected);
++	TEST_CHECK(state.authorize("https://tracker-b.example/announce", true, true
++		, stopped_generation) == aux::private_tracker_request_result::current);
++	TEST_EQUAL(stopped_generation, second_generation);
++
++	state.reset();
++	TEST_CHECK(!state.accepts("https://tracker-b.example/announce"
++		, second_generation));
++	std::uint64_t replacement_generation = 0;
++	TEST_CHECK(state.authorize("https://tracker-c.example/announce", false, false
++		, replacement_generation) == aux::private_tracker_request_result::current);
++	TEST_CHECK(replacement_generation != second_generation);
++	std::uint64_t removed_generation = 0;
++	TEST_CHECK(state.authorize("https://tracker-d.example/announce", false, false
++		, removed_generation) == aux::private_tracker_request_result::switched);
++	TEST_CHECK(removed_generation != replacement_generation);
++}
++
+ namespace {
+ 
+ bool wait_priority(torrent_handle const& h, aux::vector<download_priority_t, file_index_t> const& prio)

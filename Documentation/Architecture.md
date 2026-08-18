@@ -453,7 +453,12 @@ networking resumes. The series also confines storage,
 revalidates redirect and send targets, and keeps pread recheck buffers within
 the configured checking-memory budget. Private torrents discard pre-metadata
 and persisted peer caches and repopulate only from
-their tracker. PEX never advertises LAN endpoints, and `ut_holepunch` follows
+one active tracker. Alternate private trackers are eligible only after the
+active tracker fails or is removed; switching disconnects every peer and
+advances a request generation so late tracker responses and peer-name lookups
+cannot repopulate stale peers. Per-endpoint announce bookkeeping records which
+generation owns its in-flight update, so a late callback cannot clear a newer
+request's state. PEX never advertises LAN endpoints, and `ut_holepunch` follows
 the same PEX/private-torrent policy; explicitly enabled LSD remains the sole
 intentional local-peer discovery path. The series also preserves Apple's typed
 allocation metadata across libtorrent's pool and disk-buffer wrappers instead

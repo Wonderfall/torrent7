@@ -115,6 +115,8 @@ restore_configuration=0
         "$source_dir/test/test_torrent.cpp.global_peer_policy_does_not_replay_private_resume_peers"
     ./test_peer_list --no-redirect \
         "$source_dir/test/test_peer_list.cpp.invalidate_global_address_policy"
+    ./test_torrent --no-redirect \
+        "$source_dir/test/test_torrent.cpp.private_tracker_generation_isolation"
     ./test_fast_extension --no-redirect \
         "$source_dir/test/test_fast_extension.cpp.peer_exchange_and_holepunch_respect_source_policy"
     ./test_torrent --no-redirect \
