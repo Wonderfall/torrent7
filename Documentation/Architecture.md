@@ -446,7 +446,11 @@ life. NAT64 prefix discovery belongs to the session rather than the DHT
 lifecycle, but starts only after network access is enabled and is canceled when
 the helper blocks networking. IPv4 candidates remain classifiable immediately,
 while IPv6 peer candidates fail closed until a valid RFC 7050 result is
-available, including when DHT is disabled. Every outgoing peer connection
+available, including when DHT is disabled. HTTP and UDP tracker requests consume
+that same session state instead of issuing independent RFC 7050 lookups: they
+wait without reporting an endpoint failure while verification is pending, treat
+unavailable verification as a skipped announce, and reserve the SSRF error for
+endpoints positively classified as non-global. Every outgoing peer connection
 revalidates the endpoint under the current session policy, and each NAT64
 generation transition disconnects and removes policy-scoped IPv6 peers before
 networking resumes. The series also confines storage,

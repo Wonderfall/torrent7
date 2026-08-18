@@ -25,6 +25,7 @@ readonly -a LIBTORRENT_PATCHES=(
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-peer-source-policy.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-session-nat64-policy.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-private-tracker-isolation.patch"
+    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-tracker-session-nat64-policy.patch"
 )
 
 fail() {

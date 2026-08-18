@@ -106,9 +106,11 @@ restore_configuration=0
     ./test_tracker_manager --no-redirect \
         "$source_dir/test/test_tracker_manager.cpp.https_http_proxy_connect_uses_vetted_numeric_endpoint"
     ./test_tracker_manager --no-redirect \
-        "$source_dir/test/test_tracker_manager.cpp.http_tracker_preflight_timer_stops_before_http_request"
+        "$source_dir/test/test_tracker_manager.cpp.http_tracker_completion_is_single_shot"
     ./test_tracker_manager --no-redirect \
-        "$source_dir/test/test_tracker_manager.cpp.nat64_preflight_is_bounded_by_tracker_operation_timeout"
+        "$source_dir/test/test_tracker_manager.cpp.trackers_wait_for_session_address_policy"
+    ./test_tracker_manager --no-redirect \
+        "$source_dir/test/test_tracker_manager.cpp.unavailable_address_verification_is_not_reported_as_ssrf"
     ./test_torrent --no-redirect \
         "$source_dir/test/test_torrent.cpp.global_peer_policy_filters_remote_sources"
     ./test_torrent --no-redirect \
