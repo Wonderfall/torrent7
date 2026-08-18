@@ -1,0 +1,624 @@
+diff --git a/include/libtorrent/aux_/peer_list.hpp b/include/libtorrent/aux_/peer_list.hpp
+index 5ec0a2fb1..fef1c991d 100644
+--- a/include/libtorrent/aux_/peer_list.hpp
++++ b/include/libtorrent/aux_/peer_list.hpp
+@@ -126,6 +126,7 @@ namespace libtorrent::aux {
+ 			, std::vector<address>& banned);
+ 		void apply_port_filter(port_filter const& filter, torrent_state* state
+ 			, std::vector<tcp::endpoint>& banned);
++		void invalidate_global_address_policy(torrent_state* state);
+ 
+ 		void set_seed(torrent_peer* p, bool s);
+ 		void set_upload_only(torrent_peer* p, bool s);
+diff --git a/include/libtorrent/aux_/session_impl.hpp b/include/libtorrent/aux_/session_impl.hpp
+index 6635cc30b..0bb277394 100644
+--- a/include/libtorrent/aux_/session_impl.hpp
++++ b/include/libtorrent/aux_/session_impl.hpp
+@@ -128,8 +128,7 @@ namespace aux {
+ 		{ return lhs < rhs.get(); }
+ 	};
+ 
+-#ifndef TORRENT_DISABLE_DHT
+-	struct dht_nat64_discovery_state
++	struct nat64_discovery_state
+ 	{
+ 		std::uint64_t start_lookup()
+ 		{
+@@ -165,12 +164,23 @@ namespace aux {
+ 			pending = false;
+ 		}
+ 
++		bool is_peer_address_global(address const& addr) const
++		{
++			if (addr.is_v4()) return is_global(addr);
++			return complete && discovery.valid && is_global(addr, discovery);
++		}
++
+ 		nat64_discovery_result discovery;
+ 		std::uint64_t generation = 0;
+ 		bool complete = false;
+ 		bool pending = false;
+ 	};
+-#endif
++
++	inline bool should_discover_nat64(bool const outgoing_tcp
++		, bool const outgoing_utp, bool const dht)
++	{
++		return outgoing_tcp || outgoing_utp || dht;
++	}
+ 
+ 	using listen_socket_flags_t = flags::bitfield_flag<std::uint8_t, struct listen_socket_flags_tag>;
+ 
+@@ -516,6 +526,15 @@ namespace aux {
+ 			void apply_settings_pack_impl(settings_pack const& pack);
+ 			session_settings const& settings() const override { return m_settings; }
+ 			settings_pack get_settings() const;
++			bool global_address_policy_enabled() const;
++			bool ensure_global_address_policy();
++			void update_global_address_policy();
++			void refresh_global_address_policy();
++			void invalidate_peer_address_policy();
++			void on_nat64_name_lookup(error_code const& e
++				, std::vector<address> addresses, std::uint64_t generation);
++			void on_nat64_timeout(error_code const& e
++				, std::uint64_t generation);
+ 
+ #ifndef TORRENT_DISABLE_DHT
+ 			dht::dht_tracker* dht() override { return m_dht.get(); }
+@@ -579,12 +598,6 @@ namespace aux {
+ 				, std::vector<address> const& addresses, int port);
+ 			void on_dht_router_name_lookup(error_code const& e
+ 				, std::vector<address> const& addresses, int port);
+-			bool ensure_dht_global_address_policy();
+-			void refresh_dht_global_address_policy();
+-			void on_dht_nat64_name_lookup(error_code const& e
+-				, std::vector<address> addresses, std::uint64_t generation);
+-			void on_dht_nat64_timeout(error_code const& e
+-				, std::uint64_t generation);
+ #endif
+ 
+ #if !defined TORRENT_DISABLE_ENCRYPTION
+@@ -1231,15 +1244,15 @@ namespace aux {
+ 			// port we'll bind the next outgoing socket to
+ 			mutable int m_next_port = 0;
+ 
++			tcp::resolver m_nat64_resolver;
++			deadline_timer m_nat64_timer;
++			nat64_discovery_state m_nat64_state;
++
+ #ifndef TORRENT_DISABLE_DHT
+ 			std::unique_ptr<dht::dht_storage_interface> m_dht_storage;
+ 			std::shared_ptr<dht::dht_tracker> m_dht;
+ 			dht::dht_storage_constructor_type m_dht_storage_constructor
+ 				= dht::dht_default_storage_constructor;
+-			tcp::resolver m_dht_nat64_resolver;
+-			deadline_timer m_dht_nat64_timer;
+-			dht_nat64_discovery_state m_dht_nat64_state;
+-
+ 			// these are used when starting the DHT
+ 			// (and bootstrapping it), and then erased
+ 			std::vector<udp::endpoint> m_dht_router_nodes;
+diff --git a/include/libtorrent/aux_/torrent.hpp b/include/libtorrent/aux_/torrent.hpp
+index d3ae41f6d..7cc78745d 100644
+--- a/include/libtorrent/aux_/torrent.hpp
++++ b/include/libtorrent/aux_/torrent.hpp
+@@ -464,6 +464,7 @@ namespace libtorrent::aux {
+ 		bool allows_peer_exchange() const;
+ 		bool peer_endpoint_policy_enabled() const { return m_block_non_global_peers; }
+ 		bool is_peer_address_global(address const& addr) const;
++		void invalidate_peer_address_policy();
+ 		bt_peer_connection* find_introducer(tcp::endpoint const& ep) const;
+ 
+ 		// if we're connected to a peer at ep, return its peer connection
+diff --git a/include/libtorrent/aux_/torrent_peer.hpp b/include/libtorrent/aux_/torrent_peer.hpp
+index e69c4e163..7f32c8d12 100644
+--- a/include/libtorrent/aux_/torrent_peer.hpp
++++ b/include/libtorrent/aux_/torrent_peer.hpp
+@@ -27,6 +27,17 @@ namespace libtorrent::aux {
+ 
+ 	struct external_ip;
+ 
++	// Peers learned from remote discovery or persisted state must remain
++	// globally routable. LSD is deliberately excluded because it is the one
++	// source that is allowed to discover peers on the local network.
++	inline bool peer_source_requires_global_address(peer_source_flags_t const source)
++	{
++		return bool(source & peer_info::tracker)
++			|| bool(source & peer_info::dht)
++			|| bool(source & peer_info::pex)
++			|| bool(source & peer_info::resume_data);
++	}
++
+ 	// calculate the priority of a peer based on its address. One of the
+ 	// endpoint should be our own. The priority is symmetric, so it doesn't
+ 	// matter which is which
+diff --git a/src/peer_list.cpp b/src/peer_list.cpp
+index 303de2eb2..f9ac3b1af 100644
+--- a/src/peer_list.cpp
++++ b/src/peer_list.cpp
+@@ -270,6 +270,42 @@ namespace libtorrent::aux {
+ 		}
+ 	}
+ 
++	void peer_list::invalidate_global_address_policy(torrent_state* state)
++	{
++		TORRENT_ASSERT(is_single_thread());
++		INVARIANT_CHECK;
++
++		for (auto i = m_peers.begin(); i != m_peers.end();)
++		{
++			torrent_peer* const peer = *i;
++			if (!peer->address().is_v6()
++				|| !peer_source_requires_global_address(peer->peer_source())
++				|| peer == m_locked_peer)
++			{
++				++i;
++				continue;
++			}
++
++			int const current = int(i - m_peers.begin());
++			if (peer->connection)
++			{
++				std::size_t const count = m_peers.size();
++				peer->connection->disconnect(errors::ssrf_mitigation
++					, operation_t::bittorrent);
++				if (m_peers.size() < count)
++				{
++					i = m_peers.begin() + current;
++					continue;
++				}
++				TORRENT_ASSERT((*i)->connection == nullptr
++					|| (*i)->connection->peer_info_struct() == nullptr);
++			}
++
++			erase_peer(i, state);
++			i = m_peers.begin() + current;
++		}
++	}
++
+ 	void peer_list::erase_peer(torrent_peer* p, torrent_state* state)
+ 	{
+ 		TORRENT_ASSERT(is_single_thread());
+diff --git a/src/session_impl.cpp b/src/session_impl.cpp
+index b43190a4c..1425643af 100644
+--- a/src/session_impl.cpp
++++ b/src/session_impl.cpp
+@@ -164,7 +164,7 @@ namespace boost {
+ namespace libtorrent::aux {
+ 
+ 	namespace {
+-		constexpr seconds dht_nat64_discovery_timeout{5};
++		constexpr seconds nat64_discovery_timeout{5};
+ 	}
+ 
+ #if defined TORRENT_ASIO_DEBUGGING
+@@ -525,9 +525,9 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
+ 		, m_last_second_tick(m_created - milliseconds(900))
+ 		, m_last_choke(m_created)
+ 		, m_last_auto_manage(m_created)
++		, m_nat64_resolver(m_io_context)
++		, m_nat64_timer(m_io_context)
+ #ifndef TORRENT_DISABLE_DHT
+-		, m_dht_nat64_resolver(m_io_context)
+-		, m_dht_nat64_timer(m_io_context)
+ 		, m_dht_announce_timer(m_io_context)
+ #endif
+ 		, m_utp_socket_manager(
+@@ -1064,10 +1064,10 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
+ 		stop_lsd();
+ 		stop_upnp();
+ 		stop_natpmp();
++		m_nat64_state.reset();
++		m_nat64_resolver.cancel();
++		m_nat64_timer.cancel();
+ #ifndef TORRENT_DISABLE_DHT
+-		m_dht_nat64_state.reset();
+-		m_dht_nat64_resolver.cancel();
+-		m_dht_nat64_timer.cancel();
+ 		stop_dht();
+ 		m_dht_announce_timer.cancel();
+ #endif
+@@ -2042,10 +2042,7 @@ retry:
+ 		if (ec || m_abort || !m_ip_notifier) return;
+ 		m_ip_notifier->async_wait([this] (error_code const& e)
+ 			{ wrap(&session_impl::on_ip_change, e); });
+-#ifndef TORRENT_DISABLE_DHT
+-		if (m_settings.get_bool(settings_pack::enable_dht))
+-			refresh_dht_global_address_policy();
+-#endif
++		refresh_global_address_policy();
+ 		reopen_network_sockets({});
+ 	}
+ 
+@@ -5716,7 +5713,7 @@ retry:
+ #ifndef TORRENT_DISABLE_DHT
+ 		if (m_settings.get_bool(settings_pack::enable_dht))
+ 		{
+-			if (!ensure_dht_global_address_policy()) return;
++			if (!ensure_global_address_policy()) return;
+ 
+ 			if (!m_settings.get_str(settings_pack::dht_bootstrap_nodes).empty()
+ 				&& m_dht_router_nodes.empty())
+@@ -5733,82 +5730,117 @@ retry:
+ 		}
+ 		else
+ 		{
+-			m_dht_nat64_state.reset();
+-			m_dht_nat64_resolver.cancel();
+-			m_dht_nat64_timer.cancel();
+ 			stop_dht();
++			update_global_address_policy();
+ 		}
+ #endif
+ 	}
+ 
++	bool session_impl::global_address_policy_enabled() const
++	{
++		bool dht_enabled = false;
+ #ifndef TORRENT_DISABLE_DHT
+-	bool session_impl::ensure_dht_global_address_policy()
+-	{
+-		if (m_dht_nat64_state.complete) return true;
+-		if (m_dht_nat64_state.pending) return false;
+-
+-		std::uint64_t const generation = m_dht_nat64_state.start_lookup();
+-		ADD_OUTSTANDING_ASYNC("session_impl::on_dht_nat64_timeout");
+-		m_dht_nat64_timer.expires_after(dht_nat64_discovery_timeout);
+-		m_dht_nat64_timer.async_wait([this, generation](error_code const& error)
+-			{ wrap(&session_impl::on_dht_nat64_timeout, error, generation); });
+-		ADD_OUTSTANDING_ASYNC("session_impl::on_dht_nat64_name_lookup");
+-		m_dht_nat64_resolver.async_resolve("ipv4only.arpa", "80"
++		dht_enabled = m_settings.get_bool(settings_pack::enable_dht);
++#endif
++		return should_discover_nat64(
++			m_settings.get_bool(settings_pack::enable_outgoing_tcp)
++			, m_settings.get_bool(settings_pack::enable_outgoing_utp)
++			, dht_enabled);
++	}
++
++	bool session_impl::ensure_global_address_policy()
++	{
++		if (!global_address_policy_enabled()) return false;
++		if (m_nat64_state.complete) return true;
++		if (m_nat64_state.pending) return false;
++
++		invalidate_peer_address_policy();
++		std::uint64_t const generation = m_nat64_state.start_lookup();
++		ADD_OUTSTANDING_ASYNC("session_impl::on_nat64_timeout");
++		m_nat64_timer.expires_after(nat64_discovery_timeout);
++		m_nat64_timer.async_wait([this, generation](error_code const& error)
++			{ wrap(&session_impl::on_nat64_timeout, error, generation); });
++		ADD_OUTSTANDING_ASYNC("session_impl::on_nat64_name_lookup");
++		m_nat64_resolver.async_resolve("ipv4only.arpa", "80"
+ 			, [this, generation](error_code const& error, tcp::resolver::results_type results)
+ 			{
+ 				std::vector<address> addresses;
+ 				addresses.reserve(results.size());
+ 				for (auto const& result : results)
+ 					addresses.push_back(result.endpoint().address());
+-				wrap(&session_impl::on_dht_nat64_name_lookup
++				wrap(&session_impl::on_nat64_name_lookup
+ 					, error, std::move(addresses), generation);
+ 			});
+ 		return false;
+ 	}
+ 
+-	void session_impl::refresh_dht_global_address_policy()
++	void session_impl::invalidate_peer_address_policy()
++	{
++		for (auto const& torrent : m_torrents)
++			torrent->invalidate_peer_address_policy();
++	}
++
++	void session_impl::update_global_address_policy()
+ 	{
+-		m_dht_nat64_state.reset();
+-		m_dht_nat64_resolver.cancel();
+-		m_dht_nat64_timer.cancel();
++		if (global_address_policy_enabled())
++		{
++			ensure_global_address_policy();
++			return;
++		}
++
++		m_nat64_state.reset();
++		m_nat64_resolver.cancel();
++		m_nat64_timer.cancel();
++		invalidate_peer_address_policy();
++	}
++
++	void session_impl::refresh_global_address_policy()
++	{
++		m_nat64_state.reset();
++		m_nat64_resolver.cancel();
++		m_nat64_timer.cancel();
++		invalidate_peer_address_policy();
++#ifndef TORRENT_DISABLE_DHT
+ 		if (m_dht) m_dht_state = m_dht->state();
+ 		m_dht_router_nodes.clear();
+ 		stop_dht();
+-		ensure_dht_global_address_policy();
++#endif
++		update_global_address_policy();
+ 	}
+ 
+-	void session_impl::on_dht_nat64_name_lookup(error_code const& error
++	void session_impl::on_nat64_name_lookup(error_code const& error
+ 		, std::vector<address> addresses, std::uint64_t const generation)
+ 	{
+-		COMPLETE_ASYNC("session_impl::on_dht_nat64_name_lookup");
++		COMPLETE_ASYNC("session_impl::on_nat64_name_lookup");
+ 		nat64_discovery_result discovery = error
+ 			? nat64_discovery_result{}
+ 			: discover_nat64_prefixes(addresses);
+-		if (!m_dht_nat64_state.lookup_completed(generation, std::move(discovery)))
++		if (!m_nat64_state.lookup_completed(generation, std::move(discovery)))
+ 			return;
+-		m_dht_nat64_timer.cancel();
++		m_nat64_timer.cancel();
++		invalidate_peer_address_policy();
+ 
+ #ifndef TORRENT_DISABLE_LOGGING
+-		if (error || !m_dht_nat64_state.discovery.valid)
+-			session_log("DHT NAT64 discovery failed closed for IPv6 endpoints");
++		if (error || !m_nat64_state.discovery.valid)
++			session_log("NAT64 discovery failed closed for IPv6 endpoints");
+ #endif
+ 		if (!m_abort) update_dht();
+ 	}
+ 
+-	void session_impl::on_dht_nat64_timeout(error_code const& error
++	void session_impl::on_nat64_timeout(error_code const& error
+ 		, std::uint64_t const generation)
+ 	{
+-		COMPLETE_ASYNC("session_impl::on_dht_nat64_timeout");
++		COMPLETE_ASYNC("session_impl::on_nat64_timeout");
+ 		if (error == boost::asio::error::operation_aborted) return;
+-		if (!m_dht_nat64_state.lookup_timed_out(generation)) return;
++		if (!m_nat64_state.lookup_timed_out(generation)) return;
+ 
+-		m_dht_nat64_resolver.cancel();
++		m_nat64_resolver.cancel();
++		invalidate_peer_address_policy();
+ #ifndef TORRENT_DISABLE_LOGGING
+-		session_log("DHT NAT64 discovery timed out; continuing with IPv4 only");
++		session_log("NAT64 discovery timed out; continuing with IPv4 only");
+ #endif
+ 		if (!m_abort) update_dht();
+ 	}
+-#endif
+ 
+ 	void session_impl::update_dht_bootstrap_nodes()
+ 	{
+@@ -6189,7 +6221,7 @@ retry:
+ 		INVARIANT_CHECK;
+ 
+ 		if (!m_settings.get_bool(settings_pack::enable_dht)) return;
+-		if (!ensure_dht_global_address_policy())
++		if (!ensure_global_address_policy())
+ 		{
+ 			stop_dht();
+ 			return;
+@@ -6403,7 +6435,7 @@ retry:
+ 
+ 		for (auto const& addr : addresses)
+ 		{
+-			if (m_dht_nat64_state.complete && !is_dht_address_global(addr))
++			if (m_nat64_state.complete && !is_dht_address_global(addr))
+ 				continue;
+ 			udp::endpoint ep(addr, std::uint16_t(port));
+ 			add_dht_node(ep);
+@@ -7440,22 +7472,10 @@ retry:
+ 
+ 	ip_filter const* session_impl::get_dht_ip_filter() const { return m_ip_filter.get(); }
+ 	bool session_impl::is_dht_address_global(address const& addr) const
+-	{
+-#ifndef TORRENT_DISABLE_DHT
+-		return is_global(addr, m_dht_nat64_state.discovery);
+-#else
+-		return is_global(addr);
+-#endif
+-	}
++	{ return is_global(addr, m_nat64_state.discovery); }
+ 
+ 	bool session_impl::is_peer_address_global(address const& addr) const
+-	{
+-#ifndef TORRENT_DISABLE_DHT
+-		if (m_dht_nat64_state.discovery.valid)
+-			return is_global(addr, m_dht_nat64_state.discovery);
+-#endif
+-		return is_global(addr);
+-	}
++	{ return m_nat64_state.is_peer_address_global(addr); }
+ 
+ 	void session_impl::set_external_address(
+ 		tcp::endpoint const& local_endpoint, address const& ip
+diff --git a/src/settings_pack.cpp b/src/settings_pack.cpp
+index 5a8ced6e8..9fa971549 100644
+--- a/src/settings_pack.cpp
++++ b/src/settings_pack.cpp
+@@ -165,9 +165,9 @@ namespace {
+ 		SET(report_true_downloaded, false, nullptr),
+ 		SET(strict_end_game_mode, true, nullptr),
+ 		DEPRECATED_SET(broadcast_lsd, true, nullptr),
+-		SET(enable_outgoing_utp, true, nullptr),
++		SET(enable_outgoing_utp, true, &session_impl::update_global_address_policy),
+ 		SET(enable_incoming_utp, true, nullptr),
+-		SET(enable_outgoing_tcp, true, nullptr),
++		SET(enable_outgoing_tcp, true, &session_impl::update_global_address_policy),
+ 		SET(enable_incoming_tcp, true, nullptr),
+ 		DEPRECATED_SET(ignore_resume_timestamps, false, nullptr),
+ 		SET(no_recheck_incomplete_resume, false, nullptr),
+diff --git a/src/torrent.cpp b/src/torrent.cpp
+index c739c79e1..210d1b07b 100644
+--- a/src/torrent.cpp
++++ b/src/torrent.cpp
+@@ -2189,6 +2189,16 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 		return m_ses.is_peer_address_global(addr);
+ 	}
+ 
++	void torrent::invalidate_peer_address_policy()
++	{
++		if (!m_block_non_global_peers || !m_peer_list) return;
++
++		torrent_state st = get_peer_list_state();
++		m_peer_list->invalidate_global_address_policy(&st);
++		peers_erased(st.erased);
++		update_want_peers();
++	}
++
+ 	bt_peer_connection* torrent::find_introducer(tcp::endpoint const& ep) const
+ 	{
+ #ifndef TORRENT_DISABLE_EXTENSIONS
+@@ -8009,6 +8019,16 @@ namespace {
+ 
+ 		if (m_abort) return false;
+ 
++#if TORRENT_USE_I2P
++		if (!peerinfo->is_i2p_addr)
++#endif
++		{
++			if (m_block_non_global_peers
++				&& peer_source_requires_global_address(peerinfo->peer_source())
++				&& !is_peer_address_global(peerinfo->address()))
++				return false;
++		}
++
+ 		peerinfo->last_connected = m_ses.session_time();
+ #if TORRENT_USE_ASSERTS
+ 		if (!settings().get_bool(settings_pack::allow_multiple_connections_per_ip)
+@@ -11833,14 +11853,10 @@ namespace {
+ 
+ 		TORRENT_ASSERT(info_hash().has_v2() || !(flags & pex_lt_v2));
+ 
+-		bool const restricted_peer_source = bool(source & peer_info::tracker)
+-			|| bool(source & peer_info::dht)
+-			|| bool(source & peer_info::pex)
+-			|| bool(source & peer_info::resume_data);
+ 		bool const private_resume_peer = bool(source & peer_info::resume_data)
+ 			&& torrent_file().is_valid() && torrent_file().priv();
+ 		if (m_block_non_global_peers
+-			&& restricted_peer_source
++			&& peer_source_requires_global_address(source)
+ 			&& (private_resume_peer || !is_peer_address_global(adr.address())))
+ 		{
+ 			if (alerts().should_post<peer_blocked_alert>())
+diff --git a/test/test_dht.cpp b/test/test_dht.cpp
+index c78a5bfe9..809cd18eb 100644
+--- a/test/test_dht.cpp
++++ b/test/test_dht.cpp
+@@ -3806,11 +3806,20 @@ TORRENT_TEST(dht_global_address_policy)
+ 	}
+ }
+ 
+-TORRENT_TEST(dht_nat64_discovery_timeout_state)
++TORRENT_TEST(session_nat64_discovery_is_fail_closed_for_peers)
+ {
+-	aux::dht_nat64_discovery_state state;
++	TEST_CHECK(!aux::should_discover_nat64(false, false, false));
++	TEST_CHECK(aux::should_discover_nat64(true, false, false));
++	TEST_CHECK(aux::should_discover_nat64(false, true, false));
++	TEST_CHECK(aux::should_discover_nat64(false, false, true));
++
++	aux::nat64_discovery_state state;
++	TEST_CHECK(state.is_peer_address_global(addr("8.8.8.8")));
++	TEST_CHECK(!state.is_peer_address_global(addr("2606:4700:4700::1111")));
++	TEST_CHECK(!state.is_peer_address_global(addr("2001:4860:abcd:ef01::a00:1")));
+ 	std::uint64_t const timed_out_generation = state.start_lookup();
+ 	TEST_CHECK(state.pending);
++	TEST_CHECK(!state.is_peer_address_global(addr("2606:4700:4700::1111")));
+ 	TEST_CHECK(state.lookup_timed_out(timed_out_generation));
+ 	TEST_CHECK(state.complete);
+ 	TEST_CHECK(!state.pending);
+@@ -3818,6 +3827,8 @@ TORRENT_TEST(dht_nat64_discovery_timeout_state)
+ 	TEST_CHECK(state.generation != timed_out_generation);
+ 	TEST_CHECK(aux::is_global(addr("8.8.8.8"), state.discovery));
+ 	TEST_CHECK(!aux::is_global(addr("2606:4700:4700::1111"), state.discovery));
++	TEST_CHECK(state.is_peer_address_global(addr("8.8.8.8")));
++	TEST_CHECK(!state.is_peer_address_global(addr("2606:4700:4700::1111")));
+ 
+ 	aux::nat64_discovery_result late_success;
+ 	late_success.valid = true;
+@@ -3826,11 +3837,30 @@ TORRENT_TEST(dht_nat64_discovery_timeout_state)
+ 
+ 	state.reset();
+ 	std::uint64_t const completed_generation = state.start_lookup();
+-	aux::nat64_discovery_result success;
+-	success.valid = true;
++	std::vector<address> const answers{
++		addr("2001:4860:abcd:ef01::c000:aa"),
++		addr("2001:4860:abcd:ef01::c000:ab"),
++	};
++	aux::nat64_discovery_result success = aux::discover_nat64_prefixes(answers);
++	TEST_CHECK(success.valid);
+ 	TEST_CHECK(state.lookup_completed(completed_generation, std::move(success)));
+ 	TEST_CHECK(state.discovery.valid);
++	TEST_CHECK(state.is_peer_address_global(addr("2606:4700:4700::1111")));
++	TEST_CHECK(!state.is_peer_address_global(addr("2001:4860:abcd:ef01::a00:1")));
++	TEST_CHECK(state.is_peer_address_global(addr("2001:4860:abcd:ef01::808:808")));
+ 	TEST_CHECK(!state.lookup_timed_out(completed_generation));
++
++	aux::nat64_discovery_state previous_network;
++	std::uint64_t const previous_generation = previous_network.start_lookup();
++	std::vector<address> const previous_answers{
++		addr("64:ff9b::c000:aa"),
++		addr("64:ff9b::c000:ab"),
++	};
++	TEST_CHECK(previous_network.lookup_completed(previous_generation
++		, aux::discover_nat64_prefixes(previous_answers)));
++	address const reclassified = addr("2001:4860:abcd:ef01::a00:1");
++	TEST_CHECK(previous_network.is_peer_address_global(reclassified));
++	TEST_CHECK(!state.is_peer_address_global(reclassified));
+ }
+ 
+ TORRENT_TEST(dht_node_add_node_ip_filter)
+diff --git a/test/test_peer_list.cpp b/test/test_peer_list.cpp
+index d6a226eff..47029f60b 100644
+--- a/test/test_peer_list.cpp
++++ b/test/test_peer_list.cpp
+@@ -480,6 +480,32 @@ TORRENT_TEST(port_filter)
+ 	TEST_EQUAL(con1->was_disconnected(), false);
+ }
+ 
++TORRENT_TEST(invalidate_global_address_policy)
++{
++	torrent_state st = init_state();
++	mock_torrent t(&st);
++	peer_list p(allocator);
++	t.m_p = &p;
++
++	torrent_peer* const active_tracker = p.add_peer(
++		ep("2001:4860::1", 3000), peer_info::tracker, {}, &st);
++	TEST_CHECK(active_tracker);
++	TEST_CHECK(t.connect_to_peer(active_tracker));
++	TEST_CHECK(p.add_peer(ep("2001:4860::2", 3001), peer_info::dht, {}, &st));
++	TEST_CHECK(p.add_peer(ep("fd00::1", 3002), peer_info::lsd, {}, &st));
++	TEST_CHECK(p.add_peer(ep("8.8.8.8", 3003), peer_info::tracker, {}, &st));
++	st.erased.clear();
++
++	p.invalidate_global_address_policy(&st);
++
++	TEST_CHECK(t.m_connections.empty());
++	TEST_CHECK(!has_peer(p, ep("2001:4860::1", 3000)));
++	TEST_CHECK(!has_peer(p, ep("2001:4860::2", 3001)));
++	TEST_CHECK(has_peer(p, ep("fd00::1", 3002)));
++	TEST_CHECK(has_peer(p, ep("8.8.8.8", 3003)));
++	TEST_EQUAL(st.erased.size(), 2);
++}
++
+ // test banning peers
+ TORRENT_TEST(ban_peers)
+ {
+diff --git a/test/test_torrent.cpp b/test/test_torrent.cpp
+index 6512c30e0..40c999c18 100644
+--- a/test/test_torrent.cpp
++++ b/test/test_torrent.cpp
+@@ -335,7 +335,7 @@ TORRENT_TEST(global_peer_policy_filters_remote_sources)
+ 	tcp::endpoint const private_resume{make_address("169.254.1.1"), 48089};
+ 	tcp::endpoint const private_lsd{make_address("192.168.1.2"), 48090};
+ 	tcp::endpoint const public_tracker{make_address("8.8.8.8"), 48084};
+-	tcp::endpoint const public_dht{make_address("2606:4700:4700::1111"), 48085};
++	tcp::endpoint const public_dht{make_address("9.9.9.9"), 48085};
+ 	tcp::endpoint const public_resume{make_address("1.1.1.1"), 48086};
+ 
+ 	h.connect_peer(private_tracker, peer_info::tracker);

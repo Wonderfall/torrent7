@@ -23,6 +23,7 @@ readonly -a LIBTORRENT_PATCHES=(
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-outbound-only-dht.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-dht-global-address-policy.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-peer-source-policy.patch"
+    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-session-nat64-policy.patch"
 )
 
 fail() {

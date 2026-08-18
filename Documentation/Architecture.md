@@ -442,9 +442,17 @@ discovery, and storage path resolution happen inside libtorrent. The application
 cannot reliably secure those paths after the fact, so the pinned dependency
 patch series validates destinations at every relevant transition, blocks
 non-global tracker, DHT, PEX, and resume peer endpoints for each torrent's
-lifetime, confines storage, revalidates redirect and send targets, and keeps
-pread recheck buffers within the configured checking-memory budget. Private
-torrents discard pre-metadata and persisted peer caches and repopulate only from
+life. NAT64 prefix discovery belongs to the session rather than the DHT
+lifecycle, but starts only after network access is enabled and is canceled when
+the helper blocks networking. IPv4 candidates remain classifiable immediately,
+while IPv6 peer candidates fail closed until a valid RFC 7050 result is
+available, including when DHT is disabled. Every outgoing peer connection
+revalidates the endpoint under the current session policy, and each NAT64
+generation transition disconnects and removes policy-scoped IPv6 peers before
+networking resumes. The series also confines storage,
+revalidates redirect and send targets, and keeps pread recheck buffers within
+the configured checking-memory budget. Private torrents discard pre-metadata
+and persisted peer caches and repopulate only from
 their tracker. PEX never advertises LAN endpoints, and `ut_holepunch` follows
 the same PEX/private-torrent policy; explicitly enabled LSD remains the sole
 intentional local-peer discovery path. The series also preserves Apple's typed
