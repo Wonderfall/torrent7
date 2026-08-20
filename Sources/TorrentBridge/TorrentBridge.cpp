@@ -1593,16 +1593,6 @@ DirtyMask TTorrentClient::set_source_policy_field(
     lt::torrent_flags_t const original_flags = handle.flags();
     bool const updates_dht = field == TTORRENT_SOURCE_POLICY_ENABLE_DHT
         || field == TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT;
-    bool const should_force_dht_announce =
-        updates_dht
-        && !dht_locked
-        && enabled
-        && !(metadata_pending
-            ? bridge_bool(current_policy.allow_pre_metadata_dht)
-            : bridge_bool(current_policy.enable_dht))
-        && dht_node_enabled
-        && !requested_network_blocked
-        && !static_cast<bool>(original_flags & lt::torrent_flags::paused);
     bool const should_force_lsd_announce =
         field == TTORRENT_SOURCE_POLICY_ENABLE_LSD
         && !lsd_locked
@@ -1722,9 +1712,6 @@ DirtyMask TTorrentClient::set_source_policy_field(
     }
     if (updates_dht || field == TTORRENT_SOURCE_POLICY_ENABLE_PEER_EXCHANGE) {
         changes |= clear_peer_cache_if_restricted(handle, identity);
-    }
-    if (should_force_dht_announce) {
-        handle.force_dht_announce();
     }
     if (should_force_lsd_announce) {
         handle.force_lsd_announce();
@@ -3645,7 +3632,6 @@ extern "C" int32_t TorrentClientApplySettings(
             .trackers = client->https_tracker_policy,
             .web_seeds = client->https_web_seed_policy,
         };
-        client->dht_node_enabled = enable_dht;
         SourcePolicyApplicationResult source_policy_application;
         add_policy_result(source_policy_application, apply_dht_policy_locked(*client, use_dht_by_default));
         client->lsd_service_enabled = enable_lsd;

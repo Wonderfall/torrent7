@@ -1520,7 +1520,6 @@ struct TTorrentClient {
     bool persistence_faulted TORRENT_BRIDGE_GUARDED_BY(resume_io_lock) = false;
     bool rebuilding_snapshot_cache TORRENT_BRIDGE_GUARDED_BY(lock) = false;
     bool requested_network_blocked TORRENT_BRIDGE_GUARDED_BY(lock) = true;
-    bool dht_node_enabled TORRENT_BRIDGE_GUARDED_BY(lock) = true;
     bool dht_enabled_by_default TORRENT_BRIDGE_GUARDED_BY(lock) = true;
     bool lsd_service_enabled TORRENT_BRIDGE_GUARDED_BY(lock) = false;
     bool lsd_enabled_by_default TORRENT_BRIDGE_GUARDED_BY(lock) = true;

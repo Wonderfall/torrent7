@@ -45,7 +45,7 @@ index 8d2c4ecf0..0d8023cee 100644
  
  			// ``upnp_ignore_nonrouters`` indicates whether or not the UPnP
 diff --git a/src/session_impl.cpp b/src/session_impl.cpp
-index 155d8e72d..1925fc7bb 100644
+index 155d8e72d..f197bcc6d 100644
 --- a/src/session_impl.cpp
 +++ b/src/session_impl.cpp
 @@ -1600,6 +1600,10 @@ namespace {
@@ -76,8 +76,29 @@ index 155d8e72d..1925fc7bb 100644
  	}
  
  	std::shared_ptr<listen_socket_t> session_impl::setup_listener(
+@@ -6294,9 +6308,19 @@ retry:
+ 		m_dht_nodes.clear();
+ 		m_dht_nodes.shrink_to_fit();
+ 
+-		auto cb = [this](
++		auto const started_dht = std::weak_ptr<dht::dht_tracker>(m_dht);
++		auto const bootstrap_completed = std::make_shared<bool>(false);
++		auto cb = [this, started_dht, bootstrap_completed](
+ 			std::vector<std::pair<dht::node_entry, std::string>> const&)
+ 		{
++			auto const dht = started_dht.lock();
++			if (!dht || dht != m_dht) return;
++			if (!*bootstrap_completed)
++			{
++				*bootstrap_completed = true;
++				for (auto const& torrent : m_torrents)
++					torrent->prioritize_dht_if_ready();
++			}
+ 			if (m_alerts.should_post<dht_bootstrap_alert>())
+ 				m_alerts.emplace_alert<dht_bootstrap_alert>();
+ 		};
 diff --git a/src/torrent.cpp b/src/torrent.cpp
-index 6fda25376..a50d53e31 100644
+index 6fda25376..cd6b67ba2 100644
 --- a/src/torrent.cpp
 +++ b/src/torrent.cpp
 @@ -774,7 +774,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
@@ -90,7 +111,22 @@ index 6fda25376..a50d53e31 100644
  	}
  
  #endif
-@@ -2990,9 +2991,11 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -1021,8 +1022,14 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 		if (mask & torrent_flags::disable_dht)
+ 		{
+ 			bool const new_value = !bool(flags & torrent_flags::disable_dht);
++			bool const enable_dht = !m_enable_dht && new_value;
+ 			if (m_enable_dht != new_value) set_need_save_resume(torrent_handle::if_config_changed);
+ 			m_enable_dht = new_value;
++#ifndef TORRENT_DISABLE_DHT
++			if (enable_dht) prioritize_dht_if_ready();
++#else
++			TORRENT_UNUSED(enable_dht);
++#endif
+ 		}
+ 		if (mask & torrent_flags::disable_lsd)
+ 		{
+@@ -2990,9 +2997,11 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  					debug_log("DHT: private torrent, no DHT announce");
  
  				if (settings().get_bool(settings_pack::use_dht_as_fallback)
@@ -104,7 +140,7 @@ index 6fda25376..a50d53e31 100644
  				}
  			}
  #endif
-@@ -3042,6 +3045,12 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -3042,6 +3051,12 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  		});
  	}
  
@@ -117,7 +153,7 @@ index 6fda25376..a50d53e31 100644
  	void torrent::on_dht_announce_response_disp(std::weak_ptr<torrent> const t
  		, protocol_version const v, std::vector<tcp::endpoint> const& peers)
  	{
-@@ -6428,6 +6437,11 @@ namespace {
+@@ -6428,6 +6443,11 @@ namespace {
  			m_trackers.prioritize_udp_trackers();
  
  		if (m_announcing && !m_trackers.empty()) announce_with_tracker();
@@ -129,15 +165,21 @@ index 6fda25376..a50d53e31 100644
  
  		set_need_save_resume(torrent_handle::if_metadata_changed);
  	}
-@@ -13053,6 +13067,7 @@ namespace {
+@@ -13053,6 +13073,13 @@ namespace {
  				, ec.message().c_str(), operation_name(op), msg.c_str());
  		}
  #endif
++#ifndef TORRENT_DISABLE_DHT
++		bool const dht_fallback_was_ready
++			= settings().get_bool(settings_pack::use_dht_as_fallback)
++			&& m_trackers.all_usable_trackers_failed(m_info_hash, is_i2p()
++				, settings().get_bool(settings_pack::allow_i2p_mixed));
++#endif
 +		bool tracker_announce_failed = false;
  		if (!(r.kind & tracker_request::scrape_request))
  		{
  			// announce request
-@@ -13071,6 +13086,7 @@ namespace {
+@@ -13071,6 +13098,7 @@ namespace {
  					local_endpoint = aep->local_endpoint;
  					a.failed(settings().get_int(settings_pack::tracker_backoff)
  						, retry_interval);
@@ -145,13 +187,14 @@ index 6fda25376..a50d53e31 100644
  					a.last_error = ec;
  					a.message = msg;
  					fails = a.fails;
-@@ -13157,6 +13173,13 @@ namespace {
+@@ -13157,6 +13185,14 @@ namespace {
  					, local_endpoint, hash_version, r.url, ec);
  			}
  		}
 +#ifndef TORRENT_DISABLE_DHT
 +		if (tracker_announce_failed
-+			&& settings().get_bool(settings_pack::use_dht_as_fallback))
++			&& settings().get_bool(settings_pack::use_dht_as_fallback)
++			&& !dht_fallback_was_ready)
 +			prioritize_dht_if_ready();
 +#else
 +		TORRENT_UNUSED(tracker_announce_failed);
@@ -160,10 +203,10 @@ index 6fda25376..a50d53e31 100644
  		// We may have changed state into checking by now, in which case we
  		// shouldn't keep trying to announce
 diff --git a/src/tracker_list.cpp b/src/tracker_list.cpp
-index 863f54b0e..5cd662cb6 100644
+index 863f54b0e..1bda0e45c 100644
 --- a/src/tracker_list.cpp
 +++ b/src/tracker_list.cpp
-@@ -250,10 +250,34 @@ aux::announce_entry* tracker_list::first()
+@@ -250,10 +250,36 @@ aux::announce_entry* tracker_list::first()
  	return &*m_trackers.begin();
  }
  
@@ -193,7 +236,9 @@ index 863f54b0e..5cd662cb6 100644
 +			{
 +				if (!info_hashes.has(version)) continue;
 +				auto const& state = endpoint.info_hashes[version];
-+				if (state.updating || state.is_working()) return false;
++				// Retrying a failed endpoint does not make it healthy again. Keep
++				// fallback active until a successful response resets its fail count.
++				if (state.is_working()) return false;
 +			}
 +		}
 +	}
@@ -202,7 +247,7 @@ index 863f54b0e..5cd662cb6 100644
  
  #if TORRENT_USE_INVARIANT_CHECKS
 diff --git a/test/test_tracker_list.cpp b/test/test_tracker_list.cpp
-index 77d8a9e19..e2ee37c3f 100644
+index 77d8a9e19..f000963f1 100644
 --- a/test/test_tracker_list.cpp
 +++ b/test/test_tracker_list.cpp
 @@ -13,6 +13,8 @@ see LICENSE file.
@@ -214,7 +259,7 @@ index 77d8a9e19..e2ee37c3f 100644
  using namespace libtorrent::aux;
  
  TORRENT_TEST(test_initial_state)
-@@ -25,6 +27,45 @@ TORRENT_TEST(test_initial_state)
+@@ -25,6 +27,47 @@ TORRENT_TEST(test_initial_state)
  	TEST_EQUAL(tl.last_working_url(), "");
  }
  
@@ -235,7 +280,9 @@ index 77d8a9e19..e2ee37c3f 100644
 +
 +	first_state.fails = 1;
 +	first_state.updating = true;
-+	TEST_CHECK(!trackers.all_usable_trackers_failed(info_hashes, false, false));
++	// Retrying an already failed endpoint must not suspend fallback or cause a
++	// new transition when that retry fails again.
++	TEST_CHECK(trackers.all_usable_trackers_failed(info_hashes, false, false));
 +	first_state.updating = false;
 +	TEST_CHECK(trackers.all_usable_trackers_failed(info_hashes, false, false));
 +
