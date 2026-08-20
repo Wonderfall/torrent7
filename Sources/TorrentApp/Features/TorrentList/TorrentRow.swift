@@ -16,18 +16,19 @@ struct TorrentRow: View {
                         .font(.body.weight(.medium))
                         .lineLimit(1)
                         .truncationMode(.middle)
+                        .help(row.name)
 
                     if !labels.isEmpty {
                         TorrentLabelPillStrip(labels: labels)
                     }
                 }
-                .layoutPriority(1)
-
-                Spacer(minLength: 12)
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
 
                 Text(metrics.progress, format: .percent.precision(.fractionLength(1)))
                     .font(.caption)
                     .monospacedDigit()
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                     .foregroundStyle(.tertiary)
             }
 

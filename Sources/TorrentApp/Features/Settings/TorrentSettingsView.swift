@@ -228,10 +228,10 @@ struct TorrentSettingsView: View {
 
     private var discoverySettings: some View {
         Form {
+            httpsSourcePolicySection
             dhtDiscoverySection
             peerExchangeDiscoverySection
             localDiscoverySection
-            httpsSourcePolicySection
         }
         .formStyle(.grouped)
     }
@@ -737,7 +737,11 @@ struct TorrentSettingsView: View {
     }
 
     private var httpsTrackerPolicyRow: some View {
-        HStack {
+        Picker(selection: setting(\.httpsTrackerPolicy)) {
+            ForEach(TorrentHTTPSTrackerPolicy.allCases) { policy in
+                Text(policy.title).tag(policy)
+            }
+        } label: {
             HStack(spacing: 5) {
                 Text("Tracker policy")
 
@@ -764,22 +768,17 @@ struct TorrentSettingsView: View {
                     .frame(width: 340, alignment: .leading)
                 }
             }
-
-            Spacer()
-
-            Picker("Tracker policy", selection: setting(\.httpsTrackerPolicy)) {
-                ForEach(TorrentHTTPSTrackerPolicy.allCases) { policy in
-                    Text(policy.title).tag(policy)
-                }
-            }
-            .labelsHidden()
-            .accessibilityLabel("HTTPS tracker policy")
+            .accessibilityElement(children: .contain)
         }
         .help("Choose whether to preserve torrent tiers, prefer HTTPS with fallback, or require HTTPS.")
     }
 
     private var httpsWebSeedPolicyRow: some View {
-        HStack {
+        Picker(selection: setting(\.httpsWebSeedPolicy)) {
+            ForEach(TorrentHTTPSWebSeedPolicy.allCases) { policy in
+                Text(policy.title).tag(policy)
+            }
+        } label: {
             HStack(spacing: 5) {
                 Text("Web seed policy")
 
@@ -806,16 +805,7 @@ struct TorrentSettingsView: View {
                     .frame(width: 340, alignment: .leading)
                 }
             }
-
-            Spacer()
-
-            Picker("Web seed policy", selection: setting(\.httpsWebSeedPolicy)) {
-                ForEach(TorrentHTTPSWebSeedPolicy.allCases) { policy in
-                    Text(policy.title).tag(policy)
-                }
-            }
-            .labelsHidden()
-            .accessibilityLabel("HTTPS web seed policy")
+            .accessibilityElement(children: .contain)
         }
         .help("Choose whether to preserve torrent web seeds or require HTTPS.")
     }

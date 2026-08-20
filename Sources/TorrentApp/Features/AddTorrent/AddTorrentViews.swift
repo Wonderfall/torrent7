@@ -167,7 +167,13 @@ struct AddTorrentConfirmationView: View {
         VStack(spacing: 0) {
             Form {
                 Section {
-                    LabeledContent("Name", value: displayName)
+                    InfoDetailRow("Name") {
+                        Text(displayName)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .foregroundStyle(.secondary)
+                            .help(displayName)
+                    }
                     if draft.fileURL != nil {
                         InfoDetailRow("Info hash") {
                             previewInfoHashValue
