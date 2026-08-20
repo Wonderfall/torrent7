@@ -72,7 +72,32 @@ final class TorrentDockTileService: TorrentDockTileServicing {
     }
 
     private static func label(for bytesPerSecond: Int64) -> String? {
-        bytesPerSecond > 0 ? TransferRateDockTileView.compactRate(bytesPerSecond) : nil
+        bytesPerSecond > 0 ? DockTransferRateFormat.string(bytesPerSecond) : nil
+    }
+}
+
+enum DockTransferRateFormat {
+    static func string(_ bytesPerSecond: Int64) -> String {
+        let units = [
+            (1_000_000_000_000.0, "T/s"),
+            (1_000_000_000.0, "G/s"),
+            (1_000_000.0, "M/s"),
+            (1_000.0, "K/s")
+        ]
+
+        let value = Double(bytesPerSecond)
+        for (unitValue, suffix) in units where value >= unitValue {
+            let scaled = value / unitValue
+            let formatted = scaled >= 10 ? String(Int(scaled.rounded())) : oneDecimal(scaled)
+            return "\(formatted) \(suffix)"
+        }
+
+        return "\(bytesPerSecond) B/s"
+    }
+
+    private static func oneDecimal(_ value: Double) -> String {
+        let tenths = Int((value * 10).rounded())
+        return "\(tenths / 10).\(tenths % 10)"
     }
 }
 
@@ -183,28 +208,5 @@ private final class TransferRateDockTileView: NSView {
         let lineHeight = font.ascender - font.descender
         let insetRect = rect.insetBy(dx: 7, dy: (rect.height - lineHeight) / 2)
         badge.label.draw(in: insetRect, withAttributes: attributes)
-    }
-
-    fileprivate static func compactRate(_ bytesPerSecond: Int64) -> String {
-        let units = [
-            (1_000_000_000_000.0, "T/s"),
-            (1_000_000_000.0, "G/s"),
-            (1_000_000.0, "M/s"),
-            (1_000.0, "K/s")
-        ]
-
-        let value = Double(bytesPerSecond)
-        for (unitValue, suffix) in units where value >= unitValue {
-            let scaled = value / unitValue
-            let formatted = scaled >= 10 ? String(Int(scaled.rounded())) : oneDecimal(scaled)
-            return "\(formatted) \(suffix)"
-        }
-
-        return "\(bytesPerSecond)B/s"
-    }
-
-    private static func oneDecimal(_ value: Double) -> String {
-        let tenths = Int((value * 10).rounded())
-        return "\(tenths / 10).\(tenths % 10)"
     }
 }
