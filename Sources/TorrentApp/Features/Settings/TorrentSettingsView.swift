@@ -560,7 +560,7 @@ struct TorrentSettingsView: View {
         HStack {
             HStack(spacing: 5) {
                 disabledAwareLabel(
-                    "DHT discovery policy",
+                    "DHT peer discovery policy",
                     isDisabled: !state.settings.enableDHTNetwork
                 )
 
@@ -571,11 +571,11 @@ struct TorrentSettingsView: View {
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(.secondary)
-                .help("About the DHT discovery policy")
-                .accessibilityLabel("About the DHT discovery policy")
+                .help("About the DHT peer discovery policy")
+                .accessibilityLabel("About the DHT peer discovery policy")
                 .popover(isPresented: $isShowingDHTDiscoveryPolicyInfo) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("DHT discovery policy")
+                        Text("DHT peer discovery policy")
                             .font(.headline)
 
                         Text("Alongside trackers queries DHT immediately. After all trackers fail waits until every usable tracker has failed or timed out; trackerless torrents use DHT immediately.")
@@ -590,14 +590,14 @@ struct TorrentSettingsView: View {
 
             Spacer()
 
-            Picker("DHT discovery policy", selection: setting(\.dhtDiscoveryPolicy)) {
+            Picker("DHT peer discovery policy", selection: setting(\.dhtDiscoveryPolicy)) {
                 ForEach(TorrentDHTDiscoveryPolicy.allCases) { policy in
                     Text(policy.title).tag(policy)
                 }
             }
             .labelsHidden()
             .disabled(!state.settings.enableDHTNetwork)
-            .accessibilityLabel("DHT discovery policy")
+            .accessibilityLabel("DHT peer discovery policy")
         }
         .help(state.settings.enableDHTNetwork
               ? "Choose whether DHT runs with trackers or only after every usable tracker fails."
