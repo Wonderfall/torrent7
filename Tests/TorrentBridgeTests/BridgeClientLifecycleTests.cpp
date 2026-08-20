@@ -3771,6 +3771,50 @@ TEST_CASE("DHT privacy lookups follow effective DHT availability")
     }));
 }
 
+TEST_CASE("network diagnostics report native DHT status and routing nodes")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+
+    TTorrentNetworkStatusResult initial = TorrentClientCopyNetworkStatus(&client);
+    REQUIRE(initial.status == 1);
+    CHECK(initial.network_status.dht_status == TTORRENT_DHT_STATUS_DISABLED);
+    CHECK(initial.network_status.dht_routing_nodes == -1);
+
+    TTorrentSessionSettings settings = unblocked_session_settings();
+    settings.enable_dht = bridge_bool(true);
+    char error[512]{};
+    REQUIRE(apply_settings(
+        &client,
+        settings,
+        error,
+        static_cast<int32_t>(sizeof(error))
+    ) == 0);
+
+    CHECK(eventually([&] {
+        TTorrentNetworkStatusResult const status = TorrentClientCopyNetworkStatus(&client);
+        return status.status == 1
+            && status.network_status.dht_status == TTORRENT_DHT_STATUS_RUNNING;
+    }));
+    CHECK(eventually([&] {
+        TTorrentNetworkStatusResult const status = TorrentClientCopyNetworkStatus(&client);
+        return status.status == 1 && status.network_status.dht_routing_nodes >= 0;
+    }));
+
+    settings.enable_dht = bridge_bool(false);
+    REQUIRE(apply_settings(
+        &client,
+        settings,
+        error,
+        static_cast<int32_t>(sizeof(error))
+    ) == 0);
+    TTorrentNetworkStatusResult const disabled = TorrentClientCopyNetworkStatus(&client);
+    REQUIRE(disabled.status == 1);
+    CHECK(disabled.network_status.dht_status == TTORRENT_DHT_STATUS_DISABLED);
+    CHECK(disabled.network_status.dht_routing_nodes == -1);
+}
+
 TEST_CASE("settings apply toggles reduced DHT contribution")
 {
     bridge_tests::TemporaryDirectory temporary_directory;

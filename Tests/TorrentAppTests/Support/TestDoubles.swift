@@ -502,7 +502,9 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         networkBlocked: false,
         hasListener: false,
         endpoint: "",
-        lastError: ""
+        lastError: "",
+        dhtStatus: .disabled,
+        dhtRoutingNodeCount: nil
     )
     var bridgeHealthValue = TorrentBridgeHealth.healthy
     var networkInterfaceSnapshotValue: TorrentNetworkInterfaceSnapshot?
@@ -1329,7 +1331,9 @@ private extension TorrentNetworkStatus {
             networkBlocked: networkBlocked,
             hasListener: networkBlocked ? false : hasListener,
             endpoint: networkBlocked ? "" : endpoint,
-            lastError: lastError
+            lastError: lastError,
+            dhtStatus: networkBlocked ? .disabled : dhtStatus,
+            dhtRoutingNodeCount: networkBlocked ? nil : dhtRoutingNodeCount
         )
     }
 }

@@ -397,8 +397,17 @@ enum TorrentEngineClientResponseValidator {
     }
 
     private static func validate(_ status: TorrentNetworkStatus) throws {
+        let dhtDiagnosticsAreValid = switch status.dhtStatus {
+        case .disabled, .starting:
+            status.dhtRoutingNodeCount == nil
+        case .running:
+            status.dhtRoutingNodeCount.map {
+                (0...Int(Int32.max)).contains($0)
+            } ?? true
+        }
         guard status.submittedRevision <= status.requestedRevision,
               (0...65_535).contains(status.listenPort),
+              dhtDiagnosticsAreValid,
               isBoundedText(
                   status.endpoint,
                   maximumBytes: maximumNetworkEndpointBytes,

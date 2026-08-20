@@ -386,6 +386,7 @@ struct TorrentSettingsView: View {
             dhtEligibilityRow
             dhtDiscoveryPolicyRow
             dhtContributionRow
+            dhtDiagnosticsRow
         }
     }
 
@@ -645,6 +646,16 @@ struct TorrentSettingsView: View {
         .help(state.settings.enableDHTNetwork
               ? "Query DHT without serving other DHT users."
               : "Enable the DHT network first.")
+    }
+
+    private var dhtDiagnosticsRow: some View {
+        LabeledContent("DHT status") {
+            Text(store.networkStatus.dhtStatusSummary)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .contentTransition(.numericText())
+        }
+        .help("Live libtorrent status and active entries in its DHT routing tables.")
     }
 
     private var peerExchangePluginRow: some View {

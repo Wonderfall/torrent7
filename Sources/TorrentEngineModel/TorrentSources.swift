@@ -651,6 +651,12 @@ package struct TorrentFilePreview: Equatable, Sendable {
     }
 }
 
+package enum TorrentDHTStatus: UInt8, Codable, Equatable, Sendable {
+    case disabled
+    case starting
+    case running
+}
+
 package struct TorrentNetworkStatus: Codable, Equatable, Sendable {
     package let requestedRevision: UInt64
     package let submittedRevision: UInt64
@@ -659,6 +665,8 @@ package struct TorrentNetworkStatus: Codable, Equatable, Sendable {
     package let hasListener: Bool
     package let endpoint: String
     package let lastError: String
+    package let dhtStatus: TorrentDHTStatus
+    package let dhtRoutingNodeCount: Int?
 
     package static let empty = TorrentNetworkStatus(
         requestedRevision: 0,
@@ -667,7 +675,9 @@ package struct TorrentNetworkStatus: Codable, Equatable, Sendable {
         networkBlocked: true,
         hasListener: false,
         endpoint: "",
-        lastError: ""
+        lastError: "",
+        dhtStatus: .disabled,
+        dhtRoutingNodeCount: nil
     )
 
     package init(
@@ -677,7 +687,9 @@ package struct TorrentNetworkStatus: Codable, Equatable, Sendable {
         networkBlocked: Bool,
         hasListener: Bool,
         endpoint: String,
-        lastError: String
+        lastError: String,
+        dhtStatus: TorrentDHTStatus,
+        dhtRoutingNodeCount: Int?
     ) {
         self.requestedRevision = requestedRevision
         self.submittedRevision = submittedRevision
@@ -686,10 +698,27 @@ package struct TorrentNetworkStatus: Codable, Equatable, Sendable {
         self.hasListener = hasListener
         self.endpoint = endpoint
         self.lastError = lastError
+        self.dhtStatus = dhtStatus
+        self.dhtRoutingNodeCount = dhtRoutingNodeCount
     }
 
     package var isApplying: Bool {
         requestedRevision > submittedRevision
+    }
+
+    package var dhtStatusSummary: String {
+        switch dhtStatus {
+        case .disabled:
+            return "Off"
+        case .starting:
+            return "Starting…"
+        case .running:
+            if let dhtRoutingNodeCount {
+                let nodeLabel = dhtRoutingNodeCount == 1 ? "routing node" : "routing nodes"
+                return "Running · \(dhtRoutingNodeCount.formatted()) \(nodeLabel)"
+            }
+            return "Running · measuring routing table…"
+        }
     }
 }
 

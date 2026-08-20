@@ -904,7 +904,9 @@ struct TorrentEngineIPCJSONTests {
                 networkBlocked: false,
                 hasListener: true,
                 endpoint: String(repeating: "\"", count: 255),
-                lastError: String(repeating: "\"", count: 511)
+                lastError: String(repeating: "\"", count: 511),
+                dhtStatus: .running,
+                dhtRoutingNodeCount: Int(Int32.max)
             ),
             bridgeHealth: TorrentBridgeHealth(
                 isAvailable: true,

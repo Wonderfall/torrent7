@@ -83,6 +83,7 @@ void TTorrentClient::pump_alerts()
                 if (auto const *dropped = lt::alert_cast<lt::alerts_dropped_alert>(alert)) {
                     rebuild_cache = true;
                     force_resume_save = true;
+                    changes |= invalidate_dht_diagnostics();
                     changes |= fail_dropped_delete_request(*dropped);
                     changes |= queue_alert_error(
                         "Internal libtorrent alerts were dropped. Torrent details may be temporarily stale.");
@@ -102,6 +103,11 @@ void TTorrentClient::pump_alerts()
 
                 if (auto const *state_update = lt::alert_cast<lt::state_update_alert>(alert)) {
                     changes |= update_snapshot_cache(state_update->status);
+                    continue;
+                }
+
+                if (auto const *session_stats = lt::alert_cast<lt::session_stats_alert>(alert)) {
+                    changes |= cache_dht_diagnostics(*session_stats);
                     continue;
                 }
 

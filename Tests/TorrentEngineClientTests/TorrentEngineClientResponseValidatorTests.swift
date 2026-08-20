@@ -79,6 +79,35 @@ struct TorrentEngineClientResponseValidatorTests {
         )
     }
 
+    @Test("DHT diagnostics are bounded and state-consistent")
+    func validatesDHTDiagnostics() throws {
+        let snapshot = TorrentNetworkInterfaceSnapshot(revision: 1, interfaces: [])
+        for status in [
+            makeNetworkStatus(dhtStatus: .disabled, routingNodes: nil),
+            makeNetworkStatus(dhtStatus: .starting, routingNodes: nil),
+            makeNetworkStatus(dhtStatus: .running, routingNodes: nil),
+            makeNetworkStatus(dhtStatus: .running, routingNodes: 0),
+            makeNetworkStatus(dhtStatus: .running, routingNodes: Int(Int32.max)),
+        ] {
+            try TorrentEngineClientResponseValidator.validate(
+                makePollResponse(snapshot: snapshot, networkStatus: status)
+            )
+        }
+
+        for status in [
+            makeNetworkStatus(dhtStatus: .disabled, routingNodes: 0),
+            makeNetworkStatus(dhtStatus: .starting, routingNodes: 1),
+            makeNetworkStatus(dhtStatus: .running, routingNodes: -1),
+            makeNetworkStatus(dhtStatus: .running, routingNodes: Int(Int32.max) + 1),
+        ] {
+            #expect(throws: TorrentEngineClientError.self) {
+                try TorrentEngineClientResponseValidator.validate(
+                    makePollResponse(snapshot: snapshot, networkStatus: status)
+                )
+            }
+        }
+    }
+
     @Test("Service interface snapshots require a positive revision and unique names")
     func rejectsInvalidNetworkInterfaceSnapshotIdentity() {
         let interface = makeNetworkInterface()
@@ -364,17 +393,35 @@ struct TorrentEngineClientResponseValidatorTests {
 
     private func makePollResponse(
         snapshot: TorrentNetworkInterfaceSnapshot,
+        networkStatus: TorrentNetworkStatus = .empty,
         snapshotDataset: TorrentEngineIPCDatasetDescriptor? = nil,
         trackerHostDataset: TorrentEngineIPCDatasetDescriptor? = nil
     ) -> TorrentEngineIPCPollResponse {
         TorrentEngineIPCPollResponse(
             dirtyMask: 0,
             alertErrors: [],
-            networkStatus: .empty,
+            networkStatus: networkStatus,
             bridgeHealth: .healthy,
             networkInterfaceSnapshot: snapshot,
             snapshotDataset: snapshotDataset,
             trackerHostDataset: trackerHostDataset
+        )
+    }
+
+    private func makeNetworkStatus(
+        dhtStatus: TorrentDHTStatus,
+        routingNodes: Int?
+    ) -> TorrentNetworkStatus {
+        TorrentNetworkStatus(
+            requestedRevision: 1,
+            submittedRevision: 1,
+            listenPort: 0,
+            networkBlocked: false,
+            hasListener: false,
+            endpoint: "",
+            lastError: "",
+            dhtStatus: dhtStatus,
+            dhtRoutingNodeCount: routingNodes
         )
     }
 

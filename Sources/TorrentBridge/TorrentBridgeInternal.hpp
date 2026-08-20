@@ -19,6 +19,7 @@
 #include <libtorrent/session.hpp>
 #include <libtorrent/session_handle.hpp>
 #include <libtorrent/session_params.hpp>
+#include <libtorrent/session_stats.hpp>
 #include <libtorrent/settings_pack.hpp>
 #include <libtorrent/torrent_flags.hpp>
 #include <libtorrent/torrent_handle.hpp>
@@ -264,6 +265,7 @@ constexpr std::size_t kSynchronousAddAlertDrainInterval = 256U;
 constexpr auto kAlertWorkerInitialFailureBackoff = std::chrono::milliseconds(100);
 constexpr auto kAlertWorkerMaximumFailureBackoff = std::chrono::seconds(5);
 constexpr auto kSnapshotUpdateInterval = std::chrono::milliseconds(500);
+constexpr auto kDHTDiagnosticsRefreshInterval = std::chrono::seconds(2);
 constexpr std::size_t kMaxPendingAlertErrors = 16U;
 constexpr std::size_t kDetailCachePayloadBudgetBytes = static_cast<std::size_t>(64U) * 1024U * 1024U;
 constexpr std::size_t kDetailCacheMaxEntryCount = 256U;
@@ -302,9 +304,12 @@ static_assert(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES
                   * (TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES + 1));
 static_assert(kMaxTorrentIdentityTokenCount > static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 43U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 44U);
 static_assert(TTORRENT_DHT_DISCOVERY_ALONGSIDE_TRACKERS == 0U);
 static_assert(TTORRENT_DHT_DISCOVERY_AFTER_ALL_TRACKERS_FAIL == 1U);
+static_assert(TTORRENT_DHT_STATUS_DISABLED == 0U);
+static_assert(TTORRENT_DHT_STATUS_STARTING == 1U);
+static_assert(TTORRENT_DHT_STATUS_RUNNING == 2U);
 static_assert(TTORRENT_ADD_REJECTED == 0);
 static_assert(TTORRENT_ADD_COMMITTED == 1);
 static_assert(TTORRENT_ADD_OUTCOME_UNKNOWN == 2);
@@ -421,8 +426,10 @@ static_assert(alignof(TTorrentSourceSecurityInspection) == 4U);
 static_assert(sizeof(TTorrentSessionSettings) == 52U);
 static_assert(offsetof(TTorrentSessionSettings, dht_discovery_policy) == 50U);
 static_assert(alignof(TTorrentSessionSettings) == 4U);
-static_assert(sizeof(TTorrentNetworkStatus) == 664U);
+static_assert(sizeof(TTorrentNetworkStatus) == 672U);
 static_assert(alignof(TTorrentNetworkStatus) == 8U);
+static_assert(offsetof(TTorrentNetworkStatus, dht_routing_nodes) == 664U);
+static_assert(offsetof(TTorrentNetworkStatus, dht_status) == 668U);
 static_assert(sizeof(TTorrentBridgeHealth) == 536U);
 static_assert(alignof(TTorrentBridgeHealth) == 8U);
 static_assert(sizeof(TTorrentSourcePolicy) == 12U);
@@ -451,7 +458,7 @@ static_assert(offsetof(TTorrentPeerSourcesResult, sources) == 16U);
 static_assert(sizeof(TTorrentRemovalReadResult) == 520U);
 static_assert(alignof(TTorrentRemovalReadResult) == 4U);
 static_assert(offsetof(TTorrentRemovalReadResult, result) == 4U);
-static_assert(sizeof(TTorrentNetworkStatusResult) == 672U);
+static_assert(sizeof(TTorrentNetworkStatusResult) == 680U);
 static_assert(alignof(TTorrentNetworkStatusResult) == 8U);
 static_assert(offsetof(TTorrentNetworkStatusResult, network_status) == 8U);
 static_assert(sizeof(TTorrentBridgeHealthResult) == 544U);
@@ -1531,6 +1538,11 @@ struct TTorrentClient {
     int32_t listen_port TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
     std::string listen_endpoint TORRENT_BRIDGE_GUARDED_BY(lock);
     std::string last_network_error TORRENT_BRIDGE_GUARDED_BY(lock);
+    std::chrono::steady_clock::time_point last_dht_diagnostics_request TORRENT_BRIDGE_GUARDED_BY(lock);
+    int32_t dht_routing_nodes TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
+    bool dht_diagnostics_request_pending TORRENT_BRIDGE_GUARDED_BY(lock) = false;
+    bool dht_routing_nodes_available TORRENT_BRIDGE_GUARDED_BY(lock) = false;
+    bool observed_dht_running TORRENT_BRIDGE_GUARDED_BY(lock) = false;
     TTorrentBridgeHealth bridge_health TORRENT_BRIDGE_GUARDED_BY(lock){};
     std::vector<std::string> pending_alert_errors TORRENT_BRIDGE_GUARDED_BY(lock);
     std::size_t synchronous_adds_since_alert_drain TORRENT_BRIDGE_GUARDED_BY(lock) = 0U;
@@ -2010,7 +2022,12 @@ struct TTorrentClient {
 
     [[nodiscard]] DirtyMask record_network_blocked() TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] TTorrentNetworkStatus network_status() const TORRENT_BRIDGE_REQUIRES(lock);
+    [[nodiscard]] DirtyMask cache_dht_diagnostics(lt::session_stats_alert const &alert)
+        TORRENT_BRIDGE_REQUIRES(lock);
+
+    [[nodiscard]] DirtyMask invalidate_dht_diagnostics() noexcept TORRENT_BRIDGE_REQUIRES(lock);
+
+    [[nodiscard]] TTorrentNetworkStatus network_status() TORRENT_BRIDGE_REQUIRES(lock);
 
     [[nodiscard]] TTorrentBridgeHealth health_status() const noexcept TORRENT_BRIDGE_REQUIRES(lock);
 

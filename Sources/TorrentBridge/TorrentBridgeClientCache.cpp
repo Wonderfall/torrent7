@@ -2188,7 +2188,45 @@ DirtyMask TTorrentClient::record_network_requested(bool blocked)
 
 DirtyMask TTorrentClient::record_network_blocked() { return record_network_requested(true); }
 
-[[nodiscard]] TTorrentNetworkStatus TTorrentClient::network_status() const
+DirtyMask TTorrentClient::cache_dht_diagnostics(lt::session_stats_alert const &alert)
+{
+    if (!dht_diagnostics_request_pending) {
+        return 0U;
+    }
+
+    dht_diagnostics_request_pending = false;
+    static int const routing_nodes_index = lt::find_metric_idx("dht.dht_nodes");
+    auto const counters = alert.counters();
+    auto const counter_index = static_cast<std::ptrdiff_t>(routing_nodes_index);
+    if (routing_nodes_index < 0
+        || counter_index >= counters.size()) {
+        return invalidate_dht_diagnostics();
+    }
+
+    std::int64_t const native_count = std::max<std::int64_t>(
+        0,
+        counters.subspan(counter_index, 1).front()
+    );
+    int32_t const next_count = static_cast<int32_t>(std::min<std::int64_t>(
+        native_count,
+        std::numeric_limits<int32_t>::max()
+    ));
+    bool const changed = !dht_routing_nodes_available || dht_routing_nodes != next_count;
+    dht_routing_nodes = next_count;
+    dht_routing_nodes_available = true;
+    return changed ? TTORRENT_DIRTY_NETWORK : 0U;
+}
+
+DirtyMask TTorrentClient::invalidate_dht_diagnostics() noexcept
+{
+    bool const changed = dht_routing_nodes_available;
+    dht_diagnostics_request_pending = false;
+    dht_routing_nodes_available = false;
+    dht_routing_nodes = 0;
+    return changed ? TTORRENT_DIRTY_NETWORK : 0U;
+}
+
+[[nodiscard]] TTorrentNetworkStatus TTorrentClient::network_status()
 {
     TTorrentNetworkStatus status{};
     status.requested_revision = requested_network_revision;
@@ -2198,6 +2236,43 @@ DirtyMask TTorrentClient::record_network_blocked() { return record_network_reque
     status.has_listener = bridge_bool(has_listener);
     copy_string(std::span{status.endpoint}, listen_endpoint);
     copy_string(std::span{status.last_error}, last_network_error);
+
+    lt::settings_pack const settings = session.get_settings();
+    bool const dht_enabled = settings.get_bool(lt::settings_pack::enable_dht);
+    bool const dht_running = dht_enabled && session.is_dht_running();
+    if (dht_running != observed_dht_running) {
+        static_cast<void>(invalidate_dht_diagnostics());
+        observed_dht_running = dht_running;
+        last_dht_diagnostics_request = {};
+    }
+
+    if (!dht_enabled) {
+        status.dht_status = TTORRENT_DHT_STATUS_DISABLED;
+        status.dht_routing_nodes = -1;
+        return status;
+    }
+
+    if (!dht_running) {
+        status.dht_status = TTORRENT_DHT_STATUS_STARTING;
+        status.dht_routing_nodes = -1;
+        return status;
+    }
+
+    status.dht_status = TTORRENT_DHT_STATUS_RUNNING;
+    status.dht_routing_nodes = dht_routing_nodes_available ? dht_routing_nodes : -1;
+
+    auto const now = std::chrono::steady_clock::now();
+    if (!dht_diagnostics_request_pending
+        && now - last_dht_diagnostics_request >= kDHTDiagnosticsRefreshInterval) {
+        dht_diagnostics_request_pending = true;
+        last_dht_diagnostics_request = now;
+        try {
+            session.post_session_stats();
+        } catch (...) {
+            dht_diagnostics_request_pending = false;
+            throw;
+        }
+    }
     return status;
 }
 

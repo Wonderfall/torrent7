@@ -130,6 +130,11 @@ extension TorrentItem {
 
 extension TorrentNetworkStatus {
     init(status: TTorrentNetworkStatus) {
+        let dhtStatus: TorrentDHTStatus = switch status.dht_status {
+        case UInt8(TTORRENT_DHT_STATUS_STARTING): .starting
+        case UInt8(TTORRENT_DHT_STATUS_RUNNING): .running
+        default: .disabled
+        }
         self.init(
             requestedRevision: status.requested_revision,
             submittedRevision: status.submitted_revision,
@@ -137,7 +142,11 @@ extension TorrentNetworkStatus {
             networkBlocked: status.network_blocked != 0,
             hasListener: status.has_listener != 0,
             endpoint: String(cStringTuple: status.endpoint),
-            lastError: String(cStringTuple: status.last_error)
+            lastError: String(cStringTuple: status.last_error),
+            dhtStatus: dhtStatus,
+            dhtRoutingNodeCount: dhtStatus == .running && status.dht_routing_nodes >= 0
+                ? Int(status.dht_routing_nodes)
+                : nil
         )
     }
 }

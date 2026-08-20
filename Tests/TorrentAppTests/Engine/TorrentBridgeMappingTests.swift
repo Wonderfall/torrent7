@@ -142,6 +142,8 @@ struct TorrentBridgeMappingTests {
         status.listen_port = 51_413
         status.network_blocked = true.bridgeFlag
         status.has_listener = false.bridgeFlag
+        status.dht_status = UInt8(TTORRENT_DHT_STATUS_RUNNING)
+        status.dht_routing_nodes = 37
         writeCString("0.0.0.0:51413", to: &status.endpoint)
         writeCString("blocked", to: &status.last_error)
 
@@ -155,6 +157,37 @@ struct TorrentBridgeMappingTests {
         #expect(mapped.endpoint == "0.0.0.0:51413")
         #expect(mapped.lastError == "blocked")
         #expect(mapped.isApplying)
+        #expect(mapped.dhtStatus == .running)
+        #expect(mapped.dhtRoutingNodeCount == 37)
+        #expect(mapped.dhtStatusSummary == "Running · 37 routing nodes")
+    }
+
+    @Test("Maps DHT diagnostics states and availability")
+    func mapsDHTDiagnosticsStatesAndAvailability() {
+        var starting = TTorrentNetworkStatus()
+        starting.dht_status = UInt8(TTORRENT_DHT_STATUS_STARTING)
+        starting.dht_routing_nodes = -1
+
+        let mappedStarting = TorrentNetworkStatus(status: starting)
+        #expect(mappedStarting.dhtStatus == .starting)
+        #expect(mappedStarting.dhtRoutingNodeCount == nil)
+        #expect(mappedStarting.dhtStatusSummary == "Starting…")
+
+        var measuring = TTorrentNetworkStatus()
+        measuring.dht_status = UInt8(TTORRENT_DHT_STATUS_RUNNING)
+        measuring.dht_routing_nodes = -1
+
+        let mappedMeasuring = TorrentNetworkStatus(status: measuring)
+        #expect(mappedMeasuring.dhtRoutingNodeCount == nil)
+        #expect(mappedMeasuring.dhtStatusSummary == "Running · measuring routing table…")
+
+        var oneNode = TTorrentNetworkStatus()
+        oneNode.dht_status = UInt8(TTORRENT_DHT_STATUS_RUNNING)
+        oneNode.dht_routing_nodes = 1
+
+        let mappedOneNode = TorrentNetworkStatus(status: oneNode)
+        #expect(mappedOneNode.dhtRoutingNodeCount == 1)
+        #expect(mappedOneNode.dhtStatusSummary == "Running · 1 routing node")
     }
 
     @Test("Maps bridge health without treating a retrying worker as unavailable")
