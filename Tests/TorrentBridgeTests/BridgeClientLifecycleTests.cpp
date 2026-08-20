@@ -5173,7 +5173,7 @@ TEST_CASE("a dropped terminal deletion alert fails the request and completes cle
     CHECK(bridge_tests::string_from_c_buffer(std::span{result.error}).contains("terminal libtorrent alert was dropped"));
 }
 
-TEST_CASE("metadata-less magnet removal treats a zero-error failed alert conservatively")
+TEST_CASE("metadata-less magnet removal succeeds when no payload storage exists")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
     TTorrentClient client(
@@ -5232,9 +5232,9 @@ TEST_CASE("metadata-less magnet removal treats a zero-error failed alert conserv
         return read.status == 0 && removal_result.state != TTORRENT_REMOVAL_PENDING;
     }));
 
-    CHECK(removal_result.state == TTORRENT_REMOVAL_FAILED);
-    CHECK(bridge_tests::string_from_c_buffer(std::span{removal_result.error}).contains("Some files may remain on disk"));
-    CHECK(client.take_alert_error(std::span{error}));
+    CHECK(removal_result.state == TTORRENT_REMOVAL_SUCCEEDED);
+    CHECK(bridge_tests::string_from_c_buffer(std::span{removal_result.error}).empty());
+    CHECK_FALSE(client.take_alert_error(std::span{error}));
 }
 
 TEST_CASE("metadata validation gate survives resume reload")

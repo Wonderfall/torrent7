@@ -764,6 +764,7 @@ struct PieceMapCacheEntry {
 struct RemovalRequestEntry {
     std::uint64_t request_token = 0;
     lt::info_hash_t hashes;
+    bool metadata_available = true;
     int32_t state = TTORRENT_REMOVAL_PENDING;
     std::array<char, 512> error{};
 };
@@ -2118,7 +2119,11 @@ struct TTorrentClient {
     void finalize_removed(lt::info_hash_t const &hashes, TorrentIdentity *identity)
         TORRENT_BRIDGE_REQUIRES(lock) TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
 
-    std::uint64_t begin_delete_request(lt::info_hash_t const &hashes) TORRENT_BRIDGE_REQUIRES(lock);
+    std::uint64_t begin_delete_request(lt::info_hash_t const &hashes, bool metadata_available = true)
+        TORRENT_BRIDGE_REQUIRES(lock);
+
+    [[nodiscard]] bool pending_delete_lacked_metadata(lt::info_hash_t const &hashes) const noexcept
+        TORRENT_BRIDGE_REQUIRES(lock);
 
     void abandon_removal_request(std::uint64_t request_token) noexcept TORRENT_BRIDGE_REQUIRES(lock);
 

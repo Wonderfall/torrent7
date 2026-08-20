@@ -427,7 +427,7 @@ void TTorrentClient::finalize_removed(lt::info_hash_t const &hashes, TorrentIden
     retire_identity_if_unreferenced_locked(identity);
 }
 
-std::uint64_t TTorrentClient::begin_delete_request(lt::info_hash_t const &hashes)
+std::uint64_t TTorrentClient::begin_delete_request(lt::info_hash_t const &hashes, bool const metadata_available)
 {
     if (removal_request.has_value()) {
         throw std::runtime_error("Another torrent data deletion is already pending or awaiting result collection.");
@@ -441,11 +441,20 @@ std::uint64_t TTorrentClient::begin_delete_request(lt::info_hash_t const &hashes
         RemovalRequestEntry{
             .request_token = request_token,
             .hashes = hashes,
+            .metadata_available = metadata_available,
             .state = TTORRENT_REMOVAL_PENDING,
             .error = {}
         }
     );
     return request_token;
+}
+
+bool TTorrentClient::pending_delete_lacked_metadata(lt::info_hash_t const &hashes) const noexcept
+{
+    return removal_request.has_value()
+        && removal_request->state == TTORRENT_REMOVAL_PENDING
+        && !removal_request->metadata_available
+        && hashes_overlap_without_allocation(removal_request->hashes, hashes);
 }
 
 void TTorrentClient::abandon_removal_request(std::uint64_t request_token) noexcept

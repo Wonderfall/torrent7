@@ -174,6 +174,15 @@ void TTorrentClient::pump_alerts()
                 }
 
                 if (auto const *delete_failed = lt::alert_cast<lt::torrent_delete_failed_alert>(alert)) {
+                    // Libtorrent reports a metadata-less torrent's absent storage as a zero-error failure.
+                    bool const no_payload_storage = !delete_failed->error
+                        && pending_delete_lacked_metadata(delete_failed->info_hashes);
+                    if (no_payload_storage) {
+                        complete_delete_request(delete_failed->info_hashes, TTORRENT_REMOVAL_SUCCEEDED);
+                        changes |= complete_pending_delete(delete_failed->info_hashes, "");
+                        continue;
+                    }
+
                     constexpr std::string_view generic_failure =
                         "Downloaded data could not be deleted. Some files may remain on disk.";
                     complete_delete_request(

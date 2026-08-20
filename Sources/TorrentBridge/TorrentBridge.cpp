@@ -3466,9 +3466,12 @@ extern "C" int32_t TorrentClientRemove(TTorrentClient *client, const char *torre
         }
         bool const waits_for_delete = bridge_bool(delete_files) || bridge_bool(delete_partfile);
         lt::info_hash_t const hashes = handle->info_hashes();
+        bool const metadata_available = handle->status({}).has_metadata;
         TorrentIdentity *identity = identity_from_handle(*handle);
         std::vector<std::string> const removal_ids = client->removal_ids_for_identity(hashes, id, identity);
-        std::uint64_t const request_token = waits_for_delete ? client->begin_delete_request(hashes) : 0;
+        std::uint64_t const request_token = waits_for_delete
+            ? client->begin_delete_request(hashes, metadata_available)
+            : 0;
         BridgeResult tombstoned;
         try {
             tombstoned = client->persist_removal_tombstones(
