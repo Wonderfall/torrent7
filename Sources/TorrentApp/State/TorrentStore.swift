@@ -1293,24 +1293,22 @@ final class TorrentStore {
                         break
                     }
                 }
-                await store.completionNotifier.forget(removedIDs)
                 try await store.performLabelMutation(
                     .removeAssignments(torrentIDs: removedIDs)
                 )
                 try await store.removeFromSelection(removedIDs)
-                await store.reconcileAfterRemoval(removedIDs)
+                await store.finalizeRemovalPresentation(removedIDs)
                 if removalWarnings.isEmpty {
                     store.clearLastError(ifUnchangedSince: errorGeneration)
                 } else {
                     store.setLastError(removalWarnings.joined(separator: "\n"), source: .userAction)
                 }
             } catch {
-                await store.completionNotifier.forget(removedIDs)
                 try? await store.performLabelMutation(
                     .removeAssignments(torrentIDs: removedIDs)
                 )
                 try? await store.removeFromSelection(removedIDs)
-                await store.reconcileAfterRemoval(removedIDs)
+                await store.finalizeRemovalPresentation(removedIDs)
                 removalWarnings.append(error.localizedDescription)
                 store.setLastError(removalWarnings.joined(separator: "\n"), source: .userAction)
             }
@@ -1333,6 +1331,17 @@ final class TorrentStore {
             withExtendedLifetime(folderAccessLease) {}
         }
         return try await engine.remove(id: torrent.id, deleteFiles: true)
+    }
+
+    private func finalizeRemovalPresentation(
+        _ removedIDs: Set<TorrentItem.ID>
+    ) async {
+        // A refresh captured before removal may still carry a completed
+        // snapshot. Keep completion ownership until that refresh and its
+        // coalesced post-removal refresh have drained, then permit a future
+        // torrent lifetime with the same ID to notify again.
+        await reconcileAfterRemoval(removedIDs)
+        await completionNotifier.forget(removedIDs)
     }
 
     private func reconcileAfterRemoval(_ removedIDs: Set<TorrentItem.ID>) async {

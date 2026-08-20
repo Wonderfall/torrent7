@@ -1355,6 +1355,68 @@ struct TorrentStoreIntegrationTests {
         #expect(await harness.engine.removed.first?.deleteFiles == false)
     }
 
+    @Test("Removal reconciliation does not renotify a completed torrent from a stale snapshot")
+    func removalReconciliationDoesNotRenotifyCompletedTorrent() async {
+        let harness = makeStoreHarness()
+        let downloading = makeTorrent(
+            id: "alpha",
+            name: "Alpha",
+            progress: 0.5,
+            state: .downloading
+        )
+        let seeding = makeTorrent(
+            id: "alpha",
+            name: "Alpha",
+            progress: 1,
+            uploadRate: 1,
+            state: .seeding,
+            seeding: true
+        )
+
+        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+            revision: 1,
+            torrents: []
+        ))
+        await harness.store.refreshNow()
+        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+            revision: 2,
+            torrents: [downloading]
+        ))
+        await harness.store.refreshNow()
+        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+            revision: 3,
+            torrents: [seeding]
+        ))
+        await harness.store.refreshNow()
+        for _ in 0..<20 {
+            if await harness.notifications.notifications.count == 1 {
+                break
+            }
+            await Task.yield()
+        }
+
+        // Model a completion-bearing poll captured before remove_torrent()
+        // whose changing seeding metrics are delivered during reconciliation.
+        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+            revision: 4,
+            torrents: [makeTorrent(
+                id: "alpha",
+                name: "Alpha",
+                progress: 1,
+                uploadRate: 2,
+                state: .seeding,
+                seeding: true
+            )]
+        ))
+        harness.store.removeTorrent(id: "alpha", deleteFiles: false)
+        await harness.store.saveAll()
+        await Task.yield()
+
+        #expect(await harness.notifications.notifications.count == 1)
+        #expect(await harness.history.completedIDs.isEmpty)
+        #expect(await harness.history.forgottenIDs == [["alpha"]])
+    }
+
     @Test("Removing a torrent replaces its pruned folder authorization exactly once")
     func removingTorrentReconcilesPrunedFolderAuthorizationWithoutRedundantReplacement() async {
         let retainedPath = "/Downloads/Retained"
