@@ -96,6 +96,7 @@ struct TorrentInfoWindow: View {
             idealHeight: 640,
             maxHeight: .infinity
         )
+        .navigationTitle(torrent?.name ?? "Torrent Info")
     }
 
     private var torrent: TorrentItem? {
@@ -424,6 +425,17 @@ private struct TorrentInfoView: View {
             }
 
             Section {
+                InfoDetailRow("Name") {
+                    Text(torrent.name)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(.secondary)
+                        .help(torrent.name)
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Name")
+                .accessibilityValue(torrent.name)
+
                 AccessibleLabeledValue("Added on", value: formattedDate(torrent.addedTime, fallback: "Unavailable"))
                 AccessibleLabeledValue("Created on", value: formattedDate(torrent.createdTime, fallback: "Unavailable"))
                 AccessibleLabeledValue("Completed on", value: formattedDate(torrent.completedTime, fallback: "Not completed"))
