@@ -30,6 +30,41 @@ package enum TorrentProtocolEncryption: Int, Codable, CaseIterable, Identifiable
     }
 }
 
+package enum TorrentHTTPSTrackerPolicy: Int, Codable, CaseIterable, Identifiable, Sendable {
+    case original = 1
+    case prefer = 2
+    case require = 3
+
+    package var id: Self { self }
+
+    package var title: String {
+        switch self {
+        case .original:
+            "Original"
+        case .prefer:
+            "Prefer HTTPS"
+        case .require:
+            "Require HTTPS"
+        }
+    }
+}
+
+package enum TorrentHTTPSWebSeedPolicy: Int, Codable, CaseIterable, Identifiable, Sendable {
+    case original = 1
+    case require = 3
+
+    package var id: Self { self }
+
+    package var title: String {
+        switch self {
+        case .original:
+            "Original"
+        case .require:
+            "Require HTTPS"
+        }
+    }
+}
+
 package struct TorrentSettings: Codable, Equatable, Sendable {
     private static let defaultsKey = "TorrentSettings"
     private static let maximumRateLimitKBps = 1_000_000
@@ -53,8 +88,8 @@ package struct TorrentSettings: Codable, Equatable, Sendable {
     package var reduceDHTContribution = false
     package var enablePeerExchangePlugin = false
     package var usePeerExchangeByDefault = false
-    package var useHTTPSTrackersOnly = false
-    package var useHTTPSWebSeedsOnly = true
+    package var httpsTrackerPolicy = TorrentHTTPSTrackerPolicy.prefer
+    package var httpsWebSeedPolicy = TorrentHTTPSWebSeedPolicy.require
     package var enableLocalServiceDiscovery = false
     package var useLocalServiceDiscoveryByDefault = false
     package var protocolEncryption = TorrentProtocolEncryption.allowed
@@ -85,8 +120,8 @@ package struct TorrentSettings: Codable, Equatable, Sendable {
         case reduceDHTContribution
         case enablePeerExchangePlugin
         case usePeerExchangeByDefault
-        case useHTTPSTrackersOnly
-        case useHTTPSWebSeedsOnly
+        case httpsTrackerPolicy
+        case httpsWebSeedPolicy
         case enableLocalServiceDiscovery
         case useLocalServiceDiscoveryByDefault
         case protocolEncryption
@@ -99,6 +134,11 @@ package struct TorrentSettings: Codable, Equatable, Sendable {
         case completionNotificationNamesEnabled
         case dockTransferRatesEnabled
         case preventSleepDuringTransfers
+    }
+
+    private enum LegacyCodingKeys: String, CodingKey {
+        case useHTTPSTrackersOnly
+        case useHTTPSWebSeedsOnly
     }
 
     package init(from decoder: Decoder) throws {
@@ -118,8 +158,17 @@ package struct TorrentSettings: Codable, Equatable, Sendable {
         settings.reduceDHTContribution = try values.decodeIfPresent(Bool.self, forKey: .reduceDHTContribution) ?? settings.reduceDHTContribution
         settings.enablePeerExchangePlugin = try values.decodeIfPresent(Bool.self, forKey: .enablePeerExchangePlugin) ?? settings.enablePeerExchangePlugin
         settings.usePeerExchangeByDefault = try values.decodeIfPresent(Bool.self, forKey: .usePeerExchangeByDefault) ?? settings.usePeerExchangeByDefault
-        settings.useHTTPSTrackersOnly = try values.decodeIfPresent(Bool.self, forKey: .useHTTPSTrackersOnly) ?? settings.useHTTPSTrackersOnly
-        settings.useHTTPSWebSeedsOnly = try values.decodeIfPresent(Bool.self, forKey: .useHTTPSWebSeedsOnly) ?? settings.useHTTPSWebSeedsOnly
+        let legacyValues = try decoder.container(keyedBy: LegacyCodingKeys.self)
+        if let trackerPolicy = try values.decodeIfPresent(TorrentHTTPSTrackerPolicy.self, forKey: .httpsTrackerPolicy) {
+            settings.httpsTrackerPolicy = trackerPolicy
+        } else if let required = try legacyValues.decodeIfPresent(Bool.self, forKey: .useHTTPSTrackersOnly) {
+            settings.httpsTrackerPolicy = required ? .require : .prefer
+        }
+        if let webSeedPolicy = try values.decodeIfPresent(TorrentHTTPSWebSeedPolicy.self, forKey: .httpsWebSeedPolicy) {
+            settings.httpsWebSeedPolicy = webSeedPolicy
+        } else if let required = try legacyValues.decodeIfPresent(Bool.self, forKey: .useHTTPSWebSeedsOnly) {
+            settings.httpsWebSeedPolicy = required ? .require : .original
+        }
         settings.enableLocalServiceDiscovery = try values.decodeIfPresent(Bool.self, forKey: .enableLocalServiceDiscovery) ?? settings.enableLocalServiceDiscovery
         settings.useLocalServiceDiscoveryByDefault = try values.decodeIfPresent(Bool.self, forKey: .useLocalServiceDiscoveryByDefault) ?? settings.useLocalServiceDiscoveryByDefault
         settings.protocolEncryption = try values.decodeIfPresent(TorrentProtocolEncryption.self, forKey: .protocolEncryption) ?? settings.protocolEncryption

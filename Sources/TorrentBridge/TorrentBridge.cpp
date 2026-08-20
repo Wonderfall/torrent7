@@ -1224,29 +1224,33 @@ SourcePolicyApplicationResult apply_peer_exchange_policy_locked(TTorrentClient &
 
 DirtyMask TTorrentClient::enforce_https_source_policy(lt::torrent_handle const &handle, TorrentIdentity *identity)
 {
-    bool const require_trackers = requires_https_trackers(identity);
-    bool const require_web_seeds = requires_https_web_seeds(identity);
-    if ((!require_trackers && !require_web_seeds) || !handle.is_valid()) {
+    if (!handle.is_valid()) {
         return {};
     }
 
     DirtyMask changes = 0;
     bool changed = false;
 
-    if (require_trackers) {
-        std::vector<lt::announce_entry> const trackers = handle.trackers();
-        std::vector<lt::announce_entry> https_trackers;
-        https_trackers.reserve(trackers.size());
-        std::ranges::copy_if(trackers, std::back_inserter(https_trackers), [](lt::announce_entry const &entry) {
-            return is_https_url(entry.url);
-        });
-        if (https_trackers.size() != trackers.size()) {
-            handle.replace_trackers(https_trackers);
-            changes |= cache_trackers(handle, https_trackers);
-            changed = true;
+    std::vector<lt::announce_entry> const trackers = handle.trackers();
+    std::vector<lt::announce_entry> const effective_trackers = trackers_for_https_policy(
+        trackers,
+        effective_https_tracker_policy(identity)
+    );
+    bool const trackers_changed = !std::ranges::equal(
+        trackers,
+        effective_trackers,
+        [](lt::announce_entry const &left, lt::announce_entry const &right) {
+            return left.url == right.url && left.tier == right.tier;
         }
+    );
+    if (trackers_changed) {
+        handle.replace_trackers(effective_trackers);
+        handle.force_reannounce();
+        changes |= cache_trackers(handle, effective_trackers);
+        changed = true;
     }
 
+    bool const require_web_seeds = effective_https_web_seed_policy(identity) == HTTPSPolicy::require;
     if (require_web_seeds) {
         for (std::string const &url : handle.url_seeds()) {
             if (!is_https_url(url)) {
@@ -1292,48 +1296,55 @@ DirtyMask TTorrentClient::restore_metadata_source_policy(lt::torrent_handle cons
     DirtyMask changes = 0;
     bool changed = false;
 
-    bool const require_trackers = requires_https_trackers(identity);
-    bool const require_web_seeds = requires_https_web_seeds(identity);
-
-    auto tracker_allowed = [require_trackers](lt::announce_entry const &tracker) noexcept {
-        return !require_trackers || is_https_url(tracker.url);
-    };
+    HTTPSPolicy const tracker_policy = effective_https_tracker_policy(identity);
+    bool const require_web_seeds = effective_https_web_seed_policy(identity) == HTTPSPolicy::require;
     auto web_seed_allowed = [require_web_seeds](std::string const &web_seed) noexcept {
         return !require_web_seeds || is_https_url(web_seed);
     };
 
     std::vector<lt::announce_entry> const current_trackers = handle.trackers();
     std::vector<lt::announce_entry> restored_trackers;
-    restored_trackers.reserve(current_trackers.size());
+    restored_trackers.reserve(std::min(
+        static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT),
+        identity->source_trackers.size() + current_trackers.size()
+    ));
     std::set<std::string> tracker_urls;
-    for (lt::announce_entry const &tracker : current_trackers) {
-        if (tracker_allowed(tracker) && tracker_urls.insert(tracker.url).second) {
-            restored_trackers.push_back(tracker);
-        }
-    }
     for (lt::announce_entry const &tracker : identity->source_trackers) {
         if (restored_trackers.size() < static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT)
-            && tracker_allowed(tracker)
             && tracker_urls.insert(tracker.url).second) {
             restored_trackers.push_back(tracker);
         }
     }
+    for (lt::announce_entry const &tracker : current_trackers) {
+        if (restored_trackers.size() >= static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT)) {
+            break;
+        }
+        if (tracker_urls.insert(tracker.url).second) {
+            restored_trackers.push_back(tracker);
+        }
+    }
+    restored_trackers = trackers_for_https_policy(std::move(restored_trackers), tracker_policy);
     bool const trackers_changed = restored_trackers.size() != current_trackers.size()
         || !std::ranges::equal(restored_trackers, current_trackers, [](auto const &left, auto const &right) {
             return left.url == right.url && left.tier == right.tier;
         });
 
-    std::set<std::string> current_url_seeds = handle.url_seeds();
-    bool web_seeds_changed = false;
+    std::set<std::string> const existing_url_seeds = handle.url_seeds();
+    std::set<std::string> current_url_seeds;
+    std::ranges::copy_if(
+        existing_url_seeds,
+        std::inserter(current_url_seeds, current_url_seeds.end()),
+        web_seed_allowed
+    );
     for (std::string const &web_seed : identity->source_web_seeds) {
         if (current_url_seeds.size() >= static_cast<std::size_t>(TTORRENT_MAX_WEB_SEED_COUNT)) {
             break;
         }
         if (web_seed_allowed(web_seed) && current_url_seeds.insert(web_seed).second) {
-            web_seeds_changed = true;
             changed = true;
         }
     }
+    bool const web_seeds_changed = current_url_seeds != existing_url_seeds;
 
     lt::add_torrent_params restored_sources;
     for (lt::announce_entry const &tracker : restored_trackers) {
@@ -1349,12 +1360,18 @@ DirtyMask TTorrentClient::restore_metadata_source_policy(lt::torrent_handle cons
 
     if (trackers_changed) {
         handle.replace_trackers(restored_trackers);
+        handle.force_reannounce();
         changes |= cache_trackers(handle, restored_trackers);
         changed = true;
     }
 
     if (web_seeds_changed) {
-        std::set<std::string> const existing_url_seeds = handle.url_seeds();
+        changed = true;
+        for (std::string const &url : existing_url_seeds) {
+            if (!current_url_seeds.contains(url)) {
+                handle.remove_url_seed(url);
+            }
+        }
         for (std::string const &url : current_url_seeds) {
             if (!existing_url_seeds.contains(url)) {
                 handle.add_url_seed(url);
@@ -1402,20 +1419,18 @@ DirtyMask TTorrentClient::clear_peer_cache_if_restricted(
     return TTORRENT_DIRTY_TORRENTS;
 }
 
-bool TTorrentClient::requires_https_trackers(TorrentIdentity const *identity) const noexcept
+HTTPSPolicy TTorrentClient::effective_https_tracker_policy(TorrentIdentity const *identity) const noexcept
 {
-    if (identity == nullptr) {
-        return require_https_trackers;
-    }
-    return identity->requires_https_trackers || (require_https_trackers && !identity->allows_non_https_trackers);
+    return identity != nullptr && identity->https_tracker_policy != HTTPSPolicy::inherit
+        ? identity->https_tracker_policy
+        : https_tracker_policy;
 }
 
-bool TTorrentClient::requires_https_web_seeds(TorrentIdentity const *identity) const noexcept
+HTTPSPolicy TTorrentClient::effective_https_web_seed_policy(TorrentIdentity const *identity) const noexcept
 {
-    if (identity == nullptr) {
-        return require_https_web_seeds;
-    }
-    return identity->requires_https_web_seeds || (require_https_web_seeds && !identity->allows_non_https_web_seeds);
+    return identity != nullptr && identity->https_web_seed_policy != HTTPSPolicy::inherit
+        ? identity->https_web_seed_policy
+        : https_web_seed_policy;
 }
 
 TTorrentSourcePolicy TTorrentClient::source_policy(lt::torrent_handle const &handle, TorrentIdentity const *identity) const
@@ -1479,8 +1494,18 @@ TTorrentSourcePolicy TTorrentClient::source_policy(lt::torrent_handle const &han
     policy.enable_dht = bridge_bool(dht_enabled);
     policy.enable_peer_exchange = bridge_bool(peer_exchange_enabled);
     policy.enable_lsd = bridge_bool(lsd_enabled);
-    policy.require_https_trackers = bridge_bool(requires_https_trackers(identity));
-    policy.require_https_web_seeds = bridge_bool(requires_https_web_seeds(identity));
+    policy.https_tracker_policy = static_cast<std::uint8_t>(
+        identity != nullptr ? identity->https_tracker_policy : HTTPSPolicy::inherit
+    );
+    policy.https_web_seed_policy = static_cast<std::uint8_t>(
+        identity != nullptr ? identity->https_web_seed_policy : HTTPSPolicy::inherit
+    );
+    policy.effective_https_tracker_policy = static_cast<std::uint8_t>(
+        effective_https_tracker_policy(identity)
+    );
+    policy.effective_https_web_seed_policy = static_cast<std::uint8_t>(
+        effective_https_web_seed_policy(identity)
+    );
     policy.dht_locked = bridge_bool(dht_locked);
     policy.peer_exchange_locked = bridge_bool(peer_exchange_locked);
     policy.lsd_locked = bridge_bool(lsd_locked);
@@ -1495,13 +1520,14 @@ DirtyMask TTorrentClient::set_source_policy_field(
     lt::torrent_handle const &handle,
     TorrentIdentity *identity,
     int32_t field,
-    bool enabled
+    int32_t const value
 )
 {
     if (identity == nullptr || !handle.is_valid()) {
         return {};
     }
 
+    bool const enabled = value != 0;
     std::shared_ptr<lt::torrent_info const> const torrent_file = handle.torrent_file();
     bool const private_torrent = torrent_file && torrent_file->is_valid() && torrent_file->priv();
     bool const dht_locked = private_torrent || identity->dht_locked_by_source;
@@ -1615,19 +1641,17 @@ DirtyMask TTorrentClient::set_source_policy_field(
         }
     }
 
-    if (field == TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS) {
-        identity->requires_https_trackers = enabled;
-        identity->allows_non_https_trackers = !enabled && require_https_trackers;
+    if (field == TTORRENT_SOURCE_POLICY_HTTPS_TRACKER_POLICY) {
+        identity->https_tracker_policy = https_policy_from_value(value);
     }
 
-    if (field == TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS) {
-        identity->requires_https_web_seeds = enabled;
-        identity->allows_non_https_web_seeds = !enabled && require_https_web_seeds;
+    if (field == TTORRENT_SOURCE_POLICY_HTTPS_WEB_SEED_POLICY) {
+        identity->https_web_seed_policy = https_policy_from_value(value);
     }
 
     DirtyMask changes = 0;
-    if (field == TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS
-        || field == TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS) {
+    if (field == TTORRENT_SOURCE_POLICY_HTTPS_TRACKER_POLICY
+        || field == TTORRENT_SOURCE_POLICY_HTTPS_WEB_SEED_POLICY) {
         changes |= restore_metadata_source_policy(handle, identity);
         changes |= enforce_https_source_policy(handle, identity);
     }
@@ -1914,13 +1938,22 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         lt::add_torrent_params params = std::move(*parsed);
         lt::add_torrent_params const source_params = params;
 
-        bool const allows_non_https_trackers = bridge_bool(add_options.allow_non_https_trackers);
-        bool const allows_non_https_web_seeds = bridge_bool(add_options.allow_non_https_web_seeds);
-        bool const require_https_trackers = client->require_https_trackers && !allows_non_https_trackers;
-        bool const require_https_web_seeds = client->require_https_web_seeds && !allows_non_https_web_seeds;
-        if (require_https_trackers || require_https_web_seeds) {
-            static_cast<void>(filter_non_https_sources(params, require_https_trackers, require_https_web_seeds));
+        if (!is_valid_https_tracker_policy(add_options.https_tracker_policy, true)
+            || !is_valid_https_web_seed_policy(add_options.https_web_seed_policy, true)) {
+            return bridge_error(1, "Invalid HTTPS source policy.");
         }
+        HTTPSPolicy const requested_tracker_policy = https_policy_from_value(add_options.https_tracker_policy);
+        HTTPSPolicy const requested_web_seed_policy = https_policy_from_value(add_options.https_web_seed_policy);
+        HTTPSPolicy const effective_tracker_policy = requested_tracker_policy == HTTPSPolicy::inherit
+            ? client->https_tracker_policy
+            : requested_tracker_policy;
+        HTTPSPolicy const effective_web_seed_policy = requested_web_seed_policy == HTTPSPolicy::inherit
+            ? client->https_web_seed_policy
+            : requested_web_seed_policy;
+        static_cast<void>(apply_https_source_policy(
+            params,
+            HTTPSSourcePolicy{.trackers = effective_tracker_policy, .web_seeds = effective_web_seed_policy}
+        ));
         BridgeResult const valid_sources = validate_torrent_sources(params);
         if (!valid_sources) {
             return valid_sources;
@@ -1975,8 +2008,8 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         }
         TorrentIdentity *identity = client->attach_identity(params);
         UnpublishedIdentityGuard identity_guard(*client, identity);
-        identity->allows_non_https_trackers = allows_non_https_trackers;
-        identity->allows_non_https_web_seeds = allows_non_https_web_seeds;
+        identity->https_tracker_policy = requested_tracker_policy;
+        identity->https_web_seed_policy = requested_web_seed_policy;
         identity->queue_priority = add_options.queue_priority;
         identity->dht_locked_by_source = dht_locked_by_source;
         identity->lsd_locked_by_source = lsd_locked_by_source;
@@ -2238,13 +2271,22 @@ int32_t add_torrent_file_data_with_priorities(
         if (!admission) {
             return admission;
         }
-        bool const allows_non_https_trackers = bridge_bool(add_options.allow_non_https_trackers);
-        bool const allows_non_https_web_seeds = bridge_bool(add_options.allow_non_https_web_seeds);
-        bool const require_https_trackers = client->require_https_trackers && !allows_non_https_trackers;
-        bool const require_https_web_seeds = client->require_https_web_seeds && !allows_non_https_web_seeds;
-        if (require_https_trackers || require_https_web_seeds) {
-            static_cast<void>(filter_non_https_sources(params, require_https_trackers, require_https_web_seeds));
+        if (!is_valid_https_tracker_policy(add_options.https_tracker_policy, true)
+            || !is_valid_https_web_seed_policy(add_options.https_web_seed_policy, true)) {
+            return bridge_error(1, "Invalid HTTPS source policy.");
         }
+        HTTPSPolicy const requested_tracker_policy = https_policy_from_value(add_options.https_tracker_policy);
+        HTTPSPolicy const requested_web_seed_policy = https_policy_from_value(add_options.https_web_seed_policy);
+        HTTPSPolicy const effective_tracker_policy = requested_tracker_policy == HTTPSPolicy::inherit
+            ? client->https_tracker_policy
+            : requested_tracker_policy;
+        HTTPSPolicy const effective_web_seed_policy = requested_web_seed_policy == HTTPSPolicy::inherit
+            ? client->https_web_seed_policy
+            : requested_web_seed_policy;
+        static_cast<void>(apply_https_source_policy(
+            params,
+            HTTPSSourcePolicy{.trackers = effective_tracker_policy, .web_seeds = effective_web_seed_policy}
+        ));
         BridgeResult const valid_sources = validate_torrent_sources(params);
         if (!valid_sources) {
             return valid_sources;
@@ -2287,8 +2329,8 @@ int32_t add_torrent_file_data_with_priorities(
 
         TorrentIdentity *identity = client->attach_identity(params);
         UnpublishedIdentityGuard identity_guard(*client, identity);
-        identity->allows_non_https_trackers = allows_non_https_trackers;
-        identity->allows_non_https_web_seeds = allows_non_https_web_seeds;
+        identity->https_tracker_policy = requested_tracker_policy;
+        identity->https_web_seed_policy = requested_web_seed_policy;
         identity->queue_priority = add_options.queue_priority;
         identity->dht_locked_by_source = dht_locked_by_source;
         identity->lsd_locked_by_source = lsd_locked_by_source;
@@ -2637,7 +2679,7 @@ extern "C" int32_t TorrentClientSetSourcePolicyField(
     TTorrentClient *client,
     const char *torrent_id,
     int32_t field,
-    uint8_t enabled,
+    int32_t value,
     char *error_out,
     int32_t error_capacity
 ) noexcept
@@ -2651,7 +2693,11 @@ extern "C" int32_t TorrentClientSetSourcePolicyField(
             || field > TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT) {
             return bridge_error(1, "Invalid source policy field.");
         }
-        if (enabled > 1U) {
+        bool const tracker_policy_field = field == TTORRENT_SOURCE_POLICY_HTTPS_TRACKER_POLICY;
+        bool const web_seed_policy_field = field == TTORRENT_SOURCE_POLICY_HTTPS_WEB_SEED_POLICY;
+        if ((tracker_policy_field && !is_valid_https_tracker_policy(value, true))
+            || (web_seed_policy_field && !is_valid_https_web_seed_policy(value, true))
+            || (!tracker_policy_field && !web_seed_policy_field && value != 0 && value != 1)) {
             return bridge_error(1, "Invalid source policy value.");
         }
 
@@ -2683,7 +2729,7 @@ extern "C" int32_t TorrentClientSetSourcePolicyField(
             *handle,
             identity,
             field,
-            bridge_bool(enabled)
+            value
         );
         publisher.add(source_policy_changes);
         ResumeSaveResult const saved_policy = client->save_source_policy_resume_data(*handle, identity);
@@ -3447,8 +3493,12 @@ extern "C" int32_t TorrentClientApplySettings(
         bool const enable_lsd = bridge_bool(requested.enable_lsd);
         bool const use_lsd_by_default = bridge_bool(requested.use_lsd_by_default);
         bool const use_pex_by_default = bridge_bool(requested.use_pex_by_default);
-        bool const require_https_trackers = bridge_bool(requested.require_https_trackers);
-        bool const require_https_web_seeds = bridge_bool(requested.require_https_web_seeds);
+        if (!is_valid_https_tracker_policy(requested.https_tracker_policy, false)
+            || !is_valid_https_web_seed_policy(requested.https_web_seed_policy, false)) {
+            return bridge_error(1, "Invalid HTTPS source policy.");
+        }
+        HTTPSPolicy const https_tracker_policy = https_policy_from_value(requested.https_tracker_policy);
+        HTTPSPolicy const https_web_seed_policy = https_policy_from_value(requested.https_web_seed_policy);
         bool const anonymous_mode = bridge_bool(requested.anonymous_mode);
         bool const network_blocked = bridge_bool(requested.network_blocked);
         if (!is_valid_encryption_policy(requested.encryption_policy)) {
@@ -3524,8 +3574,8 @@ extern "C" int32_t TorrentClientApplySettings(
         settings.set_bool(lt::settings_pack::prefer_rc4, false);
         client->session.apply_settings(std::move(settings));
         add_policy_result(source_policy_application, apply_peer_exchange_policy_locked(*client, use_pex_by_default));
-        client->require_https_trackers = require_https_trackers;
-        client->require_https_web_seeds = require_https_web_seeds;
+        client->https_tracker_policy = https_tracker_policy;
+        client->https_web_seed_policy = https_web_seed_policy;
         publisher.add(source_policy_application.changes);
         request_policy_saves(*client, source_policy_application.handles_to_save);
         publisher.add(client->apply_https_source_policy_locked());

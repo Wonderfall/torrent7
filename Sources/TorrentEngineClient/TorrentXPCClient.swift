@@ -503,8 +503,8 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
         enablePeerExchange: Bool,
-        allowNonHTTPSTrackers: Bool,
-        allowNonHTTPSWebSeeds: Bool,
+        httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride,
+        httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride,
         allowPreMetadataDHT: Bool
     ) async throws -> String {
         let folder = try await folderCapability(for: savePath)
@@ -517,8 +517,8 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                     startsPaused: startsPaused,
                     queuePriority: queuePriority,
                     enablePeerExchange: enablePeerExchange,
-                    allowNonHTTPSTrackers: allowNonHTTPSTrackers,
-                    allowNonHTTPSWebSeeds: allowNonHTTPSWebSeeds,
+                    httpsTrackerPolicy: httpsTrackerPolicy,
+                    httpsWebSeedPolicy: httpsWebSeedPolicy,
                     allowPreMetadataDHT: allowPreMetadataDHT
                 )
             )
@@ -542,8 +542,8 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
         enablePeerExchange: Bool,
-        allowNonHTTPSTrackers: Bool,
-        allowNonHTTPSWebSeeds: Bool
+        httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride,
+        httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride
     ) async throws -> String {
         let folder = try await folderCapability(for: savePath)
         let priorityEntries = filePriorities?.map {
@@ -558,8 +558,8 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                     startsPaused: startsPaused,
                     queuePriority: queuePriority,
                     enablePeerExchange: enablePeerExchange,
-                    allowNonHTTPSTrackers: allowNonHTTPSTrackers,
-                    allowNonHTTPSWebSeeds: allowNonHTTPSWebSeeds
+                    httpsTrackerPolicy: httpsTrackerPolicy,
+                    httpsWebSeedPolicy: httpsWebSeedPolicy
                 ),
                 attachment: data
             )
@@ -746,12 +746,11 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
 
     package func setSourcePolicy(
         id: String,
-        field: TorrentSourcePolicyField,
-        enabled: Bool
+        mutation: TorrentSourcePolicyMutation
     ) async throws {
         try await invokeUnit(
             .setSourcePolicy,
-            TorrentEngineIPCSetSourcePolicyRequest(id: id, field: field, enabled: enabled)
+            TorrentEngineIPCSetSourcePolicyRequest(id: id, mutation: mutation)
         )
     }
 

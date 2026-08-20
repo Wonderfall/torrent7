@@ -376,12 +376,55 @@ package struct TorrentPieceMap: Codable, Equatable, Sendable {
     }
 }
 
+package enum TorrentHTTPSTrackerPolicyOverride: Int, Codable, CaseIterable, Identifiable, Sendable {
+    case inherit = 0
+    case original = 1
+    case prefer = 2
+    case require = 3
+
+    package var id: Self { self }
+
+    package var title: String {
+        switch self {
+        case .inherit:
+            "Inherit"
+        case .original:
+            "Original"
+        case .prefer:
+            "Prefer HTTPS"
+        case .require:
+            "Require HTTPS"
+        }
+    }
+}
+
+package enum TorrentHTTPSWebSeedPolicyOverride: Int, Codable, CaseIterable, Identifiable, Sendable {
+    case inherit = 0
+    case original = 1
+    case require = 3
+
+    package var id: Self { self }
+
+    package var title: String {
+        switch self {
+        case .inherit:
+            "Inherit"
+        case .original:
+            "Original"
+        case .require:
+            "Require HTTPS"
+        }
+    }
+}
+
 package struct TorrentSourcePolicy: Codable, Equatable, Sendable {
     package var isDHTEnabled: Bool
     package var isPeerExchangeEnabled: Bool
     package var isLocalServiceDiscoveryEnabled: Bool
-    package var usesHTTPSTrackersOnly: Bool
-    package var usesHTTPSWebSeedsOnly: Bool
+    package var httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride
+    package var httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride
+    package var effectiveHTTPSTrackerPolicy: TorrentHTTPSTrackerPolicy
+    package var effectiveHTTPSWebSeedPolicy: TorrentHTTPSWebSeedPolicy
     package var isDHTLocked: Bool
     package var isPeerExchangeLocked: Bool
     package var isLocalServiceDiscoveryLocked: Bool
@@ -392,8 +435,10 @@ package struct TorrentSourcePolicy: Codable, Equatable, Sendable {
         isDHTEnabled: false,
         isPeerExchangeEnabled: false,
         isLocalServiceDiscoveryEnabled: false,
-        usesHTTPSTrackersOnly: false,
-        usesHTTPSWebSeedsOnly: false,
+        httpsTrackerPolicy: .inherit,
+        httpsWebSeedPolicy: .inherit,
+        effectiveHTTPSTrackerPolicy: .original,
+        effectiveHTTPSWebSeedPolicy: .original,
         isDHTLocked: false,
         isPeerExchangeLocked: false,
         isLocalServiceDiscoveryLocked: false,
@@ -405,8 +450,10 @@ package struct TorrentSourcePolicy: Codable, Equatable, Sendable {
         isDHTEnabled: Bool,
         isPeerExchangeEnabled: Bool,
         isLocalServiceDiscoveryEnabled: Bool,
-        usesHTTPSTrackersOnly: Bool,
-        usesHTTPSWebSeedsOnly: Bool,
+        httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride,
+        httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride,
+        effectiveHTTPSTrackerPolicy: TorrentHTTPSTrackerPolicy,
+        effectiveHTTPSWebSeedPolicy: TorrentHTTPSWebSeedPolicy,
         isDHTLocked: Bool,
         isPeerExchangeLocked: Bool,
         isLocalServiceDiscoveryLocked: Bool,
@@ -416,8 +463,10 @@ package struct TorrentSourcePolicy: Codable, Equatable, Sendable {
         self.isDHTEnabled = isDHTEnabled
         self.isPeerExchangeEnabled = isPeerExchangeEnabled
         self.isLocalServiceDiscoveryEnabled = isLocalServiceDiscoveryEnabled
-        self.usesHTTPSTrackersOnly = usesHTTPSTrackersOnly
-        self.usesHTTPSWebSeedsOnly = usesHTTPSWebSeedsOnly
+        self.httpsTrackerPolicy = httpsTrackerPolicy
+        self.httpsWebSeedPolicy = httpsWebSeedPolicy
+        self.effectiveHTTPSTrackerPolicy = effectiveHTTPSTrackerPolicy
+        self.effectiveHTTPSWebSeedPolicy = effectiveHTTPSWebSeedPolicy
         self.isDHTLocked = isDHTLocked
         self.isPeerExchangeLocked = isPeerExchangeLocked
         self.isLocalServiceDiscoveryLocked = isLocalServiceDiscoveryLocked
@@ -434,10 +483,6 @@ package struct TorrentSourcePolicy: Codable, Equatable, Sendable {
                 isPeerExchangeEnabled
             case .localServiceDiscovery:
                 isLocalServiceDiscoveryEnabled
-            case .httpsTrackersOnly:
-                usesHTTPSTrackersOnly
-            case .httpsWebSeedsOnly:
-                usesHTTPSWebSeedsOnly
             case .preMetadataDHT:
                 allowsPreMetadataDHT
             }
@@ -450,10 +495,6 @@ package struct TorrentSourcePolicy: Codable, Equatable, Sendable {
                 isPeerExchangeEnabled = newValue
             case .localServiceDiscovery:
                 isLocalServiceDiscoveryEnabled = newValue
-            case .httpsTrackersOnly:
-                usesHTTPSTrackersOnly = newValue
-            case .httpsWebSeedsOnly:
-                usesHTTPSWebSeedsOnly = newValue
             case .preMetadataDHT:
                 allowsPreMetadataDHT = newValue
             }
@@ -465,9 +506,13 @@ package enum TorrentSourcePolicyField: Codable, Hashable, Sendable {
     case dht
     case peerExchange
     case localServiceDiscovery
-    case httpsTrackersOnly
-    case httpsWebSeedsOnly
     case preMetadataDHT
+}
+
+package enum TorrentSourcePolicyMutation: Codable, Equatable, Sendable {
+    case boolean(field: TorrentSourcePolicyField, enabled: Bool)
+    case httpsTracker(TorrentHTTPSTrackerPolicyOverride)
+    case httpsWebSeed(TorrentHTTPSWebSeedPolicyOverride)
 }
 
 package enum TorrentFilePriority: Int32, Codable, CaseIterable, Identifiable, Sendable {

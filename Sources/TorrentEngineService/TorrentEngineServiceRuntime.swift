@@ -669,8 +669,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             try Self.validateTorrentID(value.id)
             try await requireEngine().setSourcePolicy(
                 id: value.id,
-                field: value.field,
-                enabled: value.enabled
+                mutation: value.mutation
             )
             return try encode(TorrentEngineIPCEmpty(), for: operation)
         case .torrentOptions:
@@ -1040,8 +1039,8 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
                 startsPaused: request.startsPaused,
                 queuePriority: request.queuePriority,
                 enablePeerExchange: request.enablePeerExchange,
-                allowNonHTTPSTrackers: request.allowNonHTTPSTrackers,
-                allowNonHTTPSWebSeeds: request.allowNonHTTPSWebSeeds,
+                httpsTrackerPolicy: request.httpsTrackerPolicy,
+                httpsWebSeedPolicy: request.httpsWebSeedPolicy,
                 allowPreMetadataDHT: request.allowPreMetadataDHT
             )
             nativeAddCommitted = true
@@ -1091,8 +1090,8 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
                 startsPaused: request.startsPaused,
                 queuePriority: request.queuePriority,
                 enablePeerExchange: request.enablePeerExchange,
-                allowNonHTTPSTrackers: request.allowNonHTTPSTrackers,
-                allowNonHTTPSWebSeeds: request.allowNonHTTPSWebSeeds
+                httpsTrackerPolicy: request.httpsTrackerPolicy,
+                httpsWebSeedPolicy: request.httpsWebSeedPolicy
             )
             nativeAddCommitted = true
             try await validateAddedTorrentID(identifier)

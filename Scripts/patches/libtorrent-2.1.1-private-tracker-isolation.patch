@@ -1,5 +1,5 @@
 diff --git a/include/libtorrent/aux_/announce_entry.hpp b/include/libtorrent/aux_/announce_entry.hpp
-index dddda3de1..c8e81fcb3 100644
+index dddda3de10112eb03fe3470f29292e94dae4600c..c8e81fcb33b8c22627412e4736c060fbad6aba05 100644
 --- a/include/libtorrent/aux_/announce_entry.hpp
 +++ b/include/libtorrent/aux_/announce_entry.hpp
 @@ -53,6 +53,10 @@ namespace aux {
@@ -40,10 +40,10 @@ index dddda3de1..c8e81fcb3 100644
  #endif
 -
 diff --git a/include/libtorrent/aux_/torrent.hpp b/include/libtorrent/aux_/torrent.hpp
-index 7cc78745d..9b3791a6e 100644
+index 7cc78745d12fe4c1c5669bb1a8da56c90f2754c2..72e4df7b438ff1e1cea47e01d30b263987395b45 100644
 --- a/include/libtorrent/aux_/torrent.hpp
 +++ b/include/libtorrent/aux_/torrent.hpp
-@@ -111,6 +111,79 @@ namespace libtorrent::aux {
+@@ -111,6 +111,86 @@ namespace libtorrent::aux {
  		return incoming_tcp || incoming_utp;
  	}
  
@@ -108,6 +108,13 @@ index 7cc78745d..9b3791a6e 100644
 +			failed = false;
 +		}
 +
++		bool reset_for_policy_change(bool const changed)
++		{
++			if (!changed || active_url.empty()) return false;
++			reset();
++			return true;
++		}
++
 +		std::string active_url;
 +		std::uint64_t generation = 0;
 +		bool failed = false;
@@ -123,7 +130,7 @@ index 7cc78745d..9b3791a6e 100644
  #ifndef TORRENT_DISABLE_STREAMING
  	struct time_critical_piece
  	{
-@@ -889,13 +962,17 @@ namespace libtorrent::aux {
+@@ -889,13 +969,17 @@ namespace libtorrent::aux {
  		// (updating, next_announce, min_announce) and posts the
  		// tracker_announce_alert. Does not touch any tier-selection state;
  		// callers that have one (announce_with_tracker) update it themselves.
@@ -142,7 +149,7 @@ index 7cc78745d..9b3791a6e 100644
  
  #ifndef TORRENT_DISABLE_DHT
  		void dht_announce();
-@@ -1052,7 +1129,9 @@ namespace libtorrent::aux {
+@@ -1052,7 +1136,9 @@ namespace libtorrent::aux {
  		void completed();
  
  #if TORRENT_USE_I2P
@@ -153,7 +160,7 @@ index 7cc78745d..9b3791a6e 100644
  		void add_i2p_peer(sha256_hash const& dest, peer_source_flags_t source);
  		bool is_i2p() const { return m_i2p; }
  
-@@ -1072,7 +1151,9 @@ namespace libtorrent::aux {
+@@ -1072,7 +1158,9 @@ namespace libtorrent::aux {
  		void on_peer_name_lookup(error_code const&
  			, std::vector<address> const&
  			, int port
@@ -164,7 +171,7 @@ index 7cc78745d..9b3791a6e 100644
  
  		// this is the asio callback that is called when a name
  		// lookup for a WEB SEED is completed.
-@@ -1525,6 +1606,7 @@ namespace libtorrent::aux {
+@@ -1525,6 +1613,7 @@ namespace libtorrent::aux {
  		aux::suggest_piece m_suggest_pieces;
  
  		aux::tracker_list m_trackers;
@@ -173,7 +180,7 @@ index 7cc78745d..9b3791a6e 100644
  #ifndef TORRENT_DISABLE_STREAMING
  		// this list is sorted by time_critical_piece::deadline
 diff --git a/include/libtorrent/aux_/tracker_manager.hpp b/include/libtorrent/aux_/tracker_manager.hpp
-index ec30d77cf..de21ee519 100644
+index ec30d77cf8316e40780837c4dc8d4f218754287e..de21ee519cd9cf70047f8c2e5763909ff3503ee3 100644
 --- a/include/libtorrent/aux_/tracker_manager.hpp
 +++ b/include/libtorrent/aux_/tracker_manager.hpp
 @@ -107,6 +107,9 @@ using tracker_request_flags_t = flags::bitfield_flag<std::uint8_t, struct tracke
@@ -187,7 +194,7 @@ index ec30d77cf..de21ee519 100644
  		std::vector<address_v6> ipv6;
  		std::vector<address_v4> ipv4;
 diff --git a/src/announce_entry.cpp b/src/announce_entry.cpp
-index 7ed2ef753..d0dbb1b73 100644
+index 7ed2ef7537a8aac0f3cf918fb192db985412176d..d0dbb1b7310f379d33275cd27bff4ba786e91677 100644
 --- a/src/announce_entry.cpp
 +++ b/src/announce_entry.cpp
 @@ -221,6 +221,7 @@ namespace aux {
@@ -207,7 +214,7 @@ index 7ed2ef753..d0dbb1b73 100644
  	}
  
 diff --git a/src/torrent.cpp b/src/torrent.cpp
-index 210d1b07b..436ad5da9 100644
+index 210d1b07b9d152a925c9bc676c3687ea29e16935..43e99ab0bac73fdd6e9bbc72cb1d1413ac286898 100644
 --- a/src/torrent.cpp
 +++ b/src/torrent.cpp
 @@ -3384,7 +3384,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
@@ -413,22 +420,27 @@ index 210d1b07b..436ad5da9 100644
  
  		// TODO: add one peer per IP the hostname resolves to
  		tcp::endpoint host(host_list.front(), std::uint16_t(port));
-@@ -6293,6 +6380,14 @@ namespace {
+@@ -6292,7 +6379,19 @@ namespace {
+ 
  	void torrent::replace_trackers(std::vector<lt::announce_entry> const& urls)
  	{
++		auto const previous_trackers = trackers();
++		bool const tracker_policy_changed = previous_trackers.size() != urls.size()
++			|| !std::equal(previous_trackers.begin(), previous_trackers.end()
++				, urls.begin(), urls.end()
++				, [](lt::announce_entry const& lhs, lt::announce_entry const& rhs)
++				{ return lhs.url == rhs.url && lhs.tier == rhs.tier; });
  		m_trackers.replace(urls);
 +		if (m_torrent_file && m_torrent_file->is_valid()
 +			&& m_torrent_file->priv()
-+			&& !m_private_tracker.active_url.empty()
-+			&& m_trackers.find_tracker(m_private_tracker.active_url) == nullptr)
++			&& m_private_tracker.reset_for_policy_change(tracker_policy_changed))
 +		{
-+			m_private_tracker.reset();
 +			clear_peers();
 +		}
  
  		if (settings().get_bool(settings_pack::prefer_udp_trackers))
  			m_trackers.prioritize_udp_trackers();
-@@ -8462,10 +8557,9 @@ namespace {
+@@ -8462,10 +8561,9 @@ namespace {
  		// A private swarm may only bootstrap peers from its tracker. Peers learned
  		// while metadata was unavailable have no trustworthy source association,
  		// so discard them and let the private tracker repopulate the peer list.
@@ -440,7 +452,7 @@ index 210d1b07b..436ad5da9 100644
  		else
  		{
  			// disconnect redundant peers
-@@ -12881,6 +12975,18 @@ namespace {
+@@ -12881,6 +12979,18 @@ namespace {
  		TORRENT_ASSERT(is_single_thread());
  
  		INVARIANT_CHECK;
@@ -459,7 +471,7 @@ index 210d1b07b..436ad5da9 100644
  
  // some older versions of clang had a bug where it would fire this warning here
  #ifdef __clang__
-@@ -12961,6 +13067,14 @@ namespace {
+@@ -12961,6 +13071,14 @@ namespace {
  						return true;
  					}))
  				{
@@ -475,10 +487,10 @@ index 210d1b07b..436ad5da9 100644
  				}
  			}
 diff --git a/test/test_torrent.cpp b/test/test_torrent.cpp
-index 40c999c18..37ea620d7 100644
+index 40c999c180cd9e27893ec682377301a8dd936d65..3120ee8c8de389277cc542dc62c747f8532eee21 100644
 --- a/test/test_torrent.cpp
 +++ b/test/test_torrent.cpp
-@@ -51,6 +51,66 @@ TORRENT_TEST(dht_announce_peer_requires_incoming_transport)
+@@ -51,6 +51,69 @@ TORRENT_TEST(dht_announce_peer_requires_incoming_transport)
  	TEST_CHECK(aux::can_announce_dht_peer(false, true));
  }
  
@@ -511,6 +523,9 @@ index 40c999c18..37ea620d7 100644
 +		, first_generation));
 +	TEST_CHECK(state.accepts("https://tracker-b.example/announce"
 +		, second_generation));
++	TEST_CHECK(!state.reset_for_policy_change(false));
++	TEST_CHECK(state.accepts("https://tracker-b.example/announce"
++		, second_generation));
 +
 +	aux::announce_infohash request_state;
 +	request_state.begin_tracker_request(first_generation);
@@ -529,7 +544,7 @@ index 40c999c18..37ea620d7 100644
 +		, stopped_generation) == aux::private_tracker_request_result::current);
 +	TEST_EQUAL(stopped_generation, second_generation);
 +
-+	state.reset();
++	TEST_CHECK(state.reset_for_policy_change(true));
 +	TEST_CHECK(!state.accepts("https://tracker-b.example/announce"
 +		, second_generation));
 +	std::uint64_t replacement_generation = 0;

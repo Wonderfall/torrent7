@@ -600,11 +600,10 @@ final class TorrentStore {
 
     func setSourcePolicy(
         for id: TorrentItem.ID,
-        field: TorrentSourcePolicyField,
-        enabled: Bool
+        mutation: TorrentSourcePolicyMutation
     ) async throws {
         try await performQueuedUserOperation { engine in
-            try await engine.setSourcePolicy(id: id, field: field, enabled: enabled)
+            try await engine.setSourcePolicy(id: id, mutation: mutation)
         }
     }
 
@@ -824,8 +823,8 @@ final class TorrentStore {
         startsPaused: Bool = false,
         queuePriority: TorrentQueuePriority = .normal,
         labelIDs: Set<TorrentLabel.ID> = [],
-        allowNonHTTPSTrackers: Bool = false,
-        allowNonHTTPSWebSeeds: Bool = false,
+        httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride = .inherit,
+        httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride = .inherit,
         allowPreMetadataDHT: Bool = false
     ) -> Bool {
         guard let savePath = explicitSavePath ?? downloadFolder?.torrentFilePath else {
@@ -844,8 +843,8 @@ final class TorrentStore {
             startsPaused: startsPaused,
             queuePriority: queuePriority,
             labelIDs: labelIDs,
-            allowNonHTTPSTrackers: allowNonHTTPSTrackers,
-            allowNonHTTPSWebSeeds: allowNonHTTPSWebSeeds,
+            httpsTrackerPolicy: httpsTrackerPolicy,
+            httpsWebSeedPolicy: httpsWebSeedPolicy,
             allowPreMetadataDHT: allowPreMetadataDHT
         )
     }
@@ -858,8 +857,8 @@ final class TorrentStore {
         startsPaused: Bool = false,
         queuePriority: TorrentQueuePriority = .normal,
         labelIDs: Set<TorrentLabel.ID> = [],
-        allowNonHTTPSTrackers: Bool = false,
-        allowNonHTTPSWebSeeds: Bool = false,
+        httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride = .inherit,
+        httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride = .inherit,
         allowPreMetadataDHT: Bool = false
     ) -> Bool {
         guard Self.isMagnetWithinSizeLimit(magnet) else {
@@ -880,8 +879,8 @@ final class TorrentStore {
             startsPaused: startsPaused,
             queuePriority: queuePriority,
             labelIDs: labelIDs,
-            allowNonHTTPSTrackers: allowNonHTTPSTrackers,
-            allowNonHTTPSWebSeeds: allowNonHTTPSWebSeeds,
+            httpsTrackerPolicy: httpsTrackerPolicy,
+            httpsWebSeedPolicy: httpsWebSeedPolicy,
             allowPreMetadataDHT: allowPreMetadataDHT
         )
     }
@@ -893,8 +892,8 @@ final class TorrentStore {
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
         labelIDs: Set<TorrentLabel.ID>,
-        allowNonHTTPSTrackers: Bool,
-        allowNonHTTPSWebSeeds: Bool,
+        httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride,
+        httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride,
         allowPreMetadataDHT: Bool
     ) -> Bool {
         let enablePeerExchange = settings.effectiveUsePeerExchangeByDefault
@@ -939,8 +938,8 @@ final class TorrentStore {
                     startsPaused: startsPaused,
                     queuePriority: queuePriority,
                     enablePeerExchange: enablePeerExchange,
-                    allowNonHTTPSTrackers: allowNonHTTPSTrackers,
-                    allowNonHTTPSWebSeeds: allowNonHTTPSWebSeeds,
+                    httpsTrackerPolicy: httpsTrackerPolicy,
+                    httpsWebSeedPolicy: httpsWebSeedPolicy,
                     allowPreMetadataDHT: allowPreMetadataDHT
                 )
                 didAddTorrent = true
@@ -1002,8 +1001,8 @@ final class TorrentStore {
         startsPaused: Bool = false,
         queuePriority: TorrentQueuePriority = .normal,
         labelIDs: Set<TorrentLabel.ID> = [],
-        allowNonHTTPSTrackers: Bool = false,
-        allowNonHTTPSWebSeeds: Bool = false
+        httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride = .inherit,
+        httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride = .inherit
     ) -> Bool {
         guard let savePath = explicitSavePath ?? downloadFolder?.torrentFilePath else {
             setLastError("Choose a download folder first.", source: .userAction)
@@ -1020,8 +1019,8 @@ final class TorrentStore {
             startsPaused: startsPaused,
             queuePriority: queuePriority,
             labelIDs: labelIDs,
-            allowNonHTTPSTrackers: allowNonHTTPSTrackers,
-            allowNonHTTPSWebSeeds: allowNonHTTPSWebSeeds
+            httpsTrackerPolicy: httpsTrackerPolicy,
+            httpsWebSeedPolicy: httpsWebSeedPolicy
         )
     }
 
@@ -1036,8 +1035,8 @@ final class TorrentStore {
         startsPaused: Bool = false,
         queuePriority: TorrentQueuePriority = .normal,
         labelIDs: Set<TorrentLabel.ID> = [],
-        allowNonHTTPSTrackers: Bool = false,
-        allowNonHTTPSWebSeeds: Bool = false
+        httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride = .inherit,
+        httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride = .inherit
     ) -> Bool {
         scheduleTorrentFileAdd(
             url,
@@ -1055,8 +1054,8 @@ final class TorrentStore {
             startsPaused: startsPaused,
             queuePriority: queuePriority,
             labelIDs: labelIDs,
-            allowNonHTTPSTrackers: allowNonHTTPSTrackers,
-            allowNonHTTPSWebSeeds: allowNonHTTPSWebSeeds
+            httpsTrackerPolicy: httpsTrackerPolicy,
+            httpsWebSeedPolicy: httpsWebSeedPolicy
         )
     }
 
@@ -1070,8 +1069,8 @@ final class TorrentStore {
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
         labelIDs: Set<TorrentLabel.ID>,
-        allowNonHTTPSTrackers: Bool,
-        allowNonHTTPSWebSeeds: Bool
+        httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride,
+        httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride
     ) -> Bool {
         let enablePeerExchange = settings.effectiveUsePeerExchangeByDefault
         let errorGeneration = lastErrorGeneration
@@ -1117,8 +1116,8 @@ final class TorrentStore {
                     startsPaused: startsPaused,
                     queuePriority: queuePriority,
                     enablePeerExchange: enablePeerExchange,
-                    allowNonHTTPSTrackers: allowNonHTTPSTrackers,
-                    allowNonHTTPSWebSeeds: allowNonHTTPSWebSeeds
+                    httpsTrackerPolicy: httpsTrackerPolicy,
+                    httpsWebSeedPolicy: httpsWebSeedPolicy
                 )
                 didAddTorrent = true
                 if let preparedFolder {

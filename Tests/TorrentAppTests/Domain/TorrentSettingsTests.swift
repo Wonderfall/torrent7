@@ -94,8 +94,32 @@ struct TorrentSettingsTests {
             #expect(candidate.enablePeerExchangePlugin == false)
             #expect(candidate.usePeerExchangeByDefault == false)
             #expect(candidate.effectiveUsePeerExchangeByDefault == false)
-            #expect(candidate.useHTTPSWebSeedsOnly == true)
+            #expect(candidate.httpsTrackerPolicy == .prefer)
+            #expect(candidate.httpsWebSeedPolicy == .require)
         }
+    }
+
+    @Test("Legacy HTTPS booleans migrate to explicit policies")
+    func legacyHTTPSBooleansMigrateToExplicitPolicies() throws {
+        let permissive = try JSONDecoder().decode(
+            TorrentSettings.self,
+            from: Data(#"{"useHTTPSTrackersOnly":false,"useHTTPSWebSeedsOnly":false}"#.utf8)
+        )
+        #expect(permissive.httpsTrackerPolicy == .prefer)
+        #expect(permissive.httpsWebSeedPolicy == .original)
+
+        let strict = try JSONDecoder().decode(
+            TorrentSettings.self,
+            from: Data(#"{"useHTTPSTrackersOnly":true,"useHTTPSWebSeedsOnly":true}"#.utf8)
+        )
+        #expect(strict.httpsTrackerPolicy == .require)
+        #expect(strict.httpsWebSeedPolicy == .require)
+
+        let encoded = String(decoding: try JSONEncoder().encode(strict), as: UTF8.self)
+        #expect(encoded.contains("httpsTrackerPolicy"))
+        #expect(encoded.contains("httpsWebSeedPolicy"))
+        #expect(!encoded.contains("useHTTPSTrackersOnly"))
+        #expect(!encoded.contains("useHTTPSWebSeedsOnly"))
     }
 
     @Test("Reduced DHT contribution is opt-in and persisted")
@@ -171,8 +195,8 @@ struct TorrentSettingsTests {
         settings.usePeerExchangeByDefault = false
         settings.enableLocalServiceDiscovery = true
         settings.useLocalServiceDiscoveryByDefault = true
-        settings.useHTTPSTrackersOnly = true
-        settings.useHTTPSWebSeedsOnly = true
+        settings.httpsTrackerPolicy = .require
+        settings.httpsWebSeedPolicy = .require
         settings.anonymousMode = false
 
         #expect(settings.libtorrentDownloadRateLimit == 12 * 1_024)
@@ -190,8 +214,8 @@ struct TorrentSettingsTests {
         #expect(settings.effectiveUsePeerExchangeByDefault == false)
         #expect(settings.effectiveEnableLocalServiceDiscovery == true)
         #expect(settings.effectiveUseLocalServiceDiscoveryByDefault == true)
-        #expect(settings.useHTTPSTrackersOnly == true)
-        #expect(settings.useHTTPSWebSeedsOnly == true)
+        #expect(settings.httpsTrackerPolicy == .require)
+        #expect(settings.httpsWebSeedPolicy == .require)
         #expect(settings.anonymousMode == false)
         #expect(settings.effectiveAnonymousMode == false)
 

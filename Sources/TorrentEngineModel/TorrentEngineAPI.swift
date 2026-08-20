@@ -91,8 +91,8 @@ package protocol TorrentEngineServicing: Sendable {
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
         enablePeerExchange: Bool,
-        allowNonHTTPSTrackers: Bool,
-        allowNonHTTPSWebSeeds: Bool,
+        httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride,
+        httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride,
         allowPreMetadataDHT: Bool
     ) async throws -> String
     func addTorrentFile(
@@ -102,8 +102,8 @@ package protocol TorrentEngineServicing: Sendable {
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
         enablePeerExchange: Bool,
-        allowNonHTTPSTrackers: Bool,
-        allowNonHTTPSWebSeeds: Bool
+        httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride,
+        httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride
     ) async throws -> String
     func previewTorrentFile(data: Data) async throws -> TorrentFilePreview
     func pause(id: String) async throws
@@ -134,7 +134,7 @@ package protocol TorrentEngineServicing: Sendable {
     ) async throws -> TorrentEnginePollResult
     func requestSources(id: String) async throws
     func sourcePolicy(id: String) async throws -> TorrentSourcePolicy
-    func setSourcePolicy(id: String, field: TorrentSourcePolicyField, enabled: Bool) async throws
+    func setSourcePolicy(id: String, mutation: TorrentSourcePolicyMutation) async throws
     func torrentOptions(id: String) async throws -> TorrentOptions
     func setTorrentOptions(id: String, options: TorrentOptions) async throws
     func moveTorrentInQueue(id: String, move: TorrentQueueMove) async throws

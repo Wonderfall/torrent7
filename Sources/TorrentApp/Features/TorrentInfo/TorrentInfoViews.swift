@@ -63,8 +63,14 @@ private struct TorrentInfoOptionsRefreshID: Hashable, Sendable {
     let usesPeerExchangeByDefault: Bool
     let enablesLocalServiceDiscovery: Bool
     let usesLocalServiceDiscoveryByDefault: Bool
-    let usesHTTPSTrackersOnly: Bool
-    let usesHTTPSWebSeedsOnly: Bool
+    let httpsTrackerPolicy: TorrentHTTPSTrackerPolicy
+    let httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicy
+}
+
+private enum TorrentInfoSourcePolicyMutationKey: Hashable, Sendable {
+    case boolean(TorrentSourcePolicyField)
+    case httpsTracker
+    case httpsWebSeed
 }
 
 struct TorrentInfoWindow: View {
@@ -241,9 +247,9 @@ private struct TorrentInfoView: View {
     @State private var sourcePolicy: TorrentSourcePolicy?
     @State private var sourcePolicyMutationGeneration: UInt64 = 0
     @State private var sourcePolicyMutationTasks =
-        [TorrentSourcePolicyField: Task<Void, Never>]()
+        [TorrentInfoSourcePolicyMutationKey: Task<Void, Never>]()
     @State private var sourcePolicyMutationTaskIDs =
-        [TorrentSourcePolicyField: UUID]()
+        [TorrentInfoSourcePolicyMutationKey: UUID]()
     @State private var torrentOptionsMutationGeneration: UInt64 = 0
     @State private var torrentOptionsMutationTask: Task<Void, Never>?
     @State private var torrentOptionsMutationTaskID: UUID?
@@ -752,11 +758,19 @@ private struct TorrentInfoView: View {
                         .help(localServiceDiscoveryPolicyHelp(for: sourcePolicy))
                 }
 
-                Toggle("Use HTTPS trackers only", isOn: sourcePolicyBinding(.httpsTrackersOnly))
-                    .help("Ignore non-HTTPS trackers for this torrent.")
+                Picker("Tracker policy", selection: httpsTrackerPolicyBinding) {
+                    ForEach(TorrentHTTPSTrackerPolicyOverride.allCases) { policy in
+                        Text(httpsTrackerPolicyTitle(policy)).tag(policy)
+                    }
+                }
+                .help("Override the global HTTPS tracker policy for this torrent.")
 
-                Toggle("Use HTTPS web seeds only", isOn: sourcePolicyBinding(.httpsWebSeedsOnly))
-                    .help("Ignore non-HTTPS web seeds for this torrent.")
+                Picker("Web seed policy", selection: httpsWebSeedPolicyBinding) {
+                    ForEach(TorrentHTTPSWebSeedPolicyOverride.allCases) { policy in
+                        Text(httpsWebSeedPolicyTitle(policy)).tag(policy)
+                    }
+                }
+                .help("Override the global HTTPS web seed policy for this torrent.")
             } else {
                 HStack {
                     Text("Loading Policy")
@@ -1000,8 +1014,8 @@ private struct TorrentInfoView: View {
                 settings.effectiveEnableLocalServiceDiscovery,
             usesLocalServiceDiscoveryByDefault:
                 settings.effectiveUseLocalServiceDiscoveryByDefault,
-            usesHTTPSTrackersOnly: settings.useHTTPSTrackersOnly,
-            usesHTTPSWebSeedsOnly: settings.useHTTPSWebSeedsOnly
+            httpsTrackerPolicy: settings.httpsTrackerPolicy,
+            httpsWebSeedPolicy: settings.httpsWebSeedPolicy
         )
     }
 
@@ -1372,6 +1386,68 @@ private struct TorrentInfoView: View {
         }
     }
 
+    private var httpsTrackerPolicyBinding: Binding<TorrentHTTPSTrackerPolicyOverride> {
+        Binding {
+            sourcePolicy?.httpsTrackerPolicy ?? .inherit
+        } set: { newValue in
+            guard var updatedPolicy = sourcePolicy else {
+                return
+            }
+            updatedPolicy.httpsTrackerPolicy = newValue
+            updatedPolicy.effectiveHTTPSTrackerPolicy = switch newValue {
+            case .inherit:
+                store.settings.httpsTrackerPolicy
+            case .original:
+                .original
+            case .prefer:
+                .prefer
+            case .require:
+                .require
+            }
+            sourcePolicy = updatedPolicy
+            scheduleSourcePolicyMutation(
+                key: .httpsTracker,
+                mutation: .httpsTracker(newValue)
+            )
+        }
+    }
+
+    private var httpsWebSeedPolicyBinding: Binding<TorrentHTTPSWebSeedPolicyOverride> {
+        Binding {
+            sourcePolicy?.httpsWebSeedPolicy ?? .inherit
+        } set: { newValue in
+            guard var updatedPolicy = sourcePolicy else {
+                return
+            }
+            updatedPolicy.httpsWebSeedPolicy = newValue
+            updatedPolicy.effectiveHTTPSWebSeedPolicy = switch newValue {
+            case .inherit:
+                store.settings.httpsWebSeedPolicy
+            case .original:
+                .original
+            case .require:
+                .require
+            }
+            sourcePolicy = updatedPolicy
+            scheduleSourcePolicyMutation(
+                key: .httpsWebSeed,
+                mutation: .httpsWebSeed(newValue)
+            )
+        }
+    }
+
+    private func httpsTrackerPolicyTitle(_ policy: TorrentHTTPSTrackerPolicyOverride) -> String {
+        policy == .inherit
+            ? "Inherit (\(store.settings.httpsTrackerPolicy.title))"
+            : policy.title
+    }
+
+    private func httpsWebSeedPolicyTitle(_ policy: TorrentHTTPSWebSeedPolicyOverride) -> String {
+        policy == .inherit
+            ? "Inherit (\(store.settings.httpsWebSeedPolicy.title))"
+            : policy.title
+    }
+
     private var dhtPolicyBinding: Binding<Bool> {
         Binding {
             guard let sourcePolicy, !isDHTPolicyDisabled(for: sourcePolicy) else {
@@ -1423,6 +1499,17 @@ private struct TorrentInfoView: View {
         }
         updatedPolicy[field] = newValue
         sourcePolicy = updatedPolicy
+        scheduleSourcePolicyMutation(
+            key: .boolean(field),
+            mutation: .boolean(field: field, enabled: newValue)
+        )
+    }
+
+    @MainActor
+    private func scheduleSourcePolicyMutation(
+        key: TorrentInfoSourcePolicyMutationKey,
+        mutation: TorrentSourcePolicyMutation
+    ) {
         precondition(
             sourcePolicyMutationGeneration != UInt64.max,
             "Source-policy mutation generation exhausted"
@@ -1431,18 +1518,17 @@ private struct TorrentInfoView: View {
         let mutationGeneration = sourcePolicyMutationGeneration
         let torrentID = torrent.id
         let taskID = UUID()
-        sourcePolicyMutationTasks[field]?.cancel()
-        sourcePolicyMutationTaskIDs[field] = taskID
-        sourcePolicyMutationTasks[field] = Task { @MainActor in
+        sourcePolicyMutationTasks[key]?.cancel()
+        sourcePolicyMutationTaskIDs[key] = taskID
+        sourcePolicyMutationTasks[key] = Task { @MainActor in
             defer {
-                if sourcePolicyMutationTaskIDs[field] == taskID {
-                    sourcePolicyMutationTasks.removeValue(forKey: field)
-                    sourcePolicyMutationTaskIDs.removeValue(forKey: field)
+                if sourcePolicyMutationTaskIDs[key] == taskID {
+                    sourcePolicyMutationTasks.removeValue(forKey: key)
+                    sourcePolicyMutationTaskIDs.removeValue(forKey: key)
                 }
             }
             await setSourcePolicy(
-                field: field,
-                enabled: newValue,
+                mutation: mutation,
                 torrentID: torrentID,
                 mutationGeneration: mutationGeneration
             )
@@ -1502,13 +1588,12 @@ private struct TorrentInfoView: View {
 
     @MainActor
     private func setSourcePolicy(
-        field: TorrentSourcePolicyField,
-        enabled: Bool,
+        mutation: TorrentSourcePolicyMutation,
         torrentID: TorrentItem.ID,
         mutationGeneration: UInt64
     ) async {
         do {
-            try await store.setSourcePolicy(for: torrentID, field: field, enabled: enabled)
+            try await store.setSourcePolicy(for: torrentID, mutation: mutation)
             guard isCurrentSourcePolicyMutation(mutationGeneration) else {
                 return
             }

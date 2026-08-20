@@ -333,7 +333,7 @@ struct AddTorrentConfirmationView: View {
         } else if let sourceSecuritySummary,
                   showsSourcePolicySection(for: sourceSecuritySummary) {
             Section {
-                if store.settings.useHTTPSTrackersOnly && sourceSecuritySummary.hasNonHTTPSTrackers {
+                if store.settings.httpsTrackerPolicy == .require && sourceSecuritySummary.hasNonHTTPSTrackers {
                     sourcePolicyRow(
                         count: sourceSecuritySummary.nonHTTPSTrackerCount,
                         singular: "tracker",
@@ -342,7 +342,7 @@ struct AddTorrentConfirmationView: View {
                     )
                 }
 
-                if store.settings.useHTTPSWebSeedsOnly && sourceSecuritySummary.hasNonHTTPSWebSeeds {
+                if store.settings.httpsWebSeedPolicy == .require && sourceSecuritySummary.hasNonHTTPSWebSeeds {
                     sourcePolicyRow(
                         count: sourceSecuritySummary.nonHTTPSWebSeedCount,
                         singular: "web seed",
@@ -704,8 +704,8 @@ struct AddTorrentConfirmationView: View {
     }
 
     private func showsSourcePolicySection(for summary: TorrentSourceSecuritySummary) -> Bool {
-        (store.settings.useHTTPSTrackersOnly && summary.hasNonHTTPSTrackers)
-            || (store.settings.useHTTPSWebSeedsOnly && summary.hasNonHTTPSWebSeeds)
+        (store.settings.httpsTrackerPolicy == .require && summary.hasNonHTTPSTrackers)
+            || (store.settings.httpsWebSeedPolicy == .require && summary.hasNonHTTPSWebSeeds)
             || needsPreMetadataDHTConsent(for: summary)
     }
 
@@ -713,7 +713,7 @@ struct AddTorrentConfirmationView: View {
         guard draft.magnetURI != nil else {
             return false
         }
-        return store.settings.useHTTPSTrackersOnly
+        return store.settings.httpsTrackerPolicy == .require
             ? summary.httpsTrackerCount == 0
             : summary.trackerCount == 0
     }

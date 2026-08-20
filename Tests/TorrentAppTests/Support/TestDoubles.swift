@@ -546,8 +546,8 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
         enablePeerExchange: Bool,
-        allowNonHTTPSTrackers: Bool,
-        allowNonHTTPSWebSeeds: Bool,
+        httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride,
+        httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride,
         allowPreMetadataDHT: Bool
     )]()
     private(set) var addedTorrentFiles = [(
@@ -557,8 +557,8 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
         enablePeerExchange: Bool,
-        allowNonHTTPSTrackers: Bool,
-        allowNonHTTPSWebSeeds: Bool
+        httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride,
+        httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride
     )]()
     private var addMagnetSuspensionCount = 0
     private var addMagnetContinuations = [CheckedContinuation<Void, Never>]()
@@ -577,7 +577,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private(set) var webSeedBatchRequests = [(id: String, revision: UInt64?)]()
     private(set) var fileBatchRequests = [(id: String, revision: UInt64?)]()
     private(set) var pieceMapBatchRequests = [(id: String, revision: UInt64?)]()
-    private(set) var sourcePolicyUpdates = [(id: String, field: TorrentSourcePolicyField, enabled: Bool)]()
+    private(set) var sourcePolicyUpdates = [(id: String, mutation: TorrentSourcePolicyMutation)]()
     private(set) var torrentOptionsUpdates = [(id: String, options: TorrentOptions)]()
     private(set) var filePriorityUpdates = [(id: String, fileIndex: Int32, priority: TorrentFilePriority)]()
     private(set) var queueMoves = [(id: String, move: TorrentQueueMove)]()
@@ -587,8 +587,10 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         isDHTEnabled: true,
         isPeerExchangeEnabled: true,
         isLocalServiceDiscoveryEnabled: true,
-        usesHTTPSTrackersOnly: false,
-        usesHTTPSWebSeedsOnly: false,
+        httpsTrackerPolicy: .inherit,
+        httpsWebSeedPolicy: .inherit,
+        effectiveHTTPSTrackerPolicy: .prefer,
+        effectiveHTTPSWebSeedPolicy: .require,
         isDHTLocked: false,
         isPeerExchangeLocked: false,
         isLocalServiceDiscoveryLocked: false,
@@ -985,8 +987,8 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
         enablePeerExchange: Bool,
-        allowNonHTTPSTrackers: Bool,
-        allowNonHTTPSWebSeeds: Bool,
+        httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride,
+        httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride,
         allowPreMetadataDHT: Bool
     ) async throws -> String {
         operations.append(.addMagnet(
@@ -999,8 +1001,8 @@ actor FakeTorrentEngine: TorrentEngineServicing {
             startsPaused,
             queuePriority,
             enablePeerExchange,
-            allowNonHTTPSTrackers,
-            allowNonHTTPSWebSeeds,
+            httpsTrackerPolicy,
+            httpsWebSeedPolicy,
             allowPreMetadataDHT
         ))
         if addMagnetSuspensionCount > 0 {
@@ -1022,10 +1024,19 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
         enablePeerExchange: Bool,
-        allowNonHTTPSTrackers: Bool,
-        allowNonHTTPSWebSeeds: Bool
+        httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride,
+        httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride
     ) async throws -> String {
-        addedTorrentFiles.append((data, savePath, filePriorities, startsPaused, queuePriority, enablePeerExchange, allowNonHTTPSTrackers, allowNonHTTPSWebSeeds))
+        addedTorrentFiles.append((
+            data,
+            savePath,
+            filePriorities,
+            startsPaused,
+            queuePriority,
+            enablePeerExchange,
+            httpsTrackerPolicy,
+            httpsWebSeedPolicy
+        ))
         return nextAddedTorrentFileID
     }
 
@@ -1224,9 +1235,16 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         sourcePolicyValue
     }
 
-    func setSourcePolicy(id: String, field: TorrentSourcePolicyField, enabled: Bool) async throws {
-        sourcePolicyUpdates.append((id, field, enabled))
-        sourcePolicyValue[field] = enabled
+    func setSourcePolicy(id: String, mutation: TorrentSourcePolicyMutation) async throws {
+        sourcePolicyUpdates.append((id, mutation))
+        switch mutation {
+        case .boolean(let field, let enabled):
+            sourcePolicyValue[field] = enabled
+        case .httpsTracker(let policy):
+            sourcePolicyValue.httpsTrackerPolicy = policy
+        case .httpsWebSeed(let policy):
+            sourcePolicyValue.httpsWebSeedPolicy = policy
+        }
     }
 
     func torrentOptions(id: String) async throws -> TorrentOptions {

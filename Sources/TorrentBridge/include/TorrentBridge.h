@@ -90,13 +90,17 @@ inline constexpr int32_t TTORRENT_REMOVAL_FAILED = 2;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_ENABLE_DHT = 0;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_ENABLE_PEER_EXCHANGE = 1;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_ENABLE_LSD = 2;
-inline constexpr int32_t TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS = 3;
-inline constexpr int32_t TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS = 4;
+inline constexpr int32_t TTORRENT_SOURCE_POLICY_HTTPS_TRACKER_POLICY = 3;
+inline constexpr int32_t TTORRENT_SOURCE_POLICY_HTTPS_WEB_SEED_POLICY = 4;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT = 5;
+inline constexpr uint8_t TTORRENT_HTTPS_POLICY_INHERIT = 0;
+inline constexpr uint8_t TTORRENT_HTTPS_POLICY_ORIGINAL = 1;
+inline constexpr uint8_t TTORRENT_HTTPS_POLICY_PREFER = 2;
+inline constexpr uint8_t TTORRENT_HTTPS_POLICY_REQUIRE = 3;
 inline constexpr uint8_t TTORRENT_CONTENT_KIND_UNKNOWN = 0;
 inline constexpr uint8_t TTORRENT_CONTENT_KIND_SINGLE_FILE = 1;
 inline constexpr uint8_t TTORRENT_CONTENT_KIND_DIRECTORY = 2;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 41;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 42;
 namespace torrent_bridge::internal {
 struct TTorrentClient;
 }
@@ -154,13 +158,17 @@ enum {
     TTORRENT_SOURCE_POLICY_ENABLE_DHT = 0,
     TTORRENT_SOURCE_POLICY_ENABLE_PEER_EXCHANGE = 1,
     TTORRENT_SOURCE_POLICY_ENABLE_LSD = 2,
-    TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS = 3,
-    TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS = 4,
+    TTORRENT_SOURCE_POLICY_HTTPS_TRACKER_POLICY = 3,
+    TTORRENT_SOURCE_POLICY_HTTPS_WEB_SEED_POLICY = 4,
     TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT = 5,
+    TTORRENT_HTTPS_POLICY_INHERIT = 0,
+    TTORRENT_HTTPS_POLICY_ORIGINAL = 1,
+    TTORRENT_HTTPS_POLICY_PREFER = 2,
+    TTORRENT_HTTPS_POLICY_REQUIRE = 3,
     TTORRENT_CONTENT_KIND_UNKNOWN = 0,
     TTORRENT_CONTENT_KIND_SINGLE_FILE = 1,
     TTORRENT_CONTENT_KIND_DIRECTORY = 2,
-    TTORRENT_BRIDGE_ABI_VERSION = 41
+    TTORRENT_BRIDGE_ABI_VERSION = 42
 };
 #endif
 
@@ -312,8 +320,8 @@ typedef struct TTorrentSessionSettings {
     uint8_t enable_lsd;
     uint8_t use_lsd_by_default;
     uint8_t use_pex_by_default;
-    uint8_t require_https_trackers;
-    uint8_t require_https_web_seeds;
+    uint8_t https_tracker_policy;
+    uint8_t https_web_seed_policy;
     int32_t encryption_policy;
     uint8_t anonymous_mode;
     uint8_t network_blocked;
@@ -340,8 +348,10 @@ typedef struct TTorrentSourcePolicy {
     uint8_t enable_dht;
     uint8_t enable_peer_exchange;
     uint8_t enable_lsd;
-    uint8_t require_https_trackers;
-    uint8_t require_https_web_seeds;
+    uint8_t https_tracker_policy;
+    uint8_t https_web_seed_policy;
+    uint8_t effective_https_tracker_policy;
+    uint8_t effective_https_web_seed_policy;
     uint8_t dht_locked;
     uint8_t peer_exchange_locked;
     uint8_t lsd_locked;
@@ -353,8 +363,8 @@ typedef struct TTorrentAddOptions {
     uint8_t starts_paused;
     uint8_t queue_priority;
     uint8_t enable_peer_exchange;
-    uint8_t allow_non_https_trackers;
-    uint8_t allow_non_https_web_seeds;
+    uint8_t https_tracker_policy;
+    uint8_t https_web_seed_policy;
     uint8_t allow_pre_metadata_dht;
 } TTorrentAddOptions;
 
@@ -591,7 +601,7 @@ int32_t TorrentClientSetSourcePolicyField(
     TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
     const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED torrent_id TORRENT_BRIDGE_NOESCAPE,
     int32_t field,
-    uint8_t enabled,
+    int32_t value,
     char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;

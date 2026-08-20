@@ -800,7 +800,10 @@ TEST_CASE("source validation applies after HTTPS source filtering")
     params.url_seeds.resize(static_cast<std::size_t>(TTORRENT_MAX_WEB_SEED_COUNT) + 1U, "http://seed.example/file");
     params.url_seeds.push_back("https://secure-seed.example/file");
 
-    REQUIRE(filter_non_https_sources(params, true, true));
+    REQUIRE(apply_https_source_policy(
+        params,
+        HTTPSSourcePolicy{.trackers = HTTPSPolicy::require, .web_seeds = HTTPSPolicy::require}
+    ));
 
     CHECK(validate_torrent_sources(params).has_value());
     CHECK(params.trackers == std::vector<std::string>{"https://secure-tracker.example/announce"});
@@ -900,7 +903,7 @@ TEST_CASE("torrent file data preview applies duplicate filename renames from add
     CHECK(std::string(files.at(1).path) == renamed->second);
 }
 
-TEST_CASE("filtering non-HTTPS sources keeps tracker tiers aligned")
+TEST_CASE("requiring HTTPS sources keeps tracker tiers aligned")
 {
     lt::add_torrent_params params = bridge_tests::add_params_with_hashes();
     params.trackers = {
@@ -913,7 +916,10 @@ TEST_CASE("filtering non-HTTPS sources keeps tracker tiers aligned")
     params.url_seeds.push_back("http://seed.example/file");
     params.url_seeds.push_back("https://secure-seed.example/file");
 
-    CHECK(filter_non_https_sources(params));
+    CHECK(apply_https_source_policy(
+        params,
+        HTTPSSourcePolicy{.trackers = HTTPSPolicy::require, .web_seeds = HTTPSPolicy::require}
+    ));
 
     std::vector<std::string> const expected_trackers{
         "https://secure-tracker.example/announce",
@@ -929,7 +935,56 @@ TEST_CASE("filtering non-HTTPS sources keeps tracker tiers aligned")
     CHECK(std::vector<std::string>(params.url_seeds.begin(), params.url_seeds.end()) == expected_url_seeds);
 }
 
-TEST_CASE("filtering non-HTTPS sources can target trackers only")
+TEST_CASE("preferring HTTPS creates secure leading tiers with insecure fallback")
+{
+    lt::add_torrent_params params = bridge_tests::add_params_with_hashes();
+    params.trackers = {
+        "http://first-fallback.example/announce",
+        "https://first-secure.example/announce",
+        "https://second-secure.example/announce",
+        "udp://second-fallback.example/announce",
+        "http://third-fallback.example/announce",
+    };
+    params.tracker_tiers = {0, 1, 1, 2, 2};
+    params.url_seeds = {
+        "http://seed.example/file",
+        "https://secure-seed.example/file",
+    };
+
+    CHECK(apply_https_source_policy(
+        params,
+        HTTPSSourcePolicy{.trackers = HTTPSPolicy::prefer, .web_seeds = HTTPSPolicy::original}
+    ));
+
+    CHECK(params.trackers == std::vector<std::string>{
+        "https://first-secure.example/announce",
+        "https://second-secure.example/announce",
+        "http://first-fallback.example/announce",
+        "udp://second-fallback.example/announce",
+        "http://third-fallback.example/announce",
+    });
+    CHECK(params.tracker_tiers == std::vector<int>{0, 0, 1, 2, 2});
+    CHECK(params.url_seeds == std::vector<std::string>{
+        "http://seed.example/file",
+        "https://secure-seed.example/file",
+    });
+}
+
+TEST_CASE("original HTTPS policy preserves source order and tiers")
+{
+    lt::add_torrent_params params = make_source_torrent_params();
+    lt::add_torrent_params const original = params;
+
+    CHECK_FALSE(apply_https_source_policy(
+        params,
+        HTTPSSourcePolicy{.trackers = HTTPSPolicy::original, .web_seeds = HTTPSPolicy::original}
+    ));
+    CHECK(params.trackers == original.trackers);
+    CHECK(params.tracker_tiers == original.tracker_tiers);
+    CHECK(params.url_seeds == original.url_seeds);
+}
+
+TEST_CASE("requiring HTTPS can target trackers only")
 {
     lt::add_torrent_params params = bridge_tests::add_params_with_hashes();
     params.trackers = {
@@ -940,7 +995,10 @@ TEST_CASE("filtering non-HTTPS sources can target trackers only")
     params.url_seeds.push_back("http://seed.example/file");
     params.url_seeds.push_back("https://secure-seed.example/file");
 
-    CHECK(filter_non_https_sources(params, true, false));
+    CHECK(apply_https_source_policy(
+        params,
+        HTTPSSourcePolicy{.trackers = HTTPSPolicy::require, .web_seeds = HTTPSPolicy::original}
+    ));
 
     std::vector<std::string> const expected_trackers{"https://secure-tracker.example/announce"};
     std::vector<std::string> const expected_url_seeds{
@@ -951,7 +1009,7 @@ TEST_CASE("filtering non-HTTPS sources can target trackers only")
     CHECK(std::vector<std::string>(params.url_seeds.begin(), params.url_seeds.end()) == expected_url_seeds);
 }
 
-TEST_CASE("filtering non-HTTPS sources can target web seeds only")
+TEST_CASE("requiring HTTPS can target web seeds only")
 {
     lt::add_torrent_params params = bridge_tests::add_params_with_hashes();
     params.trackers = {
@@ -962,7 +1020,10 @@ TEST_CASE("filtering non-HTTPS sources can target web seeds only")
     params.url_seeds.push_back("http://seed.example/file");
     params.url_seeds.push_back("https://secure-seed.example/file");
 
-    CHECK(filter_non_https_sources(params, false, true));
+    CHECK(apply_https_source_policy(
+        params,
+        HTTPSSourcePolicy{.trackers = HTTPSPolicy::original, .web_seeds = HTTPSPolicy::require}
+    ));
 
     std::vector<std::string> const expected_trackers{
         "http://tracker.example/announce",
@@ -973,11 +1034,14 @@ TEST_CASE("filtering non-HTTPS sources can target web seeds only")
     CHECK(std::vector<std::string>(params.url_seeds.begin(), params.url_seeds.end()) == expected_url_seeds);
 }
 
-TEST_CASE("filtering non-HTTPS sources filters loaded torrent sources")
+TEST_CASE("requiring HTTPS filters loaded torrent sources")
 {
     lt::add_torrent_params params = make_source_torrent_params();
 
-    CHECK(filter_non_https_sources(params));
+    CHECK(apply_https_source_policy(
+        params,
+        HTTPSSourcePolicy{.trackers = HTTPSPolicy::require, .web_seeds = HTTPSPolicy::require}
+    ));
 
     TorrentSourceCounts const counts = torrent_source_counts(params);
     CHECK(counts.tracker_count == 1);
@@ -1069,16 +1133,16 @@ TEST_CASE("resume encoding uses captured source policy snapshot")
     lt::add_torrent_params params = bridge_tests::add_params_with_hashes();
     TorrentIdentity identity;
     identity.canonical_id = "t:0123456789abcdef0123456789abcdef";
-    identity.allows_non_https_trackers = true;
-    identity.requires_https_web_seeds = true;
+    identity.https_tracker_policy = HTTPSPolicy::original;
+    identity.https_web_seed_policy = HTTPSPolicy::require;
     identity.dht_disabled_by_user = true;
     identity.lsd_disabled_by_user = true;
     identity.source_trackers.emplace_back("http://tracker.example/announce");
 
     ResumePolicySnapshot const snapshot = resume_policy_snapshot(&identity, false, true, true, false);
 
-    identity.allows_non_https_trackers = false;
-    identity.requires_https_web_seeds = false;
+    identity.https_tracker_policy = HTTPSPolicy::inherit;
+    identity.https_web_seed_policy = HTTPSPolicy::inherit;
     identity.dht_disabled_by_user = false;
     identity.lsd_disabled_by_user = false;
     identity.source_trackers.clear();
@@ -1086,12 +1150,24 @@ TEST_CASE("resume encoding uses captured source policy snapshot")
     std::vector<char> const encoded = encoded_resume_data(params, snapshot);
 
     CHECK(canonical_id_from_resume_data(encoded) == "t:0123456789abcdef0123456789abcdef");
-    CHECK(allow_non_https_trackers_from_resume_data(encoded));
-    CHECK(require_https_web_seeds_from_resume_data(encoded));
+    CHECK(https_tracker_policy_from_resume_data(encoded) == HTTPSPolicy::original);
+    CHECK(https_web_seed_policy_from_resume_data(encoded) == HTTPSPolicy::require);
     CHECK(disable_dht_from_resume_data(encoded));
     CHECK(app_disabled_dht_from_resume_data(encoded));
     CHECK(disable_lsd_from_resume_data(encoded));
     CHECK(app_disabled_lsd_from_resume_data(encoded));
+}
+
+TEST_CASE("legacy HTTPS resume booleans migrate to explicit policies")
+{
+    lt::entry legacy;
+    legacy.dict().insert_or_assign(std::string(kAllowNonHTTPSTrackersResumeKey), lt::entry(1));
+    legacy.dict().insert_or_assign(std::string(kRequireHTTPSWebSeedsResumeKey), lt::entry(1));
+    std::vector<char> encoded;
+    lt::bencode(std::back_inserter(encoded), legacy);
+
+    CHECK(https_tracker_policy_from_resume_data(encoded) == HTTPSPolicy::original);
+    CHECK(https_web_seed_policy_from_resume_data(encoded) == HTTPSPolicy::require);
 }
 
 TEST_CASE("resume encoding records explicit pre-metadata DHT consent only for a pending validation")

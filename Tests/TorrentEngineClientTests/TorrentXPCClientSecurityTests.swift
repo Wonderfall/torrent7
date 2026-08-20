@@ -319,8 +319,8 @@ struct TorrentXPCClientSecurityTests {
                 startsPaused: false,
                 queuePriority: .normal,
                 enablePeerExchange: false,
-                allowNonHTTPSTrackers: false,
-                allowNonHTTPSWebSeeds: false,
+                httpsTrackerPolicy: .inherit,
+                httpsWebSeedPolicy: .inherit,
                 allowPreMetadataDHT: false
             )
         }
@@ -678,8 +678,8 @@ struct TorrentXPCClientSecurityTests {
             startsPaused: false,
             queuePriority: .normal,
             enablePeerExchange: false,
-            allowNonHTTPSTrackers: false,
-            allowNonHTTPSWebSeeds: false
+            httpsTrackerPolicy: .inherit,
+            httpsWebSeedPolicy: .inherit
         )
 
         #expect(identifier == torrentID)
@@ -2331,8 +2331,8 @@ struct TorrentXPCClientSecurityTests {
             startsPaused: false,
             queuePriority: .normal,
             enablePeerExchange: false,
-            allowNonHTTPSTrackers: false,
-            allowNonHTTPSWebSeeds: false,
+            httpsTrackerPolicy: .inherit,
+            httpsWebSeedPolicy: .inherit,
             allowPreMetadataDHT: false
         )
     }

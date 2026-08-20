@@ -52,8 +52,8 @@ package actor TorrentUnavailableEngine: TorrentEngineServicing {
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
         enablePeerExchange: Bool,
-        allowNonHTTPSTrackers: Bool,
-        allowNonHTTPSWebSeeds: Bool,
+        httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride,
+        httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride,
         allowPreMetadataDHT: Bool
     ) throws -> String {
         _ = magnet
@@ -61,8 +61,8 @@ package actor TorrentUnavailableEngine: TorrentEngineServicing {
         _ = startsPaused
         _ = queuePriority
         _ = enablePeerExchange
-        _ = allowNonHTTPSTrackers
-        _ = allowNonHTTPSWebSeeds
+        _ = httpsTrackerPolicy
+        _ = httpsWebSeedPolicy
         _ = allowPreMetadataDHT
         throw unavailableError
     }
@@ -74,8 +74,8 @@ package actor TorrentUnavailableEngine: TorrentEngineServicing {
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
         enablePeerExchange: Bool,
-        allowNonHTTPSTrackers: Bool,
-        allowNonHTTPSWebSeeds: Bool
+        httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride,
+        httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride
     ) throws -> String {
         _ = data
         _ = savePath
@@ -83,8 +83,8 @@ package actor TorrentUnavailableEngine: TorrentEngineServicing {
         _ = startsPaused
         _ = queuePriority
         _ = enablePeerExchange
-        _ = allowNonHTTPSTrackers
-        _ = allowNonHTTPSWebSeeds
+        _ = httpsTrackerPolicy
+        _ = httpsWebSeedPolicy
         throw unavailableError
     }
 
@@ -134,12 +134,10 @@ package actor TorrentUnavailableEngine: TorrentEngineServicing {
 
     package func setSourcePolicy(
         id: String,
-        field: TorrentSourcePolicyField,
-        enabled: Bool
+        mutation: TorrentSourcePolicyMutation
     ) throws {
         _ = id
-        _ = field
-        _ = enabled
+        _ = mutation
         throw unavailableError
     }
 

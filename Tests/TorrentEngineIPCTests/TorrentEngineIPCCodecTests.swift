@@ -427,8 +427,8 @@ struct TorrentEngineIPCEnvelopeTests {
             startsPaused: false,
             queuePriority: .normal,
             enablePeerExchange: false,
-            allowNonHTTPSTrackers: false,
-            allowNonHTTPSWebSeeds: false
+            httpsTrackerPolicy: .inherit,
+            httpsWebSeedPolicy: .inherit
         )
 
         _ = try TorrentEngineIPCJSONCodec.encode(

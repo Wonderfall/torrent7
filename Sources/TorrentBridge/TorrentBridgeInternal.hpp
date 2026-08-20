@@ -121,6 +121,9 @@ constexpr std::string_view kRemovalTombstonePrefix = "removal-";
 constexpr std::string_view kCanonicalIDResumeKey = "torrent-app-id";
 constexpr std::string_view kMetadataValidationPendingResumeKey = "torrent-app-metadata-validation-pending";
 constexpr std::string_view kAllowPreMetadataDHTResumeKey = "torrent-app-allow-pre-metadata-dht";
+constexpr std::string_view kHTTPSTrackerPolicyResumeKey = "torrent-app-https-tracker-policy";
+constexpr std::string_view kHTTPSWebSeedPolicyResumeKey = "torrent-app-https-web-seed-policy";
+// Read-only migration keys written by releases before explicit HTTPS policies.
 constexpr std::string_view kAllowNonHTTPSTrackersResumeKey = "torrent-app-allow-non-https-trackers";
 constexpr std::string_view kAllowNonHTTPSWebSeedsResumeKey = "torrent-app-allow-non-https-web-seeds";
 constexpr std::string_view kRequireHTTPSTrackersResumeKey = "torrent-app-require-https-trackers";
@@ -140,6 +143,50 @@ constexpr std::string_view kNetworkClientIdentity = "libtorrent/2.1";
 // Keep the BitTorrent peer ID coarse and stable across the 2.1.x series, just
 // like the HTTP user agent and extension handshake identity above.
 constexpr std::string_view kCoarsePeerFingerprint = "-LT2100-";
+
+enum class HTTPSPolicy : std::uint8_t {
+    inherit = TTORRENT_HTTPS_POLICY_INHERIT,
+    original = TTORRENT_HTTPS_POLICY_ORIGINAL,
+    prefer = TTORRENT_HTTPS_POLICY_PREFER,
+    require = TTORRENT_HTTPS_POLICY_REQUIRE,
+};
+
+struct HTTPSSourcePolicy {
+    HTTPSPolicy trackers;
+    HTTPSPolicy web_seeds;
+};
+
+constexpr bool is_valid_https_tracker_policy(int32_t const value, bool const allow_inherit) noexcept
+{
+    switch (value) {
+    case TTORRENT_HTTPS_POLICY_INHERIT:
+        return allow_inherit;
+    case TTORRENT_HTTPS_POLICY_ORIGINAL:
+    case TTORRENT_HTTPS_POLICY_PREFER:
+    case TTORRENT_HTTPS_POLICY_REQUIRE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+constexpr bool is_valid_https_web_seed_policy(int32_t const value, bool const allow_inherit) noexcept
+{
+    switch (value) {
+    case TTORRENT_HTTPS_POLICY_INHERIT:
+        return allow_inherit;
+    case TTORRENT_HTTPS_POLICY_ORIGINAL:
+    case TTORRENT_HTTPS_POLICY_REQUIRE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+constexpr HTTPSPolicy https_policy_from_value(int32_t const value) noexcept
+{
+    return static_cast<HTTPSPolicy>(static_cast<std::uint8_t>(value));
+}
 constexpr int32_t kUnsetQueueRank = -1;
 constexpr std::size_t kOneKilobyte = 1024U;
 constexpr std::uintmax_t kOneMegabyte = static_cast<std::uintmax_t>(1024U) * 1024U;
@@ -208,7 +255,7 @@ static_assert(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES
                   * (TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES + 1));
 static_assert(kMaxTorrentIdentityTokenCount > static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 41U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 42U);
 static_assert(TTORRENT_ADD_REJECTED == 0);
 static_assert(TTORRENT_ADD_COMMITTED == 1);
 static_assert(TTORRENT_ADD_OUTCOME_UNKNOWN == 2);
@@ -328,7 +375,7 @@ static_assert(sizeof(TTorrentNetworkStatus) == 664U);
 static_assert(alignof(TTorrentNetworkStatus) == 8U);
 static_assert(sizeof(TTorrentBridgeHealth) == 536U);
 static_assert(alignof(TTorrentBridgeHealth) == 8U);
-static_assert(sizeof(TTorrentSourcePolicy) == 10U);
+static_assert(sizeof(TTorrentSourcePolicy) == 12U);
 static_assert(alignof(TTorrentSourcePolicy) == 1U);
 static_assert(sizeof(TTorrentAddOptions) == 6U);
 static_assert(alignof(TTorrentAddOptions) == 1U);
@@ -526,10 +573,8 @@ struct TorrentIdentity {
     std::string comment;
     std::time_t creation_date = 0;
     ResumeSaveState resume_save;
-    bool allows_non_https_trackers = false;
-    bool allows_non_https_web_seeds = false;
-    bool requires_https_trackers = false;
-    bool requires_https_web_seeds = false;
+    HTTPSPolicy https_tracker_policy = HTTPSPolicy::inherit;
+    HTTPSPolicy https_web_seed_policy = HTTPSPolicy::inherit;
     bool dht_enabled_by_user = false;
     bool dht_disabled_by_user = false;
     bool peer_exchange_enabled_by_user = false;
@@ -553,10 +598,8 @@ struct TorrentIdentity {
 struct ResumePolicySnapshot {
     bool has_identity = false;
     std::string canonical_id;
-    bool allows_non_https_trackers = false;
-    bool allows_non_https_web_seeds = false;
-    bool requires_https_trackers = false;
-    bool requires_https_web_seeds = false;
+    HTTPSPolicy https_tracker_policy = HTTPSPolicy::inherit;
+    HTTPSPolicy https_web_seed_policy = HTTPSPolicy::inherit;
     bool dht_enabled_by_user = false;
     bool dht_disabled_by_user = false;
     bool peer_exchange_enabled_by_user = false;
@@ -1075,13 +1118,9 @@ TorrentLoadResult parse_sanitized_magnet(std::string_view magnet);
 
 void sanitize_resume_endpoint_hints(lt::add_torrent_params &params) noexcept;
 
-bool allow_non_https_trackers_from_resume_data(std::vector<char> const &buffer);
+HTTPSPolicy https_tracker_policy_from_resume_data(std::vector<char> const &buffer);
 
-bool allow_non_https_web_seeds_from_resume_data(std::vector<char> const &buffer);
-
-bool require_https_trackers_from_resume_data(std::vector<char> const &buffer);
-
-bool require_https_web_seeds_from_resume_data(std::vector<char> const &buffer);
+HTTPSPolicy https_web_seed_policy_from_resume_data(std::vector<char> const &buffer);
 
 bool enable_dht_from_resume_data(std::vector<char> const &buffer);
 
@@ -1208,10 +1247,14 @@ TorrentSourceCounts torrent_source_counts(lt::add_torrent_params const &params);
 
 BridgeResult validate_torrent_sources(lt::add_torrent_params const &params);
 
-bool filter_non_https_sources(
+bool apply_https_source_policy(
     lt::add_torrent_params &params,
-    bool require_https_trackers = true,
-    bool require_https_web_seeds = true
+    HTTPSSourcePolicy policy
+);
+
+[[nodiscard]] std::vector<lt::announce_entry> trackers_for_https_policy(
+    std::vector<lt::announce_entry> trackers,
+    HTTPSPolicy policy
 );
 
 void remember_source_policy_sources(TorrentIdentity &identity, lt::add_torrent_params const &params);
@@ -1430,8 +1473,8 @@ struct TTorrentClient {
     bool lsd_enabled_by_default TORRENT_BRIDGE_GUARDED_BY(lock) = true;
     bool peer_exchange_plugin_enabled TORRENT_BRIDGE_GUARDED_BY(lock) = true;
     bool peer_exchange_enabled_by_default TORRENT_BRIDGE_GUARDED_BY(lock) = true;
-    bool require_https_trackers TORRENT_BRIDGE_GUARDED_BY(lock) = false;
-    bool require_https_web_seeds TORRENT_BRIDGE_GUARDED_BY(lock) = false;
+    HTTPSPolicy https_tracker_policy TORRENT_BRIDGE_GUARDED_BY(lock) = HTTPSPolicy::prefer;
+    HTTPSPolicy https_web_seed_policy TORRENT_BRIDGE_GUARDED_BY(lock) = HTTPSPolicy::require;
     bool has_listener TORRENT_BRIDGE_GUARDED_BY(lock) = false;
     int32_t listen_port TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
     std::string listen_endpoint TORRENT_BRIDGE_GUARDED_BY(lock);
@@ -1799,10 +1842,10 @@ struct TTorrentClient {
         TORRENT_BRIDGE_REQUIRES_NOT(resume_capture_lock)
         TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
 
-    [[nodiscard]] bool requires_https_trackers(TorrentIdentity const *identity) const noexcept
+    [[nodiscard]] HTTPSPolicy effective_https_tracker_policy(TorrentIdentity const *identity) const noexcept
         TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] bool requires_https_web_seeds(TorrentIdentity const *identity) const noexcept
+    [[nodiscard]] HTTPSPolicy effective_https_web_seed_policy(TorrentIdentity const *identity) const noexcept
         TORRENT_BRIDGE_REQUIRES(lock);
 
     [[nodiscard]] TTorrentSourcePolicy source_policy(lt::torrent_handle const &handle, TorrentIdentity const *identity) const
@@ -1812,7 +1855,7 @@ struct TTorrentClient {
         lt::torrent_handle const &handle,
         TorrentIdentity *identity,
         int32_t field,
-        bool enabled
+        int32_t value
     ) TORRENT_BRIDGE_REQUIRES(lock)
         TORRENT_BRIDGE_REQUIRES_NOT(resume_capture_lock)
         TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);

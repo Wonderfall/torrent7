@@ -123,8 +123,8 @@ package struct TorrentEngineIPCAddMagnetRequest: Codable, Equatable, Sendable {
     package let startsPaused: Bool
     package let queuePriority: TorrentQueuePriority
     package let enablePeerExchange: Bool
-    package let allowNonHTTPSTrackers: Bool
-    package let allowNonHTTPSWebSeeds: Bool
+    package let httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride
+    package let httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride
     package let allowPreMetadataDHT: Bool
 
     package init(
@@ -133,8 +133,8 @@ package struct TorrentEngineIPCAddMagnetRequest: Codable, Equatable, Sendable {
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
         enablePeerExchange: Bool,
-        allowNonHTTPSTrackers: Bool,
-        allowNonHTTPSWebSeeds: Bool,
+        httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride,
+        httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride,
         allowPreMetadataDHT: Bool
     ) {
         self.magnet = magnet
@@ -142,8 +142,8 @@ package struct TorrentEngineIPCAddMagnetRequest: Codable, Equatable, Sendable {
         self.startsPaused = startsPaused
         self.queuePriority = queuePriority
         self.enablePeerExchange = enablePeerExchange
-        self.allowNonHTTPSTrackers = allowNonHTTPSTrackers
-        self.allowNonHTTPSWebSeeds = allowNonHTTPSWebSeeds
+        self.httpsTrackerPolicy = httpsTrackerPolicy
+        self.httpsWebSeedPolicy = httpsWebSeedPolicy
         self.allowPreMetadataDHT = allowPreMetadataDHT
     }
 }
@@ -164,8 +164,8 @@ package struct TorrentEngineIPCAddTorrentFileRequest: Codable, Equatable, Sendab
     package let startsPaused: Bool
     package let queuePriority: TorrentQueuePriority
     package let enablePeerExchange: Bool
-    package let allowNonHTTPSTrackers: Bool
-    package let allowNonHTTPSWebSeeds: Bool
+    package let httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride
+    package let httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride
 
     package init(
         folderCapabilityID: UUID,
@@ -173,16 +173,16 @@ package struct TorrentEngineIPCAddTorrentFileRequest: Codable, Equatable, Sendab
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
         enablePeerExchange: Bool,
-        allowNonHTTPSTrackers: Bool,
-        allowNonHTTPSWebSeeds: Bool
+        httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride,
+        httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride
     ) {
         self.folderCapabilityID = folderCapabilityID
         self.filePriorities = filePriorities
         self.startsPaused = startsPaused
         self.queuePriority = queuePriority
         self.enablePeerExchange = enablePeerExchange
-        self.allowNonHTTPSTrackers = allowNonHTTPSTrackers
-        self.allowNonHTTPSWebSeeds = allowNonHTTPSWebSeeds
+        self.httpsTrackerPolicy = httpsTrackerPolicy
+        self.httpsWebSeedPolicy = httpsWebSeedPolicy
     }
 }
 
@@ -350,13 +350,11 @@ package struct TorrentEngineIPCCloseDatasetRequest: Codable, Equatable, Sendable
 
 package struct TorrentEngineIPCSetSourcePolicyRequest: Codable, Equatable, Sendable {
     package let id: String
-    package let field: TorrentSourcePolicyField
-    package let enabled: Bool
+    package let mutation: TorrentSourcePolicyMutation
 
-    package init(id: String, field: TorrentSourcePolicyField, enabled: Bool) {
+    package init(id: String, mutation: TorrentSourcePolicyMutation) {
         self.id = id
-        self.field = field
-        self.enabled = enabled
+        self.mutation = mutation
     }
 }
 

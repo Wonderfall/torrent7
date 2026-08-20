@@ -16,8 +16,8 @@ struct TorrentSettingsView: View {
     @State private var isShowingDHTInfo = false
     @State private var isShowingPeerExchangeInfo = false
     @State private var isShowingLocalServiceDiscoveryInfo = false
-    @State private var isShowingHTTPSTrackersOnlyInfo = false
-    @State private var isShowingHTTPSWebSeedsOnlyInfo = false
+    @State private var isShowingHTTPSTrackerPolicyInfo = false
+    @State private var isShowingHTTPSWebSeedPolicyInfo = false
     @State private var isShowingAnonymousModeInfo = false
     @State private var isShowingVPNOnlyInfo = false
     @State private var pendingRequireNetworkInterface: Bool?
@@ -228,7 +228,7 @@ struct TorrentSettingsView: View {
             dhtDiscoverySection
             peerExchangeDiscoverySection
             localDiscoverySection
-            httpsEnforcementSection
+            httpsSourcePolicySection
         }
         .formStyle(.grouped)
     }
@@ -412,10 +412,10 @@ struct TorrentSettingsView: View {
         }
     }
 
-    private var httpsEnforcementSection: some View {
-        Section("HTTPS Sources Enforcement") {
-            httpsTrackersOnlyRow
-            httpsWebSeedsOnlyRow
+    private var httpsSourcePolicySection: some View {
+        Section("HTTPS Source Policies") {
+            httpsTrackerPolicyRow
+            httpsWebSeedPolicyRow
         }
     }
 
@@ -604,13 +604,13 @@ struct TorrentSettingsView: View {
         .help(state.settings.showOnlyVPNInterfaces ? "Unavailable while using VPN interfaces only." : "Enable local peer discovery.")
     }
 
-    private var httpsTrackersOnlyRow: some View {
+    private var httpsTrackerPolicyRow: some View {
         HStack {
             HStack(spacing: 5) {
-                Text("Use HTTPS trackers only")
+                Text("Tracker policy")
 
                 Button {
-                    isShowingHTTPSTrackersOnlyInfo = true
+                    isShowingHTTPSTrackerPolicyInfo = true
                 } label: {
                     Image(systemName: "info.circle")
                 }
@@ -618,14 +618,14 @@ struct TorrentSettingsView: View {
                 .foregroundStyle(.secondary)
                 .help("About HTTPS trackers")
                 .accessibilityLabel("About HTTPS trackers")
-                .popover(isPresented: $isShowingHTTPSTrackersOnlyInfo) {
+                .popover(isPresented: $isShowingHTTPSTrackerPolicyInfo) {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("HTTPS trackers")
                             .font(.headline)
 
-                        Text("Only HTTPS trackers are used. Non-HTTPS trackers are ignored unless allowed for a specific torrent.")
+                        Text("Prefer HTTPS moves HTTPS trackers into earlier tiers while retaining HTTP and UDP as fallbacks. Require HTTPS removes every non-HTTPS tracker.")
 
-                        Text("This does not make peer, DHT, or peer exchange traffic use HTTPS.")
+                        Text("Only Require HTTPS guarantees tracker transport security. This does not affect peer, DHT, or peer exchange traffic.")
                             .foregroundStyle(.secondary)
                     }
                     .padding(16)
@@ -635,20 +635,24 @@ struct TorrentSettingsView: View {
 
             Spacer()
 
-            Toggle("", isOn: setting(\.useHTTPSTrackersOnly))
-                .labelsHidden()
-                .accessibilityLabel("Use HTTPS trackers only")
+            Picker("Tracker policy", selection: setting(\.httpsTrackerPolicy)) {
+                ForEach(TorrentHTTPSTrackerPolicy.allCases) { policy in
+                    Text(policy.title).tag(policy)
+                }
+            }
+            .labelsHidden()
+            .accessibilityLabel("HTTPS tracker policy")
         }
-        .help("Ignore non-HTTPS trackers.")
+        .help("Choose whether to preserve torrent tiers, prefer HTTPS with fallback, or require HTTPS.")
     }
 
-    private var httpsWebSeedsOnlyRow: some View {
+    private var httpsWebSeedPolicyRow: some View {
         HStack {
             HStack(spacing: 5) {
-                Text("Use HTTPS web seeds only")
+                Text("Web seed policy")
 
                 Button {
-                    isShowingHTTPSWebSeedsOnlyInfo = true
+                    isShowingHTTPSWebSeedPolicyInfo = true
                 } label: {
                     Image(systemName: "info.circle")
                 }
@@ -656,12 +660,12 @@ struct TorrentSettingsView: View {
                 .foregroundStyle(.secondary)
                 .help("About HTTPS web seeds")
                 .accessibilityLabel("About HTTPS web seeds")
-                .popover(isPresented: $isShowingHTTPSWebSeedsOnlyInfo) {
+                .popover(isPresented: $isShowingHTTPSWebSeedPolicyInfo) {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("HTTPS web seeds")
                             .font(.headline)
 
-                        Text("Only HTTPS web seeds are used. Non-HTTPS web seeds are ignored unless allowed for a specific torrent.")
+                        Text("Require HTTPS removes non-HTTPS web seeds. Original preserves every web seed advertised by the torrent.")
 
                         Text("This does not affect trackers, peer, DHT, or peer exchange traffic.")
                             .foregroundStyle(.secondary)
@@ -673,11 +677,15 @@ struct TorrentSettingsView: View {
 
             Spacer()
 
-            Toggle("", isOn: setting(\.useHTTPSWebSeedsOnly))
-                .labelsHidden()
-                .accessibilityLabel("Use HTTPS web seeds only")
+            Picker("Web seed policy", selection: setting(\.httpsWebSeedPolicy)) {
+                ForEach(TorrentHTTPSWebSeedPolicy.allCases) { policy in
+                    Text(policy.title).tag(policy)
+                }
+            }
+            .labelsHidden()
+            .accessibilityLabel("HTTPS web seed policy")
         }
-        .help("Ignore non-HTTPS web seeds.")
+        .help("Choose whether to preserve torrent web seeds or require HTTPS.")
     }
 
     private var networkInterfaceSection: some View {
@@ -811,17 +819,7 @@ struct TorrentSettingsView: View {
               : "Reduce client and version details sent by libtorrent.")
     }
 
-    private func setting(_ keyPath: WritableKeyPath<TorrentSettings, Int>) -> Binding<Int> {
-        Binding {
-            state.settings[keyPath: keyPath]
-        } set: { value in
-            var settings = state.settings
-            settings[keyPath: keyPath] = value
-            store.updateSettings(settings)
-        }
-    }
-
-    private func setting(_ keyPath: WritableKeyPath<TorrentSettings, Bool>) -> Binding<Bool> {
+    private func setting<Value>(_ keyPath: WritableKeyPath<TorrentSettings, Value>) -> Binding<Value> {
         Binding {
             state.settings[keyPath: keyPath]
         } set: { value in

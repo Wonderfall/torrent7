@@ -1001,10 +1001,8 @@ ResumePolicySnapshot resume_policy_snapshot(
 
     policy.has_identity = true;
     policy.canonical_id = identity->canonical_id;
-    policy.allows_non_https_trackers = identity->allows_non_https_trackers;
-    policy.allows_non_https_web_seeds = identity->allows_non_https_web_seeds;
-    policy.requires_https_trackers = identity->requires_https_trackers;
-    policy.requires_https_web_seeds = identity->requires_https_web_seeds;
+    policy.https_tracker_policy = identity->https_tracker_policy;
+    policy.https_web_seed_policy = identity->https_web_seed_policy;
     policy.dht_enabled_by_user = identity->dht_enabled_by_user;
     policy.dht_disabled_by_user = identity->dht_disabled_by_user;
     policy.peer_exchange_enabled_by_user = identity->peer_exchange_enabled_by_user;
@@ -1052,28 +1050,16 @@ std::vector<char> encoded_resume_data(
             lt::entry(1)
         );
     }
-    if (policy.has_identity && policy.allows_non_https_trackers) {
+    if (policy.has_identity && policy.https_tracker_policy != HTTPSPolicy::inherit) {
         resume_entry.dict().insert_or_assign(
-            std::string(kAllowNonHTTPSTrackersResumeKey),
-            lt::entry(1)
+            std::string(kHTTPSTrackerPolicyResumeKey),
+            lt::entry(static_cast<int>(policy.https_tracker_policy))
         );
     }
-    if (policy.has_identity && policy.allows_non_https_web_seeds) {
+    if (policy.has_identity && policy.https_web_seed_policy != HTTPSPolicy::inherit) {
         resume_entry.dict().insert_or_assign(
-            std::string(kAllowNonHTTPSWebSeedsResumeKey),
-            lt::entry(1)
-        );
-    }
-    if (policy.has_identity && policy.requires_https_trackers) {
-        resume_entry.dict().insert_or_assign(
-            std::string(kRequireHTTPSTrackersResumeKey),
-            lt::entry(1)
-        );
-    }
-    if (policy.has_identity && policy.requires_https_web_seeds) {
-        resume_entry.dict().insert_or_assign(
-            std::string(kRequireHTTPSWebSeedsResumeKey),
-            lt::entry(1)
+            std::string(kHTTPSWebSeedPolicyResumeKey),
+            lt::entry(static_cast<int>(policy.https_web_seed_policy))
         );
     }
     if (policy.has_identity && policy.dht_enabled_by_user) {
@@ -1221,24 +1207,34 @@ bool allow_pre_metadata_dht_from_resume_data(std::vector<char> const &buffer)
     return resume_data_bool(buffer, kAllowPreMetadataDHTResumeKey);
 }
 
-bool allow_non_https_trackers_from_resume_data(std::vector<char> const &buffer)
+HTTPSPolicy https_tracker_policy_from_resume_data(std::vector<char> const &buffer)
 {
-    return resume_data_bool(buffer, kAllowNonHTTPSTrackersResumeKey);
+    int32_t const stored = resume_data_int(buffer, kHTTPSTrackerPolicyResumeKey, -1);
+    if (is_valid_https_tracker_policy(stored, true)) {
+        return https_policy_from_value(stored);
+    }
+    if (resume_data_bool(buffer, kRequireHTTPSTrackersResumeKey)) {
+        return HTTPSPolicy::require;
+    }
+    if (resume_data_bool(buffer, kAllowNonHTTPSTrackersResumeKey)) {
+        return HTTPSPolicy::original;
+    }
+    return HTTPSPolicy::inherit;
 }
 
-bool allow_non_https_web_seeds_from_resume_data(std::vector<char> const &buffer)
+HTTPSPolicy https_web_seed_policy_from_resume_data(std::vector<char> const &buffer)
 {
-    return resume_data_bool(buffer, kAllowNonHTTPSWebSeedsResumeKey);
-}
-
-bool require_https_trackers_from_resume_data(std::vector<char> const &buffer)
-{
-    return resume_data_bool(buffer, kRequireHTTPSTrackersResumeKey);
-}
-
-bool require_https_web_seeds_from_resume_data(std::vector<char> const &buffer)
-{
-    return resume_data_bool(buffer, kRequireHTTPSWebSeedsResumeKey);
+    int32_t const stored = resume_data_int(buffer, kHTTPSWebSeedPolicyResumeKey, -1);
+    if (is_valid_https_web_seed_policy(stored, true)) {
+        return https_policy_from_value(stored);
+    }
+    if (resume_data_bool(buffer, kRequireHTTPSWebSeedsResumeKey)) {
+        return HTTPSPolicy::require;
+    }
+    if (resume_data_bool(buffer, kAllowNonHTTPSWebSeedsResumeKey)) {
+        return HTTPSPolicy::original;
+    }
+    return HTTPSPolicy::inherit;
 }
 
 bool enable_dht_from_resume_data(std::vector<char> const &buffer)
@@ -1875,43 +1871,138 @@ bool filter_non_https_strings(Strings &strings)
     return changed;
 }
 
+struct TrackerTierAllocation {
+    std::size_t offset;
+    std::size_t count;
+};
+
+std::uint8_t remapped_tracker_tier(
+    std::uint8_t const original,
+    std::set<std::uint8_t> const &tiers,
+    TrackerTierAllocation const allocation
+)
+{
+    auto const position = tiers.find(original);
+    TORRENT_ASSERT(position != tiers.end());
+    auto const rank = static_cast<std::size_t>(std::distance(tiers.begin(), position));
+    std::size_t const mapped_rank = tiers.size() <= allocation.count
+        ? rank
+        : rank * (allocation.count - 1U) / (tiers.size() - 1U);
+    return static_cast<std::uint8_t>(allocation.offset + mapped_rank);
+}
+
 } // namespace
 
-bool filter_non_https_sources(
+std::vector<lt::announce_entry> trackers_for_https_policy(
+    std::vector<lt::announce_entry> trackers,
+    HTTPSPolicy const policy
+)
+{
+    if (policy == HTTPSPolicy::original || policy == HTTPSPolicy::inherit) {
+        return trackers;
+    }
+
+    if (policy == HTTPSPolicy::require) {
+        std::erase_if(trackers, [](lt::announce_entry const &tracker) {
+            return !is_https_url(tracker.url);
+        });
+        return trackers;
+    }
+
+    std::vector<lt::announce_entry> secure;
+    std::vector<lt::announce_entry> fallback;
+    secure.reserve(trackers.size());
+    fallback.reserve(trackers.size());
+    std::set<std::uint8_t> secure_tiers;
+    std::set<std::uint8_t> fallback_tiers;
+    for (lt::announce_entry &tracker : trackers) {
+        if (is_https_url(tracker.url)) {
+            secure_tiers.insert(tracker.tier);
+            secure.push_back(std::move(tracker));
+        } else {
+            fallback_tiers.insert(tracker.tier);
+            fallback.push_back(std::move(tracker));
+        }
+    }
+    if (secure.empty() || fallback.empty()) {
+        return secure.empty() ? std::move(fallback) : std::move(secure);
+    }
+
+    constexpr std::size_t tier_capacity = static_cast<std::size_t>(std::numeric_limits<std::uint8_t>::max()) + 1U;
+    std::size_t secure_slots = secure_tiers.size();
+    std::size_t fallback_slots = fallback_tiers.size();
+    if (secure_slots + fallback_slots > tier_capacity) {
+        secure_slots = std::clamp(
+            tier_capacity * secure_tiers.size() / (secure_tiers.size() + fallback_tiers.size()),
+            std::size_t{1},
+            tier_capacity - 1U
+        );
+        fallback_slots = tier_capacity - secure_slots;
+    }
+
+    for (lt::announce_entry &tracker : secure) {
+        tracker.tier = remapped_tracker_tier(
+            tracker.tier,
+            secure_tiers,
+            TrackerTierAllocation{.offset = 0U, .count = secure_slots}
+        );
+    }
+    for (lt::announce_entry &tracker : fallback) {
+        tracker.tier = remapped_tracker_tier(
+            tracker.tier,
+            fallback_tiers,
+            TrackerTierAllocation{.offset = secure_slots, .count = fallback_slots}
+        );
+    }
+    secure.insert(
+        secure.end(),
+        std::make_move_iterator(fallback.begin()),
+        std::make_move_iterator(fallback.end())
+    );
+    return secure;
+}
+
+bool apply_https_source_policy(
     lt::add_torrent_params &params,
-    bool const require_https_trackers,
-    bool const require_https_web_seeds
+    HTTPSSourcePolicy const policy
 )
 {
     bool changed = false;
 
-    if (require_https_trackers && !params.trackers.empty()) {
-        std::vector<std::string> filtered_trackers;
-        std::vector<int> filtered_tiers;
-        filtered_trackers.reserve(params.trackers.size());
-        filtered_tiers.reserve(params.tracker_tiers.size());
-        auto tier = params.tracker_tiers.begin();
-        for (std::string const &tracker : params.trackers) {
-            if (!is_https_url(tracker)) {
-                changed = true;
-                if (tier != params.tracker_tiers.end()) {
-                    ++tier;
-                }
-                continue;
-            }
-            filtered_trackers.push_back(tracker);
-            if (!params.tracker_tiers.empty()) {
-                filtered_tiers.push_back(tier != params.tracker_tiers.end() ? *tier : 0);
-            }
-            if (tier != params.tracker_tiers.end()) {
+    if (policy.trackers != HTTPSPolicy::original && !params.trackers.empty()) {
+        std::vector<lt::announce_entry> original_trackers;
+        original_trackers.reserve(params.trackers.size());
+        auto tier = params.tracker_tiers.cbegin();
+        for (std::string const &tracker_url : params.trackers) {
+            lt::announce_entry tracker(tracker_url);
+            tracker.tier = static_cast<std::uint8_t>(
+                tier != params.tracker_tiers.cend() ? *tier : 0
+            );
+            original_trackers.push_back(std::move(tracker));
+            if (tier != params.tracker_tiers.cend()) {
                 ++tier;
             }
         }
-        params.trackers = std::move(filtered_trackers);
-        params.tracker_tiers = std::move(filtered_tiers);
+        std::vector<lt::announce_entry> const effective_trackers =
+            trackers_for_https_policy(original_trackers, policy.trackers);
+        changed = !std::ranges::equal(
+            original_trackers,
+            effective_trackers,
+            [](lt::announce_entry const &left, lt::announce_entry const &right) {
+                return left.url == right.url && left.tier == right.tier;
+            }
+        );
+        params.trackers.clear();
+        params.tracker_tiers.clear();
+        params.trackers.reserve(effective_trackers.size());
+        params.tracker_tiers.reserve(effective_trackers.size());
+        for (lt::announce_entry const &tracker : effective_trackers) {
+            params.trackers.push_back(tracker.url);
+            params.tracker_tiers.push_back(tracker.tier);
+        }
     }
 
-    if (require_https_web_seeds) {
+    if (policy.web_seeds == HTTPSPolicy::require) {
         changed = filter_non_https_strings(params.url_seeds) || changed;
     }
     return changed;
@@ -1974,8 +2065,17 @@ void restore_source_policy_sources(lt::add_torrent_params &params, ResumePolicyS
         return;
     }
 
-    std::set<std::string> tracker_urls(params.trackers.begin(), params.trackers.end());
-    std::size_t tracker_count = static_cast<std::size_t>(torrent_source_counts(params).tracker_count);
+    std::vector<std::string> const current_trackers = std::move(params.trackers);
+    std::vector<int> const current_tiers = std::move(params.tracker_tiers);
+    params.trackers.clear();
+    params.tracker_tiers.clear();
+    params.trackers.reserve(std::min(
+        static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT),
+        policy.source_trackers.size() + current_trackers.size()
+    ));
+    params.tracker_tiers.reserve(params.trackers.capacity());
+    std::set<std::string> tracker_urls;
+    std::size_t tracker_count = 0U;
     for (lt::announce_entry const &tracker : policy.source_trackers) {
         if (tracker_count >= static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT)) {
             break;
@@ -1984,6 +2084,20 @@ void restore_source_policy_sources(lt::add_torrent_params &params, ResumePolicyS
             params.trackers.push_back(tracker.url);
             params.tracker_tiers.push_back(tracker.tier);
             ++tracker_count;
+        }
+    }
+    auto current_tier = current_tiers.cbegin();
+    for (std::string const &tracker_url : current_trackers) {
+        if (tracker_count >= static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT)) {
+            break;
+        }
+        if (tracker_urls.insert(tracker_url).second) {
+            params.trackers.push_back(tracker_url);
+            params.tracker_tiers.push_back(current_tier != current_tiers.cend() ? *current_tier : 0);
+            ++tracker_count;
+        }
+        if (current_tier != current_tiers.cend()) {
+            ++current_tier;
         }
     }
 

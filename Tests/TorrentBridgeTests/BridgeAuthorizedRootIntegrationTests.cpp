@@ -244,8 +244,8 @@ struct TorrentFixture {
         .starts_paused = bridge_bool(false),
         .queue_priority = static_cast<std::uint8_t>(TTORRENT_QUEUE_PRIORITY_NORMAL),
         .enable_peer_exchange = bridge_bool(false),
-        .allow_non_https_trackers = bridge_bool(false),
-        .allow_non_https_web_seeds = bridge_bool(false),
+        .https_tracker_policy = TTORRENT_HTTPS_POLICY_INHERIT,
+        .https_web_seed_policy = TTORRENT_HTTPS_POLICY_INHERIT,
         .allow_pre_metadata_dht = bridge_bool(false),
     };
 }

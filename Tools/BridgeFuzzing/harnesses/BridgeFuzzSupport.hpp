@@ -714,8 +714,8 @@ inline TTorrentSessionSettings settings_from_reader(ByteReader &reader, std::str
     settings.enable_lsd = reader.read_u8();
     settings.use_lsd_by_default = reader.read_u8();
     settings.use_pex_by_default = reader.read_u8();
-    settings.require_https_trackers = reader.read_u8();
-    settings.require_https_web_seeds = reader.read_u8();
+    settings.https_tracker_policy = reader.read_u8();
+    settings.https_web_seed_policy = reader.read_u8();
     settings.encryption_policy = reader.read_i32();
     settings.anonymous_mode = reader.read_u8();
     settings.network_blocked = reader.read_u8();
@@ -730,8 +730,8 @@ inline TTorrentAddOptions add_options_from_reader(ByteReader &reader)
     options.starts_paused = reader.read_u8();
     options.queue_priority = reader.read_u8();
     options.enable_peer_exchange = reader.read_u8();
-    options.allow_non_https_trackers = reader.read_u8();
-    options.allow_non_https_web_seeds = reader.read_u8();
+    options.https_tracker_policy = reader.read_u8();
+    options.https_web_seed_policy = reader.read_u8();
     options.allow_pre_metadata_dht = reader.read_u8();
     return options;
 }

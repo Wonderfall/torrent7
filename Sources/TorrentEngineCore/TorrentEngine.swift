@@ -290,8 +290,8 @@ package enum TorrentAddError: LocalizedError, Sendable {
         startsPaused: Bool = false,
         queuePriority: TorrentQueuePriority = .normal,
         enablePeerExchange: Bool = true,
-        allowNonHTTPSTrackers: Bool = false,
-        allowNonHTTPSWebSeeds: Bool = false,
+        httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride = .inherit,
+        httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride = .inherit,
         allowPreMetadataDHT: Bool = false
     ) throws -> String {
         let client = try unsafe requireClient()
@@ -299,8 +299,8 @@ package enum TorrentAddError: LocalizedError, Sendable {
             starts_paused: startsPaused.bridgeFlag,
             queue_priority: queuePriority.bridgeByteValue,
             enable_peer_exchange: enablePeerExchange.bridgeFlag,
-            allow_non_https_trackers: allowNonHTTPSTrackers.bridgeFlag,
-            allow_non_https_web_seeds: allowNonHTTPSWebSeeds.bridgeFlag,
+            https_tracker_policy: UInt8(httpsTrackerPolicy.rawValue),
+            https_web_seed_policy: UInt8(httpsWebSeedPolicy.rawValue),
             allow_pre_metadata_dht: allowPreMetadataDHT.bridgeFlag
         )
         return try unsafe throwingBridgeAddReturningString(capacity: Int(TTORRENT_ID_CAPACITY)) { outputBuffer, addOutcome, errorBuffer in
@@ -327,8 +327,8 @@ package enum TorrentAddError: LocalizedError, Sendable {
         startsPaused: Bool = false,
         queuePriority: TorrentQueuePriority = .normal,
         enablePeerExchange: Bool = true,
-        allowNonHTTPSTrackers: Bool = false,
-        allowNonHTTPSWebSeeds: Bool = false
+        httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride = .inherit,
+        httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride = .inherit
     ) throws -> String {
         let client = try unsafe requireClient()
         try Self.validateTorrentData(data)
@@ -341,8 +341,8 @@ package enum TorrentAddError: LocalizedError, Sendable {
             starts_paused: startsPaused.bridgeFlag,
             queue_priority: queuePriority.bridgeByteValue,
             enable_peer_exchange: enablePeerExchange.bridgeFlag,
-            allow_non_https_trackers: allowNonHTTPSTrackers.bridgeFlag,
-            allow_non_https_web_seeds: allowNonHTTPSWebSeeds.bridgeFlag,
+            https_tracker_policy: UInt8(httpsTrackerPolicy.rawValue),
+            https_web_seed_policy: UInt8(httpsWebSeedPolicy.rawValue),
             allow_pre_metadata_dht: false.bridgeFlag
         )
         if let priorityEntries {
@@ -666,8 +666,8 @@ package enum TorrentAddError: LocalizedError, Sendable {
             bridgeSettings.enable_lsd = settings.effectiveEnableLocalServiceDiscovery.bridgeFlag
             bridgeSettings.use_lsd_by_default = settings.effectiveUseLocalServiceDiscoveryByDefault.bridgeFlag
             bridgeSettings.use_pex_by_default = settings.effectiveUsePeerExchangeByDefault.bridgeFlag
-            bridgeSettings.require_https_trackers = settings.useHTTPSTrackersOnly.bridgeFlag
-            bridgeSettings.require_https_web_seeds = settings.useHTTPSWebSeedsOnly.bridgeFlag
+            bridgeSettings.https_tracker_policy = UInt8(settings.httpsTrackerPolicy.rawValue)
+            bridgeSettings.https_web_seed_policy = UInt8(settings.httpsWebSeedPolicy.rawValue)
             bridgeSettings.encryption_policy = settings.libtorrentEncryptionPolicy
             bridgeSettings.anonymous_mode = settings.effectiveAnonymousMode.bridgeFlag
             bridgeSettings.network_blocked = networkBinding.networkBlocked.bridgeFlag
@@ -845,15 +845,16 @@ package enum TorrentAddError: LocalizedError, Sendable {
         return TorrentSourcePolicy(snapshot: result.policy)
     }
 
-    package func setSourcePolicy(id: String, field: TorrentSourcePolicyField, enabled: Bool) throws {
+    package func setSourcePolicy(id: String, mutation: TorrentSourcePolicyMutation) throws {
         let client = try unsafe requireClient()
+        let bridgeMutation = mutation.bridgeFieldAndValue
         try throwingBridgeCall { errorBuffer in
             unsafe id.withCString {
                 unsafe TorrentClientSetSourcePolicyField(
                     client,
                     $0,
-                    field.bridgeValue,
-                    enabled.bridgeFlag,
+                    bridgeMutation.field,
+                    bridgeMutation.value,
                     &errorBuffer
                 )
             }

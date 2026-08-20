@@ -14,8 +14,8 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
         .starts_paused = 1,
         .queue_priority = TTORRENT_QUEUE_PRIORITY_NORMAL,
         .enable_peer_exchange = 0,
-        .allow_non_https_trackers = 0,
-        .allow_non_https_web_seeds = 0,
+        .https_tracker_policy = TTORRENT_HTTPS_POLICY_INHERIT,
+        .https_web_seed_policy = TTORRENT_HTTPS_POLICY_INHERIT,
         .allow_pre_metadata_dht = 0,
     };
     bridge_fuzz::AddedIdBuffer added_id;

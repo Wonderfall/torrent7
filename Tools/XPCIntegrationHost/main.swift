@@ -553,8 +553,8 @@ private enum TorrentEngineXPCIntegrationHost {
                 startsPaused: true,
                 queuePriority: .normal,
                 enablePeerExchange: false,
-                allowNonHTTPSTrackers: false,
-                allowNonHTTPSWebSeeds: false,
+                httpsTrackerPolicy: .inherit,
+                httpsWebSeedPolicy: .inherit,
                 allowPreMetadataDHT: false
             )
             guard identifiers.insert(identifier).inserted else {

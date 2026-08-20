@@ -1270,14 +1270,10 @@ void TTorrentClient::load_resume_data()
             sanitize_resume_endpoint_hints(params);
         }
         lt::add_torrent_params const source_params = params;
-        bool const allows_non_https_trackers =
-            allow_non_https_trackers_from_resume_data(*buffer);
-        bool const allows_non_https_web_seeds =
-            allow_non_https_web_seeds_from_resume_data(*buffer);
-        bool const requires_https_trackers =
-            require_https_trackers_from_resume_data(*buffer);
-        bool const requires_https_web_seeds =
-            require_https_web_seeds_from_resume_data(*buffer);
+        HTTPSPolicy const persisted_https_tracker_policy =
+            https_tracker_policy_from_resume_data(*buffer);
+        HTTPSPolicy const persisted_https_web_seed_policy =
+            https_web_seed_policy_from_resume_data(*buffer);
         int32_t const queue_priority =
             queue_priority_from_resume_data(*buffer);
         int32_t const queue_rank =
@@ -1317,9 +1313,17 @@ void TTorrentClient::load_resume_data()
                 && static_cast<bool>(params.flags & lt::torrent_flags::disable_lsd)
                 && !lsd_enabled_by_user
                 && !lsd_disabled_by_user);
-        if (requires_https_trackers || requires_https_web_seeds) {
-            static_cast<void>(filter_non_https_sources(params, requires_https_trackers, requires_https_web_seeds));
-        }
+        static_cast<void>(apply_https_source_policy(
+            params,
+            HTTPSSourcePolicy{
+                .trackers = persisted_https_tracker_policy == HTTPSPolicy::inherit
+                    ? HTTPSPolicy::original
+                    : persisted_https_tracker_policy,
+                .web_seeds = persisted_https_web_seed_policy == HTTPSPolicy::inherit
+                    ? HTTPSPolicy::original
+                    : persisted_https_web_seed_policy,
+            }
+        ));
         BridgeResult const valid_sources = validate_torrent_sources(params);
         if (!valid_sources) {
             remove_resume_file_locked(name);
@@ -1364,10 +1368,8 @@ void TTorrentClient::load_resume_data()
         params.flags |= lt::torrent_flags::update_subscribe;
 
         TorrentIdentity *identity = attach_identity(params, std::move(canonical_id));
-        identity->allows_non_https_trackers = allows_non_https_trackers;
-        identity->allows_non_https_web_seeds = allows_non_https_web_seeds;
-        identity->requires_https_trackers = requires_https_trackers;
-        identity->requires_https_web_seeds = requires_https_web_seeds;
+        identity->https_tracker_policy = persisted_https_tracker_policy;
+        identity->https_web_seed_policy = persisted_https_web_seed_policy;
         identity->queue_priority = queue_priority;
         identity->queue_rank = queue_rank;
         identity->dht_locked_by_source = dht_locked_by_source;

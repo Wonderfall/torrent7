@@ -659,8 +659,8 @@ struct TorrentStoreIntegrationTests {
         #expect(await harness.engine.addedMagnets.first?.startsPaused == true)
         #expect(await harness.engine.addedMagnets.first?.queuePriority == .normal)
         #expect(await harness.engine.addedMagnets.first?.enablePeerExchange == false)
-        #expect(await harness.engine.addedMagnets.first?.allowNonHTTPSTrackers == false)
-        #expect(await harness.engine.addedMagnets.first?.allowNonHTTPSWebSeeds == false)
+        #expect(await harness.engine.addedMagnets.first?.httpsTrackerPolicy == .inherit)
+        #expect(await harness.engine.addedMagnets.first?.httpsWebSeedPolicy == .inherit)
         #expect(await harness.engine.addedMagnets.first?.allowPreMetadataDHT == false)
         #expect(harness.store.torrents.map(\.id) == ["alpha"])
     }
@@ -1035,23 +1035,23 @@ struct TorrentStoreIntegrationTests {
         #expect(reloadedHarness.store.labels == [label])
     }
 
-    @Test("Add magnet can pass per-torrent non-HTTPS source exceptions")
-    func addMagnetCanPassNonHTTPSSourceExceptions() async {
+    @Test("Add magnet can pass explicit per-torrent HTTPS source policies")
+    func addMagnetCanPassHTTPSSourcePolicies() async {
         let harness = makeStoreHarness()
 
         harness.store.addMagnet(
             "magnet:?xt=urn:btih:abc",
             savePath: "/Downloads",
             queuePriority: .high,
-            allowNonHTTPSTrackers: true,
-            allowNonHTTPSWebSeeds: true,
+            httpsTrackerPolicy: .original,
+            httpsWebSeedPolicy: .original,
             allowPreMetadataDHT: true
         )
         await harness.store.saveAll()
 
         #expect(await harness.engine.addedMagnets.first?.queuePriority == .high)
-        #expect(await harness.engine.addedMagnets.first?.allowNonHTTPSTrackers == true)
-        #expect(await harness.engine.addedMagnets.first?.allowNonHTTPSWebSeeds == true)
+        #expect(await harness.engine.addedMagnets.first?.httpsTrackerPolicy == .original)
+        #expect(await harness.engine.addedMagnets.first?.httpsWebSeedPolicy == .original)
         #expect(await harness.engine.addedMagnets.first?.allowPreMetadataDHT == true)
     }
 

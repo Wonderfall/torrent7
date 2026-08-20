@@ -182,8 +182,10 @@ struct TorrentBridgeMappingTests {
                 enable_dht: true.bridgeFlag,
                 enable_peer_exchange: false.bridgeFlag,
                 enable_lsd: true.bridgeFlag,
-                require_https_trackers: true.bridgeFlag,
-                require_https_web_seeds: false.bridgeFlag,
+                https_tracker_policy: UInt8(TTORRENT_HTTPS_POLICY_PREFER),
+                https_web_seed_policy: UInt8(TTORRENT_HTTPS_POLICY_INHERIT),
+                effective_https_tracker_policy: UInt8(TTORRENT_HTTPS_POLICY_PREFER),
+                effective_https_web_seed_policy: UInt8(TTORRENT_HTTPS_POLICY_REQUIRE),
                 dht_locked: true.bridgeFlag,
                 peer_exchange_locked: true.bridgeFlag,
                 lsd_locked: false.bridgeFlag,
@@ -195,8 +197,10 @@ struct TorrentBridgeMappingTests {
         #expect(policy.isDHTEnabled)
         #expect(!policy.isPeerExchangeEnabled)
         #expect(policy.isLocalServiceDiscoveryEnabled)
-        #expect(policy.usesHTTPSTrackersOnly)
-        #expect(!policy.usesHTTPSWebSeedsOnly)
+        #expect(policy.httpsTrackerPolicy == .prefer)
+        #expect(policy.httpsWebSeedPolicy == .inherit)
+        #expect(policy.effectiveHTTPSTrackerPolicy == .prefer)
+        #expect(policy.effectiveHTTPSWebSeedPolicy == .require)
         #expect(policy.isDHTLocked)
         #expect(policy.isPeerExchangeLocked)
         #expect(!policy.isLocalServiceDiscoveryLocked)
@@ -213,12 +217,20 @@ struct TorrentBridgeMappingTests {
                 == Int32(TTORRENT_SOURCE_POLICY_ENABLE_LSD)
         )
         #expect(
-            TorrentSourcePolicyField.httpsTrackersOnly.bridgeValue
-                == Int32(TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS)
+            TorrentSourcePolicyMutation.httpsTracker(.prefer).bridgeFieldAndValue.field
+                == Int32(TTORRENT_SOURCE_POLICY_HTTPS_TRACKER_POLICY)
         )
         #expect(
-            TorrentSourcePolicyField.httpsWebSeedsOnly.bridgeValue
-                == Int32(TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS)
+            TorrentSourcePolicyMutation.httpsTracker(.prefer).bridgeFieldAndValue.value
+                == Int32(TTORRENT_HTTPS_POLICY_PREFER)
+        )
+        #expect(
+            TorrentSourcePolicyMutation.httpsWebSeed(.require).bridgeFieldAndValue.field
+                == Int32(TTORRENT_SOURCE_POLICY_HTTPS_WEB_SEED_POLICY)
+        )
+        #expect(
+            TorrentSourcePolicyMutation.httpsWebSeed(.require).bridgeFieldAndValue.value
+                == Int32(TTORRENT_HTTPS_POLICY_REQUIRE)
         )
         #expect(
             TorrentSourcePolicyField.preMetadataDHT.bridgeValue

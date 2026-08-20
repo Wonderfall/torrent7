@@ -177,8 +177,10 @@ struct TorrentSourceModelTests {
             isDHTEnabled: true,
             isPeerExchangeEnabled: true,
             isLocalServiceDiscoveryEnabled: true,
-            usesHTTPSTrackersOnly: true,
-            usesHTTPSWebSeedsOnly: true,
+            httpsTrackerPolicy: .require,
+            httpsWebSeedPolicy: .require,
+            effectiveHTTPSTrackerPolicy: .require,
+            effectiveHTTPSWebSeedPolicy: .require,
             isDHTLocked: false,
             isPeerExchangeLocked: false,
             isLocalServiceDiscoveryLocked: false,
@@ -192,8 +194,8 @@ struct TorrentSourceModelTests {
         #expect(!policy.isDHTEnabled)
         #expect(policy.isPeerExchangeEnabled == original.isPeerExchangeEnabled)
         #expect(policy.isLocalServiceDiscoveryEnabled == original.isLocalServiceDiscoveryEnabled)
-        #expect(policy.usesHTTPSTrackersOnly == original.usesHTTPSTrackersOnly)
-        #expect(policy.usesHTTPSWebSeedsOnly == original.usesHTTPSWebSeedsOnly)
+        #expect(policy.httpsTrackerPolicy == original.httpsTrackerPolicy)
+        #expect(policy.httpsWebSeedPolicy == original.httpsWebSeedPolicy)
     }
 
     @Test("File item display and status reflect path progress and priority")

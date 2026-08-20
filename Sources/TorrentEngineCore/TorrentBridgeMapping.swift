@@ -221,8 +221,18 @@ extension TorrentSourcePolicy {
             isDHTEnabled: snapshot.enable_dht.bridgeBool,
             isPeerExchangeEnabled: snapshot.enable_peer_exchange.bridgeBool,
             isLocalServiceDiscoveryEnabled: snapshot.enable_lsd.bridgeBool,
-            usesHTTPSTrackersOnly: snapshot.require_https_trackers.bridgeBool,
-            usesHTTPSWebSeedsOnly: snapshot.require_https_web_seeds.bridgeBool,
+            httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride(
+                rawValue: Int(snapshot.https_tracker_policy)
+            ) ?? .inherit,
+            httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride(
+                rawValue: Int(snapshot.https_web_seed_policy)
+            ) ?? .inherit,
+            effectiveHTTPSTrackerPolicy: TorrentHTTPSTrackerPolicy(
+                rawValue: Int(snapshot.effective_https_tracker_policy)
+            ) ?? .original,
+            effectiveHTTPSWebSeedPolicy: TorrentHTTPSWebSeedPolicy(
+                rawValue: Int(snapshot.effective_https_web_seed_policy)
+            ) ?? .original,
             isDHTLocked: snapshot.dht_locked.bridgeBool,
             isPeerExchangeLocked: snapshot.peer_exchange_locked.bridgeBool,
             isLocalServiceDiscoveryLocked: snapshot.lsd_locked.bridgeBool,
@@ -242,12 +252,21 @@ extension TorrentSourcePolicyField {
             Int32(TTORRENT_SOURCE_POLICY_ENABLE_PEER_EXCHANGE)
         case .localServiceDiscovery:
             Int32(TTORRENT_SOURCE_POLICY_ENABLE_LSD)
-        case .httpsTrackersOnly:
-            Int32(TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_TRACKERS)
-        case .httpsWebSeedsOnly:
-            Int32(TTORRENT_SOURCE_POLICY_REQUIRE_HTTPS_WEB_SEEDS)
         case .preMetadataDHT:
             Int32(TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT)
+        }
+    }
+}
+
+extension TorrentSourcePolicyMutation {
+    var bridgeFieldAndValue: (field: Int32, value: Int32) {
+        switch self {
+        case .boolean(let field, let enabled):
+            (field.bridgeValue, enabled ? 1 : 0)
+        case .httpsTracker(let policy):
+            (Int32(TTORRENT_SOURCE_POLICY_HTTPS_TRACKER_POLICY), Int32(policy.rawValue))
+        case .httpsWebSeed(let policy):
+            (Int32(TTORRENT_SOURCE_POLICY_HTTPS_WEB_SEED_POLICY), Int32(policy.rawValue))
         }
     }
 }
