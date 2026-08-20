@@ -28,6 +28,7 @@ readonly -a LIBTORRENT_PATCHES=(
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-tracker-session-nat64-policy.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-tracker-policy-generation.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-current-dht-fallback.patch"
+    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-dht-disable-late-response.patch"
 )
 
 fail() {

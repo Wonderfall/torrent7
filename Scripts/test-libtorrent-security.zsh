@@ -130,6 +130,8 @@ restore_configuration=0
         "$source_dir/test/test_fast_extension.cpp.peer_exchange_and_holepunch_respect_source_policy"
     ./test_torrent --no-redirect \
         "$source_dir/test/test_torrent.cpp.dht_announce_peer_requires_incoming_transport"
+    ./test_torrent --no-redirect \
+        "$source_dir/test/test_torrent.cpp.disable_dht_discards_late_announce_response"
     ./test_dht --no-redirect \
         "$source_dir/test/test_dht.cpp.get_peers_without_announce_v4"
     ./test_dht --no-redirect \

@@ -1,0 +1,123 @@
+diff --git a/include/libtorrent/aux_/torrent.hpp b/include/libtorrent/aux_/torrent.hpp
+index c5fc87b93777901bce8c5aee4019446960dcb7c6..548e3fbf4f6336a56abce640c78df8f7d24dea9a 100644
+--- a/include/libtorrent/aux_/torrent.hpp
++++ b/include/libtorrent/aux_/torrent.hpp
+@@ -1534,6 +1534,7 @@ namespace libtorrent::aux {
+ 		void on_tracker_announce(error_code const& ec);
+ 
+ #ifndef TORRENT_DISABLE_DHT
++		friend struct dht_announce_response_test_access;
+ 		static void on_dht_announce_response_disp(std::weak_ptr<torrent> t
+ 			, protocol_version v, std::vector<tcp::endpoint> const& peers);
+ 		void on_dht_announce_response(protocol_version v, std::vector<tcp::endpoint> const& peers);
+diff --git a/src/torrent.cpp b/src/torrent.cpp
+index cd6b67ba2aeffe4c5397c368cc3fe22f8ccc5194..f4639a6d93a08b6d60c02b2f41b11ee5dc0d6d00 100644
+--- a/src/torrent.cpp
++++ b/src/torrent.cpp
+@@ -3069,6 +3069,7 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 		, std::vector<tcp::endpoint> const& peers) try
+ 	{
+ 		TORRENT_ASSERT(is_single_thread());
++		if (!m_enable_dht) return;
+ 
+ #ifndef TORRENT_DISABLE_LOGGING
+ 		debug_log("END DHT announce (%d ms) (%d peers)"
+diff --git a/test/test_torrent.cpp b/test/test_torrent.cpp
+index 3120ee8c8de389277cc542dc62c747f8532eee21..e9881906e72e0a3bfb78bbf853d328127b6b1c5a 100644
+--- a/test/test_torrent.cpp
++++ b/test/test_torrent.cpp
+@@ -35,6 +35,9 @@ see LICENSE file.
+ #include <tuple>
+ #include <iostream>
+ #include <atomic>
++#ifndef TORRENT_DISABLE_DHT
++#include <future>
++#endif
+ #include <memory>
+ 
+ #include "test.hpp"
+@@ -44,6 +47,21 @@ see LICENSE file.
+ using namespace lt;
+ using namespace std::chrono_literals;
+ 
++#ifndef TORRENT_DISABLE_DHT
++namespace libtorrent::aux {
++
++struct dht_announce_response_test_access
++{
++	static void deliver(torrent& target, protocol_version const version
++		, std::vector<tcp::endpoint> const& peers)
++	{
++		target.on_dht_announce_response(version, peers);
++	}
++};
++
++}
++#endif
++
+ TORRENT_TEST(dht_announce_peer_requires_incoming_transport)
+ {
+ 	TEST_CHECK(!aux::can_announce_dht_peer(false, false));
+@@ -51,6 +69,62 @@ TORRENT_TEST(dht_announce_peer_requires_incoming_transport)
+ 	TEST_CHECK(aux::can_announce_dht_peer(false, true));
+ }
+ 
++#ifndef TORRENT_DISABLE_DHT
++TORRENT_TEST(disable_dht_discards_late_announce_response)
++{
++	settings_pack pack = settings();
++	pack.set_int(settings_pack::alert_mask, alert_category::dht);
++	session ses(pack);
++
++	add_torrent_params params = make_torrent({{"test", default_block_size}}
++		, default_block_size);
++	params.save_path = ".";
++	params.flags |= torrent_flags::paused;
++	torrent_handle const handle = ses.add_torrent(std::move(params));
++	auto const torrent = handle.native_handle();
++
++	std::vector<alert*> initial_alerts;
++	ses.pop_alerts(&initial_alerts);
++
++	struct response_result
++	{
++		bool existing_added;
++		bool existing_retained;
++		bool late_added;
++	};
++
++	std::promise<response_result> completed;
++	auto result = completed.get_future();
++	post(ses.native_handle()->get_context(), [torrent, &completed] {
++		tcp::endpoint const existing = ep("8.8.8.8", 6881);
++		tcp::endpoint const late = ep("1.1.1.1", 6881);
++		bool const existing_added = torrent->add_peer(existing, peer_info::tracker) != nullptr;
++		torrent->set_flags(torrent_flags::disable_dht, torrent_flags::disable_dht);
++		aux::dht_announce_response_test_access::deliver(
++			*torrent, protocol_version::V1, {late});
++
++		auto const existing_range = torrent->find_peers(existing.address());
++		auto const late_range = torrent->find_peers(late.address());
++		completed.set_value({
++			existing_added,
++			existing_range.first != existing_range.second,
++			late_range.first != late_range.second,
++		});
++	});
++
++	response_result const response = result.get();
++	TEST_CHECK(response.existing_added);
++	TEST_CHECK(response.existing_retained);
++	TEST_CHECK(!response.late_added);
++
++	std::vector<alert*> alerts;
++	ses.pop_alerts(&alerts);
++	TEST_CHECK(std::none_of(alerts.begin(), alerts.end(), [](alert const* alert) {
++		return alert_cast<dht_reply_alert>(alert) != nullptr;
++	}));
++}
++#endif
++
+ TORRENT_TEST(private_tracker_generation_isolation)
+ {
+ 	aux::private_tracker_state state;
