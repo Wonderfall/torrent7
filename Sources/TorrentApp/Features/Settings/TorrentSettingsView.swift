@@ -515,7 +515,7 @@ struct TorrentSettingsView: View {
         HStack {
             HStack(spacing: 5) {
                 disabledAwareLabel(
-                    "Allow DHT for eligible torrents",
+                    "Allow DHT for eligible torrents by default",
                     isDisabled: !state.settings.enableDHTNetwork
                 )
 
@@ -535,7 +535,7 @@ struct TorrentSettingsView: View {
 
                         Text("An eligible torrent is public, has trusted metadata, and is not blocked from DHT by its source or per-torrent setting.")
 
-                        Text("A magnet can use DHT before its metadata is known only with explicit consent.")
+                        Text("This default does not replace explicit per-torrent choices. A magnet can use DHT before its metadata is known only with explicit consent.")
                             .foregroundStyle(.secondary)
                     }
                     .padding(16)
@@ -548,10 +548,10 @@ struct TorrentSettingsView: View {
             Toggle("", isOn: setting(\.useDHTByDefault))
                 .labelsHidden()
                 .disabled(!state.settings.enableDHTNetwork)
-                .accessibilityLabel("Allow DHT for eligible torrents")
+                .accessibilityLabel("Allow DHT for eligible torrents by default")
         }
         .help(state.settings.enableDHTNetwork
-              ? "Allow eligible torrents to use DHT unless disabled per torrent."
+              ? "Allow eligible torrents to use DHT by default; explicit per-torrent choices remain."
               : "Enable the DHT network first.")
     }
 
