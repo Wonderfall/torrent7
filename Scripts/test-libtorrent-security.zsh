@@ -111,6 +111,10 @@ restore_configuration=0
         "$source_dir/test/test_tracker_manager.cpp.trackers_wait_for_session_address_policy"
     ./test_tracker_manager --no-redirect \
         "$source_dir/test/test_tracker_manager.cpp.unavailable_address_verification_is_not_reported_as_ssrf"
+    ./test_tracker_manager --no-redirect \
+        "$source_dir/test/test_tracker_manager.cpp.trackers_restart_after_address_policy_generation_change"
+    ./test_tracker_manager --no-redirect \
+        "$source_dir/test/test_tracker_manager.cpp.non_global_answer_takes_precedence_over_unavailable_verification"
     ./test_torrent --no-redirect \
         "$source_dir/test/test_torrent.cpp.global_peer_policy_filters_remote_sources"
     ./test_torrent --no-redirect \
