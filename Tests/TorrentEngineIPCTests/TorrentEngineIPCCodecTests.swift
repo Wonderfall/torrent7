@@ -380,7 +380,7 @@ struct TorrentEngineIPCEnvelopeTests {
 
     @Test("Stable dataset and hint operation numbers")
     func stableOperationNumbers() {
-        #expect(TorrentEngineIPCProtocol.version == 8)
+        #expect(TorrentEngineIPCProtocol.version == 9)
         #expect(TorrentEngineIPCOperation.replaceFolderCapabilities.rawValue == 7)
         #expect(TorrentEngineIPCOperation(rawValue: 10) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 41) == nil)
