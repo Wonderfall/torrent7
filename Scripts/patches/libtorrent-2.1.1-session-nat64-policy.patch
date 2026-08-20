@@ -576,7 +576,7 @@ diff --git a/test/test_peer_list.cpp b/test/test_peer_list.cpp
 index d6a226eff..47029f60b 100644
 --- a/test/test_peer_list.cpp
 +++ b/test/test_peer_list.cpp
-@@ -480,6 +480,32 @@ TORRENT_TEST(port_filter)
+@@ -480,6 +480,34 @@ TORRENT_TEST(port_filter)
  	TEST_EQUAL(con1->was_disconnected(), false);
  }
  
@@ -595,9 +595,11 @@ index d6a226eff..47029f60b 100644
 +	TEST_CHECK(p.add_peer(ep("fd00::1", 3002), peer_info::lsd, {}, &st));
 +	TEST_CHECK(p.add_peer(ep("8.8.8.8", 3003), peer_info::tracker, {}, &st));
 +	st.erased.clear();
++	auto const connection = t.m_connections.front();
 +
 +	p.invalidate_global_address_policy(&st);
 +
++	TEST_CHECK(connection->was_disconnected());
 +	TEST_CHECK(t.m_connections.empty());
 +	TEST_CHECK(!has_peer(p, ep("2001:4860::1", 3000)));
 +	TEST_CHECK(!has_peer(p, ep("2001:4860::2", 3001)));
