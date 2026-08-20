@@ -1522,6 +1522,7 @@ struct TTorrentClient {
     std::uint64_t submitted_network_revision TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
 #if defined(TORRENT_BRIDGE_TESTING)
     bool fail_next_queue_order_rebuild_before_collection TORRENT_BRIDGE_GUARDED_BY(lock) = false;
+    bool fail_next_dht_diagnostics_poll TORRENT_BRIDGE_GUARDED_BY(lock) = false;
 #endif
     bool session_identity_authority_faulted TORRENT_BRIDGE_GUARDED_BY(lock) = false;
     bool persistence_faulted TORRENT_BRIDGE_GUARDED_BY(resume_io_lock) = false;
@@ -1542,6 +1543,7 @@ struct TTorrentClient {
     int32_t dht_routing_nodes TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
     bool dht_diagnostics_request_pending TORRENT_BRIDGE_GUARDED_BY(lock) = false;
     bool dht_routing_nodes_available TORRENT_BRIDGE_GUARDED_BY(lock) = false;
+    bool observed_dht_enabled TORRENT_BRIDGE_GUARDED_BY(lock) = false;
     bool observed_dht_running TORRENT_BRIDGE_GUARDED_BY(lock) = false;
     TTorrentBridgeHealth bridge_health TORRENT_BRIDGE_GUARDED_BY(lock){};
     std::vector<std::string> pending_alert_errors TORRENT_BRIDGE_GUARDED_BY(lock);
@@ -2027,7 +2029,7 @@ struct TTorrentClient {
 
     [[nodiscard]] DirtyMask invalidate_dht_diagnostics() noexcept TORRENT_BRIDGE_REQUIRES(lock);
 
-    [[nodiscard]] TTorrentNetworkStatus network_status() TORRENT_BRIDGE_REQUIRES(lock);
+    [[nodiscard]] TTorrentNetworkStatus network_status() noexcept TORRENT_BRIDGE_REQUIRES(lock);
 
     [[nodiscard]] TTorrentBridgeHealth health_status() const noexcept TORRENT_BRIDGE_REQUIRES(lock);
 

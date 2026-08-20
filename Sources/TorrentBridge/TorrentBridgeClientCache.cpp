@@ -2226,7 +2226,7 @@ DirtyMask TTorrentClient::invalidate_dht_diagnostics() noexcept
     return changed ? TTORRENT_DIRTY_NETWORK : 0U;
 }
 
-[[nodiscard]] TTorrentNetworkStatus TTorrentClient::network_status()
+[[nodiscard]] TTorrentNetworkStatus TTorrentClient::network_status() noexcept
 {
     TTorrentNetworkStatus status{};
     status.requested_revision = requested_network_revision;
@@ -2237,41 +2237,48 @@ DirtyMask TTorrentClient::invalidate_dht_diagnostics() noexcept
     copy_string(std::span{status.endpoint}, listen_endpoint);
     copy_string(std::span{status.last_error}, last_network_error);
 
-    lt::settings_pack const settings = session.get_settings();
-    bool const dht_enabled = settings.get_bool(lt::settings_pack::enable_dht);
-    bool const dht_running = dht_enabled && session.is_dht_running();
-    if (dht_running != observed_dht_running) {
+    // Diagnostics are best-effort and must never invalidate the authoritative
+    // containment fields copied above. Preserve the last observed DHT state if
+    // libtorrent cannot service a diagnostic request, and invalidate only the
+    // routing-table measurement.
+    try {
+#if defined(TORRENT_BRIDGE_TESTING)
+        if (fail_next_dht_diagnostics_poll) {
+            fail_next_dht_diagnostics_poll = false;
+            throw std::runtime_error("Injected DHT diagnostics failure.");
+        }
+#endif
+        lt::settings_pack const settings = session.get_settings();
+        bool const dht_enabled = settings.get_bool(lt::settings_pack::enable_dht);
+        bool const dht_running = dht_enabled && session.is_dht_running();
+        if (dht_enabled != observed_dht_enabled || dht_running != observed_dht_running) {
+            static_cast<void>(invalidate_dht_diagnostics());
+            observed_dht_enabled = dht_enabled;
+            observed_dht_running = dht_running;
+            last_dht_diagnostics_request = {};
+        }
+
+        auto const now = std::chrono::steady_clock::now();
+        if (dht_running
+            && !dht_diagnostics_request_pending
+            && now - last_dht_diagnostics_request >= kDHTDiagnosticsRefreshInterval) {
+            dht_diagnostics_request_pending = true;
+            last_dht_diagnostics_request = now;
+            session.post_session_stats();
+        }
+    } catch (...) {
         static_cast<void>(invalidate_dht_diagnostics());
-        observed_dht_running = dht_running;
-        last_dht_diagnostics_request = {};
     }
 
-    if (!dht_enabled) {
+    if (!observed_dht_enabled) {
         status.dht_status = TTORRENT_DHT_STATUS_DISABLED;
         status.dht_routing_nodes = -1;
-        return status;
-    }
-
-    if (!dht_running) {
+    } else if (!observed_dht_running) {
         status.dht_status = TTORRENT_DHT_STATUS_STARTING;
         status.dht_routing_nodes = -1;
-        return status;
-    }
-
-    status.dht_status = TTORRENT_DHT_STATUS_RUNNING;
-    status.dht_routing_nodes = dht_routing_nodes_available ? dht_routing_nodes : -1;
-
-    auto const now = std::chrono::steady_clock::now();
-    if (!dht_diagnostics_request_pending
-        && now - last_dht_diagnostics_request >= kDHTDiagnosticsRefreshInterval) {
-        dht_diagnostics_request_pending = true;
-        last_dht_diagnostics_request = now;
-        try {
-            session.post_session_stats();
-        } catch (...) {
-            dht_diagnostics_request_pending = false;
-            throw;
-        }
+    } else {
+        status.dht_status = TTORRENT_DHT_STATUS_RUNNING;
+        status.dht_routing_nodes = dht_routing_nodes_available ? dht_routing_nodes : -1;
     }
     return status;
 }

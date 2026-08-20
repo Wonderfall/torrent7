@@ -1221,6 +1221,9 @@ TEST_CASE("network client identity is generic and coarse")
     CHECK(settings.get_str(lt::settings_pack::peer_fingerprint).find("torrent-app") == std::string::npos);
     CHECK(settings.get_bool(lt::settings_pack::no_connect_privileged_ports));
     CHECK(settings.get_int(lt::settings_pack::alert_queue_size) == kLibtorrentAlertQueueSize);
+    auto const alert_mask = static_cast<std::uint32_t>(settings.get_int(lt::settings_pack::alert_mask));
+    CHECK((alert_mask & static_cast<std::uint32_t>(lt::alert_category::dht)) == 0U);
+    CHECK((alert_mask & static_cast<std::uint32_t>(lt::alert_category::error)) != 0U);
 }
 
 TEST_CASE("DHT security settings are explicit")

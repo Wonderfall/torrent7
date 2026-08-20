@@ -3815,6 +3815,27 @@ TEST_CASE("network diagnostics report native DHT status and routing nodes")
     CHECK(disabled.network_status.dht_routing_nodes == -1);
 }
 
+TEST_CASE("DHT diagnostics failures preserve authoritative network status")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+
+    BRIDGE_WITH_CLIENT_LOCK(client, static_cast<void>(client.record_network_requested(false)));
+    BRIDGE_WITH_CLIENT_LOCK(client, client.has_listener = true);
+    BRIDGE_WITH_CLIENT_LOCK(client, client.listen_port = 48123);
+    BRIDGE_WITH_CLIENT_LOCK(client, client.listen_endpoint = "192.0.2.1:48123");
+    BRIDGE_WITH_CLIENT_LOCK(client, client.fail_next_dht_diagnostics_poll = true);
+
+    TTorrentNetworkStatusResult const result = TorrentClientCopyNetworkStatus(&client);
+    REQUIRE(result.status == 1);
+    CHECK_FALSE(bridge_bool(result.network_status.network_blocked));
+    CHECK(bridge_bool(result.network_status.has_listener));
+    CHECK(result.network_status.listen_port == 48123);
+    CHECK(std::string(result.network_status.endpoint) == "192.0.2.1:48123");
+    CHECK(result.network_status.dht_routing_nodes == -1);
+}
+
 TEST_CASE("settings apply toggles reduced DHT contribution")
 {
     bridge_tests::TemporaryDirectory temporary_directory;

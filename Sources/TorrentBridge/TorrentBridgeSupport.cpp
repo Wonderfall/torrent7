@@ -2232,8 +2232,7 @@ lt::settings_pack make_settings()
         | lt::alert_category::storage
         | lt::alert_category::status
         | lt::alert_category::tracker
-        | lt::alert_category::file_progress
-        | lt::alert_category::dht;
+        | lt::alert_category::file_progress;
     settings.set_int(lt::settings_pack::alert_mask, static_cast<int>(static_cast<std::uint32_t>(categories)));
     return settings;
 }
