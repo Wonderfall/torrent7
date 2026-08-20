@@ -97,10 +97,12 @@ inline constexpr uint8_t TTORRENT_HTTPS_POLICY_INHERIT = 0;
 inline constexpr uint8_t TTORRENT_HTTPS_POLICY_ORIGINAL = 1;
 inline constexpr uint8_t TTORRENT_HTTPS_POLICY_PREFER = 2;
 inline constexpr uint8_t TTORRENT_HTTPS_POLICY_REQUIRE = 3;
+inline constexpr uint8_t TTORRENT_DHT_DISCOVERY_ALONGSIDE_TRACKERS = 0;
+inline constexpr uint8_t TTORRENT_DHT_DISCOVERY_AFTER_ALL_TRACKERS_FAIL = 1;
 inline constexpr uint8_t TTORRENT_CONTENT_KIND_UNKNOWN = 0;
 inline constexpr uint8_t TTORRENT_CONTENT_KIND_SINGLE_FILE = 1;
 inline constexpr uint8_t TTORRENT_CONTENT_KIND_DIRECTORY = 2;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 42;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 43;
 namespace torrent_bridge::internal {
 struct TTorrentClient;
 }
@@ -165,10 +167,12 @@ enum {
     TTORRENT_HTTPS_POLICY_ORIGINAL = 1,
     TTORRENT_HTTPS_POLICY_PREFER = 2,
     TTORRENT_HTTPS_POLICY_REQUIRE = 3,
+    TTORRENT_DHT_DISCOVERY_ALONGSIDE_TRACKERS = 0,
+    TTORRENT_DHT_DISCOVERY_AFTER_ALL_TRACKERS_FAIL = 1,
     TTORRENT_CONTENT_KIND_UNKNOWN = 0,
     TTORRENT_CONTENT_KIND_SINGLE_FILE = 1,
     TTORRENT_CONTENT_KIND_DIRECTORY = 2,
-    TTORRENT_BRIDGE_ABI_VERSION = 42
+    TTORRENT_BRIDGE_ABI_VERSION = 43
 };
 #endif
 
@@ -325,6 +329,7 @@ typedef struct TTorrentSessionSettings {
     int32_t encryption_policy;
     uint8_t anonymous_mode;
     uint8_t network_blocked;
+    uint8_t dht_discovery_policy;
 } TTorrentSessionSettings;
 
 typedef struct TTorrentNetworkStatus {

@@ -121,6 +121,7 @@ private:
     settings.active_limit = 500;
     settings.https_tracker_policy = TTORRENT_HTTPS_POLICY_PREFER;
     settings.https_web_seed_policy = TTORRENT_HTTPS_POLICY_REQUIRE;
+    settings.dht_discovery_policy = TTORRENT_DHT_DISCOVERY_ALONGSIDE_TRACKERS;
     return settings;
 }
 
@@ -3320,6 +3321,27 @@ TEST_CASE("settings reject invalid HTTPS source policies")
     CHECK(bridge_tests::string_from_c_buffer(error) == "Invalid HTTPS source policy.");
 }
 
+TEST_CASE("settings reject invalid DHT discovery policy")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+
+    TTorrentSessionSettings settings = unblocked_session_settings();
+    settings.dht_discovery_policy = 2;
+    std::array<char, 512> error{};
+
+    CHECK(TorrentClientApplySettings(
+        &client,
+        settings,
+        nullptr,
+        0,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == 1);
+    CHECK(bridge_tests::string_from_c_buffer(error) == "Invalid DHT discovery policy.");
+}
+
 TEST_CASE("global LSD and PEX default changes request resume persistence")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
@@ -3653,6 +3675,7 @@ TEST_CASE("privacy-sensitive tracker and DHT settings are explicit")
     CHECK(initial.get_bool(lt::settings_pack::dht_restrict_search_ips));
     CHECK(initial.get_bool(lt::settings_pack::dht_ignore_dark_internet));
     CHECK(initial.get_bool(lt::settings_pack::apply_filter_to_dht));
+    CHECK_FALSE(initial.get_bool(lt::settings_pack::use_dht_as_fallback));
     CHECK_FALSE(initial.get_bool(lt::settings_pack::announce_to_all_trackers));
     CHECK_FALSE(initial.get_bool(lt::settings_pack::announce_to_all_tiers));
     CHECK_FALSE(initial.get_bool(lt::settings_pack::prefer_udp_trackers));
@@ -3687,6 +3710,7 @@ TEST_CASE("privacy-sensitive tracker and DHT settings are explicit")
             && current.get_bool(lt::settings_pack::dht_restrict_search_ips)
             && current.get_bool(lt::settings_pack::dht_ignore_dark_internet)
             && current.get_bool(lt::settings_pack::apply_filter_to_dht)
+            && !current.get_bool(lt::settings_pack::use_dht_as_fallback)
             && !current.get_bool(lt::settings_pack::announce_to_all_trackers)
             && !current.get_bool(lt::settings_pack::announce_to_all_tiers)
             && !current.get_bool(lt::settings_pack::prefer_udp_trackers)
@@ -3778,6 +3802,35 @@ TEST_CASE("settings apply toggles reduced DHT contribution")
     CHECK(eventually([&] {
         return !client.session.get_settings().get_bool(lt::settings_pack::dht_read_only);
     }));
+}
+
+TEST_CASE("settings apply switches DHT discovery policy")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+
+    TTorrentSessionSettings settings = unblocked_session_settings();
+    settings.enable_dht = bridge_bool(true);
+    settings.dht_discovery_policy = TTORRENT_DHT_DISCOVERY_AFTER_ALL_TRACKERS_FAIL;
+    char error[512]{};
+
+    REQUIRE(apply_settings(
+        &client,
+        settings,
+        error,
+        static_cast<int32_t>(sizeof(error))
+    ) == 0);
+    CHECK(client.session.get_settings().get_bool(lt::settings_pack::use_dht_as_fallback));
+
+    settings.dht_discovery_policy = TTORRENT_DHT_DISCOVERY_ALONGSIDE_TRACKERS;
+    REQUIRE(apply_settings(
+        &client,
+        settings,
+        error,
+        static_cast<int32_t>(sizeof(error))
+    ) == 0);
+    CHECK_FALSE(client.session.get_settings().get_bool(lt::settings_pack::use_dht_as_fallback));
 }
 
 TEST_CASE("settings apply switches explicit HTTPS source policies on loaded torrents")

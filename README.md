@@ -168,7 +168,9 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
   web seeds require HTTPS by default. Tracker, DHT, PEX, and persisted peer endpoints
   must be globally routable for the lifetime of a torrent; explicitly enabled LSD
   is the only local-peer discovery path. Outbound-only sessions still use DHT peer
-  discovery without advertising an unreachable peer endpoint.
+  discovery without advertising an unreachable peer endpoint. Eligible public
+  torrents query DHT alongside trackers by default; an optional fallback policy
+  waits until every usable tracker endpoint has failed or timed out.
 
 Torrent 7 can bind libtorrent connections to a selected interface and can use VPN
 interfaces only, but hostname lookup still uses macOS system DNS. This is app-level

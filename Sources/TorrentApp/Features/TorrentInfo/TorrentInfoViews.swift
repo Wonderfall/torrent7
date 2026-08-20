@@ -59,6 +59,7 @@ private struct TorrentInfoOptionsRefreshID: Hashable, Sendable {
     let isPresented: Bool
     let enablesDHTNetwork: Bool
     let usesDHTByDefault: Bool
+    let dhtDiscoveryPolicy: TorrentDHTDiscoveryPolicy
     let enablesPeerExchange: Bool
     let usesPeerExchangeByDefault: Bool
     let enablesLocalServiceDiscovery: Bool
@@ -733,16 +734,16 @@ private struct TorrentInfoView: View {
         Section {
             if let sourcePolicy {
                 if sourcePolicy.isMetadataValidationPending {
-                    Toggle("Use DHT to fetch metadata", isOn: preMetadataDHTBinding)
+                    Toggle(preMetadataDHTTitle, isOn: preMetadataDHTBinding)
                         .disabled(isDHTPolicyDisabled(for: sourcePolicy))
                         .foregroundStyle(isDHTPolicyDisabled(for: sourcePolicy) ? Color.secondary : Color.primary)
-                        .help("Share this magnet's info hash with the public DHT before its metadata is checked.")
+                        .help(preMetadataDHTHelp)
 
                     Text("PEX and local discovery stay off until the torrent metadata is checked.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    Toggle("Use Distributed Hash Table (DHT)", isOn: dhtPolicyBinding)
+                    Toggle("Allow DHT peer discovery", isOn: dhtPolicyBinding)
                         .disabled(isDHTPolicyDisabled(for: sourcePolicy))
                         .foregroundStyle(isDHTPolicyDisabled(for: sourcePolicy) ? Color.secondary : Color.primary)
                         .help(dhtPolicyHelp(for: sourcePolicy))
@@ -1007,6 +1008,7 @@ private struct TorrentInfoView: View {
             isPresented: selectedTab == .options,
             enablesDHTNetwork: settings.enableDHTNetwork,
             usesDHTByDefault: settings.effectiveUseDHTByDefault,
+            dhtDiscoveryPolicy: settings.dhtDiscoveryPolicy,
             enablesPeerExchange: settings.enablePeerExchangePlugin,
             usesPeerExchangeByDefault:
                 settings.effectiveUsePeerExchangeByDefault,
@@ -1557,7 +1559,24 @@ private struct TorrentInfoView: View {
         if !store.settings.useDHTByDefault {
             return "DHT is off by default for new torrents. Enable it here for this torrent."
         }
-        return "Use the Distributed Hash Table for this torrent."
+        if store.settings.dhtDiscoveryPolicy == .afterAllTrackersFail {
+            return "Allow DHT after every usable tracker fails, or immediately when this torrent has no trackers."
+        }
+        return "Allow this torrent to discover peers through DHT alongside its trackers."
+    }
+
+    private var preMetadataDHTTitle: String {
+        if store.settings.dhtDiscoveryPolicy == .afterAllTrackersFail, !trackers.isEmpty {
+            return "Allow DHT if trackers fail before metadata is verified"
+        }
+        return "Use DHT to fetch metadata"
+    }
+
+    private var preMetadataDHTHelp: String {
+        if store.settings.dhtDiscoveryPolicy == .afterAllTrackersFail, !trackers.isEmpty {
+            return "Share this magnet's info hash with DHT only if every usable tracker fails before metadata is checked."
+        }
+        return "Share this magnet's info hash with the public DHT before its metadata is checked."
     }
 
     private func peerExchangePolicyHelp(for policy: TorrentSourcePolicy) -> String {

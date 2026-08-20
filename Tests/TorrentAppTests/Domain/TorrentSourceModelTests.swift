@@ -146,6 +146,29 @@ struct TorrentSourceModelTests {
         #expect(oversized == .empty)
     }
 
+    @Test("Usable tracker counts honor the HTTPS policy")
+    func usableTrackerCountsHonorHTTPSPolicy() {
+        let mixed = TorrentSourceSecuritySummary(
+            trackerCount: 2,
+            httpsTrackerCount: 1,
+            webSeedCount: 0,
+            httpsWebSeedCount: 0
+        )
+        let httpOnly = TorrentSourceSecuritySummary(
+            trackerCount: 1,
+            httpsTrackerCount: 0,
+            webSeedCount: 0,
+            httpsWebSeedCount: 0
+        )
+
+        #expect(mixed.hasUsableTracker(for: .original))
+        #expect(mixed.hasUsableTracker(for: .prefer))
+        #expect(mixed.hasUsableTracker(for: .require))
+        #expect(httpOnly.hasUsableTracker(for: .prefer))
+        #expect(!httpOnly.hasUsableTracker(for: .require))
+        #expect(!TorrentSourceSecuritySummary.empty.hasUsableTracker(for: .original))
+    }
+
     @Test("Tracker status follows disabled updating error verified order")
     func trackerStatusFollowsDisabledUpdatingErrorVerifiedOrder() {
         #expect(tracker(updating: true, verified: true, hasError: true, enabled: false).statusText == "Disabled")

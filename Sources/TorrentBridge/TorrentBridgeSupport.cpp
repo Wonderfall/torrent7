@@ -2211,6 +2211,7 @@ lt::settings_pack make_settings()
     settings.set_bool(lt::settings_pack::anonymous_mode, true);
     settings.set_bool(lt::settings_pack::dht_privacy_lookups, true);
     settings.set_bool(lt::settings_pack::dht_read_only, false);
+    settings.set_bool(lt::settings_pack::use_dht_as_fallback, false);
     settings.set_bool(lt::settings_pack::dht_enforce_node_id, true);
     settings.set_bool(lt::settings_pack::dht_prefer_verified_node_ids, true);
     settings.set_bool(lt::settings_pack::dht_restrict_routing_ips, true);

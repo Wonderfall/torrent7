@@ -13,7 +13,10 @@ struct TorrentSettingsView: View {
     @State private var defaultApplicationRequest:
         TorrentDefaultApplicationRequest? = .refresh()
     @State private var isShowingIncomingConnectionsInfo = false
-    @State private var isShowingDHTInfo = false
+    @State private var isShowingDHTNetworkInfo = false
+    @State private var isShowingDHTEligibilityInfo = false
+    @State private var isShowingDHTDiscoveryPolicyInfo = false
+    @State private var isShowingDHTContributionInfo = false
     @State private var isShowingPeerExchangeInfo = false
     @State private var isShowingLocalServiceDiscoveryInfo = false
     @State private var isShowingHTTPSTrackerPolicyInfo = false
@@ -380,22 +383,9 @@ struct TorrentSettingsView: View {
     private var dhtDiscoverySection: some View {
         Section("Distributed Hash Table (DHT)") {
             dhtNetworkRow
-
-            Toggle(isOn: setting(\.useDHTByDefault)) {
-                disabledAwareLabel("Prefer DHT for eligible torrents", isDisabled: !state.settings.enableDHTNetwork)
-            }
-            .disabled(!state.settings.enableDHTNetwork)
-            .help(state.settings.enableDHTNetwork
-                  ? "Eligible torrents use DHT unless disabled by the torrent or per-torrent policy."
-                  : "Enable the DHT network first.")
-
-            Toggle(isOn: setting(\.reduceDHTContribution)) {
-                disabledAwareLabel("Reduce DHT contribution", isDisabled: !state.settings.enableDHTNetwork)
-            }
-            .disabled(!state.settings.enableDHTNetwork)
-            .help(state.settings.enableDHTNetwork
-                  ? "Use DHT for peer discovery without answering other nodes' DHT queries or remaining in their routing tables."
-                  : "Enable the DHT network first.")
+            dhtEligibilityRow
+            dhtDiscoveryPolicyRow
+            dhtContributionRow
         }
     }
 
@@ -486,25 +476,25 @@ struct TorrentSettingsView: View {
     private var dhtNetworkRow: some View {
         HStack {
             HStack(spacing: 5) {
-                Text("Enable Distributed Hash Table (DHT)")
+                Text("Enable DHT network")
 
                 Button {
-                    isShowingDHTInfo = true
+                    isShowingDHTNetworkInfo = true
                 } label: {
                     Image(systemName: "info.circle")
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(.secondary)
-                .help("About Distributed Hash Table")
-                .accessibilityLabel("About Distributed Hash Table")
-                .popover(isPresented: $isShowingDHTInfo) {
+                .help("About the DHT network")
+                .accessibilityLabel("About the DHT network")
+                .popover(isPresented: $isShowingDHTNetworkInfo) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Distributed Hash Table")
+                        Text("DHT network")
                             .font(.headline)
 
-                        Text("Starts libtorrent's DHT node so eligible public torrents can discover peers without relying only on trackers.")
+                        Text("Starts the shared DHT node. Allowed public torrents can then use it to discover peers without relying only on trackers.")
 
-                        Text("Turning this off prevents DHT for all torrents. Private torrents and torrents that disable DHT keep that policy.")
+                        Text("Turning this off prevents DHT for every torrent. Starting the node alone does not make every torrent query it.")
                             .foregroundStyle(.secondary)
                     }
                     .padding(16)
@@ -516,9 +506,145 @@ struct TorrentSettingsView: View {
 
             Toggle("", isOn: setting(\.enableDHTNetwork))
                 .labelsHidden()
-                .accessibilityLabel("Enable Distributed Hash Table (DHT)")
+                .accessibilityLabel("Enable DHT network")
         }
         .help("Start the session DHT node.")
+    }
+
+    private var dhtEligibilityRow: some View {
+        HStack {
+            HStack(spacing: 5) {
+                disabledAwareLabel(
+                    "Allow DHT for eligible torrents",
+                    isDisabled: !state.settings.enableDHTNetwork
+                )
+
+                Button {
+                    isShowingDHTEligibilityInfo = true
+                } label: {
+                    Image(systemName: "info.circle")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("About DHT eligibility")
+                .accessibilityLabel("About DHT eligibility")
+                .popover(isPresented: $isShowingDHTEligibilityInfo) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Eligible torrents")
+                            .font(.headline)
+
+                        Text("An eligible torrent is public, has trusted metadata, and is not blocked from DHT by its source or per-torrent setting.")
+
+                        Text("A magnet can use DHT before its metadata is known only with explicit consent.")
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(16)
+                    .frame(width: 340, alignment: .leading)
+                }
+            }
+
+            Spacer()
+
+            Toggle("", isOn: setting(\.useDHTByDefault))
+                .labelsHidden()
+                .disabled(!state.settings.enableDHTNetwork)
+                .accessibilityLabel("Allow DHT for eligible torrents")
+        }
+        .help(state.settings.enableDHTNetwork
+              ? "Allow eligible torrents to use DHT unless disabled per torrent."
+              : "Enable the DHT network first.")
+    }
+
+    private var dhtDiscoveryPolicyRow: some View {
+        HStack {
+            HStack(spacing: 5) {
+                disabledAwareLabel(
+                    "DHT discovery policy",
+                    isDisabled: !state.settings.enableDHTNetwork
+                )
+
+                Button {
+                    isShowingDHTDiscoveryPolicyInfo = true
+                } label: {
+                    Image(systemName: "info.circle")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("About the DHT discovery policy")
+                .accessibilityLabel("About the DHT discovery policy")
+                .popover(isPresented: $isShowingDHTDiscoveryPolicyInfo) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("DHT discovery policy")
+                            .font(.headline)
+
+                        Text("Alongside trackers queries DHT immediately. After all trackers fail waits until every usable tracker has failed or timed out; trackerless torrents use DHT immediately.")
+
+                        Text("Waiting reduces torrent-specific DHT lookups, but peer discovery may be slower while trackers time out.")
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(16)
+                    .frame(width: 340, alignment: .leading)
+                }
+            }
+
+            Spacer()
+
+            Picker("DHT discovery policy", selection: setting(\.dhtDiscoveryPolicy)) {
+                ForEach(TorrentDHTDiscoveryPolicy.allCases) { policy in
+                    Text(policy.title).tag(policy)
+                }
+            }
+            .labelsHidden()
+            .disabled(!state.settings.enableDHTNetwork)
+            .accessibilityLabel("DHT discovery policy")
+        }
+        .help(state.settings.enableDHTNetwork
+              ? "Choose whether DHT runs with trackers or only after every usable tracker fails."
+              : "Enable the DHT network first.")
+    }
+
+    private var dhtContributionRow: some View {
+        HStack {
+            HStack(spacing: 5) {
+                disabledAwareLabel(
+                    "Reduce DHT contribution",
+                    isDisabled: !state.settings.enableDHTNetwork
+                )
+
+                Button {
+                    isShowingDHTContributionInfo = true
+                } label: {
+                    Image(systemName: "info.circle")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("About reduced DHT contribution")
+                .accessibilityLabel("About reduced DHT contribution")
+                .popover(isPresented: $isShowingDHTContributionInfo) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Reduced DHT contribution")
+                            .font(.headline)
+
+                        Text("Peer-discovery queries still work, but this node does not answer other nodes' requests or remain in their routing tables.")
+
+                        Text("This reduces participation in the shared network; it does not hide this client's own DHT lookups.")
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(16)
+                    .frame(width: 340, alignment: .leading)
+                }
+            }
+
+            Spacer()
+
+            Toggle("", isOn: setting(\.reduceDHTContribution))
+                .labelsHidden()
+                .disabled(!state.settings.enableDHTNetwork)
+                .accessibilityLabel("Reduce DHT contribution")
+        }
+        .help(state.settings.enableDHTNetwork
+              ? "Query DHT without serving other DHT users."
+              : "Enable the DHT network first.")
     }
 
     private var peerExchangePluginRow: some View {

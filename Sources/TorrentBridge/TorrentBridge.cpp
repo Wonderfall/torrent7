@@ -386,6 +386,7 @@ struct NativeNetworkStateExpectation {
     bool enable_incoming_utp;
     bool dht_privacy_lookups;
     std::optional<bool> dht_read_only;
+    std::optional<bool> use_dht_as_fallback;
     bool session_paused;
 };
 
@@ -413,6 +414,8 @@ BridgeResult acknowledge_network_state_locked(
         || current.get_bool(lt::settings_pack::dht_privacy_lookups) != expected.dht_privacy_lookups
         || (expected.dht_read_only
             && current.get_bool(lt::settings_pack::dht_read_only) != *expected.dht_read_only)
+        || (expected.use_dht_as_fallback
+            && current.get_bool(lt::settings_pack::use_dht_as_fallback) != *expected.use_dht_as_fallback)
         || session_paused != expected.session_paused) {
         return bridge_error(2, std::string(failure_message));
     }
@@ -456,6 +459,7 @@ BridgeResult block_network_locked(
             .enable_incoming_utp = false,
             .dht_privacy_lookups = false,
             .dht_read_only = std::nullopt,
+            .use_dht_as_fallback = std::nullopt,
             .session_paused = true,
         },
         "Native network containment could not be confirmed."
@@ -3588,6 +3592,11 @@ extern "C" int32_t TorrentClientApplySettings(
         bool const enable_dht = bridge_bool(requested.enable_dht);
         bool const use_dht_by_default = bridge_bool(requested.use_dht_by_default);
         bool const dht_read_only = bridge_bool(requested.dht_read_only);
+        if (!is_valid_dht_discovery_policy(requested.dht_discovery_policy)) {
+            return bridge_error(1, "Invalid DHT discovery policy.");
+        }
+        bool const use_dht_as_fallback = requested.dht_discovery_policy
+            == TTORRENT_DHT_DISCOVERY_AFTER_ALL_TRACKERS_FAIL;
         bool const enable_lsd = bridge_bool(requested.enable_lsd);
         bool const use_lsd_by_default = bridge_bool(requested.use_lsd_by_default);
         bool const use_pex_by_default = bridge_bool(requested.use_pex_by_default);
@@ -3657,6 +3666,7 @@ extern "C" int32_t TorrentClientApplySettings(
         settings.set_bool(lt::settings_pack::enable_natpmp, !network_blocked && enable_port_forwarding);
         settings.set_bool(lt::settings_pack::enable_dht, !network_blocked && enable_dht);
         settings.set_bool(lt::settings_pack::dht_read_only, dht_read_only);
+        settings.set_bool(lt::settings_pack::use_dht_as_fallback, use_dht_as_fallback);
         settings.set_bool(lt::settings_pack::enable_lsd, !network_blocked && enable_lsd);
         settings.set_bool(lt::settings_pack::enable_outgoing_tcp, !network_blocked);
         settings.set_bool(lt::settings_pack::enable_incoming_tcp, !network_blocked && accept_incoming_connections);
@@ -3703,6 +3713,7 @@ extern "C" int32_t TorrentClientApplySettings(
                 .enable_incoming_utp = !network_blocked && accept_incoming_connections,
                 .dht_privacy_lookups = !network_blocked && enable_dht,
                 .dht_read_only = dht_read_only,
+                .use_dht_as_fallback = use_dht_as_fallback,
                 .session_paused = expected_session_paused,
             },
             network_blocked

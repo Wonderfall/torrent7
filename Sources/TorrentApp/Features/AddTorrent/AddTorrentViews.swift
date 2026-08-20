@@ -352,12 +352,13 @@ struct AddTorrentConfirmationView: View {
                 }
 
                 if needsPreMetadataDHTConsent(for: sourceSecuritySummary) {
-                    Toggle("Use DHT to fetch metadata", isOn: $allowsPreMetadataDHT)
+                    Toggle(
+                        preMetadataDHTConsentTitle(for: sourceSecuritySummary),
+                        isOn: $allowsPreMetadataDHT
+                    )
                         .disabled(!store.settings.enableDHTNetwork)
 
-                    Text(store.settings.enableDHTNetwork
-                         ? "This magnet has no usable tracker. Enabling DHT shares its info hash with the public DHT before its metadata can be checked."
-                         : "This magnet has no usable tracker and the DHT network is disabled in Settings.")
+                    Text(preMetadataDHTConsentMessage(for: sourceSecuritySummary))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -713,9 +714,29 @@ struct AddTorrentConfirmationView: View {
         guard draft.magnetURI != nil else {
             return false
         }
-        return store.settings.httpsTrackerPolicy == .require
-            ? summary.httpsTrackerCount == 0
-            : summary.trackerCount == 0
+        return !summary.hasUsableTracker(for: store.settings.httpsTrackerPolicy)
+            || store.settings.dhtDiscoveryPolicy == .afterAllTrackersFail
+    }
+
+    private func preMetadataDHTConsentTitle(for summary: TorrentSourceSecuritySummary) -> String {
+        if summary.hasUsableTracker(for: store.settings.httpsTrackerPolicy),
+           store.settings.dhtDiscoveryPolicy == .afterAllTrackersFail {
+            return "Allow DHT if trackers fail before metadata is verified"
+        }
+        return "Use DHT to fetch metadata"
+    }
+
+    private func preMetadataDHTConsentMessage(for summary: TorrentSourceSecuritySummary) -> String {
+        let hasUsableTracker = summary.hasUsableTracker(for: store.settings.httpsTrackerPolicy)
+        if !store.settings.enableDHTNetwork {
+            return hasUsableTracker
+                ? "The DHT network is disabled in Settings, so tracker failure cannot fall back to DHT."
+                : "This magnet has no usable tracker and the DHT network is disabled in Settings."
+        }
+        if hasUsableTracker {
+            return "If every usable tracker fails, DHT can share this magnet's info hash before its metadata is checked."
+        }
+        return "This magnet has no usable tracker. Enabling DHT shares its info hash before its metadata can be checked."
     }
 
     private func pluralized(_ singular: String, count: Int) -> String {

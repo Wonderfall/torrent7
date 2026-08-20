@@ -134,6 +134,21 @@ struct TorrentSettingsTests {
         #expect(decoded.reduceDHTContribution == true)
     }
 
+    @Test("DHT discovery runs alongside trackers by default and persists")
+    func dhtDiscoveryPolicyDefaultsAndPersists() throws {
+        var settings = TorrentSettings()
+        #expect(settings.dhtDiscoveryPolicy == .alongsideTrackers)
+        #expect(TorrentDHTDiscoveryPolicy.alongsideTrackers.title == "Alongside trackers")
+        #expect(TorrentDHTDiscoveryPolicy.afterAllTrackersFail.title == "After all trackers fail")
+
+        settings.dhtDiscoveryPolicy = .afterAllTrackersFail
+        let data = try JSONEncoder().encode(settings)
+        let decoded = try JSONDecoder().decode(TorrentSettings.self, from: data)
+
+        #expect(decoded.dhtDiscoveryPolicy == .afterAllTrackersFail)
+        #expect(try JSONDecoder().decode(TorrentSettings.self, from: Data("{}".utf8)).dhtDiscoveryPolicy == .alongsideTrackers)
+    }
+
     @Test("Completion notifications hide torrent names by default")
     func completionNotificationsHideTorrentNamesByDefault() {
         let settings = TorrentSettings()

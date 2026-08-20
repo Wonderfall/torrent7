@@ -60,6 +60,15 @@ package struct TorrentSourceSecuritySummary: Codable, Equatable, Sendable {
         webSeedCount > 0 && httpsWebSeedCount == 0
     }
 
+    package func hasUsableTracker(for policy: TorrentHTTPSTrackerPolicy) -> Bool {
+        switch policy {
+        case .original, .prefer:
+            trackerCount > 0
+        case .require:
+            httpsTrackerCount > 0
+        }
+    }
+
     package static let empty = TorrentSourceSecuritySummary(
         trackerCount: 0,
         httpsTrackerCount: 0,

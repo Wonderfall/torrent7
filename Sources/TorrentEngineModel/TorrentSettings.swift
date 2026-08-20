@@ -65,6 +65,22 @@ package enum TorrentHTTPSWebSeedPolicy: Int, Codable, CaseIterable, Identifiable
     }
 }
 
+package enum TorrentDHTDiscoveryPolicy: Int, Codable, CaseIterable, Identifiable, Sendable {
+    case alongsideTrackers = 0
+    case afterAllTrackersFail = 1
+
+    package var id: Self { self }
+
+    package var title: String {
+        switch self {
+        case .alongsideTrackers:
+            "Alongside trackers"
+        case .afterAllTrackersFail:
+            "After all trackers fail"
+        }
+    }
+}
+
 package struct TorrentSettings: Codable, Equatable, Sendable {
     private static let defaultsKey = "TorrentSettings"
     private static let maximumRateLimitKBps = 1_000_000
@@ -85,6 +101,7 @@ package struct TorrentSettings: Codable, Equatable, Sendable {
     package var usePortForwarding = false
     package var enableDHTNetwork = true
     package var useDHTByDefault = true
+    package var dhtDiscoveryPolicy = TorrentDHTDiscoveryPolicy.alongsideTrackers
     package var reduceDHTContribution = false
     package var enablePeerExchangePlugin = false
     package var usePeerExchangeByDefault = false
@@ -117,6 +134,7 @@ package struct TorrentSettings: Codable, Equatable, Sendable {
         case usePortForwarding
         case enableDHTNetwork
         case useDHTByDefault
+        case dhtDiscoveryPolicy
         case reduceDHTContribution
         case enablePeerExchangePlugin
         case usePeerExchangeByDefault
@@ -155,6 +173,7 @@ package struct TorrentSettings: Codable, Equatable, Sendable {
         settings.usePortForwarding = try values.decodeIfPresent(Bool.self, forKey: .usePortForwarding) ?? settings.usePortForwarding
         settings.enableDHTNetwork = try values.decodeIfPresent(Bool.self, forKey: .enableDHTNetwork) ?? settings.enableDHTNetwork
         settings.useDHTByDefault = try values.decodeIfPresent(Bool.self, forKey: .useDHTByDefault) ?? settings.useDHTByDefault
+        settings.dhtDiscoveryPolicy = try values.decodeIfPresent(TorrentDHTDiscoveryPolicy.self, forKey: .dhtDiscoveryPolicy) ?? settings.dhtDiscoveryPolicy
         settings.reduceDHTContribution = try values.decodeIfPresent(Bool.self, forKey: .reduceDHTContribution) ?? settings.reduceDHTContribution
         settings.enablePeerExchangePlugin = try values.decodeIfPresent(Bool.self, forKey: .enablePeerExchangePlugin) ?? settings.enablePeerExchangePlugin
         settings.usePeerExchangeByDefault = try values.decodeIfPresent(Bool.self, forKey: .usePeerExchangeByDefault) ?? settings.usePeerExchangeByDefault

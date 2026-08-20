@@ -151,6 +151,17 @@ enum class HTTPSPolicy : std::uint8_t {
     require = TTORRENT_HTTPS_POLICY_REQUIRE,
 };
 
+enum class DHTDiscoveryPolicy : std::uint8_t {
+    alongside_trackers = TTORRENT_DHT_DISCOVERY_ALONGSIDE_TRACKERS,
+    after_all_trackers_fail = TTORRENT_DHT_DISCOVERY_AFTER_ALL_TRACKERS_FAIL,
+};
+
+constexpr bool is_valid_dht_discovery_policy(std::uint8_t const value) noexcept
+{
+    return value == TTORRENT_DHT_DISCOVERY_ALONGSIDE_TRACKERS
+        || value == TTORRENT_DHT_DISCOVERY_AFTER_ALL_TRACKERS_FAIL;
+}
+
 struct HTTPSSourcePolicy {
     HTTPSPolicy trackers;
     HTTPSPolicy web_seeds;
@@ -291,7 +302,9 @@ static_assert(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES
                   * (TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES + 1));
 static_assert(kMaxTorrentIdentityTokenCount > static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 42U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 43U);
+static_assert(TTORRENT_DHT_DISCOVERY_ALONGSIDE_TRACKERS == 0U);
+static_assert(TTORRENT_DHT_DISCOVERY_AFTER_ALL_TRACKERS_FAIL == 1U);
 static_assert(TTORRENT_ADD_REJECTED == 0);
 static_assert(TTORRENT_ADD_COMMITTED == 1);
 static_assert(TTORRENT_ADD_OUTCOME_UNKNOWN == 2);
@@ -406,6 +419,7 @@ static_assert(alignof(TTorrentFilePreview) == 8U);
 static_assert(sizeof(TTorrentSourceSecurityInspection) == 16U);
 static_assert(alignof(TTorrentSourceSecurityInspection) == 4U);
 static_assert(sizeof(TTorrentSessionSettings) == 52U);
+static_assert(offsetof(TTorrentSessionSettings, dht_discovery_policy) == 50U);
 static_assert(alignof(TTorrentSessionSettings) == 4U);
 static_assert(sizeof(TTorrentNetworkStatus) == 664U);
 static_assert(alignof(TTorrentNetworkStatus) == 8U);

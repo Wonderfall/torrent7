@@ -6,7 +6,7 @@ import TorrentBridge
 struct TorrentBridgeContractTests {
     @Test("Pins bridge ABI version, limits, states, and dirty masks")
     func pinsBridgeConstants() {
-        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 42)
+        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 43)
         #expect(Int32(TTORRENT_BRIDGE_STATE_UNKNOWN) == -1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_CHECKING_FILES) == 1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_DOWNLOADING_METADATA) == 2)
@@ -60,6 +60,8 @@ struct TorrentBridgeContractTests {
         #expect(UInt8(TTORRENT_HTTPS_POLICY_ORIGINAL) == 1)
         #expect(UInt8(TTORRENT_HTTPS_POLICY_PREFER) == 2)
         #expect(UInt8(TTORRENT_HTTPS_POLICY_REQUIRE) == 3)
+        #expect(UInt8(TTORRENT_DHT_DISCOVERY_ALONGSIDE_TRACKERS) == 0)
+        #expect(UInt8(TTORRENT_DHT_DISCOVERY_AFTER_ALL_TRACKERS_FAIL) == 1)
         #expect(UInt8(TTORRENT_CONTENT_KIND_UNKNOWN) == 0)
         #expect(UInt8(TTORRENT_CONTENT_KIND_SINGLE_FILE) == 1)
         #expect(UInt8(TTORRENT_CONTENT_KIND_DIRECTORY) == 2)
@@ -94,6 +96,7 @@ struct TorrentBridgeContractTests {
         #expect(MemoryLayout<TTorrentSourceSecurityInspection>.alignment == 4)
         #expect(MemoryLayout<TTorrentSessionSettings>.size == 52)
         #expect(MemoryLayout<TTorrentSessionSettings>.alignment == 4)
+        #expect(MemoryLayout<TTorrentSessionSettings>.offset(of: \.dht_discovery_policy) == 50)
         #expect(MemoryLayout<TTorrentNetworkStatus>.size == 664)
         #expect(MemoryLayout<TTorrentNetworkStatus>.alignment == 8)
         #expect(MemoryLayout<TTorrentBridgeHealth>.size == 536)
