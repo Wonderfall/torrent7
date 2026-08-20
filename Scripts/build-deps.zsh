@@ -787,6 +787,7 @@ ensure_git_mirror() {
     local expected_commit="${5:-}"
     local seed_mirror="${6:-}"
     local shallow="${7:-0}"
+    local pinned_ref="refs/heads/torrent7-pinned"
 
     if [[ -e "$mirror_dir" ]] && ! git -C "$mirror_dir" rev-parse --is-bare-repository >/dev/null 2>&1; then
         remove_dependency_path "$mirror_dir"
@@ -826,6 +827,13 @@ ensure_git_mirror() {
 
     if [[ -n "$expected_commit" ]] && ! git -C "$mirror_dir" rev-parse --verify "$expected_commit^{commit}" >/dev/null 2>&1; then
         fail "$label mirror does not contain expected commit: $expected_commit"
+    fi
+
+    # A raw SHA fetch only records FETCH_HEAD. Advertise the pin so clones from
+    # this shallow mirror receive its complete tree after upstream HEAD moves.
+    if [[ "$shallow" == "1" && -n "$expected_commit" ]]; then
+        git -C "$mirror_dir" update-ref "$pinned_ref" "$expected_commit"
+        git -C "$mirror_dir" symbolic-ref HEAD "$pinned_ref"
     fi
 }
 
