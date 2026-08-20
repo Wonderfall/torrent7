@@ -557,7 +557,11 @@ struct TorrentSettingsView: View {
     }
 
     private var dhtDiscoveryPolicyRow: some View {
-        HStack {
+        Picker(selection: setting(\.dhtDiscoveryPolicy)) {
+            ForEach(TorrentDHTDiscoveryPolicy.allCases) { policy in
+                Text(policy.title).tag(policy)
+            }
+        } label: {
             HStack(spacing: 5) {
                 disabledAwareLabel(
                     "DHT peer discovery policy",
@@ -587,18 +591,9 @@ struct TorrentSettingsView: View {
                     .frame(width: 340, alignment: .leading)
                 }
             }
-
-            Spacer()
-
-            Picker("DHT peer discovery policy", selection: setting(\.dhtDiscoveryPolicy)) {
-                ForEach(TorrentDHTDiscoveryPolicy.allCases) { policy in
-                    Text(policy.title).tag(policy)
-                }
-            }
-            .labelsHidden()
-            .disabled(!state.settings.enableDHTNetwork)
-            .accessibilityLabel("DHT peer discovery policy")
+            .accessibilityElement(children: .contain)
         }
+        .disabled(!state.settings.enableDHTNetwork)
         .help(state.settings.enableDHTNetwork
               ? "Choose whether DHT runs with trackers or only after every usable tracker fails."
               : "Enable the DHT network first.")
