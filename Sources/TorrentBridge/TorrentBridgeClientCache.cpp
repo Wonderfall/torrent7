@@ -1639,7 +1639,11 @@ BridgeResult TTorrentClient::validate_or_remove_loaded_metadata(lt::torrent_hand
 
     if (identity != nullptr) {
         identity->metadata_validation_retry_after = {};
-        remember_source_policy_sources(*identity, metadata_sources);
+        BridgeResult const remembered_sources = remember_source_policy_sources(*identity, metadata_sources);
+        if (!remembered_sources) {
+            changes |= remove_torrent_with_invalid_metadata(handle, remembered_sources.error().message);
+            return remembered_sources;
+        }
         bool const was_pending = metadata_validation_pending.contains(identity);
         if (was_pending) {
             std::vector<lt::download_priority_t> priorities(
@@ -1728,7 +1732,7 @@ BridgeResult TTorrentClient::validate_or_remove_loaded_metadata(lt::torrent_hand
             identity->intended_file_priorities.clear();
             request_save(handle);
         }
-        changes |= enforce_https_source_policy(handle, identity);
+        changes |= enforce_https_source_policy(handle, identity, HTTPSSourcePolicyScope::all);
     }
     return valid_info;
 }

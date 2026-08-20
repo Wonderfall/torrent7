@@ -567,7 +567,7 @@ void check_replaced_resume_root_remains_confined(bool const replace_with_symlink
     prepare_add_params(params, save_path.string(), false, true);
 
     identity = client.attach_identity(params);
-    remember_source_policy_sources(*identity, params);
+    REQUIRE(remember_source_policy_sources(*identity, params));
     lt::error_code add_error;
     lt::torrent_handle handle = client.session.add_torrent(std::move(params), add_error);
     if (add_error) {
@@ -3785,6 +3785,11 @@ TEST_CASE("settings apply switches explicit HTTPS source policies on loaded torr
     bridge_tests::TemporaryDirectory temporary_directory;
     TTorrentClient client((temporary_directory.path() / "State").string());
     client.set_session_shutdown_asynchronous(false);
+    BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        (client.https_tracker_policy = HTTPSPolicy::original,
+            client.https_web_seed_policy = HTTPSPolicy::original)
+    );
 
     lt::add_torrent_params source_params = make_source_torrent_params();
     TorrentIdentity *identity = nullptr;
@@ -3853,6 +3858,105 @@ TEST_CASE("settings apply switches explicit HTTPS source policies on loaded torr
     CHECK(cached_url_seed_count(client, identity->canonical_id) == 2);
 }
 
+TEST_CASE("strict HTTPS policy rejects oversized original magnet sources")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client(
+        (temporary_directory.path() / "State").string(),
+        true,
+        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
+    );
+    client.set_session_shutdown_asynchronous(false);
+
+    std::string magnet = "magnet:?xt=urn:btih:" + std::string(40U, '7');
+    for (int32_t index = 0; index <= TTORRENT_MAX_TRACKER_COUNT; ++index) {
+        magnet += "&tr=http://t/a";
+    }
+    magnet += "&tr=https://secure.example/announce";
+    REQUIRE(magnet.size() <= kMaxMagnetURIBytes);
+
+    TTorrentAddOptions add_options = default_add_options();
+    add_options.https_tracker_policy = TTORRENT_HTTPS_POLICY_REQUIRE;
+    std::array<char, TTORRENT_ID_CAPACITY> added_id{};
+    std::array<char, 512> error{};
+    int32_t add_outcome = TTORRENT_ADD_OUTCOME_UNKNOWN;
+    std::string const save_path = temporary_directory.path().string();
+    CHECK(TorrentClientAddMagnet(
+        &client,
+        magnet.c_str(),
+        save_path.c_str(),
+        add_options,
+        added_id.data(),
+        static_cast<int32_t>(added_id.size()),
+        &add_outcome,
+        error.data(),
+        static_cast<int32_t>(error.size())
+    ) == 2);
+    CHECK(add_outcome == TTORRENT_ADD_REJECTED);
+    CHECK(std::string(error.data()) == "The torrent contains too many trackers. The maximum is 2000.");
+    CHECK(added_id.front() == '\0');
+}
+
+TEST_CASE("HTTPS policy updates preserve libtorrent tracker order when topology is unchanged")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+
+    lt::add_torrent_params source_params = make_source_torrent_params();
+    source_params.trackers = {
+        "https://first-tracker.example/announce",
+        "https://second-tracker.example/announce",
+    };
+    source_params.tracker_tiers = {0, 0};
+    TorrentIdentity *identity = nullptr;
+    lt::torrent_handle handle = add_metadata_torrent(
+        client,
+        std::move(source_params),
+        temporary_directory.path(),
+        identity
+    );
+    REQUIRE(identity != nullptr);
+
+    std::vector<lt::announce_entry> reordered = handle.trackers();
+    REQUIRE(reordered.size() == 2U);
+    std::ranges::reverse(reordered);
+    handle.replace_trackers(reordered);
+    REQUIRE(handle.trackers().front().url == "https://second-tracker.example/announce");
+
+    TTorrentSessionSettings settings{};
+    settings.network_blocked = bridge_bool(true);
+    settings.use_pex_by_default = bridge_bool(true);
+    settings.https_tracker_policy = TTORRENT_HTTPS_POLICY_ORIGINAL;
+    settings.https_web_seed_policy = TTORRENT_HTTPS_POLICY_REQUIRE;
+    char error[512]{};
+    REQUIRE(apply_settings(
+        &client,
+        settings,
+        error,
+        static_cast<int32_t>(sizeof(error))
+    ) == 0);
+    REQUIRE(handle.trackers().front().url == "https://second-tracker.example/announce");
+
+    settings.https_web_seed_policy = TTORRENT_HTTPS_POLICY_ORIGINAL;
+    REQUIRE(apply_settings(
+        &client,
+        settings,
+        error,
+        static_cast<int32_t>(sizeof(error))
+    ) == 0);
+    REQUIRE(handle.trackers().front().url == "https://second-tracker.example/announce");
+
+    settings.dht_read_only = bridge_bool(true);
+    REQUIRE(apply_settings(
+        &client,
+        settings,
+        error,
+        static_cast<int32_t>(sizeof(error))
+    ) == 0);
+    CHECK(handle.trackers().front().url == "https://second-tracker.example/announce");
+}
+
 TEST_CASE("per-torrent original HTTPS policy preserves loaded torrent sources")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
@@ -3888,6 +3992,11 @@ TEST_CASE("source policy toggles DHT PEX LSD and HTTPS sources for a loaded torr
     bridge_tests::TemporaryDirectory temporary_directory;
     TTorrentClient client((temporary_directory.path() / "State").string());
     client.set_session_shutdown_asynchronous(false);
+    BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        (client.https_tracker_policy = HTTPSPolicy::original,
+            client.https_web_seed_policy = HTTPSPolicy::original)
+    );
 
     lt::add_torrent_params source_params = make_source_torrent_params();
     TorrentIdentity *identity = nullptr;
@@ -3908,8 +4017,8 @@ TEST_CASE("source policy toggles DHT PEX LSD and HTTPS sources for a loaded torr
     CHECK(bridge_bool(policy.enable_lsd));
     CHECK(policy.https_tracker_policy == TTORRENT_HTTPS_POLICY_INHERIT);
     CHECK(policy.https_web_seed_policy == TTORRENT_HTTPS_POLICY_INHERIT);
-    CHECK(policy.effective_https_tracker_policy == TTORRENT_HTTPS_POLICY_PREFER);
-    CHECK(policy.effective_https_web_seed_policy == TTORRENT_HTTPS_POLICY_REQUIRE);
+    CHECK(policy.effective_https_tracker_policy == TTORRENT_HTTPS_POLICY_ORIGINAL);
+    CHECK(policy.effective_https_web_seed_policy == TTORRENT_HTTPS_POLICY_ORIGINAL);
     CHECK_FALSE(bridge_bool(policy.dht_locked));
     CHECK_FALSE(bridge_bool(policy.peer_exchange_locked));
     CHECK_FALSE(bridge_bool(policy.lsd_locked));
@@ -3989,6 +4098,11 @@ TEST_CASE("unrelated source policy mutations preserve global HTTPS enforcement")
     bridge_tests::TemporaryDirectory temporary_directory;
     TTorrentClient client((temporary_directory.path() / "State").string());
     client.set_session_shutdown_asynchronous(false);
+    BRIDGE_WITH_CLIENT_LOCK(
+        client,
+        (client.https_tracker_policy = HTTPSPolicy::original,
+            client.https_web_seed_policy = HTTPSPolicy::original)
+    );
 
     lt::add_torrent_params source_params = make_source_torrent_params();
     TorrentIdentity *identity = nullptr;
@@ -4402,7 +4516,7 @@ TEST_CASE("source policy restores sources preserved before HTTPS-only filtering"
 
     TorrentIdentity *identity = client.attach_identity(params);
     REQUIRE(identity != nullptr);
-    remember_source_policy_sources(*identity, source_params);
+    REQUIRE(remember_source_policy_sources(*identity, source_params));
 
     lt::error_code add_error;
     lt::torrent_handle handle = client.session.add_torrent(std::move(params), add_error);
@@ -4448,7 +4562,7 @@ TEST_CASE("source policy restore does not reinsert blocked HTTPS-only sources")
 
     TorrentIdentity *identity = client.attach_identity(params);
     REQUIRE(identity != nullptr);
-    remember_source_policy_sources(*identity, source_params);
+    REQUIRE(remember_source_policy_sources(*identity, source_params));
 
     lt::error_code add_error;
     lt::torrent_handle handle = client.session.add_torrent(std::move(params), add_error);
@@ -4466,7 +4580,11 @@ TEST_CASE("source policy restore does not reinsert blocked HTTPS-only sources")
 
     BRIDGE_WITH_CLIENT_LOCK(
         client,
-        static_cast<void>(client.restore_metadata_source_policy(handle, identity))
+        static_cast<void>(client.restore_metadata_source_policy(
+            handle,
+            identity,
+            HTTPSSourcePolicyScope::all
+        ))
     );
 
     REQUIRE(handle.trackers().size() == 1U);

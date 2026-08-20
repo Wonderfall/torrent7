@@ -156,6 +156,42 @@ struct HTTPSSourcePolicy {
     HTTPSPolicy web_seeds;
 };
 
+enum class HTTPSSourcePolicyScope : std::uint8_t {
+    none,
+    trackers,
+    web_seeds,
+    all,
+};
+
+constexpr bool updates_https_trackers(HTTPSSourcePolicyScope const scope) noexcept
+{
+    return scope == HTTPSSourcePolicyScope::trackers || scope == HTTPSSourcePolicyScope::all;
+}
+
+constexpr bool updates_https_web_seeds(HTTPSSourcePolicyScope const scope) noexcept
+{
+    return scope == HTTPSSourcePolicyScope::web_seeds || scope == HTTPSSourcePolicyScope::all;
+}
+
+constexpr HTTPSSourcePolicyScope changed_https_policy_scope(
+    HTTPSSourcePolicy const previous,
+    HTTPSSourcePolicy const current
+) noexcept
+{
+    bool const trackers_changed = previous.trackers != current.trackers;
+    bool const web_seeds_changed = previous.web_seeds != current.web_seeds;
+    if (trackers_changed && web_seeds_changed) {
+        return HTTPSSourcePolicyScope::all;
+    }
+    if (trackers_changed) {
+        return HTTPSSourcePolicyScope::trackers;
+    }
+    if (web_seeds_changed) {
+        return HTTPSSourcePolicyScope::web_seeds;
+    }
+    return HTTPSSourcePolicyScope::none;
+}
+
 constexpr bool is_valid_https_tracker_policy(int32_t const value, bool const allow_inherit) noexcept
 {
     switch (value) {
@@ -1257,7 +1293,10 @@ bool apply_https_source_policy(
     HTTPSPolicy policy
 );
 
-void remember_source_policy_sources(TorrentIdentity &identity, lt::add_torrent_params const &params);
+[[nodiscard]] BridgeResult remember_source_policy_sources(
+    TorrentIdentity &identity,
+    lt::add_torrent_params const &params
+);
 
 void restore_source_policy_sources(lt::add_torrent_params &params, TorrentIdentity const *identity);
 
@@ -1820,17 +1859,25 @@ struct TTorrentClient {
     [[nodiscard]] DirtyMask remove_torrent_with_invalid_metadata(lt::torrent_handle const &handle, std::string const &reason)
         TORRENT_BRIDGE_REQUIRES(lock) TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
 
-    [[nodiscard]] DirtyMask apply_https_source_policy_locked()
+    [[nodiscard]] DirtyMask apply_https_source_policy_locked(HTTPSSourcePolicy previous_global_policy)
         TORRENT_BRIDGE_REQUIRES(lock)
         TORRENT_BRIDGE_REQUIRES_NOT(resume_capture_lock)
         TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
 
-    [[nodiscard]] DirtyMask enforce_https_source_policy(lt::torrent_handle const &handle, TorrentIdentity *identity)
+    [[nodiscard]] DirtyMask enforce_https_source_policy(
+        lt::torrent_handle const &handle,
+        TorrentIdentity *identity,
+        HTTPSSourcePolicyScope scope
+    )
         TORRENT_BRIDGE_REQUIRES(lock)
         TORRENT_BRIDGE_REQUIRES_NOT(resume_capture_lock)
         TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
 
-    [[nodiscard]] DirtyMask restore_metadata_source_policy(lt::torrent_handle const &handle, TorrentIdentity const *identity)
+    [[nodiscard]] DirtyMask restore_metadata_source_policy(
+        lt::torrent_handle const &handle,
+        TorrentIdentity *identity,
+        HTTPSSourcePolicyScope scope
+    )
         TORRENT_BRIDGE_REQUIRES(lock)
         TORRENT_BRIDGE_REQUIRES_NOT(resume_capture_lock)
         TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);

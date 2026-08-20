@@ -792,7 +792,7 @@ TEST_CASE("source validation rejects source lists above bridge limits")
     CHECK(too_many_web_seeds.error().message == "The torrent contains too many web seeds. The maximum is 2000.");
 }
 
-TEST_CASE("source validation applies after HTTPS source filtering")
+TEST_CASE("HTTPS source filtering cannot make an oversized original source list admissible")
 {
     lt::add_torrent_params params = bridge_tests::add_params_with_hashes();
     params.trackers.resize(static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT) + 1U, "http://tracker.example/announce");
@@ -800,6 +800,7 @@ TEST_CASE("source validation applies after HTTPS source filtering")
     params.url_seeds.resize(static_cast<std::size_t>(TTORRENT_MAX_WEB_SEED_COUNT) + 1U, "http://seed.example/file");
     params.url_seeds.push_back("https://secure-seed.example/file");
 
+    CHECK_FALSE(validate_torrent_sources(params));
     REQUIRE(apply_https_source_policy(
         params,
         HTTPSSourcePolicy{.trackers = HTTPSPolicy::require, .web_seeds = HTTPSPolicy::require}
@@ -810,11 +811,11 @@ TEST_CASE("source validation applies after HTTPS source filtering")
     CHECK(params.url_seeds == std::vector<std::string>{"https://secure-seed.example/file"});
 }
 
-TEST_CASE("source restoration preserves bridge source count caps")
+TEST_CASE("source restoration preserves all originals for explicit validation")
 {
     TorrentIdentity identity;
-    identity.source_trackers.emplace_back("http://extra-tracker.example/announce");
-    identity.source_web_seeds.emplace_back("http://extra-seed.example/file");
+    identity.source_trackers.emplace_back("https://secure-tracker.example/announce");
+    identity.source_web_seeds.emplace_back("https://secure-seed.example/file");
 
     lt::add_torrent_params params = bridge_tests::add_params_with_hashes();
     params.trackers.reserve(static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT));
@@ -828,9 +829,11 @@ TEST_CASE("source restoration preserves bridge source count caps")
 
     restore_source_policy_sources(params, &identity);
 
-    CHECK(params.trackers.size() == static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT));
-    CHECK(params.url_seeds.size() == static_cast<std::size_t>(TTORRENT_MAX_WEB_SEED_COUNT));
-    CHECK(validate_torrent_sources(params).has_value());
+    CHECK(params.trackers.size() == static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT) + 1U);
+    CHECK(params.trackers.front() == "https://secure-tracker.example/announce");
+    CHECK(params.url_seeds.size() == static_cast<std::size_t>(TTORRENT_MAX_WEB_SEED_COUNT) + 1U);
+    CHECK(params.url_seeds.back() == "https://secure-seed.example/file");
+    CHECK_FALSE(validate_torrent_sources(params));
 }
 
 TEST_CASE("torrent file data preview counts sources drained into add params")

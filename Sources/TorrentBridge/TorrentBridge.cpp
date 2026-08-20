@@ -1220,9 +1220,55 @@ SourcePolicyApplicationResult apply_peer_exchange_policy_locked(TTorrentClient &
     return result;
 }
 
+using TrackerTopologyEntry = std::pair<std::string_view, std::uint8_t>;
+
+std::vector<TrackerTopologyEntry> tracker_topology(std::vector<lt::announce_entry> const &trackers)
+{
+    std::vector<TrackerTopologyEntry> topology;
+    topology.reserve(trackers.size());
+    for (lt::announce_entry const &tracker : trackers) {
+        topology.emplace_back(tracker.url, tracker.tier);
+    }
+    std::ranges::sort(topology);
+    return topology;
+}
+
+bool same_tracker_topology(
+    std::vector<lt::announce_entry> const &left,
+    std::vector<lt::announce_entry> const &right
+)
+{
+    return tracker_topology(left) == tracker_topology(right);
+}
+
+void preserve_runtime_tracker_state(
+    std::vector<lt::announce_entry> &desired,
+    std::vector<lt::announce_entry> const &current
+)
+{
+    std::map<std::string_view, lt::announce_entry const *> current_by_url;
+    for (lt::announce_entry const &tracker : current) {
+        current_by_url.emplace(tracker.url, &tracker);
+    }
+
+    for (lt::announce_entry &tracker : desired) {
+        auto const current_tracker = current_by_url.find(tracker.url);
+        if (current_tracker == current_by_url.end()) {
+            continue;
+        }
+        std::uint8_t const desired_tier = tracker.tier;
+        tracker = *current_tracker->second;
+        tracker.tier = desired_tier;
+    }
+}
+
 } // namespace
 
-DirtyMask TTorrentClient::enforce_https_source_policy(lt::torrent_handle const &handle, TorrentIdentity *identity)
+DirtyMask TTorrentClient::enforce_https_source_policy(
+    lt::torrent_handle const &handle,
+    TorrentIdentity *identity,
+    HTTPSSourcePolicyScope const scope
+)
 {
     if (!handle.is_valid()) {
         return {};
@@ -1230,37 +1276,36 @@ DirtyMask TTorrentClient::enforce_https_source_policy(lt::torrent_handle const &
 
     DirtyMask changes = 0;
     bool changed = false;
+    bool trackers_changed = false;
+    bool web_seeds_changed = false;
 
-    std::vector<lt::announce_entry> const trackers = handle.trackers();
-    std::vector<lt::announce_entry> const effective_trackers = trackers_for_https_policy(
-        trackers,
-        effective_https_tracker_policy(identity)
-    );
-    bool const trackers_changed = !std::ranges::equal(
-        trackers,
-        effective_trackers,
-        [](lt::announce_entry const &left, lt::announce_entry const &right) {
-            return left.url == right.url && left.tier == right.tier;
+    if (updates_https_trackers(scope)) {
+        std::vector<lt::announce_entry> const trackers = handle.trackers();
+        std::vector<lt::announce_entry> const effective_trackers = trackers_for_https_policy(
+            trackers,
+            effective_https_tracker_policy(identity)
+        );
+        trackers_changed = !same_tracker_topology(trackers, effective_trackers);
+        if (trackers_changed) {
+            handle.replace_trackers(effective_trackers);
+            handle.force_reannounce();
+            changes |= cache_trackers(handle, effective_trackers);
+            changed = true;
         }
-    );
-    if (trackers_changed) {
-        handle.replace_trackers(effective_trackers);
-        handle.force_reannounce();
-        changes |= cache_trackers(handle, effective_trackers);
-        changed = true;
     }
 
     bool const require_web_seeds = effective_https_web_seed_policy(identity) == HTTPSPolicy::require;
-    if (require_web_seeds) {
+    if (updates_https_web_seeds(scope) && require_web_seeds) {
         for (std::string const &url : handle.url_seeds()) {
             if (!is_https_url(url)) {
                 handle.remove_url_seed(url);
                 changed = true;
+                web_seeds_changed = true;
             }
         }
     }
 
-    if (changed && require_web_seeds) {
+    if (web_seeds_changed) {
         if (std::optional<std::string> const cache_id = cache_id_for_handle(handle)) {
             if (auto cached = web_seed_cache.find(*cache_id); cached != web_seed_cache.end()) {
                 auto const original_size = cached->second.web_seeds.size();
@@ -1274,7 +1319,9 @@ DirtyMask TTorrentClient::enforce_https_source_policy(lt::torrent_handle const &
             }
         }
     }
-    changes |= clear_peer_cache_if_restricted(handle, identity);
+    if (trackers_changed) {
+        changes |= clear_peer_cache_if_restricted(handle, identity);
+    }
     if (changed) {
         request_save(handle);
     }
@@ -1282,76 +1329,75 @@ DirtyMask TTorrentClient::enforce_https_source_policy(lt::torrent_handle const &
     return changes;
 }
 
-DirtyMask TTorrentClient::restore_metadata_source_policy(lt::torrent_handle const &handle, TorrentIdentity const *identity)
+DirtyMask TTorrentClient::restore_metadata_source_policy(
+    lt::torrent_handle const &handle,
+    TorrentIdentity *identity,
+    HTTPSSourcePolicyScope const scope
+)
 {
     if (!handle.is_valid()) {
         return {};
     }
 
     if (identity == nullptr
-        || (identity->source_trackers.empty() && identity->source_web_seeds.empty())) {
+        || ((!updates_https_trackers(scope) || identity->source_trackers.empty())
+            && (!updates_https_web_seeds(scope) || identity->source_web_seeds.empty()))) {
         return {};
     }
 
     DirtyMask changes = 0;
     bool changed = false;
 
-    HTTPSPolicy const tracker_policy = effective_https_tracker_policy(identity);
-    bool const require_web_seeds = effective_https_web_seed_policy(identity) == HTTPSPolicy::require;
-    auto web_seed_allowed = [require_web_seeds](std::string const &web_seed) noexcept {
-        return !require_web_seeds || is_https_url(web_seed);
-    };
-
     std::vector<lt::announce_entry> const current_trackers = handle.trackers();
-    std::vector<lt::announce_entry> restored_trackers;
-    restored_trackers.reserve(std::min(
-        static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT),
-        identity->source_trackers.size() + current_trackers.size()
-    ));
-    std::set<std::string> tracker_urls;
-    for (lt::announce_entry const &tracker : identity->source_trackers) {
-        if (restored_trackers.size() < static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT)
-            && tracker_urls.insert(tracker.url).second) {
-            restored_trackers.push_back(tracker);
+    std::vector<lt::announce_entry> restored_trackers = current_trackers;
+    bool trackers_changed = false;
+    if (updates_https_trackers(scope)) {
+        restored_trackers.clear();
+        restored_trackers.reserve(identity->source_trackers.size() + current_trackers.size());
+        std::set<std::string> tracker_urls;
+        for (lt::announce_entry const &tracker : identity->source_trackers) {
+            if (tracker_urls.insert(tracker.url).second) {
+                restored_trackers.push_back(tracker);
+            }
         }
+        for (lt::announce_entry const &tracker : current_trackers) {
+            if (tracker_urls.insert(tracker.url).second) {
+                restored_trackers.push_back(tracker);
+            }
+        }
+        restored_trackers = trackers_for_https_policy(
+            std::move(restored_trackers),
+            effective_https_tracker_policy(identity)
+        );
+        preserve_runtime_tracker_state(restored_trackers, current_trackers);
+        trackers_changed = !same_tracker_topology(restored_trackers, current_trackers);
     }
-    for (lt::announce_entry const &tracker : current_trackers) {
-        if (restored_trackers.size() >= static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT)) {
-            break;
-        }
-        if (tracker_urls.insert(tracker.url).second) {
-            restored_trackers.push_back(tracker);
-        }
-    }
-    restored_trackers = trackers_for_https_policy(std::move(restored_trackers), tracker_policy);
-    bool const trackers_changed = restored_trackers.size() != current_trackers.size()
-        || !std::ranges::equal(restored_trackers, current_trackers, [](auto const &left, auto const &right) {
-            return left.url == right.url && left.tier == right.tier;
-        });
 
     std::set<std::string> const existing_url_seeds = handle.url_seeds();
-    std::set<std::string> current_url_seeds;
-    std::ranges::copy_if(
-        existing_url_seeds,
-        std::inserter(current_url_seeds, current_url_seeds.end()),
-        web_seed_allowed
-    );
-    for (std::string const &web_seed : identity->source_web_seeds) {
-        if (current_url_seeds.size() >= static_cast<std::size_t>(TTORRENT_MAX_WEB_SEED_COUNT)) {
-            break;
+    std::set<std::string> restored_url_seeds = existing_url_seeds;
+    bool web_seeds_changed = false;
+    if (updates_https_web_seeds(scope)) {
+        bool const require_web_seeds = effective_https_web_seed_policy(identity) == HTTPSPolicy::require;
+        auto web_seed_allowed = [require_web_seeds](std::string const &web_seed) noexcept {
+            return !require_web_seeds || is_https_url(web_seed);
+        };
+        std::erase_if(restored_url_seeds, [&](std::string const &web_seed) {
+            return !web_seed_allowed(web_seed);
+        });
+        for (std::string const &web_seed : identity->source_web_seeds) {
+            if (web_seed_allowed(web_seed)) {
+                restored_url_seeds.insert(web_seed);
+            }
         }
-        if (web_seed_allowed(web_seed) && current_url_seeds.insert(web_seed).second) {
-            changed = true;
-        }
+        web_seeds_changed = restored_url_seeds != existing_url_seeds;
     }
-    bool const web_seeds_changed = current_url_seeds != existing_url_seeds;
 
     lt::add_torrent_params restored_sources;
     for (lt::announce_entry const &tracker : restored_trackers) {
         restored_sources.trackers.push_back(tracker.url);
         restored_sources.tracker_tiers.push_back(tracker.tier);
     }
-    restored_sources.url_seeds.assign(current_url_seeds.begin(), current_url_seeds.end());
+    restored_sources.url_seeds.assign(restored_url_seeds.begin(), restored_url_seeds.end());
     BridgeResult const valid_sources = validate_torrent_sources(restored_sources);
     if (!valid_sources) {
         changes |= remove_torrent_with_invalid_metadata(handle, valid_sources.error().message);
@@ -1362,23 +1408,24 @@ DirtyMask TTorrentClient::restore_metadata_source_policy(lt::torrent_handle cons
         handle.replace_trackers(restored_trackers);
         handle.force_reannounce();
         changes |= cache_trackers(handle, restored_trackers);
+        changes |= clear_peer_cache_if_restricted(handle, identity);
         changed = true;
     }
 
     if (web_seeds_changed) {
         changed = true;
         for (std::string const &url : existing_url_seeds) {
-            if (!current_url_seeds.contains(url)) {
+            if (!restored_url_seeds.contains(url)) {
                 handle.remove_url_seed(url);
             }
         }
-        for (std::string const &url : current_url_seeds) {
+        for (std::string const &url : restored_url_seeds) {
             if (!existing_url_seeds.contains(url)) {
                 handle.add_url_seed(url);
             }
         }
         if (std::optional<std::string> const cache_id = cache_id_for_handle(handle)) {
-            changes |= cache_web_seeds(*cache_id, current_url_seeds);
+            changes |= cache_web_seeds(*cache_id, restored_url_seeds);
         } else {
             changes |= queue_alert_error("Torrent not found.");
         }
@@ -1535,6 +1582,10 @@ DirtyMask TTorrentClient::set_source_policy_field(
     bool const lsd_locked = private_torrent || identity->lsd_locked_by_source;
     bool const metadata_pending = metadata_validation_pending.contains(identity);
     TTorrentSourcePolicy const current_policy = source_policy(handle, identity);
+    HTTPSSourcePolicy const previous_https_policy{
+        .trackers = effective_https_tracker_policy(identity),
+        .web_seeds = effective_https_web_seed_policy(identity),
+    };
     lt::torrent_flags_t const original_flags = handle.flags();
     bool const updates_dht = field == TTORRENT_SOURCE_POLICY_ENABLE_DHT
         || field == TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT;
@@ -1652,8 +1703,18 @@ DirtyMask TTorrentClient::set_source_policy_field(
     DirtyMask changes = 0;
     if (field == TTORRENT_SOURCE_POLICY_HTTPS_TRACKER_POLICY
         || field == TTORRENT_SOURCE_POLICY_HTTPS_WEB_SEED_POLICY) {
-        changes |= restore_metadata_source_policy(handle, identity);
-        changes |= enforce_https_source_policy(handle, identity);
+        HTTPSSourcePolicy const current_https_policy{
+            .trackers = effective_https_tracker_policy(identity),
+            .web_seeds = effective_https_web_seed_policy(identity),
+        };
+        HTTPSSourcePolicyScope const scope = changed_https_policy_scope(
+            previous_https_policy,
+            current_https_policy
+        );
+        if (scope != HTTPSSourcePolicyScope::none) {
+            changes |= restore_metadata_source_policy(handle, identity, scope);
+            changes |= enforce_https_source_policy(handle, identity, scope);
+        }
     }
     if (updates_dht || field == TTORRENT_SOURCE_POLICY_ENABLE_PEER_EXCHANGE) {
         changes |= clear_peer_cache_if_restricted(handle, identity);
@@ -1667,12 +1728,35 @@ DirtyMask TTorrentClient::set_source_policy_field(
     return changes;
 }
 
-DirtyMask TTorrentClient::apply_https_source_policy_locked()
+DirtyMask TTorrentClient::apply_https_source_policy_locked(
+    HTTPSSourcePolicy const previous_global_policy
+)
 {
     DirtyMask changes = 0;
     for (ActiveTorrentEntry const &entry : active_torrent_entries(*this)) {
-        changes |= restore_metadata_source_policy(entry.handle, entry.identity);
-        changes |= enforce_https_source_policy(entry.handle, entry.identity);
+        HTTPSSourcePolicy const previous_effective_policy{
+            .trackers = entry.identity != nullptr
+                    && entry.identity->https_tracker_policy != HTTPSPolicy::inherit
+                ? entry.identity->https_tracker_policy
+                : previous_global_policy.trackers,
+            .web_seeds = entry.identity != nullptr
+                    && entry.identity->https_web_seed_policy != HTTPSPolicy::inherit
+                ? entry.identity->https_web_seed_policy
+                : previous_global_policy.web_seeds,
+        };
+        HTTPSSourcePolicy const current_effective_policy{
+            .trackers = effective_https_tracker_policy(entry.identity),
+            .web_seeds = effective_https_web_seed_policy(entry.identity),
+        };
+        HTTPSSourcePolicyScope const scope = changed_https_policy_scope(
+            previous_effective_policy,
+            current_effective_policy
+        );
+        if (scope == HTTPSSourcePolicyScope::none) {
+            continue;
+        }
+        changes |= restore_metadata_source_policy(entry.handle, entry.identity, scope);
+        changes |= enforce_https_source_policy(entry.handle, entry.identity, scope);
     }
     return changes;
 }
@@ -1937,6 +2021,10 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         }
         lt::add_torrent_params params = std::move(*parsed);
         lt::add_torrent_params const source_params = params;
+        BridgeResult const valid_original_sources = validate_torrent_sources(source_params);
+        if (!valid_original_sources) {
+            return valid_original_sources;
+        }
 
         if (!is_valid_https_tracker_policy(add_options.https_tracker_policy, true)
             || !is_valid_https_web_seed_policy(add_options.https_web_seed_policy, true)) {
@@ -1954,9 +2042,9 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
             params,
             HTTPSSourcePolicy{.trackers = effective_tracker_policy, .web_seeds = effective_web_seed_policy}
         ));
-        BridgeResult const valid_sources = validate_torrent_sources(params);
-        if (!valid_sources) {
-            return valid_sources;
+        BridgeResult const valid_effective_sources = validate_torrent_sources(params);
+        if (!valid_effective_sources) {
+            return valid_effective_sources;
         }
         bool const enable_peer_exchange_value = bridge_bool(add_options.enable_peer_exchange);
         bool const metadata_pending = !params.ti;
@@ -2017,7 +2105,10 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         identity->allow_pre_metadata_dht = allow_pre_metadata_dht;
         identity->intended_default_dont_download = intended_default_dont_download;
         identity->intended_file_priorities = std::move(intended_file_priorities);
-        remember_source_policy_sources(*identity, source_params);
+        BridgeResult const remembered_sources = remember_source_policy_sources(*identity, source_params);
+        if (!remembered_sources) {
+            return remembered_sources;
+        }
         lt::add_torrent_params resume_params = params;
         lt::error_code add_error;
         *add_outcome_out = TTORRENT_ADD_OUTCOME_UNKNOWN;
@@ -2239,6 +2330,10 @@ int32_t add_torrent_file_data_with_priorities(
         }
         sanitize_resume_endpoint_hints(params);
         lt::add_torrent_params const source_params = params;
+        BridgeResult const valid_original_sources = validate_torrent_sources(source_params);
+        if (!valid_original_sources) {
+            return valid_original_sources;
+        }
         if (apply_file_priority_overrides
             && file_priority_count > params.ti->layout().num_files()) {
             return bridge_error(2, "The file priorities are invalid.");
@@ -2287,9 +2382,9 @@ int32_t add_torrent_file_data_with_priorities(
             params,
             HTTPSSourcePolicy{.trackers = effective_tracker_policy, .web_seeds = effective_web_seed_policy}
         ));
-        BridgeResult const valid_sources = validate_torrent_sources(params);
-        if (!valid_sources) {
-            return valid_sources;
+        BridgeResult const valid_effective_sources = validate_torrent_sources(params);
+        if (!valid_effective_sources) {
+            return valid_effective_sources;
         }
         bool const enable_peer_exchange_value = bridge_bool(add_options.enable_peer_exchange);
         bool const private_torrent = params.ti && params.ti->priv();
@@ -2335,7 +2430,10 @@ int32_t add_torrent_file_data_with_priorities(
         identity->dht_locked_by_source = dht_locked_by_source;
         identity->lsd_locked_by_source = lsd_locked_by_source;
         identity->peer_exchange_locked_by_source = peer_exchange_locked_by_source;
-        remember_source_policy_sources(*identity, source_params);
+        BridgeResult const remembered_sources = remember_source_policy_sources(*identity, source_params);
+        if (!remembered_sources) {
+            return remembered_sources;
+        }
         lt::add_torrent_params resume_params = params;
         lt::error_code add_error;
         *add_outcome_out = TTORRENT_ADD_OUTCOME_UNKNOWN;
@@ -3534,6 +3632,10 @@ extern "C" int32_t TorrentClientApplySettings(
         bool const should_resume_session = client->requested_network_blocked && !network_blocked;
         bool const expected_session_paused = network_blocked
             || (!should_resume_session && client->session.is_paused());
+        HTTPSSourcePolicy const previous_https_source_policy{
+            .trackers = client->https_tracker_policy,
+            .web_seeds = client->https_web_seed_policy,
+        };
         client->dht_node_enabled = enable_dht;
         SourcePolicyApplicationResult source_policy_application;
         add_policy_result(source_policy_application, apply_dht_policy_locked(*client, use_dht_by_default));
@@ -3578,7 +3680,7 @@ extern "C" int32_t TorrentClientApplySettings(
         client->https_web_seed_policy = https_web_seed_policy;
         publisher.add(source_policy_application.changes);
         request_policy_saves(*client, source_policy_application.handles_to_save);
-        publisher.add(client->apply_https_source_policy_locked());
+        publisher.add(client->apply_https_source_policy_locked(previous_https_source_policy));
 
         if (network_blocked) {
             client->session.pause();

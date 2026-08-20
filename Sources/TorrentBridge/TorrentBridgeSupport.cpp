@@ -2010,47 +2010,66 @@ bool apply_https_source_policy(
 
 namespace {
 
-void remember_source_policy_tracker(TorrentIdentity &identity, lt::announce_entry const &tracker)
+void remember_source_policy_tracker(
+    std::vector<lt::announce_entry> &trackers,
+    lt::announce_entry const &tracker
+)
 {
-    if (identity.source_trackers.size() >= static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT)) {
-        return;
-    }
-    if (std::ranges::any_of(identity.source_trackers, [&](lt::announce_entry const &stored) {
+    if (std::ranges::any_of(trackers, [&](lt::announce_entry const &stored) {
             return stored.url == tracker.url;
         })) {
         return;
     }
-    identity.source_trackers.push_back(tracker);
+    trackers.push_back(tracker);
 }
 
-void remember_source_policy_web_seed(TorrentIdentity &identity, std::string const &web_seed)
+void remember_source_policy_web_seed(
+    std::vector<std::string> &web_seeds,
+    std::string const &web_seed
+)
 {
-    if (identity.source_web_seeds.size() >= static_cast<std::size_t>(TTORRENT_MAX_WEB_SEED_COUNT)) {
+    if (std::ranges::find(web_seeds, web_seed) != web_seeds.end()) {
         return;
     }
-    if (std::ranges::find(identity.source_web_seeds, web_seed) != identity.source_web_seeds.end()) {
-        return;
-    }
-    identity.source_web_seeds.push_back(web_seed);
+    web_seeds.push_back(web_seed);
 }
 
 } // namespace
 
-void remember_source_policy_sources(TorrentIdentity &identity, lt::add_torrent_params const &params)
+BridgeResult remember_source_policy_sources(TorrentIdentity &identity, lt::add_torrent_params const &params)
 {
+    std::vector<lt::announce_entry> trackers = identity.source_trackers;
+    std::vector<std::string> web_seeds = identity.source_web_seeds;
     auto tier = params.tracker_tiers.begin();
     for (std::string const &tracker_url : params.trackers) {
         lt::announce_entry tracker(tracker_url);
         tracker.tier = static_cast<std::uint8_t>(tier != params.tracker_tiers.end() ? *tier : 0);
-        remember_source_policy_tracker(identity, tracker);
+        remember_source_policy_tracker(trackers, tracker);
         if (tier != params.tracker_tiers.end()) {
             ++tier;
         }
     }
 
     for (std::string const &url_seed : params.url_seeds) {
-        remember_source_policy_web_seed(identity, url_seed);
+        remember_source_policy_web_seed(web_seeds, url_seed);
     }
+
+    lt::add_torrent_params preserved_sources;
+    preserved_sources.trackers.reserve(trackers.size());
+    preserved_sources.tracker_tiers.reserve(trackers.size());
+    for (lt::announce_entry const &tracker : trackers) {
+        preserved_sources.trackers.push_back(tracker.url);
+        preserved_sources.tracker_tiers.push_back(tracker.tier);
+    }
+    preserved_sources.url_seeds = web_seeds;
+    BridgeResult const valid_sources = validate_torrent_sources(preserved_sources);
+    if (!valid_sources) {
+        return valid_sources;
+    }
+
+    identity.source_trackers = std::move(trackers);
+    identity.source_web_seeds = std::move(web_seeds);
+    return {};
 }
 
 void restore_source_policy_sources(lt::add_torrent_params &params, TorrentIdentity const *identity)
@@ -2069,32 +2088,20 @@ void restore_source_policy_sources(lt::add_torrent_params &params, ResumePolicyS
     std::vector<int> const current_tiers = std::move(params.tracker_tiers);
     params.trackers.clear();
     params.tracker_tiers.clear();
-    params.trackers.reserve(std::min(
-        static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT),
-        policy.source_trackers.size() + current_trackers.size()
-    ));
+    params.trackers.reserve(policy.source_trackers.size() + current_trackers.size());
     params.tracker_tiers.reserve(params.trackers.capacity());
     std::set<std::string> tracker_urls;
-    std::size_t tracker_count = 0U;
     for (lt::announce_entry const &tracker : policy.source_trackers) {
-        if (tracker_count >= static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT)) {
-            break;
-        }
         if (tracker_urls.insert(tracker.url).second) {
             params.trackers.push_back(tracker.url);
             params.tracker_tiers.push_back(tracker.tier);
-            ++tracker_count;
         }
     }
     auto current_tier = current_tiers.cbegin();
     for (std::string const &tracker_url : current_trackers) {
-        if (tracker_count >= static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT)) {
-            break;
-        }
         if (tracker_urls.insert(tracker_url).second) {
             params.trackers.push_back(tracker_url);
             params.tracker_tiers.push_back(current_tier != current_tiers.cend() ? *current_tier : 0);
-            ++tracker_count;
         }
         if (current_tier != current_tiers.cend()) {
             ++current_tier;
@@ -2102,14 +2109,9 @@ void restore_source_policy_sources(lt::add_torrent_params &params, ResumePolicyS
     }
 
     std::set<std::string> url_seed_urls(params.url_seeds.begin(), params.url_seeds.end());
-    std::size_t web_seed_count = static_cast<std::size_t>(torrent_source_counts(params).web_seed_count);
     for (std::string const &web_seed : policy.source_web_seeds) {
-        if (web_seed_count >= static_cast<std::size_t>(TTORRENT_MAX_WEB_SEED_COUNT)) {
-            break;
-        }
         if (url_seed_urls.insert(web_seed).second) {
             params.url_seeds.push_back(web_seed);
-            ++web_seed_count;
         }
     }
 }

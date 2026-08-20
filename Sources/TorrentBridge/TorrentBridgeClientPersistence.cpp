@@ -1270,6 +1270,12 @@ void TTorrentClient::load_resume_data()
             sanitize_resume_endpoint_hints(params);
         }
         lt::add_torrent_params const source_params = params;
+        BridgeResult const valid_original_sources = validate_torrent_sources(source_params);
+        if (!valid_original_sources) {
+            remove_resume_file_locked(name);
+            sync_resume_directory_quietly();
+            continue;
+        }
         HTTPSPolicy const persisted_https_tracker_policy =
             https_tracker_policy_from_resume_data(*buffer);
         HTTPSPolicy const persisted_https_web_seed_policy =
@@ -1317,10 +1323,10 @@ void TTorrentClient::load_resume_data()
             params,
             HTTPSSourcePolicy{
                 .trackers = persisted_https_tracker_policy == HTTPSPolicy::inherit
-                    ? HTTPSPolicy::original
+                    ? https_tracker_policy
                     : persisted_https_tracker_policy,
                 .web_seeds = persisted_https_web_seed_policy == HTTPSPolicy::inherit
-                    ? HTTPSPolicy::original
+                    ? https_web_seed_policy
                     : persisted_https_web_seed_policy,
             }
         ));
@@ -1385,7 +1391,13 @@ void TTorrentClient::load_resume_data()
         identity->peer_exchange_disabled_by_user = peer_exchange_disabled_by_user && !peer_exchange_locked_by_source;
         identity->lsd_enabled_by_user = lsd_enabled_by_user && !lsd_disabled_by_user && !lsd_locked_by_source;
         identity->lsd_disabled_by_user = lsd_disabled_by_user && !lsd_locked_by_source;
-        remember_source_policy_sources(*identity, source_params);
+        BridgeResult const remembered_sources = remember_source_policy_sources(*identity, source_params);
+        if (!remembered_sources) {
+            discard_unpublished_identity(identity);
+            remove_resume_file_locked(name);
+            sync_resume_directory_quietly();
+            continue;
+        }
         lt::error_code add_error;
         lt::torrent_handle handle = session.add_torrent(std::move(params), add_error);
         if (add_error) {
