@@ -253,18 +253,6 @@ template <typename Predicate>
     };
 }
 
-[[nodiscard]] std::vector<std::uint8_t> authorized_path_blob(
-    std::initializer_list<std::string_view> paths
-)
-{
-    std::vector<std::uint8_t> blob;
-    for (std::string_view const path : paths) {
-        blob.insert(blob.end(), path.begin(), path.end());
-        blob.push_back(0U);
-    }
-    return blob;
-}
-
 [[nodiscard]] std::shared_ptr<lt::torrent_info const> make_torrent_info(bool is_private)
 {
     std::vector<lt::create_file_entry> files;
@@ -443,11 +431,7 @@ void check_replaced_resume_root_remains_confined(bool const replace_with_symlink
     fs::path const download_directory = temporary_directory.path() / "Downloads";
     REQUIRE(fs::create_directory(download_directory));
 
-    TTorrentClient client(
-        state_directory.string(),
-        true,
-        AuthorizedSavePathSet{download_directory.lexically_normal().string()}
-    );
+    TTorrentClient client(state_directory.string());
     client.set_session_shutdown_asynchronous(false);
     client.stop_alert_worker();
 
@@ -483,7 +467,6 @@ void check_replaced_resume_root_remains_confined(bool const replace_with_symlink
     REQUIRE(TorrentClientAddMagnet(
         &client,
         magnet.c_str(),
-        download_directory.c_str(),
         add_options,
         added_id.data(),
         static_cast<int32_t>(added_id.size()),
@@ -558,16 +541,23 @@ void check_replaced_resume_root_remains_confined(bool const replace_with_symlink
     TTorrentClient &client,
     lt::add_torrent_params params,
     fs::path const &save_path,
-    TorrentIdentity *&identity
+    TorrentIdentity *&identity,
+    std::optional<TTorrentStorageActivation> const activation = std::nullopt
 )
 {
     if (!params.ti) {
         throw std::runtime_error("Could not add metadata torrent without torrent info.");
     }
     params.info_hashes = params.ti->info_hashes();
-    prepare_add_params(params, save_path.string(), false, true);
+    if (activation) {
+        prepare_add_params(params, client.part_file_path(*activation), false, true);
+        params.file_provider = client.make_payload_provider(*activation);
+    } else {
+        prepare_add_params(params, save_path.string(), false, true);
+    }
 
     identity = client.attach_identity(params);
+    identity->storage_activation = activation;
     REQUIRE(remember_source_policy_sources(*identity, params));
     lt::error_code add_error;
     lt::torrent_handle handle = client.session.add_torrent(std::move(params), add_error);
@@ -582,12 +572,13 @@ void check_replaced_resume_root_remains_confined(bool const replace_with_symlink
     TTorrentClient &client,
     lt::torrent_info const &info,
     fs::path const &save_path,
-    TorrentIdentity *&identity
+    TorrentIdentity *&identity,
+    std::optional<TTorrentStorageActivation> const activation = std::nullopt
 )
 {
     lt::add_torrent_params params;
     params.ti = std::make_shared<lt::torrent_info>(info);
-    return add_metadata_torrent(client, std::move(params), save_path, identity);
+    return add_metadata_torrent(client, std::move(params), save_path, identity, activation);
 }
 
 [[nodiscard]] lt::torrent_handle add_metadata_torrent_with_trackers(
@@ -605,26 +596,6 @@ void check_replaced_resume_root_remains_confined(bool const replace_with_symlink
         params.trackers.push_back(tracker.url);
     }
     return add_metadata_torrent(client, std::move(params), save_path, identity);
-}
-
-[[nodiscard]] bool eventually_take_removal_result(
-    TTorrentClient &client,
-    std::uint64_t request_token,
-    TTorrentRemovalResult &result,
-    std::span<char> error
-)
-{
-    return eventually([&] {
-        client.pump_alerts();
-        TTorrentRemovalReadResult const read = TorrentClientTakeRemovalResult(
-            &client,
-            request_token,
-            error.data(),
-            static_cast<int32_t>(error.size())
-        );
-        result = read.result;
-        return read.status == 0 && result.state != TTORRENT_REMOVAL_PENDING;
-    });
 }
 
 } // namespace
@@ -656,7 +627,7 @@ TEST_CASE("resume persistence retains its directory authority after root directo
     check_replaced_resume_root_remains_confined(false);
 }
 
-TEST_CASE("resume restoration is fail-closed and preserves unauthorized entries with one aggregate error")
+TEST_CASE("resume restoration preserves entries missing storage claim authority with one aggregate error")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
     fs::path const state_directory = temporary_directory.path() / "State";
@@ -685,231 +656,47 @@ TEST_CASE("resume restoration is fail-closed and preserves unauthorized entries 
     std::array<char, 512> error{};
     REQUIRE(client.take_alert_error(std::span{error}));
     CHECK(std::string(error.data())
-          == "Skipped restoring 2 saved torrents because download folder access is not authorized. Resume data was preserved.");
+          == "Skipped restoring 2 saved torrents because brokered storage authority was missing or invalid. Resume data was preserved.");
     CHECK_FALSE(client.take_alert_error(std::span{error}));
     DirtyMask changes = 0U;
     static_cast<void>(client.take_changes(&changes));
     CHECK((changes & TTORRENT_DIRTY_ERRORS) != 0U);
 }
 
-TEST_CASE("authorized resume restoration uses the exact lexically normalized capability path")
+TEST_CASE("resume restoration preserves pre-broker metadata-less entries without activating them")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
     fs::path const state_directory = temporary_directory.path() / "State";
-    fs::path const authorized_directory = temporary_directory.path() / "Authorized";
-    fs::path const outside_directory = temporary_directory.path() / "Outside";
-    REQUIRE(fs::create_directories(authorized_directory));
-    REQUIRE(fs::create_directories(outside_directory));
-    fs::path const resume_path = write_valid_resume_entry(
-        state_directory,
-        (authorized_directory / ".").string(),
-        43U,
-        '3'
-    );
-    fs::path const denied_resume_path = write_valid_resume_entry(
-        state_directory,
-        (authorized_directory / ".." / "Outside").string(),
-        44U,
-        '4'
-    );
+    fs::path const resume_directory = state_directory / "ResumeData";
+    REQUIRE(fs::create_directories(resume_directory));
 
-    std::string const blob_path = (authorized_directory / "child" / "..").string();
-    std::vector<std::uint8_t> blob(blob_path.begin(), blob_path.end());
-    blob.push_back(0U);
-    bridge_tests::AuthorizedSaveRoot authorized_root(authorized_directory);
-    TTorrentAuthorizedSaveRoot root_record = authorized_root.record();
-    std::array<char, 512> error{};
-    TTorrentClient *client = TorrentClientCreateWithError(
-        state_directory.c_str(),
-        1,
-        blob.data(),
-        static_cast<int32_t>(blob.size()),
-        &root_record,
-        1,
-        bridge_tests::retain_authorized_save_root,
-        bridge_tests::release_authorized_save_root,
-        error.data(),
-        static_cast<int32_t>(error.size())
+    std::string const hash(40U, '6');
+    lt::error_code parse_error;
+    lt::add_torrent_params params = lt::parse_magnet_uri(
+        "magnet:?xt=urn:btih:" + hash,
+        parse_error
     );
-    REQUIRE(client != nullptr);
-    client->set_session_shutdown_asynchronous(false);
-    client->stop_alert_worker();
+    REQUIRE_FALSE(parse_error);
+    params.save_path = temporary_directory.path().string();
 
-    CHECK(error.front() == '\0');
-    CHECK(client->session.get_torrents().size() == 1U);
+    TorrentIdentity identity;
+    identity.canonical_id = bridge_tests::canonical_id('6');
+    std::vector<char> const encoded = encoded_resume_data(params, &identity, false);
+    fs::path const resume_path = resume_directory
+        / ("v1:" + hash + std::string(kResumeExtension));
+    REQUIRE(write_owner_only_file_checked(
+        resume_path,
+        std::string_view(encoded.data(), encoded.size())
+    ).has_value());
+
+    TTorrentClient client(state_directory.string());
+    client.set_session_shutdown_asynchronous(false);
+    CHECK(client.session.get_torrents().empty());
     CHECK(file_exists(resume_path));
-    CHECK(file_exists(denied_resume_path));
-    std::array<char, 512> alert_error{};
-    REQUIRE(client->take_alert_error(std::span{alert_error}));
-    CHECK(std::string(alert_error.data())
-          == "Skipped restoring 1 saved torrent because download folder access is not authorized. Resume data was preserved.");
-    CHECK_FALSE(client->take_alert_error(std::span{alert_error}));
-
-    TorrentClientDestroyBlocking(client);
-}
-
-TEST_CASE("live magnet adds require the current exact authorized save path")
-{
-    bridge_tests::TemporaryDirectory temporary_directory;
-    fs::path const state_directory = temporary_directory.path() / "State";
-    fs::path const first_directory = temporary_directory.path() / "First";
-    fs::path const second_directory = temporary_directory.path() / "Second";
-    REQUIRE(fs::create_directories(first_directory));
-    REQUIRE(fs::create_directories(second_directory));
-    bridge_tests::AuthorizedSaveRoot first_root(first_directory);
-    bridge_tests::AuthorizedSaveRoot second_root(second_directory);
-
-    TTorrentClient client(state_directory.string());
-    client.set_session_shutdown_asynchronous(false);
-    TTorrentAddOptions add_options = default_add_options();
-    std::array<char, TTORRENT_ID_CAPACITY> added_id{};
     std::array<char, 512> error{};
-    int32_t add_outcome = TTORRENT_ADD_REJECTED;
-
-    auto add_magnet = [&](char hash_digit, fs::path const &save_path) {
-        added_id.fill('\0');
-        error.fill('\0');
-        add_outcome = TTORRENT_ADD_REJECTED;
-        std::string const magnet = "magnet:?xt=urn:btih:" + std::string(40U, hash_digit);
-        return TorrentClientAddMagnet(
-            &client,
-            magnet.c_str(),
-            save_path.c_str(),
-            add_options,
-            added_id.data(),
-            static_cast<int32_t>(added_id.size()),
-            &add_outcome,
-            error.data(),
-            static_cast<int32_t>(error.size())
-        );
-    };
-
-    CHECK(add_magnet('1', first_directory) != 0);
-    CHECK(add_outcome == TTORRENT_ADD_REJECTED);
-    CHECK(std::string(error.data()) == "The save path is not authorized.");
-    CHECK(added_id.front() == '\0');
-
-    std::string const first_blob_path = (first_directory / "child" / "..").string();
-    std::vector<std::uint8_t> first_blob = authorized_path_blob({first_blob_path});
-    TTorrentAuthorizedSaveRoot first_record = first_root.record();
-    REQUIRE(TorrentClientReplaceAuthorizedSavePaths(
-        &client,
-        first_blob.data(),
-        static_cast<int32_t>(first_blob.size()),
-        &first_record,
-        1,
-        bridge_tests::retain_authorized_save_root,
-        bridge_tests::release_authorized_save_root,
-        error.data(),
-        static_cast<int32_t>(error.size())
-    ) == 0);
-
-    CHECK(add_magnet('1', first_directory / ".") == 0);
-    CHECK(add_outcome == TTORRENT_ADD_COMMITTED);
-    CHECK(is_canonical_torrent_id(added_id.data()));
-    CHECK(add_magnet('2', first_directory / "child") != 0);
-    CHECK(add_outcome == TTORRENT_ADD_REJECTED);
-    CHECK(std::string(error.data()) == "The save path is not authorized.");
-
-    std::string const second_blob_path = second_directory.string();
-    std::vector<std::uint8_t> second_blob = authorized_path_blob({second_blob_path});
-    TTorrentAuthorizedSaveRoot second_record = second_root.record();
-    REQUIRE(TorrentClientReplaceAuthorizedSavePaths(
-        &client,
-        second_blob.data(),
-        static_cast<int32_t>(second_blob.size()),
-        &second_record,
-        1,
-        bridge_tests::retain_authorized_save_root,
-        bridge_tests::release_authorized_save_root,
-        error.data(),
-        static_cast<int32_t>(error.size())
-    ) == 0);
-
-    CHECK(add_magnet('2', first_directory) != 0);
-    CHECK(std::string(error.data()) == "The save path is not authorized.");
-    CHECK(add_magnet('2', second_directory) == 0);
-    CHECK(add_outcome == TTORRENT_ADD_COMMITTED);
-    CHECK(is_canonical_torrent_id(added_id.data()));
-
-    REQUIRE(TorrentClientReplaceAuthorizedSavePaths(
-        &client,
-        nullptr,
-        0,
-        nullptr,
-        0,
-        nullptr,
-        nullptr,
-        error.data(),
-        static_cast<int32_t>(error.size())
-    ) == 0);
-    CHECK(add_magnet('3', second_directory) != 0);
-    CHECK(add_outcome == TTORRENT_ADD_REJECTED);
-    CHECK(std::string(error.data()) == "The save path is not authorized.");
-}
-
-TEST_CASE("live torrent file adds require a dynamically authorized save path")
-{
-    bridge_tests::TemporaryDirectory temporary_directory;
-    fs::path const state_directory = temporary_directory.path() / "State";
-    fs::path const download_directory = temporary_directory.path() / "Downloads";
-    REQUIRE(fs::create_directories(download_directory));
-    bridge_tests::AuthorizedSaveRoot download_root(download_directory);
-
-    std::vector<lt::create_file_entry> files;
-    files.emplace_back("authorized-file.bin", 4);
-    lt::create_torrent creator(std::move(files), 16 * 1024, lt::create_torrent::v1_only);
-    creator.set_hash(lt::piece_index_t(0), bridge_tests::sha1_hash_from_seed(45U));
-    std::vector<char> const torrent_data = creator.generate_buf();
-
-    TTorrentClient client(state_directory.string());
-    client.set_session_shutdown_asynchronous(false);
-    TTorrentAddOptions add_options = default_add_options();
-    std::array<char, TTORRENT_ID_CAPACITY> added_id{};
-    std::array<char, 512> error{};
-    int32_t add_outcome = TTORRENT_ADD_REJECTED;
-
-    auto add_torrent = [&] {
-        added_id.fill('\0');
-        error.fill('\0');
-        add_outcome = TTORRENT_ADD_REJECTED;
-        return TorrentClientAddTorrentFileData(
-            &client,
-            bridge_tests::byte_data(torrent_data),
-            static_cast<int32_t>(torrent_data.size()),
-            download_directory.c_str(),
-            add_options,
-            added_id.data(),
-            static_cast<int32_t>(added_id.size()),
-            &add_outcome,
-            error.data(),
-            static_cast<int32_t>(error.size())
-        );
-    };
-
-    CHECK(add_torrent() != 0);
-    CHECK(add_outcome == TTORRENT_ADD_REJECTED);
-    CHECK(std::string(error.data()) == "The save path is not authorized.");
-    CHECK(added_id.front() == '\0');
-
-    std::string const authorized_path = download_directory.string();
-    std::vector<std::uint8_t> blob = authorized_path_blob({authorized_path});
-    TTorrentAuthorizedSaveRoot root_record = download_root.record();
-    REQUIRE(TorrentClientReplaceAuthorizedSavePaths(
-        &client,
-        blob.data(),
-        static_cast<int32_t>(blob.size()),
-        &root_record,
-        1,
-        bridge_tests::retain_authorized_save_root,
-        bridge_tests::release_authorized_save_root,
-        error.data(),
-        static_cast<int32_t>(error.size())
-    ) == 0);
-
-    CHECK(add_torrent() == 0);
-    CHECK(add_outcome == TTORRENT_ADD_COMMITTED);
-    CHECK(is_canonical_torrent_id(added_id.data()));
+    REQUIRE(client.take_alert_error(std::span{error}));
+    CHECK(std::string(error.data())
+          == "Skipped restoring 1 saved torrent because brokered storage authority was missing or invalid. Resume data was preserved.");
 }
 
 TEST_CASE("add failures report an unknown outcome when durable rollback cannot be proven")
@@ -919,11 +706,7 @@ TEST_CASE("add failures report an unknown outcome when durable rollback cannot b
     fs::path const download_directory = temporary_directory.path() / "Downloads";
     REQUIRE(fs::create_directories(download_directory));
 
-    TTorrentClient client(
-        state_directory.string(),
-        true,
-        AuthorizedSavePathSet{download_directory.lexically_normal().string()}
-    );
+    TTorrentClient client(state_directory.string());
     client.set_session_shutdown_asynchronous(false);
     client.stop_alert_worker();
 
@@ -939,7 +722,6 @@ TEST_CASE("add failures report an unknown outcome when durable rollback cannot b
     int32_t const result = TorrentClientAddMagnet(
         &client,
         magnet.c_str(),
-        download_directory.c_str(),
         add_options,
         added_id.data(),
         static_cast<int32_t>(added_id.size()),
@@ -993,11 +775,7 @@ TEST_CASE("post-accept add failures remain unknown after a durable removal reque
     fs::path const download_directory = temporary_directory.path() / "Downloads";
     REQUIRE(fs::create_directories(download_directory));
 
-    TTorrentClient client(
-        state_directory.string(),
-        true,
-        AuthorizedSavePathSet{download_directory.lexically_normal().string()}
-    );
+    TTorrentClient client(state_directory.string());
     client.set_session_shutdown_asynchronous(false);
     client.stop_alert_worker();
 
@@ -1018,7 +796,6 @@ TEST_CASE("post-accept add failures remain unknown after a durable removal reque
     int32_t const result = TorrentClientAddMagnet(
         &client,
         magnet.c_str(),
-        download_directory.c_str(),
         add_options,
         added_id.data(),
         static_cast<int32_t>(added_id.size()),
@@ -1065,12 +842,7 @@ TEST_CASE("startup tombstone indexing enforces budgets before publication")
         ResumeSaveResult const written = write_owner_only_file_at_checked(
             client.resume_directory_descriptor.get(),
             make_removal_tombstone_filename(),
-            tombstone_payload(
-                entry_ids,
-                RemovalTombstoneState::resume_cleanup,
-                false,
-                false
-            )
+            tombstone_payload(entry_ids)
         );
         REQUIRE(written.has_value());
     }
@@ -1355,7 +1127,7 @@ TEST_CASE("TTorrentClient startup completes durable tombstoned resume cleanup")
     bridge_tests::write_text_file(unique_temp_path, "temp");
     ResumeSaveResult const tombstone = write_owner_only_file_checked(
         tombstone_path,
-        tombstone_payload({id}, RemovalTombstoneState::resume_cleanup, false, false)
+        tombstone_payload({id})
     );
     REQUIRE(tombstone.has_value());
 
@@ -1391,30 +1163,6 @@ TEST_CASE("TTorrentClient startup preserves unreadable resume entries but remove
 
     CHECK(fs::is_symlink(fs::symlink_status(unreadable_resume)));
     CHECK_FALSE(file_exists(empty_resume));
-}
-
-TEST_CASE("TTorrentClient startup reports abandoned payload deletion tombstones")
-{
-    bridge_tests::TemporaryDirectory temporary_directory;
-    fs::path const state_directory = temporary_directory.path() / "State";
-    fs::path const resume_directory = state_directory / "ResumeData";
-    REQUIRE(fs::create_directories(resume_directory));
-
-    std::string const id = bridge_tests::v1_id('6');
-    fs::path const tombstone_path = removal_tombstone_path(resume_directory);
-    ResumeSaveResult const tombstone = write_owner_only_file_checked(
-        tombstone_path,
-        tombstone_payload({id}, RemovalTombstoneState::awaiting_payload_delete, true, true)
-    );
-    REQUIRE(tombstone.has_value());
-
-    TTorrentClient client(state_directory.string());
-    client.set_session_shutdown_asynchronous(false);
-
-    std::array<char, 512> error{};
-    CHECK(client.take_alert_error(std::span{error}));
-    CHECK(bridge_tests::string_from_c_buffer(std::span{error}) == "A previous data deletion did not finish before shutdown. Some downloaded files may remain on disk.");
-    CHECK_FALSE(file_exists(tombstone_path));
 }
 
 TEST_CASE("pending resume cleanup groups are normalized and deduplicated")
@@ -1520,11 +1268,7 @@ TEST_CASE("resume restore drains synchronous add alerts before the queue can ove
     bridge_tests::TemporaryDirectory temporary_directory;
     fs::path const state_directory = temporary_directory.path() / "State";
     std::string const save_path = temporary_directory.path().lexically_normal().string();
-    TTorrentClient client(
-        state_directory.string(),
-        true,
-        AuthorizedSavePathSet{save_path}
-    );
+    TTorrentClient client(state_directory.string());
     client.set_session_shutdown_asynchronous(false);
     client.stop_alert_worker();
     client.pump_alerts();
@@ -1553,11 +1297,7 @@ TEST_CASE("live magnet bursts opportunistically drain synchronous add alerts")
     bridge_tests::TemporaryDirectory temporary_directory;
     fs::path const state_directory = temporary_directory.path() / "State";
     std::string const save_path = temporary_directory.path().lexically_normal().string();
-    TTorrentClient client(
-        state_directory.string(),
-        true,
-        AuthorizedSavePathSet{save_path}
-    );
+    TTorrentClient client(state_directory.string());
     client.set_session_shutdown_asynchronous(false);
     client.stop_alert_worker();
     client.pump_alerts();
@@ -1578,7 +1318,6 @@ TEST_CASE("live magnet bursts opportunistically drain synchronous add alerts")
         REQUIRE(TorrentClientAddMagnet(
             &client,
             magnet.c_str(),
-            save_path.c_str(),
             add_options,
             added_id.data(),
             static_cast<int32_t>(added_id.size()),
@@ -1887,11 +1626,7 @@ TEST_CASE("resume persistence rejects unsafe serialized file renames")
         );
         REQUIRE(written.has_value());
 
-        TTorrentClient client(
-            state_directory.string(),
-            true,
-            AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
-        );
+        TTorrentClient client(state_directory.string());
         client.set_session_shutdown_asynchronous(false);
 
         CHECK(client.session.get_torrents().empty());
@@ -1923,14 +1658,16 @@ TEST_CASE("resume metadata flows through add, async save alerts, and reload")
     creator.set_creation_date(expected_creation_date);
     creator.set_hash(lt::piece_index_t(0), bridge_tests::sha1_hash_from_seed(31U));
     std::vector<char> const torrent_data = creator.generate_buf();
+    lt::add_torrent_params const claim_params = bridge_tests::load_torrent_params(
+        torrent_data,
+        "metadata lifecycle claim"
+    );
+    bridge_tests::TestPayloadBroker broker(temporary_directory.path() / "Payload");
+    TTorrentStorageActivation const activation = broker.register_torrent(claim_params);
 
     std::string canonical_id;
     {
-        TTorrentClient client(
-            state_directory.string(),
-            true,
-            AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
-        );
+        TTorrentClient client(state_directory.string(), true, broker.context());
         client.set_session_shutdown_asynchronous(false);
 
         TTorrentAddOptions add_options = default_add_options();
@@ -1941,7 +1678,7 @@ TEST_CASE("resume metadata flows through add, async save alerts, and reload")
             &client,
             bridge_tests::byte_data(torrent_data),
             static_cast<int32_t>(torrent_data.size()),
-            temporary_directory.path().c_str(),
+            activation,
             add_options,
             added_id,
             static_cast<int32_t>(sizeof(added_id)),
@@ -1988,11 +1725,7 @@ TEST_CASE("resume metadata flows through add, async save alerts, and reload")
         }));
     }
 
-    TTorrentClient reloaded(
-        state_directory.string(),
-        true,
-        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
-    );
+    TTorrentClient reloaded(state_directory.string(), true, broker.context());
     reloaded.set_session_shutdown_asynchronous(false);
     std::scoped_lock guard(reloaded.lock);
     auto const cached = reloaded.snapshot_indices.find(canonical_id);
@@ -2000,6 +1733,175 @@ TEST_CASE("resume metadata flows through add, async save alerts, and reload")
     TTorrentSnapshot const &snapshot = reloaded.snapshot_cache.at(cached->second);
     CHECK(std::string(snapshot.comment) == expected_comment);
     CHECK(snapshot.created_time == expected_creation_date);
+}
+
+TEST_CASE("exact torrent metadata can be copied without re-encoding")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    std::vector<lt::create_file_entry> files;
+    files.emplace_back("exact-info.bin", 4);
+    lt::create_torrent creator(std::move(files), 16 * 1024, lt::create_torrent::v1_only);
+    creator.set_hash(lt::piece_index_t(0), bridge_tests::sha1_hash_from_seed(47U));
+    std::vector<char> const torrent_data = creator.generate_buf();
+    lt::add_torrent_params const claim_params = bridge_tests::load_torrent_params(
+        torrent_data,
+        "exact metadata claim"
+    );
+    bridge_tests::TestPayloadBroker broker(temporary_directory.path() / "Payload");
+    TTorrentStorageActivation const activation = broker.register_torrent(claim_params);
+
+    TTorrentClient client((temporary_directory.path() / "State").string(), true, broker.context());
+    client.set_session_shutdown_asynchronous(false);
+    char added_id[TTORRENT_ID_CAPACITY]{};
+    char error[512]{};
+    int32_t add_outcome = TTORRENT_ADD_REJECTED;
+    REQUIRE(TorrentClientAddTorrentFileData(
+        &client,
+        bridge_tests::byte_data(torrent_data),
+        static_cast<int32_t>(torrent_data.size()),
+        activation,
+        default_add_options(),
+        added_id,
+        static_cast<int32_t>(sizeof(added_id)),
+        &add_outcome,
+        error,
+        static_cast<int32_t>(sizeof(error))
+    ) == 0);
+
+    lt::span<char const> const expected = claim_params.ti->info_section();
+    int32_t required_count = -1;
+    std::uint8_t available = bridge_bool(false);
+    CHECK(TorrentClientCopyTorrentMetadata(
+        &client,
+        added_id,
+        nullptr,
+        0,
+        &required_count,
+        &available
+    ) == 0);
+    REQUIRE(bridge_bool(available));
+    REQUIRE(required_count == expected.size());
+
+    std::vector<std::uint8_t> copied(static_cast<std::size_t>(required_count));
+    CHECK(TorrentClientCopyTorrentMetadata(
+        &client,
+        added_id,
+        copied.data(),
+        static_cast<int32_t>(copied.size()),
+        &required_count,
+        &available
+    ) == required_count);
+    std::vector<std::uint8_t> expected_bytes;
+    expected_bytes.reserve(static_cast<std::size_t>(expected.size()));
+    std::ranges::transform(
+        expected,
+        std::back_inserter(expected_bytes),
+        [](char const byte) { return static_cast<std::uint8_t>(byte); }
+    );
+    CHECK(copied == expected_bytes);
+
+    required_count = -1;
+    available = bridge_bool(true);
+    CHECK(TorrentClientCopyTorrentMetadata(
+        &client,
+        "t:00000000000000000000000000000000",
+        nullptr,
+        0,
+        &required_count,
+        &available
+    ) == 0);
+    CHECK_FALSE(bridge_bool(available));
+    CHECK(required_count == 0);
+}
+
+TEST_CASE("known torrent activation hands off an identity only from removal")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    std::vector<lt::create_file_entry> files;
+    files.emplace_back("identity-handoff.bin", 4);
+    lt::create_torrent creator(std::move(files), 16 * 1024, lt::create_torrent::v1_only);
+    creator.set_hash(lt::piece_index_t(0), bridge_tests::sha1_hash_from_seed(53U));
+    std::vector<char> const torrent_data = creator.generate_buf();
+    lt::add_torrent_params const claim_params = bridge_tests::load_torrent_params(
+        torrent_data,
+        "identity handoff claim"
+    );
+    bridge_tests::TestPayloadBroker broker(temporary_directory.path() / "Payload");
+    TTorrentStorageActivation const first_activation = broker.register_torrent(claim_params);
+    TTorrentStorageActivation second_activation = broker.register_torrent(claim_params);
+
+    TTorrentClient client((temporary_directory.path() / "State").string(), true, broker.context());
+    client.set_session_shutdown_asynchronous(false);
+    char first_id[TTORRENT_ID_CAPACITY]{};
+    char error[512]{};
+    int32_t add_outcome = TTORRENT_ADD_REJECTED;
+    REQUIRE(TorrentClientAddTorrentFileData(
+        &client,
+        bridge_tests::byte_data(torrent_data),
+        static_cast<int32_t>(torrent_data.size()),
+        first_activation,
+        default_add_options(),
+        first_id,
+        static_cast<int32_t>(sizeof(first_id)),
+        &add_outcome,
+        error,
+        static_cast<int32_t>(sizeof(error))
+    ) == 0);
+    std::string const canonical_id(first_id);
+    REQUIRE(canonical_id.size() == std::size(second_activation.preserved_torrent_id));
+    std::ranges::transform(
+        canonical_id,
+        second_activation.preserved_torrent_id,
+        [](char const byte) { return static_cast<std::uint8_t>(byte); }
+    );
+
+    char duplicate_id[TTORRENT_ID_CAPACITY]{};
+    add_outcome = TTORRENT_ADD_REJECTED;
+    CHECK(TorrentClientAddTorrentFileData(
+        &client,
+        bridge_tests::byte_data(torrent_data),
+        static_cast<int32_t>(torrent_data.size()),
+        second_activation,
+        default_add_options(),
+        duplicate_id,
+        static_cast<int32_t>(sizeof(duplicate_id)),
+        &add_outcome,
+        error,
+        static_cast<int32_t>(sizeof(error))
+    ) != 0);
+    CHECK(add_outcome == TTORRENT_ADD_REJECTED);
+
+    std::uint8_t removal_committed = bridge_bool(false);
+    REQUIRE(TorrentClientRemove(
+        &client,
+        first_id,
+        &removal_committed,
+        error,
+        static_cast<int32_t>(sizeof(error))
+    ) == 0);
+    REQUIRE(bridge_bool(removal_committed));
+
+    char promoted_id[TTORRENT_ID_CAPACITY]{};
+    add_outcome = TTORRENT_ADD_REJECTED;
+    REQUIRE(TorrentClientAddTorrentFileData(
+        &client,
+        bridge_tests::byte_data(torrent_data),
+        static_cast<int32_t>(torrent_data.size()),
+        second_activation,
+        default_add_options(),
+        promoted_id,
+        static_cast<int32_t>(sizeof(promoted_id)),
+        &add_outcome,
+        error,
+        static_cast<int32_t>(sizeof(error))
+    ) == 0);
+    CHECK(std::string(promoted_id) == canonical_id);
+    std::optional<lt::torrent_handle> const promoted = client.find(promoted_id);
+    REQUIRE(promoted.has_value());
+    TorrentIdentity const *const promoted_identity = identity_from_handle(*promoted);
+    REQUIRE(promoted_identity != nullptr);
+    CHECK(promoted_identity->queue_rank == 0);
+    CHECK(static_cast<int>(promoted->queue_position()) == 0);
 }
 
 TEST_CASE("active file cache applies filenames renamed before add")
@@ -2701,17 +2603,50 @@ TEST_CASE("queue moves normalize and persist app-owned queue ranks")
     auto first_info = make_queue_torrent_info(21U);
     auto second_info = make_queue_torrent_info(22U);
     auto third_info = make_queue_torrent_info(23U);
+    auto activation_for = [](std::shared_ptr<lt::torrent_info const> const &info) {
+        lt::add_torrent_params params;
+        params.ti = info;
+        return params;
+    };
+    bridge_tests::TestPayloadBroker broker(temporary_directory.path() / "Payload");
+    TTorrentStorageActivation const first_activation = broker.register_torrent(
+        activation_for(first_info)
+    );
+    TTorrentStorageActivation const second_activation = broker.register_torrent(
+        activation_for(second_info)
+    );
+    TTorrentStorageActivation const third_activation = broker.register_torrent(
+        activation_for(third_info)
+    );
 
     {
-        TTorrentClient client(state_directory.string());
+        TTorrentClient client(state_directory.string(), true, broker.context());
         client.set_session_shutdown_asynchronous(false);
 
         TorrentIdentity *first_identity = nullptr;
         TorrentIdentity *second_identity = nullptr;
         TorrentIdentity *third_identity = nullptr;
-        static_cast<void>(add_metadata_torrent(client, *first_info, temporary_directory.path(), first_identity));
-        static_cast<void>(add_metadata_torrent(client, *second_info, temporary_directory.path(), second_identity));
-        static_cast<void>(add_metadata_torrent(client, *third_info, temporary_directory.path(), third_identity));
+        static_cast<void>(add_metadata_torrent(
+            client,
+            *first_info,
+            temporary_directory.path(),
+            first_identity,
+            first_activation
+        ));
+        static_cast<void>(add_metadata_torrent(
+            client,
+            *second_info,
+            temporary_directory.path(),
+            second_identity,
+            second_activation
+        ));
+        static_cast<void>(add_metadata_torrent(
+            client,
+            *third_info,
+            temporary_directory.path(),
+            third_identity,
+            third_activation
+        ));
         REQUIRE(first_identity != nullptr);
         REQUIRE(second_identity != nullptr);
         REQUIRE(third_identity != nullptr);
@@ -2747,11 +2682,7 @@ TEST_CASE("queue moves normalize and persist app-owned queue ranks")
         }));
     }
 
-    TTorrentClient reloaded(
-        state_directory.string(),
-        true,
-        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
-    );
+    TTorrentClient reloaded(state_directory.string(), true, broker.context());
     reloaded.set_session_shutdown_asynchronous(false);
     TorrentIdentity *reloaded_third =
         identity_from_handle(mapped_torrent_handle(reloaded, primary_hash_key(third_info->info_hashes())));
@@ -2985,12 +2916,10 @@ TEST_CASE("definite duplicate add rejection preserves the valid queue index")
     creator.set_hash(lt::piece_index_t(0), bridge_tests::sha1_hash_from_seed(106U));
     std::vector<char> const torrent_data = creator.generate_buf();
     lt::add_torrent_params params = bridge_tests::load_torrent_params(torrent_data, "queue duplicate");
+    bridge_tests::TestPayloadBroker broker(temporary_directory.path() / "Payload");
+    TTorrentStorageActivation const activation = broker.register_torrent(params);
 
-    TTorrentClient client(
-        state_directory.string(),
-        true,
-        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
-    );
+    TTorrentClient client(state_directory.string(), true, broker.context());
     client.set_session_shutdown_asynchronous(false);
     client.stop_alert_worker();
     TorrentIdentity *identity = nullptr;
@@ -3013,7 +2942,7 @@ TEST_CASE("definite duplicate add rejection preserves the valid queue index")
         &client,
         bridge_tests::byte_data(torrent_data),
         static_cast<int32_t>(torrent_data.size()),
-        temporary_directory.path().c_str(),
+        activation,
         add_options,
         added_id.data(),
         static_cast<int32_t>(added_id.size()),
@@ -3979,11 +3908,7 @@ TEST_CASE("settings apply switches explicit HTTPS source policies on loaded torr
 TEST_CASE("strict HTTPS policy rejects oversized original magnet sources")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
-    TTorrentClient client(
-        (temporary_directory.path() / "State").string(),
-        true,
-        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
-    );
+    TTorrentClient client((temporary_directory.path() / "State").string());
     client.set_session_shutdown_asynchronous(false);
 
     std::string magnet = "magnet:?xt=urn:btih:" + std::string(40U, '7');
@@ -4002,7 +3927,6 @@ TEST_CASE("strict HTTPS policy rejects oversized original magnet sources")
     CHECK(TorrentClientAddMagnet(
         &client,
         magnet.c_str(),
-        save_path.c_str(),
         add_options,
         added_id.data(),
         static_cast<int32_t>(added_id.size()),
@@ -4410,11 +4334,7 @@ TEST_CASE("hash-only torrent info is rejected as invalid metadata")
 TEST_CASE("metadata-less magnets replace retained file and piece details with authoritative empties")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
-    TTorrentClient client(
-        (temporary_directory.path() / "State").string(),
-        true,
-        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
-    );
+    TTorrentClient client((temporary_directory.path() / "State").string());
     client.set_session_shutdown_asynchronous(false);
 
     std::string const magnet = "magnet:?xt=urn:btih:0123456A89abcdef32056417897768acf0261b73";
@@ -4428,7 +4348,6 @@ TEST_CASE("metadata-less magnets replace retained file and piece details with au
     REQUIRE(TorrentClientAddMagnet(
         &client,
         magnet.c_str(),
-        save_path.c_str(),
         add_options,
         added_id,
         static_cast<int32_t>(sizeof(added_id)),
@@ -4716,11 +4635,7 @@ TEST_CASE("source policy restore does not reinsert blocked HTTPS-only sources")
 TEST_CASE("magnet torrents gate payload files and untrusted discovery until metadata is validated")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
-    TTorrentClient client(
-        (temporary_directory.path() / "State").string(),
-        true,
-        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
-    );
+    TTorrentClient client((temporary_directory.path() / "State").string());
     client.set_session_shutdown_asynchronous(false);
 
     std::string const hash(40U, '2');
@@ -4734,7 +4649,6 @@ TEST_CASE("magnet torrents gate payload files and untrusted discovery until meta
     REQUIRE(TorrentClientAddMagnet(
         &client,
         magnet.c_str(),
-        save_path.c_str(),
         add_options,
         added_id,
         static_cast<int32_t>(sizeof(added_id)),
@@ -4772,16 +4686,11 @@ TEST_CASE("trackerless magnet can explicitly allow DHT before metadata validatio
     int32_t add_outcome = TTORRENT_ADD_REJECTED;
 
     {
-        TTorrentClient client(
-            state_directory.string(),
-            true,
-            AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
-        );
+        TTorrentClient client(state_directory.string());
         client.set_session_shutdown_asynchronous(false);
         REQUIRE(TorrentClientAddMagnet(
             &client,
             magnet.c_str(),
-            save_path.c_str(),
             add_options,
             added_id,
             static_cast<int32_t>(sizeof(added_id)),
@@ -4807,11 +4716,7 @@ TEST_CASE("trackerless magnet can explicitly allow DHT before metadata validatio
         CHECK(bridge_bool(policy.allow_pre_metadata_dht));
     }
 
-    TTorrentClient reloaded(
-        state_directory.string(),
-        true,
-        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
-    );
+    TTorrentClient reloaded(state_directory.string());
     reloaded.set_session_shutdown_asynchronous(false);
     lt::torrent_handle handle = mapped_torrent_handle(reloaded, bridge_tests::v1_id('6'));
     TorrentIdentity *identity = identity_from_handle(handle);
@@ -4835,16 +4740,11 @@ TEST_CASE("pending magnet DHT revocation is durable before the setter returns")
     char error[512]{};
     int32_t add_outcome = TTORRENT_ADD_REJECTED;
 
-    TTorrentClient client(
-        state_directory.string(),
-        true,
-        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
-    );
+    TTorrentClient client(state_directory.string());
     client.set_session_shutdown_asynchronous(false);
     REQUIRE(TorrentClientAddMagnet(
         &client,
         magnet.c_str(),
-        save_path.c_str(),
         add_options,
         added_id,
         static_cast<int32_t>(sizeof(added_id)),
@@ -4885,11 +4785,7 @@ TEST_CASE("pending magnet DHT revocation is durable before the setter returns")
         fs::copy_options::none
     ));
 
-    TTorrentClient restarted(
-        restart_state.string(),
-        true,
-        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
-    );
+    TTorrentClient restarted(restart_state.string());
     restarted.set_session_shutdown_asynchronous(false);
     lt::torrent_handle restarted_handle = mapped_torrent_handle(restarted, resume_id);
     TorrentIdentity *restarted_identity = identity_from_handle(restarted_handle);
@@ -4902,7 +4798,7 @@ TEST_CASE("pending magnet DHT revocation is durable before the setter returns")
     CHECK(static_cast<bool>(restarted_handle.flags() & lt::torrent_flags::disable_dht));
 }
 
-TEST_CASE("non-deleting removal reports its commit independently of a deletion token")
+TEST_CASE("untracking reports its durable commit without touching payload files")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
     TTorrentClient client((temporary_directory.path() / "State").string());
@@ -4910,331 +4806,23 @@ TEST_CASE("non-deleting removal reports its commit independently of a deletion t
     client.stop_alert_worker();
 
     std::shared_ptr<lt::torrent_info const> const info = make_torrent_info(false);
-    TorrentIdentity *identity = nullptr;
-    static_cast<void>(add_metadata_torrent(client, *info, temporary_directory.path(), identity));
-    REQUIRE(identity != nullptr);
-
-    std::uint64_t request_token = 1;
-    std::uint8_t removal_committed = bridge_bool(false);
-    std::array<char, 512> error{};
-    REQUIRE(TorrentClientRemove(
-        &client,
-        identity->canonical_id.c_str(),
-        bridge_bool(false),
-        bridge_bool(false),
-        &request_token,
-        &removal_committed,
-        error.data(),
-        static_cast<int32_t>(error.size())
-    ) == 0);
-    CHECK(request_token == 0);
-    CHECK(bridge_bool(removal_committed));
-}
-
-TEST_CASE("payload deletion waits for libtorrent and removes an exact torrent file")
-{
-    bridge_tests::TemporaryDirectory temporary_directory;
-    TTorrentClient client((temporary_directory.path() / "State").string());
-    client.set_session_shutdown_asynchronous(false);
-    client.stop_alert_worker();
-
     fs::path const payload = temporary_directory.path() / "public.bin";
-    bridge_tests::write_text_file(payload, "data");
-    std::shared_ptr<lt::torrent_info const> const info = make_torrent_info(false);
+    bridge_tests::write_text_file(payload, "payload remains GUI-owned");
     TorrentIdentity *identity = nullptr;
     static_cast<void>(add_metadata_torrent(client, *info, temporary_directory.path(), identity));
     REQUIRE(identity != nullptr);
 
-    std::uint64_t request_token = 0;
     std::uint8_t removal_committed = bridge_bool(false);
     std::array<char, 512> error{};
     REQUIRE(TorrentClientRemove(
         &client,
         identity->canonical_id.c_str(),
-        bridge_bool(true),
-        bridge_bool(false),
-        &request_token,
         &removal_committed,
         error.data(),
         static_cast<int32_t>(error.size())
     ) == 0);
-    REQUIRE(request_token != 0);
-    REQUIRE(bridge_bool(removal_committed));
-
-    TTorrentRemovalResult result{};
-    TTorrentRemovalReadResult read = TorrentClientTakeRemovalResult(
-        &client,
-        request_token,
-        error.data(),
-        static_cast<int32_t>(error.size())
-    );
-    REQUIRE(read.status == 0);
-    result = read.result;
-    CHECK(result.state == TTORRENT_REMOVAL_PENDING);
-
-    REQUIRE(eventually_take_removal_result(client, request_token, result, error));
-    CHECK(result.state == TTORRENT_REMOVAL_SUCCEEDED);
-    CHECK_FALSE(file_exists(payload));
-}
-
-TEST_CASE("payload deletion does not recursively remove a colliding directory")
-{
-    bridge_tests::TemporaryDirectory temporary_directory;
-    TTorrentClient client((temporary_directory.path() / "State").string());
-    client.set_session_shutdown_asynchronous(false);
-    client.stop_alert_worker();
-
-    fs::path const colliding_directory = temporary_directory.path() / "public.bin";
-    fs::path const unrelated_file = colliding_directory / "unrelated.txt";
-    REQUIRE(fs::create_directory(colliding_directory));
-    bridge_tests::write_text_file(unrelated_file, "unrelated data");
-    std::shared_ptr<lt::torrent_info const> const info = make_torrent_info(false);
-    TorrentIdentity *identity = nullptr;
-    static_cast<void>(add_metadata_torrent(client, *info, temporary_directory.path(), identity));
-    REQUIRE(identity != nullptr);
-
-    std::uint64_t request_token = 0;
-    std::uint8_t removal_committed = bridge_bool(false);
-    std::array<char, 512> error{};
-    REQUIRE(TorrentClientRemove(
-        &client,
-        identity->canonical_id.c_str(),
-        bridge_bool(true),
-        bridge_bool(false),
-        &request_token,
-        &removal_committed,
-        error.data(),
-        static_cast<int32_t>(error.size())
-    ) == 0);
-    REQUIRE(bridge_bool(removal_committed));
-
-    TTorrentRemovalResult result{};
-    REQUIRE(eventually_take_removal_result(client, request_token, result, error));
-    CHECK(result.state == TTORRENT_REMOVAL_FAILED);
-    CHECK(bridge_tests::string_from_c_buffer(std::span{result.error}).contains("Some files may remain on disk"));
-    CHECK(fs::is_directory(colliding_directory));
-    CHECK(file_exists(unrelated_file));
-}
-
-TEST_CASE("a second payload deletion is rejected while the first is pending")
-{
-    bridge_tests::TemporaryDirectory temporary_directory;
-    TTorrentClient client((temporary_directory.path() / "State").string());
-    client.set_session_shutdown_asynchronous(false);
-    client.stop_alert_worker();
-
-    std::shared_ptr<lt::torrent_info const> const first_info = make_queue_torrent_info(41U);
-    std::shared_ptr<lt::torrent_info const> const second_info = make_queue_torrent_info(42U);
-    TorrentIdentity *first_identity = nullptr;
-    TorrentIdentity *second_identity = nullptr;
-    static_cast<void>(add_metadata_torrent(client, *first_info, temporary_directory.path(), first_identity));
-    static_cast<void>(add_metadata_torrent(client, *second_info, temporary_directory.path(), second_identity));
-    REQUIRE(first_identity != nullptr);
-    REQUIRE(second_identity != nullptr);
-
-    std::uint64_t first_token = 0;
-    std::uint8_t first_removal_committed = bridge_bool(false);
-    std::array<char, 512> error{};
-    REQUIRE(TorrentClientRemove(
-        &client,
-        first_identity->canonical_id.c_str(),
-        bridge_bool(true),
-        bridge_bool(false),
-        &first_token,
-        &first_removal_committed,
-        error.data(),
-        static_cast<int32_t>(error.size())
-    ) == 0);
-    REQUIRE(bridge_bool(first_removal_committed));
-
-    std::uint64_t second_token = 1;
-    std::uint8_t second_removal_committed = bridge_bool(true);
-    CHECK(TorrentClientRemove(
-        &client,
-        second_identity->canonical_id.c_str(),
-        bridge_bool(true),
-        bridge_bool(false),
-        &second_token,
-        &second_removal_committed,
-        error.data(),
-        static_cast<int32_t>(error.size())
-    ) != 0);
-    CHECK(second_token == 0);
-    CHECK_FALSE(bridge_bool(second_removal_committed));
-    CHECK(bridge_tests::string_from_c_buffer(std::span{error}).contains("already pending"));
-    CHECK(client.find(second_identity->canonical_id).has_value());
-
-    TTorrentRemovalResult result{};
-    CHECK(eventually_take_removal_result(client, first_token, result, error));
-}
-
-TEST_CASE("a completed payload deletion remains tracked until its result is collected")
-{
-    bridge_tests::TemporaryDirectory temporary_directory;
-    TTorrentClient client((temporary_directory.path() / "State").string());
-    client.set_session_shutdown_asynchronous(false);
-    client.stop_alert_worker();
-
-    std::shared_ptr<lt::torrent_info const> const first_info = make_queue_torrent_info(43U);
-    std::shared_ptr<lt::torrent_info const> const second_info = make_queue_torrent_info(44U);
-    std::uint64_t const first_token = BRIDGE_WITH_CLIENT_LOCK(
-        client,
-        client.begin_delete_request(first_info->info_hashes())
-    );
-    BRIDGE_WITH_CLIENT_LOCK(
-        client,
-        client.complete_delete_request(first_info->info_hashes(), TTORRENT_REMOVAL_SUCCEEDED)
-    );
-
-    std::bitset<lt::abi_alert_count> dropped_alerts;
-    dropped_alerts.set(lt::torrent_deleted_alert::alert_type);
-    lt::aux::stack_allocator allocator;
-    lt::alerts_dropped_alert const dropped_alert(allocator, dropped_alerts);
-    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.fail_dropped_delete_request(dropped_alert)) == 0U);
-
-    CHECK_THROWS(BRIDGE_WITH_CLIENT_LOCK(
-        client,
-        client.begin_delete_request(second_info->info_hashes())
-    ));
-
-    TTorrentRemovalResult result{};
-    std::array<char, 512> error{};
-    TTorrentRemovalReadResult read = TorrentClientTakeRemovalResult(
-        &client,
-        first_token + 1U,
-        error.data(),
-        static_cast<int32_t>(error.size())
-    );
-    CHECK(read.status != 0);
-    CHECK_THROWS(BRIDGE_WITH_CLIENT_LOCK(
-        client,
-        client.begin_delete_request(second_info->info_hashes())
-    ));
-
-    read = TorrentClientTakeRemovalResult(
-        &client,
-        first_token,
-        error.data(),
-        static_cast<int32_t>(error.size())
-    );
-    REQUIRE(read.status == 0);
-    result = read.result;
-    CHECK(result.state == TTORRENT_REMOVAL_SUCCEEDED);
-
-    std::uint64_t const second_token = BRIDGE_WITH_CLIENT_LOCK(
-        client,
-        client.begin_delete_request(second_info->info_hashes())
-    );
-    CHECK(second_token != 0);
-    BRIDGE_WITH_CLIENT_LOCK(client, client.abandon_removal_request(second_token));
-    std::uint64_t const third_token = BRIDGE_WITH_CLIENT_LOCK(
-        client,
-        client.begin_delete_request(first_info->info_hashes())
-    );
-    CHECK(third_token != 0);
-    BRIDGE_WITH_CLIENT_LOCK(client, client.abandon_removal_request(third_token));
-    CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(client, client.removal_request.has_value()));
-}
-
-TEST_CASE("a dropped terminal deletion alert fails the request and completes cleanup")
-{
-    bridge_tests::TemporaryDirectory temporary_directory;
-    TTorrentClient client((temporary_directory.path() / "State").string());
-    client.set_session_shutdown_asynchronous(false);
-    client.stop_alert_worker();
-
-    std::shared_ptr<lt::torrent_info const> const info = make_torrent_info(false);
-    std::string const resume_id = primary_hash_key(info->info_hashes());
-    std::uint64_t const request_token = BRIDGE_WITH_CLIENT_LOCK(
-        client,
-        client.begin_delete_request(info->info_hashes())
-    );
-    client.remember_pending_delete(info->info_hashes(), {resume_id});
-
-    std::bitset<lt::abi_alert_count> dropped_alerts;
-    dropped_alerts.set(lt::torrent_deleted_alert::alert_type);
-    lt::aux::stack_allocator allocator;
-    lt::alerts_dropped_alert const alert(allocator, dropped_alerts);
-    CHECK((BRIDGE_WITH_CLIENT_LOCK(client, client.fail_dropped_delete_request(alert))
-           & TTORRENT_DIRTY_ERRORS) != 0U);
-    CHECK(BRIDGE_WITH_RESUME_IO_LOCK(client, client.awaiting_delete_resume_ids_by_id.empty()));
-
-    TTorrentRemovalResult result{};
-    std::array<char, 512> error{};
-    TTorrentRemovalReadResult const read = TorrentClientTakeRemovalResult(
-        &client,
-        request_token,
-        error.data(),
-        static_cast<int32_t>(error.size())
-    );
-    REQUIRE(read.status == 0);
-    result = read.result;
-    CHECK(result.state == TTORRENT_REMOVAL_FAILED);
-    CHECK(bridge_tests::string_from_c_buffer(std::span{result.error}).contains("terminal libtorrent alert was dropped"));
-}
-
-TEST_CASE("metadata-less magnet removal succeeds when no payload storage exists")
-{
-    bridge_tests::TemporaryDirectory temporary_directory;
-    TTorrentClient client(
-        (temporary_directory.path() / "State").string(),
-        true,
-        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
-    );
-    client.set_session_shutdown_asynchronous(false);
-
-    std::string const hash(40U, '9');
-    std::string const id = bridge_tests::v1_id('9');
-    std::string const magnet = "magnet:?xt=urn:btih:" + hash;
-    std::string const save_path = temporary_directory.path().string();
-    TTorrentAddOptions add_options = default_add_options();
-    char added_id[TTORRENT_ID_CAPACITY]{};
-    char error[512]{};
-    int32_t add_outcome = TTORRENT_ADD_REJECTED;
-
-    REQUIRE(TorrentClientAddMagnet(
-        &client,
-        magnet.c_str(),
-        save_path.c_str(),
-        add_options,
-        added_id,
-        static_cast<int32_t>(sizeof(added_id)),
-        &add_outcome,
-        error,
-        static_cast<int32_t>(sizeof(error))
-    ) == 0);
-
-    std::uint64_t request_token = 0;
-    std::uint8_t removal_committed = bridge_bool(false);
-    REQUIRE(TorrentClientRemove(
-        &client,
-        id.c_str(),
-        bridge_bool(true),
-        bridge_bool(true),
-        &request_token,
-        &removal_committed,
-        error,
-        static_cast<int32_t>(sizeof(error))
-    ) == 0);
-    REQUIRE(request_token != 0);
-    REQUIRE(bridge_bool(removal_committed));
-
-    TTorrentRemovalResult removal_result{};
-    CHECK(eventually([&] {
-        client.pump_alerts();
-        TTorrentRemovalReadResult const read = TorrentClientTakeRemovalResult(
-            &client,
-            request_token,
-            error,
-            static_cast<int32_t>(sizeof(error))
-        );
-        removal_result = read.result;
-        return read.status == 0 && removal_result.state != TTORRENT_REMOVAL_PENDING;
-    }));
-
-    CHECK(removal_result.state == TTORRENT_REMOVAL_SUCCEEDED);
-    CHECK(bridge_tests::string_from_c_buffer(std::span{removal_result.error}).empty());
-    CHECK_FALSE(client.take_alert_error(std::span{error}));
+    CHECK(bridge_bool(removal_committed));
+    CHECK(file_exists(payload));
 }
 
 TEST_CASE("metadata validation gate survives resume reload")
@@ -5250,16 +4838,11 @@ TEST_CASE("metadata validation gate survives resume reload")
     int32_t add_outcome = TTORRENT_ADD_REJECTED;
 
     {
-        TTorrentClient client(
-            state_directory.string(),
-            true,
-            AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
-        );
+        TTorrentClient client(state_directory.string());
         client.set_session_shutdown_asynchronous(false);
         REQUIRE(TorrentClientAddMagnet(
             &client,
             magnet.c_str(),
-            save_path.c_str(),
             add_options,
             added_id,
             static_cast<int32_t>(sizeof(added_id)),
@@ -5269,11 +4852,7 @@ TEST_CASE("metadata validation gate survives resume reload")
         ) == 0);
     }
 
-    TTorrentClient reloaded(
-        state_directory.string(),
-        true,
-        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
-    );
+    TTorrentClient reloaded(state_directory.string());
     reloaded.set_session_shutdown_asynchronous(false);
     lt::torrent_handle handle = mapped_torrent_handle(reloaded, bridge_tests::v1_id('3'));
     TorrentIdentity *identity = identity_from_handle(handle);
@@ -5318,11 +4897,7 @@ TEST_CASE("pending resume discovery guards do not become source locks")
     );
     REQUIRE(written.has_value());
 
-    TTorrentClient reloaded(
-        state_directory.string(),
-        true,
-        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
-    );
+    TTorrentClient reloaded(state_directory.string());
     reloaded.set_session_shutdown_asynchronous(false);
     lt::torrent_handle handle = mapped_torrent_handle(reloaded, resume_id);
     TorrentIdentity *identity = identity_from_handle(handle);
@@ -5350,11 +4925,7 @@ TEST_CASE("app-default DHT changes do not bypass pending metadata consent after 
     int32_t add_outcome = TTORRENT_ADD_REJECTED;
 
     {
-        TTorrentClient client(
-            state_directory.string(),
-            true,
-            AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
-        );
+        TTorrentClient client(state_directory.string());
         client.set_session_shutdown_asynchronous(false);
 
         TTorrentSessionSettings settings{};
@@ -5375,7 +4946,6 @@ TEST_CASE("app-default DHT changes do not bypass pending metadata consent after 
         REQUIRE(TorrentClientAddMagnet(
             &client,
             magnet.c_str(),
-            save_path.c_str(),
             add_options,
             added_id,
             static_cast<int32_t>(sizeof(added_id)),
@@ -5391,11 +4961,7 @@ TEST_CASE("app-default DHT changes do not bypass pending metadata consent after 
         CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.dht_disabled_by_app.contains(identity)));
     }
 
-    TTorrentClient reloaded(
-        state_directory.string(),
-        true,
-        AuthorizedSavePathSet{temporary_directory.path().lexically_normal().string()}
-    );
+    TTorrentClient reloaded(state_directory.string());
     reloaded.set_session_shutdown_asynchronous(false);
     lt::torrent_handle handle = mapped_torrent_handle(reloaded, bridge_tests::v1_id('4'));
     TorrentIdentity *identity = identity_from_handle(handle);

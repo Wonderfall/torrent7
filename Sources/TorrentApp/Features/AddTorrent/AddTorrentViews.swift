@@ -160,6 +160,7 @@ struct AddTorrentConfirmationView: View {
     @State private var queuePriority = TorrentQueuePriority.normal
     @State private var selectedLabelIDs = Set<TorrentLabel.ID>()
     @State private var allowsPreMetadataDHT = false
+    @State private var storageMode = TorrentAddStorageMode.createNew
     @State private var folderError: String?
     @State private var pendingDownloadFolderURL: URL?
 
@@ -196,6 +197,22 @@ struct AddTorrentConfirmationView: View {
                     }
 
                     setDefaultDownloadFolderToggle
+                    if draft.fileURL != nil {
+                        Picker("Payload", selection: $storageMode) {
+                            ForEach(TorrentAddStorageMode.allCases) { mode in
+                                Text(mode.title).tag(mode)
+                            }
+                        }
+
+                        if storageMode == .useExistingData {
+                            Label(
+                                "Existing files are modified in place while downloading, but are never deleted automatically.",
+                                systemImage: "externaldrive.badge.checkmark"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        }
+                    }
                     TorrentLabelSelectionRow(
                         labels: store.labels,
                         selectedLabelIDs: $selectedLabelIDs,
@@ -703,7 +720,8 @@ struct AddTorrentConfirmationView: View {
             startsPaused: startsPaused,
             queuePriority: queuePriority,
             labelIDs: selectedLabelIDs,
-            allowsPreMetadataDHT: allowsPreMetadataDHT
+            allowsPreMetadataDHT: allowsPreMetadataDHT,
+            storageMode: storageMode
         ))
         if !accepted {
             folderError = store.lastError ?? TorrentStoreError.tooManyPendingOperations.localizedDescription

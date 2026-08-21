@@ -11,16 +11,11 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
-#include <fcntl.h>
 #include <fstream>
-#include <memory>
-#include <optional>
+#include <limits>
 #include <span>
-#include <stdexcept>
 #include <string>
 #include <string_view>
-#include <system_error>
-#include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 
@@ -28,7 +23,7 @@ namespace bridge_fuzz {
 
 namespace fs = std::filesystem;
 
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 44, "Update the fuzz harnesses for the current TorrentBridge ABI.");
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 46, "Update the fuzz harnesses for the current TorrentBridge ABI.");
 #if !defined(TORRENT_USE_ASSERTS) || !TORRENT_USE_ASSERTS
 #error "Fuzz consumers must match the assertion-enabled Debug libtorrent archive."
 #endif
@@ -202,145 +197,110 @@ struct AddedIdBuffer {
     }
 };
 
-struct AuthorizedSaveRootLifetimeProbe {
-    std::atomic_uint32_t retain_count = 0;
-    std::atomic_uint32_t release_count = 0;
-};
-
-inline std::atomic<std::uint64_t> next_authorized_save_root_lifetime_token = 1U;
-inline std::atomic<std::uint64_t> authorized_save_root_lifetime_token = 0U;
-inline std::atomic<AuthorizedSaveRootLifetimeProbe *> authorized_save_root_lifetime_probe = nullptr;
-
-inline std::uint64_t register_authorized_save_root_lifetime(
-    AuthorizedSaveRootLifetimeProbe &probe
-)
-{
-    std::uint64_t token = next_authorized_save_root_lifetime_token.fetch_add(
-        1U,
-        std::memory_order_relaxed
-    );
-    if (token == 0U) {
-        token = next_authorized_save_root_lifetime_token.fetch_add(
-            1U,
-            std::memory_order_relaxed
-        );
-    }
-    AuthorizedSaveRootLifetimeProbe *expected = nullptr;
-    authorized_save_root_lifetime_token.store(token, std::memory_order_relaxed);
-    if (!authorized_save_root_lifetime_probe.compare_exchange_strong(
-            expected,
-            &probe,
-            std::memory_order_release,
-            std::memory_order_relaxed
-        )) {
-        throw std::logic_error("The fuzz authorized-root lifetime is already registered");
-    }
-    return token;
-}
-
-inline void unregister_authorized_save_root_lifetime(
-    std::uint64_t const token,
-    AuthorizedSaveRootLifetimeProbe &probe
-)
-{
-    AuthorizedSaveRootLifetimeProbe *expected = &probe;
-    if (authorized_save_root_lifetime_token.load(std::memory_order_relaxed) == token
-        && authorized_save_root_lifetime_probe.compare_exchange_strong(
-            expected,
-            nullptr,
-            std::memory_order_acq_rel,
-            std::memory_order_relaxed
-        )) {
-        authorized_save_root_lifetime_token.store(0U, std::memory_order_relaxed);
-    }
-}
-
-inline std::uint8_t retain_authorized_save_root(std::uint64_t const token)
-{
-    AuthorizedSaveRootLifetimeProbe *const probe = authorized_save_root_lifetime_probe.load(
-        std::memory_order_acquire
-    );
-    if (probe == nullptr
-        || authorized_save_root_lifetime_token.load(std::memory_order_relaxed) != token) {
-        return 0U;
-    }
-    probe->retain_count.fetch_add(1U, std::memory_order_relaxed);
-    return 1U;
-}
-
-inline void release_authorized_save_root(std::uint64_t const token)
-{
-    AuthorizedSaveRootLifetimeProbe *const probe = authorized_save_root_lifetime_probe.load(
-        std::memory_order_acquire
-    );
-    if (probe != nullptr
-        && authorized_save_root_lifetime_token.load(std::memory_order_relaxed) == token) {
-        probe->release_count.fetch_add(1U, std::memory_order_relaxed);
-    }
-}
-
-class AuthorizedSaveRoot {
+class PayloadBroker final {
 public:
-    explicit AuthorizedSaveRoot(fs::path const &path)
-        : descriptor_(::open(
-              path.c_str(),
-              O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
-          ))
+    PayloadBroker()
+        : state_(new State)
     {
-        if (descriptor_ < 0) {
-            throw std::system_error(errno, std::generic_category(), "Could not open fuzz save root");
-        }
-
-        struct ::stat metadata {};
-        if (::fstat(descriptor_, &metadata) != 0) {
-            int const saved_errno = errno;
-            static_cast<void>(::close(descriptor_));
-            descriptor_ = -1;
-            throw std::system_error(
-                saved_errno,
-                std::generic_category(),
-                "Could not inspect fuzz save root"
-            );
-        }
-        if (!S_ISDIR(metadata.st_mode)) {
-            static_cast<void>(::close(descriptor_));
-            descriptor_ = -1;
-            throw std::runtime_error("The fuzz save root is not a directory");
-        }
-        device_ = static_cast<std::uint64_t>(metadata.st_dev);
-        inode_ = static_cast<std::uint64_t>(metadata.st_ino);
-        lifetime_token_ = register_authorized_save_root_lifetime(lifetime_probe_);
     }
 
-    AuthorizedSaveRoot(AuthorizedSaveRoot const &) = delete;
-    AuthorizedSaveRoot &operator=(AuthorizedSaveRoot const &) = delete;
-    AuthorizedSaveRoot(AuthorizedSaveRoot &&) = delete;
-    AuthorizedSaveRoot &operator=(AuthorizedSaveRoot &&) = delete;
+    PayloadBroker(PayloadBroker const &) = delete;
+    PayloadBroker &operator=(PayloadBroker const &) = delete;
+    PayloadBroker(PayloadBroker &&) = delete;
+    PayloadBroker &operator=(PayloadBroker &&) = delete;
 
-    ~AuthorizedSaveRoot()
+    ~PayloadBroker()
     {
-        unregister_authorized_save_root_lifetime(lifetime_token_, lifetime_probe_);
-        if (descriptor_ >= 0) {
-            static_cast<void>(::close(descriptor_));
-        }
+        release_state(state_);
     }
 
-    [[nodiscard]] TTorrentAuthorizedSaveRoot record() noexcept
+    [[nodiscard]] TTorrentPayloadBrokerCallbacks callbacks() const noexcept
     {
-        return TTorrentAuthorizedSaveRoot{
-            .directory_descriptor = descriptor_,
-            .device = device_,
-            .inode = inode_,
-            .lifetime_token = lifetime_token_,
+        return TTorrentPayloadBrokerCallbacks{
+            .context = state_,
+            .retain_context = retain_callback,
+            .release_context = release_callback,
+            .open_payload = open_callback,
+            .payload_size = size_callback,
         };
     }
 
 private:
-    int descriptor_ = -1;
-    std::uint64_t device_ = 0U;
-    std::uint64_t inode_ = 0U;
-    AuthorizedSaveRootLifetimeProbe lifetime_probe_;
-    std::uint64_t lifetime_token_ = 0U;
+    struct State {
+        std::atomic_uint32_t references{1U};
+    };
+
+    static void release_state(State *state) noexcept
+    {
+        if (state != nullptr
+            && state->references.fetch_sub(1U, std::memory_order_acq_rel) == 1U) {
+            delete state;
+        }
+    }
+
+    static std::uint8_t retain_callback(void *context) noexcept
+    {
+        auto *state = static_cast<State *>(context);
+        if (state == nullptr) {
+            return 0U;
+        }
+        std::uint32_t references = state->references.load(std::memory_order_acquire);
+        while (references != 0U
+               && references != std::numeric_limits<std::uint32_t>::max()) {
+            if (state->references.compare_exchange_weak(
+                    references,
+                    references + 1U,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire
+                )) {
+                return 1U;
+            }
+        }
+        return 0U;
+    }
+
+    static void release_callback(void *context) noexcept
+    {
+        release_state(static_cast<State *>(context));
+    }
+
+    static int32_t open_callback(
+        void *context,
+        std::uint8_t const *claim_id,
+        std::uint64_t generation,
+        int32_t file_index,
+        std::uint8_t writable,
+        int32_t *descriptor_out
+    ) noexcept
+    {
+        if (context == nullptr || claim_id == nullptr || descriptor_out == nullptr) {
+            return EINVAL;
+        }
+        static_cast<void>(generation);
+        static_cast<void>(file_index);
+        static_cast<void>(writable);
+        *descriptor_out = -1;
+        return ENOENT;
+    }
+
+    static int32_t size_callback(
+        void *context,
+        std::uint8_t const *claim_id,
+        std::uint64_t generation,
+        int32_t file_index,
+        std::int64_t *size_out
+    ) noexcept
+    {
+        if (context == nullptr || claim_id == nullptr || size_out == nullptr) {
+            return EINVAL;
+        }
+        static_cast<void>(generation);
+        static_cast<void>(file_index);
+        *size_out = -1;
+        return ENOENT;
+    }
+
+    State *state_;
 };
 
 class BridgeClientHarness {
@@ -348,27 +308,14 @@ public:
     explicit BridgeClientHarness(std::string_view label)
         : root_(make_temp_root(label)),
           state_dir_(root_ / "state"),
-          save_dir_(root_ / "downloads"),
-          state_path_(state_dir_.string()),
-          save_path_(save_dir_.string())
+          state_path_(state_dir_.string())
     {
         fs::create_directories(state_dir_);
-        fs::create_directories(save_dir_);
-
-        std::vector<std::uint8_t> authorized_save_paths(save_path_.begin(), save_path_.end());
-        authorized_save_paths.push_back(0U);
-        authorized_save_root_.emplace(save_dir_);
-        TTorrentAuthorizedSaveRoot native_root = authorized_save_root_->record();
         ErrorBuffer error;
         client_ = TorrentClientCreateWithError(
             state_path_.c_str(),
             1,
-            authorized_save_paths.data(),
-            static_cast<int32_t>(authorized_save_paths.size()),
-            &native_root,
-            1,
-            retain_authorized_save_root,
-            release_authorized_save_root,
+            payload_broker_.callbacks(),
             error.data(),
             error.capacity()
         );
@@ -399,52 +346,13 @@ public:
         return client_;
     }
 
-    [[nodiscard]] char const *save_path() const noexcept
-    {
-        return save_path_.c_str();
-    }
-
-    [[nodiscard]] TTorrentAuthorizedSaveRoot authorized_save_root_record() noexcept
-    {
-        return authorized_save_root_->record();
-    }
-
-    void restore_authorized_save_path()
-    {
-        std::vector<std::uint8_t> authorized_save_paths(save_path_.begin(), save_path_.end());
-        authorized_save_paths.push_back(0U);
-        TTorrentAuthorizedSaveRoot native_root = authorized_save_root_->record();
-        ErrorBuffer error;
-        if (TorrentClientReplaceAuthorizedSavePaths(
-                client_,
-                authorized_save_paths.data(),
-                static_cast<int32_t>(authorized_save_paths.size()),
-                &native_root,
-                1,
-                retain_authorized_save_root,
-                release_authorized_save_root,
-                error.data(),
-                error.capacity()
-            ) != 0) {
-            std::abort();
-        }
-    }
-
-    [[nodiscard]] std::optional<std::uint64_t> &tracked_removal_token() noexcept
-    {
-        return tracked_removal_token_;
-    }
-
 private:
     fs::path root_;
     fs::path state_dir_;
-    fs::path save_dir_;
     std::string state_path_;
-    std::string save_path_;
-    std::optional<AuthorizedSaveRoot> authorized_save_root_;
+    PayloadBroker payload_broker_;
     TTorrentClient *client_ = nullptr;
     std::atomic_uint64_t wake_count_ = 0;
-    std::optional<std::uint64_t> tracked_removal_token_;
 };
 
 inline BridgeClientHarness &shared_harness(std::string_view label)
@@ -680,14 +588,10 @@ inline void remove_all_torrents(TTorrentClient *client)
 
         for (std::string const &id : ids) {
             ErrorBuffer error;
-            std::uint64_t request_token = 0;
             std::uint8_t removal_committed = 0;
             static_cast<void>(TorrentClientRemove(
                 client,
                 id.c_str(),
-                0,
-                0,
-                &request_token,
                 &removal_committed,
                 error.data(),
                 error.capacity()
@@ -734,6 +638,24 @@ inline TTorrentAddOptions add_options_from_reader(ByteReader &reader)
     options.https_web_seed_policy = reader.read_u8();
     options.allow_pre_metadata_dht = reader.read_u8();
     return options;
+}
+
+inline TTorrentStorageActivation storage_activation_from_reader(ByteReader &reader)
+{
+    TTorrentStorageActivation activation{};
+    for (std::uint8_t &byte : activation.claim_id) {
+        byte = reader.read_u8();
+    }
+    activation.claim_generation = static_cast<std::uint64_t>(
+        static_cast<std::uint32_t>(reader.read_i32())
+    );
+    for (std::uint8_t &byte : activation.source_manifest_digest) {
+        byte = reader.read_u8();
+    }
+    for (std::uint8_t &byte : activation.preserved_torrent_id) {
+        byte = reader.read_u8();
+    }
+    return activation;
 }
 
 inline std::vector<TTorrentFilePriorityEntry> file_priorities_from_reader(ByteReader &reader)

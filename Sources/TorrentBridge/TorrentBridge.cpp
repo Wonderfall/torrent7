@@ -342,8 +342,8 @@ void TTorrentClient::insert_added_queue_priority_order_locked(
     }
 
     auto *const priority = queue_order_index.state(identity->queue_priority);
-    auto const insertion_position = queue_order_index.insertion_position(identity->queue_priority);
-    if (priority == nullptr || !insertion_position) {
+    auto const group_end = queue_order_index.insertion_position(identity->queue_priority);
+    if (priority == nullptr || !group_end) {
         invalidate_queue_order_index_locked();
         return;
     }
@@ -351,14 +351,21 @@ void TTorrentClient::insert_added_queue_priority_order_locked(
         invalidate_queue_order_index_locked();
         return;
     }
-    if (*insertion_position > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    std::size_t insertion_position = *group_end;
+    bool const restores_rank = is_valid_queue_rank(identity->queue_rank)
+        && std::cmp_less_equal(identity->queue_rank, priority->count);
+    if (restores_rank) {
+        insertion_position = *group_end - priority->count
+            + static_cast<std::size_t>(identity->queue_rank);
+    }
+    if (insertion_position > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
         invalidate_queue_order_index_locked();
         return;
     }
 
     try {
-        if (std::cmp_not_equal(*insertion_position, *position)) {
-            handle.queue_position_set(lt::queue_position_t(static_cast<int>(*insertion_position)));
+        if (std::cmp_not_equal(insertion_position, *position)) {
+            handle.queue_position_set(lt::queue_position_t(static_cast<int>(insertion_position)));
         }
     } catch (...) {
         invalidate_queue_order_index_locked();
@@ -366,7 +373,9 @@ void TTorrentClient::insert_added_queue_priority_order_locked(
         return;
     }
 
-    identity->queue_rank = priority->next_rank++;
+    if (!restores_rank) {
+        identity->queue_rank = priority->next_rank++;
+    }
     identity->queue_order_tracked = true;
     ++priority->count;
 }
@@ -473,462 +482,434 @@ BridgeResult block_network_locked(
     return {};
 }
 
-using NormalizedLiveSavePathResult = std::expected<std::string, BridgeError>;
-
-NormalizedLiveSavePathResult normalized_live_save_path(std::string_view const save_path)
+[[nodiscard]] int callback_error_code(int32_t const code) noexcept
 {
-    BridgeResult const valid_save_path = validate_save_path(save_path);
-    if (!valid_save_path) {
-        return std::unexpected(valid_save_path.error());
-    }
-
-    std::optional<std::string> normalized = normalize_authorized_save_path(save_path);
-    if (!normalized) {
-        return std::unexpected(BridgeError{
-            .code = 1,
-            .message = "The save path is invalid.",
-        });
-    }
-    return std::move(*normalized);
+    return code > 0 ? code : EIO;
 }
 
-using AuthorizedSaveRootLookupResult =
-    std::expected<std::shared_ptr<lt::aux::storage_root>, BridgeError>;
-
-AuthorizedSaveRootLookupResult require_authorized_save_path(
-    TTorrentClient const &client,
-    std::string const &normalized_save_path
-) TORRENT_BRIDGE_REQUIRES(client.lock)
+void assign_callback_error(lt::error_code &error, int32_t const code) noexcept
 {
-    auto const root = client.authorized_save_roots.find(normalized_save_path);
-    if (root == client.authorized_save_roots.end() || !root->second) {
-        return std::unexpected(BridgeError{
-            .code = 1,
-            .message = "The save path is not authorized.",
-        });
-    }
-    return root->second;
+    error.assign(callback_error_code(code), lt::generic_category());
 }
 
-BridgeResult prepare_authorized_root_lifetime_replacement(
-    TTorrentClient &client,
-    AuthorizedSaveRootMap const &replacement
-) TORRENT_BRIDGE_REQUIRES(client.lock)
+[[nodiscard]] bool all_zero(std::span<std::uint8_t const> const bytes) noexcept
 {
-    std::set<lt::aux::storage_root const *> current_roots;
-    for (auto const &[path, root] : client.authorized_save_roots) {
-        static_cast<void>(path);
-        if (root) {
-            current_roots.insert(root.get());
-        }
-    }
-
-    std::set<lt::aux::storage_root const *> replacement_roots;
-    AuthorizedSaveRootWeakList tracked_roots;
-    tracked_roots.reserve(client.authorized_save_root_lifetimes.size() + replacement.size());
-    for (auto const &[path, root] : replacement) {
-        static_cast<void>(path);
-        if (root && replacement_roots.insert(root.get()).second) {
-            tracked_roots.emplace_back(root);
-        }
-    }
-
-    std::set<lt::aux::storage_root const *> roots_live_after_replacement = replacement_roots;
-    for (std::weak_ptr<lt::aux::storage_root> const &weak_root
-         : client.authorized_save_root_lifetimes) {
-        long const strong_reference_count = weak_root.use_count();
-        std::shared_ptr<lt::aux::storage_root> const root = weak_root.lock();
-        if (!root || replacement_roots.contains(root.get())) {
-            continue;
-        }
-
-        bool const expires_with_current_allowlist = current_roots.contains(root.get())
-            && strong_reference_count == 1;
-        if (expires_with_current_allowlist) {
-            continue;
-        }
-        if (roots_live_after_replacement.insert(root.get()).second) {
-            tracked_roots.emplace_back(root);
-        }
-    }
-
-    if (roots_live_after_replacement.size()
-        > static_cast<std::size_t>(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT)) {
-        return bridge_error(
-            TTORRENT_ERROR_AUTHORIZED_SAVE_ROOT_CAPACITY,
-            "Too many authorized save roots remain in use."
-        );
-    }
-
-    client.authorized_save_root_lifetimes.swap(tracked_roots);
-    return {};
+    return std::ranges::all_of(bytes, [](std::uint8_t const byte) {
+        return byte == 0U;
+    });
 }
 
-#if defined(__PTRAUTH__)
-constexpr ptrauth_extra_data_t kAuthorizedRootRetainCallbackDiscriminator =
-    ptrauth_string_discriminator("torrent.bridge.authorized-root.retain");
-constexpr ptrauth_extra_data_t kAuthorizedRootReleaseCallbackDiscriminator =
-    ptrauth_string_discriminator("torrent.bridge.authorized-root.release");
-
-static_assert(kWakeCallbackDiscriminator != kAuthorizedRootRetainCallbackDiscriminator);
-static_assert(kWakeCallbackDiscriminator != kAuthorizedRootReleaseCallbackDiscriminator);
-static_assert(
-    kAuthorizedRootRetainCallbackDiscriminator != kAuthorizedRootReleaseCallbackDiscriminator
-);
-#endif
-
-struct AuthorizedRootLifetimeCallbacks {
-#if defined(__PTRAUTH__)
-    using RetainCallback = TTorrentAuthorizedRootLifetimeRetainCallback __ptrauth(
-        ptrauth_key_function_pointer,
-        1,
-        kAuthorizedRootRetainCallbackDiscriminator
-    );
-    using ReleaseCallback = TTorrentAuthorizedRootLifetimeReleaseCallback __ptrauth(
-        ptrauth_key_function_pointer,
-        1,
-        kAuthorizedRootReleaseCallbackDiscriminator
-    );
-#else
-    using RetainCallback = TTorrentAuthorizedRootLifetimeRetainCallback;
-    using ReleaseCallback = TTorrentAuthorizedRootLifetimeReleaseCallback;
-#endif
-
-    RetainCallback retain = nullptr;
-    ReleaseCallback release = nullptr;
-};
-
-#if defined(__PTRAUTH__)
-static_assert(!std::is_trivially_copyable_v<AuthorizedRootLifetimeCallbacks>);
-#endif
-
-struct AuthorizedRootLifetime {
-    AuthorizedRootLifetime(
-        AuthorizedRootLifetimeCallbacks lifetime_callbacks,
-        std::uint64_t const lifetime_token
-    ) noexcept
-        : callbacks(std::move(lifetime_callbacks)), token(lifetime_token)
-    {
-    }
-
-    AuthorizedRootLifetime(AuthorizedRootLifetime const &) = delete;
-    AuthorizedRootLifetime &operator=(AuthorizedRootLifetime const &) = delete;
-    AuthorizedRootLifetime(AuthorizedRootLifetime &&) = delete;
-    AuthorizedRootLifetime &operator=(AuthorizedRootLifetime &&) = delete;
-
-    ~AuthorizedRootLifetime()
-    {
-        if (retained) {
-            callbacks.release(token);
+void append_u64(std::vector<char> &bytes, std::uint64_t const value)
+{
+    for (unsigned int shift = 56U;; shift -= 8U) {
+        bytes.push_back(static_cast<char>(static_cast<std::uint8_t>(value >> shift)));
+        if (shift == 0U) {
+            break;
         }
     }
-
-    [[nodiscard]] bool retain() noexcept
-    {
-        retained = callbacks.retain(token) != 0U;
-        return retained;
-    }
-
-    AuthorizedRootLifetimeCallbacks callbacks;
-    std::uint64_t token = 0U;
-    bool retained = false;
-};
-
-#if defined(__PTRAUTH__)
-static_assert(!std::is_trivially_copyable_v<AuthorizedRootLifetime>);
-#endif
-
-[[nodiscard]] std::uint64_t authorized_root_lifetime_token(
-    lt::aux::storage_root const &root
-) noexcept
-{
-    auto const *lifetime = static_cast<AuthorizedRootLifetime const *>(
-        root.lifetime_context()
-    );
-    return lifetime == nullptr ? 0U : lifetime->token;
 }
 
-BridgeResult preflight_authorized_root_lifetime_replacement(
-    TTorrentClient &client,
-    std::uint8_t const *authorized_save_paths_blob,
-    int32_t const authorized_save_paths_blob_size,
-    TTorrentAuthorizedSaveRoot const *authorized_save_roots,
-    int32_t const authorized_save_root_count,
-    AuthorizedRootLifetimeCallbacks const &callbacks
+void append_string(std::vector<char> &bytes, std::string_view const value)
+{
+    append_u64(bytes, value.size());
+    bytes.insert(bytes.end(), value.begin(), value.end());
+}
+
+void append_optional_hash(
+    std::vector<char> &bytes,
+    bool const present,
+    char const *value,
+    std::size_t const size
 )
 {
-    if (authorized_save_paths_blob_size < 0
-        || authorized_save_paths_blob_size > TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES
-        || authorized_save_root_count < 0
-        || authorized_save_root_count > TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT) {
-        return {};
+    bytes.push_back(present ? '\x01' : '\0');
+    if (!present) {
+        return;
     }
-    bool const has_path_blob = authorized_save_paths_blob != nullptr;
-    bool const has_path_bytes = authorized_save_paths_blob_size != 0;
-    bool const has_roots = authorized_save_roots != nullptr;
-    bool const has_root_records = authorized_save_root_count != 0;
-    bool const has_retain_callback = callbacks.retain != nullptr;
-    bool const has_release_callback = callbacks.release != nullptr;
-    if (has_path_blob != has_path_bytes
-        || has_roots != has_root_records
-        || has_retain_callback != has_release_callback
-        || (has_root_records && !has_retain_callback)) {
-        return {};
-    }
+    append_u64(bytes, size);
+    bytes.insert(bytes.end(), value, std::next(value, static_cast<std::ptrdiff_t>(size)));
+}
 
-    AuthorizedSavePathListResult const paths = parse_authorized_save_path_list_blob(
-        input_span_from_c_buffer(authorized_save_paths_blob, authorized_save_paths_blob_size)
-    );
-    if (!paths || paths->size() != static_cast<std::size_t>(authorized_save_root_count)) {
-        return {};
-    }
-    std::span<TTorrentAuthorizedSaveRoot const> const borrowed_records =
-        input_span_from_c_buffer(authorized_save_roots, authorized_save_root_count);
-    std::vector<TTorrentAuthorizedSaveRoot> const records(
-        borrowed_records.begin(),
-        borrowed_records.end()
-    );
-    std::set<std::string> unique_paths;
-    std::set<std::pair<std::uint64_t, std::uint64_t>> unique_identities;
-    for (std::size_t index = 0U; index < records.size(); ++index) {
-        TTorrentAuthorizedSaveRoot const &record = records.at(index);
-        if (record.directory_descriptor < 0
-            || record.lifetime_token == 0U
-            || !unique_paths.insert(paths->at(index)).second
-            || !unique_identities.emplace(record.device, record.inode).second) {
-            return {};
+[[nodiscard]] std::vector<std::string> split_manifest_path(std::string_view path)
+{
+    std::vector<std::string> components;
+    while (!path.empty()) {
+        std::size_t const separator = path.find('/');
+        std::string_view const component = path.substr(0U, separator);
+        if (component.empty()) {
+            throw std::invalid_argument("The torrent contains an invalid logical path.");
         }
+        components.emplace_back(component);
+        if (separator == std::string_view::npos) {
+            break;
+        }
+        path.remove_prefix(separator + 1U);
     }
+    return components;
+}
 
-    struct LiveRoot {
-        std::shared_ptr<lt::aux::storage_root> root;
-        bool expires_with_current_allowlist;
+[[nodiscard]] std::string rootless_manifest_name(lt::info_hash_t const &hashes)
+{
+    if (!hashes.has_v2()) {
+        return {};
+    }
+    constexpr std::array<char, 16> alphabet{
+        '0', '1', '2', '3', '4', '5', '6', '7',
+        '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
     };
+    std::string name = "Torrent-";
+    std::string const digest = hashes.v2.to_string();
+    for (std::size_t index = 0U; index < 6U; ++index) {
+        auto const byte = static_cast<std::uint8_t>(digest.at(index));
+        name.push_back(alphabet.at(byte >> 4U));
+        name.push_back(alphabet.at(byte & 0x0fU));
+    }
+    return name;
+}
 
-    std::scoped_lock guard(client.lock);
-    std::set<lt::aux::storage_root const *> current_roots;
-    for (auto const &[path, root] : client.authorized_save_roots) {
-        static_cast<void>(path);
-        if (root) {
-            current_roots.insert(root.get());
-        }
+[[nodiscard]] lt::sha256_hash logical_manifest_digest(lt::add_torrent_params const &params)
+{
+    if (!params.ti) {
+        throw std::invalid_argument("The torrent metadata is unavailable.");
     }
 
-    std::vector<LiveRoot> live_roots;
-    live_roots.reserve(client.authorized_save_root_lifetimes.size());
-    std::set<lt::aux::storage_root const *> seen_roots;
-    for (std::weak_ptr<lt::aux::storage_root> const &weak_root
-         : client.authorized_save_root_lifetimes) {
-        long const strong_reference_count = weak_root.use_count();
-        std::shared_ptr<lt::aux::storage_root> root = weak_root.lock();
-        if (!root || !seen_roots.insert(root.get()).second) {
-            continue;
-        }
-        bool const expires_with_current_allowlist = current_roots.contains(root.get())
-            && strong_reference_count == 1;
-        live_roots.push_back(LiveRoot{
-            .root = std::move(root),
-            .expires_with_current_allowlist = expires_with_current_allowlist,
-        });
+    lt::torrent_info const &info = *params.ti;
+    lt::file_storage const &files = info.layout();
+    if (files.num_files() <= 0) {
+        throw std::invalid_argument("The torrent has no files.");
     }
 
-    std::set<lt::aux::storage_root const *> roots_live_after_replacement;
-    for (LiveRoot const &live_root : live_roots) {
-        if (!live_root.expires_with_current_allowlist) {
-            roots_live_after_replacement.insert(live_root.root.get());
-        }
-    }
-
-    std::size_t new_root_count = 0U;
-    for (std::size_t index = 0U; index < records.size(); ++index) {
-        TTorrentAuthorizedSaveRoot const &record = records.at(index);
-        auto const reusable = std::ranges::find_if(
-            live_roots,
-            [&](LiveRoot const &live_root) {
-                return live_root.root->path() == paths->at(index)
-                    && live_root.root->device() == record.device
-                    && live_root.root->inode() == record.inode
-                    && authorized_root_lifetime_token(*live_root.root)
-                        == record.lifetime_token;
+    lt::file_index_t first_payload{0};
+    int payload_count = 0;
+    for (lt::file_index_t const file : files.file_range()) {
+        if (!files.pad_file_at(file)) {
+            if (payload_count == 0) {
+                first_payload = file;
             }
-        );
-        if (reusable == live_roots.end()) {
-            ++new_root_count;
+            ++payload_count;
+        }
+    }
+    if (payload_count == 0) {
+        throw std::invalid_argument("The torrent has no payload files.");
+    }
+
+    std::string name = files.name();
+    if (name.empty()) {
+        name = rootless_manifest_name(info.info_hashes());
+    }
+    if (name.empty()) {
+        throw std::invalid_argument("The torrent has no logical name.");
+    }
+
+    bool const single_file = payload_count == 1
+        && files.file_path(first_payload) == files.name();
+
+    std::vector<char> input;
+    static constexpr auto domain = std::to_array("Torrent7 logical storage manifest\0v1");
+    auto const domain_bytes = std::span{domain}.first<domain.size() - 1U>();
+    input.insert(input.end(), domain_bytes.begin(), domain_bytes.end());
+    append_string(input, name);
+    input.push_back(single_file ? '\0' : '\x01');
+
+    lt::info_hash_t const hashes = info.info_hashes();
+    append_optional_hash(
+        input,
+        hashes.has_v1(),
+        hashes.v1.data(),
+        static_cast<std::size_t>(lt::sha1_hash::size())
+    );
+    append_optional_hash(
+        input,
+        hashes.has_v2(),
+        hashes.v2.data(),
+        static_cast<std::size_t>(lt::sha256_hash::size())
+    );
+    append_u64(input, static_cast<std::uint64_t>(info.piece_length()));
+    append_u64(input, static_cast<std::uint64_t>(files.num_files()));
+
+    for (lt::file_index_t const file : files.file_range()) {
+        int const index = static_cast<int>(file);
+        bool const padding = files.pad_file_at(file);
+        append_u64(input, static_cast<std::uint64_t>(index));
+
+        std::vector<std::string> components;
+        if (padding) {
+            components.emplace_back(".pad");
+            components.push_back(
+                std::to_string(files.file_size(file)) + "-" + std::to_string(index)
+            );
+        } else if (single_file) {
+            components.push_back(name);
         } else {
-            roots_live_after_replacement.insert(reusable->root.get());
+            components = split_manifest_path(files.file_path(file));
+            if (!files.name().empty() && !components.empty()
+                && components.front() == files.name()) {
+                components.erase(components.begin());
+            }
+            if (components.empty()) {
+                throw std::invalid_argument("The torrent contains an empty logical path.");
+            }
         }
+
+        append_u64(input, components.size());
+        for (std::string const &component : components) {
+            append_string(input, component);
+        }
+        append_u64(input, static_cast<std::uint64_t>(files.file_size(file)));
+        input.push_back(padding ? '\x01' : '\0');
     }
 
-    if (roots_live_after_replacement.size() + new_root_count
-        > static_cast<std::size_t>(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT)) {
-        return bridge_error(
-            TTORRENT_ERROR_AUTHORIZED_SAVE_ROOT_CAPACITY,
-            "Too many authorized save roots remain in use."
+    return lt::hasher256(lt::span<char const>(input.data(), static_cast<int>(input.size()))).final();
+}
+
+[[nodiscard]] bool digest_matches(
+    lt::sha256_hash const &digest,
+    TTorrentStorageActivation const &activation
+)
+{
+    std::uint8_t difference = 0U;
+    std::string const actual = digest.to_string();
+    std::array<std::uint8_t, 32> expected{};
+    std::ranges::copy(activation.source_manifest_digest, expected.begin());
+    for (std::size_t index = 0U; index < 32U; ++index) {
+        auto const mismatch = static_cast<std::uint8_t>(
+            static_cast<std::uint8_t>(actual.at(index)) ^ expected.at(index)
         );
+        difference = static_cast<std::uint8_t>(difference | mismatch);
+    }
+    return difference == 0U;
+}
+
+} // namespace
+
+#if defined(TORRENT_BRIDGE_TESTING)
+lt::sha256_hash testing_logical_manifest_digest(lt::add_torrent_params const &params)
+{
+    return logical_manifest_digest(params);
+}
+#endif
+
+PayloadBrokerContext::PayloadBrokerContext(TTorrentPayloadBrokerCallbacks const callbacks)
+    : callbacks_{
+        .context = callbacks.context,
+        .retain_context = callbacks.retain_context,
+        .release_context = callbacks.release_context,
+        .open_payload = callbacks.open_payload,
+        .payload_size = callbacks.payload_size,
+    }
+{
+    if (callbacks_.context == nullptr
+        || callbacks_.retain_context == nullptr
+        || callbacks_.release_context == nullptr
+        || callbacks_.open_payload == nullptr
+        || callbacks_.payload_size == nullptr) {
+        throw std::invalid_argument("The payload broker callback table is incomplete.");
+    }
+    retained_ = callbacks_.retain_context(callbacks_.context) != 0U;
+    if (!retained_) {
+        throw std::invalid_argument("The payload broker context is unavailable.");
+    }
+}
+
+PayloadBrokerContext::~PayloadBrokerContext()
+{
+    if (retained_) {
+        callbacks_.release_context(callbacks_.context);
+    }
+}
+
+int PayloadBrokerContext::open_payload(
+    TTorrentStorageActivation const &activation,
+    lt::file_index_t const file,
+    bool const writable,
+    lt::error_code &error
+) const noexcept
+{
+    int32_t descriptor = -1;
+    try {
+        int32_t const result = callbacks_.open_payload(
+            callbacks_.context,
+            activation.claim_id,
+            activation.claim_generation,
+            static_cast<int32_t>(static_cast<int>(file)),
+            writable ? 1U : 0U,
+            &descriptor
+        );
+        if (result != 0 || descriptor < 0) {
+            if (descriptor >= 0) {
+                static_cast<void>(::close(descriptor));
+            }
+            assign_callback_error(error, result == 0 ? EBADF : result);
+            return -1;
+        }
+
+        int const descriptor_flags = ::fcntl(descriptor, F_GETFD);
+        auto const cloexec_flags = static_cast<int>(
+            static_cast<unsigned int>(descriptor_flags)
+                | static_cast<unsigned int>(FD_CLOEXEC)
+        );
+        if (descriptor_flags < 0
+            || ::fcntl(descriptor, F_SETFD, cloexec_flags) != 0) {
+            int const error_number = errno;
+            static_cast<void>(::close(descriptor));
+            assign_callback_error(error, error_number);
+            return -1;
+        }
+
+        struct ::stat metadata {};
+        if (::fstat(descriptor, &metadata) != 0) {
+            int const error_number = errno;
+            static_cast<void>(::close(descriptor));
+            assign_callback_error(error, error_number);
+            return -1;
+        }
+        if (!S_ISREG(metadata.st_mode)) {
+            static_cast<void>(::close(descriptor));
+            assign_callback_error(error, EFTYPE);
+            return -1;
+        }
+        int const access_mode = ::fcntl(descriptor, F_GETFL);
+        auto const access_bits = static_cast<unsigned int>(access_mode)
+            & static_cast<unsigned int>(O_ACCMODE);
+        if (access_mode < 0
+            || (writable && access_bits == static_cast<unsigned int>(O_RDONLY))) {
+            int const error_number = access_mode < 0 ? errno : EACCES;
+            static_cast<void>(::close(descriptor));
+            assign_callback_error(error, error_number);
+            return -1;
+        }
+
+        error.clear();
+        return descriptor;
+    } catch (...) {
+        if (descriptor >= 0) {
+            static_cast<void>(::close(descriptor));
+        }
+        assign_callback_error(error, EIO);
+        return -1;
+    }
+}
+
+std::int64_t PayloadBrokerContext::payload_size(
+    TTorrentStorageActivation const &activation,
+    lt::file_index_t const file,
+    lt::error_code &error
+) const noexcept
+{
+    std::int64_t size = -1;
+    try {
+        int32_t const result = callbacks_.payload_size(
+            callbacks_.context,
+            activation.claim_id,
+            activation.claim_generation,
+            static_cast<int32_t>(static_cast<int>(file)),
+            &size
+        );
+        if (result != 0 || size < 0) {
+            assign_callback_error(error, result == 0 ? EIO : result);
+            return -1;
+        }
+        error.clear();
+        return size;
+    } catch (...) {
+        assign_callback_error(error, EIO);
+        return -1;
+    }
+}
+
+BridgePayloadFileProvider::BridgePayloadFileProvider(
+    std::shared_ptr<PayloadBrokerContext> broker,
+    TTorrentStorageActivation activation
+)
+    : broker_(std::move(broker)), activation_(activation)
+{
+    if (!broker_) {
+        throw std::invalid_argument("The payload broker is unavailable.");
+    }
+}
+
+int BridgePayloadFileProvider::open_payload(
+    lt::file_index_t const file,
+    bool const writable,
+    lt::error_code &error
+)
+{
+    return broker_->open_payload(activation_, file, writable, error);
+}
+
+std::int64_t BridgePayloadFileProvider::payload_size(
+    lt::file_index_t const file,
+    lt::error_code &error
+)
+{
+    return broker_->payload_size(activation_, file, error);
+}
+
+static std::string storage_preserved_torrent_id(
+    TTorrentStorageActivation const &activation
+)
+{
+    std::span<std::uint8_t const> const bytes{activation.preserved_torrent_id};
+    if (all_zero(bytes)) {
+        return {};
+    }
+    std::string result;
+    result.reserve(bytes.size());
+    std::ranges::transform(
+        bytes,
+        std::back_inserter(result),
+        [](std::uint8_t const byte) { return static_cast<char>(byte); }
+    );
+    return result;
+}
+
+BridgeResult validate_storage_activation(
+    lt::add_torrent_params const &params,
+    TTorrentStorageActivation const &activation
+)
+{
+    std::span<std::uint8_t const> const claim_id{activation.claim_id};
+    std::span<std::uint8_t const> const expected_digest{activation.source_manifest_digest};
+    std::string const preserved_id = storage_preserved_torrent_id(activation);
+    if (activation.claim_generation == 0U
+        || activation.claim_generation > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())
+        || all_zero(claim_id)
+        || all_zero(expected_digest)
+        || (!preserved_id.empty() && !is_canonical_torrent_id(preserved_id))) {
+        return bridge_error(2, "The storage claim activation is invalid.");
+    }
+    try {
+        lt::sha256_hash const actual_digest = logical_manifest_digest(params);
+        if (!digest_matches(actual_digest, activation)) {
+            return bridge_error(
+                2,
+                "The storage claim does not match libtorrent's logical manifest."
+            );
+        }
+    } catch (std::exception const &exception) {
+        return bridge_error(2, exception.what());
+    } catch (...) {
+        return bridge_error(2, "The logical manifest could not be validated.");
     }
     return {};
 }
 
-using AuthorizedRootLifetimeResult = std::expected<std::shared_ptr<void>, BridgeError>;
-
-[[nodiscard]] AuthorizedRootLifetimeResult retain_authorized_root_lifetime(
-    std::uint64_t const token,
-    AuthorizedRootLifetimeCallbacks const &callbacks
-)
+std::string storage_claim_key(TTorrentStorageActivation const &activation)
 {
-    auto lifetime = std::make_shared<AuthorizedRootLifetime>(callbacks, token);
-    if (!lifetime->retain()) {
-        return std::unexpected(BridgeError{
-            .code = 1,
-            .message = "An authorized save root lifetime token is invalid.",
-        });
-    }
-    return std::static_pointer_cast<void>(std::move(lifetime));
-}
-
-AuthorizedSaveRootResult authorized_save_roots_from_c_buffer(
-    std::uint8_t const *authorized_save_paths_blob,
-    int32_t const authorized_save_paths_blob_size,
-    TTorrentAuthorizedSaveRoot const *authorized_save_roots,
-    int32_t const authorized_save_root_count,
-    TTorrentAuthorizedRootLifetimeRetainCallback const retain_authorized_root,
-    TTorrentAuthorizedRootLifetimeReleaseCallback const release_authorized_root,
-    AuthorizedSaveRootWeakList const *reusable_roots = nullptr
-)
-{
-    if (authorized_save_paths_blob_size < 0
-        || authorized_save_paths_blob_size > TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES) {
-        return std::unexpected(BridgeError{
-            .code = 1,
-            .message = "The authorized save path list has an invalid size.",
-        });
-    }
-    bool const has_path_blob = authorized_save_paths_blob != nullptr;
-    bool const has_path_bytes = authorized_save_paths_blob_size != 0;
-    if (has_path_blob != has_path_bytes) {
-        return std::unexpected(BridgeError{
-            .code = 1,
-            .message = "The authorized save path list pointer and size do not match.",
-        });
-    }
-    if (authorized_save_root_count < 0
-        || authorized_save_root_count > TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT) {
-        return std::unexpected(BridgeError{
-            .code = 1,
-            .message = "The authorized save root list has an invalid count.",
-        });
-    }
-    bool const has_roots = authorized_save_roots != nullptr;
-    bool const has_root_records = authorized_save_root_count != 0;
-    if (has_roots != has_root_records) {
-        return std::unexpected(BridgeError{
-            .code = 1,
-            .message = "The authorized save root list pointer and count do not match.",
-        });
-    }
-    bool const has_retain_callback = retain_authorized_root != nullptr;
-    bool const has_release_callback = release_authorized_root != nullptr;
-    if (has_retain_callback != has_release_callback
-        || (has_root_records && !has_retain_callback)) {
-        return std::unexpected(BridgeError{
-            .code = 1,
-            .message = "The authorized save root lifetime callbacks are invalid.",
-        });
-    }
-
-    AuthorizedSavePathListResult paths = parse_authorized_save_path_list_blob(
-        input_span_from_c_buffer(authorized_save_paths_blob, authorized_save_paths_blob_size)
-    );
-    if (!paths) {
-        return std::unexpected(paths.error());
-    }
-    if (paths->size() != static_cast<std::size_t>(authorized_save_root_count)) {
-        return std::unexpected(BridgeError{
-            .code = 1,
-            .message = "The authorized save paths and roots do not correspond.",
-        });
-    }
-
-    AuthorizedSaveRootMap roots;
-    std::set<std::pair<std::uint64_t, std::uint64_t>> identities;
-    // The retain callback is supplied by the caller and may release or mutate
-    // its borrowed input storage. Snapshot every bounded record before the
-    // first callback so validation never rereads caller-owned memory.
-    std::span<TTorrentAuthorizedSaveRoot const> const borrowed_records =
-        input_span_from_c_buffer(authorized_save_roots, authorized_save_root_count);
-    std::vector<TTorrentAuthorizedSaveRoot> records(
-        borrowed_records.begin(),
-        borrowed_records.end()
-    );
-    auto path = paths->cbegin();
-    AuthorizedRootLifetimeCallbacks const lifetime_callbacks{
-        .retain = retain_authorized_root,
-        .release = release_authorized_root,
+    constexpr std::array<char, 16> alphabet{
+        '0', '1', '2', '3', '4', '5', '6', '7',
+        '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
     };
-    for (TTorrentAuthorizedSaveRoot const &record : records) {
-        std::string const &canonical_path = *path;
-        ++path;
-        if (record.directory_descriptor < 0 || record.lifetime_token == 0U) {
-            return std::unexpected(BridgeError{
-                .code = 1,
-                .message = "An authorized save root record is invalid.",
-            });
-        }
-        if (!identities.emplace(record.device, record.inode).second
-            || roots.contains(canonical_path)) {
-            return std::unexpected(BridgeError{
-                .code = 1,
-                .message = "The authorized save root list contains a duplicate.",
-            });
-        }
-
-        AuthorizedRootLifetimeResult lifetime = retain_authorized_root_lifetime(
-            record.lifetime_token,
-            lifetime_callbacks
-        );
-        if (!lifetime) {
-            return std::unexpected(lifetime.error());
-        }
-        lt::error_code root_error;
-        std::shared_ptr<lt::aux::storage_root> root = lt::aux::make_storage_root(
-            canonical_path,
-            record.directory_descriptor,
-            record.device,
-            record.inode,
-            std::move(*lifetime),
-            root_error
-        );
-        if (root_error || !root) {
-            bool const descriptor_capacity_exhausted = root_error.value() == EMFILE
-                || root_error.value() == ENFILE;
-            return std::unexpected(BridgeError{
-                .code = descriptor_capacity_exhausted
-                    ? TTORRENT_ERROR_AUTHORIZED_SAVE_ROOT_CAPACITY
-                    : 1,
-                .message = descriptor_capacity_exhausted
-                    ? "Too many authorized save roots remain in use."
-                    : "An authorized save root does not match its directory capability.",
-            });
-        }
-
-        if (reusable_roots != nullptr) {
-            for (std::weak_ptr<lt::aux::storage_root> const &weak_root : *reusable_roots) {
-                std::shared_ptr<lt::aux::storage_root> candidate = weak_root.lock();
-                if (candidate
-                    && candidate->path() == canonical_path
-                    && candidate->device() == record.device
-                    && candidate->inode() == record.inode
-                    && authorized_root_lifetime_token(*candidate)
-                        == record.lifetime_token) {
-                    root = std::move(candidate);
-                    break;
-                }
-            }
-        }
-        roots.emplace(canonical_path, std::move(root));
+    std::string key;
+    key.reserve(32U);
+    for (std::uint8_t const byte : activation.claim_id) {
+        key.push_back(alphabet.at(byte >> 4U));
+        key.push_back(alphabet.at(byte & 0x0fU));
     }
-    return roots;
+    return key;
 }
+
+namespace {
 
 struct SourcePolicyApplicationResult {
     DirtyMask changes = 0;
@@ -1786,12 +1767,7 @@ extern "C" TTorrentSourceSecurityInspectionResult TorrentBridgeInspectMagnetSour
 extern "C" TTorrentClient *TorrentClientCreateWithError(
     const char *state_path,
     uint8_t enable_pex_plugin,
-    const uint8_t *authorized_save_paths_blob,
-    int32_t authorized_save_paths_blob_size,
-    TTorrentAuthorizedSaveRoot const *authorized_save_roots,
-    int32_t authorized_save_root_count,
-    TTorrentAuthorizedRootLifetimeRetainCallback retain_authorized_root,
-    TTorrentAuthorizedRootLifetimeReleaseCallback release_authorized_root,
+    TTorrentPayloadBrokerCallbacks payload_broker,
     char *error_out,
     int32_t error_capacity
 ) noexcept
@@ -1806,30 +1782,18 @@ extern "C" TTorrentClient *TorrentClientCreateWithError(
     std::string_view const requested_state_path = c_string_view(state_path);
 
     try {
-        AuthorizedSaveRootResult authorized_roots = authorized_save_roots_from_c_buffer(
-            authorized_save_paths_blob,
-            authorized_save_paths_blob_size,
-            authorized_save_roots,
-            authorized_save_root_count,
-            retain_authorized_root,
-            release_authorized_root
-        );
-        if (!authorized_roots) {
-            copy_error(error_buffer, authorized_roots.error().message);
-            return nullptr;
-        }
-
         fs::path const state_directory_path{std::string(requested_state_path)};
         if (!state_directory_path.is_absolute()) {
             copy_error(error_buffer, "The state path must be absolute.");
             return nullptr;
         }
         std::string normalized_state_path = state_directory_path.lexically_normal().native();
+        auto broker = std::make_shared<PayloadBrokerContext>(payload_broker);
 
         return std::make_unique<TTorrentClient>(
             normalized_state_path,
             bridge_bool(enable_pex_plugin),
-            std::move(*authorized_roots)
+            std::move(broker)
         ).release();
     } catch (std::exception const &exception) {
         copy_error(error_buffer, exception.what());
@@ -1838,74 +1802,6 @@ extern "C" TTorrentClient *TorrentClientCreateWithError(
         copy_error(error_buffer, "Unexpected libtorrent error.");
         return nullptr;
     }
-}
-
-extern "C" int32_t TorrentClientReplaceAuthorizedSavePaths(
-    TTorrentClient *client,
-    std::uint8_t const *authorized_save_paths_blob,
-    int32_t authorized_save_paths_blob_size,
-    TTorrentAuthorizedSaveRoot const *authorized_save_roots,
-    int32_t authorized_save_root_count,
-    TTorrentAuthorizedRootLifetimeRetainCallback retain_authorized_root,
-    TTorrentAuthorizedRootLifetimeReleaseCallback release_authorized_root,
-    char *error_out,
-    int32_t error_capacity
-) noexcept
-{
-    return run_bridge_operation(output_buffer(error_out, error_capacity), 2, [&]() -> BridgeResult {
-        if (client == nullptr) {
-            return bridge_error(1, "Missing torrent client.");
-        }
-
-        // Root callbacks and descriptor duplication are intentionally outside
-        // the general client lock. Serialize the complete replacement so
-        // concurrent callers cannot transiently exceed the live-root budget.
-        std::scoped_lock replacement_guard(client->authorized_root_replacement_lock);
-        BridgeResult const capacity_preflight = preflight_authorized_root_lifetime_replacement(
-            *client,
-            authorized_save_paths_blob,
-            authorized_save_paths_blob_size,
-            authorized_save_roots,
-            authorized_save_root_count,
-            AuthorizedRootLifetimeCallbacks{
-                .retain = retain_authorized_root,
-                .release = release_authorized_root,
-            }
-        );
-        if (!capacity_preflight) {
-            return capacity_preflight;
-        }
-        AuthorizedSaveRootResult authorized_roots = [&] {
-            AuthorizedSaveRootWeakList reusable_roots;
-            {
-                std::scoped_lock guard(client->lock);
-                reusable_roots = client->authorized_save_root_lifetimes;
-            }
-            return authorized_save_roots_from_c_buffer(
-                authorized_save_paths_blob,
-                authorized_save_paths_blob_size,
-                authorized_save_roots,
-                authorized_save_root_count,
-                retain_authorized_root,
-                release_authorized_root,
-                &reusable_roots
-            );
-        }();
-        if (!authorized_roots) {
-            return std::unexpected(authorized_roots.error());
-        }
-
-        std::scoped_lock guard(client->lock);
-        BridgeResult const lifetime_budget = prepare_authorized_root_lifetime_replacement(
-            *client,
-            *authorized_roots
-        );
-        if (!lifetime_budget) {
-            return lifetime_budget;
-        }
-        client->authorized_save_roots.swap(*authorized_roots);
-        return {};
-    });
 }
 
 extern "C" void TorrentClientDestroy(TTorrentClient *client) noexcept
@@ -1958,7 +1854,7 @@ extern "C" uint64_t TorrentClientTakeChanges(TTorrentClient *client, uint32_t *d
     return client->take_changes(dirty_mask_out);
 }
 
-extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *magnet_uri, const char *save_path,
+extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *magnet_uri,
                                           TTorrentAddOptions options,
                                           char *added_id_out, int32_t added_id_capacity,
                                           int32_t *add_outcome_out,
@@ -1971,19 +1867,13 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
     std::span<char> const added_id_buffer = output_buffer(added_id_out, added_id_capacity);
     copy_string_dynamic(added_id_buffer, "");
     int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 4, [&]() -> BridgeResult {
-        if (client == nullptr || magnet_uri == nullptr || save_path == nullptr || add_outcome_out == nullptr) {
-            return bridge_error(1, "Missing torrent client, magnet URI, save path, or add outcome output.");
+        if (client == nullptr || magnet_uri == nullptr || add_outcome_out == nullptr) {
+            return bridge_error(1, "Missing torrent client, magnet URI, or add outcome output.");
         }
         TTorrentAddOptions const &add_options = options;
         std::string_view const magnet = c_string_view(magnet_uri);
         if (magnet.size() > kMaxMagnetURIBytes) {
             return bridge_error(2, "The magnet link is too large.");
-        }
-        NormalizedLiveSavePathResult const normalized_save_path = normalized_live_save_path(
-            c_string_view(save_path)
-        );
-        if (!normalized_save_path) {
-            return std::unexpected(normalized_save_path.error());
         }
         if (!is_valid_queue_priority(add_options.queue_priority)) {
             return bridge_error(1, "Invalid queue priority.");
@@ -1991,13 +1881,6 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
 
         std::scoped_lock guard(client->lock);
         LockedChangePublisher publisher(*client, wake);
-        AuthorizedSaveRootLookupResult const authorized_save_root = require_authorized_save_path(
-            *client,
-            *normalized_save_path
-        );
-        if (!authorized_save_root) {
-            return std::unexpected(authorized_save_root.error());
-        }
         BridgeResult const persistence = client->ensure_persistence_available(3);
         if (!persistence) {
             return persistence;
@@ -2075,14 +1958,13 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         }
         prepare_add_params(
             params,
-            *normalized_save_path,
+            client->staging_path(params.info_hashes),
             bridge_bool(add_options.starts_paused),
             enable_peer_exchange_value && !metadata_pending
         );
-        params.storage_root = *authorized_save_root;
         bool const peer_exchange_disabled_by_app =
             !enable_peer_exchange_value && !peer_exchange_was_disabled && !peer_exchange_locked_by_source;
-        if (client->delete_pending_for_hashes(params.info_hashes)) {
+        if (client->resume_cleanup_pending_for_hashes(params.info_hashes)) {
             return bridge_error(3, "Torrent data deletion is still pending.");
         }
         TorrentIdentity *identity = client->attach_identity(params);
@@ -2267,7 +2149,7 @@ TorrentLoadResult load_torrent_data_from_c_buffer(void const *torrent_data, int3
 template <typename LoadTorrent>
 int32_t add_torrent_file_data_with_priorities(
     TTorrentClient *client,
-    const char *save_path,
+    TTorrentStorageActivation const activation,
     TTorrentAddOptions const &options,
     bool apply_file_priority_overrides,
     const TTorrentFilePriorityEntry *file_priorities,
@@ -2287,8 +2169,8 @@ int32_t add_torrent_file_data_with_priorities(
     std::span<char> const added_id_buffer = output_buffer(added_id_out, added_id_capacity);
     copy_string_dynamic(added_id_buffer, "");
     int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 3, [&]() -> BridgeResult {
-        if (client == nullptr || save_path == nullptr || add_outcome_out == nullptr) {
-            return bridge_error(1, "Missing torrent client, save path, or add outcome output.");
+        if (client == nullptr || add_outcome_out == nullptr) {
+            return bridge_error(1, "Missing torrent client or add outcome output.");
         }
         TTorrentAddOptions const &add_options = options;
         if (file_priority_count < 0) {
@@ -2299,12 +2181,6 @@ int32_t add_torrent_file_data_with_priorities(
         }
         if (file_priority_count > 0 && file_priorities == nullptr) {
             return bridge_error(1, "Missing file priorities.");
-        }
-        NormalizedLiveSavePathResult const normalized_save_path = normalized_live_save_path(
-            c_string_view(save_path)
-        );
-        if (!normalized_save_path) {
-            return std::unexpected(normalized_save_path.error());
         }
         if (!is_valid_queue_priority(add_options.queue_priority)) {
             return bridge_error(1, "Invalid queue priority.");
@@ -2318,6 +2194,10 @@ int32_t add_torrent_file_data_with_priorities(
         BridgeResult const valid_info = validate_torrent_info(params);
         if (!valid_info) {
             return valid_info;
+        }
+        BridgeResult const valid_activation = validate_storage_activation(params, activation);
+        if (!valid_activation) {
+            return valid_activation;
         }
         sanitize_resume_endpoint_hints(params);
         lt::add_torrent_params const source_params = params;
@@ -2341,13 +2221,6 @@ int32_t add_torrent_file_data_with_priorities(
 
         std::scoped_lock guard(client->lock);
         LockedChangePublisher publisher(*client, wake);
-        AuthorizedSaveRootLookupResult const authorized_save_root = require_authorized_save_path(
-            *client,
-            *normalized_save_path
-        );
-        if (!authorized_save_root) {
-            return std::unexpected(authorized_save_root.error());
-        }
         BridgeResult const persistence =
             client->ensure_persistence_available(2);
         if (!persistence) {
@@ -2402,19 +2275,25 @@ int32_t add_torrent_file_data_with_priorities(
         }
         prepare_add_params(
             params,
-            *normalized_save_path,
+            client->part_file_path(activation),
             bridge_bool(add_options.starts_paused),
             enable_peer_exchange_value
         );
-        params.storage_root = *authorized_save_root;
+        params.file_provider = client->make_payload_provider(activation);
         bool const peer_exchange_disabled_by_app =
             !enable_peer_exchange_value && !peer_exchange_was_disabled && !peer_exchange_locked_by_source;
-        if (client->delete_pending_for_hashes(params.info_hashes)) {
+        if (client->resume_cleanup_pending_for_hashes(params.info_hashes)) {
             return bridge_error(2, "Torrent data deletion is still pending.");
         }
 
-        TorrentIdentity *identity = client->attach_identity(params);
+        std::string const preserved_id = storage_preserved_torrent_id(activation);
+        TorrentIdentity *identity = client->attach_identity(
+            params,
+            preserved_id,
+            !preserved_id.empty()
+        );
         UnpublishedIdentityGuard identity_guard(*client, identity);
+        identity->storage_activation = activation;
         identity->https_tracker_policy = requested_tracker_policy;
         identity->https_web_seed_policy = requested_web_seed_policy;
         identity->queue_priority = add_options.queue_priority;
@@ -2556,7 +2435,7 @@ extern "C" int32_t TorrentClientAddTorrentFileData(
     TTorrentClient *client,
     std::uint8_t const *torrent_data,
     int32_t torrent_data_size,
-    const char *save_path,
+    TTorrentStorageActivation activation,
     TTorrentAddOptions options,
     char *added_id_out,
     int32_t added_id_capacity,
@@ -2567,7 +2446,7 @@ extern "C" int32_t TorrentClientAddTorrentFileData(
 {
     return add_torrent_file_data_with_priorities(
         client,
-        save_path,
+        activation,
         options,
         false,
         nullptr,
@@ -2587,7 +2466,7 @@ extern "C" int32_t TorrentClientAddTorrentFileDataWithPriorities(
     TTorrentClient *client,
     std::uint8_t const *torrent_data,
     int32_t torrent_data_size,
-    const char *save_path,
+    TTorrentStorageActivation activation,
     TTorrentAddOptions options,
     const TTorrentFilePriorityEntry *file_priorities,
     int32_t file_priority_count,
@@ -2600,7 +2479,7 @@ extern "C" int32_t TorrentClientAddTorrentFileDataWithPriorities(
 {
     return add_torrent_file_data_with_priorities(
         client,
-        save_path,
+        activation,
         options,
         true,
         file_priorities,
@@ -3245,6 +3124,59 @@ extern "C" int32_t TorrentClientCopyPieceMap(
     }
 }
 
+extern "C" int32_t TorrentClientCopyTorrentMetadata(
+    TTorrentClient *client,
+    const char *torrent_id,
+    std::uint8_t *metadata,
+    int32_t capacity,
+    int32_t *required_count_out,
+    std::uint8_t *available_out
+) noexcept
+{
+    if (required_count_out != nullptr) {
+        *required_count_out = 0;
+    }
+    if (available_out != nullptr) {
+        *available_out = bridge_bool(false);
+    }
+    if (client == nullptr || torrent_id == nullptr
+        || required_count_out == nullptr || available_out == nullptr) {
+        return 0;
+    }
+
+    try {
+        std::span<std::uint8_t> output = output_span_from_c_buffer(metadata, capacity);
+        std::scoped_lock guard(client->lock);
+        auto const handle = client->find(std::string(c_string_view(torrent_id)));
+        if (!handle) {
+            return 0;
+        }
+        std::shared_ptr<lt::torrent_info const> const torrent_file = handle->torrent_file();
+        if (!torrent_file || !torrent_file->is_valid()) {
+            return 0;
+        }
+        lt::span<char const> const info = torrent_file->info_section();
+        if (info.empty()
+            || info.size() > static_cast<decltype(info.size())>(kMaxTorrentFileBytes)) {
+            return 0;
+        }
+
+        *required_count_out = static_cast<int32_t>(info.size());
+        *available_out = bridge_bool(true);
+        std::size_t const copied = std::min(output.size(), static_cast<std::size_t>(info.size()));
+        std::ranges::transform(
+            info.first(static_cast<int>(copied)),
+            output.begin(),
+            [](char const byte) { return static_cast<std::uint8_t>(byte); }
+        );
+        return static_cast<int32_t>(copied);
+    } catch (...) {
+        *required_count_out = 0;
+        *available_out = bridge_bool(false);
+        return 0;
+    }
+}
+
 extern "C" int32_t TorrentClientSetFilePriority(
     TTorrentClient *client,
     const char *torrent_id,
@@ -3428,20 +3360,15 @@ extern "C" int32_t TorrentClientForceRecheck(TTorrentClient *client, const char 
     return result;
 }
 
-extern "C" int32_t TorrentClientRemove(TTorrentClient *client, const char *torrent_id, uint8_t delete_files,
-                                       uint8_t delete_partfile, std::uint64_t *request_token_out,
+extern "C" int32_t TorrentClientRemove(TTorrentClient *client, const char *torrent_id,
                                        uint8_t *removal_committed_out, char *error_out, int32_t error_capacity) noexcept
 {
-    if (request_token_out != nullptr) {
-        *request_token_out = 0;
-    }
     if (removal_committed_out != nullptr) {
         *removal_committed_out = bridge_bool(false);
     }
     WakeCallbackInvocation wake;
     int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 3, [&]() -> BridgeResult {
-        if (client == nullptr || torrent_id == nullptr || request_token_out == nullptr
-            || removal_committed_out == nullptr) {
+        if (client == nullptr || torrent_id == nullptr || removal_committed_out == nullptr) {
             return bridge_error(1, "Missing torrent client, torrent id, or removal operation output.");
         }
 
@@ -3457,65 +3384,41 @@ extern "C" int32_t TorrentClientRemove(TTorrentClient *client, const char *torre
             return bridge_error(2, "Torrent not found.");
         }
 
-        lt::remove_flags_t flags{};
-        if (bridge_bool(delete_files)) {
-            flags |= lt::session_handle::delete_files;
-        }
-        if (bridge_bool(delete_partfile)) {
-            flags |= lt::session_handle::delete_partfile;
-        }
-        bool const waits_for_delete = bridge_bool(delete_files) || bridge_bool(delete_partfile);
         lt::info_hash_t const hashes = handle->info_hashes();
-        bool const metadata_available = handle->status({}).has_metadata;
         TorrentIdentity *identity = identity_from_handle(*handle);
         std::vector<std::string> const removal_ids = client->removal_ids_for_identity(hashes, id, identity);
-        std::uint64_t const request_token = waits_for_delete
-            ? client->begin_delete_request(hashes, metadata_available)
-            : 0;
         BridgeResult tombstoned;
         try {
-            tombstoned = client->persist_removal_tombstones(
-                removal_ids,
-                waits_for_delete ? RemovalTombstoneState::awaiting_payload_delete : RemovalTombstoneState::resume_cleanup,
-                bridge_bool(delete_files), bridge_bool(delete_partfile));
+            tombstoned = client->persist_removal_tombstones(removal_ids);
         } catch (...) {
-            client->abandon_removal_request(request_token);
             throw;
         }
         if (!tombstoned) {
-            client->abandon_removal_request(request_token);
             return tombstoned;
         }
 
         client->invalidate_queue_order_index_locked();
         try {
-            client->session.remove_torrent(*handle, flags);
+            client->session.remove_torrent(*handle);
         } catch (std::exception const &exception) {
-            client->abandon_removal_request(request_token);
             return client->cancel_tombstoned_operation_or_fault(removal_ids, 3, exception.what());
         } catch (...) {
-            client->abandon_removal_request(request_token);
             return client->cancel_tombstoned_operation_or_fault(removal_ids, 3, "Torrent could not be removed.");
         }
-        *request_token_out = request_token;
         *removal_committed_out = bridge_bool(true);
         client->mark_remove_requested(hashes, id, identity);
-        if (waits_for_delete) {
-            client->remember_pending_delete(hashes, removal_ids);
+        ResumeSaveResult removed_resume = client->remove_resume_files_for_ids_checked(removal_ids);
+        if (!removed_resume) {
+            client->remember_pending_resume_cleanup(removal_ids);
+            publisher.add(client->queue_alert_error("Torrent was removed, but resume cleanup is pending: " + removed_resume.error() + "."));
         } else {
-            ResumeSaveResult removed_resume = client->remove_resume_files_for_ids_checked(removal_ids);
-            if (!removed_resume) {
-                client->remember_pending_resume_cleanup(removal_ids);
-                publisher.add(client->queue_alert_error("Torrent was removed, but resume cleanup is pending: " + removed_resume.error() + "."));
-            } else {
-                ResumeSaveResult cleared_tombstones = client->clear_removal_tombstones(removal_ids);
-                if (!cleared_tombstones) {
-                    publisher.add(client->queue_alert_error(
-                        "Torrent was removed, but removal marker cleanup is pending: "
-                        + cleared_tombstones.error()
-                        + "."
-                    ));
-                }
+            ResumeSaveResult cleared_tombstones = client->clear_removal_tombstones(removal_ids);
+            if (!cleared_tombstones) {
+                publisher.add(client->queue_alert_error(
+                    "Torrent was removed, but removal marker cleanup is pending: "
+                    + cleared_tombstones.error()
+                    + "."
+                ));
             }
         }
         publisher.add(client->remove_snapshot(hashes, id));
@@ -3526,25 +3429,6 @@ extern "C" int32_t TorrentClientRemove(TTorrentClient *client, const char *torre
         client->invoke_wake_callback(wake);
     }
     return result;
-}
-
-extern "C" TTorrentRemovalReadResult TorrentClientTakeRemovalResult(
-    TTorrentClient *client,
-    std::uint64_t request_token,
-    char *error_out,
-    int32_t error_capacity
-) noexcept
-{
-    TTorrentRemovalReadResult output{};
-    output.status = run_bridge_operation(output_buffer(error_out, error_capacity), 3, [&]() -> BridgeResult {
-        if (client == nullptr) {
-            return bridge_error(1, "Missing torrent client.");
-        }
-
-        std::scoped_lock guard(client->lock);
-        return client->take_removal_result(request_token, &output.result);
-    });
-    return output;
 }
 
 extern "C" int32_t TorrentClientApplySettings(

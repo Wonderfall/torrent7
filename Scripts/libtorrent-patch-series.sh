@@ -10,7 +10,7 @@ readonly -a LIBTORRENT_PATCHES=(
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-network-security.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-storage-confinement.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-tracker-endpoint-security.patch"
-    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-root-authority.patch"
+    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-file-provider.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-bounded-pread-hashing.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-listen-socket-id.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-session-settings-lock.patch"

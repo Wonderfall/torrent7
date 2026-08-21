@@ -131,8 +131,8 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
     var capabilityDefaultAccess: DownloadFolderAccessing?
     var capabilityAdditionalAccesses = [DownloadFolderAccessing]()
     var mirrorsCapabilityMutations = false
-    var capabilitySnapshot: DownloadFolderCapabilitySnapshot {
-        DownloadFolderCapabilitySnapshot(
+    var capabilitySnapshot: DownloadFolderAccessSnapshot {
+        DownloadFolderAccessSnapshot(
             revision: capabilityRevision,
             defaultAccess: capabilityDefaultAccess,
             additionalAccesses: capabilityAdditionalAccesses
@@ -140,7 +140,7 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
     }
     var pruneSnapshot: DownloadFolderPruneSnapshot {
         DownloadFolderPruneSnapshot(
-            capabilityRevision: capabilityRevision,
+            accessRevision: capabilityRevision,
             candidateAccessKeys: Set(capabilityAdditionalAccesses.map {
                 Self.accessKey($0.url)
             })
@@ -197,11 +197,11 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
         defaultURL
     }
 
-    func currentCapabilityRevision() async -> UInt64 {
+    func currentAccessRevision() async -> UInt64 {
         capabilityRevision
     }
 
-    func makeCapabilitySnapshot() async -> DownloadFolderCapabilitySnapshot {
+    func makeAccessSnapshot() async -> DownloadFolderAccessSnapshot {
         let snapshot = capabilitySnapshot
         onMakeCapabilitySnapshot?()
         if suspendsNextCapabilitySnapshot {
@@ -358,7 +358,7 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
         _ plan: DownloadFolderPrunePlan,
         activeTorrents: [TorrentItem]
     ) async -> Bool {
-        guard plan.capabilityRevision == capabilityRevision else {
+        guard plan.accessRevision == capabilityRevision else {
             return false
         }
         pruneCalls.append(activeTorrents)
@@ -438,22 +438,24 @@ final class RecordingTorrentFileLocationService: TorrentFileLocationServicing {
         }
     }
 
-    func revealURL(for torrent: TorrentItem) async throws -> URL? {
-        revealURLs[torrent.id]
+    func revealURL(
+        for location: TorrentStorageLocation,
+        fileIndex: Int32?
+    ) async throws -> URL? {
+        _ = fileIndex
+        return revealURLs[location.torrentID]
     }
 
-    func revealURL(for torrent: TorrentItem, filePath: String) async throws -> URL? {
-        revealURLs[torrent.id]
-    }
-
-    func revealURLs(for torrents: [TorrentItem]) async throws -> [URL] {
+    func revealURLs(
+        for locations: [TorrentStorageLocation]
+    ) async throws -> [URL] {
         if revealURLSuspensionCount > 0 {
             revealURLSuspensionCount -= 1
             await withCheckedContinuation { continuation in
                 revealURLContinuations.append(continuation)
             }
         }
-        return torrents.compactMap { revealURLs[$0.id] }
+        return locations.compactMap { revealURLs[$0.torrentID] }
     }
 }
 
@@ -485,6 +487,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     var webSeedBatchValue = TorrentWebSeedBatch(revision: 0, webSeeds: [])
     var fileBatchValue = TorrentFileBatch(revision: 0, files: [])
     var pieceMapBatchValue = TorrentPieceMapBatch(revision: 0, pieceMap: .empty)
+    var torrentMetadataByID = [String: Data]()
     private var trackerBatchSuspensionCount = 0
     private var trackerBatchContinuations =
         [CheckedContinuation<Void, Never>]()
@@ -512,9 +515,9 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     var nextAddedMagnetID = "alpha"
     var addMagnetError: Error?
     var nextAddedTorrentFileID = "alpha"
+    var addTorrentFileError: Error?
     private(set) var restartCount = 0
     private(set) var restartPeerExchangePluginValues = [Bool]()
-    private(set) var restartAuthorizedSavePathSnapshots = [[String]]()
     private var restartSuspensionCount = 0
     private var restartContinuations = [CheckedContinuation<Void, Never>]()
     private(set) var blockNetworkCount = 0
@@ -538,13 +541,8 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private(set) var previewedTorrentFiles = [Data]()
     private var previewSuspensionCount = 0
     private var previewContinuations = [CheckedContinuation<Void, Never>]()
-    private(set) var delegatedFolderAuthorizations = [TorrentFolderAuthorization]()
-    private(set) var reconciledFolderAuthorizationSnapshots = [[TorrentFolderAuthorization]]()
-    private var folderReconciliationSuspensionCount = 0
-    private var folderReconciliationContinuations = [CheckedContinuation<Void, Never>]()
     private(set) var addedMagnets = [(
         magnet: String,
-        savePath: String,
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
         enablePeerExchange: Bool,
@@ -554,7 +552,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     )]()
     private(set) var addedTorrentFiles = [(
         data: Data,
-        savePath: String,
+        activation: TorrentStorageActivation,
         filePriorities: [Int32: TorrentFilePriority]?,
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
@@ -565,10 +563,11 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private var addMagnetSuspensionCount = 0
     private var addMagnetContinuations = [CheckedContinuation<Void, Never>]()
     private(set) var pausedIDs = [String]()
+    private var pauseError: Error?
     private(set) var pauseAppliedDHTValues = [Bool?]()
     private(set) var pauseNetworkBlockedValues = [Bool]()
     private(set) var resumedIDs = [String]()
-    private(set) var removed = [(id: String, deleteFiles: Bool)]()
+    private(set) var removedIDs = [String]()
     var removeError: Error?
     var removeOutcome = TorrentRemovalOutcome.removed
     var becomesUnavailableOnRemove = false
@@ -604,10 +603,14 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     init(
         keepsWakeStreamOpen: Bool = false,
         networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot? = nil,
-        suspendsInitialSnapshotBatch: Bool = false
+        suspendsInitialSnapshotBatch: Bool = false,
+        initialSnapshotBatch: TorrentSnapshotBatch? = nil,
+        initialPauseError: Error? = nil
     ) {
         self.keepsWakeStreamOpen = keepsWakeStreamOpen
         networkInterfaceSnapshotValue = networkInterfaceSnapshot
+        snapshotBatch = initialSnapshotBatch
+        pauseError = initialPauseError
         snapshotBatchSuspensionCount = suspendsInitialSnapshotBatch ? 1 : 0
     }
 
@@ -651,6 +654,18 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func setFileBatch(_ batch: TorrentFileBatch) {
         fileBatchValue = batch
+    }
+
+    func setTorrentMetadata(_ metadata: Data?, for id: String) {
+        torrentMetadataByID[id] = metadata
+    }
+
+    func setSourcePolicy(_ policy: TorrentSourcePolicy) {
+        sourcePolicyValue = policy
+    }
+
+    func setTorrentOptions(_ options: TorrentOptions) {
+        torrentOptionsValue = options
     }
 
     func setPieceMapBatch(_ batch: TorrentPieceMapBatch) {
@@ -882,6 +897,10 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         nextAddedTorrentFileID = id
     }
 
+    func setAddTorrentFileError(_ error: Error?) {
+        addTorrentFileError = error
+    }
+
     func suspendNextRestart() {
         restartSuspensionCount += 1
     }
@@ -900,28 +919,9 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         }
     }
 
-    func suspendNextFolderReconciliation() {
-        folderReconciliationSuspensionCount += 1
-    }
-
-    func waitForSuspendedFolderReconciliation() async {
-        while folderReconciliationContinuations.isEmpty {
-            await Task.yield()
-        }
-    }
-
-    func resumeSuspendedFolderReconciliations() {
-        let continuations = folderReconciliationContinuations
-        folderReconciliationContinuations.removeAll()
-        for continuation in continuations {
-            continuation.resume()
-        }
-    }
-
-    func restart(enablePeerExchangePlugin: Bool, authorizedSavePaths: [String]) async throws {
+    func restart(enablePeerExchangePlugin: Bool) async throws {
         restartCount += 1
         restartPeerExchangePluginValues.append(enablePeerExchangePlugin)
-        restartAuthorizedSavePathSnapshots.append(authorizedSavePaths)
         if restartSuspensionCount > 0 {
             restartSuspensionCount -= 1
             await withCheckedContinuation { continuation in
@@ -931,22 +931,6 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         currentNetworkBlocked = true
         networkStatusValue = networkStatusValue.withNetworkBlocked(true)
         availability.withLock { $0 = true }
-    }
-
-    func delegateFolderAuthorization(_ authorization: TorrentFolderAuthorization) {
-        delegatedFolderAuthorizations.append(authorization)
-    }
-
-    func reconcileFolderAuthorizations(
-        _ authorizations: [TorrentFolderAuthorization]
-    ) async {
-        reconciledFolderAuthorizationSnapshots.append(authorizations)
-        if folderReconciliationSuspensionCount > 0 {
-            folderReconciliationSuspensionCount -= 1
-            await withCheckedContinuation { continuation in
-                folderReconciliationContinuations.append(continuation)
-            }
-        }
     }
 
     func wakeEvents() async -> AsyncStream<Void> {
@@ -985,7 +969,6 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func addMagnet(
         _ magnet: String,
-        savePath: String,
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
         enablePeerExchange: Bool,
@@ -999,7 +982,6 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         ))
         addedMagnets.append((
             magnet,
-            savePath,
             startsPaused,
             queuePriority,
             enablePeerExchange,
@@ -1021,7 +1003,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func addTorrentFile(
         data: Data,
-        savePath: String,
+        activation: TorrentStorageActivation,
         filePriorities: [Int32: TorrentFilePriority]?,
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
@@ -1031,7 +1013,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     ) async throws -> String {
         addedTorrentFiles.append((
             data,
-            savePath,
+            activation,
             filePriorities,
             startsPaused,
             queuePriority,
@@ -1039,7 +1021,14 @@ actor FakeTorrentEngine: TorrentEngineServicing {
             httpsTrackerPolicy,
             httpsWebSeedPolicy
         ))
+        if let addTorrentFileError {
+            throw addTorrentFileError
+        }
         return nextAddedTorrentFileID
+    }
+
+    func torrentMetadata(id: String) -> Data? {
+        torrentMetadataByID[id]
     }
 
     func previewTorrentFile(data: Data) async throws -> TorrentFilePreview {
@@ -1057,6 +1046,9 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         pausedIDs.append(id)
         pauseAppliedDHTValues.append(appliedSettings.last?.settings.enableDHTNetwork)
         pauseNetworkBlockedValues.append(currentNetworkBlocked)
+        if let pauseError {
+            throw pauseError
+        }
     }
 
     func resume(id: String) async throws {
@@ -1067,14 +1059,11 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func forceRecheck(id: String) async throws {}
 
-    func remove(
-        id: String,
-        deleteFiles: Bool
-    ) async throws -> TorrentRemovalOutcome {
+    func remove(id: String) async throws -> TorrentRemovalOutcome {
         if let removeError {
             throw removeError
         }
-        removed.append((id, deleteFiles))
+        removedIDs.append(id)
         if removeSuspensionCount > 0 {
             removeSuspensionCount -= 1
             await withCheckedContinuation { continuation in

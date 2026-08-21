@@ -49,11 +49,14 @@ as small and explicit as possible.
 ## Architecture
 
 Torrent 7 has two separately sandboxed executables. The pure-Swift GUI owns
-SwiftUI state, user consent, and persistent security-scoped bookmarks. It talks
-over a versioned, bounded XPC protocol to a system-managed engine extension,
-which owns network access, resume state, native protocol parsing, and
-libtorrent. Inside that helper, a narrow C ABI remains the language boundary
-around the C++23 bridge; it is no longer part of the GUI process.
+SwiftUI state, user consent, persistent security-scoped bookmarks, storage
+claims, destination creation, and payload deletion. It talks over a versioned,
+bounded XPC protocol to a system-managed engine extension, which owns network
+access, resume state, native protocol parsing, and libtorrent. Payload I/O is
+pathless across this boundary: the helper asks a mutually authenticated GUI
+broker for one exact file descriptor at a time. Inside the helper, a narrow C
+ABI remains the language boundary around the C++23 bridge; it is no longer part
+of the GUI process.
 
 Library rows remain immutable revisioned snapshots. High-cardinality library
 and tracker-host snapshots cross XPC as bounded, short-lived paged datasets;
@@ -106,22 +109,21 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
   and no exception crossing into Swift. The C ABI declares nullability,
   synchronous borrows, and byte/element bounds so Swift imports its buffers as
   lifetime-scoped `Span` wrappers; production bridge calls use those wrappers
-  rather than separate raw pointers and caller-supplied counts. The removal ABI
-  reports native commit separately from asynchronous deletion tracking,
-  preventing a post-commit bookkeeping failure from being treated as a rejected
-  removal. The bridge is linked only into the engine helper extension.
+  rather than separate raw pointers and caller-supplied counts. Native removal
+  only untracks a torrent and retires its resume record; the GUI performs any
+  authenticated payload deletion through its storage journal. The bridge is
+  linked only into the engine helper extension.
 - **Input bounds:** caps for torrent files, magnets, file counts, tracker/web-seed
   counts, tracker host rows, snapshots, piece-map data, XPC payloads, paged
   datasets, queued requests, file descriptors, and open peers.
-- **Delegated folder authority:** the GUI persists app-scoped bookmarks, but sends
-  only transient delegation bookmarks over XPC. The helper validates and scopes
-  each resolved directory by canonical path and filesystem identity; capability
-  IDs are bound to one controller and engine epoch. Prepared adds hold an
-  exclusive authorization transaction and always end in an exact capability-set
-  replacement or controller termination. Local bookmark/path validation failures
-  fail closed too, and restart reuses only an exactly reconciled capability set.
-  Native lifetime retention uses validated random tokens rather than Swift
-  object pointers.
+- **Exact-file storage broker:** the GUI alone persists bookmarks, plans
+  destinations, owns durable storage claims, and deletes payloads. The helper
+  receives an authenticated anonymous broker endpoint, then requests pathless
+  `(claimID, generation, fileIndex, access)` handles. The broker resolves every
+  component relative to verified directory descriptors, rejects symlinks and
+  non-regular files, and returns only the exact descriptor requested. Libtorrent
+  has no pathname fallback. Imported existing data is never automatically
+  deleted.
 - **Helper-authoritative network policy:** the engine starts blocked. A network
   binding can unblock it only after the helper-side interface monitor validates
   the interface fingerprint and VPN service identity. The networkless GUI gets a
@@ -183,18 +185,19 @@ Torrent 7 splits authority between two App Sandbox profiles:
 | Authority or responsibility | GUI application | Engine helper extension |
 | --- | --- | --- |
 | User-selected read/write and app-scoped bookmark entitlements | Present | Absent |
-| Delegated download-folder access | Creates delegation from an active persistent scope | Holds a transient controller-scoped capability |
+| Payload filesystem authority | Owns bookmarks, directory descriptors, durable claims, and the exact-file broker | Receives only broker-returned exact file descriptors |
 | Outbound and inbound network entitlements | Absent | Present |
 | SwiftUI, Finder, notifications, and user preferences | Yes | No |
-| Libtorrent, C++ bridge, resume state, and torrent payload I/O | No | Yes |
+| Libtorrent, C++ bridge, and resume state | No | Yes |
+| Payload destination creation and deletion | Yes | No |
 | Hardened process, hardened heap, dyld read-only, platform restrictions, checked allocations | Yes | Yes |
 
 The GUI stores persistent app-scoped bookmarks only for the default download
-folder and active torrent-specific folders. While one of those scopes is active,
-it creates a transient bookmark that delegates the current sandbox extension to
-the helper. The helper does not persist that bookmark: it explicitly starts
-and balances the delegated scope, holds a verified directory descriptor, and
-invalidates the capability when the controller disconnects.
+folder and active torrent-specific folders. It resolves those scopes, traverses
+and creates destinations relative to verified directory descriptors, and
+transfers only exact regular-file descriptors through the storage broker. No
+bookmark, parent directory descriptor, payload path, rename authority, or
+deletion authority crosses into the helper.
 
 Resume data and removal tombstones live in the helper's container and are
 written with owner-only permissions and durability barriers. Both executable

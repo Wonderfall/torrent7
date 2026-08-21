@@ -34,92 +34,37 @@ package enum TorrentEngineIPCPeerAuthentication: Equatable, Sendable {
     case reducedAssuranceAdHocDevelopment
 }
 
-package struct TorrentEngineIPCFolderGrant: Codable, Equatable, Sendable {
-    package let bookmark: Data
-
-    package init(bookmark: Data) {
-        self.bookmark = bookmark
-    }
-}
-
-package struct TorrentEngineIPCGrantedFolder: Codable, Equatable, Sendable {
-    package let capabilityID: UUID
-    package let resolvedPath: String
-
-    package init(capabilityID: UUID, resolvedPath: String) {
-        self.capabilityID = capabilityID
-        self.resolvedPath = resolvedPath
-    }
-}
-
 package struct TorrentEngineIPCHandshakeRequest: Codable, Equatable, Sendable {
     package let enablePeerExchangePlugin: Bool
-    package let folders: [TorrentEngineIPCFolderGrant]
+    package let brokerSessionNonce: UUID
 
     package init(
         enablePeerExchangePlugin: Bool,
-        folders: [TorrentEngineIPCFolderGrant]
+        brokerSessionNonce: UUID
     ) {
         self.enablePeerExchangePlugin = enablePeerExchangePlugin
-        self.folders = folders
+        self.brokerSessionNonce = brokerSessionNonce
     }
 }
 
 package struct TorrentEngineIPCHandshakeResponse: Codable, Equatable, Sendable {
     package let libtorrentVersion: String
-    package let folders: [TorrentEngineIPCGrantedFolder]
 
-    package init(libtorrentVersion: String, folders: [TorrentEngineIPCGrantedFolder]) {
+    package init(libtorrentVersion: String) {
         self.libtorrentVersion = libtorrentVersion
-        self.folders = folders
     }
 }
 
 package struct TorrentEngineIPCRestartRequest: Codable, Equatable, Sendable {
     package let enablePeerExchangePlugin: Bool
-    package let capabilityIDs: [UUID]
 
-    package init(enablePeerExchangePlugin: Bool, capabilityIDs: [UUID]) {
+    package init(enablePeerExchangePlugin: Bool) {
         self.enablePeerExchangePlugin = enablePeerExchangePlugin
-        self.capabilityIDs = capabilityIDs
-    }
-}
-
-package struct TorrentEngineIPCGrantFolderResponse: Codable, Equatable, Sendable {
-    package let folder: TorrentEngineIPCGrantedFolder
-
-    package init(folder: TorrentEngineIPCGrantedFolder) {
-        self.folder = folder
-    }
-}
-
-package struct TorrentEngineIPCRevokeFolderRequest: Codable, Equatable, Sendable {
-    package let capabilityID: UUID
-
-    package init(capabilityID: UUID) {
-        self.capabilityID = capabilityID
-    }
-}
-
-package struct TorrentEngineIPCReplaceFoldersRequest: Codable, Equatable, Sendable {
-    package let folders: [TorrentEngineIPCFolderGrant]
-
-    package init(folders: [TorrentEngineIPCFolderGrant]) {
-        self.folders = folders
-    }
-}
-
-package struct TorrentEngineIPCReplaceFoldersResponse: Codable, Equatable, Sendable {
-    package let folders: [TorrentEngineIPCGrantedFolder]
-
-    package init(folders: [TorrentEngineIPCGrantedFolder]) {
-        self.folders = folders
     }
 }
 
 package struct TorrentEngineIPCAddMagnetRequest: Codable, Equatable, Sendable {
     package let magnet: String
-    package let folderCapabilityID: UUID
     package let startsPaused: Bool
     package let queuePriority: TorrentQueuePriority
     package let enablePeerExchange: Bool
@@ -129,7 +74,6 @@ package struct TorrentEngineIPCAddMagnetRequest: Codable, Equatable, Sendable {
 
     package init(
         magnet: String,
-        folderCapabilityID: UUID,
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
         enablePeerExchange: Bool,
@@ -138,7 +82,6 @@ package struct TorrentEngineIPCAddMagnetRequest: Codable, Equatable, Sendable {
         allowPreMetadataDHT: Bool
     ) {
         self.magnet = magnet
-        self.folderCapabilityID = folderCapabilityID
         self.startsPaused = startsPaused
         self.queuePriority = queuePriority
         self.enablePeerExchange = enablePeerExchange
@@ -159,7 +102,7 @@ package struct TorrentEngineIPCFilePriorityEntry: Codable, Equatable, Sendable {
 }
 
 package struct TorrentEngineIPCAddTorrentFileRequest: Codable, Equatable, Sendable {
-    package let folderCapabilityID: UUID
+    package let activation: TorrentStorageActivation
     package let filePriorities: [TorrentEngineIPCFilePriorityEntry]?
     package let startsPaused: Bool
     package let queuePriority: TorrentQueuePriority
@@ -168,7 +111,7 @@ package struct TorrentEngineIPCAddTorrentFileRequest: Codable, Equatable, Sendab
     package let httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride
 
     package init(
-        folderCapabilityID: UUID,
+        activation: TorrentStorageActivation,
         filePriorities: [TorrentEngineIPCFilePriorityEntry]?,
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
@@ -176,7 +119,7 @@ package struct TorrentEngineIPCAddTorrentFileRequest: Codable, Equatable, Sendab
         httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride,
         httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride
     ) {
-        self.folderCapabilityID = folderCapabilityID
+        self.activation = activation
         self.filePriorities = filePriorities
         self.startsPaused = startsPaused
         self.queuePriority = queuePriority
@@ -216,11 +159,9 @@ package struct TorrentEngineIPCTorrentRevisionRequest: Codable, Equatable, Senda
 
 package struct TorrentEngineIPCRemoveRequest: Codable, Equatable, Sendable {
     package let id: String
-    package let deleteFiles: Bool
 
-    package init(id: String, deleteFiles: Bool) {
+    package init(id: String) {
         self.id = id
-        self.deleteFiles = deleteFiles
     }
 }
 

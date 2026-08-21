@@ -821,15 +821,13 @@ ResumeIDListResult normalized_resume_ids(std::vector<std::string> const &ids)
 TombstonePayloadResult tombstone_payload_from_bytes(std::vector<char> const &buffer)
 {
     std::string_view remaining(buffer.data(), buffer.size());
-    if (!remaining.starts_with("version=2\n")) {
+    if (!remaining.starts_with("version=3\n")) {
         return std::unexpected("Removal tombstone version is invalid.");
     }
-    remaining.remove_prefix(std::string_view("version=2\n").size());
+    remaining.remove_prefix(std::string_view("version=3\n").size());
 
     RemovalTombstonePayload payload;
-    bool saw_state = false;
-    bool saw_delete_files = false;
-    bool saw_delete_partfile = false;
+    bool saw_kind = false;
     while (!remaining.empty()) {
         std::size_t const newline = remaining.find('\n');
         std::string_view line = newline == std::string_view::npos
@@ -839,24 +837,11 @@ TombstonePayloadResult tombstone_payload_from_bytes(std::vector<char> const &buf
             return std::unexpected("Removal tombstone contains an empty field.");
         }
 
-        if (line == "state=resume_cleanup") {
-            payload.state = RemovalTombstoneState::resume_cleanup;
-            saw_state = true;
-        } else if (line == "state=awaiting_payload_delete") {
-            payload.state = RemovalTombstoneState::awaiting_payload_delete;
-            saw_state = true;
-        } else if (line == "delete_files=0") {
-            payload.delete_files = false;
-            saw_delete_files = true;
-        } else if (line == "delete_files=1") {
-            payload.delete_files = true;
-            saw_delete_files = true;
-        } else if (line == "delete_partfile=0") {
-            payload.delete_partfile = false;
-            saw_delete_partfile = true;
-        } else if (line == "delete_partfile=1") {
-            payload.delete_partfile = true;
-            saw_delete_partfile = true;
+        if (line == "kind=resume_cleanup") {
+            if (saw_kind) {
+                return std::unexpected("Removal tombstone contains duplicate metadata.");
+            }
+            saw_kind = true;
         } else if (line.starts_with("id=")) {
             line.remove_prefix(std::string_view("id=").size());
             if (!is_resume_data_id(line)) {
@@ -877,7 +862,7 @@ TombstonePayloadResult tombstone_payload_from_bytes(std::vector<char> const &buf
     if (payload.ids.empty()) {
         return std::unexpected("Removal tombstone is empty.");
     }
-    if (!saw_state || !saw_delete_files || !saw_delete_partfile) {
+    if (!saw_kind) {
         return std::unexpected("Removal tombstone metadata is incomplete.");
     }
     return payload;
@@ -897,31 +882,11 @@ std::string tombstone_read_error(FileReadFailure failure)
     return "Removal tombstone could not be read.";
 }
 
-std::string tombstone_state_name(RemovalTombstoneState state)
-{
-    switch (state) {
-    case RemovalTombstoneState::resume_cleanup:
-        return "resume_cleanup";
-    case RemovalTombstoneState::awaiting_payload_delete:
-        return "awaiting_payload_delete";
-    }
-    return "resume_cleanup";
-}
-
-std::string tombstone_payload(
-    std::vector<std::string> const &ids,
-    RemovalTombstoneState state,
-    bool delete_files,
-    bool delete_partfile
-)
+std::string tombstone_payload(std::vector<std::string> const &ids)
 {
     std::string payload;
-    payload += "version=2\n";
-    payload += "state=";
-    payload += tombstone_state_name(state);
-    payload.push_back('\n');
-    payload += delete_files ? "delete_files=1\n" : "delete_files=0\n";
-    payload += delete_partfile ? "delete_partfile=1\n" : "delete_partfile=0\n";
+    payload += "version=3\n";
+    payload += "kind=resume_cleanup\n";
     for (std::string const &id : ids) {
         payload += "id=";
         payload += id;
@@ -1001,6 +966,7 @@ ResumePolicySnapshot resume_policy_snapshot(
 
     policy.has_identity = true;
     policy.canonical_id = identity->canonical_id;
+    policy.storage_activation = identity->storage_activation;
     policy.https_tracker_policy = identity->https_tracker_policy;
     policy.https_web_seed_policy = identity->https_web_seed_policy;
     policy.dht_enabled_by_user = identity->dht_enabled_by_user;
@@ -1036,6 +1002,35 @@ std::vector<char> encoded_resume_data(
         resume_entry.dict().insert_or_assign(
             std::string(kCanonicalIDResumeKey),
             lt::entry(policy.canonical_id)
+        );
+    }
+    if (policy.has_identity && policy.storage_activation) {
+        TTorrentStorageActivation const &activation = *policy.storage_activation;
+        std::string claim_id;
+        claim_id.reserve(sizeof(activation.claim_id));
+        std::ranges::transform(
+            activation.claim_id,
+            std::back_inserter(claim_id),
+            [](std::uint8_t byte) { return static_cast<char>(byte); }
+        );
+        std::string manifest_digest;
+        manifest_digest.reserve(sizeof(activation.source_manifest_digest));
+        std::ranges::transform(
+            activation.source_manifest_digest,
+            std::back_inserter(manifest_digest),
+            [](std::uint8_t byte) { return static_cast<char>(byte); }
+        );
+        resume_entry.dict().insert_or_assign(
+            std::string(kStorageClaimIDResumeKey),
+            lt::entry(std::move(claim_id))
+        );
+        resume_entry.dict().insert_or_assign(
+            std::string(kStorageClaimGenerationResumeKey),
+            lt::entry(static_cast<std::int64_t>(activation.claim_generation))
+        );
+        resume_entry.dict().insert_or_assign(
+            std::string(kStorageManifestDigestResumeKey),
+            lt::entry(std::move(manifest_digest))
         );
     }
     if (policy.metadata_validation_pending) {
@@ -1161,6 +1156,50 @@ std::string canonical_id_from_resume_data(std::vector<char> const &buffer)
     }
     std::string id(value.data(), value.size());
     return is_canonical_torrent_id(id) ? id : std::string();
+}
+
+std::optional<TTorrentStorageActivation> storage_activation_from_resume_data(
+    std::vector<char> const &buffer
+)
+{
+    lt::error_code error;
+    lt::bdecode_node const root = lt::bdecode(
+        lt::span<char const>(buffer.data(), static_cast<int>(buffer.size())),
+        error
+    );
+    if (error || root.type() != lt::bdecode_node::dict_t) {
+        return std::nullopt;
+    }
+
+    auto find_string = [&](std::string_view const key_name) {
+        lt::string_view const key(key_name.data(), key_name.size());
+        return root.dict_find_string_value(key);
+    };
+    lt::string_view const claim_id = find_string(kStorageClaimIDResumeKey);
+    lt::string_view const digest = find_string(kStorageManifestDigestResumeKey);
+    lt::string_view const generation_key(
+        kStorageClaimGenerationResumeKey.data(),
+        kStorageClaimGenerationResumeKey.size()
+    );
+    std::int64_t const generation = root.dict_find_int_value(generation_key, -1);
+    if (claim_id.size() != 16U || digest.size() != 32U || generation <= 0) {
+        return std::nullopt;
+    }
+
+    TTorrentStorageActivation activation{};
+    std::ranges::copy(claim_id, std::begin(activation.claim_id));
+    std::ranges::copy(digest, std::begin(activation.source_manifest_digest));
+    activation.claim_generation = static_cast<std::uint64_t>(generation);
+    bool const empty_claim = std::ranges::all_of(activation.claim_id, [](std::uint8_t byte) {
+        return byte == 0U;
+    });
+    bool const empty_digest = std::ranges::all_of(
+        activation.source_manifest_digest,
+        [](std::uint8_t byte) { return byte == 0U; }
+    );
+    return empty_claim || empty_digest
+        ? std::nullopt
+        : std::optional<TTorrentStorageActivation>(activation);
 }
 
 namespace {
@@ -2270,113 +2309,6 @@ void prepare_add_params(
     } else {
         params.flags |= lt::torrent_flags::auto_managed;
     }
-}
-
-BridgeResult validate_save_path(std::string_view save_path)
-{
-    if (save_path.empty()) {
-        return bridge_error(1, "Missing save path.");
-    }
-
-    fs::path const path{std::string(save_path)};
-    if (!path.is_absolute()) {
-        return bridge_error(1, "The save path must be absolute.");
-    }
-
-    return {};
-}
-
-std::optional<std::string> normalize_authorized_save_path(std::string_view const save_path)
-{
-    if (save_path.empty()
-        || save_path.size() > static_cast<std::size_t>(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES)
-        || save_path.contains('\0')) {
-        return std::nullopt;
-    }
-
-    std::size_t offset = 0U;
-    while (offset < save_path.size()) {
-        UTF8Sequence const sequence = utf8_sequence(save_path, offset);
-        if (!sequence.valid) {
-            return std::nullopt;
-        }
-        offset += sequence.length;
-    }
-
-    fs::path const path{std::string(save_path)};
-    if (!path.is_absolute()) {
-        return std::nullopt;
-    }
-
-    std::string normalized = path.lexically_normal().native();
-    if (normalized.empty()
-        || normalized.size() > static_cast<std::size_t>(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES)) {
-        return std::nullopt;
-    }
-    return normalized;
-}
-
-AuthorizedSavePathListResult parse_authorized_save_path_list_blob(
-    std::span<std::uint8_t const> const blob
-)
-{
-    if (blob.empty()) {
-        return AuthorizedSavePathList{};
-    }
-    if (blob.size() > static_cast<std::size_t>(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES)) {
-        return std::unexpected(BridgeError{
-            .code = 1,
-            .message = "The authorized save path list is too large.",
-        });
-    }
-    if (blob.back() != 0U) {
-        return std::unexpected(BridgeError{
-            .code = 1,
-            .message = "The authorized save path list is not NUL terminated.",
-        });
-    }
-
-    AuthorizedSavePathList paths;
-    std::size_t offset = 0U;
-    std::size_t path_count = 0U;
-    while (offset < blob.size()) {
-        std::span<std::uint8_t const> const remaining = blob.subspan(offset);
-        auto const terminator = std::ranges::find(remaining, std::uint8_t{0});
-        std::size_t const length = static_cast<std::size_t>(std::ranges::distance(
-            remaining.begin(),
-            terminator
-        ));
-        if (length == 0U) {
-            return std::unexpected(BridgeError{
-                .code = 1,
-                .message = "The authorized save path list contains an empty path.",
-            });
-        }
-
-        ++path_count;
-        if (path_count > static_cast<std::size_t>(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT)) {
-            return std::unexpected(BridgeError{
-                .code = 1,
-                .message = "The authorized save path list contains too many paths.",
-            });
-        }
-
-        std::string path;
-        path.reserve(length);
-        for (std::uint8_t const byte : remaining.first(length)) {
-            path.push_back(static_cast<char>(byte));
-        }
-        std::optional<std::string> const normalized = normalize_authorized_save_path(path);
-        if (!normalized) {
-            return std::unexpected(BridgeError{
-                .code = 1,
-                .message = "The authorized save path list contains an invalid path.",
-            });
-        }
-        paths.push_back(*normalized);
-        offset += length + 1U;
-    }
-    return paths;
 }
 
 std::string trimmed(std::string_view value)

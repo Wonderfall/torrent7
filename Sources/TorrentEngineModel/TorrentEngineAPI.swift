@@ -3,7 +3,6 @@ import Foundation
 package enum TorrentEngineError: LocalizedError, Sendable {
     case failedToCreateClient
     case startupFailed(String)
-    case authorizedRootCapacityReached(String)
     case bridgeError(String)
 
     package var errorDescription: String? {
@@ -14,10 +13,6 @@ package enum TorrentEngineError: LocalizedError, Sendable {
             return message.isEmpty
                 ? "Could not start the torrent engine."
                 : "Could not start the torrent engine: \(message)"
-        case .authorizedRootCapacityReached(let message):
-            return message.isEmpty
-                ? "Too many download folders are still in use by active torrents."
-                : message
         case .bridgeError(let message):
             return message.isEmpty ? "The torrent operation failed." : message
         }
@@ -55,16 +50,6 @@ package enum TorrentEngineRecoveryDisposition: Equatable, Sendable {
     case terminal
 }
 
-package struct TorrentFolderAuthorization: Equatable, Sendable {
-    package let path: String
-    package let bookmarkData: Data
-
-    package init(path: String, bookmarkData: Data) {
-        self.path = path
-        self.bookmarkData = bookmarkData
-    }
-}
-
 package protocol TorrentEngineServicing: Sendable {
     var startupFailureMessage: String? { get }
     var libtorrentVersion: String { get }
@@ -79,15 +64,10 @@ package protocol TorrentEngineServicing: Sendable {
     func terminateConnection(
         recoveryDisposition: TorrentEngineRecoveryDisposition
     ) async
-    func restart(enablePeerExchangePlugin: Bool, authorizedSavePaths: [String]) async throws
-    func delegateFolderAuthorization(_ authorization: TorrentFolderAuthorization) async throws
-    func reconcileFolderAuthorizations(
-        _ authorizations: [TorrentFolderAuthorization]
-    ) async throws
+    func restart(enablePeerExchangePlugin: Bool) async throws
     func wakeEvents() async -> AsyncStream<Void>
     func addMagnet(
         _ magnet: String,
-        savePath: String,
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
         enablePeerExchange: Bool,
@@ -97,7 +77,7 @@ package protocol TorrentEngineServicing: Sendable {
     ) async throws -> String
     func addTorrentFile(
         data: Data,
-        savePath: String,
+        activation: TorrentStorageActivation,
         filePriorities: [Int32: TorrentFilePriority]?,
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
@@ -110,7 +90,7 @@ package protocol TorrentEngineServicing: Sendable {
     func resume(id: String) async throws
     func reannounce(id: String) async throws
     func forceRecheck(id: String) async throws
-    func remove(id: String, deleteFiles: Bool) async throws -> TorrentRemovalOutcome
+    func remove(id: String) async throws -> TorrentRemovalOutcome
     func applySettings(_ settings: TorrentSettings, networkBinding: TorrentNetworkBinding) async throws
     /// Establishes fail-closed network containment before returning.
     ///
@@ -139,6 +119,9 @@ package protocol TorrentEngineServicing: Sendable {
     func setTorrentOptions(id: String, options: TorrentOptions) async throws
     func moveTorrentInQueue(id: String, move: TorrentQueueMove) async throws
     func requestFiles(id: String) async throws
+    /// Returns libtorrent's exact immutable bencoded info dictionary once
+    /// magnet metadata is resident. The bytes are never re-encoded.
+    func torrentMetadata(id: String) async throws -> Data?
     func setFilePriority(id: String, fileIndex: Int32, priority: TorrentFilePriority) async throws
     func requestPieceMap(id: String) async throws
     func trackerBatch(id: String, since revision: UInt64?) async -> TorrentTrackerBatch?

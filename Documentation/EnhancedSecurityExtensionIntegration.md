@@ -25,25 +25,28 @@ The fixture has the same structural security properties as production:
 - Enhanced Security version 2 and network client/server authority only in the
   helper;
 - no legacy `Contents/XPCServices` bundle;
+- one anonymous, mutually authenticated storage-broker endpoint supplied by the
+  host during each command-channel handshake;
 - exact application/helper identity selection and explicit reduced-assurance
   mode only because the fixture is ad-hoc signed.
 
-The positive folder-delegation and performance runs are intentionally
-interactive. Apple documents simulated input in Open and Save dialogs as
-incompatible with App Sandbox, and the system-owned Powerbox process ignores an
-app trying to approve its own file access. A genuine approval is therefore part
-of this security test rather than a runtime bypass.
+The host-side Powerbox and performance runs are intentionally interactive.
+Apple documents simulated input in Open and Save dialogs as incompatible with
+App Sandbox, and the system-owned Powerbox process ignores an app trying to
+approve its own file access. A genuine approval is therefore part of the GUI
+sandbox test rather than a runtime bypass. The approved scope stays entirely in
+the host; no bookmark, directory descriptor, or path is sent to the helper.
 
 CI runs `--automated`, which launches the real signed host and extension with no
-folder grants. It verifies blocked-network startup and a nonempty local-interface
-snapshot, reports the VPN-classified count, and exercises restart, shutdown, and
-fresh-session reconnect.
+Powerbox interaction. It verifies the authenticated storage-broker handshake,
+blocked-network startup, and a nonempty local-interface snapshot, reports the
+VPN-classified count, and exercises restart, shutdown, and fresh-session
+reconnect.
 The runner also kills the exact helper process, requires the client to observe
 the interruption, requires ExtensionFoundation to launch a different PID, and
-verifies a fresh blocked controller afterward. A final connection sends a
-malformed nonempty bookmark and must receive the exact invalid-folder-grant
-rejection. `--build-only` is available when only assembly, metadata, discovery
-registration, and signature verification are needed.
+verifies a fresh blocked controller and a fresh broker handshake afterward.
+`--build-only` is available when only assembly, metadata, discovery registration,
+and signature verification are needed.
 
 ## Practical dataset
 
@@ -55,8 +58,9 @@ SKIP_BUILD_DEPS=1 Scripts/test-enhanced-security-extension.zsh
 
 The script prints and preselects an exact `PowerboxRoot` under its integration
 output directory. Approve that folder in the system Open panel. The host creates
-a UUID child inside the approved root and delegates only that child's transient
-bookmark to the helper.
+a UUID child inside the approved root and retains the security scope itself. The
+dataset contains staged, paused magnets, so the helper exercises the broker
+handshake but does not request payload descriptors during this gate.
 
 The default run adds 512 unique tracker-bearing magnets while network access is
 blocked, verifies a real paged snapshot and tracker-host poll, restarts the
@@ -97,9 +101,9 @@ SKIP_BUILD_DEPS=1 Scripts/test-enhanced-security-extension.zsh --automated
 ```
 
 This mode needs no Powerbox interaction and does not add torrents. Its purpose
-is the signed Enhanced Security process lifecycle, recovery path, network
-observation, and negative folder-authorization boundary. The practical and
-maximum modes provide positive delegation and transport measurements.
+is the signed Enhanced Security process lifecycle, broker authentication,
+recovery path, and network observation. The practical and maximum modes add
+paged-dataset and transport measurements plus a genuine GUI-side Powerbox scope.
 
 To run the same lifecycle with the fully instrumented ThreadSanitizer dependency
 profile:

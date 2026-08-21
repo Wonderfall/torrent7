@@ -458,7 +458,13 @@ private struct TorrentInfoView: View {
 
             Section {
                 InfoDetailRow("Download path") {
-                    DownloadPathValueView(path: torrent.savePath) {
+                    let downloadPath = store.downloadLocationPath(
+                        for: torrent.id
+                    )
+                    DownloadPathValueView(
+                        path: downloadPath ?? "Unavailable",
+                        canReveal: downloadPath != nil
+                    ) {
                         store.revealTorrentInFinder(id: torrent.id)
                     }
                 }

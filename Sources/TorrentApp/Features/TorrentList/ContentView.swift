@@ -212,10 +212,14 @@ struct ContentView: View {
                 return
             }
             do {
+                let downloadLocationPaths = store.downloadLocationPaths(
+                    for: ids
+                )
                 let request =
                     try await TorrentRemovalConfirmationRequest.prepare(
                         requestedIDs: ids,
-                        torrents: torrentState.torrents
+                        torrents: torrentState.torrents,
+                        downloadLocationPaths: downloadLocationPaths
                     )
                 try Task.checkCancellation()
                 guard pendingRemovalIDs == ids else {
@@ -430,8 +434,12 @@ struct ContentView: View {
         guard let removalConfirmationRequest else {
             return ""
         }
-        if removalConfirmationRequest.count == 1, let savePath = removalConfirmationRequest.singleTorrentSavePath {
-            return "Choose whether to keep the downloaded data in \(savePath). If removed, it will be deleted permanently."
+        if removalConfirmationRequest.count == 1,
+           let path = removalConfirmationRequest.singleTorrentDownloadPath {
+            return "Choose whether to keep the downloaded data at \(path). If removed, it will be deleted permanently."
+        }
+        if removalConfirmationRequest.count == 1 {
+            return "Choose whether to keep the downloaded data. Data without a verified app-owned storage claim will be preserved."
         }
 
         return "Choose whether to keep the downloaded data for \(removalConfirmationRequest.count) torrents. If removed, it will be deleted permanently."
@@ -569,7 +577,8 @@ struct ContentView: View {
                 setsDownloadFolderAsDefault: options.setsDownloadFolderAsDefault,
                 startsPaused: options.startsPaused,
                 queuePriority: options.queuePriority,
-                labelIDs: options.labelIDs
+                labelIDs: options.labelIDs,
+                usesExistingData: options.storageMode == .useExistingData
             )
         case .magnet(let uri):
             accepted = store.addMagnet(
@@ -715,17 +724,18 @@ private struct TorrentFileIntakeRequest: Identifiable, Sendable {
 private struct TorrentRemovalConfirmationRequest: Sendable {
     let ids: Set<TorrentItem.ID>
     let count: Int
-    let singleTorrentSavePath: String?
+    let singleTorrentDownloadPath: String?
 
     @concurrent
     static func prepare(
         requestedIDs: Set<TorrentItem.ID>,
-        torrents: [TorrentItem]
+        torrents: [TorrentItem],
+        downloadLocationPaths: [TorrentItem.ID: String]
     ) async throws -> Self? {
         try Task.checkCancellation()
         var retainedIDs = Set<TorrentItem.ID>()
         retainedIDs.reserveCapacity(min(requestedIDs.count, torrents.count))
-        var singleTorrentSavePath: String?
+        var singleTorrentDownloadPath: String?
         for (offset, torrent) in torrents.enumerated() {
             if offset.isMultiple(of: 128) {
                 try Task.checkCancellation()
@@ -734,8 +744,8 @@ private struct TorrentRemovalConfirmationRequest: Sendable {
                 continue
             }
             retainedIDs.insert(torrent.id)
-            singleTorrentSavePath = retainedIDs.count == 1
-                ? torrent.savePath
+            singleTorrentDownloadPath = retainedIDs.count == 1
+                ? downloadLocationPaths[torrent.id]
                 : nil
         }
         try Task.checkCancellation()
@@ -745,8 +755,8 @@ private struct TorrentRemovalConfirmationRequest: Sendable {
         return Self(
             ids: retainedIDs,
             count: retainedIDs.count,
-            singleTorrentSavePath: retainedIDs.count == 1
-                ? singleTorrentSavePath
+            singleTorrentDownloadPath: retainedIDs.count == 1
+                ? singleTorrentDownloadPath
                 : nil
         )
     }

@@ -16,8 +16,7 @@ struct TorrentXPCClientDeadlineTests {
             case .handshake:
                 return try queueDeadlineReply(
                     TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: []
+                        libtorrentVersion: "2.1.0"
                     ),
                     for: request,
                     epoch: epoch
@@ -43,7 +42,8 @@ struct TorrentXPCClientDeadlineTests {
         }
         let client = try await TorrentXPCClient.connect(
             enablePeerExchangePlugin: false,
-            folderAuthorizations: [],
+            brokerEndpoint: TorrentEngineClientTestStorageBroker.endpoint,
+            brokerSessionNonce: TorrentEngineClientTestStorageBroker.sessionNonce,
             transport: transport,
             requestTimeoutOverrides: [
                 .pause: .seconds(1),
@@ -98,8 +98,7 @@ struct TorrentXPCClientDeadlineTests {
             case .handshake:
                 return try queueDeadlineReply(
                     TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: []
+                        libtorrentVersion: "2.1.0"
                     ),
                     for: request,
                     epoch: epoch
@@ -120,7 +119,8 @@ struct TorrentXPCClientDeadlineTests {
         }
         let client = try await TorrentXPCClient.connect(
             enablePeerExchangePlugin: false,
-            folderAuthorizations: [],
+            brokerEndpoint: TorrentEngineClientTestStorageBroker.endpoint,
+            brokerSessionNonce: TorrentEngineClientTestStorageBroker.sessionNonce,
             transport: transport
         )
         let torrentID = "v1:\(String(repeating: "b", count: 40))"
@@ -148,8 +148,7 @@ struct TorrentXPCClientDeadlineTests {
             try await Task.sleep(for: .milliseconds(150))
             return try queueDeadlineReply(
                 TorrentEngineIPCHandshakeResponse(
-                    libtorrentVersion: "2.1.0",
-                    folders: []
+                    libtorrentVersion: "2.1.0"
                 ),
                 for: request,
                 epoch: epoch
@@ -160,7 +159,8 @@ struct TorrentXPCClientDeadlineTests {
         do {
             _ = try await TorrentXPCClient.connect(
                 enablePeerExchangePlugin: false,
-                folderAuthorizations: [],
+                brokerEndpoint: TorrentEngineClientTestStorageBroker.endpoint,
+                brokerSessionNonce: TorrentEngineClientTestStorageBroker.sessionNonce,
                 transport: transport,
                 connectionDeadline: deadline
             )

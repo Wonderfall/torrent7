@@ -9,42 +9,6 @@ namespace {
     return value == std::numeric_limits<std::uint64_t>::max() ? value : value + 1U;
 }
 
-#if defined(TORRENT_BRIDGE_TESTING)
-[[nodiscard]] AuthorizedSaveRootMap test_authorized_save_roots(
-    AuthorizedSavePathSet const &paths
-)
-{
-    AuthorizedSaveRootMap roots;
-    for (std::string const &path : paths) {
-        UniqueFileDescriptor descriptor(::open(
-            path.c_str(),
-            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
-        ));
-        if (!descriptor.is_valid()) {
-            throw std::system_error(errno, std::generic_category(), "Could not open authorized test root");
-        }
-        struct ::stat metadata {};
-        if (::fstat(descriptor.get(), &metadata) != 0) {
-            throw std::system_error(errno, std::generic_category(), "Could not inspect authorized test root");
-        }
-        lt::error_code root_error;
-        std::shared_ptr<lt::aux::storage_root> root = lt::aux::make_storage_root(
-            path,
-            descriptor.get(),
-            static_cast<std::uint64_t>(metadata.st_dev),
-            static_cast<std::uint64_t>(metadata.st_ino),
-            {},
-            root_error
-        );
-        if (root_error || !root) {
-            throw std::runtime_error("Could not create authorized test root: " + root_error.message());
-        }
-        roots.emplace(path, std::move(root));
-    }
-    return roots;
-}
-#endif
-
 } // namespace
 
 std::chrono::milliseconds alert_worker_failure_backoff(std::uint64_t const consecutive_failures) noexcept
@@ -80,42 +44,23 @@ bool wait_for_alert_worker_backoff(
 }
 
 TTorrentClient::TTorrentClient(std::string_view state_path, bool enable_peer_exchange_plugin)
-    : TTorrentClient(state_path, enable_peer_exchange_plugin, AuthorizedSaveRootMap{})
+    : TTorrentClient(state_path, enable_peer_exchange_plugin, nullptr)
 {
 }
-
-#if defined(TORRENT_BRIDGE_TESTING)
-TTorrentClient::TTorrentClient(
-    std::string_view state_path,
-    bool enable_peer_exchange_plugin,
-    AuthorizedSavePathSet const &authorized_paths
-)
-    : TTorrentClient(
-        state_path,
-        enable_peer_exchange_plugin,
-        test_authorized_save_roots(authorized_paths)
-    )
-{
-}
-#endif
 
 TTorrentClient::TTorrentClient(
     std::string_view state_path,
     bool enable_peer_exchange_plugin,
-    AuthorizedSaveRootMap authorized_roots
+    std::shared_ptr<PayloadBrokerContext> broker
 )
     : state_directory(std::string(state_path)),
       resume_directory(state_directory / "ResumeData"),
-      authorized_save_roots(std::move(authorized_roots)),
+      part_files_directory(state_directory / "PartFiles"),
+      staging_directory(state_directory / "Staging"),
+      payload_broker(std::move(broker)),
       session(make_session_params(enable_peer_exchange_plugin)),
       peer_exchange_plugin_enabled(enable_peer_exchange_plugin)
 {
-    authorized_save_root_lifetimes.reserve(authorized_save_roots.size());
-    for (auto const &[path, root] : authorized_save_roots) {
-        static_cast<void>(path);
-        authorized_save_root_lifetimes.emplace_back(root);
-    }
-
     session.pause();
 
     std::error_code create_error;
@@ -141,6 +86,24 @@ TTorrentClient::TTorrentClient(
         "resume data directory"
     );
     restrict_permissions(resume_directory_descriptor.get(), "resume data directory", FileSystemNodeKind::directory);
+    auto create_private_directory = [&](char const *name, std::string_view label) {
+        if (::mkdirat(state_directory_descriptor.get(), name, kOwnerDirectoryPermissions) != 0
+            && errno != EEXIST) {
+            throw std::system_error(
+                std::error_code(errno, std::generic_category()),
+                "Could not create " + std::string(label)
+            );
+        }
+        UniqueFileDescriptor descriptor = open_directory_at_no_follow(
+            state_directory_descriptor.get(),
+            name,
+            label
+        );
+        restrict_permissions(descriptor.get(), label, FileSystemNodeKind::directory);
+        return descriptor;
+    };
+    part_files_directory_descriptor = create_private_directory("PartFiles", "part files directory");
+    staging_directory_descriptor = create_private_directory("Staging", "magnet staging directory");
     remove_orphan_resume_temp_files();
     {
         std::scoped_lock io_guard(resume_io_lock);
@@ -192,6 +155,31 @@ TTorrentClient::~TTorrentClient() noexcept
 void TTorrentClient::set_session_shutdown_asynchronous(bool value) noexcept
 {
     deferred_session_shutdown.set_destroy_asynchronously(value);
+}
+
+std::shared_ptr<lt::aux::payload_file_provider> TTorrentClient::make_payload_provider(
+    TTorrentStorageActivation const &activation
+) const
+{
+    if (!payload_broker) {
+        throw std::logic_error("The payload broker is unavailable.");
+    }
+    return std::make_shared<BridgePayloadFileProvider>(payload_broker, activation);
+}
+
+std::string TTorrentClient::part_file_path(TTorrentStorageActivation const &activation) const
+{
+    return (part_files_directory / storage_claim_key(activation)).native();
+}
+
+std::string TTorrentClient::staging_path(lt::info_hash_t const &hashes) const
+{
+    std::string key = primary_hash_key(hashes);
+    std::ranges::replace(key, ':', '_');
+    if (key.empty()) {
+        throw std::invalid_argument("The magnet has no usable info hash.");
+    }
+    return (staging_directory / key).native();
 }
 
 void TTorrentClient::set_wake_callback(TTorrentWakeCallback callback, void *context)
@@ -479,11 +467,52 @@ void TTorrentClient::record_alert_worker_recovery() noexcept
     invoke_wake_callback(wake);
 }
 
-[[nodiscard]] std::string TTorrentClient::reserve_canonical_torrent_id_locked(std::string canonical_id)
+[[nodiscard]] std::string TTorrentClient::reserve_canonical_torrent_id_locked(
+    std::string canonical_id,
+    bool const requires_requested_id,
+    int32_t *const preserved_queue_rank_out
+)
 {
-    if (is_canonical_torrent_id(canonical_id)
-        && canonical_ids_in_use.insert(canonical_id).second) {
-        return canonical_id;
+    if (preserved_queue_rank_out != nullptr) {
+        *preserved_queue_rank_out = kUnsetQueueRank;
+    }
+    if (!canonical_id.empty()) {
+        if (!is_canonical_torrent_id(canonical_id)) {
+            if (requires_requested_id) {
+                throw std::invalid_argument("The requested torrent identifier is invalid.");
+            }
+        } else if (canonical_ids_in_use.insert(canonical_id).second) {
+            return canonical_id;
+        }
+
+        if (requires_requested_id) {
+            auto const previous = std::ranges::find_if(
+                torrent_identities,
+                [&canonical_id](auto const &owned) {
+                    return owned != nullptr && owned->canonical_id == canonical_id;
+                }
+            );
+            if (previous != torrent_identities.end()) {
+                TorrentIdentity *const identity = previous->get();
+                auto const references_identity = [identity](auto const &entry) {
+                    return entry.second == identity;
+                };
+                bool const is_active = std::ranges::any_of(
+                    active_identity_by_id,
+                    references_identity
+                );
+                bool const is_removing = unidentified_removing_identities.contains(identity)
+                    || std::ranges::any_of(removing_identity_by_id, references_identity);
+                if (!is_active && is_removing) {
+                    if (preserved_queue_rank_out != nullptr) {
+                        *preserved_queue_rank_out = identity->queue_rank;
+                    }
+                    identity->canonical_id.clear();
+                    return canonical_id;
+                }
+            }
+            throw std::runtime_error("The requested torrent identifier is still active.");
+        }
     }
 
     constexpr int kMaxCanonicalIDGenerationAttempts = 256;
@@ -497,7 +526,10 @@ void TTorrentClient::record_alert_worker_recovery() noexcept
     throw std::runtime_error("A unique torrent identifier could not be generated.");
 }
 
-TorrentIdentity *TTorrentClient::make_identity(std::string canonical_id)
+TorrentIdentity *TTorrentClient::make_identity(
+    std::string canonical_id,
+    bool const requires_requested_id
+)
 {
     std::scoped_lock io_guard(resume_io_lock);
     if (!torrent_count_allows_admission(torrent_identities.size())) {
@@ -511,9 +543,15 @@ TorrentIdentity *TTorrentClient::make_identity(std::string canonical_id)
 
     auto token = std::make_unique<TorrentIdentityToken>();
     auto identity = std::make_unique<TorrentIdentity>();
+    int32_t preserved_queue_rank = kUnsetQueueRank;
     identity->generation = next_identity_generation++;
     token->generation = identity->generation;
-    identity->canonical_id = reserve_canonical_torrent_id_locked(std::move(canonical_id));
+    identity->canonical_id = reserve_canonical_torrent_id_locked(
+        std::move(canonical_id),
+        requires_requested_id,
+        &preserved_queue_rank
+    );
+    identity->queue_rank = preserved_queue_rank;
     TorrentIdentity *const raw = identity.get();
     TorrentIdentityToken *const raw_token = token.get();
     identity->token = raw_token;
@@ -533,9 +571,16 @@ TorrentIdentity *TTorrentClient::make_identity(std::string canonical_id)
     return raw;
 }
 
-TorrentIdentity *TTorrentClient::attach_identity(lt::add_torrent_params &params, std::string canonical_id)
+TorrentIdentity *TTorrentClient::attach_identity(
+    lt::add_torrent_params &params,
+    std::string canonical_id,
+    bool const requires_requested_id
+)
 {
-    TorrentIdentity *identity = make_identity(std::move(canonical_id));
+    TorrentIdentity *identity = make_identity(
+        std::move(canonical_id),
+        requires_requested_id
+    );
     std::array<char, sizeof(TTorrentSnapshot::comment)> comment{};
     copy_string(std::span{comment}, params.comment);
     identity->comment = comment.data();

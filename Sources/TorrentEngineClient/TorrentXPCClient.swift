@@ -2,6 +2,7 @@ import Foundation
 import Synchronization
 import TorrentEngineIPC
 import TorrentEngineModel
+import XPC
 
 package enum TorrentEngineConnectionRetryMode: Equatable, Sendable {
     case initial
@@ -166,24 +167,15 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
 @safe package actor TorrentXPCClient: TorrentEngineServicing {
     private static let maximumQueuedRequestCount = 128
 
-    private enum CapabilityState: Equatable, Sendable {
-        case committed
-        case provisional
-    }
-
-    private struct CapabilityRecord: Equatable, Sendable {
-        let id: UUID
-        var state: CapabilityState
-    }
-
     private let controllerID: UUID
     private let transport: any TorrentEngineIPCTransport
     private let state: TorrentXPCClientState
     private let requestTimeoutOverrides: [TorrentEngineIPCOperation: Duration]
+    private let brokerEndpoint: XPCEndpoint
+    private let brokerSessionNonce: UUID
     private var connectionDeadline: ContinuousClock.Instant?
     private var engineEpoch: UUID?
     private var nextSequence: UInt64 = 1
-    private var capabilitiesByCanonicalPath = [String: CapabilityRecord]()
     private var latestNetworkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot?
     private var requestIsInFlight = false
     private struct RequestWaiter {
@@ -224,18 +216,23 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         transport: any TorrentEngineIPCTransport,
         state: TorrentXPCClientState,
         requestTimeoutOverrides: [TorrentEngineIPCOperation: Duration],
-        connectionDeadline: ContinuousClock.Instant?
+        connectionDeadline: ContinuousClock.Instant?,
+        brokerEndpoint: XPCEndpoint,
+        brokerSessionNonce: UUID
     ) {
         self.controllerID = controllerID
         self.transport = transport
         self.state = state
         self.requestTimeoutOverrides = requestTimeoutOverrides
         self.connectionDeadline = connectionDeadline
+        self.brokerEndpoint = brokerEndpoint
+        self.brokerSessionNonce = brokerSessionNonce
     }
 
     package static func connect(
         enablePeerExchangePlugin: Bool,
-        folderAuthorizations: [TorrentFolderAuthorization],
+        brokerEndpoint: XPCEndpoint,
+        brokerSessionNonce: UUID,
         retryMode: TorrentEngineConnectionRetryMode = .initial
     ) async throws -> TorrentXPCClient {
         let configuration = try TorrentEngineXPCIdentity.configuration()
@@ -273,9 +270,10 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                     transport: transport,
                     state: state,
                     enablePeerExchangePlugin: enablePeerExchangePlugin,
-                    folderAuthorizations: folderAuthorizations,
                     requestTimeoutOverrides: [:],
-                    connectionDeadline: recoveryDeadline
+                    connectionDeadline: recoveryDeadline,
+                    brokerEndpoint: brokerEndpoint,
+                    brokerSessionNonce: brokerSessionNonce
                 )
             } catch {
                 guard !(error is CancellationError), !Task.isCancelled else {
@@ -306,7 +304,8 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     /// the production XPC peer requirements used by the primary overload.
     package static func connect(
         enablePeerExchangePlugin: Bool,
-        folderAuthorizations: [TorrentFolderAuthorization],
+        brokerEndpoint: XPCEndpoint,
+        brokerSessionNonce: UUID,
         transport: any TorrentEngineIPCTransport,
         controllerID: UUID = UUID(),
         requestTimeoutOverrides: [TorrentEngineIPCOperation: Duration] = [:],
@@ -317,9 +316,10 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             transport: transport,
             state: TorrentXPCClientState(),
             enablePeerExchangePlugin: enablePeerExchangePlugin,
-            folderAuthorizations: folderAuthorizations,
             requestTimeoutOverrides: requestTimeoutOverrides,
-            connectionDeadline: connectionDeadline
+            connectionDeadline: connectionDeadline,
+            brokerEndpoint: brokerEndpoint,
+            brokerSessionNonce: brokerSessionNonce
         )
     }
 
@@ -328,21 +328,23 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         transport: any TorrentEngineIPCTransport,
         state: TorrentXPCClientState,
         enablePeerExchangePlugin: Bool,
-        folderAuthorizations: [TorrentFolderAuthorization],
         requestTimeoutOverrides: [TorrentEngineIPCOperation: Duration],
-        connectionDeadline: ContinuousClock.Instant?
+        connectionDeadline: ContinuousClock.Instant?,
+        brokerEndpoint: XPCEndpoint,
+        brokerSessionNonce: UUID
     ) async throws -> TorrentXPCClient {
         let client = TorrentXPCClient(
             controllerID: controllerID,
             transport: transport,
             state: state,
             requestTimeoutOverrides: requestTimeoutOverrides,
-            connectionDeadline: connectionDeadline
+            connectionDeadline: connectionDeadline,
+            brokerEndpoint: brokerEndpoint,
+            brokerSessionNonce: brokerSessionNonce
         )
         do {
             try await client.bootstrap(
-                enablePeerExchangePlugin: enablePeerExchangePlugin,
-                folderAuthorizations: folderAuthorizations
+                enablePeerExchangePlugin: enablePeerExchangePlugin
             )
             try await client.finishConnectionEstablishment()
             return client
@@ -369,7 +371,6 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         if state.isAvailable {
             try? await invokeUnit(.shutdown, TorrentEngineIPCEmpty())
         }
-        capabilitiesByCanonicalPath.removeAll(keepingCapacity: false)
         engineEpoch = nil
         terminalize(
             message: "The isolated torrent engine connection ended safely.",
@@ -380,7 +381,6 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     package func terminateConnection(
         recoveryDisposition: TorrentEngineRecoveryDisposition
     ) async {
-        capabilitiesByCanonicalPath.removeAll(keepingCapacity: false)
         engineEpoch = nil
         terminalize(
             message: TorrentEngineClientError.connectionCancelled.localizedDescription,
@@ -389,108 +389,14 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     }
 
     package func restart(
-        enablePeerExchangePlugin: Bool,
-        authorizedSavePaths: [String]
+        enablePeerExchangePlugin: Bool
     ) async throws {
-        var granted = [(path: String, record: CapabilityRecord)]()
-        granted.reserveCapacity(authorizedSavePaths.count)
-        for path in try Self.canonicalPaths(authorizedSavePaths) {
-            guard let record = capabilitiesByCanonicalPath[path] else {
-                throw TorrentEngineClientError.capabilityUnavailable
-            }
-            granted.append((path, record))
-        }
-
-        do {
-            try await invokeUnit(
-                .restart,
-                TorrentEngineIPCRestartRequest(
-                    enablePeerExchangePlugin: enablePeerExchangePlugin,
-                    capabilityIDs: granted.map(\.record.id)
-                )
+        try await invokeUnit(
+            .restart,
+            TorrentEngineIPCRestartRequest(
+                enablePeerExchangePlugin: enablePeerExchangePlugin
             )
-            capabilitiesByCanonicalPath = Dictionary(
-                uniqueKeysWithValues: granted.map {
-                    ($0.path, CapabilityRecord(id: $0.record.id, state: .committed))
-                }
-            )
-        } catch {
-            if Self.isDefiniteUnsubmittedOrRejectedFailure(error) {
-                for grant in granted where grant.record.state == .provisional {
-                    await revokeForMandatoryCleanup(capabilityID: grant.record.id)
-                }
-            }
-            throw error
-        }
-    }
-
-    package func delegateFolderAuthorization(
-        _ authorization: TorrentFolderAuthorization
-    ) async throws {
-        let canonicalPath = try Self.canonicalPath(authorization.path)
-        guard !authorization.bookmarkData.isEmpty,
-              authorization.bookmarkData.count <= TorrentEngineIPCLimits.maximumBookmarkBytes else {
-            throw TorrentEngineClientError.invalidBookmark
-        }
-        if capabilitiesByCanonicalPath[canonicalPath] != nil {
-            return
-        }
-        let granted = try await grantProvisionalFolder(
-            path: canonicalPath,
-            bookmarkData: authorization.bookmarkData
         )
-        capabilitiesByCanonicalPath[canonicalPath] = CapabilityRecord(
-            id: granted.capabilityID,
-            state: .provisional
-        )
-    }
-
-    package func reconcileFolderAuthorizations(
-        _ authorizations: [TorrentFolderAuthorization]
-    ) async throws {
-        let normalized: [TorrentFolderAuthorization]
-        let response: TorrentEngineIPCReplaceFoldersResponse
-        do {
-            normalized = try Self.canonicalAuthorizations(authorizations)
-            response = try await invoke(
-                .replaceFolderCapabilities,
-                TorrentEngineIPCReplaceFoldersRequest(
-                    folders: normalized.map {
-                        TorrentEngineIPCFolderGrant(bookmark: $0.bookmarkData)
-                    }
-                )
-            )
-        } catch {
-            // Exact replacement is the revocation boundary. If it cannot be
-            // confirmed, retaining the previous capability set would leave
-            // authority that the GUI has already removed. Tear down the
-            // controller so service disconnect cleanup revokes everything.
-            let failure = responseFailure(from: error)
-            terminalize(failure)
-            throw failure
-        }
-
-        let expectedPaths = Set(normalized.map(\.path))
-        guard response.folders.count == expectedPaths.count,
-              Set(response.folders.map(\.resolvedPath)) == expectedPaths else {
-            let error = TorrentEngineClientError.invalidReply
-            terminalize(error)
-            throw error
-        }
-
-        var replacements = [String: CapabilityRecord]()
-        replacements.reserveCapacity(response.folders.count)
-        for folder in response.folders {
-            guard replacements.updateValue(
-                CapabilityRecord(id: folder.capabilityID, state: .committed),
-                forKey: folder.resolvedPath
-            ) == nil else {
-                let error = TorrentEngineClientError.invalidReply
-                terminalize(error)
-                throw error
-            }
-        }
-        capabilitiesByCanonicalPath = replacements
     }
 
     package func wakeEvents() -> AsyncStream<Void> {
@@ -499,7 +405,6 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
 
     package func addMagnet(
         _ magnet: String,
-        savePath: String,
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
         enablePeerExchange: Bool,
@@ -507,37 +412,24 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride,
         allowPreMetadataDHT: Bool
     ) async throws -> String {
-        let folder = try await folderCapability(for: savePath)
-        do {
-            let response: TorrentEngineIPCAddedTorrentResponse = try await invoke(
-                .addMagnet,
-                TorrentEngineIPCAddMagnetRequest(
-                    magnet: magnet,
-                    folderCapabilityID: folder.capabilityID,
-                    startsPaused: startsPaused,
-                    queuePriority: queuePriority,
-                    enablePeerExchange: enablePeerExchange,
-                    httpsTrackerPolicy: httpsTrackerPolicy,
-                    httpsWebSeedPolicy: httpsWebSeedPolicy,
-                    allowPreMetadataDHT: allowPreMetadataDHT
-                )
+        let response: TorrentEngineIPCAddedTorrentResponse = try await invoke(
+            .addMagnet,
+            TorrentEngineIPCAddMagnetRequest(
+                magnet: magnet,
+                startsPaused: startsPaused,
+                queuePriority: queuePriority,
+                enablePeerExchange: enablePeerExchange,
+                httpsTrackerPolicy: httpsTrackerPolicy,
+                httpsWebSeedPolicy: httpsWebSeedPolicy,
+                allowPreMetadataDHT: allowPreMetadataDHT
             )
-            capabilitiesByCanonicalPath[folder.path] = CapabilityRecord(
-                id: folder.capabilityID,
-                state: .committed
-            )
-            return response.identifier
-        } catch {
-            if folder.wasProvisional, Self.isDefiniteUnsubmittedOrRejectedFailure(error) {
-                await revokeForMandatoryCleanup(capabilityID: folder.capabilityID)
-            }
-            throw error
-        }
+        )
+        return response.identifier
     }
 
     package func addTorrentFile(
         data: Data,
-        savePath: String,
+        activation: TorrentStorageActivation,
         filePriorities: [Int32: TorrentFilePriority]?,
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
@@ -545,35 +437,49 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride,
         httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride
     ) async throws -> String {
-        let folder = try await folderCapability(for: savePath)
         let priorityEntries = filePriorities?.map {
             TorrentEngineIPCFilePriorityEntry(index: $0.key, priority: $0.value)
         }.sorted { $0.index < $1.index }
-        do {
-            let response: TorrentEngineIPCAddedTorrentResponse = try await invoke(
-                .addTorrentFile,
-                TorrentEngineIPCAddTorrentFileRequest(
-                    folderCapabilityID: folder.capabilityID,
-                    filePriorities: priorityEntries,
-                    startsPaused: startsPaused,
-                    queuePriority: queuePriority,
-                    enablePeerExchange: enablePeerExchange,
-                    httpsTrackerPolicy: httpsTrackerPolicy,
-                    httpsWebSeedPolicy: httpsWebSeedPolicy
-                ),
-                attachment: data
-            )
-            capabilitiesByCanonicalPath[folder.path] = CapabilityRecord(
-                id: folder.capabilityID,
-                state: .committed
-            )
-            return response.identifier
-        } catch {
-            if folder.wasProvisional, Self.isDefiniteUnsubmittedOrRejectedFailure(error) {
-                await revokeForMandatoryCleanup(capabilityID: folder.capabilityID)
-            }
+        let response: TorrentEngineIPCAddedTorrentResponse = try await invoke(
+            .addTorrentFile,
+            TorrentEngineIPCAddTorrentFileRequest(
+                activation: activation,
+                filePriorities: priorityEntries,
+                startsPaused: startsPaused,
+                queuePriority: queuePriority,
+                enablePeerExchange: enablePeerExchange,
+                httpsTrackerPolicy: httpsTrackerPolicy,
+                httpsWebSeedPolicy: httpsWebSeedPolicy
+            ),
+            attachment: data
+        )
+        return response.identifier
+    }
+
+    package func torrentMetadata(id: String) async throws -> Data? {
+        guard let engineEpoch else {
+            let error = TorrentEngineClientError.connectionFailed
+            terminalize(error)
             throw error
         }
+        let operation = TorrentEngineIPCOperation.torrentMetadata
+        let payload = try TorrentEngineIPCJSONCodec.encode(
+            TorrentEngineIPCTorrentIDRequest(id: id),
+            maximumBytes: operation.maximumRequestPayloadBytes,
+            limits: operation.requestJSONLimits
+        )
+        let reply = try await send(
+            operation: operation,
+            payload: payload,
+            expectedEpoch: engineEpoch
+        )
+        guard let metadata = reply.payload,
+              metadata.count <= operation.maximumReplyPayloadBytes else {
+            let error = TorrentEngineClientError.invalidReply
+            terminalize(error)
+            throw error
+        }
+        return metadata.isEmpty ? nil : metadata
     }
 
     package func previewTorrentFile(data: Data) async throws -> TorrentFilePreview {
@@ -610,10 +516,10 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         try await invokeUnit(.forceRecheck, TorrentEngineIPCTorrentIDRequest(id: id))
     }
 
-    package func remove(id: String, deleteFiles: Bool) async throws -> TorrentRemovalOutcome {
+    package func remove(id: String) async throws -> TorrentRemovalOutcome {
         let response: TorrentEngineIPCRemovalResponse = try await invoke(
             .remove,
-            TorrentEngineIPCRemoveRequest(id: id, deleteFiles: deleteFiles)
+            TorrentEngineIPCRemoveRequest(id: id)
         )
         return response.outcome
     }
@@ -829,37 +735,19 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     }
 
     private func bootstrap(
-        enablePeerExchangePlugin: Bool,
-        folderAuthorizations: [TorrentFolderAuthorization]
+        enablePeerExchangePlugin: Bool
     ) async throws {
-        let authorizations = try Self.canonicalAuthorizations(folderAuthorizations)
-        let folders = authorizations.map {
-            TorrentEngineIPCFolderGrant(bookmark: $0.bookmarkData)
-        }
         let request = TorrentEngineIPCHandshakeRequest(
             enablePeerExchangePlugin: enablePeerExchangePlugin,
-            folders: folders
+            brokerSessionNonce: brokerSessionNonce
         )
-        let (response, epoch): (TorrentEngineIPCHandshakeResponse, UUID) = try await invokeBeforeHandshake(
-            .handshake,
-            request
-        )
-        guard response.folders.count == authorizations.count else {
-            throw TorrentEngineClientError.invalidReply
-        }
-        var capabilities = [String: CapabilityRecord]()
-        for (authorization, granted) in zip(authorizations, response.folders) {
-            let path = authorization.path
-            guard granted.resolvedPath == path,
-                  capabilities.updateValue(
-                    CapabilityRecord(id: granted.capabilityID, state: .committed),
-                    forKey: path
-                  ) == nil else {
-                throw TorrentEngineClientError.capabilityPathMismatch
-            }
-        }
+        let (response, epoch): (TorrentEngineIPCHandshakeResponse, UUID) =
+            try await invokeBeforeHandshake(
+                .handshake,
+                request,
+                brokerEndpoint: brokerEndpoint
+            )
         engineEpoch = epoch
-        capabilitiesByCanonicalPath = capabilities
         state.setLibtorrentVersion(response.libtorrentVersion)
     }
 
@@ -937,79 +825,13 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         }
         try TorrentEngineClientResponseValidator.validateDataset(
             values,
-            kind: descriptor.kind,
-            authorizedSavePaths: Set(capabilitiesByCanonicalPath.keys)
+            kind: descriptor.kind
         )
         return values
     }
 
     private func closeDataset(_ id: UUID) async throws {
         try await invokeUnit(.closeDataset, TorrentEngineIPCCloseDatasetRequest(id: id))
-    }
-
-    private func folderCapability(
-        for path: String
-    ) async throws -> (path: String, capabilityID: UUID, wasProvisional: Bool) {
-        let canonicalPath = try Self.canonicalPath(path)
-        if let record = capabilitiesByCanonicalPath[canonicalPath] {
-            return (canonicalPath, record.id, record.state == .provisional)
-        }
-        throw TorrentEngineClientError.capabilityUnavailable
-    }
-
-    private func grantProvisionalFolder(
-        path: String,
-        bookmarkData: Data
-    ) async throws -> TorrentEngineIPCGrantedFolder {
-        let response: TorrentEngineIPCGrantFolderResponse = try await invoke(
-            .grantFolderCapability,
-            TorrentEngineIPCFolderGrant(bookmark: bookmarkData)
-        )
-        guard response.folder.resolvedPath == path else {
-            await revokeForMandatoryCleanup(
-                capabilityID: response.folder.capabilityID
-            )
-            throw TorrentEngineClientError.capabilityPathMismatch
-        }
-        return response.folder
-    }
-
-    private func revoke(capabilityID: UUID) async throws {
-        try await invokeUnit(
-            .revokeFolderCapability,
-            TorrentEngineIPCRevokeFolderRequest(capabilityID: capabilityID)
-        )
-        capabilitiesByCanonicalPath = capabilitiesByCanonicalPath.filter {
-            $0.value.id != capabilityID
-        }
-    }
-
-    /// Security cleanup belongs to the authenticated connection once the
-    /// triggering reply is known. Run it from an uncancelled task so an
-    /// observer disappearing cannot suppress the revoke between requests.
-    private func revokeForMandatoryCleanup(capabilityID: UUID) async {
-        let result = await Task.detached { [weak self] ()
-            -> Result<Void, TorrentEngineClientError> in
-            guard let self else {
-                return .failure(.connectionFailed)
-            }
-            do {
-                try await self.revoke(capabilityID: capabilityID)
-                return .success(())
-            } catch let error as TorrentEngineClientError {
-                return .failure(error)
-            } catch {
-                return .failure(.connectionFailed)
-            }
-        }.value
-        guard case .failure(let failure) = result else {
-            return
-        }
-        if failure.recoveryDisposition == .terminal {
-            terminalize(failure)
-        } else {
-            terminalize(.connectionFailed)
-        }
     }
 
     private func closeDatasetsForMandatoryPollCleanup(_ ids: [UUID]) async {
@@ -1126,14 +948,20 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         Response: Decodable & Sendable
     >(
         _ operation: TorrentEngineIPCOperation,
-        _ request: Request
+        _ request: Request,
+        brokerEndpoint: XPCEndpoint
     ) async throws -> (Response, UUID) {
         let payload = try TorrentEngineIPCJSONCodec.encode(
             request,
             maximumBytes: operation.maximumRequestPayloadBytes,
             limits: operation.requestJSONLimits
         )
-        let reply = try await send(operation: operation, payload: payload, expectedEpoch: nil)
+        let reply = try await send(
+            operation: operation,
+            payload: payload,
+            expectedEpoch: nil,
+            brokerEndpoint: brokerEndpoint
+        )
         let response: Response = try decodeValidatedResponse(reply, for: operation)
         return (response, reply.engineEpoch)
     }
@@ -1167,7 +995,8 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         operation: TorrentEngineIPCOperation,
         payload: Data?,
         attachment: Data? = nil,
-        expectedEpoch: UUID?
+        expectedEpoch: UUID?,
+        brokerEndpoint: XPCEndpoint? = nil
     ) async throws -> TorrentEngineIPCReply {
         let clock = ContinuousClock()
         let requestTimeout = requestTimeoutOverrides[operation]
@@ -1208,7 +1037,8 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                 TorrentEngineIPCRequest(
                     header: header,
                     payload: payload,
-                    attachment: attachment
+                    attachment: attachment,
+                    brokerEndpoint: brokerEndpoint
                 ),
                 deadline: deadline
             )
@@ -1445,76 +1275,6 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         waiter.continuation.resume(returning: .acquired)
     }
 
-    private static func canonicalPaths(_ paths: [String]) throws -> [String] {
-        guard paths.count <= TorrentEngineLimits.maximumAuthorizedSavePathCount else {
-            throw TorrentEngineClientError.capabilityUnavailable
-        }
-        var unique = Set<String>()
-        for path in paths {
-            unique.insert(try canonicalPath(path))
-        }
-        return unique.sorted()
-    }
-
-    private static func isDefiniteUnsubmittedOrRejectedFailure(
-        _ error: any Error
-    ) -> Bool {
-        guard let clientError = error as? TorrentEngineClientError else {
-            return false
-        }
-        switch clientError {
-        case .serviceRejected, .requestExpiredBeforeSubmission:
-            return true
-        default:
-            return false
-        }
-    }
-
-    private static func canonicalAuthorizations(
-        _ authorizations: [TorrentFolderAuthorization]
-    ) throws -> [TorrentFolderAuthorization] {
-        guard authorizations.count <= TorrentEngineLimits.maximumAuthorizedSavePathCount else {
-            throw TorrentEngineClientError.capabilityUnavailable
-        }
-        var canonicalByPath = [String: TorrentFolderAuthorization]()
-        var aggregateBookmarkBytes = 0
-        for authorization in authorizations {
-            guard !authorization.bookmarkData.isEmpty,
-                  authorization.bookmarkData.count <= TorrentEngineIPCLimits.maximumBookmarkBytes,
-                  aggregateBookmarkBytes <= TorrentEngineIPCLimits.maximumBookmarkAggregateBytes
-                    - authorization.bookmarkData.count else {
-                throw TorrentEngineClientError.invalidBookmark
-            }
-            aggregateBookmarkBytes += authorization.bookmarkData.count
-            let path = try canonicalPath(authorization.path)
-            guard canonicalByPath.updateValue(
-                TorrentFolderAuthorization(path: path, bookmarkData: authorization.bookmarkData),
-                forKey: path
-            ) == nil else {
-                throw TorrentEngineClientError.capabilityUnavailable
-            }
-        }
-        return canonicalByPath.values.sorted { $0.path < $1.path }
-    }
-
-    private static func canonicalPath(_ path: String) throws -> String {
-        guard !path.isEmpty,
-              !path.utf8.contains(0),
-              (path as NSString).isAbsolutePath,
-              path.utf8.count <= TorrentEngineLimits.maximumAuthorizedSavePathBytes else {
-            throw TorrentEngineClientError.capabilityUnavailable
-        }
-        let standardized = URL(filePath: path, directoryHint: .isDirectory).standardizedFileURL
-        let canonical = standardized.resolvingSymlinksInPath().standardizedFileURL
-        let canonicalPath = canonical.path(percentEncoded: false)
-        guard canonicalPath == standardized.path(percentEncoded: false),
-              canonicalPath.utf8.count
-                <= TorrentEngineLimits.maximumAuthorizedSavePathBytes else {
-            throw TorrentEngineClientError.capabilityUnavailable
-        }
-        return canonicalPath
-    }
-
     deinit {
         state.cancel(
             message: "The isolated torrent engine connection ended safely.",
@@ -1530,8 +1290,8 @@ extension TorrentEngineClientError {
         case .connectionFailed, .connectionCancelled, .serviceTemporarilyUnavailable:
             .replaceController
         case .invalidReply, .engineRestarted, .serviceRejected,
-             .capabilityUnavailable, .capabilityPathMismatch,
-             .invalidBookmark, .requestQueueFull,
+             .operationOutcomeUnknown,
+             .requestQueueFull,
              .recoveryDeadlineExceeded:
             .terminal
         case .requestExpiredBeforeSubmission:

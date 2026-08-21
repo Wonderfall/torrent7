@@ -26,7 +26,7 @@ struct TorrentStoreIntegrationTests {
         let productionEngine = FakeTorrentEngine()
         let startupCount = Mutex(0)
         TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _, _ in
+            factory = { _ in
                 startupCount.withLock { $0 += 1 }
                 return productionEngine
             }
@@ -85,7 +85,7 @@ struct TorrentStoreIntegrationTests {
             TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
         }
         TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _, _ in
+            factory = { _ in
                 state.withLock { $0.didEnter = true }
                 while !Task.isCancelled {
                     Thread.sleep(forTimeInterval: 0.001)
@@ -106,13 +106,12 @@ struct TorrentStoreIntegrationTests {
         #expect(state.withLock { $0.observedCancellation })
     }
 
-    @Test("Concurrent startup installs the engine and applies current settings with fresh capabilities")
-    func concurrentStartupInstallsEngineAndAppliesCurrentSettingsWithFreshCapabilities() async throws {
+    @Test("Concurrent startup installs the engine and applies current settings")
+    func concurrentStartupInstallsEngineAndAppliesCurrentSettings() async {
         struct StartupCapture: Sendable {
             var didEnter = false
             var ranOffMainThread = false
             var enablePeerExchangePlugin = false
-            var authorizedSavePaths = [String]()
         }
 
         let harness = makeStoreHarness()
@@ -124,24 +123,17 @@ struct TorrentStoreIntegrationTests {
             TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
         }
         TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { enablePeerExchangePlugin, authorizedSavePaths in
+            factory = { enablePeerExchangePlugin in
                 capture.withLock { state in
                     state.didEnter = true
                     state.ranOffMainThread = !Thread.isMainThread
                     state.enablePeerExchangePlugin = enablePeerExchangePlugin
-                    state.authorizedSavePaths = authorizedSavePaths
                 }
                 releaseStartup.wait()
                 return installedEngine
             }
         }
 
-        var startupAccess: FakeDownloadFolderAccess? = FakeDownloadFolderAccess(
-            url: URL(filePath: "/Downloads/Initial", directoryHint: .isDirectory)
-        )
-        weak var weakStartupAccess: FakeDownloadFolderAccess?
-        weakStartupAccess = startupAccess
-        harness.accessStore.capabilityAdditionalAccesses = [try #require(startupAccess)]
         harness.store.startProductionEngine(
             enablePeerExchangePlugin: false
         )
@@ -149,22 +141,6 @@ struct TorrentStoreIntegrationTests {
             await Task.yield()
         }
 
-        let settingsBeforeBlockedRestore = harness.store.settings
-        let folderChange = await harness.store.chooseDownloadFolder(
-            URL(filePath: "/Downloads/Blocked", directoryHint: .isDirectory)
-        )
-        harness.store.restoreDefaultSettings()
-
-        #expect(isFolderAuthorityChangeInProgress(folderChange))
-        #expect(harness.accessStore.setDefaultCalls.isEmpty)
-        #expect(harness.accessStore.clearDefaultCalls.isEmpty)
-        #expect(harness.store.settings == settingsBeforeBlockedRestore)
-
-        harness.accessStore.capabilityAdditionalAccesses = []
-        startupAccess = nil
-        #expect(weakStartupAccess != nil)
-
-        harness.accessStore.setCapabilityPaths(["/Downloads/AddedAfterLaunch"])
         var currentSettings = harness.store.settings
         currentSettings.enablePeerExchangePlugin = false
         harness.store.updateSettings(currentSettings)
@@ -174,14 +150,8 @@ struct TorrentStoreIntegrationTests {
 
         #expect(!capture.withLock { $0.enablePeerExchangePlugin })
         #expect(capture.withLock { $0.ranOffMainThread })
-        #expect(capture.withLock { $0.authorizedSavePaths } == ["/Downloads/Initial"])
         #expect(await harness.engine.shutdownCount == 1)
-        #expect(harness.store.settings == TorrentSettings())
-        #expect(harness.store.downloadFolder == nil)
-        #expect(harness.accessStore.clearDefaultCalls.count == 1)
         #expect(await installedEngine.appliedSettings.last?.settings.enablePeerExchangePlugin == false)
-        #expect(await installedEngine.restartAuthorizedSavePathSnapshots.isEmpty)
-        #expect(weakStartupAccess == nil)
     }
 
     @Test("A superseded startup shuts down the engine it created")
@@ -203,7 +173,7 @@ struct TorrentStoreIntegrationTests {
             }
         }
         TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _, _ in
+            factory = { _ in
                 let call = state.withLock { state in
                     state.callCount += 1
                     if state.callCount == 1 {
@@ -238,66 +208,6 @@ struct TorrentStoreIntegrationTests {
         #expect(harness.store.engineAvailable)
     }
 
-    @Test("A superseded startup cannot publish a capability error after its actor hop")
-    func supersededStartupCannotPublishCapabilityError() async throws {
-        let harness = makeStoreHarness()
-        let replacementEngine = FakeTorrentEngine()
-        let replacementStarted = Mutex(false)
-        let releaseReplacement = DispatchSemaphore(value: 0)
-        defer {
-            releaseReplacement.signal()
-            harness.accessStore.resumeSuspendedCapabilitySnapshot()
-            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
-        }
-        TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _, _ in
-                replacementStarted.withLock { $0 = true }
-                releaseReplacement.wait()
-                return replacementEngine
-            }
-        }
-
-        harness.accessStore.capabilityAdditionalAccesses = [
-            FakeDownloadFolderAccess(
-                url: URL(
-                    filePath: "/Downloads/Stale",
-                    directoryHint: .isDirectory
-                ),
-                delegationBookmarkError: FakeBookmarkError()
-            )
-        ]
-        harness.accessStore.suspendNextCapabilitySnapshot()
-        harness.store.startProductionEngine(enablePeerExchangePlugin: true)
-        while !harness.accessStore.capabilitySnapshotIsSuspended {
-            await Task.yield()
-        }
-
-        harness.accessStore.capabilityAdditionalAccesses = [
-            FakeDownloadFolderAccess(
-                url: URL(
-                    filePath: "/Downloads/Current",
-                    directoryHint: .isDirectory
-                )
-            )
-        ]
-        harness.store.startProductionEngine(enablePeerExchangePlugin: true)
-        harness.accessStore.resumeSuspendedCapabilitySnapshot()
-        while !replacementStarted.withLock({ $0 }) {
-            await Task.yield()
-        }
-
-        let folderChange = await harness.store.chooseDownloadFolder(
-            URL(filePath: "/Downloads/Blocked", directoryHint: .isDirectory),
-            reportsGlobalError: false
-        )
-        #expect(isFolderAuthorityChangeInProgress(folderChange))
-        #expect(harness.store.lastError == nil)
-
-        releaseReplacement.signal()
-        await harness.store.saveAll()
-        #expect(await replacementEngine.appliedSettings.count == 1)
-    }
-
     @Test("Engine startup preserves visible interface choices until the fresh snapshot arrives")
     func engineStartupPreservesVisibleInterfaceChoices() async {
         let interfaces = [
@@ -329,7 +239,7 @@ struct TorrentStoreIntegrationTests {
             TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
         }
         TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _, _ in
+            factory = { _ in
                 startupEntered.withLock { $0 = true }
                 releaseStartup.wait()
                 return FakeTorrentEngine()
@@ -393,60 +303,6 @@ struct TorrentStoreIntegrationTests {
         }
 
         #expect(harness.store.torrents.map(\.id) == ["beta", "alpha"])
-    }
-
-    @Test("Refresh replaces pruned folder authorizations exactly once")
-    func refreshReconcilesPrunedFolderAuthorizationsWithoutRedundantReplacement() async {
-        let retainedPath = "/Downloads/Retained"
-        let prunedPath = "/Downloads/Pruned"
-        let harness = makeStoreHarness(
-            initialFolderCapabilityPaths: [retainedPath, prunedPath],
-            mirrorsFolderCapabilityMutations: true
-        )
-        let retained = makeTorrent(id: "alpha", savePath: retainedPath)
-        let pruned = makeTorrent(id: "beta", savePath: prunedPath)
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
-            revision: 1,
-            torrents: [retained, pruned]
-        ))
-
-        await harness.store.refreshNow()
-
-        #expect(await harness.engine.reconciledFolderAuthorizationSnapshots.isEmpty)
-
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
-            revision: 2,
-            torrents: [retained]
-        ))
-        await harness.store.refreshNow()
-        await harness.store.refreshNow()
-
-        #expect(await harness.engine.reconciledFolderAuthorizationSnapshots == [[
-            expectedFolderAuthorization(for: retainedPath),
-        ]])
-    }
-
-    @Test("Presentation invalidation cannot skip pruned folder authorization reconciliation")
-    func presentationInvalidationCannotSkipFolderReconciliation() async {
-        let stalePath = "/Downloads/Stale"
-        let harness = makeStoreHarness(
-            initialFolderCapabilityPaths: [stalePath],
-            mirrorsFolderCapabilityMutations: true
-        )
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
-            revision: 1,
-            torrents: []
-        ))
-        weak let store = harness.store
-        harness.accessStore.onPrune = {
-            store?.setSortOrder(.dateAdded)
-        }
-
-        await harness.store.refreshNow()
-        harness.accessStore.onPrune = nil
-
-        #expect(harness.accessStore.capabilitySnapshot.paths.isEmpty)
-        #expect(await harness.engine.reconciledFolderAuthorizationSnapshots == [[]])
     }
 
     @Test("Refresh polls degraded bridge health without making the engine unavailable")
@@ -540,29 +396,46 @@ struct TorrentStoreIntegrationTests {
     }
 
     @Test("Finder reveal survives unrelated torrent presentation changes")
-    func finderRevealSurvivesUnrelatedPresentationChanges() async {
-        let harness = makeStoreHarness()
-        let alpha = makeTorrent(id: "alpha", name: "Alpha")
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
-            revision: 1,
-            torrents: [alpha]
-        ))
-        await harness.store.refreshNow()
-        harness.fileLocationService.suspendNextRevealURLs()
+    func finderRevealSurvivesUnrelatedPresentationChanges() async throws {
+        try await withKnownTorrentHarness { harness, downloadFolder in
+            let alpha = makeTorrent(
+                id: "alpha",
+                name: "sample.bin",
+                contentKind: .singleFile,
+                hasMetadata: true
+            )
+            await harness.engine.setNextAddedTorrentFileID(alpha.id)
+            await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+                revision: 1,
+                torrents: [alpha]
+            ))
+            #expect(harness.store.addTorrentFile(
+                downloadFolder.appending(path: "sample.torrent"),
+                torrentData: validSingleFileTorrentData(),
+                savePath: downloadFolder.torrentFilePath
+            ))
+            await harness.store.saveAll()
+            #expect(harness.store.downloadLocationPath(for: alpha.id)
+                == downloadFolder.appending(path: "sample.bin").torrentFilePath)
+            harness.fileLocationService.suspendNextRevealURLs()
 
-        harness.store.revealTorrentInFinder(id: alpha.id)
-        await harness.fileLocationService.waitForSuspendedRevealURLs()
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
-            revision: 2,
-            torrents: [alpha, makeTorrent(id: "beta", name: "Beta")]
-        ))
-        await harness.store.refreshNow()
-        harness.fileLocationService.resumeSuspendedRevealURLs()
-        for _ in 0..<20 where harness.store.lastError == nil {
-            await Task.yield()
+            harness.store.revealTorrentInFinder(id: alpha.id)
+            await harness.fileLocationService.waitForSuspendedRevealURLs()
+            await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+                revision: 2,
+                torrents: [alpha, makeTorrent(id: "beta", name: "Beta")]
+            ))
+            await harness.store.refreshNow()
+            harness.fileLocationService.resumeSuspendedRevealURLs()
+            for _ in 0..<20 where harness.store.lastError == nil {
+                await Task.yield()
+            }
+
+            #expect(
+                harness.store.lastError
+                    == "The download location could not be found."
+            )
         }
-
-        #expect(harness.store.lastError == "The download location could not be found.")
     }
 
     @Test("Refresh maintains tracker host index independently of torrent snapshots")
@@ -655,7 +528,6 @@ struct TorrentStoreIntegrationTests {
         await harness.store.saveAll()
 
         #expect(await harness.engine.addedMagnets.map(\.magnet) == ["magnet:?xt=urn:btih:abc"])
-        #expect(await harness.engine.addedMagnets.first?.savePath == "/Downloads")
         #expect(await harness.engine.addedMagnets.first?.startsPaused == true)
         #expect(await harness.engine.addedMagnets.first?.queuePriority == .normal)
         #expect(await harness.engine.addedMagnets.first?.enablePeerExchange == false)
@@ -665,112 +537,6 @@ struct TorrentStoreIntegrationTests {
         #expect(harness.store.torrents.map(\.id) == ["alpha"])
     }
 
-    @Test("A prepared folder delegates only its transient transfer bookmark")
-    func preparedFolderDelegatesTransientBookmark() async {
-        let harness = makeStoreHarness()
-        let folder = URL(filePath: "/Downloads/Delegated", directoryHint: .isDirectory)
-
-        let accepted = harness.store.addMagnet(
-            "magnet:?xt=urn:btih:abc",
-            downloadFolder: folder,
-            setsDownloadFolderAsDefault: true
-        )
-        await harness.store.saveAll()
-
-        #expect(accepted)
-        let authorization = await harness.engine.delegatedFolderAuthorizations.first
-        #expect(authorization?.path == folder.torrentFilePath)
-        #expect(authorization?.bookmarkData == Data("delegation:\(folder.torrentFilePath)".utf8))
-        #expect(authorization?.bookmarkData != Data(folder.torrentFilePath.utf8))
-    }
-
-    @Test("A successful prepared add reconciles authority without waiting for a snapshot")
-    func preparedAddImmediatelyReconcilesFolderAuthority() async {
-        let oldPath = "/Downloads/Old"
-        let folder = URL(filePath: "/Downloads/New", directoryHint: .isDirectory)
-        let harness = makeStoreHarness(
-            initialFolderCapabilityPaths: [oldPath],
-            mirrorsFolderCapabilityMutations: true
-        )
-
-        let accepted = harness.store.addMagnet(
-            "magnet:?xt=urn:btih:abc",
-            downloadFolder: folder,
-            setsDownloadFolderAsDefault: true
-        )
-        await harness.store.saveAll()
-
-        #expect(accepted)
-        #expect(await harness.engine.reconciledFolderAuthorizationSnapshots == [[
-            expectedFolderAuthorization(for: folder.torrentFilePath),
-        ]])
-    }
-
-    @Test("Refresh cannot revoke a provisional folder during an add")
-    func refreshDoesNotRacePreparedFolderTransaction() async {
-        let folder = URL(filePath: "/Downloads/New", directoryHint: .isDirectory)
-        let harness = makeStoreHarness(
-            initialFolderCapabilityPaths: ["/Downloads/Old"],
-            mirrorsFolderCapabilityMutations: true
-        )
-        await harness.engine.suspendNextAddMagnet()
-
-        let accepted = harness.store.addMagnet(
-            "magnet:?xt=urn:btih:abc",
-            downloadFolder: folder,
-            setsDownloadFolderAsDefault: true
-        )
-        await harness.engine.waitForSuspendedAddMagnet()
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
-            revision: 1,
-            torrents: []
-        ))
-        await harness.store.refreshNow()
-
-        #expect(await harness.engine.reconciledFolderAuthorizationSnapshots.isEmpty)
-
-        await harness.engine.resumeSuspendedAddMagnets()
-        await harness.store.saveAll()
-
-        #expect(accepted)
-        #expect(await harness.engine.reconciledFolderAuthorizationSnapshots == [[
-            expectedFolderAuthorization(for: folder.torrentFilePath),
-        ]])
-    }
-
-    @Test("A poll captured before a prepared add cannot prune its committed folder")
-    func stalePollCannotPrunePreparedFolderCommit() async {
-        let folder = URL(filePath: "/Downloads/New", directoryHint: .isDirectory)
-        let harness = makeStoreHarness(mirrorsFolderCapabilityMutations: true)
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 1, torrents: []))
-        await harness.engine.suspendNextSnapshotBatchCall()
-
-        let staleRefresh = Task { @MainActor in
-            await harness.store.refreshNow()
-        }
-        await harness.engine.waitForSuspendedSnapshotBatchCall()
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
-            revision: 2,
-            torrents: [makeTorrent(id: "alpha", savePath: folder.torrentFilePath)]
-        ))
-        await harness.engine.suspendNextFolderReconciliation()
-
-        let accepted = harness.store.addMagnet(
-            "magnet:?xt=urn:btih:abc",
-            downloadFolder: folder,
-            setsDownloadFolderAsDefault: false
-        )
-        await harness.engine.waitForSuspendedFolderReconciliation()
-        await harness.engine.resumeSuspendedSnapshotBatchCalls()
-        await staleRefresh.value
-
-        #expect(accepted)
-        #expect(harness.accessStore.capabilitySnapshot.paths == [folder.torrentFilePath])
-
-        await harness.engine.resumeSuspendedFolderReconciliations()
-        await harness.store.saveAll()
-        #expect(harness.accessStore.capabilitySnapshot.paths == [folder.torrentFilePath])
-    }
 
     @Test("A poll captured before restart cannot mutate the restarted engine state")
     func stalePollCannotCrossEngineRestart() async {
@@ -804,87 +570,6 @@ struct TorrentStoreIntegrationTests {
         #expect(harness.store.torrents.map(\.id) == [current.id])
     }
 
-    @Test("Changing the default folder replaces the exact authorization set only when needed")
-    func changingDefaultFolderReconcilesExactAuthorizationsWithoutRedundantReplacement() async throws {
-        let harness = makeStoreHarness(mirrorsFolderCapabilityMutations: true)
-        let firstFolder = URL(filePath: "/Downloads/First", directoryHint: .isDirectory)
-        let secondFolder = URL(filePath: "/Downloads/Second", directoryHint: .isDirectory)
-
-        try await harness.store.chooseDownloadFolder(firstFolder).get()
-        await harness.store.saveAll()
-        try await harness.store.chooseDownloadFolder(firstFolder).get()
-        await harness.store.saveAll()
-        try await harness.store.chooseDownloadFolder(secondFolder).get()
-        await harness.store.saveAll()
-
-        #expect(await harness.engine.reconciledFolderAuthorizationSnapshots == [
-            [expectedFolderAuthorization(for: firstFolder.torrentFilePath)],
-            [expectedFolderAuthorization(for: secondFolder.torrentFilePath)],
-        ])
-    }
-
-    @Test("A local bookmark failure closes the engine instead of retaining stale folder authority")
-    func localBookmarkFailureContainsStaleFolderAuthority() async throws {
-        let harness = makeStoreHarness(mirrorsFolderCapabilityMutations: true)
-        harness.accessStore.nextCapabilityDelegationBookmarkError = FakeBookmarkError()
-
-        let result = await harness.store.chooseDownloadFolder(
-            URL(filePath: "/Downloads/Unencodable", directoryHint: .isDirectory)
-        )
-        #expect(throws: FakeBookmarkError.self) {
-            try result.get()
-        }
-        await harness.store.saveAll()
-
-        #expect(!harness.engine.isAvailable)
-        #expect(await harness.engine.shutdownCount == 1)
-        #expect(!harness.store.engineAvailable)
-        #expect(await harness.engine.reconciledFolderAuthorizationSnapshots.isEmpty)
-    }
-
-    @Test("An overlapping folder change is rejected during exact replacement")
-    func overlappingFolderChangeIsRejectedDuringReplacement() async throws {
-        let firstFolder = URL(filePath: "/Downloads/First", directoryHint: .isDirectory)
-        let secondFolder = URL(filePath: "/Downloads/Second", directoryHint: .isDirectory)
-        let harness = makeStoreHarness(mirrorsFolderCapabilityMutations: true)
-
-        await harness.engine.suspendNextFolderReconciliation()
-        let firstChange = Task { @MainActor in
-            await harness.store.chooseDownloadFolder(firstFolder)
-        }
-        await harness.engine.waitForSuspendedFolderReconciliation()
-
-        let secondChange = Task { @MainActor in
-            await harness.store.chooseDownloadFolder(secondFolder)
-        }
-        await harness.engine.resumeSuspendedFolderReconciliations()
-        try await firstChange.value.get()
-        let secondResult = await secondChange.value
-        #expect(isFolderAuthorityChangeInProgress(secondResult))
-        await harness.store.saveAll()
-
-        #expect(await harness.engine.reconciledFolderAuthorizationSnapshots == [
-            [expectedFolderAuthorization(for: firstFolder.torrentFilePath)],
-        ])
-    }
-
-    @Test("Repeated restore requests coalesce and revoke the default folder once")
-    func repeatedRestoreRequestsCoalesceAndRevokeDefaultFolderOnce() async throws {
-        let harness = makeStoreHarness(mirrorsFolderCapabilityMutations: true)
-        let folder = URL(filePath: "/Downloads/Default", directoryHint: .isDirectory)
-        try await harness.store.chooseDownloadFolder(folder).get()
-        await harness.store.saveAll()
-
-        harness.store.restoreDefaultSettings()
-        harness.store.restoreDefaultSettings()
-        await harness.store.saveAll()
-
-        #expect(harness.accessStore.clearDefaultCalls.count == 1)
-        #expect(await harness.engine.reconciledFolderAuthorizationSnapshots == [
-            [expectedFolderAuthorization(for: folder.torrentFilePath)],
-            [],
-        ])
-    }
 
     @Test("Add magnet assigns selected labels to newly registered torrent")
     func addMagnetAssignsSelectedLabelsToNewlyRegisteredTorrent() async throws {
@@ -939,6 +624,200 @@ struct TorrentStoreIntegrationTests {
         #expect(harness.store.labelIDs(for: "v1:beta").isEmpty)
     }
 
+    @Test("Folder-backed magnets promote exact metadata while preserving identity and runtime")
+    func folderBackedMagnetPromotionPreservesState() async throws {
+        let suiteName = "app.torrent7.magnet-promotion.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        try await withKnownTorrentHarness(
+            defaultsDomain: .suite(suiteName)
+        ) { harness, downloadFolder in
+            let fixture = try magnetPromotionFixture()
+            let label = try #require(harness.store.createLabel(named: "Linux"))
+            let options = TorrentOptions(
+                downloadRateLimitKBps: 128,
+                uploadRateLimitKBps: 64,
+                uploadSlotLimit: 6,
+                connectionLimit: 40,
+                queuePriority: .high
+            )
+            let sourcePolicy = TorrentSourcePolicy(
+                isDHTEnabled: false,
+                isPeerExchangeEnabled: false,
+                isLocalServiceDiscoveryEnabled: false,
+                httpsTrackerPolicy: .original,
+                httpsWebSeedPolicy: .original,
+                effectiveHTTPSTrackerPolicy: .original,
+                effectiveHTTPSWebSeedPolicy: .original,
+                isDHTLocked: false,
+                isPeerExchangeLocked: false,
+                isLocalServiceDiscoveryLocked: false,
+                isMetadataValidationPending: false,
+                allowsPreMetadataDHT: true
+            )
+            await harness.engine.setNextAddedMagnetID(fixture.torrentID)
+            await harness.engine.setNextAddedTorrentFileID(fixture.torrentID)
+            await harness.engine.setTorrentMetadata(
+                fixture.exactInfoDictionary,
+                for: fixture.torrentID
+            )
+            await harness.engine.setTorrentOptions(options)
+            await harness.engine.setSourcePolicy(sourcePolicy)
+            await harness.engine.setFileBatch(TorrentFileBatch(
+                revision: 1,
+                files: [TorrentFileItem(
+                    path: "sample.bin",
+                    size: 4,
+                    downloaded: 2,
+                    progress: 0.5,
+                    index: 0,
+                    priority: .high,
+                    isPadFile: false
+                )]
+            ))
+            await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+                revision: 1,
+                torrents: [makeTorrent(
+                    id: fixture.torrentID,
+                    name: "sample.bin",
+                    queuePosition: 7,
+                    queuePriority: .high,
+                    paused: true,
+                    autoManaged: false,
+                    contentKind: .singleFile,
+                    hasMetadata: true
+                )]
+            ))
+
+            #expect(harness.store.addMagnet(
+                fixture.magnet,
+                downloadFolder: downloadFolder,
+                setsDownloadFolderAsDefault: false,
+                startsPaused: false,
+                queuePriority: .low,
+                labelIDs: [label.id]
+            ))
+            await harness.store.saveAll()
+
+            let promoted = try #require(
+                await harness.engine.addedTorrentFiles.first
+            )
+            let parsed = try TorrentManifestParser().parse(promoted.data)
+            #expect(parsed.rawInfoDictionary == fixture.exactInfoDictionary)
+            #expect(promoted.activation.preservedTorrentID == fixture.torrentID)
+            #expect(promoted.filePriorities == [0: .high])
+            #expect(promoted.startsPaused)
+            #expect(promoted.queuePriority == .high)
+            #expect(!promoted.enablePeerExchange)
+            #expect(promoted.httpsTrackerPolicy == .original)
+            #expect(promoted.httpsWebSeedPolicy == .original)
+            #expect(await harness.engine.removedIDs == [fixture.torrentID])
+            #expect(await harness.engine.torrentOptionsUpdates.last?.options == options)
+            #expect(await harness.engine.pausedIDs.last == fixture.torrentID)
+            #expect(harness.store.labelIDs(for: fixture.torrentID) == [label.id])
+            #expect(harness.store.lastError == nil)
+
+            let journal = try #require(harness.storageClaimJournal)
+            #expect(await journal.allPromotions().isEmpty)
+            let claim = try #require(await journal.allClaims().first)
+            #expect(claim.lease.state == .active)
+            #expect(claim.torrentID == fixture.torrentID)
+        }
+    }
+
+    @Test("Magnet promotion rejects metadata before removing the staged torrent")
+    func magnetPromotionRejectsMismatchedMetadata() async throws {
+        try await withKnownTorrentHarness { harness, downloadFolder in
+            let fixture = try magnetPromotionFixture()
+            let wrongMagnet = "magnet:?xt=urn:btih:\(String(repeating: "0", count: 40))"
+            await harness.engine.setNextAddedMagnetID(fixture.torrentID)
+            await harness.engine.setTorrentMetadata(
+                fixture.exactInfoDictionary,
+                for: fixture.torrentID
+            )
+            await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+                revision: 1,
+                torrents: [makeTorrent(
+                    id: fixture.torrentID,
+                    hasMetadata: true
+                )]
+            ))
+
+            #expect(harness.store.addMagnet(
+                wrongMagnet,
+                downloadFolder: downloadFolder,
+                setsDownloadFolderAsDefault: false
+            ))
+            await harness.store.saveAll()
+
+            #expect(await harness.engine.removedIDs.isEmpty)
+            #expect(await harness.engine.addedTorrentFiles.isEmpty)
+            #expect(
+                harness.store.lastError
+                    == TorrentManifestError.advertisedInfoHashMismatch.localizedDescription
+            )
+            let journal = try #require(harness.storageClaimJournal)
+            let pending = try #require(await journal.allPromotions().first)
+            #expect(pending.state == .awaitingMetadata)
+            #expect(pending.exactInfoDictionary == nil)
+        }
+    }
+
+    @Test("Ambiguous magnet removal preserves durable promotion evidence")
+    func ambiguousMagnetRemovalPreservesPromotion() async throws {
+        try await withKnownTorrentHarness { harness, downloadFolder in
+            let fixture = try magnetPromotionFixture()
+            await harness.engine.setNextAddedMagnetID(fixture.torrentID)
+            await harness.engine.setTorrentMetadata(
+                fixture.exactInfoDictionary,
+                for: fixture.torrentID
+            )
+            await harness.engine.setFileBatch(TorrentFileBatch(
+                revision: 1,
+                files: [TorrentFileItem(
+                    path: "sample.bin",
+                    size: 4,
+                    downloaded: 0,
+                    progress: 0,
+                    index: 0,
+                    priority: .normal,
+                    isPadFile: false
+                )]
+            ))
+            await harness.engine.setRemoveError(
+                TorrentEngineClientError.operationOutcomeUnknown(
+                    "Removal outcome unknown."
+                )
+            )
+            await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+                revision: 1,
+                torrents: [makeTorrent(
+                    id: fixture.torrentID,
+                    queuePosition: 2,
+                    hasMetadata: true
+                )]
+            ))
+
+            #expect(harness.store.addMagnet(
+                fixture.magnet,
+                downloadFolder: downloadFolder,
+                setsDownloadFolderAsDefault: false
+            ))
+            await harness.store.saveAll()
+
+            #expect(await harness.engine.addedTorrentFiles.isEmpty)
+            let journal = try #require(harness.storageClaimJournal)
+            let pending = try #require(await journal.allPromotions().first)
+            #expect(pending.state == .outcomeUnknown)
+            #expect(pending.exactInfoDictionary == fixture.exactInfoDictionary)
+            #expect(pending.activation?.runtime.queuePosition == 2)
+            #expect(pending.activation?.runtime.filePriorities == [0: .normal])
+            #expect(harness.store.lastError == "Removal outcome unknown.")
+        }
+    }
+
     @Test("Add torrent file assigns selected labels to returned torrent ID")
     func addTorrentFileAssignsSelectedLabelsToReturnedTorrentID() async throws {
         let suiteName = "app.torrent7.labels.\(UUID().uuidString)"
@@ -947,23 +826,102 @@ struct TorrentStoreIntegrationTests {
         defer {
             defaults.removePersistentDomain(forName: suiteName)
         }
-        let harness = makeStoreHarness(defaultsDomain: .suite(suiteName))
-        let label = try #require(harness.store.createLabel(named: "Linux"))
-        await harness.engine.setNextAddedTorrentFileID("file-added")
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
-            revision: 1,
-            torrents: [makeTorrent(id: "file-added", name: "Added torrent")]
-        ))
+        try await withKnownTorrentHarness(defaultsDomain: .suite(suiteName)) { harness, downloadFolder in
+            let label = try #require(harness.store.createLabel(named: "Linux"))
+            await harness.engine.setNextAddedTorrentFileID("file-added")
+            await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+                revision: 1,
+                torrents: [makeTorrent(id: "file-added", name: "Added torrent")]
+            ))
 
-        harness.store.addTorrentFile(
-            URL(filePath: "/tmp/sample.torrent"),
-            torrentData: Data("preview bytes".utf8),
-            savePath: "/Downloads",
-            labelIDs: [label.id]
-        )
-        await harness.store.saveAll()
+            harness.store.addTorrentFile(
+                downloadFolder.appending(path: "sample.torrent"),
+                torrentData: validSingleFileTorrentData(),
+                savePath: downloadFolder.torrentFilePath,
+                labelIDs: [label.id]
+            )
+            await harness.store.saveAll()
 
-        #expect(harness.store.labelIDs(for: "file-added") == [label.id])
+            #expect(harness.store.labelIDs(for: "file-added") == [label.id])
+        }
+    }
+
+    @Test("Displayed storage path comes from the GUI claim, not the engine part-file path")
+    func displayedStoragePathUsesClaimMapping() async throws {
+        try await withKnownTorrentHarness { harness, downloadFolder in
+            try Data("foreign".utf8).write(
+                to: downloadFolder.appending(path: "sample.bin")
+            )
+            await harness.engine.setNextAddedTorrentFileID("claimed")
+            await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+                revision: 1,
+                torrents: [makeTorrent(
+                    id: "claimed",
+                    name: "sample.bin",
+                    savePath:
+                        "/Users/test/Library/Containers/app.torrent7.engine/Data/Library/Application Support/Torrent7/EngineState/PartFiles/private-claim",
+                    contentKind: .singleFile,
+                    hasMetadata: true
+                )]
+            ))
+
+            #expect(harness.store.addTorrentFile(
+                downloadFolder.appending(path: "sample.torrent"),
+                torrentData: validSingleFileTorrentData(),
+                savePath: downloadFolder.torrentFilePath
+            ))
+            await harness.store.saveAll()
+
+            #expect(harness.store.downloadLocationPath(for: "claimed")
+                == downloadFolder.appending(path: "sample 2.bin").torrentFilePath)
+        }
+    }
+
+    @Test("Imported torrent data is activated in place and never deleted automatically")
+    func importedTorrentDataIsPreservedOnRemoval() async throws {
+        try await withKnownTorrentHarness { harness, downloadFolder in
+            let payload = downloadFolder.appending(path: "sample.bin")
+            let original = Data("seed".utf8)
+            try original.write(to: payload)
+            await harness.engine.setNextAddedTorrentFileID("imported")
+            await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+                revision: 1,
+                torrents: [makeTorrent(
+                    id: "imported",
+                    name: "sample.bin",
+                    contentKind: .singleFile,
+                    hasMetadata: true
+                )]
+            ))
+
+            #expect(harness.store.addTorrentFile(
+                downloadFolder.appending(path: "sample.torrent"),
+                torrentData: validSingleFileTorrentData(),
+                savePath: downloadFolder.torrentFilePath,
+                usesExistingData: true
+            ))
+            await harness.store.saveAll()
+
+            let journal = try #require(harness.storageClaimJournal)
+            let activeClaim = try #require(await journal.allClaims().first)
+            let policy = try #require(activeClaim.lease.filePolicies.first)
+            #expect(activeClaim.lease.state == .active)
+            #expect(policy.provenance == .imported)
+            #expect(policy.maximumAccess == .explicitlyImportedWritable)
+            #expect(!policy.mayDeleteAutomatically)
+            #expect(try Data(contentsOf: payload) == original)
+
+            harness.store.removeTorrent(id: "imported", deleteFiles: true)
+            await harness.store.saveAll()
+
+            #expect(await harness.engine.removedIDs == ["imported"])
+            #expect(try Data(contentsOf: payload) == original)
+            #expect(
+                harness.store.lastError
+                    == "The torrent was removed, but imported payload data was preserved."
+            )
+            #expect(await journal.allClaims().first?.lease.state == .deleted)
+        }
     }
 
     @Test("Labels can be toggled, renamed, deleted, and pruned")
@@ -1089,30 +1047,25 @@ struct TorrentStoreIntegrationTests {
 
     @Test("Add torrent file uses bytes captured during preview")
     func addTorrentFileUsesBytesCapturedDuringPreview() async throws {
-        let harness = makeStoreHarness()
-        let directory = FileManager.default.temporaryDirectory
-            .appending(path: "TorrentAppTests-\(UUID().uuidString)", directoryHint: .isDirectory)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
-        defer {
-            try? FileManager.default.removeItem(at: directory)
+        try await withKnownTorrentHarness { harness, downloadFolder in
+            let torrentURL = downloadFolder.appending(path: "sample.torrent")
+            let previewBytes = validSingleFileTorrentData()
+            let replacedBytes = Data("replaced bytes".utf8)
+            try previewBytes.write(to: torrentURL)
+
+            let preview = try await harness.store.previewTorrentFile(torrentURL)
+            try replacedBytes.write(to: torrentURL)
+
+            harness.store.addTorrentFile(
+                torrentURL,
+                torrentData: preview.torrentData,
+                savePath: downloadFolder.torrentFilePath
+            )
+            await harness.store.saveAll()
+
+            #expect(await harness.engine.addedTorrentFiles.first?.data == previewBytes)
+            #expect(await harness.engine.addedTorrentFiles.first?.activation.sourceManifestDigest.count == 32)
         }
-
-        let torrentURL = directory.appending(path: "sample.torrent")
-        let previewBytes = Data("preview bytes".utf8)
-        let replacedBytes = Data("replaced bytes".utf8)
-        try previewBytes.write(to: torrentURL)
-
-        let preview = try await harness.store.previewTorrentFile(torrentURL)
-        try replacedBytes.write(to: torrentURL)
-
-        harness.store.addTorrentFile(
-            torrentURL,
-            torrentData: preview.torrentData,
-            savePath: "/Downloads"
-        )
-        await harness.store.saveAll()
-
-        #expect(await harness.engine.addedTorrentFiles.first?.data == previewBytes)
     }
 
     @Test("Torrent preview rejects symlinked torrent paths before reading")
@@ -1174,28 +1127,25 @@ struct TorrentStoreIntegrationTests {
     }
 
     @Test("Add torrent file forwards file priorities")
-    func addTorrentFileForwardsFilePriorities() async {
-        let harness = makeStoreHarness()
-        let torrentURL = URL(filePath: "/tmp/sample.torrent")
-        let priorities: [Int32: TorrentFilePriority] = [
-            0: .high,
-            1: .skip,
-            2: .low
-        ]
+    func addTorrentFileForwardsFilePriorities() async throws {
+        try await withKnownTorrentHarness { harness, downloadFolder in
+            let torrentURL = downloadFolder.appending(path: "sample.torrent")
+            let priorities: [Int32: TorrentFilePriority] = [0: .high]
 
-        harness.store.addTorrentFile(
-            torrentURL,
-            torrentData: Data("preview bytes".utf8),
-            savePath: "/Downloads",
-            filePriorities: priorities,
-            startsPaused: true,
-            queuePriority: .high
-        )
-        await harness.store.saveAll()
+            harness.store.addTorrentFile(
+                torrentURL,
+                torrentData: validSingleFileTorrentData(),
+                savePath: downloadFolder.torrentFilePath,
+                filePriorities: priorities,
+                startsPaused: true,
+                queuePriority: .high
+            )
+            await harness.store.saveAll()
 
-        #expect(await harness.engine.addedTorrentFiles.first?.filePriorities == priorities)
-        #expect(await harness.engine.addedTorrentFiles.first?.startsPaused == true)
-        #expect(await harness.engine.addedTorrentFiles.first?.queuePriority == .high)
+            #expect(await harness.engine.addedTorrentFiles.first?.filePriorities == priorities)
+            #expect(await harness.engine.addedTorrentFiles.first?.startsPaused == true)
+            #expect(await harness.engine.addedTorrentFiles.first?.queuePriority == .high)
+        }
     }
 
     @Test("Set file priority delegates to engine")
@@ -1276,7 +1226,7 @@ struct TorrentStoreIntegrationTests {
             }
         }
         TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _, _ in replacementEngine }
+            factory = { _ in replacementEngine }
         }
 
         harness.store.startProductionEngine(
@@ -1320,224 +1270,117 @@ struct TorrentStoreIntegrationTests {
         #expect(await harness.engine.resumedIDs == ["paused"])
     }
 
-    @Test("Removing data delegates deletion to libtorrent under a folder access lease")
-    func removingDataDelegatesDeletionToLibtorrentUnderFolderAccessLease() async {
-        let harness = makeStoreHarness()
-        let torrent = makeTorrent(id: "alpha", name: "Alpha", savePath: "/Downloads", finished: true)
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 1, torrents: [torrent]))
-        await harness.store.refreshNow()
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 2, torrents: []))
-        harness.store.selectionState.ids = ["alpha"]
+    @Test("Unresolved storage activation is paused before settings and cannot be resumed")
+    func unresolvedStorageActivationRemainsPaused() async throws {
+        try await withTemporaryDirectory { root in
+            let downloads = root.appending(
+                path: "Downloads",
+                directoryHint: .isDirectory
+            )
+            try FileManager.default.createDirectory(
+                at: downloads,
+                withIntermediateDirectories: true
+            )
+            let journal = try TorrentStorageClaimJournal(
+                directory: root.appending(
+                    path: "Journal",
+                    directoryHint: .isDirectory
+                )
+            )
+            let initial = makeStoreHarness(storageClaimJournal: journal)
+            await initial.engine.setAddTorrentFileError(
+                TorrentEngineClientError.operationOutcomeUnknown(
+                    "Activation outcome unknown."
+                )
+            )
+            #expect(initial.store.addTorrentFile(
+                downloads.appending(path: "sample.torrent"),
+                torrentData: validSingleFileTorrentData(),
+                savePath: downloads.torrentFilePath
+            ))
+            await initial.store.saveAll()
 
-        harness.store.removeTorrents(ids: ["alpha"], deleteFiles: true)
-        await harness.store.saveAll()
-
-        #expect(harness.accessStore.leaseCalls == ["/Downloads"])
-        #expect(await harness.engine.removed.count == 1)
-        #expect(await harness.engine.removed.first?.id == "alpha")
-        #expect(await harness.engine.removed.first?.deleteFiles == true)
-        #expect(await harness.history.forgottenIDs == [["alpha"]])
-        #expect(harness.store.selectionState.ids.isEmpty)
-    }
-
-    @Test("Removing a torrent without data does not acquire a folder access lease")
-    func removingTorrentWithoutDataDoesNotAcquireFolderAccessLease() async {
-        let harness = makeStoreHarness()
-        let torrent = makeTorrent(id: "alpha", savePath: "/Downloads")
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 1, torrents: [torrent]))
-        await harness.store.refreshNow()
-
-        harness.store.removeTorrents(ids: ["alpha"], deleteFiles: false)
-        await harness.store.saveAll()
-
-        #expect(harness.accessStore.leaseCalls.isEmpty)
-        #expect(await harness.engine.removed.count == 1)
-        #expect(await harness.engine.removed.first?.deleteFiles == false)
-    }
-
-    @Test("Removal reconciliation does not renotify a completed torrent from a stale snapshot")
-    func removalReconciliationDoesNotRenotifyCompletedTorrent() async {
-        let harness = makeStoreHarness()
-        let downloading = makeTorrent(
-            id: "alpha",
-            name: "Alpha",
-            progress: 0.5,
-            state: .downloading
-        )
-        let seeding = makeTorrent(
-            id: "alpha",
-            name: "Alpha",
-            progress: 1,
-            uploadRate: 1,
-            state: .seeding,
-            seeding: true
-        )
-
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
-            revision: 1,
-            torrents: []
-        ))
-        await harness.store.refreshNow()
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
-            revision: 2,
-            torrents: [downloading]
-        ))
-        await harness.store.refreshNow()
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
-            revision: 3,
-            torrents: [seeding]
-        ))
-        await harness.store.refreshNow()
-        for _ in 0..<20 {
-            if await harness.notifications.notifications.count == 1 {
-                break
+            let claim = try #require(await journal.allClaims().first)
+            #expect(claim.lease.state == .activationUnknown)
+            #expect(claim.torrentID == nil)
+            let digest = try #require(claim.manifest.infoHashes.v1)
+            let alphabet = Array("0123456789abcdef".utf8)
+            var encodedHash = [UInt8]()
+            encodedHash.reserveCapacity(digest.count * 2)
+            for byte in digest {
+                encodedHash.append(alphabet[Int(byte >> 4)])
+                encodedHash.append(alphabet[Int(byte & 0x0f)])
             }
-            await Task.yield()
+            let infoHash = "v1:" + String(decoding: encodedHash, as: UTF8.self)
+            let restoredID = "t:\(String(repeating: "d", count: 32))"
+            let restored = makeStoreHarness(
+                initialSnapshotBatch: TorrentSnapshotBatch(
+                    revision: 1,
+                    torrents: [makeTorrent(
+                        id: restoredID,
+                        infoHash: infoHash,
+                        state: .downloading,
+                        paused: false,
+                        autoManaged: true
+                    )]
+                ),
+                startsTasks: true,
+                storageClaimJournal: journal
+            )
+
+            await restored.store.saveAll()
+
+            #expect(await restored.engine.pausedIDs == [restoredID])
+            #expect(await restored.engine.pauseAppliedDHTValues == [nil])
+            #expect(await restored.engine.appliedSettings.count == 1)
+
+            await restored.engine.setSnapshotBatch(TorrentSnapshotBatch(
+                revision: 2,
+                torrents: [makeTorrent(
+                    id: restoredID,
+                    infoHash: infoHash,
+                    paused: true,
+                    autoManaged: false
+                )]
+            ))
+            await restored.store.refreshNow()
+            restored.store.resumeTorrent(id: restoredID)
+            await restored.store.saveAll()
+
+            #expect(await restored.engine.resumedIDs.isEmpty)
+
+            let failedID = "t:\(String(repeating: "e", count: 32))"
+            let failed = makeStoreHarness(
+                initialSnapshotBatch: TorrentSnapshotBatch(
+                    revision: 1,
+                    torrents: [makeTorrent(
+                        id: failedID,
+                        infoHash: infoHash,
+                        state: .downloading,
+                        paused: false,
+                        autoManaged: true
+                    )]
+                ),
+                initialPauseError: TorrentEngineClientError.serviceRejected(
+                    "Pause failed."
+                ),
+                startsTasks: true,
+                storageClaimJournal: journal
+            )
+
+            await failed.store.saveAll()
+
+            #expect(await failed.engine.pausedIDs == [failedID])
+            #expect(await failed.engine.appliedSettings.isEmpty)
+            #expect(await failed.engine.shutdownCount == 1)
+            #expect(!failed.store.engineAvailable)
+            #expect(
+                failed.store.lastError
+                    == "A torrent with unresolved storage activation could not be kept paused. The torrent engine was stopped. Pause failed."
+            )
         }
-
-        // Model a completion-bearing poll captured before remove_torrent()
-        // whose changing seeding metrics are delivered during reconciliation.
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
-            revision: 4,
-            torrents: [makeTorrent(
-                id: "alpha",
-                name: "Alpha",
-                progress: 1,
-                uploadRate: 2,
-                state: .seeding,
-                seeding: true
-            )]
-        ))
-        harness.store.removeTorrent(id: "alpha", deleteFiles: false)
-        await harness.store.saveAll()
-        await Task.yield()
-
-        #expect(await harness.notifications.notifications.count == 1)
-        #expect(await harness.history.completedIDs.isEmpty)
-        #expect(await harness.history.forgottenIDs == [["alpha"]])
     }
 
-    @Test("Removing a torrent replaces its pruned folder authorization exactly once")
-    func removingTorrentReconcilesPrunedFolderAuthorizationWithoutRedundantReplacement() async {
-        let retainedPath = "/Downloads/Retained"
-        let removedPath = "/Downloads/Removed"
-        let harness = makeStoreHarness(
-            initialFolderCapabilityPaths: [retainedPath, removedPath],
-            mirrorsFolderCapabilityMutations: true
-        )
-        let retained = makeTorrent(id: "alpha", savePath: retainedPath)
-        let removed = makeTorrent(id: "beta", savePath: removedPath)
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
-            revision: 1,
-            torrents: [retained, removed]
-        ))
-        await harness.store.refreshNow()
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
-            revision: 2,
-            torrents: [retained]
-        ))
-
-        harness.store.removeTorrent(id: removed.id, deleteFiles: false)
-        await harness.store.saveAll()
-        await harness.store.refreshNow()
-
-        #expect(await harness.engine.removed.map(\.id) == [removed.id])
-        #expect(await harness.engine.reconciledFolderAuthorizationSnapshots == [[
-            expectedFolderAuthorization(for: retainedPath),
-        ]])
-    }
-
-    @Test("A missing folder access lease prevents data deletion")
-    func missingFolderAccessLeasePreventsDataDeletion() async {
-        let harness = makeStoreHarness()
-        let torrent = makeTorrent(id: "alpha", savePath: "/Downloads")
-        harness.accessStore.leaseResult = .failure(FakeBookmarkError())
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 1, torrents: [torrent]))
-        await harness.store.refreshNow()
-
-        harness.store.removeTorrents(ids: ["alpha"], deleteFiles: true)
-        await harness.store.saveAll()
-
-        #expect(harness.accessStore.leaseCalls == ["/Downloads"])
-        #expect(await harness.engine.removed.isEmpty)
-        #expect(harness.store.lastError != nil)
-    }
-
-    @Test("Folder access lease survives snapshot pruning until terminal deletion")
-    func folderAccessLeaseSurvivesSnapshotPruningUntilTerminalDeletion() async throws {
-        let harness = makeStoreHarness()
-        let torrent = makeTorrent(id: "alpha", savePath: "/Downloads")
-        var access: FakeDownloadFolderAccess? = FakeDownloadFolderAccess(
-            url: URL(filePath: torrent.savePath, directoryHint: .isDirectory)
-        )
-        weak let weakAccess = access
-        harness.accessStore.leaseResult = .success(DownloadFolderAccessLease(access: try #require(access)))
-        access = nil
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 1, torrents: [torrent]))
-        await harness.store.refreshNow()
-        await harness.engine.suspendNextRemove()
-
-        harness.store.removeTorrents(ids: ["alpha"], deleteFiles: true)
-        await harness.engine.waitForSuspendedRemove()
-        #expect(weakAccess != nil)
-
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 2, torrents: []))
-        await harness.store.refreshNow()
-        #expect(harness.accessStore.pruneCalls.map { $0.map(\.id) } == [["alpha"], []])
-        #expect(weakAccess != nil)
-
-        await harness.engine.resumeSuspendedRemoves()
-        await harness.store.saveAll()
-        #expect(weakAccess == nil)
-    }
-
-    @Test("Terminal deletion warning releases access and forgets removed torrent ownership")
-    func terminalDeletionWarningReleasesAccessAndForgetsRemovedTorrentOwnership() async throws {
-        let harness = makeStoreHarness()
-        let torrent = makeTorrent(id: "alpha", savePath: "/Downloads", finished: true)
-        var access: FakeDownloadFolderAccess? = FakeDownloadFolderAccess(
-            url: URL(filePath: torrent.savePath, directoryHint: .isDirectory)
-        )
-        weak let weakAccess = access
-        harness.accessStore.leaseResult = .success(DownloadFolderAccessLease(access: try #require(access)))
-        access = nil
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 1, torrents: [torrent]))
-        await harness.store.refreshNow()
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 2, torrents: []))
-        await harness.engine.setRemoveOutcome(.removedWithWarning("Some downloaded files may remain on disk."))
-        harness.store.selectionState.ids = ["alpha"]
-
-        harness.store.removeTorrents(ids: ["alpha"], deleteFiles: true)
-        await harness.store.saveAll()
-
-        #expect(await harness.history.forgottenIDs == [["alpha"]])
-        #expect(harness.store.selectionState.ids.isEmpty)
-        #expect(harness.store.lastError == "Some downloaded files may remain on disk.")
-        #expect(weakAccess == nil)
-    }
-
-    @Test("Deletion tracking fault preserves unrelated torrents and folder access")
-    func deletionTrackingFaultPreservesUnrelatedTorrentsAndFolderAccess() async throws {
-        let harness = makeStoreHarness()
-        let removed = makeTorrent(id: "alpha", savePath: "/Downloads/Alpha")
-        let retained = makeTorrent(id: "beta", savePath: "/Downloads/Beta")
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 1, torrents: [removed, retained]))
-        await harness.store.refreshNow()
-        await harness.engine.setRemoveOutcome(.removedWithWarning("The torrent engine was stopped safely."))
-        await harness.engine.setBecomesUnavailableOnRemove(true)
-
-        harness.store.removeTorrents(ids: [removed.id, retained.id], deleteFiles: true)
-        await harness.store.saveAll()
-        await harness.store.refreshNow()
-
-        let acceptedID = try #require(await harness.engine.removed.first?.id)
-        let retainedID = acceptedID == removed.id ? retained.id : removed.id
-        #expect(await harness.engine.removed.count == 1)
-        #expect(Set(harness.store.torrents.map(\.id)) == [retainedID])
-        #expect(harness.accessStore.pruneCalls.last?.map(\.id) == [retainedID])
-        #expect(await harness.history.forgottenIDs == [[acceptedID]])
-        #expect(harness.store.lastError == "The torrent engine was stopped safely.")
-    }
 
     @Test("Updating settings clears disabled completion badge and applies blocked network policy")
     func updatingSettingsClearsDisabledCompletionBadgeAndAppliesBlockedNetworkPolicy() async throws {
@@ -1564,17 +1407,8 @@ struct TorrentStoreIntegrationTests {
     }
 
     @Test("Changing PEX plugin setting restarts engine")
-    func changingPEXPluginSettingRestartsEngine() async throws {
+    func changingPEXPluginSettingRestartsEngine() async {
         let harness = makeStoreHarness()
-        var restartAccess: FakeDownloadFolderAccess? = FakeDownloadFolderAccess(
-            url: URL(filePath: "/Downloads/New", directoryHint: .isDirectory)
-        )
-        weak var weakRestartAccess: FakeDownloadFolderAccess?
-        weakRestartAccess = restartAccess
-        harness.accessStore.capabilityAdditionalAccesses = [
-            FakeDownloadFolderAccess(url: URL(filePath: "/Downloads/Existing", directoryHint: .isDirectory)),
-            try #require(restartAccess)
-        ]
         await harness.engine.suspendNextRestart()
         var settings = harness.store.settings
         settings.enablePeerExchangePlugin = true
@@ -1582,62 +1416,14 @@ struct TorrentStoreIntegrationTests {
         harness.store.updateSettings(settings)
         await harness.engine.waitForSuspendedRestart()
 
-        let settingsBeforeBlockedRestore = harness.store.settings
-        let folderChange = await harness.store.chooseDownloadFolder(
-            URL(filePath: "/Downloads/Blocked", directoryHint: .isDirectory)
-        )
-        harness.store.restoreDefaultSettings()
-
-        #expect(isFolderAuthorityChangeInProgress(folderChange))
-        #expect(harness.accessStore.setDefaultCalls.isEmpty)
-        #expect(harness.accessStore.clearDefaultCalls.isEmpty)
-        #expect(harness.store.settings == settingsBeforeBlockedRestore)
-
-        harness.accessStore.capabilityAdditionalAccesses = []
-        restartAccess = nil
-        #expect(weakRestartAccess != nil)
-
         await harness.engine.resumeSuspendedRestarts()
         await harness.store.saveAll()
 
         #expect(await harness.engine.blockNetworkCount >= 1)
-        #expect(await harness.engine.restartPeerExchangePluginValues == [true, false])
-        #expect(await harness.engine.restartAuthorizedSavePathSnapshots == [
-            ["/Downloads/Existing", "/Downloads/New"],
-            [],
-        ])
-        #expect(harness.store.settings == TorrentSettings())
-        #expect(harness.store.downloadFolder == nil)
-        #expect(harness.accessStore.clearDefaultCalls.count == 1)
-        #expect(await harness.engine.appliedSettings.last?.settings.enablePeerExchangePlugin == false)
-        #expect(weakRestartAccess == nil)
+        #expect(await harness.engine.restartPeerExchangePluginValues == [true])
+        #expect(await harness.engine.appliedSettings.last?.settings.enablePeerExchangePlugin == true)
     }
 
-    @Test("Engine restart uses capabilities stabilized after reconciliation")
-    func engineRestartUsesStabilizedCapabilities() async {
-        let harness = makeStoreHarness()
-        let oldPath = "/Downloads/Old"
-        let currentPath = "/Downloads/Current"
-        harness.accessStore.setCapabilityPaths([oldPath])
-        var didAdvanceCapabilities = false
-        harness.accessStore.onMakeCapabilitySnapshot = {
-            guard !didAdvanceCapabilities else {
-                return
-            }
-            didAdvanceCapabilities = true
-            harness.accessStore.setCapabilityPaths([currentPath])
-        }
-
-        var settings = harness.store.settings
-        settings.enablePeerExchangePlugin.toggle()
-        harness.store.updateSettings(settings)
-        await harness.store.saveAll()
-
-        #expect(
-            await harness.engine.restartAuthorizedSavePathSnapshots
-                == [[currentPath]]
-        )
-    }
 
     @Test("Enabling interface binding contains once without restarting the engine")
     func enablingInterfaceBindingContainsOnceWithoutRestart() async throws {
@@ -1722,7 +1508,7 @@ struct TorrentStoreIntegrationTests {
             TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
         }
         TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _, _ in
+            factory = { _ in
                 replacementCount.withLock { $0 += 1 }
                 return FakeTorrentEngine()
             }
@@ -2033,107 +1819,6 @@ struct TorrentStoreIntegrationTests {
         #expect(harness.store.lastError == nil)
     }
 
-    @Test("Rejected add admission does not prepare or commit its folder")
-    func rejectedAddAdmissionDoesNotMutateFolderState() async {
-        let harness = makeStoreHarness()
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
-            revision: 1,
-            torrents: [makeTorrent(id: "alpha")]
-        ))
-        await harness.store.refreshNow()
-        await harness.engine.suspendNextRemove()
-        harness.store.removeTorrent(id: "alpha", deleteFiles: false)
-        await harness.engine.waitForSuspendedRemove()
-
-        for _ in 0..<64 {
-            harness.store.pauseTorrent(id: "alpha")
-        }
-        let folder = URL(filePath: "/Downloads/New", directoryHint: .isDirectory)
-
-        let accepted = harness.store.addMagnet(
-            "magnet:?xt=urn:btih:abc",
-            downloadFolder: folder,
-            setsDownloadFolderAsDefault: true
-        )
-
-        #expect(!accepted)
-        #expect(harness.accessStore.prepareForAddCalls.isEmpty)
-        #expect(harness.accessStore.commitPreparedForAddCalls.isEmpty)
-        #expect(harness.accessStore.defaultURL == nil)
-        #expect(harness.store.downloadFolder == nil)
-        #expect(harness.store.lastError == TorrentStoreError.tooManyPendingOperations.localizedDescription)
-
-        await harness.engine.resumeSuspendedRemoves()
-        await harness.store.saveAll()
-    }
-
-    @Test("Prepared add retains folder access until the queued engine add completes")
-    func preparedAddRetainsFolderAccessThroughQueuedExecution() async throws {
-        let harness = makeStoreHarness()
-        let folder = URL(filePath: "/Downloads/New", directoryHint: .isDirectory)
-        var access: FakeDownloadFolderAccess? = FakeDownloadFolderAccess(url: folder)
-        weak let weakAccess = access
-        do {
-            let retainedAccess = try #require(access)
-            harness.accessStore.prepareForAddResult = .success(PreparedDownloadFolder(
-                access: retainedAccess,
-                defaultURL: folder,
-                bookmarkData: try retainedAccess.bookmarkData()
-            ))
-        }
-        access = nil
-        await harness.engine.suspendNextAddMagnet()
-
-        let accepted = harness.store.addMagnet(
-            "magnet:?xt=urn:btih:abc",
-            downloadFolder: folder,
-            setsDownloadFolderAsDefault: true
-        )
-        await harness.engine.waitForSuspendedAddMagnet()
-
-        #expect(accepted)
-        #expect(weakAccess != nil)
-        #expect(harness.accessStore.commitPreparedForAddCalls.isEmpty)
-
-        let settingsBeforeBlockedRestore = harness.store.settings
-        let folderChange = await harness.store.chooseDownloadFolder(
-            URL(filePath: "/Downloads/Blocked", directoryHint: .isDirectory)
-        )
-        harness.store.restoreDefaultSettings()
-
-        #expect(isFolderAuthorityChangeInProgress(folderChange))
-        #expect(harness.accessStore.setDefaultCalls.isEmpty)
-        #expect(harness.accessStore.clearDefaultCalls.isEmpty)
-        #expect(harness.store.settings == settingsBeforeBlockedRestore)
-
-        await harness.engine.resumeSuspendedAddMagnets()
-        await harness.store.saveAll()
-        #expect(harness.accessStore.commitPreparedForAddCalls.count == 1)
-        #expect(harness.accessStore.clearDefaultCalls.count == 1)
-        #expect(harness.store.downloadFolder == nil)
-    }
-
-    @Test("Failed engine add revokes its provisional folder without a local revision change")
-    func failedEngineAddDoesNotCommitPreparedFolder() async {
-        let harness = makeStoreHarness()
-        let folder = URL(filePath: "/Downloads/New", directoryHint: .isDirectory)
-        await harness.engine.setAddMagnetError(FakeBookmarkError())
-
-        let accepted = harness.store.addMagnet(
-            "magnet:?xt=urn:btih:abc",
-            downloadFolder: folder,
-            setsDownloadFolderAsDefault: true
-        )
-        await harness.store.saveAll()
-
-        #expect(accepted)
-        #expect(harness.accessStore.prepareForAddCalls.count == 1)
-        #expect(harness.accessStore.commitPreparedForAddCalls.isEmpty)
-        #expect(harness.accessStore.defaultURL == nil)
-        #expect(harness.store.downloadFolder == nil)
-        #expect(harness.store.lastError != nil)
-        #expect(await harness.engine.reconciledFolderAuthorizationSnapshots == [[]])
-    }
 
     @Test("Torrent Info mutations share FIFO ordering with list commands")
     func torrentInfoMutationsShareFIFOOrdering() async throws {
@@ -2190,36 +1875,6 @@ struct TorrentStoreIntegrationTests {
         #expect(await harness.engine.filePriorityUpdates.isEmpty)
     }
 
-    @Test("Cancelling a queued folder change does not publish an error")
-    func cancellingQueuedFolderChangeDoesNotPublishError() async {
-        let harness = makeStoreHarness()
-        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
-            revision: 1,
-            torrents: [makeTorrent(id: "alpha")]
-        ))
-        await harness.store.refreshNow()
-        await harness.engine.suspendNextRemove()
-        harness.store.removeTorrent(id: "alpha", deleteFiles: false)
-        await harness.engine.waitForSuspendedRemove()
-
-        let folderChange = Task { @MainActor in
-            await harness.store.chooseDownloadFolder(
-                URL(filePath: "/Downloads/Cancelled", directoryHint: .isDirectory)
-            )
-        }
-        await Task.yield()
-        folderChange.cancel()
-
-        let result = await folderChange.value
-        #expect(throws: CancellationError.self) {
-            try result.get()
-        }
-        #expect(harness.store.lastError == nil)
-
-        await harness.engine.resumeSuspendedRemoves()
-        await harness.store.saveAll()
-        #expect(harness.accessStore.setDefaultCalls.isEmpty)
-    }
 
     @Test("Save drains an urgent network block before a later unblock")
     func saveDrainsNetworkSecurityBarrierBeforeLaterUnblock() async {
@@ -2290,7 +1945,7 @@ struct TorrentStoreIntegrationTests {
             TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
         }
         TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _, _ in
+            factory = { _ in
                 replacementCount.withLock { $0 += 1 }
                 return replacementEngine
             }
@@ -2367,7 +2022,7 @@ struct TorrentStoreIntegrationTests {
             TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
         }
         TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _, _ in
+            factory = { _ in
                 replacementCount.withLock { $0 += 1 }
                 return replacementEngine
             }
@@ -2417,7 +2072,7 @@ struct TorrentStoreIntegrationTests {
             TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
         }
         TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _, _ in
+            factory = { _ in
                 replacementCount.withLock { $0 += 1 }
                 throw FakeBookmarkError()
             }
@@ -2475,7 +2130,7 @@ struct TorrentStoreIntegrationTests {
             TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
         }
         TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _, _ in
+            factory = { _ in
                 replacementCount.withLock { $0 += 1 }
                 return replacementEngine
             }
@@ -2500,7 +2155,7 @@ struct TorrentStoreIntegrationTests {
             TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
         }
         TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _, _ in
+            factory = { _ in
                 replacementCount.withLock { $0 += 1 }
                 return FakeTorrentEngine()
             }
@@ -2536,7 +2191,7 @@ struct TorrentStoreIntegrationTests {
             TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
         }
         TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _, _ in
+            factory = { _ in
                 replacementCount.withLock { $0 += 1 }
                 return FakeTorrentEngine()
             }
@@ -2572,7 +2227,7 @@ struct TorrentStoreIntegrationTests {
             TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
         }
         TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _, _ in
+            factory = { _ in
                 replacementCount.withLock { $0 += 1 }
                 return FakeTorrentEngine()
             }
@@ -2610,7 +2265,7 @@ struct TorrentStoreIntegrationTests {
             TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
         }
         TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _, _ in
+            factory = { _ in
                 replacementCount.withLock { $0 += 1 }
                 return replacementEngine
             }
@@ -2653,7 +2308,7 @@ struct TorrentStoreIntegrationTests {
             TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
         }
         TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _, _ in
+            factory = { _ in
                 replacementCount.withLock { $0 += 1 }
                 return replacementEngine
             }
@@ -2777,6 +2432,7 @@ private struct StoreHarness {
     let notifications: RecordingNotificationService
     let accessStore: RecordingDownloadFolderAccessStore
     let fileLocationService: RecordingTorrentFileLocationService
+    let storageClaimJournal: TorrentStorageClaimJournal?
 }
 
 @MainActor
@@ -2791,16 +2447,19 @@ private func makeStoreHarness(
     ] = [:],
     networkInterfaces: [NetworkInterfaceOption] = [],
     networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot? = nil,
+    initialSnapshotBatch: TorrentSnapshotBatch? = nil,
+    initialPauseError: Error? = nil,
     startsTasks: Bool = false,
     keepsWakeStreamOpen: Bool = false,
     suspendsInitialSnapshotBatch: Bool = false,
-    initialFolderCapabilityPaths: [String] = [],
-    mirrorsFolderCapabilityMutations: Bool = false
+    storageClaimJournal: TorrentStorageClaimJournal? = nil
 ) -> StoreHarness {
     let engine = FakeTorrentEngine(
         keepsWakeStreamOpen: keepsWakeStreamOpen,
         networkInterfaceSnapshot: networkInterfaceSnapshot,
-        suspendsInitialSnapshotBatch: suspendsInitialSnapshotBatch
+        suspendsInitialSnapshotBatch: suspendsInitialSnapshotBatch,
+        initialSnapshotBatch: initialSnapshotBatch,
+        initialPauseError: initialPauseError
     )
     let dock = RecordingDockTileService()
     let notifications = RecordingNotificationService()
@@ -2813,8 +2472,6 @@ private func makeStoreHarness(
     )
     let sleep = RecordingSleepPreventionService()
     let accessStore = RecordingDownloadFolderAccessStore()
-    accessStore.setCapabilityPaths(initialFolderCapabilityPaths)
-    accessStore.mirrorsCapabilityMutations = mirrorsFolderCapabilityMutations
     let fileLocationService = RecordingTorrentFileLocationService()
     let store = TorrentStore(
         settings: settings,
@@ -2827,7 +2484,7 @@ private func makeStoreHarness(
         downloadFolderAccessStore: accessStore,
         fileLocationService: fileLocationService,
         defaultsDomain: defaultsDomain,
-        initialFolderCapabilityRevision: accessStore.capabilityRevision,
+        storageClaimJournal: storageClaimJournal,
         initialLabels: initialLabels,
         initialLabelAssignments: initialLabelAssignments,
         networkInterfaces: networkInterfaces,
@@ -2841,24 +2498,68 @@ private func makeStoreHarness(
         history: history,
         notifications: notifications,
         accessStore: accessStore,
-        fileLocationService: fileLocationService
+        fileLocationService: fileLocationService,
+        storageClaimJournal: storageClaimJournal
     )
 }
 
-private func expectedFolderAuthorization(for path: String) -> TorrentFolderAuthorization {
-    TorrentFolderAuthorization(
-        path: path,
-        bookmarkData: Data("delegation:\(path)".utf8)
-    )
+@MainActor
+private func withKnownTorrentHarness<Result>(
+    defaultsDomain: TorrentDefaultsDomain = .standard,
+    _ body: @MainActor (
+        _ harness: StoreHarness,
+        _ downloadFolder: URL
+    ) async throws -> Result
+) async throws -> Result {
+    try await withTemporaryDirectory { root in
+        let downloadFolder = root.appending(
+            path: "Downloads",
+            directoryHint: .isDirectory
+        )
+        try FileManager.default.createDirectory(
+            at: downloadFolder,
+            withIntermediateDirectories: true
+        )
+        let journal = try TorrentStorageClaimJournal(
+            directory: root.appending(path: "Journal", directoryHint: .isDirectory)
+        )
+        let harness = makeStoreHarness(
+            defaultsDomain: defaultsDomain,
+            storageClaimJournal: journal
+        )
+        return try await body(harness, downloadFolder)
+    }
 }
 
-private func isFolderAuthorityChangeInProgress(_ result: Result<Void, Error>) -> Bool {
-    guard case .failure(let error) = result,
-          let storeError = error as? TorrentStoreError else {
-        return false
+private func validSingleFileTorrentData() -> Data {
+    var data = Data(
+        "d4:infod6:lengthi4e4:name10:sample.bin12:piece lengthi16384e6:pieces20:".utf8
+    )
+    data.append(Data(repeating: 0, count: 20))
+    data.append(contentsOf: Data("ee".utf8))
+    return data
+}
+
+private struct MagnetPromotionFixture {
+    let torrentID: String
+    let magnet: String
+    let exactInfoDictionary: Data
+}
+
+private func magnetPromotionFixture() throws -> MagnetPromotionFixture {
+    let parsed = try TorrentManifestParser().parse(validSingleFileTorrentData())
+    let v1 = try #require(parsed.manifest.infoHashes.v1)
+    let alphabet = Array("0123456789abcdef".utf8)
+    var encoded = [UInt8]()
+    encoded.reserveCapacity(v1.count * 2)
+    for byte in v1 {
+        encoded.append(alphabet[Int(byte >> 4)])
+        encoded.append(alphabet[Int(byte & 0x0f)])
     }
-    if case .folderAuthorityChangeInProgress = storeError {
-        return true
-    }
-    return false
+    let hash = String(decoding: encoded, as: UTF8.self)
+    return MagnetPromotionFixture(
+        torrentID: "t:\(String(repeating: "c", count: 32))",
+        magnet: "magnet:?xt=urn:btih:\(hash)&tr=https%3A%2F%2Ftracker.example%2Fannounce",
+        exactInfoDictionary: parsed.rawInfoDictionary
+    )
 }

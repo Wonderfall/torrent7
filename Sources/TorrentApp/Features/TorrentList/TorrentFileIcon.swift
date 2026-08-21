@@ -99,8 +99,6 @@ private actor FileIconService {
     private func icon(for source: TorrentFileIconSource) throws -> NSImage {
         try cachedIcon(for: source.identifier) {
             switch source {
-            case .existingItem(let path):
-                return NSWorkspace.shared.icon(forFile: path)
             case .fileExtension(let pathExtension):
                 if let contentType = UTType(filenameExtension: pathExtension) {
                     return NSWorkspace.shared.icon(for: contentType)
@@ -177,21 +175,17 @@ private enum FileItemIconSource: Hashable {
 }
 
 enum TorrentFileIconSource: Hashable {
-    case existingItem(String)
     case fileExtension(String)
     case genericFile
     case folder
 
     static func resolve(for row: TorrentRowSnapshot) -> Self {
-        let saveURL = URL(filePath: row.savePath, directoryHint: .isDirectory)
-            .standardizedFileURL
-        let itemURL = saveURL.appending(path: row.name)
-            .standardizedFileURL
-
-        let savePath = saveURL.path(percentEncoded: false)
-        let itemPath = itemURL.path(percentEncoded: false)
-        let containedPrefix = savePath.hasSuffix("/") ? savePath : "\(savePath)/"
-        guard itemPath.hasPrefix(containedPrefix), itemPath != savePath else {
+        guard !row.name.isEmpty,
+              row.name != ".",
+              row.name != "..",
+              !row.name.utf8.contains(0),
+              !row.name.contains("/"),
+              !row.name.contains("\\") else {
             return .folder
         }
 
@@ -199,11 +193,7 @@ enum TorrentFileIconSource: Hashable {
             return .folder
         }
 
-        if FileManager().fileExists(atPath: itemPath) {
-            return .existingItem(itemPath)
-        }
-
-        let pathExtension = itemURL.pathExtension
+        let pathExtension = (row.name as NSString).pathExtension
         if !pathExtension.isEmpty {
             return .fileExtension(pathExtension.localizedLowercase)
         }
@@ -216,8 +206,6 @@ enum TorrentFileIconSource: Hashable {
 
     var identifier: String {
         switch self {
-        case .existingItem(let path):
-            "item:\(path)"
         case .fileExtension(let pathExtension):
             "extension:\(pathExtension)"
         case .genericFile:

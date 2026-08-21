@@ -2,11 +2,52 @@ import Foundation
 import Testing
 import TorrentBridge
 
+private func contractPayloadContextRetain(_ context: UnsafeMutableRawPointer?) -> UInt8 {
+    unsafe context == nil ? 0 : 1
+}
+
+private func contractPayloadContextRelease(_ context: UnsafeMutableRawPointer?) {}
+
+private func contractPayloadOpen(
+    _ context: UnsafeMutableRawPointer?,
+    _ claimID: UnsafePointer<UInt8>,
+    _ generation: UInt64,
+    _ fileIndex: Int32,
+    _ writable: UInt8,
+    _ descriptorOut: UnsafeMutablePointer<Int32>
+) -> Int32 {
+    2
+}
+
+private func contractPayloadSize(
+    _ context: UnsafeMutableRawPointer?,
+    _ claimID: UnsafePointer<UInt8>,
+    _ generation: UInt64,
+    _ fileIndex: Int32,
+    _ sizeOut: UnsafeMutablePointer<Int64>
+) -> Int32 {
+    2
+}
+
+private func contractPayloadBrokerCallbacks() -> TTorrentPayloadBrokerCallbacks {
+    var callbacks = unsafe TTorrentPayloadBrokerCallbacks()
+    unsafe callbacks.context = UnsafeMutableRawPointer(bitPattern: 1)
+    unsafe callbacks.retain_context = contractPayloadContextRetain
+    unsafe callbacks.release_context = contractPayloadContextRelease
+    unsafe callbacks.open_payload = contractPayloadOpen
+    unsafe callbacks.payload_size = contractPayloadSize
+    return unsafe callbacks
+}
+
+private func bridgeString(_ buffer: [CChar]) -> String {
+    String(decoding: buffer.prefix { $0 != 0 }.map(UInt8.init(bitPattern:)), as: UTF8.self)
+}
+
 @Suite("Torrent bridge contract")
 struct TorrentBridgeContractTests {
     @Test("Pins bridge ABI version, limits, states, and dirty masks")
     func pinsBridgeConstants() {
-        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 44)
+        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 46)
         #expect(Int32(TTORRENT_BRIDGE_STATE_UNKNOWN) == -1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_CHECKING_FILES) == 1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_DOWNLOADING_METADATA) == 2)
@@ -20,10 +61,6 @@ struct TorrentBridgeContractTests {
         #expect(Int32(TTORRENT_MAX_WEB_SEED_COUNT) == 2_000)
         #expect(Int32(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT) == 20_000)
         #expect(Int32(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT) == 20_000)
-        #expect(Int32(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT) == 32)
-        #expect(Int32(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES) == 1_023)
-        #expect(Int32(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES) == 32_768)
-        #expect(Int32(TTORRENT_ERROR_AUTHORIZED_SAVE_ROOT_CAPACITY) == 4)
         #expect(Int32(TTORRENT_ID_CAPACITY) == 68)
         #expect(Int32(TTORRENT_TRACKER_HOST_CAPACITY) == 256)
         #expect(Int32(TTORRENT_MAX_PIECE_MAP_COUNT) == 0x200000)
@@ -47,9 +84,6 @@ struct TorrentBridgeContractTests {
         #expect(Int32(TTORRENT_ADD_REJECTED) == 0)
         #expect(Int32(TTORRENT_ADD_COMMITTED) == 1)
         #expect(Int32(TTORRENT_ADD_OUTCOME_UNKNOWN) == 2)
-        #expect(Int32(TTORRENT_REMOVAL_PENDING) == 0)
-        #expect(Int32(TTORRENT_REMOVAL_SUCCEEDED) == 1)
-        #expect(Int32(TTORRENT_REMOVAL_FAILED) == 2)
         #expect(Int32(TTORRENT_SOURCE_POLICY_ENABLE_DHT) == 0)
         #expect(Int32(TTORRENT_SOURCE_POLICY_ENABLE_PEER_EXCHANGE) == 1)
         #expect(Int32(TTORRENT_SOURCE_POLICY_ENABLE_LSD) == 2)
@@ -89,8 +123,15 @@ struct TorrentBridgeContractTests {
         #expect(MemoryLayout<TTorrentFileSnapshot>.alignment == 8)
         #expect(MemoryLayout<TTorrentFilePriorityEntry>.size == 8)
         #expect(MemoryLayout<TTorrentFilePriorityEntry>.alignment == 4)
-        #expect(MemoryLayout<TTorrentRemovalResult>.size == 516)
-        #expect(MemoryLayout<TTorrentRemovalResult>.alignment == 4)
+        let payloadBrokerCallbacksSize = unsafe MemoryLayout<TTorrentPayloadBrokerCallbacks>.size
+        let payloadBrokerCallbacksAlignment = unsafe MemoryLayout<TTorrentPayloadBrokerCallbacks>.alignment
+        #expect(payloadBrokerCallbacksSize == 40)
+        #expect(payloadBrokerCallbacksAlignment == 8)
+        #expect(MemoryLayout<TTorrentStorageActivation>.size == 96)
+        #expect(MemoryLayout<TTorrentStorageActivation>.alignment == 8)
+        #expect(MemoryLayout<TTorrentStorageActivation>.offset(of: \.claim_generation) == 16)
+        #expect(MemoryLayout<TTorrentStorageActivation>.offset(of: \.source_manifest_digest) == 24)
+        #expect(MemoryLayout<TTorrentStorageActivation>.offset(of: \.preserved_torrent_id) == 56)
         #expect(MemoryLayout<TTorrentPieceMapSnapshot>.size == 16)
         #expect(MemoryLayout<TTorrentPieceMapSnapshot>.alignment == 4)
         #expect(MemoryLayout<TTorrentFilePreview>.size == 616)
@@ -129,19 +170,12 @@ struct TorrentBridgeContractTests {
         #expect(MemoryLayout<TTorrentPeerSourcesResult>.alignment == 8)
         #expect(MemoryLayout<TTorrentPeerSourcesResult>.offset(of: \.revision) == 8)
         #expect(MemoryLayout<TTorrentPeerSourcesResult>.offset(of: \.sources) == 16)
-        #expect(MemoryLayout<TTorrentRemovalReadResult>.size == 520)
-        #expect(MemoryLayout<TTorrentRemovalReadResult>.alignment == 4)
-        #expect(MemoryLayout<TTorrentRemovalReadResult>.offset(of: \.result) == 4)
         #expect(MemoryLayout<TTorrentNetworkStatusResult>.size == 680)
         #expect(MemoryLayout<TTorrentNetworkStatusResult>.alignment == 8)
         #expect(MemoryLayout<TTorrentNetworkStatusResult>.offset(of: \.network_status) == 8)
         #expect(MemoryLayout<TTorrentBridgeHealthResult>.size == 544)
         #expect(MemoryLayout<TTorrentBridgeHealthResult>.alignment == 8)
         #expect(MemoryLayout<TTorrentBridgeHealthResult>.offset(of: \.health) == 8)
-        let authorizedSaveRootSize = MemoryLayout<TTorrentAuthorizedSaveRoot>.size
-        let authorizedSaveRootAlignment = MemoryLayout<TTorrentAuthorizedSaveRoot>.alignment
-        #expect(authorizedSaveRootSize == 32)
-        #expect(authorizedSaveRootAlignment == 8)
     }
 
     @Test("Pins fixed C string field capacities")
@@ -151,7 +185,6 @@ struct TorrentBridgeContractTests {
         let trackerHost = TTorrentTrackerHostSnapshot()
         let webSeed = TTorrentWebSeedSnapshot()
         let file = TTorrentFileSnapshot()
-        let removal = TTorrentRemovalResult()
         let preview = TTorrentFilePreview()
         let network = TTorrentNetworkStatus()
         let health = TTorrentBridgeHealth()
@@ -169,7 +202,6 @@ struct TorrentBridgeContractTests {
         #expect(MemoryLayout.size(ofValue: trackerHost.host) == Int(TTORRENT_TRACKER_HOST_CAPACITY))
         #expect(MemoryLayout.size(ofValue: webSeed.url) == 1_024)
         #expect(MemoryLayout.size(ofValue: file.path) == 1_024)
-        #expect(MemoryLayout.size(ofValue: removal.error) == 512)
         #expect(MemoryLayout.size(ofValue: preview.name) == 512)
         #expect(MemoryLayout.size(ofValue: preview.id) == 68)
         #expect(MemoryLayout.size(ofValue: network.endpoint) == 128)
@@ -358,25 +390,23 @@ struct TorrentBridgeContractTests {
     @Test("Null client mutation APIs report contract errors")
     func nullClientMutationAPIsReportContractErrors() {
         var addOutcome = Int32.max
-        expectBridgeError(
-            code: 1,
-            message: "Missing torrent client, magnet URI, save path, or add outcome output."
-        ) { errorBuffer, capacity in
-            var addedID = Array<CChar>(repeating: 1, count: Int(TTORRENT_ID_CAPACITY))
-            return unsafe addedID.withUnsafeMutableBufferPointer { addedIDBuffer in
-                unsafe TorrentClientAddMagnet(
-                    nil,
-                    nil,
-                    nil,
-                    TTorrentAddOptions(),
-                    addedIDBuffer.baseAddress,
-                    Int32(addedIDBuffer.count),
-                    &addOutcome,
-                    &errorBuffer,
-                    capacity
-                )
-            }
-        }
+        var addedIDStorage = Array<CChar>(repeating: 1, count: Int(TTORRENT_ID_CAPACITY))
+        var errorStorage = Array<CChar>(repeating: 0, count: 1_024)
+        var addedID: MutableSpan<CChar>? = addedIDStorage.mutableSpan
+        var error: MutableSpan<CChar>? = errorStorage.mutableSpan
+        let addResult = unsafe TorrentClientAddMagnet(
+            nil,
+            nil,
+            TTorrentAddOptions(),
+            &addedID,
+            &addOutcome,
+            &error
+        )
+        addedID = nil
+        error = nil
+
+        #expect(addResult == 1)
+        #expect(bridgeString(errorStorage) == "Missing torrent client, magnet URI, or add outcome output.")
         #expect(addOutcome == Int32(TTORRENT_ADD_REJECTED))
 
         expectBridgeError(
@@ -451,19 +481,15 @@ private struct BridgeErrorBuffer {
 private func invalidCreateResult(path: String?) -> (didCreate: Bool, error: String) {
     var errorBuffer = BridgeErrorBuffer()
     let didCreate = errorBuffer.withMutableBuffer { buffer -> Bool in
+        var error: MutableSpan<CChar>? = buffer.mutableSpan
+        defer { error = nil }
         if let path {
             let client = unsafe path.withCString { statePath in
                 unsafe TorrentClientCreateWithError(
                     statePath,
                     1,
-                    nil,
-                    0,
-                    nil,
-                    0,
-                    nil,
-                    nil,
-                    &buffer,
-                    Int32(buffer.count)
+                    contractPayloadBrokerCallbacks(),
+                    &error
                 )
             }
             if let client = unsafe client {
@@ -475,14 +501,8 @@ private func invalidCreateResult(path: String?) -> (didCreate: Bool, error: Stri
         let client = unsafe TorrentClientCreateWithError(
             nil,
             1,
-            nil,
-            0,
-            nil,
-            0,
-            nil,
-            nil,
-            &buffer,
-            Int32(buffer.count)
+            contractPayloadBrokerCallbacks(),
+            &error
         )
         if let client = unsafe client {
             unsafe TorrentClientDestroyBlocking(client)
@@ -540,18 +560,14 @@ private func emptyClientSmokeResult(statePath: String) -> EmptyClientSmokeResult
     var result = EmptyClientSmokeResult()
     var creationErrorBuffer = BridgeErrorBuffer()
     let maybeClient = unsafe creationErrorBuffer.withMutableBuffer { buffer in
-        unsafe statePath.withCString { statePathPointer in
+        var error: MutableSpan<CChar>? = buffer.mutableSpan
+        defer { error = nil }
+        return unsafe statePath.withCString { statePathPointer in
             unsafe TorrentClientCreateWithError(
                 statePathPointer,
                 1,
-                nil,
-                0,
-                nil,
-                0,
-                nil,
-                nil,
-                &buffer,
-                Int32(buffer.count)
+                contractPayloadBrokerCallbacks(),
+                &error
             )
         }
     }

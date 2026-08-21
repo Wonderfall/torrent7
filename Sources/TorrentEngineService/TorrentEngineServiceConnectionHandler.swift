@@ -295,7 +295,9 @@ package enum TorrentEngineExtensionConfiguration {
         let runtime = TorrentEngineServiceRuntime(
             stateDirectory: stateDirectory,
             containmentWatchdog: containmentWatchdog,
-            cleanupWatchdog: cleanupWatchdog
+            cleanupWatchdog: cleanupWatchdog,
+            brokerAppIdentifier: configuration.appIdentifier,
+            brokerAuthentication: configuration.authentication
         )
         let queue = DispatchQueue(
             label: "app.torrent7.engine.connection-handler",

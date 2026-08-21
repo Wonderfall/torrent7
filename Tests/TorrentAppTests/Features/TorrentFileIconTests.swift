@@ -16,8 +16,8 @@ struct TorrentFileIconTests {
         #expect(TorrentFileIconSource.resolve(for: row) == .fileExtension("iso"))
     }
 
-    @Test("Existing torrent item uses its exact path")
-    func existingItemUsesExactPath() throws {
+    @Test("Engine save paths cannot influence torrent icons")
+    func engineSavePathCannotInfluenceIcon() throws {
         try withTemporaryDirectory { root in
             let saveURL = root.appending(path: "downloads", directoryHint: .isDirectory)
             try FileManager.default.createDirectory(at: saveURL, withIntermediateDirectories: true)
@@ -29,7 +29,7 @@ struct TorrentFileIconTests {
                 contentKind: .singleFile
             ))
 
-            #expect(TorrentFileIconSource.resolve(for: row) == .existingItem(itemURL.torrentFilePath))
+            #expect(TorrentFileIconSource.resolve(for: row) == .fileExtension("iso"))
         }
     }
 

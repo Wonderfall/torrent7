@@ -9,10 +9,8 @@ package enum TorrentEngineClientError: LocalizedError, Sendable {
     case invalidReply
     case engineRestarted
     case serviceRejected(String)
+    case operationOutcomeUnknown(String)
     case serviceTemporarilyUnavailable(String)
-    case capabilityUnavailable
-    case capabilityPathMismatch
-    case invalidBookmark
     case requestQueueFull
     case requestExpiredBeforeSubmission
     case requestTimedOut(outcomeUnknown: Bool)
@@ -30,14 +28,12 @@ package enum TorrentEngineClientError: LocalizedError, Sendable {
             "The isolated torrent engine restarted. Try the operation again."
         case .serviceRejected(let message):
             message.isEmpty ? "The isolated torrent engine rejected the operation." : message
+        case .operationOutcomeUnknown(let message):
+            message.isEmpty
+                ? "The isolated torrent engine could not confirm the operation outcome."
+                : message
         case .serviceTemporarilyUnavailable(let message):
             message.isEmpty ? "The isolated torrent engine is finishing a previous connection. Try again shortly." : message
-        case .capabilityUnavailable:
-            "The download folder is not authorized in the isolated torrent engine."
-        case .capabilityPathMismatch:
-            "The isolated torrent engine resolved the download folder differently. Choose it again."
-        case .invalidBookmark:
-            "The download folder authorization could not be delegated safely."
         case .requestQueueFull:
             "Too many torrent engine requests are waiting. Try again."
         case .requestExpiredBeforeSubmission:
@@ -408,6 +404,10 @@ package protocol TorrentEngineIPCTransport: Sendable {
                 )
             case .operationRejected, nil:
                 throw TorrentEngineClientError.serviceRejected(reply.errorMessage ?? "")
+            case .operationOutcomeUnknown:
+                throw TorrentEngineClientError.operationOutcomeUnknown(
+                    reply.errorMessage ?? ""
+                )
             }
         }
     }
@@ -421,11 +421,11 @@ extension TorrentEngineClientError {
     package var isFatalTransportError: Bool {
         switch self {
         case .connectionFailed, .connectionCancelled, .invalidReply, .engineRestarted,
+             .operationOutcomeUnknown,
              .recoveryDeadlineExceeded:
             true
         case .serviceRejected, .serviceTemporarilyUnavailable,
-             .capabilityUnavailable, .capabilityPathMismatch,
-             .invalidBookmark, .requestQueueFull,
+             .requestQueueFull,
              .requestExpiredBeforeSubmission:
             false
         case .requestTimedOut:
@@ -453,10 +453,9 @@ extension TorrentEngineIPCOperation {
         switch self {
         case .poll, .previewTorrentFile, .requestSources,
              .sourcePolicy, .torrentOptions, .requestFiles,
-             .requestPieceMap, .trackerBatch, .webSeedBatch,
+             .requestPieceMap, .torrentMetadata, .trackerBatch, .webSeedBatch,
              .webSeedActivity, .peerSources, .fileBatch,
-             .pieceMapBatch, .readDataset, .closeDataset,
-             .changeHint:
+             .pieceMapBatch, .readDataset, .closeDataset, .changeHint:
             false
         default:
             true

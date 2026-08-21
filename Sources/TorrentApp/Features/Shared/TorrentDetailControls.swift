@@ -59,6 +59,7 @@ struct InfoDetailRow<Content: View>: View {
 
 struct DownloadPathValueView: View {
     let path: String
+    var canReveal = true
     let revealInFinder: () -> Void
 
     var body: some View {
@@ -77,7 +78,10 @@ struct DownloadPathValueView: View {
             .fixedSize()
             .buttonStyle(.borderless)
             .controlSize(.small)
-            .help("Reveal in Finder")
+            .disabled(!canReveal)
+            .help(canReveal
+                ? "Reveal in Finder"
+                : "No verified download location is available")
             .accessibilityLabel("Reveal in Finder")
         }
     }

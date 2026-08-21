@@ -28,7 +28,6 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
     int32_t const result = TorrentClientAddMagnet(
         harness.client(),
         magnet.c_str(),
-        harness.save_path(),
         options,
         added_id.data(),
         added_id.capacity(),

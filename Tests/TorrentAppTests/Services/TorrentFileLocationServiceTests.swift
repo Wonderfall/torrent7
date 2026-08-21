@@ -2,100 +2,256 @@ import Foundation
 import Testing
 @testable import TorrentApp
 
-@Suite("Torrent file location service")
+@MainActor
+@Suite("Torrent file location service", .serialized)
 struct TorrentFileLocationServiceTests {
-    @Test("Reveals downloaded item inside save path")
-    func revealsDownloadedItemInsideSavePath() async throws {
+    @Test("Reveals the collision-selected claimed payload instead of the engine save path")
+    func revealsClaimedTopLevelPayload() async throws {
         try await withTemporaryDirectory { root in
-            let saveURL = root.appending(path: "downloads", directoryHint: .isDirectory)
-            try FileManager.default.createDirectory(at: saveURL, withIntermediateDirectories: true)
-            let itemURL = saveURL.appending(path: "Ubuntu.iso")
-            #expect(FileManager.default.createFile(atPath: itemURL.torrentFilePath, contents: Data()))
-
-            let service = TorrentFileLocationService()
-            let torrent = makeTorrent(name: "Ubuntu.iso", savePath: saveURL.torrentFilePath)
-
-            #expect(try await service.revealURL(for: torrent)?.torrentFilePath == itemURL.torrentFilePath)
-        }
-    }
-
-    @Test("Falls back to save directory when item is missing")
-    func fallsBackToSaveDirectoryWhenItemIsMissing() async throws {
-        try await withTemporaryDirectory { root in
-            let saveURL = root.appending(path: "downloads", directoryHint: .isDirectory)
-            try FileManager.default.createDirectory(at: saveURL, withIntermediateDirectories: true)
-
-            let service = TorrentFileLocationService()
-            let torrent = makeTorrent(name: "Missing.iso", savePath: saveURL.torrentFilePath)
-
-            #expect(try await service.revealURL(for: torrent)?.torrentFilePath == saveURL.torrentFilePath)
-        }
-    }
-
-    @Test("Reveals nearest existing parent for file paths")
-    func revealsNearestExistingParentForFilePaths() async throws {
-        try await withTemporaryDirectory { root in
-            let saveURL = root.appending(path: "downloads", directoryHint: .isDirectory)
-            let parentURL = saveURL.appending(path: "folder", directoryHint: .isDirectory)
-            try FileManager.default.createDirectory(at: parentURL, withIntermediateDirectories: true)
-
-            let service = TorrentFileLocationService()
-            let torrent = makeTorrent(savePath: saveURL.torrentFilePath)
-
-            #expect(try await service.revealURL(
-                for: torrent,
-                filePath: "folder/missing/video.mkv"
-            )?.torrentFilePath == parentURL.torrentFilePath)
-        }
-    }
-
-    @Test("Rejects traversal outside save path")
-    func rejectsTraversalOutsideSavePath() async throws {
-        try await withTemporaryDirectory { root in
-            let saveURL = root.appending(path: "downloads", directoryHint: .isDirectory)
-            try FileManager.default.createDirectory(at: saveURL, withIntermediateDirectories: true)
-
-            let service = TorrentFileLocationService()
-            let torrent = makeTorrent(name: "../outside.iso", savePath: saveURL.torrentFilePath)
-
-            #expect(try await service.revealURL(for: torrent)?.torrentFilePath == saveURL.torrentFilePath)
-            #expect(try await service.revealURL(for: torrent, filePath: "../outside.iso") == nil)
-        }
-    }
-
-    @Test("Rejects symlink escapes outside save path")
-    func rejectsSymlinkEscapesOutsideSavePath() async throws {
-        try await withTemporaryDirectory { root in
-            let saveURL = root.appending(path: "downloads", directoryHint: .isDirectory)
-            let outsideURL = root.appending(path: "outside", directoryHint: .isDirectory)
-            try FileManager.default.createDirectory(at: saveURL, withIntermediateDirectories: true)
-            try FileManager.default.createDirectory(at: outsideURL, withIntermediateDirectories: true)
-            try FileManager.default.createSymbolicLink(
-                at: saveURL.appending(path: "escape", directoryHint: .isDirectory),
-                withDestinationURL: outsideURL
+            let downloads = root.appending(
+                path: "Downloads",
+                directoryHint: .isDirectory
+            )
+            try FileManager.default.createDirectory(
+                at: downloads,
+                withIntermediateDirectories: true
+            )
+            try Data("foreign".utf8).write(
+                to: downloads.appending(path: "sample.bin")
+            )
+            let fixture = try makeLocation(
+                downloads: downloads,
+                name: "sample.bin",
+                contentKind: .singleFile,
+                files: [.init(
+                    index: 0,
+                    pathComponents: ["sample.bin"],
+                    expectedSize: 16,
+                    isPadding: false
+                )]
             )
 
-            let service = TorrentFileLocationService()
-            let torrent = makeTorrent(name: "escape/secret.txt", savePath: saveURL.torrentFilePath)
+            let revealed = try await TorrentFileLocationService().revealURL(
+                for: fixture.location,
+                fileIndex: nil
+            )
 
-            #expect(try await service.revealURL(for: torrent)?.torrentFilePath == saveURL.torrentFilePath)
-            #expect(try await service.revealURL(for: torrent, filePath: "escape/secret.txt") == nil)
+            #expect(revealed?.path(percentEncoded: false)
+                == downloads.appending(path: "sample 2.bin").path(percentEncoded: false))
+            #expect(fixture.location.displayPath
+                == downloads.appending(path: "sample 2.bin").path(percentEncoded: false))
         }
     }
 
-    @Test("Batch resolution deduplicates shared download locations")
+    @Test("Reveals a file by claimed file index")
+    func revealsClaimedFileIndex() async throws {
+        try await withTemporaryDirectory { root in
+            let downloads = root.appending(
+                path: "Downloads",
+                directoryHint: .isDirectory
+            )
+            try FileManager.default.createDirectory(
+                at: downloads,
+                withIntermediateDirectories: true
+            )
+            let fixture = try makeLocation(
+                downloads: downloads,
+                name: "Videos",
+                contentKind: .directory,
+                files: [.init(
+                    index: 0,
+                    pathComponents: ["Season 1", "episode.mkv"],
+                    expectedSize: 16,
+                    isPadding: false
+                )]
+            )
+
+            let revealed = try await TorrentFileLocationService().revealURL(
+                for: fixture.location,
+                fileIndex: 0
+            )
+
+            #expect(revealed?.path(percentEncoded: false) == downloads
+                .appending(path: "Videos", directoryHint: .isDirectory)
+                .appending(path: "Season 1", directoryHint: .isDirectory)
+                .appending(path: "episode.mkv")
+                .path(percentEncoded: false))
+        }
+    }
+
+    @Test("A substituted file is not revealed")
+    func substitutedFileFallsBackToClaimRoot() async throws {
+        try await withTemporaryDirectory { root in
+            let downloads = root.appending(
+                path: "Downloads",
+                directoryHint: .isDirectory
+            )
+            try FileManager.default.createDirectory(
+                at: downloads,
+                withIntermediateDirectories: true
+            )
+            let fixture = try makeLocation(
+                downloads: downloads,
+                name: "Bundle",
+                contentKind: .directory,
+                files: [.init(
+                    index: 0,
+                    pathComponents: ["payload.bin"],
+                    expectedSize: 16,
+                    isPadding: false
+                )]
+            )
+            let payload = downloads
+                .appending(path: "Bundle", directoryHint: .isDirectory)
+                .appending(path: "payload.bin")
+            try FileManager.default.removeItem(at: payload)
+            try Data().write(to: payload)
+
+            let revealed = try await TorrentFileLocationService().revealURL(
+                for: fixture.location,
+                fileIndex: 0
+            )
+
+            #expect(revealed?.path(percentEncoded: false)
+                == fixture.location.displayPath)
+        }
+    }
+
+    @Test("A substituted claim root fails closed")
+    func substitutedRootFailsClosed() async throws {
+        try await withTemporaryDirectory { root in
+            let downloads = root.appending(
+                path: "Downloads",
+                directoryHint: .isDirectory
+            )
+            try FileManager.default.createDirectory(
+                at: downloads,
+                withIntermediateDirectories: true
+            )
+            let fixture = try makeLocation(
+                downloads: downloads,
+                name: "payload.bin",
+                contentKind: .singleFile,
+                files: [.init(
+                    index: 0,
+                    pathComponents: ["payload.bin"],
+                    expectedSize: 16,
+                    isPadding: false
+                )]
+            )
+            let payload = fixture.location.displayURL
+            try FileManager.default.removeItem(at: payload)
+            try Data().write(to: payload)
+
+            await #expect(throws: TorrentStoragePlanningError.self) {
+                _ = try await TorrentFileLocationService().revealURL(
+                    for: fixture.location,
+                    fileIndex: nil
+                )
+            }
+        }
+    }
+
+    @Test("Batch resolution deduplicates claimed locations")
     func batchResolutionDeduplicatesLocations() async throws {
         try await withTemporaryDirectory { root in
-            let saveURL = root.appending(path: "downloads", directoryHint: .isDirectory)
-            try FileManager.default.createDirectory(at: saveURL, withIntermediateDirectories: true)
-            let service = TorrentFileLocationService()
+            let downloads = root.appending(
+                path: "Downloads",
+                directoryHint: .isDirectory
+            )
+            try FileManager.default.createDirectory(
+                at: downloads,
+                withIntermediateDirectories: true
+            )
+            let fixture = try makeLocation(
+                downloads: downloads,
+                name: "payload.bin",
+                contentKind: .singleFile,
+                files: [.init(
+                    index: 0,
+                    pathComponents: ["payload.bin"],
+                    expectedSize: 16,
+                    isPadding: false
+                )]
+            )
 
-            let urls = try await service.revealURLs(for: [
-                makeTorrent(id: "alpha", name: "Missing A", savePath: saveURL.torrentFilePath),
-                makeTorrent(id: "beta", name: "Missing B", savePath: saveURL.torrentFilePath),
-            ])
+            let urls = try await TorrentFileLocationService().revealURLs(
+                for: [fixture.location, fixture.location]
+            )
 
-            #expect(urls.map(\.torrentFilePath) == [saveURL.torrentFilePath])
+            #expect(urls.map { $0.path(percentEncoded: false) }
+                == [fixture.location.displayPath])
         }
+    }
+
+    private struct LocationFixture {
+        let location: TorrentStorageLocation
+    }
+
+    private enum FixtureError: Error {
+        case invalidLocation
+    }
+
+    private func makeLocation(
+        downloads: URL,
+        name: String,
+        contentKind: TorrentStorageContentKind,
+        files: [TorrentLogicalFile]
+    ) throws -> LocationFixture {
+        let parent = try TorrentStorageParentAuthority(
+            lease: DownloadFolderAccessLease(
+                access: FakeDownloadFolderAccess(url: downloads)
+            )
+        )
+        let hashes = try TorrentStorageInfoHashes(
+            v1: Data(repeating: 0x55, count: 20),
+            v2: nil
+        )
+        let pieceLength: Int64 = 16_384
+        let logical = TorrentLogicalManifest(
+            name: name,
+            contentKind: contentKind,
+            infoHashes: hashes,
+            pieceLength: pieceLength,
+            files: files,
+            sourceManifestDigest: TorrentManifestDigest.source(
+                name: name,
+                contentKind: contentKind,
+                infoHashes: hashes,
+                pieceLength: pieceLength,
+                files: files
+            )
+        )
+        let planner = TorrentStorageDestinationPlanner()
+        let selected = try planner.planTopLevelName(
+            for: logical,
+            in: parent
+        )
+        let reservation = try planner.reserve(
+            manifest: logical,
+            in: parent,
+            claimID: UUID(),
+            generation: 1,
+            ownershipToken:
+                TorrentStorageDestinationPlanner.randomOwnershipToken(),
+            selectedTopLevelName: selected
+        )
+        let claim = TorrentStorageClaim(
+            manifest: reservation.storageManifest,
+            lease: TorrentStorageLease(
+                state: .active,
+                policyRevision: reservation.initialLease.policyRevision,
+                filePolicies: reservation.initialLease.filePolicies
+            ),
+            torrentID: "t:\(String(repeating: "a", count: 32))",
+            operationNonce: UUID()
+        )
+        guard let location = TorrentStorageLocation(
+            claim: claim,
+            parent: parent
+        ) else {
+            throw FixtureError.invalidLocation
+        }
+        return LocationFixture(location: location)
     }
 }

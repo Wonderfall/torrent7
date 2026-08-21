@@ -1,8 +1,9 @@
 import Foundation
 import TorrentEngineModel
+import XPC
 
 package enum TorrentEngineIPCProtocol {
-    package static let version: UInt64 = 9
+    package static let version: UInt64 = 10
 }
 
 package enum TorrentEngineIPCLimits {
@@ -11,34 +12,19 @@ package enum TorrentEngineIPCLimits {
     package static let maximumPayloadBytes = 66 * 1_024 * 1_024
     package static let maximumSmallPayloadBytes = 64 * 1_024
     package static let maximumErrorBytes = 4 * 1_024
-    package static let maximumBookmarkBytes = 1 * 1_024 * 1_024
-    package static let maximumBookmarkAggregateBytes = 20 * 1_024 * 1_024
-    // Base64 is four-thirds the source size. The fixed allowance covers JSON
-    // keys and independent padding for every authorized folder.
-    package static let maximumBookmarkJSONPayloadBytes =
-        ((maximumBookmarkAggregateBytes + 2) / 3) * 4 + 64 * 1_024
-    package static let maximumSingleBookmarkJSONPayloadBytes =
-        ((maximumBookmarkBytes + 2) / 3) * 4 + 16 * 1_024
     package static let maximumDatasetPageBytes = 1 * 1_024 * 1_024
     package static let maximumDatasetPageJSONReplyBytes =
         ((maximumDatasetPageBytes + 2) / 3) * 4 + 64 * 1_024
     package static let maximumDatasetPageItemCount = 256
     package static let maximumJSONNestingDepthLimit = 32
     package static let maximumJSONValueNodeCountLimit = 384 * 1_024
-    package static let maximumJSONStringByteCountLimit =
-        ((maximumBookmarkBytes + 2) / 3) * 4
+    package static let maximumJSONStringByteCountLimit = 2 * 1_024 * 1_024
     package static let maximumJSONPrimitiveByteCountLimit = 128
 
     package static let smallJSONLimits = TorrentEngineIPCJSONLimits(
         maximumNestingDepth: 8,
         maximumValueNodeCount: 256,
         maximumStringByteCount: 8 * 1_024,
-        maximumPrimitiveByteCount: maximumJSONPrimitiveByteCountLimit
-    )
-    package static let folderCapabilityRequestJSONLimits = TorrentEngineIPCJSONLimits(
-        maximumNestingDepth: 6,
-        maximumValueNodeCount: 256,
-        maximumStringByteCount: maximumJSONStringByteCountLimit,
         maximumPrimitiveByteCount: maximumJSONPrimitiveByteCountLimit
     )
     package static let magnetRequestJSONLimits = TorrentEngineIPCJSONLimits(
@@ -124,7 +110,6 @@ package enum TorrentEngineIPCLimits {
     // a promise that every Cartesian product of item and string maxima fits.
     package static let maximumDatasetAggregateBytes = 128 * 1_024 * 1_024
     package static let maximumFileMetadataReplyBytes = 48 * 1_024 * 1_024
-    package static let maximumFolderCapabilityReplyBytes = 256 * 1_024
     package static let maximumOpenDatasets = 4
     package static let maximumAlertErrorsPerPoll = 16
 }
@@ -134,10 +119,6 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
     case restart = 2
     case shutdown = 3
     case poll = 4
-    case grantFolderCapability = 5
-    case revokeFolderCapability = 6
-    case replaceFolderCapabilities = 7
-
     case previewTorrentFile = 11
     case addMagnet = 12
     case addTorrentFile = 13
@@ -160,6 +141,7 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
     case requestFiles = 36
     case setFilePriority = 37
     case requestPieceMap = 38
+    case torrentMetadata = 39
 
     case trackerBatch = 40
     case webSeedBatch = 42
@@ -175,10 +157,8 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
 
     package var maximumRequestPayloadBytes: Int {
         switch self {
-        case .handshake, .replaceFolderCapabilities:
-            TorrentEngineIPCLimits.maximumBookmarkJSONPayloadBytes
-        case .grantFolderCapability:
-            TorrentEngineIPCLimits.maximumSingleBookmarkJSONPayloadBytes
+        case .handshake:
+            TorrentEngineIPCLimits.maximumSmallPayloadBytes
         case .previewTorrentFile:
             0
         case .addMagnet:
@@ -203,8 +183,6 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
 
     package var requestJSONLimits: TorrentEngineIPCJSONLimits {
         switch self {
-        case .handshake, .grantFolderCapability, .replaceFolderCapabilities:
-            TorrentEngineIPCLimits.folderCapabilityRequestJSONLimits
         case .addMagnet:
             TorrentEngineIPCLimits.magnetRequestJSONLimits
         case .addTorrentFile:
@@ -247,12 +225,12 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
             TorrentEngineIPCLimits.maximumWebSeedReplyBytes
         case .pieceMapBatch:
             TorrentEngineIPCLimits.maximumPieceMapReplyBytes
+        case .torrentMetadata:
+            TorrentInputLimits.maxTorrentFileBytes
         case .fileBatch:
             TorrentEngineIPCLimits.maximumFileMetadataReplyBytes
         case .readDataset:
             TorrentEngineIPCLimits.maximumDatasetPageJSONReplyBytes
-        case .handshake, .replaceFolderCapabilities:
-            TorrentEngineIPCLimits.maximumFolderCapabilityReplyBytes
         default:
             TorrentEngineIPCLimits.maximumSmallPayloadBytes
         }
@@ -268,6 +246,7 @@ package enum TorrentEngineIPCFailureCode: UInt64, Sendable {
     case operationRejected = 1
     case controllerBusy = 2
     case serviceShuttingDown = 3
+    case operationOutcomeUnknown = 4
 }
 
 package struct TorrentEngineIPCHeader: Equatable, Sendable {
@@ -299,15 +278,18 @@ package struct TorrentEngineIPCRequest: Equatable, Sendable {
     package let header: TorrentEngineIPCHeader
     package let payload: Data?
     package let attachment: Data?
+    package let brokerEndpoint: XPCEndpoint?
 
     package init(
         header: TorrentEngineIPCHeader,
         payload: Data? = nil,
-        attachment: Data? = nil
+        attachment: Data? = nil,
+        brokerEndpoint: XPCEndpoint? = nil
     ) {
         self.header = header
         self.payload = payload
         self.attachment = attachment
+        self.brokerEndpoint = brokerEndpoint
     }
 }
 

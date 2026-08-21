@@ -220,7 +220,6 @@ package struct TorrentItem: Codable, Identifiable, Hashable, Sendable {
 package struct TorrentRowSnapshot: Identifiable, Hashable, Sendable {
     package let id: TorrentItem.ID
     package let name: String
-    package let savePath: String
     package let error: String
     package let state: TorrentState
     package let queuePriority: TorrentQueuePriority
@@ -235,7 +234,6 @@ package struct TorrentRowSnapshot: Identifiable, Hashable, Sendable {
     package init(_ torrent: TorrentItem) {
         id = torrent.id
         name = torrent.name
-        savePath = torrent.savePath
         error = torrent.error
         state = torrent.state
         queuePriority = torrent.queuePriority

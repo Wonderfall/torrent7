@@ -103,6 +103,19 @@ struct TorrentSourceModelTests {
         #expect(invalid == .empty)
     }
 
+    @Test("Magnet source security summary validates v2 multihashes")
+    func magnetSourceSecuritySummaryValidatesV2Multihashes() {
+        let valid = TorrentSourceSecurityInspector.summary(
+            magnetURI: "magnet:?xt=urn:btmh:1220\(String(repeating: "a", count: 64))&tr=https%3A%2F%2Fsecure.example%2Fannounce"
+        )
+        let invalid = TorrentSourceSecurityInspector.summary(
+            magnetURI: "magnet:?xt=urn:btmh:1120\(String(repeating: "a", count: 64))&tr=https%3A%2F%2Fsecure.example%2Fannounce"
+        )
+
+        #expect(valid.trackerCount == 1)
+        #expect(invalid == .empty)
+    }
+
     @Test("Magnet source security summary recognizes numbered tracker parameters")
     func magnetSourceSecuritySummaryRecognizesNumberedTrackerParameters() {
         let summary = TorrentSourceSecurityInspector.summary(
