@@ -3224,7 +3224,27 @@ extern "C" int32_t TorrentClientSetFilePriority(
             return bridge_error(2, "File not found.");
         }
 
-        handle->file_priority(lt::file_index_t(file_index), file_priority_from_bridge(priority));
+        TorrentIdentity *const identity = identity_from_handle(*handle);
+        if (identity != nullptr && !identity->storage_activation) {
+            identity->intended_file_priorities.resize(
+                static_cast<std::size_t>(torrent_file->layout().num_files()),
+                identity->intended_default_dont_download
+                    ? lt::dont_download
+                    : lt::default_priority
+            );
+            identity->intended_file_priorities.at(
+                static_cast<std::size_t>(file_index)
+            ) = file_priority_from_bridge(priority);
+            handle->file_priority(
+                lt::file_index_t(file_index),
+                lt::dont_download
+            );
+        } else {
+            handle->file_priority(
+                lt::file_index_t(file_index),
+                file_priority_from_bridge(priority)
+            );
+        }
         client->request_save(*handle);
         BridgeResult const cached_files = client->cache_file_metadata(*handle, publisher.changes);
         if (!cached_files) {

@@ -4988,7 +4988,7 @@ TEST_CASE("app-default DHT changes do not bypass pending metadata consent after 
     CHECK_FALSE(identity->allow_pre_metadata_dht);
 }
 
-TEST_CASE("metadata resolution owns peer exchange pending policy")
+TEST_CASE("metadata resolution keeps staged payload disabled and owns source policy")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
     TTorrentClient client((temporary_directory.path() / "State").string());
@@ -5016,9 +5016,8 @@ TEST_CASE("metadata resolution owns peer exchange pending policy")
     ));
     REQUIRE(eventually([&public_handle] {
         std::vector<lt::download_priority_t> const priorities = public_handle.get_file_priorities();
-        return priorities.size() == 1U && priorities.front() == lt::low_priority;
+        return priorities.size() == 1U && priorities.front() == lt::dont_download;
     }));
-    CHECK_FALSE(static_cast<bool>(public_handle.flags() & lt::torrent_flags::default_dont_download));
     CHECK_FALSE(static_cast<bool>(public_handle.flags() & lt::torrent_flags::disable_dht));
     CHECK_FALSE(static_cast<bool>(public_handle.flags() & lt::torrent_flags::disable_pex));
     CHECK_FALSE(static_cast<bool>(public_handle.flags() & lt::torrent_flags::disable_lsd));
@@ -5027,6 +5026,56 @@ TEST_CASE("metadata resolution owns peer exchange pending policy")
         client,
         client.metadata_validation_pending.contains(public_identity)
     ));
+    {
+        std::scoped_lock guard(client.lock);
+        REQUIRE(client.request_files(public_identity->canonical_id, changes).has_value());
+    }
+    std::uint64_t file_revision = 0;
+    int32_t required_file_count = 0;
+    std::uint8_t files_resident = bridge_bool(false);
+    REQUIRE(client.copy_files(
+        public_identity->canonical_id,
+        {},
+        &file_revision,
+        &required_file_count,
+        &files_resident
+    ) == 0);
+    REQUIRE(bridge_bool(files_resident));
+    REQUIRE(required_file_count == 1);
+    std::array<TTorrentFileSnapshot, 1> files{};
+    REQUIRE(client.copy_files(
+        public_identity->canonical_id,
+        files,
+        &file_revision,
+        &required_file_count,
+        &files_resident
+    ) == 1);
+    CHECK(files.front().priority == TTORRENT_FILE_PRIORITY_LOW);
+
+    char priority_error[256]{};
+    REQUIRE(TorrentClientSetFilePriority(
+        &client,
+        public_identity->canonical_id.c_str(),
+        0,
+        TTORRENT_FILE_PRIORITY_HIGH,
+        priority_error,
+        static_cast<int32_t>(sizeof(priority_error))
+    ) == 0);
+    REQUIRE(eventually([&public_handle] {
+        std::vector<lt::download_priority_t> const priorities =
+            public_handle.get_file_priorities();
+        return priorities.size() == 1U
+            && priorities.front() == lt::dont_download;
+    }));
+    file_revision = 0;
+    REQUIRE(client.copy_files(
+        public_identity->canonical_id,
+        files,
+        &file_revision,
+        &required_file_count,
+        &files_resident
+    ) == 1);
+    CHECK(files.front().priority == TTORRENT_FILE_PRIORITY_HIGH);
 
     public_identity->dht_locked_by_source = true;
     public_identity->peer_exchange_locked_by_source = true;
