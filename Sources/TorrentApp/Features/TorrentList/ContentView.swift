@@ -263,6 +263,34 @@ struct ContentView: View {
             }
             .environment(store)
         }
+        .sheet(item: magnetDestinationConflictBinding) { request in
+            TorrentDestinationConflictView(
+                conflict: request.conflict,
+                cancel: {
+                    store.cancelMagnetDestinationConflict(id: request.id)
+                },
+                chooseAnotherFolder: {
+                    beginFileImport(.magnetDestination(
+                        promotionID: request.id
+                    ))
+                },
+                downloadSeparateCopy: {
+                    store.resolveMagnetDestinationConflict(
+                        id: request.id,
+                        choice: .separateCopy(
+                            topLevelName:
+                                request.conflict.separateCopyTopLevelName
+                        )
+                    )
+                },
+                useExistingFiles: {
+                    store.resolveMagnetDestinationConflict(
+                        id: request.id,
+                        choice: .useExistingFiles
+                    )
+                }
+            )
+        }
         .fileImporter(
             isPresented: $isChoosingFile,
             allowedContentTypes: fileImportMode.allowedContentTypes,
@@ -346,12 +374,24 @@ struct ContentView: View {
         }
     }
 
+    private var magnetDestinationConflictBinding:
+        Binding<TorrentMagnetDestinationConflict?> {
+        Binding {
+            store.magnetDestinationConflict
+        } set: { _ in
+            // The sheet has explicit, durable resolution actions and cannot
+            // be dismissed interactively.
+        }
+    }
+
     private var fileDialogMessage: Text? {
         switch fileImportMode {
         case .torrentFiles:
             nil
         case .downloadFolder:
             Text("Choose a dedicated folder. \(AppIdentity.displayName) can access files inside it.")
+        case .magnetDestination:
+            Text("Choose where to save this torrent.")
         }
     }
 
@@ -359,7 +399,7 @@ struct ContentView: View {
         switch fileImportMode {
         case .torrentFiles:
             nil
-        case .downloadFolder:
+        case .downloadFolder, .magnetDestination:
             Text("Use Folder")
         }
     }
@@ -513,6 +553,14 @@ struct ContentView: View {
                 return
             }
             pendingDownloadFolderURL = url
+        case .magnetDestination(let promotionID):
+            guard let url = urls.first else {
+                return
+            }
+            store.chooseAnotherFolderForMagnetConflict(
+                id: promotionID,
+                folder: url
+            )
         }
     }
 
@@ -578,7 +626,7 @@ struct ContentView: View {
                 startsPaused: options.startsPaused,
                 queuePriority: options.queuePriority,
                 labelIDs: options.labelIDs,
-                usesExistingData: options.storageMode == .useExistingData
+                destinationChoice: options.destinationChoice
             )
         case .magnet(let uri):
             accepted = store.addMagnet(

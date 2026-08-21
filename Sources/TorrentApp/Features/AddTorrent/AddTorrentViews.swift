@@ -133,6 +133,109 @@ struct TorrentAddFileSelectionPresentation: Sendable {
     }
 }
 
+private struct TorrentDestinationInspectionRequest: Identifiable, Sendable {
+    let id = UUID()
+    let torrentData: Data
+    let downloadFolder: URL
+    let setsDownloadFolderAsDefault: Bool
+    let startsPaused: Bool
+}
+
+private struct TorrentAddDestinationConflictRequest: Identifiable {
+    let id = UUID()
+    let conflict: TorrentStorageDestinationConflict
+    let startsPaused: Bool
+}
+
+struct TorrentDestinationConflictView: View {
+    let conflict: TorrentStorageDestinationConflict
+    let cancel: () -> Void
+    let chooseAnotherFolder: () -> Void
+    let downloadSeparateCopy: () -> Void
+    let useExistingFiles: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("A Download Already Exists")
+                    .font(.title2.weight(.semibold))
+
+                Text(
+                    "\u{201c}\(conflict.existingTopLevelName)\u{201d} already exists in \(conflict.parentDisplayName)."
+                )
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(alignment: .leading, spacing: 16) {
+                destinationChoiceDescription(
+                    title: "Download a Separate Copy",
+                    systemImage: "plus.square.on.square",
+                    detail:
+                        "Leaves the existing item untouched and downloads to \u{201c}\(conflict.separateCopyTopLevelName)\u{201d}."
+                )
+
+                if conflict.canUseExistingFiles {
+                    destinationChoiceDescription(
+                        title: "Use Existing Files",
+                        systemImage: "externaldrive.badge.checkmark",
+                        detail:
+                            "Verifies the files again and may modify them to complete the torrent. Imported files are never automatically deleted."
+                    )
+                } else {
+                    Label(
+                        "The existing item cannot be used safely for this torrent.",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .foregroundStyle(.secondary)
+                }
+            }
+
+            HStack {
+                Button("Choose Another Folder\u{2026}", action: chooseAnotherFolder)
+
+                Spacer()
+
+                Button("Cancel", role: .cancel, action: cancel)
+                    .keyboardShortcut(.cancelAction)
+
+                if conflict.canUseExistingFiles {
+                    Button("Use Existing Files", action: useExistingFiles)
+                }
+
+                Button(
+                    "Download a Separate Copy",
+                    action: downloadSeparateCopy
+                )
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 580)
+        .interactiveDismissDisabled()
+    }
+
+    private func destinationChoiceDescription(
+        title: String,
+        systemImage: String,
+        detail: String
+    ) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: systemImage)
+                .frame(width: 20)
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .fontWeight(.medium)
+                Text(detail)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
 struct AddTorrentConfirmationView: View {
     private static let fileSelectionPreviewLimit = 5
 
@@ -160,9 +263,12 @@ struct AddTorrentConfirmationView: View {
     @State private var queuePriority = TorrentQueuePriority.normal
     @State private var selectedLabelIDs = Set<TorrentLabel.ID>()
     @State private var allowsPreMetadataDHT = false
-    @State private var storageMode = TorrentAddStorageMode.createNew
     @State private var folderError: String?
     @State private var pendingDownloadFolderURL: URL?
+    @State private var destinationInspectionRequest:
+        TorrentDestinationInspectionRequest?
+    @State private var destinationConflictRequest:
+        TorrentAddDestinationConflictRequest?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -181,7 +287,7 @@ struct AddTorrentConfirmationView: View {
                         }
                     }
 
-                    InfoDetailRow("Download folder") {
+                    InfoDetailRow("Save to") {
                         DownloadFolderPickerValueView(
                             text: downloadFolderText,
                             isUnset: selectedDownloadFolder == nil
@@ -197,22 +303,6 @@ struct AddTorrentConfirmationView: View {
                     }
 
                     setDefaultDownloadFolderToggle
-                    if draft.fileURL != nil {
-                        Picker("Payload", selection: $storageMode) {
-                            ForEach(TorrentAddStorageMode.allCases) { mode in
-                                Text(mode.title).tag(mode)
-                            }
-                        }
-
-                        if storageMode == .useExistingData {
-                            Label(
-                                "Existing files are modified in place while downloading, but are never deleted automatically.",
-                                systemImage: "externaldrive.badge.checkmark"
-                            )
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        }
-                    }
                     TorrentLabelSelectionRow(
                         labels: store.labels,
                         selectedLabelIDs: $selectedLabelIDs,
@@ -325,7 +415,47 @@ struct AddTorrentConfirmationView: View {
             }
             pendingDownloadFolderURL = nil
         }
+        .task(id: destinationInspectionRequest?.id) {
+            guard let request = destinationInspectionRequest else {
+                return
+            }
+            do {
+                let conflict = try await store.inspectTorrentDestination(
+                    torrentData: request.torrentData,
+                    downloadFolder: request.downloadFolder,
+                    setsDownloadFolderAsDefault:
+                        request.setsDownloadFolderAsDefault
+                )
+                try Task.checkCancellation()
+                guard destinationInspectionRequest?.id == request.id else {
+                    return
+                }
+                destinationInspectionRequest = nil
+                if let conflict {
+                    destinationConflictRequest =
+                        TorrentAddDestinationConflictRequest(
+                            conflict: conflict,
+                            startsPaused: request.startsPaused
+                        )
+                } else {
+                    submitAdd(
+                        startsPaused: request.startsPaused,
+                        destinationChoice: .preferredName
+                    )
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard destinationInspectionRequest?.id == request.id else {
+                    return
+                }
+                destinationInspectionRequest = nil
+                folderError = error.localizedDescription
+            }
+        }
         .onChange(of: selectedDownloadFolder) { _, _ in
+            destinationInspectionRequest = nil
+            destinationConflictRequest = nil
             if isSetDefaultToggleDisabled {
                 setsDownloadFolderAsDefault = false
             }
@@ -339,6 +469,36 @@ struct AddTorrentConfirmationView: View {
         }
         .fileDialogMessage(Text("Choose a dedicated folder for downloads."))
         .fileDialogConfirmationLabel(Text("Use Folder"))
+        .sheet(item: $destinationConflictRequest) { request in
+            TorrentDestinationConflictView(
+                conflict: request.conflict,
+                cancel: {
+                    destinationConflictRequest = nil
+                    cancel()
+                },
+                chooseAnotherFolder: {
+                    destinationConflictRequest = nil
+                    isChoosingDownloadFolder = true
+                },
+                downloadSeparateCopy: {
+                    destinationConflictRequest = nil
+                    submitAdd(
+                        startsPaused: request.startsPaused,
+                        destinationChoice: .separateCopy(
+                            topLevelName:
+                                request.conflict.separateCopyTopLevelName
+                        )
+                    )
+                },
+                useExistingFiles: {
+                    destinationConflictRequest = nil
+                    submitAdd(
+                        startsPaused: request.startsPaused,
+                        destinationChoice: .useExistingFiles
+                    )
+                }
+            )
+        }
     }
 
     @ViewBuilder
@@ -540,7 +700,8 @@ struct AddTorrentConfirmationView: View {
     }
 
     private var isAddDisabled: Bool {
-        if selectedDownloadFolder == nil {
+        if selectedDownloadFolder == nil
+            || destinationInspectionRequest != nil {
             return true
         }
         guard draft.fileURL != nil else {
@@ -708,6 +869,31 @@ struct AddTorrentConfirmationView: View {
     }
 
     private func confirmAdd(startsPaused: Bool) {
+        guard let downloadFolder = selectedDownloadFolder,
+              destinationInspectionRequest == nil else {
+            return
+        }
+        guard let torrentData = preview?.torrentData,
+              draft.fileURL != nil else {
+            submitAdd(
+                startsPaused: startsPaused,
+                destinationChoice: .preferredName
+            )
+            return
+        }
+        folderError = nil
+        destinationInspectionRequest = TorrentDestinationInspectionRequest(
+            torrentData: torrentData,
+            downloadFolder: downloadFolder,
+            setsDownloadFolderAsDefault: setsDownloadFolderAsDefault,
+            startsPaused: startsPaused
+        )
+    }
+
+    private func submitAdd(
+        startsPaused: Bool,
+        destinationChoice: TorrentStorageDestinationChoice
+    ) {
         guard let downloadFolder = selectedDownloadFolder else {
             return
         }
@@ -721,7 +907,7 @@ struct AddTorrentConfirmationView: View {
             queuePriority: queuePriority,
             labelIDs: selectedLabelIDs,
             allowsPreMetadataDHT: allowsPreMetadataDHT,
-            storageMode: storageMode
+            destinationChoice: destinationChoice
         ))
         if !accepted {
             folderError = store.lastError ?? TorrentStoreError.tooManyPendingOperations.localizedDescription

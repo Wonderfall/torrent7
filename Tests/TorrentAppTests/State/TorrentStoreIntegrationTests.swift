@@ -727,6 +727,209 @@ struct TorrentStoreIntegrationTests {
         }
     }
 
+    @Test("Magnet conflicts wait without payload access and can download a separate copy")
+    func magnetConflictCanDownloadSeparateCopy() async throws {
+        try await withKnownTorrentHarness { harness, downloadFolder in
+            let fixture = try magnetPromotionFixture()
+            let label = try #require(
+                harness.store.createLabel(named: "Linux")
+            )
+            let existingPayload = downloadFolder.appending(path: "sample.bin")
+            let original = Data("seed".utf8)
+            try original.write(to: existingPayload)
+            await configureMetadataReadyMagnet(
+                harness,
+                fixture: fixture
+            )
+
+            #expect(harness.store.addMagnet(
+                fixture.magnet,
+                downloadFolder: downloadFolder,
+                setsDownloadFolderAsDefault: false,
+                labelIDs: [label.id]
+            ))
+            await harness.store.saveAll()
+
+            let request = try #require(
+                harness.store.magnetDestinationConflict
+            )
+            #expect(request.conflict.existingTopLevelName == "sample.bin")
+            #expect(request.conflict.separateCopyTopLevelName == "sample 2.bin")
+            #expect(request.conflict.canUseExistingFiles)
+            #expect(await harness.engine.removedIDs == [fixture.torrentID])
+            #expect(await harness.engine.addedTorrentFiles.isEmpty)
+            #expect(try Data(contentsOf: existingPayload) == original)
+
+            let journal = try #require(harness.storageClaimJournal)
+            #expect(await journal.allPromotions().first?.state
+                == .awaitingDestination)
+            #expect(harness.store.resolveMagnetDestinationConflict(
+                id: request.id,
+                choice: .separateCopy(
+                    topLevelName: request.conflict.separateCopyTopLevelName
+                )
+            ))
+            await harness.store.saveAll()
+
+            let promoted = try #require(
+                await harness.engine.addedTorrentFiles.first
+            )
+            #expect(promoted.activation.preservedTorrentID == fixture.torrentID)
+            #expect(FileManager.default.fileExists(
+                atPath: downloadFolder.appending(
+                    path: "sample 2.bin"
+                ).torrentFilePath
+            ))
+            #expect(try Data(contentsOf: existingPayload) == original)
+            #expect(harness.store.magnetDestinationConflict == nil)
+            #expect(await journal.allPromotions().isEmpty)
+            #expect(harness.store.labelIDs(for: fixture.torrentID)
+                == [label.id])
+        }
+    }
+
+    @Test("Magnet conflicts import only safely validated existing files")
+    func magnetConflictCanUseExistingFiles() async throws {
+        try await withKnownTorrentHarness { harness, downloadFolder in
+            let fixture = try magnetPromotionFixture()
+            let existingPayload = downloadFolder.appending(path: "sample.bin")
+            let original = Data("seed".utf8)
+            try original.write(to: existingPayload)
+            await configureMetadataReadyMagnet(
+                harness,
+                fixture: fixture
+            )
+
+            #expect(harness.store.addMagnet(
+                fixture.magnet,
+                downloadFolder: downloadFolder,
+                setsDownloadFolderAsDefault: false
+            ))
+            await harness.store.saveAll()
+            let request = try #require(
+                harness.store.magnetDestinationConflict
+            )
+            #expect(request.conflict.canUseExistingFiles)
+            #expect(harness.store.resolveMagnetDestinationConflict(
+                id: request.id,
+                choice: .useExistingFiles
+            ))
+            await harness.store.saveAll()
+
+            let journal = try #require(harness.storageClaimJournal)
+            let claim = try #require(await journal.allClaims().first)
+            let policy = try #require(claim.lease.filePolicies.first)
+            #expect(policy.provenance == .imported)
+            #expect(policy.mayModify)
+            #expect(!policy.mayDeleteAutomatically)
+            #expect(try Data(contentsOf: existingPayload) == original)
+            #expect(harness.store.magnetDestinationConflict == nil)
+            #expect(await journal.allPromotions().isEmpty)
+        }
+    }
+
+    @Test("Unsafe magnet conflicts omit importing and cancel cleanly")
+    func unsafeMagnetConflictCanCancel() async throws {
+        try await withKnownTorrentHarness { harness, downloadFolder in
+            let fixture = try magnetPromotionFixture()
+            let existingPayload = downloadFolder.appending(path: "sample.bin")
+            try Data("seed".utf8).write(to: existingPayload)
+            try FileManager.default.linkItem(
+                at: existingPayload,
+                to: downloadFolder.appending(path: "linked.bin")
+            )
+            await configureMetadataReadyMagnet(
+                harness,
+                fixture: fixture
+            )
+
+            #expect(harness.store.addMagnet(
+                fixture.magnet,
+                downloadFolder: downloadFolder,
+                setsDownloadFolderAsDefault: false
+            ))
+            await harness.store.saveAll()
+            let request = try #require(
+                harness.store.magnetDestinationConflict
+            )
+            #expect(!request.conflict.canUseExistingFiles)
+            #expect(!harness.store.resolveMagnetDestinationConflict(
+                id: request.id,
+                choice: .useExistingFiles
+            ))
+            #expect(harness.store.cancelMagnetDestinationConflict(
+                id: request.id
+            ))
+            await harness.store.saveAll()
+
+            let journal = try #require(harness.storageClaimJournal)
+            #expect(await journal.allPromotions().isEmpty)
+            #expect(await harness.engine.addedTorrentFiles.isEmpty)
+            #expect(try Data(contentsOf: existingPayload) == Data("seed".utf8))
+            #expect(harness.store.magnetDestinationConflict == nil)
+        }
+    }
+
+    @Test("A magnet conflict can move to another authorized folder")
+    func magnetConflictCanChooseAnotherFolder() async throws {
+        try await withKnownTorrentHarness { harness, downloadFolder in
+            let fixture = try magnetPromotionFixture()
+            try Data("seed".utf8).write(
+                to: downloadFolder.appending(path: "sample.bin")
+            )
+            let otherFolder = downloadFolder.deletingLastPathComponent()
+                .appending(path: "Other Downloads", directoryHint: .isDirectory)
+            try FileManager.default.createDirectory(
+                at: otherFolder,
+                withIntermediateDirectories: true
+            )
+            await configureMetadataReadyMagnet(
+                harness,
+                fixture: fixture
+            )
+
+            #expect(harness.store.addMagnet(
+                fixture.magnet,
+                downloadFolder: downloadFolder,
+                setsDownloadFolderAsDefault: false
+            ))
+            await harness.store.saveAll()
+            let request = try #require(
+                harness.store.magnetDestinationConflict
+            )
+            harness.accessStore.prepareForAddResult = .failure(
+                FakeBookmarkError()
+            )
+            #expect(harness.store.chooseAnotherFolderForMagnetConflict(
+                id: request.id,
+                folder: otherFolder
+            ))
+            await harness.store.saveAll()
+            #expect(harness.store.magnetDestinationConflict?.id == request.id)
+            let journal = try #require(harness.storageClaimJournal)
+            #expect(await journal.allPromotions().first?.state
+                == .awaitingDestination)
+
+            harness.accessStore.prepareForAddResult = nil
+            #expect(harness.store.chooseAnotherFolderForMagnetConflict(
+                id: request.id,
+                folder: otherFolder
+            ))
+            await harness.store.saveAll()
+
+            #expect(FileManager.default.fileExists(
+                atPath: otherFolder.appending(path: "sample.bin")
+                    .torrentFilePath
+            ))
+            #expect(harness.accessStore.prepareForAddCalls.last?.url
+                == otherFolder)
+            #expect(harness.accessStore.prepareForAddCalls.last?.setsDefault
+                == false)
+            #expect(harness.store.magnetDestinationConflict == nil)
+            #expect(await journal.allPromotions().isEmpty)
+        }
+    }
+
     @Test("Magnet promotion rejects metadata before removing the staged torrent")
     func magnetPromotionRejectsMismatchedMetadata() async throws {
         try await withKnownTorrentHarness { harness, downloadFolder in
@@ -868,7 +1071,10 @@ struct TorrentStoreIntegrationTests {
             #expect(harness.store.addTorrentFile(
                 downloadFolder.appending(path: "sample.torrent"),
                 torrentData: validSingleFileTorrentData(),
-                savePath: downloadFolder.torrentFilePath
+                savePath: downloadFolder.torrentFilePath,
+                destinationChoice: .separateCopy(
+                    topLevelName: "sample 2.bin"
+                )
             ))
             await harness.store.saveAll()
 
@@ -898,7 +1104,7 @@ struct TorrentStoreIntegrationTests {
                 downloadFolder.appending(path: "sample.torrent"),
                 torrentData: validSingleFileTorrentData(),
                 savePath: downloadFolder.torrentFilePath,
-                usesExistingData: true
+                destinationChoice: .useExistingFiles
             ))
             await harness.store.saveAll()
 
@@ -2562,4 +2768,38 @@ private func magnetPromotionFixture() throws -> MagnetPromotionFixture {
         magnet: "magnet:?xt=urn:btih:\(hash)&tr=https%3A%2F%2Ftracker.example%2Fannounce",
         exactInfoDictionary: parsed.rawInfoDictionary
     )
+}
+
+@MainActor
+private func configureMetadataReadyMagnet(
+    _ harness: StoreHarness,
+    fixture: MagnetPromotionFixture
+) async {
+    await harness.engine.setNextAddedMagnetID(fixture.torrentID)
+    await harness.engine.setNextAddedTorrentFileID(fixture.torrentID)
+    await harness.engine.setTorrentMetadata(
+        fixture.exactInfoDictionary,
+        for: fixture.torrentID
+    )
+    await harness.engine.setFileBatch(TorrentFileBatch(
+        revision: 1,
+        files: [TorrentFileItem(
+            path: "sample.bin",
+            size: 4,
+            downloaded: 0,
+            progress: 0,
+            index: 0,
+            priority: .normal,
+            isPadFile: false
+        )]
+    ))
+    await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+        revision: 1,
+        torrents: [makeTorrent(
+            id: fixture.torrentID,
+            name: "sample.bin",
+            contentKind: .singleFile,
+            hasMetadata: true
+        )]
+    ))
 }

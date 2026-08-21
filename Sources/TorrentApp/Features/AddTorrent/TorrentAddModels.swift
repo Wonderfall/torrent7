@@ -7,18 +7,24 @@ let bittorrentFileType = UTType(importedAs: "org.bittorrent.torrent", conforming
 enum FileImportMode {
     case torrentFiles
     case downloadFolder
+    case magnetDestination(promotionID: UUID)
 
     var allowedContentTypes: [UTType] {
         switch self {
         case .torrentFiles:
             return [bittorrentFileType]
-        case .downloadFolder:
+        case .downloadFolder, .magnetDestination:
             return [.folder]
         }
     }
 
     var allowsMultipleSelection: Bool {
-        self == .torrentFiles
+        switch self {
+        case .torrentFiles:
+            true
+        case .downloadFolder, .magnetDestination:
+            false
+        }
     }
 }
 
@@ -156,23 +162,7 @@ struct TorrentAddOptions {
     let queuePriority: TorrentQueuePriority
     let labelIDs: Set<TorrentLabel.ID>
     let allowsPreMetadataDHT: Bool
-    let storageMode: TorrentAddStorageMode
-}
-
-enum TorrentAddStorageMode: String, CaseIterable, Identifiable, Sendable {
-    case createNew
-    case useExistingData
-
-    var id: Self { self }
-
-    var title: String {
-        switch self {
-        case .createNew:
-            "Create New Download"
-        case .useExistingData:
-            "Use Existing Data"
-        }
-    }
+    let destinationChoice: TorrentStorageDestinationChoice
 }
 
 enum TorrentSourceSecurityInspector {

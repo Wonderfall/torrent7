@@ -35,6 +35,11 @@ private enum TorrentMagnetPromotionError: LocalizedError {
     }
 }
 
+struct TorrentMagnetDestinationConflict: Identifiable, Equatable, Sendable {
+    let id: UUID
+    let conflict: TorrentStorageDestinationConflict
+}
+
 private typealias TorrentStoreUserOperation = @MainActor @Sendable (TorrentStore) async -> Void
 
 private struct TorrentStorePendingUserOperation {
@@ -186,6 +191,8 @@ final class TorrentStore {
     private(set) var labelAssignments: [TorrentItem.ID: Set<TorrentLabel.ID>] = [:]
     private(set) var trackerHostsByTorrentID: [TorrentItem.ID: Set<String>] = [:]
     private(set) var torrentFilterRevision: UInt64 = 0
+    private(set) var magnetDestinationConflict:
+        TorrentMagnetDestinationConflict?
 
     private(set) var libtorrentVersion: String
 
@@ -971,6 +978,177 @@ final class TorrentStore {
         return preview
     }
 
+    func inspectTorrentDestination(
+        torrentData: Data,
+        downloadFolder: URL,
+        setsDownloadFolderAsDefault: Bool
+    ) async throws -> TorrentStorageDestinationConflict? {
+        let parsed = try await Self.parseStorageManifest(torrentData)
+        let preparedFolder = try await downloadFolderAccessStore.prepareForAdd(
+            downloadFolder,
+            setsDefault: setsDownloadFolderAsDefault,
+            activeTorrents: torrents
+        )
+        defer {
+            withExtendedLifetime(preparedFolder.lease) {}
+        }
+        let parent = try await Self.makeStorageParentAuthority(
+            preparedFolder.lease
+        )
+        return try await Self.inspectStorageDestination(
+            manifest: parsed.manifest,
+            parent: parent
+        )
+    }
+
+    @discardableResult
+    func resolveMagnetDestinationConflict(
+        id: UUID,
+        choice: TorrentStorageDestinationChoice
+    ) -> Bool {
+        guard let request = magnetDestinationConflict,
+              request.id == id else {
+            return false
+        }
+        switch choice {
+        case .preferredName:
+            return false
+        case .separateCopy(let topLevelName):
+            guard topLevelName == request.conflict.separateCopyTopLevelName else {
+                return false
+            }
+        case .useExistingFiles:
+            guard request.conflict.canUseExistingFiles else {
+                return false
+            }
+        }
+
+        return scheduleMagnetDestinationOperation(request: request) {
+            store, promotion in
+            try await store.continueMagnetPromotion(
+                promotion,
+                destinationChoice: choice
+            )
+        }
+    }
+
+    @discardableResult
+    func chooseAnotherFolderForMagnetConflict(
+        id: UUID,
+        folder: URL
+    ) -> Bool {
+        guard let request = magnetDestinationConflict,
+              request.id == id else {
+            return false
+        }
+        return scheduleMagnetDestinationOperation(request: request) {
+            store, promotion in
+            let preparedFolder = try await store.downloadFolderAccessStore
+                .prepareForAdd(
+                    folder,
+                    setsDefault: false,
+                    activeTorrents: store.torrents
+                )
+            defer {
+                withExtendedLifetime(preparedFolder.lease) {}
+            }
+            await store.commitDownloadFolderForAdd(preparedFolder)
+            guard let storageClaimJournal = store.storageClaimJournal else {
+                throw TorrentStorageJournalError.unavailable
+            }
+            let updated = try await storageClaimJournal
+                .replacePromotionDestination(
+                    id: promotion.id,
+                    operationNonce: promotion.operationNonce,
+                    destinationPath: preparedFolder.path
+                )
+            try await store.continueMagnetPromotion(
+                updated,
+                destinationChoice: nil
+            )
+        }
+    }
+
+    @discardableResult
+    func cancelMagnetDestinationConflict(id: UUID) -> Bool {
+        guard let request = magnetDestinationConflict,
+              request.id == id else {
+            return false
+        }
+        return scheduleMagnetDestinationOperation(request: request) {
+            store, promotion in
+            guard let storageClaimJournal = store.storageClaimJournal else {
+                throw TorrentStorageJournalError.unavailable
+            }
+            try await storageClaimJournal.completePromotion(
+                id: promotion.id,
+                operationNonce: promotion.operationNonce
+            )
+        }
+    }
+
+    private func scheduleMagnetDestinationOperation(
+        request: TorrentMagnetDestinationConflict,
+        operation: @escaping @MainActor @Sendable (
+            TorrentStore,
+            TorrentMagnetPromotion
+        ) async throws -> Void
+    ) -> Bool {
+        guard magnetDestinationConflict == request,
+              magnetPromotionInFlightID == nil else {
+            return false
+        }
+
+        magnetDestinationConflict = nil
+        magnetPromotionInFlightID = request.id
+        let errorGeneration = lastErrorGeneration
+        let accepted = scheduleUserOperation(id: request.id) { store in
+            defer {
+                store.magnetPromotionInFlightID = nil
+            }
+            do {
+                guard let storageClaimJournal = store.storageClaimJournal,
+                      let promotion = await storageClaimJournal.promotion(
+                          id: request.id
+                      ),
+                      promotion.state == .awaitingDestination else {
+                    throw TorrentStorageJournalError.invalidTransition
+                }
+                try await operation(store, promotion)
+                await store.refreshFromEngine(notifiesCompletions: false)
+                store.clearLastError(ifUnchangedSince: errorGeneration)
+            } catch {
+                await store.restoreMagnetDestinationPromptIfPossible(
+                    id: request.id
+                )
+                await store.refreshFromEngine(notifiesCompletions: false)
+                store.setLastError(
+                    error.localizedDescription,
+                    source: .userAction
+                )
+            }
+        }
+        if !accepted {
+            magnetPromotionInFlightID = nil
+            magnetDestinationConflict = request
+        }
+        return accepted
+    }
+
+    private func restoreMagnetDestinationPromptIfPossible(
+        id: UUID
+    ) async {
+        guard let storageClaimJournal,
+              let promotion = await storageClaimJournal.promotion(id: id),
+              promotion.state == .awaitingDestination else {
+            return
+        }
+        try? await continueMagnetPromotion(
+            promotion,
+            destinationChoice: nil
+        )
+    }
+
     @discardableResult
     func addMagnet(
         _ magnet: String,
@@ -1113,7 +1291,7 @@ final class TorrentStore {
         labelIDs: Set<TorrentLabel.ID> = [],
         httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride = .inherit,
         httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride = .inherit,
-        usesExistingData: Bool = false
+        destinationChoice: TorrentStorageDestinationChoice = .preferredName
     ) -> Bool {
         guard let savePath = explicitSavePath ?? downloadFolder?.torrentFilePath else {
             setLastError("Choose a download folder first.", source: .userAction)
@@ -1132,7 +1310,7 @@ final class TorrentStore {
             labelIDs: labelIDs,
             httpsTrackerPolicy: httpsTrackerPolicy,
             httpsWebSeedPolicy: httpsWebSeedPolicy,
-            usesExistingData: usesExistingData
+            destinationChoice: destinationChoice
         )
     }
 
@@ -1149,7 +1327,7 @@ final class TorrentStore {
         labelIDs: Set<TorrentLabel.ID> = [],
         httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride = .inherit,
         httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride = .inherit,
-        usesExistingData: Bool = false
+        destinationChoice: TorrentStorageDestinationChoice = .preferredName
     ) -> Bool {
         scheduleTorrentFileAdd(
             url,
@@ -1169,7 +1347,7 @@ final class TorrentStore {
             labelIDs: labelIDs,
             httpsTrackerPolicy: httpsTrackerPolicy,
             httpsWebSeedPolicy: httpsWebSeedPolicy,
-            usesExistingData: usesExistingData
+            destinationChoice: destinationChoice
         )
     }
 
@@ -1185,7 +1363,7 @@ final class TorrentStore {
         labelIDs: Set<TorrentLabel.ID>,
         httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride,
         httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride,
-        usesExistingData: Bool
+        destinationChoice: TorrentStorageDestinationChoice
     ) -> Bool {
         let enablePeerExchange = settings.effectiveUsePeerExchangeByDefault
         let errorGeneration = lastErrorGeneration
@@ -1216,7 +1394,7 @@ final class TorrentStore {
                     enablePeerExchange: enablePeerExchange,
                     httpsTrackerPolicy: httpsTrackerPolicy,
                     httpsWebSeedPolicy: httpsWebSeedPolicy,
-                    usesExistingData: usesExistingData
+                    destinationChoice: destinationChoice
                 )
                 if let preparedFolder {
                     await store.commitDownloadFolderForAdd(preparedFolder)
@@ -1249,7 +1427,7 @@ final class TorrentStore {
         claimID: UUID = UUID(),
         operationNonce: UUID = UUID(),
         preservingTorrentID: String? = nil,
-        usesExistingData: Bool = false
+        destinationChoice: TorrentStorageDestinationChoice = .preferredName
     ) async throws -> String {
         guard let storageClaimJournal else {
             throw TorrentStorageJournalError.unavailable
@@ -1270,7 +1448,17 @@ final class TorrentStore {
         )
         let selectedTopLevelName: String
         let inspectedImport: TorrentStorageReservation?
-        if usesExistingData {
+        switch destinationChoice {
+        case .preferredName:
+            selectedTopLevelName = parsed.manifest.name
+            inspectedImport = nil
+        case .separateCopy(let topLevelName):
+            guard topLevelName != parsed.manifest.name else {
+                throw TorrentStoragePlanningError.reservationFailed
+            }
+            selectedTopLevelName = topLevelName
+            inspectedImport = nil
+        case .useExistingFiles:
             selectedTopLevelName = parsed.manifest.name
             inspectedImport = try await Self.importExistingStorage(
                 manifest: parsed.manifest,
@@ -1280,12 +1468,6 @@ final class TorrentStore {
                 ownershipKey: ownershipKey,
                 selectedTopLevelName: selectedTopLevelName
             )
-        } else {
-            selectedTopLevelName = try await Self.planStorageTopLevelName(
-                manifest: parsed.manifest,
-                parent: parent
-            )
-            inspectedImport = nil
         }
 
         try await storageClaimJournal.beginPreparation(preparation)
@@ -1470,11 +1652,11 @@ final class TorrentStore {
     }
 
     @concurrent
-    private static func planStorageTopLevelName(
+    private static func inspectStorageDestination(
         manifest: TorrentLogicalManifest,
         parent: TorrentStorageParentAuthority
-    ) async throws -> String {
-        try TorrentStorageDestinationPlanner().planTopLevelName(
+    ) async throws -> TorrentStorageDestinationConflict? {
+        try TorrentStorageDestinationPlanner().inspectDestination(
             for: manifest,
             in: parent
         )
@@ -2373,6 +2555,7 @@ final class TorrentStore {
         in snapshots: [TorrentItem]
     ) async {
         guard magnetPromotionInFlightID == nil,
+              magnetDestinationConflict == nil,
               let storageClaimJournal else {
             return
         }
@@ -2395,6 +2578,8 @@ final class TorrentStore {
                 return snapshotsByID[promotion.torrentID]?.hasMetadata == true
             case .metadataReady:
                 return snapshotsByID[promotion.torrentID] != nil
+            case .awaitingDestination:
+                return true
             case .promoting, .outcomeUnknown:
                 guard let activation = promotion.activation,
                       let claim = claimsByID[activation.claimID] else {
@@ -2420,7 +2605,15 @@ final class TorrentStore {
                     guard let item = store.torrentsByID[candidate.torrentID] else {
                         throw TorrentMagnetPromotionError.metadataNotReady
                     }
-                    try await store.promoteMagnet(candidate, item: item)
+                    try await store.prepareMagnetDestination(
+                        candidate,
+                        item: item
+                    )
+                case .awaitingDestination:
+                    try await store.continueMagnetPromotion(
+                        candidate,
+                        destinationChoice: nil
+                    )
                 case .promoting, .outcomeUnknown:
                     try await store.finishPromotedMagnet(candidate)
                 }
@@ -2436,7 +2629,7 @@ final class TorrentStore {
         }
     }
 
-    private func promoteMagnet(
+    private func prepareMagnetDestination(
         _ initialPromotion: TorrentMagnetPromotion,
         item: TorrentItem
     ) async throws {
@@ -2480,9 +2673,6 @@ final class TorrentStore {
             torrentData,
             advertisedHashes: descriptor.advertisedInfoHashes
         )
-        let folderLease = try await downloadFolderAccessStore.lease(
-            forSavePath: promotion.destinationPath
-        )
 
         let options = try await engine.torrentOptions(id: item.id)
         let sourcePolicy = try await engine.sourcePolicy(id: item.id)
@@ -2502,7 +2692,8 @@ final class TorrentStore {
                 queuePosition: item.queuePosition,
                 options: options,
                 sourcePolicy: sourcePolicy,
-                filePriorities: filePriorities
+                filePriorities: filePriorities,
+                labelIDs: labelAssignments[item.id] ?? []
             )
         )
         promotion = try await storageClaimJournal.beginPromotionActivation(
@@ -2522,7 +2713,77 @@ final class TorrentStore {
                 }
                 throw TorrentMagnetPromotionError.removalUncertain(detail)
             }
+        } catch {
+            _ = try? await storageClaimJournal.markPromotionOutcomeUnknown(
+                id: promotion.id,
+                operationNonce: promotion.operationNonce
+            )
+            throw error
+        }
+        promotion = try await storageClaimJournal
+            .markPromotionAwaitingDestination(
+                id: promotion.id,
+                operationNonce: promotion.operationNonce
+            )
+        try await continueMagnetPromotion(
+            promotion,
+            destinationChoice: nil
+        )
+    }
 
+    private func continueMagnetPromotion(
+        _ initialPromotion: TorrentMagnetPromotion,
+        destinationChoice requestedChoice: TorrentStorageDestinationChoice?
+    ) async throws {
+        guard let storageClaimJournal,
+              initialPromotion.state == .awaitingDestination,
+              let exactInfo = initialPromotion.exactInfoDictionary,
+              let activation = initialPromotion.activation else {
+            throw TorrentStorageJournalError.invalidTransition
+        }
+        let descriptor = try TorrentMagnetDescriptor.parse(
+            initialPromotion.originalMagnet
+        )
+        guard descriptor.infoHashes == initialPromotion.advertisedInfoHashes else {
+            throw TorrentStorageJournalError.corrupt
+        }
+        let torrentData = try descriptor.torrentFile(
+            exactInfoDictionary: exactInfo
+        )
+        let parsed = try await Self.parseStorageManifest(
+            torrentData,
+            advertisedHashes: descriptor.advertisedInfoHashes
+        )
+        let folderLease = try await downloadFolderAccessStore.lease(
+            forSavePath: initialPromotion.destinationPath
+        )
+        defer {
+            withExtendedLifetime(folderLease) {}
+        }
+        let parent = try await Self.makeStorageParentAuthority(folderLease)
+
+        let destinationChoice: TorrentStorageDestinationChoice
+        if let requestedChoice {
+            destinationChoice = requestedChoice
+        } else if let conflict = try await Self.inspectStorageDestination(
+            manifest: parsed.manifest,
+            parent: parent
+        ) {
+            magnetDestinationConflict = TorrentMagnetDestinationConflict(
+                id: initialPromotion.id,
+                conflict: conflict
+            )
+            return
+        } else {
+            destinationChoice = .preferredName
+        }
+
+        let promotion = try await storageClaimJournal
+            .beginPromotionDestinationActivation(
+                id: initialPromotion.id,
+                operationNonce: initialPromotion.operationNonce
+            )
+        do {
             let promotedID = try await activateKnownTorrent(
                 data: torrentData,
                 folderLease: folderLease,
@@ -2537,7 +2798,8 @@ final class TorrentStore {
                     activation.runtime.sourcePolicy.httpsWebSeedPolicy,
                 claimID: activation.claimID,
                 operationNonce: activation.claimOperationNonce,
-                preservingTorrentID: promotion.torrentID
+                preservingTorrentID: promotion.torrentID,
+                destinationChoice: destinationChoice
             )
             guard promotedID == promotion.torrentID else {
                 throw TorrentMagnetPromotionError.identityChanged
@@ -2546,10 +2808,17 @@ final class TorrentStore {
                 activation.runtime,
                 torrentID: promotedID
             )
+            try await restorePromotedLabels(
+                activation.runtime,
+                torrentID: promotedID
+            )
             try await storageClaimJournal.completePromotion(
                 id: promotion.id,
                 operationNonce: promotion.operationNonce
             )
+            if magnetDestinationConflict?.id == promotion.id {
+                magnetDestinationConflict = nil
+            }
         } catch {
             _ = try? await storageClaimJournal.markPromotionOutcomeUnknown(
                 id: promotion.id,
@@ -2557,7 +2826,6 @@ final class TorrentStore {
             )
             throw error
         }
-        withExtendedLifetime(folderLease) {}
     }
 
     private func finishPromotedMagnet(
@@ -2573,6 +2841,10 @@ final class TorrentStore {
             throw TorrentStorageJournalError.invalidTransition
         }
         try await restorePromotedRuntime(
+            activation.runtime,
+            torrentID: promotion.torrentID
+        )
+        try await restorePromotedLabels(
             activation.runtime,
             torrentID: promotion.torrentID
         )
@@ -2639,6 +2911,17 @@ final class TorrentStore {
         } else {
             try await engine.resume(id: torrentID)
         }
+    }
+
+    private func restorePromotedLabels(
+        _ runtime: TorrentMagnetPromotionRuntimeState,
+        torrentID: TorrentItem.ID
+    ) async throws {
+        try await performLabelMutation(.set(
+            labelIDs: runtime.labelIDs,
+            torrentID: torrentID,
+            requiresActiveTorrent: false
+        ))
     }
 
     nonisolated private static func validatedPromotionFilePriorities(

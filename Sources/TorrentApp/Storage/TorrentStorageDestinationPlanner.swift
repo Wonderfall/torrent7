@@ -163,6 +163,24 @@ struct TorrentStorageReservation: Sendable {
     let initialLease: TorrentStorageLease
 }
 
+struct TorrentStorageDestinationConflict: Equatable, Sendable {
+    let existingTopLevelName: String
+    let separateCopyTopLevelName: String
+    let parentPath: String
+    let canUseExistingFiles: Bool
+
+    var parentDisplayName: String {
+        URL(filePath: parentPath, directoryHint: .isDirectory)
+            .lastPathComponent
+    }
+}
+
+enum TorrentStorageDestinationChoice: Equatable, Sendable {
+    case preferredName
+    case separateCopy(topLevelName: String)
+    case useExistingFiles
+}
+
 struct TorrentStorageDestinationPlanner: Sendable {
     static let ownershipAttribute = "app.torrent7.storage-claim"
     private static let maximumCollisionAttempts = 10_000
@@ -198,6 +216,31 @@ struct TorrentStorageDestinationPlanner: Sendable {
             }
         }
         throw TorrentStoragePlanningError.destinationNameExhausted
+    }
+
+    func inspectDestination(
+        for logicalManifest: TorrentLogicalManifest,
+        in parent: TorrentStorageParentAuthority
+    ) throws -> TorrentStorageDestinationConflict? {
+        let separateCopyName = try planTopLevelName(
+            for: logicalManifest,
+            in: parent
+        )
+        guard separateCopyName != logicalManifest.name else {
+            return nil
+        }
+
+        let canUseExistingFiles = (try? inspectExistingPayload(
+            manifest: logicalManifest,
+            in: parent,
+            topLevelName: logicalManifest.name
+        )) != nil
+        return TorrentStorageDestinationConflict(
+            existingTopLevelName: logicalManifest.name,
+            separateCopyTopLevelName: separateCopyName,
+            parentPath: parent.canonicalPath,
+            canUseExistingFiles: canUseExistingFiles
+        )
     }
 
     func reserve(
@@ -349,64 +392,13 @@ struct TorrentStorageDestinationPlanner: Sendable {
             throw TorrentStoragePlanningError.hiddenTopLevelName
         }
 
-        let topLevelIdentity: TorrentFilesystemIdentity
-        let mappings: [TorrentPhysicalFileMapping]
-        switch logicalManifest.contentKind {
-        case .singleFile:
-            guard logicalManifest.files.count == 1,
-                  let logicalFile = logicalManifest.files.first,
-                  !logicalFile.isPadding else {
-                throw TorrentStoragePlanningError.existingDataUnsafe
-            }
-            let descriptor = try openImportedPayload(
-                named: topLevelName,
-                relativeTo: parent.descriptor
-            )
-            defer { _ = Darwin.close(descriptor) }
-            topLevelIdentity = try validateImportedPayloadDescriptor(
-                descriptor,
-                maximumSize: logicalFile.expectedSize
-            )
-            mappings = [TorrentPhysicalFileMapping(
-                fileIndex: logicalFile.index,
-                relativePathComponents: [topLevelName],
-                identity: topLevelIdentity
-            )]
-        case .directory:
-            let topLevelDescriptor: Int32
-            do {
-                topLevelDescriptor = try openDirectory(
-                    named: topLevelName,
-                    relativeTo: parent.descriptor
-                )
-            } catch {
-                throw TorrentStoragePlanningError.existingDataUnavailable
-            }
-            defer { _ = Darwin.close(topLevelDescriptor) }
-            topLevelIdentity = try validateDirectoryDescriptor(
-                topLevelDescriptor
-            )
-            mappings = try logicalManifest.files.map { logicalFile in
-                guard !logicalFile.isPadding else {
-                    return TorrentPhysicalFileMapping(
-                        fileIndex: logicalFile.index,
-                        relativePathComponents: nil,
-                        identity: nil
-                    )
-                }
-                let identity = try inspectImportedPayload(
-                    logicalFile.pathComponents,
-                    startingAt: topLevelDescriptor,
-                    maximumSize: logicalFile.expectedSize
-                )
-                return TorrentPhysicalFileMapping(
-                    fileIndex: logicalFile.index,
-                    relativePathComponents:
-                        [topLevelName] + logicalFile.pathComponents,
-                    identity: identity
-                )
-            }
-        }
+        let inspection = try inspectExistingPayload(
+            manifest: logicalManifest,
+            in: parent,
+            topLevelName: topLevelName
+        )
+        let topLevelIdentity = inspection.topLevelIdentity
+        let mappings = inspection.mappings
 
         let mappingDigest = TorrentManifestDigest.mapping(
             claimID: claimID,
@@ -1017,6 +1009,76 @@ struct TorrentStorageDestinationPlanner: Sendable {
         } catch {
             _ = Darwin.close(current)
             throw error
+        }
+    }
+
+    private func inspectExistingPayload(
+        manifest logicalManifest: TorrentLogicalManifest,
+        in parent: TorrentStorageParentAuthority,
+        topLevelName: String
+    ) throws -> (
+        topLevelIdentity: TorrentFilesystemIdentity,
+        mappings: [TorrentPhysicalFileMapping]
+    ) {
+        switch logicalManifest.contentKind {
+        case .singleFile:
+            guard logicalManifest.files.count == 1,
+                  let logicalFile = logicalManifest.files.first,
+                  !logicalFile.isPadding else {
+                throw TorrentStoragePlanningError.existingDataUnsafe
+            }
+            let descriptor = try openImportedPayload(
+                named: topLevelName,
+                relativeTo: parent.descriptor
+            )
+            defer { _ = Darwin.close(descriptor) }
+            let identity = try validateImportedPayloadDescriptor(
+                descriptor,
+                maximumSize: logicalFile.expectedSize
+            )
+            return (
+                identity,
+                [TorrentPhysicalFileMapping(
+                    fileIndex: logicalFile.index,
+                    relativePathComponents: [topLevelName],
+                    identity: identity
+                )]
+            )
+        case .directory:
+            let topLevelDescriptor: Int32
+            do {
+                topLevelDescriptor = try openDirectory(
+                    named: topLevelName,
+                    relativeTo: parent.descriptor
+                )
+            } catch {
+                throw TorrentStoragePlanningError.existingDataUnavailable
+            }
+            defer { _ = Darwin.close(topLevelDescriptor) }
+            let topLevelIdentity = try validateDirectoryDescriptor(
+                topLevelDescriptor
+            )
+            let mappings = try logicalManifest.files.map { logicalFile in
+                guard !logicalFile.isPadding else {
+                    return TorrentPhysicalFileMapping(
+                        fileIndex: logicalFile.index,
+                        relativePathComponents: nil,
+                        identity: nil
+                    )
+                }
+                let identity = try inspectImportedPayload(
+                    logicalFile.pathComponents,
+                    startingAt: topLevelDescriptor,
+                    maximumSize: logicalFile.expectedSize
+                )
+                return TorrentPhysicalFileMapping(
+                    fileIndex: logicalFile.index,
+                    relativePathComponents:
+                        [topLevelName] + logicalFile.pathComponents,
+                    identity: identity
+                )
+            }
+            return (topLevelIdentity, mappings)
         }
     }
 

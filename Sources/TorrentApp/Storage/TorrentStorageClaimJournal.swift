@@ -45,6 +45,7 @@ struct TorrentStoragePreparation: Codable, Equatable, Sendable {
 enum TorrentMagnetPromotionState: String, Codable, Sendable {
     case awaitingMetadata
     case metadataReady
+    case awaitingDestination
     case promoting
     case outcomeUnknown
 }
@@ -55,6 +56,7 @@ struct TorrentMagnetPromotionRuntimeState: Codable, Equatable, Sendable {
     let options: TorrentOptions
     let sourcePolicy: TorrentSourcePolicy
     let filePriorities: [Int32: TorrentFilePriority]
+    let labelIDs: Set<TorrentLabel.ID>
 }
 
 struct TorrentMagnetPromotionActivation: Codable, Equatable, Sendable {
@@ -68,7 +70,7 @@ struct TorrentMagnetPromotion: Codable, Equatable, Sendable {
     let torrentID: String
     let originalMagnet: String
     let advertisedInfoHashes: TorrentStorageInfoHashes
-    let destinationPath: String
+    var destinationPath: String
     let operationNonce: UUID
     var state: TorrentMagnetPromotionState
     var exactInfoDictionary: Data?
@@ -77,7 +79,7 @@ struct TorrentMagnetPromotion: Codable, Equatable, Sendable {
 
 actor TorrentStorageClaimJournal {
     private struct Snapshot: Codable, Sendable {
-        var schemaVersion: UInt64 = 3
+        var schemaVersion: UInt64 = 4
         var preparations = [UUID: TorrentStoragePreparation]()
         var claims = [UUID: TorrentStorageClaim]()
         var promotions = [UUID: TorrentMagnetPromotion]()
@@ -157,6 +159,10 @@ actor TorrentStorageClaimJournal {
         snapshot.promotions.values.sorted {
             $0.id.uuidString < $1.id.uuidString
         }
+    }
+
+    func promotion(id: UUID) -> TorrentMagnetPromotion? {
+        snapshot.promotions[id]
     }
 
     func claim(id: UUID) -> TorrentStorageClaim? {
@@ -277,6 +283,89 @@ actor TorrentStorageClaimJournal {
     }
 
     @discardableResult
+    func markPromotionAwaitingDestination(
+        id: UUID,
+        operationNonce: UUID
+    ) throws -> TorrentMagnetPromotion {
+        guard var promotion = snapshot.promotions[id] else {
+            throw TorrentStorageJournalError.unknownPromotion
+        }
+        guard promotion.operationNonce == operationNonce else {
+            throw TorrentStorageJournalError.operationNonceMismatch
+        }
+        if promotion.state == .awaitingDestination {
+            return promotion
+        }
+        guard promotion.state == .promoting,
+              promotion.exactInfoDictionary != nil,
+              promotion.activation != nil else {
+            throw TorrentStorageJournalError.invalidTransition
+        }
+        promotion.state = .awaitingDestination
+        var updated = snapshot
+        updated.promotions[id] = promotion
+        try persist(updated)
+        snapshot = updated
+        return promotion
+    }
+
+    @discardableResult
+    func replacePromotionDestination(
+        id: UUID,
+        operationNonce: UUID,
+        destinationPath: String
+    ) throws -> TorrentMagnetPromotion {
+        guard var promotion = snapshot.promotions[id] else {
+            throw TorrentStorageJournalError.unknownPromotion
+        }
+        guard promotion.operationNonce == operationNonce else {
+            throw TorrentStorageJournalError.operationNonceMismatch
+        }
+        guard promotion.state == .awaitingDestination else {
+            throw TorrentStorageJournalError.invalidTransition
+        }
+        if promotion.destinationPath == destinationPath {
+            return promotion
+        }
+        promotion.destinationPath = destinationPath
+        guard Self.isValid(promotion) else {
+            throw TorrentStorageJournalError.invalidTransition
+        }
+        var updated = snapshot
+        updated.promotions[id] = promotion
+        try persist(updated)
+        snapshot = updated
+        return promotion
+    }
+
+    @discardableResult
+    func beginPromotionDestinationActivation(
+        id: UUID,
+        operationNonce: UUID
+    ) throws -> TorrentMagnetPromotion {
+        guard var promotion = snapshot.promotions[id] else {
+            throw TorrentStorageJournalError.unknownPromotion
+        }
+        guard promotion.operationNonce == operationNonce else {
+            throw TorrentStorageJournalError.operationNonceMismatch
+        }
+        if promotion.state == .promoting {
+            return promotion
+        }
+        guard promotion.state == .awaitingDestination,
+              promotion.exactInfoDictionary != nil,
+              promotion.activation != nil else {
+            throw TorrentStorageJournalError.invalidTransition
+        }
+        promotion.state = .promoting
+        var updated = snapshot
+        updated.promotions[id] = promotion
+        try persist(updated)
+        snapshot = updated
+        return promotion
+    }
+
+    @discardableResult
     func markPromotionOutcomeUnknown(
         id: UUID,
         operationNonce: UUID
@@ -312,6 +401,7 @@ actor TorrentStorageClaimJournal {
             throw TorrentStorageJournalError.operationNonceMismatch
         }
         guard promotion.state == .promoting
+                || promotion.state == .awaitingDestination
                 || promotion.state == .outcomeUnknown else {
             throw TorrentStorageJournalError.invalidTransition
         }
@@ -538,7 +628,7 @@ actor TorrentStorageClaimJournal {
         )
         do {
             let decoded = try JSONDecoder().decode(Snapshot.self, from: data)
-            guard decoded.schemaVersion == 3,
+            guard decoded.schemaVersion == 4,
                   decoded.claims.count + decoded.preparations.count
                     + decoded.promotions.count
                     <= maximumClaimCount,
@@ -729,7 +819,7 @@ actor TorrentStorageClaimJournal {
             return promotion.exactInfoDictionary.map {
                 exactInfoMatches($0, hashes: promotion.advertisedInfoHashes)
             } == true && promotion.activation == nil
-        case .promoting, .outcomeUnknown:
+        case .awaitingDestination, .promoting, .outcomeUnknown:
             guard let info = promotion.exactInfoDictionary,
                   exactInfoMatches(info, hashes: promotion.advertisedInfoHashes),
                   let activation = promotion.activation,
@@ -738,6 +828,11 @@ actor TorrentStorageClaimJournal {
                     <= TorrentEngineLimits.maximumFileCount,
                   activation.runtime.filePriorities.allSatisfy({
                       (0..<Int32(TorrentEngineLimits.maximumFileCount)).contains($0.key)
+                  }),
+                  activation.runtime.labelIDs.count <= TorrentLabel.maximumCount,
+                  activation.runtime.labelIDs.allSatisfy({
+                      !$0.isEmpty
+                          && $0.utf8.count <= TorrentLabel.maxIDByteCount
                   }) else {
                 return false
             }
