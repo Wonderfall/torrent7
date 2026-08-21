@@ -1130,6 +1130,102 @@ struct TorrentStoreIntegrationTests {
         }
     }
 
+    @Test("Removing a torrent while keeping files retires its storage claim")
+    func removalKeepingFilesRetiresStorageClaim() async throws {
+        try await withKnownTorrentHarness { harness, downloadFolder in
+            let payload = downloadFolder.appending(path: "sample.bin")
+            await harness.engine.setNextAddedTorrentFileID("kept")
+            await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+                revision: 1,
+                torrents: [makeTorrent(
+                    id: "kept",
+                    name: "sample.bin",
+                    contentKind: .singleFile,
+                    hasMetadata: true
+                )]
+            ))
+
+            #expect(harness.store.addTorrentFile(
+                downloadFolder.appending(path: "sample.torrent"),
+                torrentData: validSingleFileTorrentData(),
+                savePath: downloadFolder.torrentFilePath
+            ))
+            await harness.store.saveAll()
+
+            let journal = try #require(harness.storageClaimJournal)
+            #expect(await journal.allClaims().first?.lease.state == .active)
+            #expect(FileManager.default.fileExists(atPath: payload.torrentFilePath))
+
+            harness.store.removeTorrent(id: "kept", deleteFiles: false)
+            await harness.store.saveAll()
+
+            #expect(await harness.engine.removedIDs == ["kept"])
+            #expect(FileManager.default.fileExists(atPath: payload.torrentFilePath))
+            #expect(await journal.allClaims().first?.lease.state == .deleted)
+            #expect(harness.store.lastError == nil)
+        }
+    }
+
+    @Test("Orphaned claims remain preserved without a recurring recovery warning")
+    func orphanedClaimsAreTerminallyPreserved() async throws {
+        let suiteName = "app.torrent7.orphaned-claim.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
+        }
+
+        try await withKnownTorrentHarness(
+            defaultsDomain: .suite(suiteName)
+        ) { harness, downloadFolder in
+            await harness.engine.setNextAddedTorrentFileID("orphaned")
+            await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+                revision: 1,
+                torrents: [makeTorrent(
+                    id: "orphaned",
+                    name: "sample.bin",
+                    contentKind: .singleFile,
+                    hasMetadata: true
+                )]
+            ))
+            #expect(harness.store.addTorrentFile(
+                downloadFolder.appending(path: "sample.torrent"),
+                torrentData: validSingleFileTorrentData(),
+                savePath: downloadFolder.torrentFilePath
+            ))
+            await harness.store.saveAll()
+
+            let journal = try #require(harness.storageClaimJournal)
+            let active = try #require(await journal.allClaims().first)
+            _ = try await journal.transition(
+                claimID: active.manifest.claimID,
+                generation: active.manifest.generation,
+                operationNonce: UUID(),
+                from: [.active],
+                to: .orphaned
+            )
+
+            let productionEngine = FakeTorrentEngine()
+            TorrentStore.engineStartupFactoryOverride.withLock { factory in
+                factory = { _ in productionEngine }
+            }
+            let restored = makeStoreHarness(
+                defaultsDomain: .suite(suiteName),
+                storageClaimJournal: journal
+            )
+            restored.store.start()
+            await restored.store.saveAll()
+
+            #expect(restored.store.lastError == nil)
+            #expect(await journal.allClaims().first?.lease.state == .orphaned)
+            #expect(FileManager.default.fileExists(
+                atPath: downloadFolder.appending(path: "sample.bin")
+                    .torrentFilePath
+            ))
+        }
+    }
+
     @Test("Labels can be toggled, renamed, deleted, and pruned")
     func labelsCanBeToggledRenamedDeletedAndPruned() async throws {
         let suiteName = "app.torrent7.labels.\(UUID().uuidString)"

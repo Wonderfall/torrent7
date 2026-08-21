@@ -4809,19 +4809,50 @@ TEST_CASE("untracking reports its durable commit without touching payload files"
     fs::path const payload = temporary_directory.path() / "public.bin";
     bridge_tests::write_text_file(payload, "payload remains GUI-owned");
     TorrentIdentity *identity = nullptr;
-    static_cast<void>(add_metadata_torrent(client, *info, temporary_directory.path(), identity));
+    lt::torrent_handle handle = add_metadata_torrent(
+        client,
+        *info,
+        temporary_directory.path(),
+        identity
+    );
     REQUIRE(identity != nullptr);
+    TorrentIdentityToken *const token = identity->token;
+    REQUIRE(token != nullptr);
 
     std::uint8_t removal_committed = bridge_bool(false);
     std::array<char, 512> error{};
-    REQUIRE(TorrentClientRemove(
-        &client,
-        identity->canonical_id.c_str(),
-        &removal_committed,
-        error.data(),
-        static_cast<int32_t>(error.size())
-    ) == 0);
+    int32_t removal_result = -1;
+    std::atomic_bool removal_returned = false;
+    std::string const id = identity->canonical_id;
+    std::jthread removal([&] {
+        removal_result = TorrentClientRemove(
+            &client,
+            id.c_str(),
+            &removal_committed,
+            error.data(),
+            static_cast<int32_t>(error.size())
+        );
+        removal_returned.store(true, std::memory_order_release);
+    });
+
+    REQUIRE(eventually([&handle] {
+        try {
+            return !handle.in_session();
+        } catch (lt::system_error const &) {
+            return true;
+        }
+    }));
+    CHECK_FALSE(removal_returned.load(std::memory_order_acquire));
+    CHECK(token->active_identity.load(std::memory_order_acquire) == identity);
+    REQUIRE(eventually([&] {
+        client.pump_alerts();
+        return token->active_identity.load(std::memory_order_acquire) == nullptr;
+    }));
+    removal.join();
+
+    REQUIRE(removal_result == 0);
     CHECK(bridge_bool(removal_committed));
+    CHECK(removal_returned.load(std::memory_order_acquire));
     CHECK(file_exists(payload));
 }
 

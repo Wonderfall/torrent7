@@ -415,6 +415,27 @@ void TTorrentClient::finalize_removed(lt::info_hash_t const &hashes, TorrentIden
     handle_by_id.erase(identity->canonical_id);
     removing_identity_by_id.erase(identity->canonical_id);
     retire_identity_if_unreferenced_locked(identity);
+    torrent_removal_quiesced.notify_all();
+}
+
+bool TTorrentClient::wait_for_torrent_removal(
+    TorrentIdentityToken const *token,
+    std::chrono::milliseconds const timeout
+)
+{
+    if (token == nullptr) {
+        return false;
+    }
+
+    AnalyzedUniqueLock guard(lock);
+    return torrent_removal_quiesced.wait_for(
+        guard.native(),
+        timeout,
+        [this, token]() TORRENT_BRIDGE_REQUIRES(lock) {
+            static_cast<void>(this);
+            return token->active_identity.load(std::memory_order_acquire) == nullptr;
+        }
+    );
 }
 
 bool TTorrentClient::resume_write_is_current(lt::info_hash_t const &hashes, TorrentIdentity *identity)

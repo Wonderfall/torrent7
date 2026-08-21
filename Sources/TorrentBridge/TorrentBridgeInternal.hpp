@@ -259,6 +259,10 @@ constexpr std::size_t kMaxRemovalTombstoneIDMembershipCount =
     4U * static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT);
 constexpr std::array<unsigned char, 3> kUTF8ReplacementCharacter{0xefU, 0xbfU, 0xbdU};
 constexpr auto kAlertWaitInterval = std::chrono::milliseconds(250);
+// A public remove request has a 60-second IPC deadline. Leave enough headroom
+// for the fail-closed engine shutdown and reply if libtorrent never confirms
+// that its disk pipeline has quiesced.
+constexpr auto kTorrentRemovalQuiescenceTimeout = std::chrono::seconds(30);
 // Synchronous adds post critical and high-priority alerts. The worker normally
 // drains them immediately; this bounded queue extends burst tolerance when it
 // is temporarily starved on the client lock. Explicit cadence drains below are
@@ -1618,6 +1622,7 @@ struct TTorrentClient {
     int32_t wake_callbacks_in_flight TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
     bool wake_pending TORRENT_BRIDGE_GUARDED_BY(lock) = false;
     std::condition_variable wake_callback_quiesced TORRENT_BRIDGE_GUARDED_BY(lock);
+    std::condition_variable torrent_removal_quiesced TORRENT_BRIDGE_GUARDED_BY(lock);
 
     void start_alert_worker();
 
@@ -2169,6 +2174,11 @@ struct TTorrentClient {
 
     void finalize_removed(lt::info_hash_t const &hashes, TorrentIdentity *identity)
         TORRENT_BRIDGE_REQUIRES(lock) TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
+
+    [[nodiscard]] bool wait_for_torrent_removal(
+        TorrentIdentityToken const *token,
+        std::chrono::milliseconds timeout
+    ) TORRENT_BRIDGE_REQUIRES_NOT(lock) TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
 
     bool resume_write_is_current(lt::info_hash_t const &hashes, TorrentIdentity *identity)
         TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
