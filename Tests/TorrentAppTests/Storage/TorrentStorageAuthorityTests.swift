@@ -65,6 +65,64 @@ struct TorrentStorageAuthorityTests {
         }
     }
 
+    @Test("Destination inspection progressively discloses only safe choices")
+    func destinationInspectionReportsSafeChoices() throws {
+        try withTemporaryDirectory { root in
+            let downloads = root.appending(
+                path: "Downloads",
+                directoryHint: .isDirectory
+            )
+            try FileManager.default.createDirectory(
+                at: downloads,
+                withIntermediateDirectories: true
+            )
+            let parent = try makeParent(downloads)
+            let logical = try makeLogicalManifest(
+                name: "sample.bin",
+                contentKind: .singleFile,
+                files: [.init(
+                    index: 0,
+                    pathComponents: ["sample.bin"],
+                    expectedSize: 8,
+                    isPadding: false
+                )]
+            )
+            let planner = TorrentStorageDestinationPlanner()
+
+            #expect(try planner.inspectDestination(
+                for: logical,
+                in: parent
+            ) == nil)
+
+            let payload = downloads.appending(path: "sample.bin")
+            try Data("seed".utf8).write(to: payload)
+            let inspectedSafeConflict = try planner.inspectDestination(
+                for: logical,
+                in: parent
+            )
+            let safeConflict = try #require(inspectedSafeConflict)
+            #expect(safeConflict.existingTopLevelName == "sample.bin")
+            #expect(safeConflict.separateCopyTopLevelName == "sample 2.bin")
+            #expect(URL(
+                filePath: safeConflict.parentPath,
+                directoryHint: .isDirectory
+            ).standardizedFileURL == downloads.standardizedFileURL)
+            #expect(safeConflict.canUseExistingFiles)
+
+            try FileManager.default.linkItem(
+                at: payload,
+                to: downloads.appending(path: "linked.bin")
+            )
+            let inspectedUnsafeConflict = try planner.inspectDestination(
+                for: logical,
+                in: parent
+            )
+            let unsafeConflict = try #require(inspectedUnsafeConflict)
+            #expect(unsafeConflict.separateCopyTopLevelName == "sample 2.bin")
+            #expect(!unsafeConflict.canUseExistingFiles)
+        }
+    }
+
     @Test("A collision race preserves the foreign object and durable preparation")
     func reservationRaceFailsClosed() async throws {
         try await withTemporaryDirectory { root in
@@ -980,13 +1038,30 @@ struct TorrentStorageAuthorityTests {
                     queuePosition: 7,
                     options: .unlimited,
                     sourcePolicy: .unavailable,
-                    filePriorities: [0: .high]
+                    filePriorities: [0: .high],
+                    labelIDs: ["linux"]
                 )
             )
             _ = try await journal.beginPromotionActivation(
                 id: promotionID,
                 operationNonce: operationNonce,
                 activation: activation
+            )
+            let awaitingDestination = try await journal
+                .markPromotionAwaitingDestination(
+                    id: promotionID,
+                    operationNonce: operationNonce
+                )
+            #expect(awaitingDestination.state == .awaitingDestination)
+            let moved = try await journal.replacePromotionDestination(
+                id: promotionID,
+                operationNonce: operationNonce,
+                destinationPath: "/Other Downloads"
+            )
+            #expect(moved.destinationPath == "/Other Downloads")
+            _ = try await journal.beginPromotionDestinationActivation(
+                id: promotionID,
+                operationNonce: operationNonce
             )
             _ = try await journal.markPromotionOutcomeUnknown(
                 id: promotionID,
