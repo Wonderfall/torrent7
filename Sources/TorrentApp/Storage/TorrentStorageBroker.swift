@@ -13,6 +13,7 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
     case fileUnavailable
     case accessDenied
     case filesystemObjectChanged
+    case deadlineExceeded
 
     var errorDescription: String? {
         switch self {
@@ -30,6 +31,8 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
             "The requested payload access is not permitted."
         case .filesystemObjectChanged:
             "The payload filesystem object changed."
+        case .deadlineExceeded:
+            "The storage broker request deadline expired."
         }
     }
 }
@@ -185,13 +188,15 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
     func statBatch(
         claimID: UUID,
         generation: UInt64,
-        fileIndices: [Int32]
+        fileIndices: [Int32],
+        deadlineUptimeNanoseconds: UInt64? = nil
     ) throws -> [TorrentStorageBrokerFileMetadata] {
         guard !fileIndices.isEmpty,
               fileIndices.count <= TorrentStorageBrokerProtocol.maximumStatBatchCount else {
             throw TorrentStorageBrokerRegistryError.invalidClaim
         }
         return try fileIndices.map { fileIndex in
+            try Self.checkDeadline(deadlineUptimeNanoseconds)
             let resolved = try resolvedFile(
                 claimID: claimID,
                 generation: generation,
@@ -210,11 +215,13 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
             }
             let descriptor = try Self.open(resolved, access: .readOnly)
             defer { _ = Darwin.close(descriptor) }
-            return try Self.validatePayloadDescriptor(
+            let metadata = try Self.validatePayloadDescriptor(
                 descriptor,
                 resolved: resolved,
                 access: .readOnly
             )
+            try Self.checkDeadline(deadlineUptimeNanoseconds)
+            return metadata
         }
     }
 
@@ -239,16 +246,22 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
                     throw TorrentStorageBrokerRegistryError.claimInactive
                 }
             }
-            guard let mapping = claim.manifest.physicalMappings.first(where: {
-                $0.fileIndex == fileIndex
-            }),
-            let logicalFile = claim.manifest.logicalFiles.first(where: {
-                $0.index == fileIndex
-            }),
-            let policy = claim.lease.filePolicies.first(where: {
-                $0.fileIndex == fileIndex
-            }) else {
+            guard fileIndex >= 0 else {
                 throw TorrentStorageBrokerRegistryError.fileUnavailable
+            }
+            let index = Int(fileIndex)
+            guard index < claim.manifest.physicalMappings.count,
+                  index < claim.manifest.logicalFiles.count,
+                  index < claim.lease.filePolicies.count else {
+                throw TorrentStorageBrokerRegistryError.fileUnavailable
+            }
+            let mapping = claim.manifest.physicalMappings[index]
+            let logicalFile = claim.manifest.logicalFiles[index]
+            let policy = claim.lease.filePolicies[index]
+            guard mapping.fileIndex == fileIndex,
+                  logicalFile.index == fileIndex,
+                  policy.fileIndex == fileIndex else {
+                throw TorrentStorageBrokerRegistryError.invalidClaim
             }
             return ResolvedFile(
                 parent: parent,
@@ -344,7 +357,7 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
                     unsafe Darwin.openat(
                         current,
                         pointer,
-                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
                     )
                 }
                 guard next >= 0 else {
@@ -357,7 +370,7 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
                 throw TorrentStorageBrokerRegistryError.fileUnavailable
             }
             let flags = (access == .readWrite ? O_RDWR : O_RDONLY)
-                | O_CLOEXEC | O_NOFOLLOW
+                | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
             let result = unsafe leaf.withCString { pointer in
                 unsafe Darwin.openat(current, pointer, flags)
             }
@@ -435,6 +448,15 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
         return Data(marker)
     }
 
+    private static func checkDeadline(_ deadline: UInt64?) throws {
+        guard let deadline else {
+            return
+        }
+        guard DispatchTime.now().uptimeNanoseconds < deadline else {
+            throw TorrentStorageBrokerRegistryError.deadlineExceeded
+        }
+    }
+
     private static func isSafeComponent(_ component: String) -> Bool {
         !component.isEmpty
             && component != "."
@@ -445,21 +467,60 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
     }
 }
 
-@safe private final class TorrentStorageBrokerSessionGate: Sendable {
+@safe final class TorrentStorageBrokerSessionGate: Sendable {
+    struct Limits: Sendable {
+        static let production = Limits(
+            maximumInFlightRequests: 64,
+            maximumRequestsPerInterval: 2_048,
+            rateIntervalNanoseconds: 1_000_000_000,
+            maximumFutureDeadlineNanoseconds: 6_000_000_000
+        )
+
+        let maximumInFlightRequests: Int
+        let maximumRequestsPerInterval: Int
+        let rateIntervalNanoseconds: UInt64
+        let maximumFutureDeadlineNanoseconds: UInt64
+
+        init(
+            maximumInFlightRequests: Int,
+            maximumRequestsPerInterval: Int,
+            rateIntervalNanoseconds: UInt64,
+            maximumFutureDeadlineNanoseconds: UInt64
+        ) {
+            precondition(maximumInFlightRequests > 0)
+            precondition(maximumRequestsPerInterval >= maximumInFlightRequests)
+            precondition(rateIntervalNanoseconds > 0)
+            precondition(maximumFutureDeadlineNanoseconds > 0)
+            self.maximumInFlightRequests = maximumInFlightRequests
+            self.maximumRequestsPerInterval = maximumRequestsPerInterval
+            self.rateIntervalNanoseconds = rateIntervalNanoseconds
+            self.maximumFutureDeadlineNanoseconds = maximumFutureDeadlineNanoseconds
+        }
+    }
+
     private struct State: Sendable {
         var acceptedSession: XPCSession?
         var didAcceptSession = false
         var engineEpoch: UUID?
         var isCancelled = false
+        var inFlightRequestCount = 0
+        var rateIntervalStart: UInt64?
+        var requestsInRateInterval = 0
     }
 
     private let registry: TorrentStorageBrokerRegistry
     private let sessionNonce: UUID
+    private let limits: Limits
     private let state = Mutex(State())
 
-    init(registry: TorrentStorageBrokerRegistry, sessionNonce: UUID) {
+    init(
+        registry: TorrentStorageBrokerRegistry,
+        sessionNonce: UUID,
+        limits: Limits = .production
+    ) {
         self.registry = registry
         self.sessionNonce = sessionNonce
+        self.limits = limits
     }
 
     func reserveSession() -> Bool {
@@ -486,6 +547,12 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
     }
 
     func handle(_ dictionary: XPCDictionary) -> XPCDictionary? {
+        let requestStart = DispatchTime.now().uptimeNanoseconds
+        guard beginRequest(at: requestStart) else {
+            return nil
+        }
+        defer { finishRequest() }
+
         var descriptorToClose: Int32?
         defer {
             if let descriptorToClose {
@@ -496,6 +563,7 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
         do {
             request = try TorrentStorageBrokerIPCCodec.decodeRequest(dictionary)
         } catch {
+            cancel(reason: "The storage broker received a malformed request")
             return nil
         }
         let common = request.common
@@ -504,10 +572,7 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
             guard common.sessionNonce == sessionNonce else {
                 throw TorrentStorageBrokerFailure.sessionRejected
             }
-            guard DispatchTime.now().uptimeNanoseconds
-                    < common.deadlineUptimeNanoseconds else {
-                throw TorrentStorageBrokerFailure.deadlineExceeded
-            }
+            try validateDeadline(common.deadlineUptimeNanoseconds, now: requestStart)
             try authenticate(request)
             switch request {
             case .handshake:
@@ -525,6 +590,7 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
                     access: access
                 )
                 descriptorToClose = opened.descriptor
+                try checkDeadline(common.deadlineUptimeNanoseconds)
                 reply = .success(
                     requestID: common.requestID,
                     metadata: opened.metadata,
@@ -538,7 +604,8 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
                     statistics: try registry.statBatch(
                         claimID: claimID,
                         generation: generation,
-                        fileIndices: fileIndices
+                        fileIndices: fileIndices,
+                        deadlineUptimeNanoseconds: common.deadlineUptimeNanoseconds
                     ),
                     fileDescriptor: nil
                 )
@@ -567,6 +634,10 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
     }
 
     func cancel() {
+        cancel(reason: "The storage broker session ended")
+    }
+
+    private func cancel(reason: String) {
         let session = state.withLock { state in
             guard !state.isCancelled else {
                 return nil as XPCSession?
@@ -577,7 +648,69 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
             state.engineEpoch = nil
             return session
         }
-        session?.cancel(reason: "The storage broker session ended")
+        session?.cancel(reason: reason)
+    }
+
+    private func beginRequest(at now: UInt64) -> Bool {
+        let result: (accepted: Bool, session: XPCSession?) = state.withLock { state in
+            guard !state.isCancelled else {
+                return (false, nil)
+            }
+            let rateIntervalExpired: Bool
+            if let start = state.rateIntervalStart {
+                rateIntervalExpired = now < start
+                    || now - start >= limits.rateIntervalNanoseconds
+            } else {
+                rateIntervalExpired = true
+            }
+            if rateIntervalExpired {
+                state.rateIntervalStart = now
+                state.requestsInRateInterval = 0
+            }
+            guard state.requestsInRateInterval
+                    < limits.maximumRequestsPerInterval,
+                  state.inFlightRequestCount
+                    < limits.maximumInFlightRequests else {
+                return (false, Self.cancelledSession(from: &state))
+            }
+            state.requestsInRateInterval += 1
+            state.inFlightRequestCount += 1
+            return (true, nil)
+        }
+        result.session?.cancel(reason: "The storage broker request limit was exceeded")
+        return result.accepted
+    }
+
+    private func finishRequest() {
+        state.withLock { state in
+            precondition(state.inFlightRequestCount > 0)
+            state.inFlightRequestCount -= 1
+        }
+    }
+
+    private func validateDeadline(_ deadline: UInt64, now: UInt64) throws {
+        try checkDeadline(deadline)
+        let upperBound = now.addingReportingOverflow(
+            limits.maximumFutureDeadlineNanoseconds
+        )
+        guard !upperBound.overflow,
+              deadline <= upperBound.partialValue else {
+            throw TorrentStorageBrokerFailure.deadlineExceeded
+        }
+    }
+
+    private func checkDeadline(_ deadline: UInt64) throws {
+        guard DispatchTime.now().uptimeNanoseconds < deadline else {
+            throw TorrentStorageBrokerFailure.deadlineExceeded
+        }
+    }
+
+    private static func cancelledSession(from state: inout State) -> XPCSession? {
+        state.isCancelled = true
+        let session = state.acceptedSession
+        state.acceptedSession = nil
+        state.engineEpoch = nil
+        return session
     }
 
     private func authenticate(_ request: TorrentStorageBrokerRequest) throws {
@@ -616,6 +749,8 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
             .accessDenied
         case .filesystemObjectChanged:
             .filesystemObjectChanged
+        case .deadlineExceeded:
+            .deadlineExceeded
         }
     }
 

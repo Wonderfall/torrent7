@@ -1,8 +1,10 @@
 import Darwin
 import CryptoKit
 import Foundation
+import Synchronization
 import Testing
 import TorrentEngineIPC
+import XPC
 @testable import TorrentApp
 
 @MainActor
@@ -388,6 +390,147 @@ struct TorrentStorageAuthorityTests {
         }
     }
 
+    @Test("A substituted FIFO cannot block a broker worker")
+    func brokerRejectsFIFOWithoutBlocking() throws {
+        try withTemporaryDirectory { root in
+            let fixture = try reserveSingleFile(in: root, name: "payload.bin", size: 16)
+            let claim = makeClaim(fixture.reservation, state: .active)
+            let registry = TorrentStorageBrokerRegistry()
+            try registry.install(parentAuthority: fixture.parent)
+            try registry.install(claim: claim)
+
+            let payload = fixture.downloads.appending(
+                path: claim.manifest.collisionSelectedTopLevelName
+            )
+            try FileManager.default.moveItem(
+                at: payload,
+                to: fixture.downloads.appending(path: "original.bin")
+            )
+            let fifoStatus = unsafe payload.path().withCString { pointer in
+                unsafe Darwin.mkfifo(pointer, 0o600)
+            }
+            #expect(fifoStatus == 0)
+
+            let outcome = Mutex(FIFOOpenOutcome.pending)
+            let finished = DispatchSemaphore(value: 0)
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let opened = try registry.openPayload(
+                        claimID: claim.manifest.claimID,
+                        generation: claim.manifest.generation,
+                        fileIndex: 0,
+                        access: .readOnly
+                    )
+                    _ = Darwin.close(opened.descriptor)
+                    outcome.withLock { $0 = .opened }
+                } catch let error as TorrentStorageBrokerRegistryError {
+                    outcome.withLock { $0 = .rejected(error) }
+                } catch {
+                    outcome.withLock { $0 = .unexpectedError }
+                }
+                finished.signal()
+            }
+
+            let completedWithoutWriter = finished.wait(
+                timeout: .now() + .seconds(1)
+            ) == .success
+            var releaseDescriptor: Int32 = -1
+            if !completedWithoutWriter {
+                releaseDescriptor = unsafe payload.path().withCString { pointer in
+                    unsafe Darwin.open(pointer, O_RDWR | O_NONBLOCK | O_CLOEXEC)
+                }
+                _ = finished.wait(timeout: .now() + .seconds(1))
+            }
+            if releaseDescriptor >= 0 {
+                _ = Darwin.close(releaseDescriptor)
+            }
+
+            #expect(completedWithoutWriter)
+            #expect(outcome.withLock { $0 }
+                == .rejected(.filesystemObjectChanged))
+        }
+    }
+
+    @Test("Malformed broker traffic cancels the session")
+    func malformedBrokerTrafficCancelsSession() {
+        let nonce = UUID()
+        let gate = TorrentStorageBrokerSessionGate(
+            registry: TorrentStorageBrokerRegistry(),
+            sessionNonce: nonce
+        )
+        #expect(gate.handle(XPCDictionary()) == nil)
+        #expect(gate.handle(handshakeDictionary(nonce: nonce)) == nil)
+    }
+
+    @Test("Broker request rate is enforced independently of the client")
+    func brokerRateLimitIsEnforced() {
+        let nonce = UUID()
+        let gate = TorrentStorageBrokerSessionGate(
+            registry: TorrentStorageBrokerRegistry(),
+            sessionNonce: nonce,
+            limits: .init(
+                maximumInFlightRequests: 1,
+                maximumRequestsPerInterval: 1,
+                rateIntervalNanoseconds: 1_000_000_000,
+                maximumFutureDeadlineNanoseconds: 6_000_000_000
+            )
+        )
+        #expect(gate.handle(handshakeDictionary(nonce: nonce)) != nil)
+        #expect(gate.handle(handshakeDictionary(nonce: nonce)) == nil)
+        #expect(gate.handle(handshakeDictionary(nonce: nonce)) == nil)
+    }
+
+    @Test("Broker rejects deadlines outside its bounded horizon")
+    func brokerDeadlineHorizonIsBounded() throws {
+        let nonce = UUID()
+        let gate = TorrentStorageBrokerSessionGate(
+            registry: TorrentStorageBrokerRegistry(),
+            sessionNonce: nonce,
+            limits: .init(
+                maximumInFlightRequests: 1,
+                maximumRequestsPerInterval: 1,
+                rateIntervalNanoseconds: 1_000_000_000,
+                maximumFutureDeadlineNanoseconds: 1_000_000
+            )
+        )
+        let request = handshakeRequest(
+            nonce: nonce,
+            deadline: DispatchTime.now().uptimeNanoseconds + 1_000_000_000
+        )
+        let response = try #require(gate.handle(
+            TorrentStorageBrokerIPCCodec.encode(request)
+        ))
+        let reply = try TorrentStorageBrokerIPCCodec.decodeReply(
+            response,
+            for: request
+        )
+        guard case .failure(_, let code, _) = reply else {
+            Issue.record("Expected the distant deadline to be rejected")
+            return
+        }
+        #expect(code == .deadlineExceeded)
+    }
+
+    @Test("Broker batch work observes its request deadline")
+    func brokerBatchObservesDeadline() throws {
+        try withTemporaryDirectory { root in
+            let fixture = try reserveSingleFile(in: root, name: "payload.bin", size: 16)
+            let claim = makeClaim(fixture.reservation, state: .active)
+            let registry = TorrentStorageBrokerRegistry()
+            try registry.install(parentAuthority: fixture.parent)
+            try registry.install(claim: claim)
+
+            #expect(throws: TorrentStorageBrokerRegistryError.deadlineExceeded) {
+                _ = try registry.statBatch(
+                    claimID: claim.manifest.claimID,
+                    generation: claim.manifest.generation,
+                    fileIndices: [0],
+                    deadlineUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds
+                )
+            }
+        }
+    }
+
     @Test("Journal transitions are nonce-bound, durable, and centrally validated")
     func journalTransitionsAreDurable() async throws {
         try await withTemporaryDirectory { root in
@@ -551,6 +694,29 @@ struct TorrentStorageAuthorityTests {
         let downloads: URL
         let parent: TorrentStorageParentAuthority
         let reservation: TorrentStorageReservation
+    }
+
+    private enum FIFOOpenOutcome: Equatable, Sendable {
+        case pending
+        case opened
+        case rejected(TorrentStorageBrokerRegistryError)
+        case unexpectedError
+    }
+
+    private func handshakeDictionary(nonce: UUID) -> XPCDictionary {
+        TorrentStorageBrokerIPCCodec.encode(handshakeRequest(nonce: nonce))
+    }
+
+    private func handshakeRequest(
+        nonce: UUID,
+        deadline: UInt64 = DispatchTime.now().uptimeNanoseconds + 5_000_000_000
+    ) -> TorrentStorageBrokerRequest {
+        .handshake(.init(
+            requestID: UUID(),
+            engineEpoch: UUID(),
+            sessionNonce: nonce,
+            deadlineUptimeNanoseconds: deadline
+        ))
     }
 
     private func reserveSingleFile(

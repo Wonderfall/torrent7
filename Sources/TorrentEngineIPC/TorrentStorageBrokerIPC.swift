@@ -5,6 +5,9 @@ package enum TorrentStorageBrokerProtocol {
     package static let version: UInt64 = 1
     package static let maximumStatBatchCount = 256
     package static let maximumErrorBytes = 1_024
+
+    static let maximumStatBatchBytes = 4 + maximumStatBatchCount * 4
+    static let maximumMetadataBytes = 4 + maximumStatBatchCount * 40
 }
 
 package enum TorrentStorageBrokerAccess: UInt64, Sendable {
@@ -170,9 +173,9 @@ package enum TorrentStorageBrokerIPCCodec {
         guard dictionary.count <= 10,
               let version: UInt64 = dictionary[Field.version],
               version == TorrentStorageBrokerProtocol.version,
-              let requestID = uuid(dictionary[Field.requestID] as String?),
-              let engineEpoch = uuid(dictionary[Field.engineEpoch] as String?),
-              let sessionNonce = uuid(dictionary[Field.sessionNonce] as String?),
+              let requestID = uuid(in: dictionary, forKey: Field.requestID),
+              let engineEpoch = uuid(in: dictionary, forKey: Field.engineEpoch),
+              let sessionNonce = uuid(in: dictionary, forKey: Field.sessionNonce),
               let deadline: UInt64 = dictionary[Field.deadline],
               deadline > 0,
               let rawOperation: UInt64 = dictionary[Field.operation],
@@ -201,7 +204,7 @@ package enum TorrentStorageBrokerIPCCodec {
                  Field.sessionNonce, Field.deadline, Field.operation,
                  Field.claimID, Field.generation, Field.fileIndex, Field.access]
             )
-            guard let claimID = uuid(dictionary[Field.claimID] as String?),
+            guard let claimID = uuid(in: dictionary, forKey: Field.claimID),
                   let generation: UInt64 = dictionary[Field.generation],
                   generation > 0,
                   let rawIndex: Int64 = dictionary[Field.fileIndex],
@@ -225,13 +228,16 @@ package enum TorrentStorageBrokerIPCCodec {
                  Field.sessionNonce, Field.deadline, Field.operation,
                  Field.claimID, Field.generation, Field.fileIndices]
             )
-            guard let claimID = uuid(dictionary[Field.claimID] as String?),
+            guard let claimID = uuid(in: dictionary, forKey: Field.claimID),
                   let generation: UInt64 = dictionary[Field.generation],
                   generation > 0,
                   let object = unsafe dictionary[Field.fileIndices, as: XPC_TYPE_DATA] else {
                 throw TorrentStorageBrokerIPCError.malformedMessage
             }
-            let indices = try decodeIndices(data(from: object))
+            let indices = try decodeIndices(data(
+                from: object,
+                maximumBytes: TorrentStorageBrokerProtocol.maximumStatBatchBytes
+            ))
             return .statBatch(
                 common,
                 claimID: claimID,
@@ -305,7 +311,7 @@ package enum TorrentStorageBrokerIPCCodec {
         guard dictionary.count <= 7,
               let version: UInt64 = dictionary[Field.version],
               version == TorrentStorageBrokerProtocol.version,
-              let requestID = uuid(dictionary[Field.requestID] as String?),
+              let requestID = uuid(in: dictionary, forKey: Field.requestID),
               requestID == request.common.requestID,
               let status: UInt64 = dictionary[Field.status] else {
             throw TorrentStorageBrokerIPCError.requestMismatch
@@ -317,17 +323,20 @@ package enum TorrentStorageBrokerIPCCodec {
             )
             guard let rawFailure: UInt64 = dictionary[Field.failure],
                   let failure = TorrentStorageBrokerFailure(rawValue: rawFailure),
-                  let message: String = dictionary[Field.message],
+                  let message = boundedString(
+                      in: dictionary,
+                      forKey: Field.message,
+                      maximumUTF8Bytes: TorrentStorageBrokerProtocol.maximumErrorBytes
+                  ),
                   !message.isEmpty,
-                  !message.utf8.contains(0),
-                  message.utf8.count <= TorrentStorageBrokerProtocol.maximumErrorBytes else {
+                  !message.utf8.contains(0) else {
                 throw TorrentStorageBrokerIPCError.malformedMessage
             }
             return .failure(requestID: requestID, code: failure, message: message)
         }
         guard status == 0,
-              !dictionary.keys.contains(Field.failure),
-              !dictionary.keys.contains(Field.message) else {
+              !containsValue(dictionary, forKey: Field.failure),
+              !containsValue(dictionary, forKey: Field.message) else {
             throw TorrentStorageBrokerIPCError.malformedMessage
         }
         let expectedKeys: Set<String>
@@ -347,7 +356,10 @@ package enum TorrentStorageBrokerIPCCodec {
         try requireKeys(dictionary, expectedKeys)
         let metadata: TorrentStorageBrokerFileMetadata?
         if let object = unsafe dictionary[Field.metadata, as: XPC_TYPE_DATA] {
-            let values = try decodeMetadata(data(from: object))
+            let values = try decodeMetadata(data(
+                from: object,
+                maximumBytes: TorrentStorageBrokerProtocol.maximumMetadataBytes
+            ))
             guard values.count == 1 else {
                 throw TorrentStorageBrokerIPCError.malformedMessage
             }
@@ -357,7 +369,10 @@ package enum TorrentStorageBrokerIPCCodec {
         }
         let statistics: [TorrentStorageBrokerFileMetadata]
         if let object = unsafe dictionary[Field.statistics, as: XPC_TYPE_DATA] {
-            statistics = try decodeMetadata(data(from: object))
+            statistics = try decodeMetadata(data(
+                from: object,
+                maximumBytes: TorrentStorageBrokerProtocol.maximumMetadataBytes
+            ))
         } else {
             statistics = []
         }
@@ -491,10 +506,15 @@ package enum TorrentStorageBrokerIPCCodec {
         }
     }
 
-    private static func data(from object: xpc_object_t) -> Data {
+    private static func data(
+        from object: xpc_object_t,
+        maximumBytes: Int
+    ) throws -> Data {
         let count = xpc_data_get_length(object)
-        guard count > 0, let pointer = unsafe xpc_data_get_bytes_ptr(object) else {
-            return Data()
+        guard count > 0,
+              count <= maximumBytes,
+              let pointer = unsafe xpc_data_get_bytes_ptr(object) else {
+            throw TorrentStorageBrokerIPCError.malformedMessage
         }
         return unsafe Data(bytes: pointer, count: count)
     }
@@ -503,19 +523,63 @@ package enum TorrentStorageBrokerIPCCodec {
         _ dictionary: XPCDictionary,
         _ expected: Set<String>
     ) throws {
-        guard Set(dictionary.keys) == expected else {
+        guard dictionary.count == expected.count,
+              expected.allSatisfy({ containsValue(dictionary, forKey: $0) }) else {
             throw TorrentStorageBrokerIPCError.malformedMessage
         }
     }
 
-    private static func uuid(_ value: String?) -> UUID? {
-        guard let value,
-              value.utf8.count == 36,
+    private static func uuid(
+        in dictionary: XPCDictionary,
+        forKey key: String
+    ) -> UUID? {
+        guard let value = boundedString(
+            in: dictionary,
+            forKey: key,
+            exactUTF8Bytes: 36
+        ),
               let uuid = UUID(uuidString: value),
               uuid.uuidString == value else {
             return nil
         }
         return uuid
+    }
+
+    private static func boundedString(
+        in dictionary: XPCDictionary,
+        forKey key: String,
+        exactUTF8Bytes: Int
+    ) -> String? {
+        guard let object = unsafe dictionary[key, as: XPC_TYPE_STRING],
+              xpc_string_get_length(object) == exactUTF8Bytes,
+              let pointer = unsafe xpc_string_get_string_ptr(object) else {
+            return nil
+        }
+        return unsafe String(validatingCString: pointer)
+    }
+
+    private static func boundedString(
+        in dictionary: XPCDictionary,
+        forKey key: String,
+        maximumUTF8Bytes: Int
+    ) -> String? {
+        guard let object = unsafe dictionary[key, as: XPC_TYPE_STRING],
+              xpc_string_get_length(object) <= maximumUTF8Bytes,
+              let pointer = unsafe xpc_string_get_string_ptr(object) else {
+            return nil
+        }
+        return unsafe String(validatingCString: pointer)
+    }
+
+    private static func containsValue(
+        _ dictionary: XPCDictionary,
+        forKey key: String
+    ) -> Bool {
+        dictionary.withUnsafeUnderlyingDictionary { rawDictionary in
+            unsafe key.withCString { pointer in
+                unsafe xpc_dictionary_get_value(rawDictionary, pointer) != nil
+            }
+        }
     }
 
     private static func boundedError(_ source: String) -> String {
