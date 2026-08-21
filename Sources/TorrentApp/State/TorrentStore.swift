@@ -1859,45 +1859,63 @@ final class TorrentStore {
             from: [.active, .activationUnknown],
             to: .removing
         )
-        try storageBrokerRegistry.install(claim: claim)
 
         let outcome: TorrentRemovalOutcome
         do {
             outcome = try await engine.remove(id: torrent.id)
         } catch {
-            if let orphaned = try? await storageClaimJournal.transition(
+            // The native outcome is ambiguous, so revoke future broker opens
+            // without making any claim about payload ownership or deletion.
+            try? storageBrokerRegistry.removeClaim(
+                claimID: claim.manifest.claimID,
+                generation: claim.manifest.generation
+            )
+            _ = try? await storageClaimJournal.transition(
                 claimID: claim.manifest.claimID,
                 generation: claim.manifest.generation,
                 operationNonce: nonce,
                 from: [.removing],
                 to: .orphaned
-            ) {
-                try? storageBrokerRegistry.install(claim: orphaned)
-            }
+            )
             throw error
         }
 
-        guard case .removed = outcome else {
-            claim = try await storageClaimJournal.transition(
-                claimID: claim.manifest.claimID,
-                generation: claim.manifest.generation,
-                operationNonce: nonce,
-                from: [.removing],
-                to: deleteFiles ? .deletionPending : .orphaned
-            )
-            try storageBrokerRegistry.install(claim: claim)
-            return outcome
-        }
+        // TorrentClientRemove returns only after torrent_removed_alert has
+        // fenced libtorrent's disk work. Until that point the live registry
+        // intentionally retains the previous active lease even though the
+        // durable journal records the in-progress removal.
+        try storageBrokerRegistry.removeClaim(
+            claimID: claim.manifest.claimID,
+            generation: claim.manifest.generation
+        )
+
         guard deleteFiles else {
             claim = try await storageClaimJournal.transition(
                 claimID: claim.manifest.claimID,
                 generation: claim.manifest.generation,
                 operationNonce: nonce,
                 from: [.removing],
-                to: .orphaned
+                to: .deleting
             )
-            try storageBrokerRegistry.install(claim: claim)
-            return .removed
+            _ = try await storageClaimJournal.transition(
+                claimID: claim.manifest.claimID,
+                generation: claim.manifest.generation,
+                operationNonce: nonce,
+                from: [.deleting],
+                to: .deleted
+            )
+            return outcome
+        }
+
+        guard case .removed = outcome else {
+            _ = try await storageClaimJournal.transition(
+                claimID: claim.manifest.claimID,
+                generation: claim.manifest.generation,
+                operationNonce: nonce,
+                from: [.removing],
+                to: .deletionPending
+            )
+            return outcome
         }
 
         let hasAutomaticallyDeletablePayload = claim.lease.filePolicies.contains {
@@ -1918,10 +1936,6 @@ final class TorrentStore {
                 from: [.deleting],
                 to: .deleted
             )
-            try storageBrokerRegistry.removeClaim(
-                claimID: claim.manifest.claimID,
-                generation: claim.manifest.generation
-            )
             return .removedWithWarning(
                 "The torrent was removed, but imported payload data was preserved."
             )
@@ -1934,7 +1948,6 @@ final class TorrentStore {
             from: [.removing],
             to: .deleting
         )
-        try storageBrokerRegistry.install(claim: claim)
         do {
             guard let parent = storageParentAuthorities[claim.manifest.parentAuthorityID] else {
                 throw TorrentStoragePlanningError.deletionNotProvable
@@ -1947,21 +1960,15 @@ final class TorrentStore {
                 from: [.deleting],
                 to: .deleted
             )
-            try storageBrokerRegistry.removeClaim(
-                claimID: claim.manifest.claimID,
-                generation: claim.manifest.generation
-            )
             return .removed
         } catch {
-            if let pending = try? await storageClaimJournal.transition(
+            _ = try? await storageClaimJournal.transition(
                 claimID: claim.manifest.claimID,
                 generation: claim.manifest.generation,
                 operationNonce: nonce,
                 from: [.deleting],
                 to: .deletionPending
-            ) {
-                try? storageBrokerRegistry.install(claim: pending)
-            }
+            )
             return .removedWithWarning(error.localizedDescription)
         }
     }
@@ -3208,11 +3215,13 @@ final class TorrentStore {
                 continue
             case .active:
                 break
-            case .preparing, .reserved, .deletionPending,
-                 .deleted, .orphaned:
-                if claim.lease.state != .deleted {
-                    unresolvedCount += 1
-                }
+            case .preparing, .reserved, .deletionPending:
+                unresolvedCount += 1
+                continue
+            case .deleted, .orphaned:
+                // Both states are durable fail-closed dispositions. They
+                // retain no broker authority and require no recovery action;
+                // their payloads and journal evidence remain untouched.
                 continue
             }
 

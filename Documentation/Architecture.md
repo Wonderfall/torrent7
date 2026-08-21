@@ -297,12 +297,19 @@ crash does not silently refetch or guess the result.
 
 ## Removal and revocation
 
-Removal uses soft revocation. The GUI first transitions the claim out of a
-broker-active state, which denies future opens, then asks the engine to remove
-the torrent and release its file-pool handles without deleting payloads. After
-that cooperative acknowledgement, the GUI verifies claim generation,
-filesystem identity, provenance, and the object-bound ownership tag before
-unlinking any manifest object. Imported and unknown files are always preserved.
+Removal uses soft revocation. The GUI first records the in-progress removal in
+the durable journal while leaving the live broker lease usable for libtorrent's
+pending disk work. The bridge asks libtorrent to remove the torrent and waits,
+with a bounded deadline, for `torrent_removed_alert`; that alert is emitted only
+after the torrent's disk activity and file-pool handles have quiesced. A missing
+acknowledgement makes the native operation fail after its durable commit, which
+stops the engine before storage authority is released.
+
+After cooperative acknowledgement, the GUI removes the claim from the live
+broker registry. It then verifies claim generation, filesystem identity,
+provenance, and the object-bound ownership tag before unlinking any manifest
+object. A remove-without-delete operation instead retires the claim while
+preserving its payload. Imported and unknown files are always preserved.
 
 Neither a claim transition nor session cancellation can recall an already
 issued descriptor, an in-flight successful reply, a memory mapping, or copied

@@ -3393,56 +3393,73 @@ extern "C" int32_t TorrentClientRemove(TTorrentClient *client, const char *torre
         }
 
         std::string const id(c_string_view(torrent_id));
-        std::scoped_lock guard(client->lock);
-        LockedChangePublisher publisher(*client, wake);
-        BridgeResult const persistence = client->ensure_persistence_available(3);
-        if (!persistence) {
-            return persistence;
-        }
-        auto handle = client->find(id);
-        if (!handle) {
-            return bridge_error(2, "Torrent not found.");
-        }
-
-        lt::info_hash_t const hashes = handle->info_hashes();
-        TorrentIdentity *identity = identity_from_handle(*handle);
-        std::vector<std::string> const removal_ids = client->removal_ids_for_identity(hashes, id, identity);
-        BridgeResult tombstoned;
-        try {
-            tombstoned = client->persist_removal_tombstones(removal_ids);
-        } catch (...) {
-            throw;
-        }
-        if (!tombstoned) {
-            return tombstoned;
-        }
-
-        client->invalidate_queue_order_index_locked();
-        try {
-            client->session.remove_torrent(*handle);
-        } catch (std::exception const &exception) {
-            return client->cancel_tombstoned_operation_or_fault(removal_ids, 3, exception.what());
-        } catch (...) {
-            return client->cancel_tombstoned_operation_or_fault(removal_ids, 3, "Torrent could not be removed.");
-        }
-        *removal_committed_out = bridge_bool(true);
-        client->mark_remove_requested(hashes, id, identity);
-        ResumeSaveResult removed_resume = client->remove_resume_files_for_ids_checked(removal_ids);
-        if (!removed_resume) {
-            client->remember_pending_resume_cleanup(removal_ids);
-            publisher.add(client->queue_alert_error("Torrent was removed, but resume cleanup is pending: " + removed_resume.error() + "."));
-        } else {
-            ResumeSaveResult cleared_tombstones = client->clear_removal_tombstones(removal_ids);
-            if (!cleared_tombstones) {
-                publisher.add(client->queue_alert_error(
-                    "Torrent was removed, but removal marker cleanup is pending: "
-                    + cleared_tombstones.error()
-                    + "."
-                ));
+        TorrentIdentityToken *removal_token = nullptr;
+        {
+            std::scoped_lock guard(client->lock);
+            LockedChangePublisher publisher(*client, wake);
+            BridgeResult const persistence = client->ensure_persistence_available(3);
+            if (!persistence) {
+                return persistence;
             }
+            auto handle = client->find(id);
+            if (!handle) {
+                return bridge_error(2, "Torrent not found.");
+            }
+
+            lt::info_hash_t const hashes = handle->info_hashes();
+            TorrentIdentity *identity = identity_from_handle(*handle);
+            if (identity == nullptr || identity->token == nullptr) {
+                return bridge_error(3, "Torrent removal identity is unavailable.");
+            }
+            removal_token = identity->token;
+            std::vector<std::string> const removal_ids = client->removal_ids_for_identity(hashes, id, identity);
+            BridgeResult tombstoned;
+            try {
+                tombstoned = client->persist_removal_tombstones(removal_ids);
+            } catch (...) {
+                throw;
+            }
+            if (!tombstoned) {
+                return tombstoned;
+            }
+
+            client->invalidate_queue_order_index_locked();
+            try {
+                client->session.remove_torrent(*handle);
+            } catch (std::exception const &exception) {
+                return client->cancel_tombstoned_operation_or_fault(removal_ids, 3, exception.what());
+            } catch (...) {
+                return client->cancel_tombstoned_operation_or_fault(removal_ids, 3, "Torrent could not be removed.");
+            }
+            *removal_committed_out = bridge_bool(true);
+            client->mark_remove_requested(hashes, id, identity);
+            ResumeSaveResult removed_resume = client->remove_resume_files_for_ids_checked(removal_ids);
+            if (!removed_resume) {
+                client->remember_pending_resume_cleanup(removal_ids);
+                publisher.add(client->queue_alert_error("Torrent was removed, but resume cleanup is pending: " + removed_resume.error() + "."));
+            } else {
+                ResumeSaveResult cleared_tombstones = client->clear_removal_tombstones(removal_ids);
+                if (!cleared_tombstones) {
+                    publisher.add(client->queue_alert_error(
+                        "Torrent was removed, but removal marker cleanup is pending: "
+                        + cleared_tombstones.error()
+                        + "."
+                    ));
+                }
+            }
+            publisher.add(client->remove_snapshot(hashes, id));
+            client->request_snapshot_update_locked();
         }
-        publisher.add(client->remove_snapshot(hashes, id));
-        client->request_snapshot_update_locked();
+
+        if (!client->wait_for_torrent_removal(
+                removal_token,
+                kTorrentRemovalQuiescenceTimeout
+            )) {
+            return bridge_error(
+                3,
+                "Torrent removal did not release its disk activity before the deadline."
+            );
+        }
         return {};
     });
     if (client != nullptr) {
