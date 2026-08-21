@@ -44,11 +44,13 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
     }
 
     private struct ResolvedFile: Sendable {
+        let claimID: UUID
+        let claimGeneration: UInt64
         let parent: TorrentStorageParentAuthority
         let mapping: TorrentPhysicalFileMapping
         let logicalFile: TorrentLogicalFile
         let policy: TorrentPayloadFilePolicy
-        let ownershipToken: Data
+        let ownershipKey: Data
     }
 
     private let state = Mutex(State())
@@ -264,11 +266,13 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
                 throw TorrentStorageBrokerRegistryError.invalidClaim
             }
             return ResolvedFile(
+                claimID: claim.manifest.claimID,
+                claimGeneration: claim.manifest.generation,
                 parent: parent,
                 mapping: mapping,
                 logicalFile: logicalFile,
                 policy: policy,
-                ownershipToken: claim.manifest.ownershipToken
+                ownershipKey: claim.manifest.ownershipKey
             )
         }
     }
@@ -276,10 +280,12 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
     private static func validate(_ claim: TorrentStorageClaim) throws {
         let manifest = claim.manifest
         guard manifest.generation > 0,
-              manifest.ownershipToken.count == 32,
+              manifest.ownershipKey.count
+                == TorrentStorageOwnershipTag.keyByteCount,
               manifest.sourceManifestDigest.count == 32,
               manifest.claimMappingDigest.count == 32,
               !manifest.logicalFiles.isEmpty,
+              manifest.topLevelIdentity.ownerUserID == geteuid(),
               manifest.logicalFiles.map(\.index)
                 == Array(0..<Int32(manifest.logicalFiles.count)),
               manifest.physicalMappings.map(\.fileIndex)
@@ -308,7 +314,9 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
                   logicalFile.isPadding
                     == (mapping.relativePathComponents == nil),
                   (mapping.relativePathComponents == nil)
-                    == (mapping.identity == nil) else {
+                    == (mapping.identity == nil),
+                  mapping.identity.map({ $0.ownerUserID == geteuid() })
+                    ?? true else {
                 throw TorrentStorageBrokerRegistryError.invalidClaim
             }
         }
@@ -394,25 +402,44 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
             throw TorrentStorageBrokerRegistryError.fileUnavailable
         }
         var metadata = stat()
-        guard unsafe Darwin.fstat(descriptor, &metadata) == 0,
-              (metadata.st_mode & S_IFMT) == S_IFREG,
+        guard unsafe Darwin.fstat(descriptor, &metadata) == 0 else {
+            throw TorrentStorageBrokerRegistryError.filesystemObjectChanged
+        }
+        let actualIdentity = TorrentFilesystemIdentity(
+            device: UInt64(truncatingIfNeeded: metadata.st_dev),
+            inode: UInt64(truncatingIfNeeded: metadata.st_ino),
+            linkCount: UInt64(truncatingIfNeeded: metadata.st_nlink),
+            ownerUserID: metadata.st_uid,
+            fileGeneration: metadata.st_gen
+        )
+        guard (metadata.st_mode & S_IFMT) == S_IFREG,
               metadata.st_size >= 0,
               metadata.st_size <= resolved.logicalFile.expectedSize,
-              UInt64(truncatingIfNeeded: metadata.st_dev) == expectedIdentity.device,
-              UInt64(truncatingIfNeeded: metadata.st_ino) == expectedIdentity.inode,
-              UInt64(truncatingIfNeeded: metadata.st_nlink) == expectedIdentity.linkCount else {
+              actualIdentity == expectedIdentity else {
             throw TorrentStorageBrokerRegistryError.filesystemObjectChanged
         }
 
         switch resolved.policy.provenance {
         case .appCreated:
             guard metadata.st_uid == geteuid(), metadata.st_nlink == 1,
-                  ownershipMarker(on: descriptor) == resolved.ownershipToken else {
+                  let components = resolved.mapping.relativePathComponents,
+                  let tag = ownershipTag(on: descriptor),
+                  TorrentStorageOwnershipTag.isValid(
+                      tag,
+                      key: resolved.ownershipKey,
+                      claimID: resolved.claimID,
+                      claimGeneration: resolved.claimGeneration,
+                      relativePathComponents: components,
+                      identity: actualIdentity,
+                      isDirectory: false
+                  ) else {
                 throw TorrentStorageBrokerRegistryError.filesystemObjectChanged
             }
         case .imported:
             if access == .readWrite {
-                guard resolved.policy.mayModify, metadata.st_nlink == 1 else {
+                guard resolved.policy.mayModify,
+                      metadata.st_uid == geteuid(),
+                      metadata.st_nlink == 1 else {
                     throw TorrentStorageBrokerRegistryError.accessDenied
                 }
             }
@@ -428,9 +455,12 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
         )
     }
 
-    private static func ownershipMarker(on descriptor: Int32) -> Data? {
-        var marker = [UInt8](repeating: 0, count: 32)
-        let count = unsafe marker.withUnsafeMutableBytes { bytes in
+    private static func ownershipTag(on descriptor: Int32) -> Data? {
+        var tag = [UInt8](
+            repeating: 0,
+            count: TorrentStorageOwnershipTag.tagByteCount
+        )
+        let count = unsafe tag.withUnsafeMutableBytes { bytes in
             unsafe TorrentStorageDestinationPlanner.ownershipAttribute.withCString { name in
                 unsafe Darwin.fgetxattr(
                     descriptor,
@@ -442,10 +472,10 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
                 )
             }
         }
-        guard count == marker.count else {
+        guard count == tag.count else {
             return nil
         }
-        return Data(marker)
+        return Data(tag)
     }
 
     private static func checkDeadline(_ deadline: UInt64?) throws {

@@ -10,7 +10,7 @@ enum TorrentStoragePlanningError: LocalizedError, Equatable, Sendable {
     case reservationFailed
     case filesystemObjectChanged
     case unsupportedFilesystemObject
-    case ownershipMarkerFailed
+    case ownershipTagFailed
     case deletionNotProvable
     case existingDataUnavailable
     case existingDataUnsafe
@@ -31,8 +31,8 @@ enum TorrentStoragePlanningError: LocalizedError, Equatable, Sendable {
             "The torrent destination changed while it was being prepared."
         case .unsupportedFilesystemObject:
             "The torrent destination contains an unsupported filesystem object."
-        case .ownershipMarkerFailed:
-            "The torrent destination ownership marker could not be recorded."
+        case .ownershipTagFailed:
+            "The torrent destination security tag could not be recorded."
         case .deletionNotProvable:
             "The torrent payload was preserved because app ownership could not be proven."
         case .existingDataUnavailable:
@@ -107,8 +107,7 @@ final class TorrentStorageParentAuthority: @unchecked Sendable {
         var metadata = stat()
         guard unsafe Darwin.fstat(descriptor, &metadata) == 0,
               (metadata.st_mode & S_IFMT) == S_IFDIR,
-              Self.identity(metadata).device == identity.device,
-              Self.identity(metadata).inode == identity.inode else {
+              Self.identity(metadata).refersToSameObject(as: identity) else {
             throw TorrentStoragePlanningError.invalidParentAuthority
         }
     }
@@ -117,7 +116,9 @@ final class TorrentStorageParentAuthority: @unchecked Sendable {
         TorrentFilesystemIdentity(
             device: UInt64(truncatingIfNeeded: metadata.st_dev),
             inode: UInt64(truncatingIfNeeded: metadata.st_ino),
-            linkCount: UInt64(truncatingIfNeeded: metadata.st_nlink)
+            linkCount: UInt64(truncatingIfNeeded: metadata.st_nlink),
+            ownerUserID: metadata.st_uid,
+            fileGeneration: metadata.st_gen
         )
     }
 }
@@ -204,11 +205,11 @@ struct TorrentStorageDestinationPlanner: Sendable {
         in parent: TorrentStorageParentAuthority,
         claimID: UUID,
         generation: UInt64,
-        ownershipToken: Data,
+        ownershipKey: Data,
         selectedTopLevelName: String? = nil
     ) throws -> TorrentStorageReservation {
-        guard ownershipToken.count == 32 else {
-            throw TorrentStoragePlanningError.ownershipMarkerFailed
+        guard ownershipKey.count == TorrentStorageOwnershipTag.keyByteCount else {
+            throw TorrentStoragePlanningError.ownershipTagFailed
         }
         try parent.validate()
         guard !logicalManifest.name.hasPrefix(".") else {
@@ -235,7 +236,9 @@ struct TorrentStorageDestinationPlanner: Sendable {
                     preferredName: logicalManifest.name,
                     selectedName: selectedTopLevelName,
                     parentDescriptor: parent.descriptor,
-                    ownershipToken: ownershipToken,
+                    claimID: claimID,
+                    claimGeneration: generation,
+                    ownershipKey: ownershipKey,
                     created: &created
                 )
             case .directory:
@@ -243,7 +246,9 @@ struct TorrentStorageDestinationPlanner: Sendable {
                     preferredName: logicalManifest.name,
                     selectedName: selectedTopLevelName,
                     parentDescriptor: parent.descriptor,
-                    ownershipToken: ownershipToken,
+                    claimID: claimID,
+                    claimGeneration: generation,
+                    ownershipKey: ownershipKey,
                     created: &created
                 )
             }
@@ -270,7 +275,9 @@ struct TorrentStorageDestinationPlanner: Sendable {
                     logicalManifest.files,
                     topLevel: reservation,
                     parentDescriptor: parent.descriptor,
-                    ownershipToken: ownershipToken,
+                    claimID: claimID,
+                    claimGeneration: generation,
+                    ownershipKey: ownershipKey,
                     created: &created
                 )
             }
@@ -294,7 +301,7 @@ struct TorrentStorageDestinationPlanner: Sendable {
                 collisionSelectedTopLevelName: reservation.name,
                 topLevelIdentity: reservation.identity,
                 claimMappingDigest: mappingDigest,
-                ownershipToken: ownershipToken
+                ownershipKey: ownershipKey
             )
             let policies = logicalManifest.files.map { file in
                 TorrentPayloadFilePolicy(
@@ -329,11 +336,11 @@ struct TorrentStorageDestinationPlanner: Sendable {
         in parent: TorrentStorageParentAuthority,
         claimID: UUID,
         generation: UInt64,
-        ownershipToken: Data,
+        ownershipKey: Data,
         selectedTopLevelName: String? = nil
     ) throws -> TorrentStorageReservation {
-        guard ownershipToken.count == 32 else {
-            throw TorrentStoragePlanningError.ownershipMarkerFailed
+        guard ownershipKey.count == TorrentStorageOwnershipTag.keyByteCount else {
+            throw TorrentStoragePlanningError.ownershipTagFailed
         }
         try parent.validate()
         let topLevelName = selectedTopLevelName ?? logicalManifest.name
@@ -420,7 +427,7 @@ struct TorrentStorageDestinationPlanner: Sendable {
             collisionSelectedTopLevelName: topLevelName,
             topLevelIdentity: topLevelIdentity,
             claimMappingDigest: mappingDigest,
-            ownershipToken: ownershipToken
+            ownershipKey: ownershipKey
         )
         let policies = logicalManifest.files.map { file in
             TorrentPayloadFilePolicy(
@@ -443,9 +450,11 @@ struct TorrentStorageDestinationPlanner: Sendable {
         )
     }
 
-    static func randomOwnershipToken() -> Data {
+    static func randomOwnershipKey() -> Data {
         var generator = SystemRandomNumberGenerator()
-        return Data((0..<32).map { _ in UInt8.random(in: .min ... .max, using: &generator) })
+        return Data((0..<TorrentStorageOwnershipTag.keyByteCount).map { _ in
+            UInt8.random(in: .min ... .max, using: &generator)
+        })
     }
 
     func validateClaimRoot(
@@ -454,7 +463,8 @@ struct TorrentStorageDestinationPlanner: Sendable {
     ) throws {
         try parent.validate()
         guard claim.manifest.parentAuthorityID == parent.id,
-              claim.manifest.ownershipToken.count == 32 else {
+              claim.manifest.ownershipKey.count
+                == TorrentStorageOwnershipTag.keyByteCount else {
             throw TorrentStoragePlanningError.invalidParentAuthority
         }
         let name = claim.manifest.collisionSelectedTopLevelName
@@ -472,8 +482,7 @@ struct TorrentStorageDestinationPlanner: Sendable {
             ? validateDirectoryDescriptor(descriptor)
             : validatePayloadDescriptor(descriptor, writable: true)
         let expectedIdentity = claim.manifest.topLevelIdentity
-        guard identity.device == expectedIdentity.device,
-              identity.inode == expectedIdentity.inode,
+        guard identity.refersToSameObject(as: expectedIdentity),
               claim.manifest.contentKind == .directory
                 || identity.linkCount == expectedIdentity.linkCount else {
             throw TorrentStoragePlanningError.filesystemObjectChanged
@@ -481,8 +490,13 @@ struct TorrentStorageDestinationPlanner: Sendable {
         if claim.lease.filePolicies.contains(where: {
             $0.provenance == .appCreated && $0.mayDeleteAutomatically
         }) {
-            try verifyOwnershipMarker(
-                claim.manifest.ownershipToken,
+            try verifyOwnershipTag(
+                key: claim.manifest.ownershipKey,
+                claimID: claim.manifest.claimID,
+                claimGeneration: claim.manifest.generation,
+                relativePathComponents: [name],
+                identity: identity,
+                isDirectory: claim.manifest.contentKind == .directory,
                 descriptor: descriptor
             )
         }
@@ -545,8 +559,13 @@ struct TorrentStorageDestinationPlanner: Sendable {
             if claim.lease.filePolicies.first(where: {
                 $0.fileIndex == fileIndex
             })?.provenance == .appCreated {
-                try verifyOwnershipMarker(
-                    claim.manifest.ownershipToken,
+                try verifyOwnershipTag(
+                    key: claim.manifest.ownershipKey,
+                    claimID: claim.manifest.claimID,
+                    claimGeneration: claim.manifest.generation,
+                    relativePathComponents: components,
+                    identity: actualIdentity,
+                    isDirectory: false,
                     descriptor: descriptor
                 )
             }
@@ -567,7 +586,8 @@ struct TorrentStorageDestinationPlanner: Sendable {
     ) throws {
         try parent.validate()
         guard claim.manifest.parentAuthorityID == parent.id,
-              claim.manifest.ownershipToken.count == 32 else {
+              claim.manifest.ownershipKey.count
+                == TorrentStorageOwnershipTag.keyByteCount else {
             throw TorrentStoragePlanningError.deletionNotProvable
         }
 
@@ -621,8 +641,13 @@ struct TorrentStorageDestinationPlanner: Sendable {
             let actualIdentity: TorrentFilesystemIdentity
             do {
                 actualIdentity = try validatePayloadDescriptor(descriptor, writable: true)
-                try verifyOwnershipMarker(
-                    claim.manifest.ownershipToken,
+                try verifyOwnershipTag(
+                    key: claim.manifest.ownershipKey,
+                    claimID: claim.manifest.claimID,
+                    claimGeneration: claim.manifest.generation,
+                    relativePathComponents: components,
+                    identity: actualIdentity,
+                    isDirectory: false,
                     descriptor: descriptor
                 )
             } catch {
@@ -681,13 +706,19 @@ struct TorrentStorageDestinationPlanner: Sendable {
             }
             do {
                 let identity = try validateDirectoryDescriptor(descriptor)
-                try verifyOwnershipMarker(
-                    claim.manifest.ownershipToken,
+                try verifyOwnershipTag(
+                    key: claim.manifest.ownershipKey,
+                    claimID: claim.manifest.claimID,
+                    claimGeneration: claim.manifest.generation,
+                    relativePathComponents: components,
+                    identity: identity,
+                    isDirectory: true,
                     descriptor: descriptor
                 )
                 if components.count == 1 {
-                    guard identity.device == claim.manifest.topLevelIdentity.device,
-                          identity.inode == claim.manifest.topLevelIdentity.inode else {
+                    guard identity.refersToSameObject(
+                        as: claim.manifest.topLevelIdentity
+                    ) else {
                         throw TorrentStoragePlanningError.deletionNotProvable
                     }
                 }
@@ -721,7 +752,9 @@ struct TorrentStorageDestinationPlanner: Sendable {
         preferredName: String,
         selectedName: String?,
         parentDescriptor: Int32,
-        ownershipToken: Data,
+        claimID: UUID,
+        claimGeneration: UInt64,
+        ownershipKey: Data,
         created: inout [CreatedObject]
     ) throws -> ReservedTopLevel {
         let attempts = selectedName == nil ? Self.maximumCollisionAttempts : 1
@@ -744,12 +777,20 @@ struct TorrentStorageDestinationPlanner: Sendable {
             }
             do {
                 let identity = try validatePayloadDescriptor(descriptor, writable: true)
-                try setOwnershipMarker(ownershipToken, descriptor: descriptor)
                 created.append(CreatedObject(
                     components: [candidate],
                     identity: identity,
                     isDirectory: false
                 ))
+                try setOwnershipTag(
+                    key: ownershipKey,
+                    claimID: claimID,
+                    claimGeneration: claimGeneration,
+                    relativePathComponents: [candidate],
+                    identity: identity,
+                    isDirectory: false,
+                    descriptor: descriptor
+                )
                 return ReservedTopLevel(
                     name: candidate,
                     descriptor: descriptor,
@@ -767,7 +808,9 @@ struct TorrentStorageDestinationPlanner: Sendable {
         preferredName: String,
         selectedName: String?,
         parentDescriptor: Int32,
-        ownershipToken: Data,
+        claimID: UUID,
+        claimGeneration: UInt64,
+        ownershipKey: Data,
         created: inout [CreatedObject]
     ) throws -> ReservedTopLevel {
         let attempts = selectedName == nil ? Self.maximumCollisionAttempts : 1
@@ -789,12 +832,20 @@ struct TorrentStorageDestinationPlanner: Sendable {
             )
             do {
                 let identity = try validateDirectoryDescriptor(descriptor)
-                try setOwnershipMarker(ownershipToken, descriptor: descriptor)
                 created.append(CreatedObject(
                     components: [candidate],
                     identity: identity,
                     isDirectory: true
                 ))
+                try setOwnershipTag(
+                    key: ownershipKey,
+                    claimID: claimID,
+                    claimGeneration: claimGeneration,
+                    relativePathComponents: [candidate],
+                    identity: identity,
+                    isDirectory: true,
+                    descriptor: descriptor
+                )
                 return ReservedTopLevel(
                     name: candidate,
                     descriptor: descriptor,
@@ -812,7 +863,9 @@ struct TorrentStorageDestinationPlanner: Sendable {
         _ logicalFiles: [TorrentLogicalFile],
         topLevel: ReservedTopLevel,
         parentDescriptor: Int32,
-        ownershipToken: Data,
+        claimID: UUID,
+        claimGeneration: UInt64,
+        ownershipKey: Data,
         created: inout [CreatedObject]
     ) throws -> [TorrentPhysicalFileMapping] {
         defer {
@@ -840,7 +893,9 @@ struct TorrentStorageDestinationPlanner: Sendable {
                 directoryComponents,
                 topLevelDescriptor: topLevel.descriptor,
                 topLevelName: topLevel.name,
-                ownershipToken: ownershipToken,
+                claimID: claimID,
+                claimGeneration: claimGeneration,
+                ownershipKey: ownershipKey,
                 identities: &directoryIdentities,
                 created: &created
             )
@@ -861,21 +916,29 @@ struct TorrentStorageDestinationPlanner: Sendable {
                 throw TorrentStoragePlanningError.reservationFailed
             }
             let identity: TorrentFilesystemIdentity
+            let relativeComponents = [topLevel.name] + logicalFile.pathComponents
             do {
                 identity = try validatePayloadDescriptor(fileDescriptor, writable: true)
-                try setOwnershipMarker(ownershipToken, descriptor: fileDescriptor)
+                created.append(CreatedObject(
+                    components: relativeComponents,
+                    identity: identity,
+                    isDirectory: false
+                ))
+                try setOwnershipTag(
+                    key: ownershipKey,
+                    claimID: claimID,
+                    claimGeneration: claimGeneration,
+                    relativePathComponents: relativeComponents,
+                    identity: identity,
+                    isDirectory: false,
+                    descriptor: fileDescriptor
+                )
             } catch {
                 _ = Darwin.close(fileDescriptor)
                 throw error
             }
             _ = Darwin.close(fileDescriptor)
 
-            let relativeComponents = [topLevel.name] + logicalFile.pathComponents
-            created.append(CreatedObject(
-                components: relativeComponents,
-                identity: identity,
-                isDirectory: false
-            ))
             mappings.append(TorrentPhysicalFileMapping(
                 fileIndex: logicalFile.index,
                 relativePathComponents: relativeComponents,
@@ -889,7 +952,9 @@ struct TorrentStorageDestinationPlanner: Sendable {
         _ components: [String],
         topLevelDescriptor: Int32,
         topLevelName: String,
-        ownershipToken: Data,
+        claimID: UUID,
+        claimGeneration: UInt64,
+        ownershipKey: Data,
         identities: inout [String: TorrentFilesystemIdentity],
         created: inout [CreatedObject]
     ) throws -> Int32 {
@@ -910,14 +975,27 @@ struct TorrentStorageDestinationPlanner: Sendable {
                 }
                 if status == 0 {
                     let next = try openDirectory(named: component, relativeTo: current)
-                    let identity = try validateDirectoryDescriptor(next)
-                    try setOwnershipMarker(ownershipToken, descriptor: next)
-                    identities[key] = identity
-                    created.append(CreatedObject(
-                        components: [topLevelName] + traversed,
-                        identity: identity,
-                        isDirectory: true
-                    ))
+                    do {
+                        let identity = try validateDirectoryDescriptor(next)
+                        created.append(CreatedObject(
+                            components: [topLevelName] + traversed,
+                            identity: identity,
+                            isDirectory: true
+                        ))
+                        try setOwnershipTag(
+                            key: ownershipKey,
+                            claimID: claimID,
+                            claimGeneration: claimGeneration,
+                            relativePathComponents: [topLevelName] + traversed,
+                            identity: identity,
+                            isDirectory: true,
+                            descriptor: next
+                        )
+                        identities[key] = identity
+                    } catch {
+                        _ = Darwin.close(next)
+                        throw error
+                    }
                     _ = Darwin.close(current)
                     current = next
                     continue
@@ -928,8 +1006,7 @@ struct TorrentStorageDestinationPlanner: Sendable {
                 }
                 let next = try openDirectory(named: component, relativeTo: current)
                 let actual = try validateDirectoryDescriptor(next)
-                guard actual.device == expected.device,
-                      actual.inode == expected.inode else {
+                guard actual.refersToSameObject(as: expected) else {
                     _ = Darwin.close(next)
                     throw TorrentStoragePlanningError.filesystemObjectChanged
                 }
@@ -1076,12 +1153,32 @@ struct TorrentStorageDestinationPlanner: Sendable {
         TorrentFilesystemIdentity(
             device: UInt64(truncatingIfNeeded: metadata.st_dev),
             inode: UInt64(truncatingIfNeeded: metadata.st_ino),
-            linkCount: UInt64(truncatingIfNeeded: metadata.st_nlink)
+            linkCount: UInt64(truncatingIfNeeded: metadata.st_nlink),
+            ownerUserID: metadata.st_uid,
+            fileGeneration: metadata.st_gen
         )
     }
 
-    private func setOwnershipMarker(_ token: Data, descriptor: Int32) throws {
-        let status = unsafe token.withUnsafeBytes { bytes in
+    private func setOwnershipTag(
+        key: Data,
+        claimID: UUID,
+        claimGeneration: UInt64,
+        relativePathComponents: [String],
+        identity: TorrentFilesystemIdentity,
+        isDirectory: Bool,
+        descriptor: Int32
+    ) throws {
+        guard let tag = TorrentStorageOwnershipTag.authenticationCode(
+            key: key,
+            claimID: claimID,
+            claimGeneration: claimGeneration,
+            relativePathComponents: relativePathComponents,
+            identity: identity,
+            isDirectory: isDirectory
+        ) else {
+            throw TorrentStoragePlanningError.ownershipTagFailed
+        }
+        let status = unsafe tag.withUnsafeBytes { bytes in
             unsafe Self.ownershipAttribute.withCString { name in
                 unsafe Darwin.fsetxattr(
                     descriptor,
@@ -1094,13 +1191,21 @@ struct TorrentStorageDestinationPlanner: Sendable {
             }
         }
         guard status == 0 else {
-            throw TorrentStoragePlanningError.ownershipMarkerFailed
+            throw TorrentStoragePlanningError.ownershipTagFailed
         }
     }
 
-    private func verifyOwnershipMarker(_ token: Data, descriptor: Int32) throws {
-        var value = Data(count: token.count)
-        let result = unsafe value.withUnsafeMutableBytes { bytes in
+    private func verifyOwnershipTag(
+        key: Data,
+        claimID: UUID,
+        claimGeneration: UInt64,
+        relativePathComponents: [String],
+        identity: TorrentFilesystemIdentity,
+        isDirectory: Bool,
+        descriptor: Int32
+    ) throws {
+        var tag = Data(count: TorrentStorageOwnershipTag.tagByteCount)
+        let result = unsafe tag.withUnsafeMutableBytes { bytes in
             unsafe Self.ownershipAttribute.withCString { name in
                 unsafe Darwin.fgetxattr(
                     descriptor,
@@ -1112,7 +1217,16 @@ struct TorrentStorageDestinationPlanner: Sendable {
                 )
             }
         }
-        guard result == token.count, value == token else {
+        guard result == tag.count,
+              TorrentStorageOwnershipTag.isValid(
+                  tag,
+                  key: key,
+                  claimID: claimID,
+                  claimGeneration: claimGeneration,
+                  relativePathComponents: relativePathComponents,
+                  identity: identity,
+                  isDirectory: isDirectory
+              ) else {
             throw TorrentStoragePlanningError.deletionNotProvable
         }
     }
@@ -1165,8 +1279,7 @@ struct TorrentStorageDestinationPlanner: Sendable {
                 ? try? validateDirectoryDescriptor(current)
                 : try? validatePayloadDescriptor(current, writable: false)
             _ = Darwin.close(current)
-            guard actual?.device == object.identity.device,
-                  actual?.inode == object.identity.inode else {
+            guard actual?.refersToSameObject(as: object.identity) == true else {
                 continue
             }
             _ = unsafe leaf.withCString { pointer in

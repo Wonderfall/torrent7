@@ -37,7 +37,7 @@ struct TorrentStoragePreparation: Codable, Equatable, Sendable {
     let generation: UInt64
     let parentAuthorityID: UUID
     let preferredTopLevelName: String
-    let ownershipToken: Data
+    let ownershipKey: Data
     let operationNonce: UUID
     var reservedTopLevelName: String?
 }
@@ -77,7 +77,7 @@ struct TorrentMagnetPromotion: Codable, Equatable, Sendable {
 
 actor TorrentStorageClaimJournal {
     private struct Snapshot: Codable, Sendable {
-        var schemaVersion: UInt64 = 2
+        var schemaVersion: UInt64 = 3
         var preparations = [UUID: TorrentStoragePreparation]()
         var claims = [UUID: TorrentStorageClaim]()
         var promotions = [UUID: TorrentMagnetPromotion]()
@@ -102,10 +102,10 @@ actor TorrentStorageClaimJournal {
                 [UUID: TorrentStorageClaim].self,
                 forKey: .claims
             )
-            promotions = try container.decodeIfPresent(
+            promotions = try container.decode(
                 [UUID: TorrentMagnetPromotion].self,
                 forKey: .promotions
-            ) ?? [:]
+            )
         }
     }
 
@@ -365,7 +365,7 @@ actor TorrentStorageClaimJournal {
         }
         guard preparation.operationNonce == claim.operationNonce,
               preparation.parentAuthorityID == claim.manifest.parentAuthorityID,
-              preparation.ownershipToken == claim.manifest.ownershipToken,
+              preparation.ownershipKey == claim.manifest.ownershipKey,
               preparation.reservedTopLevelName
                 == claim.manifest.collisionSelectedTopLevelName,
               claim.lease.state == .reserved,
@@ -537,8 +537,8 @@ actor TorrentStorageClaimJournal {
             expectedSize: Int(metadata.st_size)
         )
         do {
-            var decoded = try JSONDecoder().decode(Snapshot.self, from: data)
-            guard (1...2).contains(decoded.schemaVersion),
+            let decoded = try JSONDecoder().decode(Snapshot.self, from: data)
+            guard decoded.schemaVersion == 3,
                   decoded.claims.count + decoded.preparations.count
                     + decoded.promotions.count
                     <= maximumClaimCount,
@@ -552,7 +552,6 @@ actor TorrentStorageClaimJournal {
                     == decoded.promotions.count else {
                 throw TorrentStorageJournalError.corrupt
             }
-            decoded.schemaVersion = 2
             return decoded
         } catch let error as TorrentStorageJournalError {
             throw error
@@ -659,7 +658,8 @@ actor TorrentStorageClaimJournal {
 
     private static func isValid(_ preparation: TorrentStoragePreparation) -> Bool {
         preparation.generation > 0
-            && preparation.ownershipToken.count == 32
+            && preparation.ownershipKey.count
+                == TorrentStorageOwnershipTag.keyByteCount
             && isSafeComponent(preparation.preferredTopLevelName)
             && (preparation.reservedTopLevelName.map(isSafeComponent) ?? true)
     }
@@ -673,8 +673,10 @@ actor TorrentStorageClaimJournal {
               manifest.infoHashes.v1 != nil || manifest.infoHashes.v2 != nil,
               manifest.sourceManifestDigest.count == 32,
               manifest.claimMappingDigest.count == 32,
-              manifest.ownershipToken.count == 32,
+              manifest.ownershipKey.count
+                == TorrentStorageOwnershipTag.keyByteCount,
               !manifest.logicalFiles.isEmpty,
+              manifest.topLevelIdentity.ownerUserID == geteuid(),
               manifest.logicalFiles.map(\.index) == expectedIndices,
               manifest.physicalMappings.map(\.fileIndex) == expectedIndices,
               claim.lease.policyRevision > 0,
@@ -701,6 +703,7 @@ actor TorrentStorageClaimJournal {
                 && logicalFile.pathComponents.allSatisfy(isSafeComponent)
                 && logicalFile.isPadding == (mapping.relativePathComponents == nil)
                 && (mapping.relativePathComponents == nil) == (mapping.identity == nil)
+                && (mapping.identity.map({ $0.ownerUserID == geteuid() }) ?? true)
                 && (mapping.relativePathComponents?.allSatisfy(isSafeComponent) ?? true)
         }
     }
