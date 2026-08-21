@@ -1530,6 +1530,20 @@ final class TorrentStore {
             operationNonce: operationNonce
         )
         try await storageClaimJournal.commitReserved(claim)
+        if inspectedImport != nil {
+            do {
+                try await Self.claimImportedStorage(claim, parent: parent)
+            } catch {
+                _ = try? await storageClaimJournal.transition(
+                    claimID: claimID,
+                    generation: generation,
+                    operationNonce: operationNonce,
+                    from: [.reserved],
+                    to: .orphaned
+                )
+                throw error
+            }
+        }
         claim = try await storageClaimJournal.transition(
             claimID: claimID,
             generation: generation,
@@ -1664,6 +1678,17 @@ final class TorrentStore {
             generation: generation,
             ownershipKey: ownershipKey,
             selectedTopLevelName: selectedTopLevelName
+        )
+    }
+
+    @concurrent
+    private static func claimImportedStorage(
+        _ claim: TorrentStorageClaim,
+        parent: TorrentStorageParentAuthority
+    ) async throws {
+        try TorrentStorageDestinationPlanner().claimImportedPayload(
+            claim,
+            in: parent
         )
     }
 
@@ -1897,14 +1922,37 @@ final class TorrentStore {
                 from: [.removing],
                 to: .deleting
             )
-            _ = try await storageClaimJournal.transition(
-                claimID: claim.manifest.claimID,
-                generation: claim.manifest.generation,
-                operationNonce: nonce,
-                from: [.deleting],
-                to: .deleted
-            )
-            return outcome
+            do {
+                guard let parent = storageParentAuthorities[
+                    claim.manifest.parentAuthorityID
+                ] else {
+                    throw TorrentStoragePlanningError.deletionNotProvable
+                }
+                try await Self.releaseStorageClaim(claim, from: parent)
+                _ = try await storageClaimJournal.transition(
+                    claimID: claim.manifest.claimID,
+                    generation: claim.manifest.generation,
+                    operationNonce: nonce,
+                    from: [.deleting],
+                    to: .deleted
+                )
+                return outcome
+            } catch {
+                _ = try? await storageClaimJournal.transition(
+                    claimID: claim.manifest.claimID,
+                    generation: claim.manifest.generation,
+                    operationNonce: nonce,
+                    from: [.deleting],
+                    to: .deletionPending
+                )
+                let warning = switch outcome {
+                case .removed:
+                    error.localizedDescription
+                case .removedWithWarning(let existing):
+                    "\(existing)\n\(error.localizedDescription)"
+                }
+                return .removedWithWarning(warning)
+            }
         }
 
         guard case .removed = outcome else {
@@ -1916,29 +1964,6 @@ final class TorrentStore {
                 to: .deletionPending
             )
             return outcome
-        }
-
-        let hasAutomaticallyDeletablePayload = claim.lease.filePolicies.contains {
-            $0.provenance == .appCreated && $0.mayDeleteAutomatically
-        }
-        guard hasAutomaticallyDeletablePayload else {
-            claim = try await storageClaimJournal.transition(
-                claimID: claim.manifest.claimID,
-                generation: claim.manifest.generation,
-                operationNonce: nonce,
-                from: [.removing],
-                to: .deleting
-            )
-            claim = try await storageClaimJournal.transition(
-                claimID: claim.manifest.claimID,
-                generation: claim.manifest.generation,
-                operationNonce: nonce,
-                from: [.deleting],
-                to: .deleted
-            )
-            return .removedWithWarning(
-                "The torrent was removed, but imported payload data was preserved."
-            )
         }
 
         claim = try await storageClaimJournal.transition(
@@ -1974,13 +1999,25 @@ final class TorrentStore {
     }
 
     @concurrent
+    private static func releaseStorageClaim(
+        _ claim: TorrentStorageClaim,
+        from parent: TorrentStorageParentAuthority
+    ) async throws {
+        try TorrentStorageDestinationPlanner().releaseClaimedPayload(
+            claim,
+            from: parent
+        )
+    }
+
+    @concurrent
     private static func deleteStorageClaim(
         _ claim: TorrentStorageClaim,
         from parent: TorrentStorageParentAuthority
     ) async throws {
-        try TorrentStorageDestinationPlanner().deleteOwnedPayload(
+        try TorrentStorageDestinationPlanner().deleteClaimedPayload(
             claim: claim,
-            from: parent
+            from: parent,
+            authorizedBy: .explicitUserRequest
         )
     }
 
