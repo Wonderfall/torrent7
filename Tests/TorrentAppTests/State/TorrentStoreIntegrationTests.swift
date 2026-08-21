@@ -1083,8 +1083,8 @@ struct TorrentStoreIntegrationTests {
         }
     }
 
-    @Test("Imported torrent data is activated in place and never deleted automatically")
-    func importedTorrentDataIsPreservedOnRemoval() async throws {
+    @Test("Explicit removal deletes imported torrent data")
+    func importedTorrentDataIsDeletedWhenRequested() async throws {
         try await withKnownTorrentHarness { harness, downloadFolder in
             let payload = downloadFolder.appending(path: "sample.bin")
             let original = Data("seed".utf8)
@@ -1121,11 +1121,8 @@ struct TorrentStoreIntegrationTests {
             await harness.store.saveAll()
 
             #expect(await harness.engine.removedIDs == ["imported"])
-            #expect(try Data(contentsOf: payload) == original)
-            #expect(
-                harness.store.lastError
-                    == "The torrent was removed, but imported payload data was preserved."
-            )
+            #expect(!FileManager.default.fileExists(atPath: payload.torrentFilePath))
+            #expect(harness.store.lastError == nil)
             #expect(await journal.allClaims().first?.lease.state == .deleted)
         }
     }

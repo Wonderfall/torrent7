@@ -195,12 +195,28 @@ enum TorrentPayloadProvenance: String, Codable, Sendable {
     case imported
 }
 
+enum TorrentPayloadDeletionAuthorization: Equatable, Sendable {
+    case automaticCleanup
+    case explicitUserRequest
+}
+
 struct TorrentPayloadFilePolicy: Codable, Equatable, Sendable {
     let fileIndex: Int32
     var maximumAccess: TorrentPayloadMaximumAccess
     let provenance: TorrentPayloadProvenance
     let mayModify: Bool
     let mayDeleteAutomatically: Bool
+
+    func permitsDeletion(
+        authorizedBy authorization: TorrentPayloadDeletionAuthorization
+    ) -> Bool {
+        if mayDeleteAutomatically {
+            return true
+        }
+        return authorization == .explicitUserRequest
+            && provenance == .imported
+            && mayModify
+    }
 }
 
 enum TorrentStorageClaimState: String, Codable, Sendable {

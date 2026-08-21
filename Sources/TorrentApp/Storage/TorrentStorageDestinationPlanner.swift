@@ -373,7 +373,7 @@ struct TorrentStorageDestinationPlanner: Sendable {
     /// truncating, renaming, or marking any filesystem object. Imported
     /// writable files must be regular, owned by this user, no larger than the
     /// torrent layout, and have exactly one hard link before their identities
-    /// are pinned into the claim.
+    /// are pinned into the proposed claim.
     func importExisting(
         manifest logicalManifest: TorrentLogicalManifest,
         in parent: TorrentStorageParentAuthority,
@@ -442,6 +442,165 @@ struct TorrentStorageDestinationPlanner: Sendable {
         )
     }
 
+    /// Authenticates the ownership transfer for a durably reserved import.
+    /// Only manifest files and their containing directories are marked. A
+    /// directory marker authorizes removing that directory only when it is
+    /// empty; it never grants deletion authority over unrelated contents.
+    func claimImportedPayload(
+        _ claim: TorrentStorageClaim,
+        in parent: TorrentStorageParentAuthority
+    ) throws {
+        try parent.validate()
+        let manifest = claim.manifest
+        guard claim.lease.state == .reserved,
+              manifest.parentAuthorityID == parent.id,
+              manifest.ownershipKey.count
+                == TorrentStorageOwnershipTag.keyByteCount,
+              manifest.logicalFiles.map(\.index)
+                == manifest.physicalMappings.map(\.fileIndex),
+              TorrentStoragePolicyValidation.isValid(
+                logicalFiles: manifest.logicalFiles,
+                policies: claim.lease.filePolicies
+              ) else {
+            throw TorrentStoragePlanningError.existingDataUnsafe
+        }
+
+        let policies = Dictionary(uniqueKeysWithValues:
+            claim.lease.filePolicies.map { ($0.fileIndex, $0) }
+        )
+        guard zip(manifest.logicalFiles, manifest.physicalMappings).allSatisfy({
+            logicalFile, mapping in
+            guard logicalFile.index == mapping.fileIndex else {
+                return false
+            }
+            if logicalFile.isPadding {
+                return mapping.relativePathComponents == nil
+                    && mapping.identity == nil
+            }
+            guard let policy = policies[logicalFile.index] else {
+                return false
+            }
+            return policy.provenance == .imported
+                && policy.mayModify
+                && !policy.mayDeleteAutomatically
+                && mapping.relativePathComponents != nil
+                && mapping.identity != nil
+        }) else {
+            throw TorrentStoragePlanningError.existingDataUnsafe
+        }
+
+        var claimedObjects = [CreatedObject]()
+        do {
+            var directories = Set<[String]>()
+            for mapping in manifest.physicalMappings {
+                guard let components = mapping.relativePathComponents else {
+                    continue
+                }
+                for count in 1..<components.count {
+                    directories.insert(Array(components.prefix(count)))
+                }
+            }
+            if manifest.contentKind == .directory {
+                directories.insert([manifest.collisionSelectedTopLevelName])
+            }
+
+            for components in directories.sorted(by: { $0.count < $1.count }) {
+                guard let leaf = components.last else {
+                    throw TorrentStoragePlanningError.existingDataUnsafe
+                }
+                let containingDirectory = try openParentDirectory(
+                    of: components,
+                    startingAt: parent.descriptor
+                )
+                defer {
+                    if containingDirectory != parent.descriptor {
+                        _ = Darwin.close(containingDirectory)
+                    }
+                }
+                let descriptor = try openDirectory(
+                    named: leaf,
+                    relativeTo: containingDirectory
+                )
+                defer { _ = Darwin.close(descriptor) }
+                let identity = try validateDirectoryDescriptor(descriptor)
+                if components.count == 1 {
+                    guard identity.refersToSameObject(
+                        as: manifest.topLevelIdentity
+                    ) else {
+                        throw TorrentStoragePlanningError.filesystemObjectChanged
+                    }
+                }
+                try setOwnershipTag(
+                    key: manifest.ownershipKey,
+                    claimID: manifest.claimID,
+                    claimGeneration: manifest.generation,
+                    relativePathComponents: components,
+                    identity: identity,
+                    isDirectory: true,
+                    descriptor: descriptor
+                )
+                claimedObjects.append(CreatedObject(
+                    components: components,
+                    identity: identity,
+                    isDirectory: true
+                ))
+            }
+
+            for (logicalFile, mapping) in zip(
+                manifest.logicalFiles,
+                manifest.physicalMappings
+            ) where !logicalFile.isPadding {
+                guard let components = mapping.relativePathComponents,
+                      let expectedIdentity = mapping.identity,
+                      let leaf = components.last else {
+                    throw TorrentStoragePlanningError.existingDataUnsafe
+                }
+                let containingDirectory = try openParentDirectory(
+                    of: components,
+                    startingAt: parent.descriptor
+                )
+                defer {
+                    if containingDirectory != parent.descriptor {
+                        _ = Darwin.close(containingDirectory)
+                    }
+                }
+                let descriptor = try openImportedPayload(
+                    named: leaf,
+                    relativeTo: containingDirectory
+                )
+                defer { _ = Darwin.close(descriptor) }
+                let identity = try validateImportedPayloadDescriptor(
+                    descriptor,
+                    maximumSize: logicalFile.expectedSize
+                )
+                guard identity == expectedIdentity else {
+                    throw TorrentStoragePlanningError.filesystemObjectChanged
+                }
+                try setOwnershipTag(
+                    key: manifest.ownershipKey,
+                    claimID: manifest.claimID,
+                    claimGeneration: manifest.generation,
+                    relativePathComponents: components,
+                    identity: identity,
+                    isDirectory: false,
+                    descriptor: descriptor
+                )
+                claimedObjects.append(CreatedObject(
+                    components: components,
+                    identity: identity,
+                    isDirectory: false
+                ))
+            }
+        } catch {
+            removeOwnershipTags(
+                from: claimedObjects,
+                claim: claim,
+                parentDescriptor: parent.descriptor
+            )
+            throw error
+        }
+    }
+
     static func randomOwnershipKey() -> Data {
         var generator = SystemRandomNumberGenerator()
         return Data((0..<TorrentStorageOwnershipTag.keyByteCount).map { _ in
@@ -479,19 +638,15 @@ struct TorrentStorageDestinationPlanner: Sendable {
                 || identity.linkCount == expectedIdentity.linkCount else {
             throw TorrentStoragePlanningError.filesystemObjectChanged
         }
-        if claim.lease.filePolicies.contains(where: {
-            $0.provenance == .appCreated && $0.mayDeleteAutomatically
-        }) {
-            try verifyOwnershipTag(
-                key: claim.manifest.ownershipKey,
-                claimID: claim.manifest.claimID,
-                claimGeneration: claim.manifest.generation,
-                relativePathComponents: [name],
-                identity: identity,
-                isDirectory: claim.manifest.contentKind == .directory,
-                descriptor: descriptor
-            )
-        }
+        try verifyOwnershipTag(
+            key: claim.manifest.ownershipKey,
+            claimID: claim.manifest.claimID,
+            claimGeneration: claim.manifest.generation,
+            relativePathComponents: [name],
+            identity: identity,
+            isDirectory: claim.manifest.contentKind == .directory,
+            descriptor: descriptor
+        )
     }
 
     /// Resolves a Finder presentation target from GUI-owned claim authority.
@@ -548,19 +703,15 @@ struct TorrentStorageDestinationPlanner: Sendable {
             guard actualIdentity == expectedIdentity else {
                 return rootURL
             }
-            if claim.lease.filePolicies.first(where: {
-                $0.fileIndex == fileIndex
-            })?.provenance == .appCreated {
-                try verifyOwnershipTag(
-                    key: claim.manifest.ownershipKey,
-                    claimID: claim.manifest.claimID,
-                    claimGeneration: claim.manifest.generation,
-                    relativePathComponents: components,
-                    identity: actualIdentity,
-                    isDirectory: false,
-                    descriptor: descriptor
-                )
-            }
+            try verifyOwnershipTag(
+                key: claim.manifest.ownershipKey,
+                claimID: claim.manifest.claimID,
+                claimGeneration: claim.manifest.generation,
+                relativePathComponents: components,
+                identity: actualIdentity,
+                isDirectory: false,
+                descriptor: descriptor
+            )
             return components.reduce(URL(
                 filePath: parent.canonicalPath,
                 directoryHint: .isDirectory
@@ -572,29 +723,122 @@ struct TorrentStorageDestinationPlanner: Sendable {
         }
     }
 
-    func deleteOwnedPayload(
-        claim: TorrentStorageClaim,
+    /// Relinquishes authenticated ownership without deleting payload data.
+    /// Missing objects or already-released tags are idempotent success; a
+    /// changed object or a foreign tag fails closed.
+    func releaseClaimedPayload(
+        _ claim: TorrentStorageClaim,
         from parent: TorrentStorageParentAuthority
     ) throws {
         try parent.validate()
-        guard claim.manifest.parentAuthorityID == parent.id,
-              claim.manifest.ownershipKey.count
-                == TorrentStorageOwnershipTag.keyByteCount else {
+        let manifest = claim.manifest
+        guard claim.lease.state == .deleting,
+              manifest.parentAuthorityID == parent.id,
+              manifest.ownershipKey.count
+                == TorrentStorageOwnershipTag.keyByteCount,
+              manifest.logicalFiles.map(\.index)
+                == manifest.physicalMappings.map(\.fileIndex),
+              TorrentStoragePolicyValidation.isValid(
+                logicalFiles: manifest.logicalFiles,
+                policies: claim.lease.filePolicies
+              ) else {
+            throw TorrentStoragePlanningError.deletionNotProvable
+        }
+
+        var directories = Set<[String]>()
+        for (logicalFile, mapping) in zip(
+            manifest.logicalFiles,
+            manifest.physicalMappings
+        ) {
+            if logicalFile.isPadding {
+                guard mapping.relativePathComponents == nil,
+                      mapping.identity == nil else {
+                    throw TorrentStoragePlanningError.deletionNotProvable
+                }
+                continue
+            }
+            guard let components = mapping.relativePathComponents,
+                  let identity = mapping.identity else {
+                throw TorrentStoragePlanningError.deletionNotProvable
+            }
+            try removeOwnershipTag(
+                key: manifest.ownershipKey,
+                claimID: manifest.claimID,
+                claimGeneration: manifest.generation,
+                relativePathComponents: components,
+                expectedIdentity: identity,
+                isDirectory: false,
+                parentDescriptor: parent.descriptor
+            )
+            for count in 1..<components.count {
+                directories.insert(Array(components.prefix(count)))
+            }
+        }
+        if manifest.contentKind == .directory {
+            directories.insert([manifest.collisionSelectedTopLevelName])
+        }
+        for components in directories.sorted(by: { $0.count > $1.count }) {
+            try removeOwnershipTag(
+                key: manifest.ownershipKey,
+                claimID: manifest.claimID,
+                claimGeneration: manifest.generation,
+                relativePathComponents: components,
+                expectedIdentity: components.count == 1
+                    ? manifest.topLevelIdentity
+                    : nil,
+                isDirectory: true,
+                parentDescriptor: parent.descriptor
+            )
+        }
+    }
+
+    func deleteClaimedPayload(
+        claim: TorrentStorageClaim,
+        from parent: TorrentStorageParentAuthority,
+        authorizedBy authorization: TorrentPayloadDeletionAuthorization
+    ) throws {
+        try parent.validate()
+        let manifest = claim.manifest
+        guard claim.lease.state == .deleting,
+              manifest.parentAuthorityID == parent.id,
+              manifest.ownershipKey.count
+                == TorrentStorageOwnershipTag.keyByteCount,
+              manifest.logicalFiles.map(\.index)
+                == manifest.physicalMappings.map(\.fileIndex),
+              TorrentStoragePolicyValidation.isValid(
+                logicalFiles: manifest.logicalFiles,
+                policies: claim.lease.filePolicies
+              ) else {
             throw TorrentStoragePlanningError.deletionNotProvable
         }
 
         let policies = Dictionary(
             uniqueKeysWithValues: claim.lease.filePolicies.map { ($0.fileIndex, $0) }
         )
-        let deletableMappings = claim.manifest.physicalMappings.compactMap { mapping
-            -> TorrentPhysicalFileMapping? in
-            guard let policy = policies[mapping.fileIndex],
-                  policy.provenance == .appCreated,
-                  policy.mayDeleteAutomatically,
-                  mapping.relativePathComponents != nil else {
-                return nil
+        var deletableMappings = [TorrentPhysicalFileMapping]()
+        deletableMappings.reserveCapacity(manifest.physicalMappings.count)
+        for (logicalFile, mapping) in zip(
+            manifest.logicalFiles,
+            manifest.physicalMappings
+        ) {
+            if logicalFile.isPadding {
+                guard mapping.relativePathComponents == nil,
+                      mapping.identity == nil else {
+                    throw TorrentStoragePlanningError.deletionNotProvable
+                }
+                continue
             }
-            return mapping
+            guard let policy = policies[logicalFile.index],
+                  let components = mapping.relativePathComponents,
+                  !components.isEmpty,
+                  mapping.identity != nil else {
+                throw TorrentStoragePlanningError.deletionNotProvable
+            }
+            if policy.permitsDeletion(authorizedBy: authorization) {
+                deletableMappings.append(mapping)
+            } else if authorization == .explicitUserRequest {
+                throw TorrentStoragePlanningError.deletionNotProvable
+            }
         }
         guard !deletableMappings.isEmpty else {
             return
@@ -621,7 +865,7 @@ struct TorrentStorageDestinationPlanner: Sendable {
                 unsafe Darwin.openat(
                     containingDirectory,
                     pointer,
-                    O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+                    O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
                 )
             }
             if descriptor < 0, errno == ENOENT {
@@ -634,9 +878,9 @@ struct TorrentStorageDestinationPlanner: Sendable {
             do {
                 actualIdentity = try validatePayloadDescriptor(descriptor, writable: true)
                 try verifyOwnershipTag(
-                    key: claim.manifest.ownershipKey,
-                    claimID: claim.manifest.claimID,
-                    claimGeneration: claim.manifest.generation,
+                    key: manifest.ownershipKey,
+                    claimID: manifest.claimID,
+                    claimGeneration: manifest.generation,
                     relativePathComponents: components,
                     identity: actualIdentity,
                     isDirectory: false,
@@ -667,8 +911,8 @@ struct TorrentStorageDestinationPlanner: Sendable {
                 directories.insert(Array(components.prefix(count)))
             }
         }
-        if claim.manifest.contentKind == .directory {
-            directories.insert([claim.manifest.collisionSelectedTopLevelName])
+        if manifest.contentKind == .directory {
+            directories.insert([manifest.collisionSelectedTopLevelName])
         }
         for components in directories.sorted(by: { $0.count > $1.count }) {
             guard let leaf = components.last else {
@@ -687,7 +931,7 @@ struct TorrentStorageDestinationPlanner: Sendable {
                 unsafe Darwin.openat(
                     containingDirectory,
                     pointer,
-                    O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+                    O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
                 )
             }
             if descriptor < 0, errno == ENOENT {
@@ -699,9 +943,9 @@ struct TorrentStorageDestinationPlanner: Sendable {
             do {
                 let identity = try validateDirectoryDescriptor(descriptor)
                 try verifyOwnershipTag(
-                    key: claim.manifest.ownershipKey,
-                    claimID: claim.manifest.claimID,
-                    claimGeneration: claim.manifest.generation,
+                    key: manifest.ownershipKey,
+                    claimID: manifest.claimID,
+                    claimGeneration: manifest.generation,
                     relativePathComponents: components,
                     identity: identity,
                     isDirectory: true,
@@ -709,7 +953,7 @@ struct TorrentStorageDestinationPlanner: Sendable {
                 )
                 if components.count == 1 {
                     guard identity.refersToSameObject(
-                        as: claim.manifest.topLevelIdentity
+                        as: manifest.topLevelIdentity
                     ) else {
                         throw TorrentStoragePlanningError.deletionNotProvable
                     }
@@ -718,11 +962,31 @@ struct TorrentStorageDestinationPlanner: Sendable {
                 _ = Darwin.close(descriptor)
                 throw error
             }
-            _ = Darwin.close(descriptor)
             let status = unsafe leaf.withCString { pointer in
                 unsafe Darwin.unlinkat(containingDirectory, pointer, AT_REMOVEDIR)
             }
-            guard status == 0 || errno == ENOENT else {
+            let removalError = status == 0 ? 0 : errno
+            if removalError == ENOTEMPTY {
+                do {
+                    let identity = try validateDirectoryDescriptor(descriptor)
+                    try removeAuthenticatedOwnershipTag(
+                        key: manifest.ownershipKey,
+                        claimID: manifest.claimID,
+                        claimGeneration: manifest.generation,
+                        relativePathComponents: components,
+                        identity: identity,
+                        isDirectory: true,
+                        descriptor: descriptor
+                    )
+                } catch {
+                    _ = Darwin.close(descriptor)
+                    throw error
+                }
+            }
+            _ = Darwin.close(descriptor)
+            guard status == 0
+                    || removalError == ENOENT
+                    || removalError == ENOTEMPTY else {
                 throw TorrentStoragePlanningError.deletionNotProvable
             }
         }
@@ -1138,7 +1402,7 @@ struct TorrentStorageDestinationPlanner: Sendable {
             unsafe Darwin.openat(
                 descriptor,
                 pointer,
-                O_RDWR | O_CLOEXEC | O_NOFOLLOW
+                O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
             )
         }
         guard opened >= 0 else {
@@ -1248,12 +1512,137 @@ struct TorrentStorageDestinationPlanner: Sendable {
                     bytes.baseAddress,
                     bytes.count,
                     0,
-                    0
+                    XATTR_CREATE
                 )
             }
         }
         guard status == 0 else {
             throw TorrentStoragePlanningError.ownershipTagFailed
+        }
+    }
+
+    private func removeOwnershipTags(
+        from objects: [CreatedObject],
+        claim: TorrentStorageClaim,
+        parentDescriptor: Int32
+    ) {
+        for object in objects.reversed() {
+            try? removeOwnershipTag(
+                key: claim.manifest.ownershipKey,
+                claimID: claim.manifest.claimID,
+                claimGeneration: claim.manifest.generation,
+                relativePathComponents: object.components,
+                expectedIdentity: object.identity,
+                isDirectory: object.isDirectory,
+                parentDescriptor: parentDescriptor
+            )
+        }
+    }
+
+    private func removeOwnershipTag(
+        key: Data,
+        claimID: UUID,
+        claimGeneration: UInt64,
+        relativePathComponents: [String],
+        expectedIdentity: TorrentFilesystemIdentity?,
+        isDirectory: Bool,
+        parentDescriptor: Int32
+    ) throws {
+        guard let leaf = relativePathComponents.last else {
+            throw TorrentStoragePlanningError.deletionNotProvable
+        }
+        let containingDirectory = try openParentDirectory(
+            of: relativePathComponents,
+            startingAt: parentDescriptor
+        )
+        defer {
+            if containingDirectory != parentDescriptor {
+                _ = Darwin.close(containingDirectory)
+            }
+        }
+        let flags = (isDirectory
+            ? O_RDONLY | O_DIRECTORY
+            : O_RDONLY | O_NONBLOCK) | O_CLOEXEC | O_NOFOLLOW
+        let descriptor = unsafe leaf.withCString { pointer in
+            unsafe Darwin.openat(containingDirectory, pointer, flags)
+        }
+        if descriptor < 0, errno == ENOENT {
+            return
+        }
+        guard descriptor >= 0 else {
+            throw TorrentStoragePlanningError.deletionNotProvable
+        }
+        defer { _ = Darwin.close(descriptor) }
+        let identity: TorrentFilesystemIdentity
+        if isDirectory {
+            identity = try validateDirectoryDescriptor(descriptor)
+        } else {
+            identity = try validatePayloadDescriptor(
+                descriptor,
+                writable: false
+            )
+        }
+        if let expectedIdentity {
+            let matches = isDirectory
+                ? identity.refersToSameObject(as: expectedIdentity)
+                : identity == expectedIdentity
+            guard matches else {
+                throw TorrentStoragePlanningError.deletionNotProvable
+            }
+        }
+        try removeAuthenticatedOwnershipTag(
+            key: key,
+            claimID: claimID,
+            claimGeneration: claimGeneration,
+            relativePathComponents: relativePathComponents,
+            identity: identity,
+            isDirectory: isDirectory,
+            descriptor: descriptor
+        )
+    }
+
+    private func removeAuthenticatedOwnershipTag(
+        key: Data,
+        claimID: UUID,
+        claimGeneration: UInt64,
+        relativePathComponents: [String],
+        identity: TorrentFilesystemIdentity,
+        isDirectory: Bool,
+        descriptor: Int32
+    ) throws {
+        var tag = Data(count: TorrentStorageOwnershipTag.tagByteCount)
+        let result = unsafe tag.withUnsafeMutableBytes { bytes in
+            unsafe Self.ownershipAttribute.withCString { name in
+                unsafe Darwin.fgetxattr(
+                    descriptor,
+                    name,
+                    bytes.baseAddress,
+                    bytes.count,
+                    0,
+                    0
+                )
+            }
+        }
+        if result < 0, errno == ENOATTR {
+            return
+        }
+        guard result == tag.count,
+              TorrentStorageOwnershipTag.isValid(
+                tag,
+                key: key,
+                claimID: claimID,
+                claimGeneration: claimGeneration,
+                relativePathComponents: relativePathComponents,
+                identity: identity,
+                isDirectory: isDirectory
+              ) else {
+            throw TorrentStoragePlanningError.deletionNotProvable
+        }
+        let status = unsafe Self.ownershipAttribute.withCString { name in
+            unsafe Darwin.fremovexattr(descriptor, name, 0)
+        }
+        guard status == 0 || errno == ENOATTR else {
+            throw TorrentStoragePlanningError.deletionNotProvable
         }
     }
 
