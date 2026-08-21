@@ -347,51 +347,8 @@ struct TorrentStorageAuthorityTests {
         }
     }
 
-    @Test("Keeping data releases ownership for a future import")
-    func keepingDataReleasesClaimMarkers() throws {
-        try withTemporaryDirectory { root in
-            let fixture = try reserveSingleFile(
-                in: root,
-                name: "keep.bin",
-                size: 8
-            )
-            let planner = TorrentStorageDestinationPlanner()
-            try planner.releaseClaimedPayload(
-                makeClaim(fixture.reservation, state: .deleting),
-                from: fixture.parent
-            )
-            let payload = fixture.downloads.appending(path: "keep.bin")
-            #expect(FileManager.default.fileExists(atPath: payload.path()))
-
-            let logical = try makeLogicalManifest(
-                name: "keep.bin",
-                contentKind: .singleFile,
-                files: [
-                    .init(
-                        index: 0,
-                        pathComponents: ["keep.bin"],
-                        expectedSize: 8,
-                        isPadding: false
-                    ),
-                ]
-            )
-            let replacement = try planner.importExisting(
-                manifest: logical,
-                in: fixture.parent,
-                claimID: UUID(),
-                generation: 1,
-                ownershipKey: TorrentStorageDestinationPlanner.randomOwnershipKey(),
-                selectedTopLevelName: logical.name
-            )
-            try planner.claimImportedPayload(
-                makeClaim(replacement, state: .reserved),
-                in: fixture.parent
-            )
-        }
-    }
-
-    @Test("Explicit imports transfer authenticated deletion ownership")
-    func explicitImportTransfersDeletionOwnership() throws {
+    @Test("Explicit imports authorize identity-pinned deletion")
+    func explicitImportAuthorizesDeletion() throws {
         try withTemporaryDirectory { root in
             let downloads = root.appending(path: "Downloads", directoryHint: .isDirectory)
             try FileManager.default.createDirectory(
@@ -401,6 +358,30 @@ struct TorrentStorageAuthorityTests {
             let payload = downloads.appending(path: "sample.bin")
             let original = Data("seed".utf8)
             try original.write(to: payload)
+            do {
+                let descriptor = unsafe payload.path().withCString { path in
+                    unsafe Darwin.open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+                }
+                try #require(descriptor >= 0)
+                defer { _ = Darwin.close(descriptor) }
+                let staleTag = Data(
+                    repeating: 0xA5,
+                    count: TorrentStorageOwnershipTag.tagByteCount
+                )
+                let status = unsafe staleTag.withUnsafeBytes { bytes in
+                    unsafe TorrentStorageDestinationPlanner.ownershipAttribute.withCString { name in
+                        unsafe Darwin.fsetxattr(
+                            descriptor,
+                            name,
+                            bytes.baseAddress,
+                            bytes.count,
+                            0,
+                            0
+                        )
+                    }
+                }
+                try #require(status == 0)
+            }
             let parent = try makeParent(downloads)
             let logical = try makeLogicalManifest(
                 name: "sample.bin",
@@ -430,8 +411,6 @@ struct TorrentStorageAuthorityTests {
             #expect(!policy.mayDeleteAutomatically)
             #expect(try Data(contentsOf: payload) == original)
 
-            let reservedClaim = makeClaim(reservation, state: .reserved)
-            try planner.claimImportedPayload(reservedClaim, in: parent)
             let activeClaim = makeClaim(reservation, state: .active)
             try planner.validateClaimRoot(activeClaim, in: parent)
             let registry = TorrentStorageBrokerRegistry()
@@ -510,11 +489,6 @@ struct TorrentStorageAuthorityTests {
                 ownershipKey: TorrentStorageDestinationPlanner.randomOwnershipKey(),
                 selectedTopLevelName: logical.name
             )
-            try planner.claimImportedPayload(
-                makeClaim(reservation, state: .reserved),
-                in: parent
-            )
-
             try planner.deleteClaimedPayload(
                 claim: makeClaim(reservation, state: .deleting),
                 from: parent,
@@ -525,24 +499,6 @@ struct TorrentStorageAuthorityTests {
             #expect(!FileManager.default.fileExists(atPath: nested.path()))
             #expect(FileManager.default.fileExists(atPath: payloadRoot.path()))
             #expect(try Data(contentsOf: unrelated) == unrelatedData)
-
-            try FileManager.default.createDirectory(
-                at: nested,
-                withIntermediateDirectories: false
-            )
-            try Data("new data".utf8).write(to: payload)
-            let replacement = try planner.importExisting(
-                manifest: logical,
-                in: parent,
-                claimID: UUID(),
-                generation: 1,
-                ownershipKey: TorrentStorageDestinationPlanner.randomOwnershipKey(),
-                selectedTopLevelName: logical.name
-            )
-            try planner.claimImportedPayload(
-                makeClaim(replacement, state: .reserved),
-                in: parent
-            )
         }
     }
 
@@ -819,10 +775,6 @@ struct TorrentStorageAuthorityTests {
                 generation: 1,
                 ownershipKey: TorrentStorageDestinationPlanner.randomOwnershipKey(),
                 selectedTopLevelName: logical.name
-            )
-            try planner.claimImportedPayload(
-                makeClaim(reservation, state: .reserved),
-                in: parent
             )
             let manifest = reservation.storageManifest
             let mapping = try #require(manifest.physicalMappings.first)

@@ -415,29 +415,31 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
         guard (metadata.st_mode & S_IFMT) == S_IFREG,
               metadata.st_size >= 0,
               metadata.st_size <= resolved.logicalFile.expectedSize,
-              actualIdentity == expectedIdentity,
-              metadata.st_uid == geteuid(),
-              metadata.st_nlink == 1,
-              let components = resolved.mapping.relativePathComponents,
-              let tag = ownershipTag(on: descriptor),
-              TorrentStorageOwnershipTag.isValid(
-                tag,
-                key: resolved.ownershipKey,
-                claimID: resolved.claimID,
-                claimGeneration: resolved.claimGeneration,
-                relativePathComponents: components,
-                identity: actualIdentity,
-                isDirectory: false
-              ) else {
+              actualIdentity == expectedIdentity else {
             throw TorrentStorageBrokerRegistryError.filesystemObjectChanged
         }
 
         switch resolved.policy.provenance {
         case .appCreated:
-            break
+            guard metadata.st_uid == geteuid(), metadata.st_nlink == 1,
+                  let components = resolved.mapping.relativePathComponents,
+                  let tag = ownershipTag(on: descriptor),
+                  TorrentStorageOwnershipTag.isValid(
+                      tag,
+                      key: resolved.ownershipKey,
+                      claimID: resolved.claimID,
+                      claimGeneration: resolved.claimGeneration,
+                      relativePathComponents: components,
+                      identity: actualIdentity,
+                      isDirectory: false
+                  ) else {
+                throw TorrentStorageBrokerRegistryError.filesystemObjectChanged
+            }
         case .imported:
             if access == .readWrite {
-                guard resolved.policy.mayModify else {
+                guard resolved.policy.mayModify,
+                      metadata.st_uid == geteuid(),
+                      metadata.st_nlink == 1 else {
                     throw TorrentStorageBrokerRegistryError.accessDenied
                 }
             }
