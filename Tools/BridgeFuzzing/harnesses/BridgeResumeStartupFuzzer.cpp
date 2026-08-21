@@ -6,7 +6,6 @@
 #include <filesystem>
 #include <span>
 #include <string>
-#include <vector>
 
 namespace {
 
@@ -20,16 +19,12 @@ void exercise_asynchronous_destroy_once(std::filesystem::path const &root)
     TorrentClientDestroy(nullptr);
 
     std::string const state_path = (root / "async-state").string();
+    bridge_fuzz::PayloadBroker payload_broker;
     bridge_fuzz::ErrorBuffer create_error;
     TTorrentClient *client = TorrentClientCreateWithError(
         state_path.c_str(),
         1,
-        nullptr,
-        0,
-        nullptr,
-        0,
-        nullptr,
-        nullptr,
+        payload_broker.callbacks(),
         create_error.data(),
         create_error.capacity()
     );
@@ -61,24 +56,12 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
     bridge_fuzz::write_file(resume_file, std::span<char const>{begin, size});
 
     std::string const state_path = state_dir.string();
-    std::string const authorized_save_path = root.string();
-    std::vector<std::uint8_t> authorized_save_paths(
-        authorized_save_path.begin(),
-        authorized_save_path.end()
-    );
-    authorized_save_paths.push_back(0U);
-    bridge_fuzz::AuthorizedSaveRoot authorized_save_root(root);
-    TTorrentAuthorizedSaveRoot native_root = authorized_save_root.record();
+    bridge_fuzz::PayloadBroker payload_broker;
     bridge_fuzz::ErrorBuffer create_error;
     TTorrentClient *client = TorrentClientCreateWithError(
         state_path.c_str(),
         1,
-        authorized_save_paths.data(),
-        static_cast<int32_t>(authorized_save_paths.size()),
-        &native_root,
-        1,
-        bridge_fuzz::retain_authorized_save_root,
-        bridge_fuzz::release_authorized_save_root,
+        payload_broker.callbacks(),
         create_error.data(),
         create_error.capacity()
     );

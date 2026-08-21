@@ -15,6 +15,7 @@ package enum TorrentEngineIPCField {
     package static let errorMessage = "error"
     package static let payload = "payload"
     package static let attachment = "attachment"
+    package static let brokerEndpoint = "brokerEndpoint"
 }
 
 package struct TorrentEngineIPCRequestMetadata: Equatable, Sendable {
@@ -23,6 +24,7 @@ package struct TorrentEngineIPCRequestMetadata: Equatable, Sendable {
     package let payloadByteCount: Int
     package let hasAttachment: Bool
     package let attachmentByteCount: Int
+    package let brokerEndpoint: XPCEndpoint?
     package let totalByteCount: Int
 
     package init(
@@ -31,6 +33,7 @@ package struct TorrentEngineIPCRequestMetadata: Equatable, Sendable {
         payloadByteCount: Int,
         hasAttachment: Bool,
         attachmentByteCount: Int,
+        brokerEndpoint: XPCEndpoint? = nil,
         totalByteCount: Int
     ) {
         self.header = header
@@ -38,6 +41,7 @@ package struct TorrentEngineIPCRequestMetadata: Equatable, Sendable {
         self.payloadByteCount = payloadByteCount
         self.hasAttachment = hasAttachment
         self.attachmentByteCount = attachmentByteCount
+        self.brokerEndpoint = brokerEndpoint
         self.totalByteCount = totalByteCount
     }
 }
@@ -56,6 +60,7 @@ package enum TorrentEngineIPCEnvelopeCodec {
 
     private static let requestFields = commonFields.union([
         TorrentEngineIPCField.attachment,
+        TorrentEngineIPCField.brokerEndpoint,
     ])
     private static let replyFields = commonFields.union([
         TorrentEngineIPCField.engineEpoch,
@@ -80,6 +85,10 @@ package enum TorrentEngineIPCEnvelopeCodec {
             attachmentByteCount: request.attachment?.count ?? 0,
             maximumAttachmentBytes: maximumAttachmentBytes
         )
+        try validateBrokerEndpoint(
+            request.brokerEndpoint,
+            for: request.header.operation
+        )
 
         var dictionary = encodeHeader(request.header)
         try TorrentEngineIPCXPCValues.insertPayload(
@@ -93,6 +102,9 @@ package enum TorrentEngineIPCEnvelopeCodec {
             maximumBytes: maximumAttachmentBytes,
             field: TorrentEngineIPCField.attachment
         )
+        if let brokerEndpoint = request.brokerEndpoint {
+            dictionary[TorrentEngineIPCField.brokerEndpoint] = brokerEndpoint
+        }
         return dictionary
     }
 
@@ -131,6 +143,20 @@ package enum TorrentEngineIPCEnvelopeCodec {
             in: dictionary,
             field: TorrentEngineIPCField.attachment
         )
+        let endpointFieldIsPresent = dictionary.keys.contains(
+            TorrentEngineIPCField.brokerEndpoint
+        )
+        let brokerEndpoint = dictionary[
+            TorrentEngineIPCField.brokerEndpoint,
+            as: XPCEndpoint.self
+        ]
+        guard !endpointFieldIsPresent || brokerEndpoint != nil else {
+            throw TorrentEngineIPCError.wrongFieldType(
+                field: TorrentEngineIPCField.brokerEndpoint,
+                expected: "endpoint"
+            )
+        }
+        try validateBrokerEndpoint(brokerEndpoint, for: header.operation)
         let totalByteCount = try requestTotalByteCount(
             payloadByteCount: payloadByteCount,
             attachmentByteCount: attachmentByteCount
@@ -141,6 +167,7 @@ package enum TorrentEngineIPCEnvelopeCodec {
             payloadByteCount: payloadByteCount,
             hasAttachment: dictionary.keys.contains(TorrentEngineIPCField.attachment),
             attachmentByteCount: attachmentByteCount,
+            brokerEndpoint: brokerEndpoint,
             totalByteCount: totalByteCount
         )
     }
@@ -174,7 +201,8 @@ package enum TorrentEngineIPCEnvelopeCodec {
         return TorrentEngineIPCRequest(
             header: metadata.header,
             payload: payload,
-            attachment: attachment
+            attachment: attachment,
+            brokerEndpoint: metadata.brokerEndpoint
         )
     }
 
@@ -282,6 +310,26 @@ package enum TorrentEngineIPCEnvelopeCodec {
         )
         guard metadata.totalByteCount == totalByteCount else {
             throw TorrentEngineIPCError.requestMetadataMismatch
+        }
+    }
+
+    private static func validateBrokerEndpoint(
+        _ endpoint: XPCEndpoint?,
+        for operation: TorrentEngineIPCOperation
+    ) throws {
+        switch operation {
+        case .handshake:
+            guard endpoint != nil else {
+                throw TorrentEngineIPCError.missingField(
+                    TorrentEngineIPCField.brokerEndpoint
+                )
+            }
+        default:
+            guard endpoint == nil else {
+                throw TorrentEngineIPCError.unexpectedField(
+                    TorrentEngineIPCField.brokerEndpoint
+                )
+            }
         }
     }
 

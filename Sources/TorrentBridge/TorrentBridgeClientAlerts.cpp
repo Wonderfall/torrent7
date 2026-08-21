@@ -80,11 +80,10 @@ void TTorrentClient::pump_alerts()
 
         for (lt::alert const *alert : alerts) {
             try {
-                if (auto const *dropped = lt::alert_cast<lt::alerts_dropped_alert>(alert)) {
+                if (lt::alert_cast<lt::alerts_dropped_alert>(alert) != nullptr) {
                     rebuild_cache = true;
                     force_resume_save = true;
                     changes |= invalidate_dht_diagnostics();
-                    changes |= fail_dropped_delete_request(*dropped);
                     changes |= queue_alert_error(
                         "Internal libtorrent alerts were dropped. Torrent details may be temporarily stale.");
                     continue;
@@ -164,41 +163,6 @@ void TTorrentClient::pump_alerts()
                                            .generation = *generation,
                                            .async = true,
                                            .cleanups = cleanups_for_write(identity, *generation)});
-                    continue;
-                }
-
-                if (auto const *deleted = lt::alert_cast<lt::torrent_deleted_alert>(alert)) {
-                    complete_delete_request(deleted->info_hashes, TTORRENT_REMOVAL_SUCCEEDED);
-                    changes |= complete_pending_delete(deleted->info_hashes, "");
-                    continue;
-                }
-
-                if (auto const *delete_failed = lt::alert_cast<lt::torrent_delete_failed_alert>(alert)) {
-                    // Libtorrent reports a metadata-less torrent's absent storage as a zero-error failure.
-                    bool const no_payload_storage = !delete_failed->error
-                        && pending_delete_lacked_metadata(delete_failed->info_hashes);
-                    if (no_payload_storage) {
-                        complete_delete_request(delete_failed->info_hashes, TTORRENT_REMOVAL_SUCCEEDED);
-                        changes |= complete_pending_delete(delete_failed->info_hashes, "");
-                        continue;
-                    }
-
-                    constexpr std::string_view generic_failure =
-                        "Downloaded data could not be deleted. Some files may remain on disk.";
-                    complete_delete_request(
-                        delete_failed->info_hashes,
-                        TTORRENT_REMOVAL_FAILED,
-                        generic_failure
-                    );
-
-                    std::string failure_message(generic_failure);
-                    if (delete_failed->error) {
-                        failure_message = "Downloaded data could not be deleted. Some files may remain on disk: " +
-                            delete_failed->error.message() + ".";
-                    }
-                    changes |= complete_pending_delete(
-                        delete_failed->info_hashes,
-                        failure_message);
                     continue;
                 }
 
@@ -446,9 +410,7 @@ ResumeSaveResult TTorrentClient::remove_resume_files_for_ids_checked(std::vector
     return sync_directory(resume_directory_descriptor.get());
 }
 
-BridgeResult TTorrentClient::persist_removal_tombstones(std::vector<std::string> const &ids,
-                                        RemovalTombstoneState state,
-                                        bool delete_files, bool delete_partfile)
+BridgeResult TTorrentClient::persist_removal_tombstones(std::vector<std::string> const &ids)
 {
     std::scoped_lock io_guard(resume_io_lock);
     BridgeResult const persistence = ensure_persistence_available_locked(3);
@@ -456,7 +418,7 @@ BridgeResult TTorrentClient::persist_removal_tombstones(std::vector<std::string>
         return persistence;
     }
 
-    TombstoneCommitResult saved = persist_removal_tombstones_locked(ids, state, delete_files, delete_partfile);
+    TombstoneCommitResult saved = persist_removal_tombstones_locked(ids);
     if (!saved) {
         return bridge_error(3, saved.error());
     }

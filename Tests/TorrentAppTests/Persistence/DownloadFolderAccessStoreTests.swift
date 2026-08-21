@@ -7,8 +7,8 @@ import TorrentEngineModel
 @MainActor
 @Suite("Download folder access store")
 struct DownloadFolderAccessStoreTests {
-    @Test("Capability snapshots put the default first and sort and deduplicate additional paths")
-    func capabilitySnapshotsAreDeterministicAndDeduplicated() async throws {
+    @Test("Access snapshots put the default first and sort and deduplicate additional paths")
+    func accessSnapshotsAreDeterministicAndDeduplicated() async throws {
         try await withIsolatedDefaults { defaults, suiteName in
             try await withTemporaryDirectory { root in
                 let alpha = root.appending(path: "alpha", directoryHint: .isDirectory)
@@ -27,7 +27,7 @@ struct DownloadFolderAccessStoreTests {
                 )
 
                 _ = await store.bootstrap()
-                let snapshot = await store.makeCapabilitySnapshot()
+                let snapshot = await store.makeAccessSnapshot()
 
                 #expect(snapshot.paths == [
                     beta.torrentFilePath,
@@ -37,9 +37,9 @@ struct DownloadFolderAccessStoreTests {
         }
     }
 
-    @Test("Capability snapshots defensively cap paths while retaining the default first")
-    func capabilitySnapshotsDefensivelyCapPaths() {
-        let maximumPathCount = DownloadFolderCapabilitySnapshot.maximumPathCount
+    @Test("Access snapshots defensively cap paths while retaining the default first")
+    func accessSnapshotsDefensivelyCapPaths() {
+        let maximumPathCount = DownloadFolderAccessSnapshot.maximumPathCount
         let defaultAccess = FakeDownloadFolderAccess(
             url: URL(filePath: "/Downloads/default", directoryHint: .isDirectory)
         )
@@ -52,7 +52,7 @@ struct DownloadFolderAccessStoreTests {
             )
         }
 
-        let snapshot = DownloadFolderCapabilitySnapshot(
+        let snapshot = DownloadFolderAccessSnapshot(
             defaultAccess: defaultAccess,
             additionalAccesses: additionalAccesses
         )
@@ -66,11 +66,11 @@ struct DownloadFolderAccessStoreTests {
         ))
     }
 
-    @Test("Restoration and projected mutations enforce the distinct capability path limit")
-    func restorationAndProjectedMutationsEnforceCapabilityLimit() async throws {
+    @Test("Restoration and projected mutations enforce the distinct access path limit")
+    func restorationAndProjectedMutationsEnforceAccessLimit() async throws {
         try await withIsolatedDefaults { defaults, suiteName in
             try await withTemporaryDirectory { root in
-                let maximumPathCount = DownloadFolderCapabilitySnapshot.maximumPathCount
+                let maximumPathCount = DownloadFolderAccessSnapshot.maximumPathCount
                 let oldDefault = root.appending(path: "default", directoryHint: .isDirectory)
                 let additionalURLs = (0..<maximumPathCount).map { index in
                     root.appending(
@@ -95,7 +95,7 @@ struct DownloadFolderAccessStoreTests {
                 #expect(restoredBookmarks.count == maximumPathCount - 1)
                 #expect(restoredBookmarks[accessKey(additionalURLs[0])] != nil)
                 #expect(restoredBookmarks[accessKey(additionalURLs[maximumPathCount - 1])] == nil)
-                let snapshot = await store.makeCapabilitySnapshot()
+                let snapshot = await store.makeAccessSnapshot()
                 #expect(snapshot.paths.count == maximumPathCount)
                 #expect(snapshot.paths.first == oldDefault.torrentFilePath)
 
@@ -106,7 +106,7 @@ struct DownloadFolderAccessStoreTests {
                         setsDefault: false,
                         activeTorrents: []
                     )
-                    Issue.record("Preparing an additional folder beyond the capability limit succeeded")
+                    Issue.record("Preparing an additional folder beyond the access limit succeeded")
                 } catch {
                     #expect(isTooManyAuthorizedDownloadFolders(error))
                 }
@@ -126,7 +126,7 @@ struct DownloadFolderAccessStoreTests {
                         newDefault,
                         activeTorrents: activeTorrents
                     )
-                    Issue.record("Setting a default folder beyond the capability limit succeeded")
+                    Issue.record("Setting a default folder beyond the access limit succeeded")
                 } catch {
                     #expect(isTooManyAuthorizedDownloadFolders(error))
                 }
@@ -202,8 +202,8 @@ struct DownloadFolderAccessStoreTests {
         }
     }
 
-    @Test("Committing a non-default folder saves and prunes its bookmark")
-    func committingNonDefaultFolderSavesAndPrunesAdditionalBookmark() async throws {
+    @Test("Engine snapshots cannot prune a committed folder bookmark")
+    func engineSnapshotsCannotPruneCommittedFolderBookmark() async throws {
         try await withIsolatedDefaults { defaults, suiteName in
             try await withTemporaryDirectory { root in
                 let store = DownloadFolderAccessStore(
@@ -235,7 +235,7 @@ struct DownloadFolderAccessStoreTests {
                 #expect(additionalBookmarks(in: defaults)[accessKey(folder)] == Data(folder.torrentFilePath.utf8))
 
                 try await prune(store, activeTorrents: [])
-                #expect(additionalBookmarks(in: defaults).isEmpty)
+                #expect(additionalBookmarks(in: defaults)[accessKey(folder)] == Data(folder.torrentFilePath.utf8))
             }
         }
     }
@@ -274,8 +274,8 @@ struct DownloadFolderAccessStoreTests {
         }
     }
 
-    @Test("Setting new default preserves old default only while active torrents use it")
-    func settingNewDefaultPreservesOldDefaultOnlyWhileActiveTorrentsUseIt() async throws {
+    @Test("Setting a new default keeps old GUI-owned access independent of engine snapshots")
+    func settingNewDefaultKeepsOldGUIOwnedAccess() async throws {
         try await withIsolatedDefaults { defaults, suiteName in
             try await withTemporaryDirectory { root in
                 let store = DownloadFolderAccessStore(
@@ -302,7 +302,7 @@ struct DownloadFolderAccessStoreTests {
                 #expect(additionalBookmarks(in: defaults)[accessKey(newDefault)] == nil)
 
                 try await prune(store, activeTorrents: [])
-                #expect(additionalBookmarks(in: defaults).isEmpty)
+                #expect(additionalBookmarks(in: defaults)[accessKey(oldDefault)] == Data(oldDefault.torrentFilePath.utf8))
             }
         }
     }
@@ -395,7 +395,7 @@ private func isTooManyAuthorizedDownloadFolders(_ error: Error) -> Bool {
     guard let storeError = error as? TorrentStoreError else {
         return false
     }
-    if case .tooManyAuthorizedDownloadFolders = storeError {
+    if case .tooManyDownloadFolders = storeError {
         return true
     }
     return false

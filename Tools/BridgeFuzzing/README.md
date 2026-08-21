@@ -23,7 +23,7 @@ tooling self-contained.
 - `bridge_session_api`: runs short mutated operation sequences across add,
   preview, file priorities, settings, snapshots, detail batches, torrent
   options, queue movement, piece maps, wake/change, pause/resume/remove, save,
-  network, health, authorized-root replacement, and alert APIs.
+  network, health, payload-broker lifecycle, and alert APIs.
 
 All harness runtime state is written to temporary directories and removed on
 normal exit. Network access is blocked or disabled by the bridge settings used

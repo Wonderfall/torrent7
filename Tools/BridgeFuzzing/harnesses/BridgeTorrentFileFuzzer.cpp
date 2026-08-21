@@ -21,11 +21,12 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
     bridge_fuzz::AddedIdBuffer added_id;
     bridge_fuzz::ErrorBuffer error;
     int32_t add_outcome = TTORRENT_ADD_REJECTED;
+    TTorrentStorageActivation activation{};
     int32_t const result = TorrentClientAddTorrentFileData(
         harness.client(),
         data,
         static_cast<int32_t>(size),
-        harness.save_path(),
+        activation,
         options,
         added_id.data(),
         added_id.capacity(),

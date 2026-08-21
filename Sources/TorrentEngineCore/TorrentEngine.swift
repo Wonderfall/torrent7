@@ -58,35 +58,9 @@ private func torrentWakeCallback(_ context: UnsafeMutableRawPointer?) {
 
 package typealias TorrentClientCreationPreflight = @Sendable (
     _ stateDirectory: URL,
-    _ enablePeerExchangePlugin: Bool,
-    _ authorizedSaveRoots: [TorrentAuthorizedSaveRoot]
+    _ enablePeerExchangePlugin: Bool
 ) throws -> Void
 
-private struct TorrentRemovalResultStatus: Sendable {
-    var state: Int32
-    var error: String
-}
-
-package enum TorrentRemovalResultReadOverride: Sendable {
-    case pending
-    case unknownState
-}
-
-@safe private struct TorrentEncodedAuthorizedSaveRoots {
-    let pathBlob: [UInt8]
-    let nativeRoots: [TTorrentAuthorizedSaveRoot]
-    // Native records contain process-local tokens registered by these roots.
-    // Keep the token owners alive until the synchronous bridge call retains
-    // every accepted lifetime.
-    let retainedRoots: [TorrentAuthorizedSaveRoot]
-}
-
-private struct TorrentAuthorizedSaveRootIdentity: Hashable {
-    let device: UInt64
-    let inode: UInt64
-}
-
-package typealias TorrentRemovalResultReader = @Sendable () throws -> TorrentRemovalResultReadOverride?
 package typealias TorrentAlertErrorReader = @Sendable () -> String?
 
 package enum TorrentAddError: LocalizedError, Sendable {
@@ -105,25 +79,23 @@ package enum TorrentAddError: LocalizedError, Sendable {
     package static let clientCreationPreflight = Mutex<TorrentClientCreationPreflight?>(nil)
 
     private let stateDirectory: URL?
-    private let removalResultReader: TorrentRemovalResultReader?
+    private let payloadBroker: (any TorrentPayloadBrokerAccess)?
     private let alertErrorReader: TorrentAlertErrorReader?
     package nonisolated let startupFailureMessage: String?
     private let runtimeFailureMessage = Mutex<String?>(nil)
     private let wakeRelay = TorrentWakeRelay()
     private var client: TorrentClientHandle?
-    private var hasPendingRemovalRequest = false
     private var isShutdown = false
     package nonisolated let libtorrentVersion: String
 
     package init(
         stateDirectory: URL,
         enablePeerExchangePlugin: Bool,
-        authorizedSaveRoots: [TorrentAuthorizedSaveRoot] = [],
-        removalResultReader: TorrentRemovalResultReader? = nil,
+        payloadBroker: any TorrentPayloadBrokerAccess,
         alertErrorReader: TorrentAlertErrorReader? = nil
     ) throws {
         self.stateDirectory = stateDirectory
-        self.removalResultReader = removalResultReader
+        self.payloadBroker = payloadBroker
         self.alertErrorReader = alertErrorReader
         startupFailureMessage = nil
         unsafe libtorrentVersion = String(cString: TorrentBridgeLibtorrentVersion())
@@ -131,13 +103,13 @@ package enum TorrentAddError: LocalizedError, Sendable {
             stateDirectory: stateDirectory,
             wakeRelay: wakeRelay,
             enablePeerExchangePlugin: enablePeerExchangePlugin,
-            authorizedSaveRoots: authorizedSaveRoots
+            payloadBroker: payloadBroker
         )
     }
 
     package init(startupFailureMessage: String) {
         stateDirectory = nil
-        removalResultReader = nil
+        payloadBroker = nil
         alertErrorReader = nil
         self.startupFailureMessage = startupFailureMessage
         unsafe libtorrentVersion = String(cString: TorrentBridgeLibtorrentVersion())
@@ -149,17 +121,16 @@ package enum TorrentAddError: LocalizedError, Sendable {
     }
 
     package func restart(
-        enablePeerExchangePlugin: Bool,
-        authorizedSaveRoots: [TorrentAuthorizedSaveRoot]
+        enablePeerExchangePlugin: Bool
     ) throws {
         guard !isShutdown else {
             throw TorrentEngineError.bridgeError("The torrent engine has been shut down.")
         }
-        guard !hasPendingRemovalRequest else {
-            throw TorrentEngineError.bridgeError("The torrent engine cannot restart while removal is pending.")
-        }
         guard let stateDirectory else {
             throw TorrentEngineError.startupFailed(startupFailureMessage ?? "")
+        }
+        guard let payloadBroker else {
+            throw TorrentEngineError.startupFailed("The storage broker is unavailable.")
         }
         let hasRuntimeFailure = runtimeFailureMessage.withLock { $0 != nil }
         if !hasRuntimeFailure, client != nil {
@@ -172,34 +143,11 @@ package enum TorrentAddError: LocalizedError, Sendable {
                 stateDirectory: stateDirectory,
                 wakeRelay: wakeRelay,
                 enablePeerExchangePlugin: enablePeerExchangePlugin,
-                authorizedSaveRoots: authorizedSaveRoots
+                payloadBroker: payloadBroker
             )
         } catch {
             runtimeFailureMessage.withLock { $0 = error.localizedDescription }
             throw error
-        }
-    }
-
-    package func replaceAuthorizedSaveRoots(
-        _ authorizedSaveRoots: [TorrentAuthorizedSaveRoot]
-    ) throws {
-        let client = try unsafe requireClient()
-        let encoded = try Self.encodeAuthorizedSaveRoots(authorizedSaveRoots)
-        try withExtendedLifetime(encoded.retainedRoots) {
-            try throwingAuthorizedRootReplacement { errorBuffer in
-                let paths: Span<UInt8>? = encoded.pathBlob.isEmpty ? nil : encoded.pathBlob.span
-                let roots: Span<TTorrentAuthorizedSaveRoot>? = encoded.nativeRoots.isEmpty
-                    ? nil
-                    : encoded.nativeRoots.span
-                return unsafe TorrentClientReplaceAuthorizedSavePaths(
-                    client,
-                    paths,
-                    roots,
-                    torrentAuthorizedSaveRootRetainCallback,
-                    torrentAuthorizedSaveRootReleaseCallback,
-                    &errorBuffer
-                )
-            }
         }
     }
 
@@ -232,10 +180,6 @@ package enum TorrentAddError: LocalizedError, Sendable {
             if message == nil {
                 message = shuttingDownMessage
             }
-        }
-
-        while hasPendingRemovalRequest {
-            await Self.waitForRemovalPollIntervalIgnoringCancellation()
         }
 
         if let runtimeFailure = runtimeFailureMessage.withLock({ $0 }),
@@ -286,7 +230,6 @@ package enum TorrentAddError: LocalizedError, Sendable {
 
     package func addMagnet(
         _ magnet: String,
-        savePath: String,
         startsPaused: Bool = false,
         queuePriority: TorrentQueuePriority = .normal,
         enablePeerExchange: Bool = true,
@@ -305,24 +248,21 @@ package enum TorrentAddError: LocalizedError, Sendable {
         )
         return try unsafe throwingBridgeAddReturningString(capacity: Int(TTORRENT_ID_CAPACITY)) { outputBuffer, addOutcome, errorBuffer in
             unsafe magnet.withCString { magnetPointer in
-                unsafe savePath.withCString { savePointer in
-                    unsafe TorrentClientAddMagnet(
-                        client,
-                        magnetPointer,
-                        savePointer,
-                        options,
-                        &outputBuffer,
-                        addOutcome,
-                        &errorBuffer
-                    )
-                }
+                unsafe TorrentClientAddMagnet(
+                    client,
+                    magnetPointer,
+                    options,
+                    &outputBuffer,
+                    addOutcome,
+                    &errorBuffer
+                )
             }
         }
     }
 
     package func addTorrentFile(
         data: Data,
-        savePath: String,
+        activation: TorrentStorageActivation,
         filePriorities: [Int32: TorrentFilePriority]? = nil,
         startsPaused: Bool = false,
         queuePriority: TorrentQueuePriority = .normal,
@@ -332,6 +272,7 @@ package enum TorrentAddError: LocalizedError, Sendable {
     ) throws -> String {
         let client = try unsafe requireClient()
         try Self.validateTorrentData(data)
+        let nativeActivation = Self.nativeStorageActivation(activation)
         let priorityEntries = filePriorities?
             .map { index, priority in
                 TTorrentFilePriorityEntry(index: index, priority: priority.bridgeValue)
@@ -349,33 +290,29 @@ package enum TorrentAddError: LocalizedError, Sendable {
             return try unsafe throwingBridgeAddReturningString(capacity: Int(TTORRENT_ID_CAPACITY)) { outputBuffer, addOutcome, errorBuffer in
                 let torrentData: Span<UInt8>? = data.span
                 let priorities: Span<TTorrentFilePriorityEntry>? = priorityEntries.span
-                return unsafe savePath.withCString { savePointer in
-                    unsafe TorrentClientAddTorrentFileDataWithPriorities(
-                        client,
-                        torrentData,
-                        savePointer,
-                        options,
-                        priorities,
-                        &outputBuffer,
-                        addOutcome,
-                        &errorBuffer
-                    )
-                }
+                return unsafe TorrentClientAddTorrentFileDataWithPriorities(
+                    client,
+                    torrentData,
+                    nativeActivation,
+                    options,
+                    priorities,
+                    &outputBuffer,
+                    addOutcome,
+                    &errorBuffer
+                )
             }
         } else {
             return try unsafe throwingBridgeAddReturningString(capacity: Int(TTORRENT_ID_CAPACITY)) { outputBuffer, addOutcome, errorBuffer in
                 let torrentData: Span<UInt8>? = data.span
-                return unsafe savePath.withCString { savePointer in
-                    unsafe TorrentClientAddTorrentFileData(
-                        client,
-                        torrentData,
-                        savePointer,
-                        options,
-                        &outputBuffer,
-                        addOutcome,
-                        &errorBuffer
-                    )
-                }
+                return unsafe TorrentClientAddTorrentFileData(
+                    client,
+                    torrentData,
+                    nativeActivation,
+                    options,
+                    &outputBuffer,
+                    addOutcome,
+                    &errorBuffer
+                )
             }
         }
     }
@@ -462,24 +399,8 @@ package enum TorrentAddError: LocalizedError, Sendable {
         }
     }
 
-    package func remove(
-        id: String,
-        deleteFiles: Bool
-    ) async throws -> TorrentRemovalOutcome {
+    package func remove(id: String) throws -> TorrentRemovalOutcome {
         let client = try unsafe requireClient()
-        if deleteFiles {
-            guard !hasPendingRemovalRequest else {
-                throw TorrentEngineError.bridgeError("Another torrent data deletion is already pending.")
-            }
-            hasPendingRemovalRequest = true
-        }
-        defer {
-            if deleteFiles {
-                hasPendingRemovalRequest = false
-            }
-        }
-
-        var requestToken: UInt64 = 0
         var removalCommitted: UInt8 = 0
         do {
             try throwingBridgeCall { errorBuffer in
@@ -487,9 +408,6 @@ package enum TorrentAddError: LocalizedError, Sendable {
                     unsafe TorrentClientRemove(
                         client,
                         $0,
-                        deleteFiles.bridgeFlag,
-                        false.bridgeFlag,
-                        &requestToken,
                         &removalCommitted,
                         &errorBuffer
                     )
@@ -499,115 +417,25 @@ package enum TorrentAddError: LocalizedError, Sendable {
             guard removalCommitted != 0 else {
                 throw error
             }
+            return quiesceAfterUntrackableRemoval(detail: error.localizedDescription)
+        }
+
+        guard removalCommitted != 0 else {
             return quiesceAfterUntrackableRemoval(
-                detail: error.localizedDescription,
-                downloadedFilesMayRemain: deleteFiles
+                detail: "The bridge returned inconsistent removal state."
             )
         }
-
-        guard deleteFiles else {
-            guard removalCommitted != 0, requestToken == 0 else {
-                return quiesceAfterUntrackableRemoval(
-                    detail: "The bridge returned inconsistent non-deleting removal state.",
-                    downloadedFilesMayRemain: false
-                )
-            }
-            return .removed
-        }
-        guard removalCommitted != 0, requestToken != 0 else {
-            return quiesceAfterUntrackableRemoval(
-                detail: "The bridge returned inconsistent deleting removal state."
-            )
-        }
-
-        while true {
-            let result: TorrentRemovalResultStatus
-            do {
-                result = try unsafe removalResult(client: client, requestToken: requestToken)
-            } catch {
-                return quiesceAfterUntrackableRemoval(detail: error.localizedDescription)
-            }
-
-            switch result.state {
-            case Int32(TTORRENT_REMOVAL_PENDING):
-                await Self.waitForRemovalPollIntervalIgnoringCancellation()
-                guard !isShutdown,
-                      unsafe client == self.client?.pointer else {
-                    return Self.removedWithBoundedWarning(
-                        "The torrent engine was stopped for security containment while data deletion was pending. Some downloaded files may remain on disk."
-                    )
-                }
-            case Int32(TTORRENT_REMOVAL_SUCCEEDED):
-                return .removed
-            case Int32(TTORRENT_REMOVAL_FAILED):
-                let message = result.error
-                return Self.removedWithBoundedWarning(
-                    message.isEmpty
-                        ? "The torrent was removed, but some downloaded files may remain on disk."
-                        : message
-                )
-            default:
-                return quiesceAfterUntrackableRemoval(
-                    detail: "The bridge returned an unknown deletion state."
-                )
-            }
-        }
+        return .removed
     }
 
-    private func removalResult(
-        client: OpaquePointer,
-        requestToken: UInt64
-    ) throws -> TorrentRemovalResultStatus {
-        if let removalResultReader,
-           let override = try removalResultReader() {
-            switch override {
-            case .pending:
-                return TorrentRemovalResultStatus(
-                    state: Int32(TTORRENT_REMOVAL_PENDING),
-                    error: ""
-                )
-            case .unknownState:
-                return TorrentRemovalResultStatus(
-                    state: .max,
-                    error: ""
-                )
-            }
-        }
-
-        var readResult = TTorrentRemovalReadResult()
-        try throwingBridgeCall { errorBuffer in
-            readResult = unsafe TorrentClientTakeRemovalResult(
-                client,
-                requestToken,
-                &errorBuffer
-            )
-            return readResult.status
-        }
-        return TorrentRemovalResultStatus(
-            state: readResult.result.state,
-            error: String(cStringTuple: readResult.result.error)
-        )
-    }
-
-    private func quiesceAfterUntrackableRemoval(
-        detail: String,
-        downloadedFilesMayRemain: Bool = true
-    ) -> TorrentRemovalOutcome {
-        let fileWarning = downloadedFilesMayRemain ? " Some downloaded files may remain on disk." : ""
+    private func quiesceAfterUntrackableRemoval(detail: String) -> TorrentRemovalOutcome {
         let message = "The torrent was removed, but the bridge could not reliably track the operation. "
-            + "The torrent engine was stopped safely before folder access was released."
-            + fileWarning
+            + "The torrent engine was stopped safely before storage access was released."
             + " \(detail)"
         let boundedMessage = Self.boundedRemovalWarning(message)
         runtimeFailureMessage.withLock { $0 = boundedMessage }
         destroyClient(waitForShutdown: true)
         return .removedWithWarning(boundedMessage)
-    }
-
-    private nonisolated static func removedWithBoundedWarning(
-        _ message: String
-    ) -> TorrentRemovalOutcome {
-        .removedWithWarning(boundedRemovalWarning(message))
     }
 
     package nonisolated static func boundedRemovalWarning(_ message: String) -> String {
@@ -626,15 +454,6 @@ package enum TorrentAddError: LocalizedError, Sendable {
             byteCount += characterBytes
         }
         return result
-    }
-
-    /// Terminal deletion tracking must remain rate-limited after its caller is canceled.
-    /// A detached child gives the sleep a fresh cancellation context; directly sleeping
-    /// here would throw immediately and turn the terminal-state loop into a hot poll.
-    private nonisolated static func waitForRemovalPollIntervalIgnoringCancellation() async {
-        await Task.detached {
-            try? await Task.sleep(for: .milliseconds(25))
-        }.value
     }
 
     package func applySettings(
@@ -1314,6 +1133,55 @@ package enum TorrentAddError: LocalizedError, Sendable {
         )
     }
 
+    package func torrentMetadata(id: String) throws -> Data? {
+        guard let client, let pointer = unsafe client.pointer else {
+            return nil
+        }
+
+        var requiredCount: Int32 = 0
+        var available: UInt8 = 0
+        var metadataSpan: MutableSpan<UInt8>?
+        _ = unsafe id.withCString { idPointer in
+            unsafe TorrentClientCopyTorrentMetadata(
+                pointer,
+                idPointer,
+                &metadataSpan,
+                &requiredCount,
+                &available
+            )
+        }
+        guard available != 0 else {
+            return nil
+        }
+        guard requiredCount > 0,
+              requiredCount <= Int32(TorrentInputLimits.maxTorrentFileBytes) else {
+            throw TorrentEngineError.bridgeError(
+                "Torrent metadata exceeded the trusted size limit."
+            )
+        }
+
+        var bytes = [UInt8](repeating: 0, count: Int(requiredCount))
+        let copied = Self.withMutableBridgeSpan(&bytes) { metadataSpan in
+            unsafe id.withCString { idPointer in
+                unsafe TorrentClientCopyTorrentMetadata(
+                    pointer,
+                    idPointer,
+                    &metadataSpan,
+                    &requiredCount,
+                    &available
+                )
+            }
+        }
+        guard available != 0,
+              copied == requiredCount,
+              copied == Int32(bytes.count) else {
+            throw TorrentEngineError.bridgeError(
+                "Torrent metadata changed while it was being copied."
+            )
+        }
+        return Data(bytes)
+    }
+
     private func snapshotBatch() -> TorrentSnapshotBatch {
         guard let client else {
             return TorrentSnapshotBatch(revision: 0, torrents: [])
@@ -1388,34 +1256,36 @@ package enum TorrentAddError: LocalizedError, Sendable {
         stateDirectory: URL,
         wakeRelay: TorrentWakeRelay,
         enablePeerExchangePlugin: Bool,
-        authorizedSaveRoots: [TorrentAuthorizedSaveRoot]
+        payloadBroker: any TorrentPayloadBrokerAccess
     ) throws -> TorrentClientHandle {
         try clientCreationPreflight.withLock { $0 }?(
             stateDirectory,
-            enablePeerExchangePlugin,
-            authorizedSaveRoots
+            enablePeerExchangePlugin
         )
 
         let path = stateDirectory.torrentFilePath
-        let encoded = try encodeAuthorizedSaveRoots(authorizedSaveRoots)
-        var errorBuffer = Array<CChar>(repeating: 0, count: 1024)
+        let context = TorrentPayloadBrokerBridgeContext(broker: payloadBroker)
+        let retainedContext = unsafe Unmanaged.passRetained(context)
+        defer {
+            unsafe retainedContext.release()
+        }
+
+        var callbacks = unsafe TTorrentPayloadBrokerCallbacks()
+        unsafe callbacks.context = retainedContext.toOpaque()
+        unsafe callbacks.retain_context = torrentPayloadContextRetainCallback
+        unsafe callbacks.release_context = torrentPayloadContextReleaseCallback
+        unsafe callbacks.open_payload = torrentPayloadOpenCallback
+        unsafe callbacks.payload_size = torrentPayloadSizeCallback
+
+        var errorBuffer = Array<CChar>(repeating: 0, count: 1_024)
         var errorSpan: MutableSpan<CChar>? = errorBuffer.mutableSpan
-        let created = unsafe withExtendedLifetime(encoded.retainedRoots) {
-            unsafe path.withCString { pointer in
-                let paths: Span<UInt8>? = encoded.pathBlob.isEmpty ? nil : encoded.pathBlob.span
-                let roots: Span<TTorrentAuthorizedSaveRoot>? = encoded.nativeRoots.isEmpty
-                    ? nil
-                    : encoded.nativeRoots.span
-                return unsafe TorrentClientCreateWithError(
-                    pointer,
-                    enablePeerExchangePlugin.bridgeFlag,
-                    paths,
-                    roots,
-                    torrentAuthorizedSaveRootRetainCallback,
-                    torrentAuthorizedSaveRootReleaseCallback,
-                    &errorSpan
-                )
-            }
+        let created = unsafe path.withCString { pointer in
+            unsafe TorrentClientCreateWithError(
+                pointer,
+                enablePeerExchangePlugin.bridgeFlag,
+                callbacks,
+                &errorSpan
+            )
         }
         errorSpan = nil
         guard let created = unsafe created else {
@@ -1423,51 +1293,6 @@ package enum TorrentAddError: LocalizedError, Sendable {
             throw TorrentEngineError.bridgeError(message.isEmpty ? "Unknown startup error." : message)
         }
         return unsafe TorrentClientHandle(created, wakeRelay: wakeRelay)
-    }
-
-    private nonisolated static func encodeAuthorizedSaveRoots(
-        _ roots: [TorrentAuthorizedSaveRoot]
-    ) throws -> TorrentEncodedAuthorizedSaveRoots {
-        guard roots.count <= Int(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT) else {
-            throw TorrentEngineError.bridgeError("Too many authorized download folders were provided.")
-        }
-
-        var uniquePaths = Set<String>(minimumCapacity: roots.count)
-        var uniqueIdentities = Set<TorrentAuthorizedSaveRootIdentity>(minimumCapacity: roots.count)
-        for root in roots {
-            let path = root.canonicalPath
-            let bytes = path.utf8
-            guard !bytes.isEmpty,
-                  bytes.count <= Int(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES),
-                  !bytes.contains(0),
-                  (path as NSString).isAbsolutePath,
-                  uniquePaths.insert(path).inserted,
-                  uniqueIdentities.insert(TorrentAuthorizedSaveRootIdentity(
-                      device: root.device,
-                      inode: root.inode
-                  )).inserted else {
-                throw TorrentEngineError.bridgeError("An authorized download folder path is invalid.")
-            }
-        }
-
-        let sortedRoots = roots.sorted { $0.canonicalPath < $1.canonicalPath }
-        var blob = [UInt8]()
-        var nativeRoots = [TTorrentAuthorizedSaveRoot]()
-        nativeRoots.reserveCapacity(sortedRoots.count)
-        for root in sortedRoots {
-            let bytes = Array(root.canonicalPath.utf8)
-            guard blob.count <= Int(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES) - bytes.count - 1 else {
-                throw TorrentEngineError.bridgeError("The authorized download folder list is too large.")
-            }
-            blob.append(contentsOf: bytes)
-            blob.append(0)
-            nativeRoots.append(root.nativeRecord())
-        }
-        return TorrentEncodedAuthorizedSaveRoots(
-            pathBlob: blob,
-            nativeRoots: nativeRoots,
-            retainedRoots: sortedRoots
-        )
     }
 
     private func requireClient() throws -> OpaquePointer {
@@ -1501,23 +1326,6 @@ package enum TorrentAddError: LocalizedError, Sendable {
             let message = stringFromBridgeBuffer(errorBuffer)
             throw TorrentEngineError.bridgeError(message)
         }
-    }
-
-    private func throwingAuthorizedRootReplacement(
-        _ body: (inout MutableSpan<CChar>?) -> Int32
-    ) throws {
-        var errorBuffer = Array<CChar>(repeating: 0, count: 1_024)
-        var errorSpan: MutableSpan<CChar>? = errorBuffer.mutableSpan
-        let result = body(&errorSpan)
-        errorSpan = nil
-        guard result != 0 else {
-            return
-        }
-        let message = stringFromBridgeBuffer(errorBuffer)
-        if result == Int32(TTORRENT_ERROR_AUTHORIZED_SAVE_ROOT_CAPACITY) {
-            throw TorrentEngineError.authorizedRootCapacityReached(message)
-        }
-        throw TorrentEngineError.bridgeError(message)
     }
 
     private func throwingBridgeAddReturningString(
@@ -1566,6 +1374,29 @@ package enum TorrentAddError: LocalizedError, Sendable {
         guard data.count <= TorrentInputLimits.maxTorrentFileBytes else {
             throw TorrentEngineError.bridgeError("The torrent file is too large.")
         }
+    }
+
+    private static func nativeStorageActivation(
+        _ activation: TorrentStorageActivation
+    ) -> TTorrentStorageActivation {
+        var native = TTorrentStorageActivation()
+        native.claim_generation = activation.generation
+        var uuid = activation.claimID.uuid
+        _ = unsafe withUnsafeMutableBytes(of: &native.claim_id) { destination in
+            unsafe withUnsafeBytes(of: &uuid) { source in
+                unsafe destination.copyBytes(from: source)
+            }
+        }
+        _ = unsafe withUnsafeMutableBytes(of: &native.source_manifest_digest) { destination in
+            _ = unsafe activation.sourceManifestDigest.copyBytes(to: destination)
+        }
+        if let preservedTorrentID = activation.preservedTorrentID {
+            let preservedIDBytes = Data(preservedTorrentID.utf8)
+            _ = unsafe withUnsafeMutableBytes(of: &native.preserved_torrent_id) { destination in
+                _ = unsafe preservedIDBytes.copyBytes(to: destination)
+            }
+        }
+        return native
     }
 
     private static func withMutableBridgeSpan<Element>(

@@ -6,42 +6,34 @@ struct PreparedDownloadFolder: Sendable {
     let defaultURL: URL?
     let lease: DownloadFolderAccessLease
     let bookmarkData: Data?
-    private let authorization: Result<TorrentFolderAuthorization, any Error>
 
     init(access: DownloadFolderAccessing, defaultURL: URL?, bookmarkData: Data?) {
         path = access.url.torrentFilePath
         self.defaultURL = defaultURL
         lease = DownloadFolderAccessLease(access: access)
         self.bookmarkData = bookmarkData
-        authorization = Result {
-            TorrentFolderAuthorization(
-                path: access.url.torrentFilePath,
-                bookmarkData: try access.delegationBookmarkData()
-            )
-        }
-    }
-
-    func engineAuthorization() throws -> TorrentFolderAuthorization {
-        try authorization.get()
     }
 }
 
 final class DownloadFolderAccessLease: Sendable {
     fileprivate let access: DownloadFolderAccessing
 
+    var url: URL {
+        access.url
+    }
+
     init(access: DownloadFolderAccessing) {
         self.access = access
     }
 }
 
-struct DownloadFolderCapabilitySnapshot: Sendable {
-    static let maximumPathCount = TorrentEngineLimits.maximumAuthorizedSavePathCount
+struct DownloadFolderAccessSnapshot: Sendable {
+    static let maximumPathCount = 32
 
     let revision: UInt64
     let paths: [String]
-    private let authorizations: Result<[TorrentFolderAuthorization], any Error>
     // Security-scoped access remains live for the lifetime of this snapshot.
-    private let leases: [DownloadFolderAccessLease]
+    let leases: [DownloadFolderAccessLease]
 
     init(
         revision: UInt64 = 0,
@@ -49,10 +41,8 @@ struct DownloadFolderCapabilitySnapshot: Sendable {
         additionalAccesses: [DownloadFolderAccessing]
     ) {
         var paths = [String]()
-        var preparedAuthorizations = [TorrentFolderAuthorization]()
         var leases = [DownloadFolderAccessLease]()
         var seenPaths = Set<String>()
-        var preparationError: (any Error)?
 
         func append(_ access: DownloadFolderAccessing) {
             let path = access.url.torrentFilePath
@@ -62,17 +52,6 @@ struct DownloadFolderCapabilitySnapshot: Sendable {
             }
             paths.append(path)
             leases.append(DownloadFolderAccessLease(access: access))
-            guard preparationError == nil else {
-                return
-            }
-            do {
-                preparedAuthorizations.append(TorrentFolderAuthorization(
-                    path: path,
-                    bookmarkData: try access.delegationBookmarkData()
-                ))
-            } catch {
-                preparationError = error
-            }
         }
 
         if let defaultAccess {
@@ -86,13 +65,7 @@ struct DownloadFolderCapabilitySnapshot: Sendable {
 
         self.revision = revision
         self.paths = paths
-        authorizations = preparationError.map(Result.failure)
-            ?? .success(preparedAuthorizations)
         self.leases = leases
-    }
-
-    func engineAuthorizations() throws -> [TorrentFolderAuthorization] {
-        try authorizations.get()
     }
 }
 
@@ -107,12 +80,12 @@ struct DownloadFolderDefaultUpdate: Sendable {
 }
 
 struct DownloadFolderPruneSnapshot: Sendable {
-    let capabilityRevision: UInt64
+    let accessRevision: UInt64
     let candidateAccessKeys: Set<String>
 }
 
 struct DownloadFolderPrunePlan: Sendable {
-    let capabilityRevision: UInt64
+    let accessRevision: UInt64
     let retainedAccessKeys: Set<String>
 
     @concurrent
@@ -121,42 +94,20 @@ struct DownloadFolderPrunePlan: Sendable {
         activeTorrents: [TorrentItem]
     ) async throws -> DownloadFolderPrunePlan {
         try Task.checkCancellation()
-        var unmatchedAccessKeys = snapshot.candidateAccessKeys
-        var retainedAccessKeys = Set<String>()
-        retainedAccessKeys.reserveCapacity(unmatchedAccessKeys.count)
-
-        for (offset, torrent) in activeTorrents.enumerated() {
-            if offset.isMultiple(of: 128) {
-                try Task.checkCancellation()
-            }
-            guard !unmatchedAccessKeys.isEmpty else {
-                break
-            }
-            let key = accessKey(
-                URL(filePath: torrent.savePath, directoryHint: .isDirectory)
-            )
-            if unmatchedAccessKeys.remove(key) != nil {
-                retainedAccessKeys.insert(key)
-            }
-        }
-
+        _ = activeTorrents
         try Task.checkCancellation()
         return DownloadFolderPrunePlan(
-            capabilityRevision: snapshot.capabilityRevision,
-            retainedAccessKeys: retainedAccessKeys
+            accessRevision: snapshot.accessRevision,
+            retainedAccessKeys: snapshot.candidateAccessKeys
         )
-    }
-
-    private static func accessKey(_ url: URL) -> String {
-        url.standardizedFileURL.resolvingSymlinksInPath().torrentFilePath
     }
 }
 
 protocol DownloadFolderAccessStoring: AnyObject, Sendable {
     func bootstrap() async -> DownloadFolderBootstrapResult
     func currentDefaultURL() async -> URL?
-    func currentCapabilityRevision() async -> UInt64
-    func makeCapabilitySnapshot() async -> DownloadFolderCapabilitySnapshot
+    func currentAccessRevision() async -> UInt64
+    func makeAccessSnapshot() async -> DownloadFolderAccessSnapshot
     func makePruneSnapshot() async -> DownloadFolderPruneSnapshot
     func clearDefaultBookmarkAndAccess() async
     func validateSelection(_ url: URL) async throws
@@ -193,7 +144,7 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
     private var didRestoreAdditionalAccesses = false
     private var didRestoreDefaultAccess = false
     private var discardedInvalidDefault = false
-    private var capabilityRevision: UInt64 = 0
+    private var accessRevision: UInt64 = 0
 
     init(
         domain: TorrentDefaultsDomain = .standard,
@@ -245,15 +196,15 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
         defaultAccess?.url
     }
 
-    func currentCapabilityRevision() async -> UInt64 {
+    func currentAccessRevision() async -> UInt64 {
         restoreAdditionalAccessesIfNeeded()
-        return capabilityRevision
+        return accessRevision
     }
 
-    func makeCapabilitySnapshot() async -> DownloadFolderCapabilitySnapshot {
+    func makeAccessSnapshot() async -> DownloadFolderAccessSnapshot {
         restoreAdditionalAccessesIfNeeded()
-        return DownloadFolderCapabilitySnapshot(
-            revision: capabilityRevision,
+        return DownloadFolderAccessSnapshot(
+            revision: accessRevision,
             defaultAccess: defaultAccess,
             additionalAccesses: Array(additionalAccesses.values)
         )
@@ -262,14 +213,14 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
     func makePruneSnapshot() async -> DownloadFolderPruneSnapshot {
         restoreAdditionalAccessesIfNeeded()
         return DownloadFolderPruneSnapshot(
-            capabilityRevision: capabilityRevision,
+            accessRevision: accessRevision,
             candidateAccessKeys: Set(additionalAccesses.keys)
         )
     }
 
     func clearDefaultBookmarkAndAccess() async {
-        let previousIdentity = capabilityIdentity
-        defer { advanceCapabilityRevision(ifChangedFrom: previousIdentity) }
+        let previousIdentity = accessIdentity
+        defer { advanceAccessRevision(ifChangedFrom: previousIdentity) }
         didRestoreDefaultAccess = true
         accessProvider.clearDefaultBookmark(defaults: defaults)
         defaultAccess = nil
@@ -297,8 +248,8 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
             )
         }
 
-        let previousIdentity = capabilityIdentity
-        defer { advanceCapabilityRevision(ifChangedFrom: previousIdentity) }
+        let previousIdentity = accessIdentity
+        defer { advanceAccessRevision(ifChangedFrom: previousIdentity) }
         let previousAccess = defaultAccess
         let previousURL = previousAccess?.url
         let newAccess = try accessProvider.createAccess(
@@ -328,8 +279,8 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
 
     func clearDefault(activeTorrents: [TorrentItem]) async {
         restoreAdditionalAccessesIfNeeded()
-        let previousIdentity = capabilityIdentity
-        defer { advanceCapabilityRevision(ifChangedFrom: previousIdentity) }
+        let previousIdentity = accessIdentity
+        defer { advanceAccessRevision(ifChangedFrom: previousIdentity) }
         let previousAccess = defaultAccess
         let previousURL = previousAccess?.url
         accessProvider.clearDefaultBookmark(defaults: defaults)
@@ -370,7 +321,7 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
         } else {
             var projectedAdditionalAccesses = additionalAccesses
             projectedAdditionalAccesses[Self.accessKey(access.url)] = access
-            try validateCapabilityCount(
+            try validateAccessCount(
                 defaultAccess: defaultAccess,
                 additionalAccesses: projectedAdditionalAccesses
             )
@@ -389,8 +340,8 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
         activeTorrents: [TorrentItem]
     ) async -> URL? {
         restoreAdditionalAccessesIfNeeded()
-        let previousIdentity = capabilityIdentity
-        defer { advanceCapabilityRevision(ifChangedFrom: previousIdentity) }
+        let previousIdentity = accessIdentity
+        defer { advanceAccessRevision(ifChangedFrom: previousIdentity) }
         guard let bookmarkData = preparedFolder.bookmarkData else {
             return nil
         }
@@ -454,7 +405,7 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
         activeTorrents _: [TorrentItem]
     ) async -> Bool {
         restoreAdditionalAccessesIfNeeded()
-        guard plan.capabilityRevision == capabilityRevision else {
+        guard plan.accessRevision == accessRevision else {
             return false
         }
         prune(retainingActiveKeys: plan.retainedAccessKeys)
@@ -473,20 +424,13 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
     }
 
     private func pruneSynchronously(activeTorrents: [TorrentItem]) {
-        var activeKeys = Set(activeTorrents.map { torrent in
-            Self.accessKey(
-                URL(filePath: torrent.savePath, directoryHint: .isDirectory)
-            )
-        })
-        if let defaultAccess {
-            activeKeys.remove(Self.accessKey(defaultAccess.url))
-        }
-        prune(retainingActiveKeys: activeKeys)
+        _ = activeTorrents
+        enforceAdditionalAccessLimit()
     }
 
     private func prune(retainingActiveKeys activeKeys: Set<String>) {
-        let previousIdentity = capabilityIdentity
-        defer { advanceCapabilityRevision(ifChangedFrom: previousIdentity) }
+        let previousIdentity = accessIdentity
+        defer { advanceAccessRevision(ifChangedFrom: previousIdentity) }
         let staleKeys = Set(additionalAccesses.keys).subtracting(activeKeys)
         guard !staleKeys.isEmpty else {
             return
@@ -497,13 +441,13 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
         removeAdditionalDownloadFolderBookmarks(for: staleKeys)
     }
 
-    private struct CapabilityIdentity: Equatable {
+    private struct AccessIdentity: Equatable {
         let defaultAccess: ObjectIdentifier?
         let additionalAccesses: [String: ObjectIdentifier]
     }
 
-    private var capabilityIdentity: CapabilityIdentity {
-        CapabilityIdentity(
+    private var accessIdentity: AccessIdentity {
+        AccessIdentity(
             defaultAccess: defaultAccess.map(ObjectIdentifier.init),
             additionalAccesses: additionalAccesses.mapValues(
                 ObjectIdentifier.init
@@ -511,17 +455,17 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
         )
     }
 
-    private func advanceCapabilityRevision(
-        ifChangedFrom previousIdentity: CapabilityIdentity
+    private func advanceAccessRevision(
+        ifChangedFrom previousIdentity: AccessIdentity
     ) {
-        guard capabilityIdentity != previousIdentity else {
+        guard accessIdentity != previousIdentity else {
             return
         }
         precondition(
-            capabilityRevision != UInt64.max,
-            "Download-folder capability revision exhausted"
+            accessRevision != UInt64.max,
+            "Download-folder access revision exhausted"
         )
-        capabilityRevision += 1
+        accessRevision += 1
     }
 
     private static func accessKey(_ url: URL) -> String {
@@ -534,31 +478,23 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
     ) throws {
         var projectedAdditionalAccesses = additionalAccesses
         let projectedDefaultKey = Self.accessKey(projectedDefaultAccess.url)
-        let activeKeys = Set(activeTorrents.map { torrent in
-            Self.accessKey(
-                URL(filePath: torrent.savePath, directoryHint: .isDirectory)
-            )
-        })
+        _ = activeTorrents
 
         if let defaultAccess {
             let previousDefaultKey = Self.accessKey(defaultAccess.url)
-            if previousDefaultKey != projectedDefaultKey,
-               activeKeys.contains(previousDefaultKey) {
+            if previousDefaultKey != projectedDefaultKey {
                 projectedAdditionalAccesses[previousDefaultKey] = defaultAccess
             }
         }
 
         projectedAdditionalAccesses.removeValue(forKey: projectedDefaultKey)
-        projectedAdditionalAccesses = projectedAdditionalAccesses.filter {
-            key, _ in activeKeys.contains(key)
-        }
-        try validateCapabilityCount(
+        try validateAccessCount(
             defaultAccess: projectedDefaultAccess,
             additionalAccesses: projectedAdditionalAccesses
         )
     }
 
-    private func validateCapabilityCount(
+    private func validateAccessCount(
         defaultAccess: DownloadFolderAccessing?,
         additionalAccesses: [String: DownloadFolderAccessing]
     ) throws {
@@ -566,8 +502,8 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
         if let defaultAccess {
             paths.insert(defaultAccess.url.torrentFilePath)
         }
-        guard paths.count <= DownloadFolderCapabilitySnapshot.maximumPathCount else {
-            throw TorrentStoreError.tooManyAuthorizedDownloadFolders
+        guard paths.count <= DownloadFolderAccessSnapshot.maximumPathCount else {
+            throw TorrentStoreError.tooManyDownloadFolders
         }
     }
 
@@ -581,14 +517,7 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
         }
 
         let key = Self.accessKey(url)
-        let isUsedByActiveTorrent = activeTorrents.contains { torrent in
-            Self.accessKey(
-                URL(filePath: torrent.savePath, directoryHint: .isDirectory)
-            ) == key
-        }
-        guard isUsedByActiveTorrent else {
-            return
-        }
+        _ = activeTorrents
 
         additionalAccesses[key] = access
         try? saveAdditionalDownloadFolderBookmark(for: access)
@@ -608,7 +537,7 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
         var restoredBookmarks = [String: Data]()
         for key in bookmarks.keys.sorted() {
             guard accesses.count
-                    < DownloadFolderCapabilitySnapshot.maximumPathCount else {
+                    < DownloadFolderAccessSnapshot.maximumPathCount else {
                 break
             }
             guard let bookmark = bookmarks[key] else {
@@ -643,7 +572,7 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
 
     private func enforceAdditionalAccessLimit() {
         let maximumAdditionalAccessCount =
-            DownloadFolderCapabilitySnapshot.maximumPathCount
+            DownloadFolderAccessSnapshot.maximumPathCount
             - (defaultAccess == nil ? 0 : 1)
         let retainedKeys = Set(additionalAccesses
             .sorted { lhs, rhs in

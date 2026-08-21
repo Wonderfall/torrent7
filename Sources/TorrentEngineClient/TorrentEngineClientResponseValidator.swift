@@ -23,10 +23,6 @@ enum TorrentEngineClientResponseValidator {
         switch value {
         case let response as TorrentEngineIPCHandshakeResponse:
             try validate(response)
-        case let response as TorrentEngineIPCGrantFolderResponse:
-            try validate(response.folder)
-        case let response as TorrentEngineIPCReplaceFoldersResponse:
-            try validate(folders: response.folders)
         case let response as TorrentEngineIPCPollResponse:
             try validate(response)
         case let response as TorrentEngineIPCFilePreviewResponse:
@@ -42,7 +38,7 @@ enum TorrentEngineClientResponseValidator {
                 throw TorrentEngineClientError.invalidReply
             }
         case let batch as TorrentSnapshotBatch:
-            try validate(torrents: batch.torrents, authorizedSavePaths: nil)
+            try validate(torrents: batch.torrents)
         case let batch as TorrentTrackerBatch:
             try validate(batch)
         case let batch as TorrentTrackerHostBatch:
@@ -64,15 +60,14 @@ enum TorrentEngineClientResponseValidator {
 
     static func validateDataset<Value: Sendable>(
         _ values: [Value],
-        kind: TorrentEngineIPCDatasetKind,
-        authorizedSavePaths: Set<String>
+        kind: TorrentEngineIPCDatasetKind
     ) throws {
         switch kind {
         case .torrentSnapshots:
             guard let torrents = values as? [TorrentItem] else {
                 throw TorrentEngineClientError.invalidReply
             }
-            try validate(torrents: torrents, authorizedSavePaths: authorizedSavePaths)
+            try validate(torrents: torrents)
         case .trackerHosts:
             guard let hosts = values as? [TorrentTrackerHostItem] else {
                 throw TorrentEngineClientError.invalidReply
@@ -86,24 +81,7 @@ enum TorrentEngineClientResponseValidator {
             response.libtorrentVersion,
             maximumBytes: maximumVersionBytes,
             allowsEmpty: false
-        ),
-        response.folders.count <= TorrentEngineLimits.maximumAuthorizedSavePathCount else {
-            throw TorrentEngineClientError.invalidReply
-        }
-        try validate(folders: response.folders)
-    }
-
-    private static func validate(folders: [TorrentEngineIPCGrantedFolder]) throws {
-        guard folders.count <= TorrentEngineLimits.maximumAuthorizedSavePathCount,
-              Set(folders.map(\.capabilityID)).count == folders.count,
-              Set(folders.map(\.resolvedPath)).count == folders.count else {
-            throw TorrentEngineClientError.invalidReply
-        }
-        try folders.forEach(validate)
-    }
-
-    private static func validate(_ folder: TorrentEngineIPCGrantedFolder) throws {
-        guard isCanonicalAbsolutePath(folder.resolvedPath) else {
+        ) else {
             throw TorrentEngineClientError.invalidReply
         }
     }
@@ -208,15 +186,9 @@ enum TorrentEngineClientResponseValidator {
         }
     }
 
-    private static func validate(
-        torrents: [TorrentItem],
-        authorizedSavePaths: Set<String>?
-    ) throws {
+    private static func validate(torrents: [TorrentItem]) throws {
         guard torrents.count <= TorrentEngineLimits.maximumTorrentSnapshotCount else {
             throw TorrentEngineClientError.invalidReply
-        }
-        let authorizedPathKeys = authorizedSavePaths.map { paths in
-            Set(paths.map(canonicalDirectoryPathKey))
         }
         var identifiers = Set<String>(minimumCapacity: torrents.count)
         for torrent in torrents {
@@ -228,9 +200,6 @@ enum TorrentEngineClientResponseValidator {
                       maximumBytes: maximumTorrentNameBytes
                   ),
                   isCanonicalAbsolutePath(torrent.savePath),
-                  authorizedPathKeys?.contains(
-                      canonicalDirectoryPathKey(torrent.savePath)
-                  ) ?? true,
                   isBoundedText(
                       torrent.error,
                       maximumBytes: maximumTorrentErrorBytes,
@@ -456,7 +425,7 @@ enum TorrentEngineClientResponseValidator {
     private static func isCanonicalAbsolutePath(_ path: String) -> Bool {
         guard isBoundedText(
             path,
-            maximumBytes: TorrentEngineLimits.maximumAuthorizedSavePathBytes,
+            maximumBytes: TorrentEngineLimits.maximumEnginePrivatePathBytes,
             allowsEmpty: false
         ),
         (path as NSString).isAbsolutePath else {

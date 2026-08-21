@@ -3,6 +3,7 @@ import Synchronization
 import Testing
 import TorrentEngineIPC
 import TorrentEngineModel
+import XPC
 @testable import TorrentEngineClient
 
 @Suite("Isolated engine client security")
@@ -140,8 +141,7 @@ struct TorrentXPCClientSecurityTests {
             }
             return try successReply(
                 TorrentEngineIPCHandshakeResponse(
-                    libtorrentVersion: "2.1.0",
-                    folders: []
+                    libtorrentVersion: "2.1.0"
                 ),
                 for: request,
                 epoch: epoch
@@ -163,8 +163,7 @@ struct TorrentXPCClientSecurityTests {
             case .handshake:
                 return try successReply(
                     TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: []
+                        libtorrentVersion: "2.1.0"
                     ),
                     for: request,
                     epoch: epoch
@@ -197,6 +196,45 @@ struct TorrentXPCClientSecurityTests {
         #expect(preview.torrentData == input)
     }
 
+    @Test("Torrent metadata uses an exact bounded raw reply")
+    func torrentMetadataUsesRawReply() async throws {
+        let epoch = epoch
+        let metadata = Data([0x64, 0x34, 0x3A, 0x6E, 0x61, 0x6D, 0x65])
+        let transport = ScriptedTorrentEngineTransport { request in
+            switch request.header.operation {
+            case .handshake:
+                return try successReply(
+                    TorrentEngineIPCHandshakeResponse(
+                        libtorrentVersion: "2.1.0"
+                    ),
+                    for: request,
+                    epoch: epoch
+                )
+            case .torrentMetadata:
+                let value: TorrentEngineIPCTorrentIDRequest = try decodeRequest(
+                    request
+                )
+                #expect(value.id == self.torrentID)
+                #expect(request.attachment == nil)
+                return TorrentEngineIPCReply(
+                    header: request.header,
+                    engineEpoch: epoch,
+                    status: .success,
+                    payload: request.header.sequence == 2 ? metadata : Data()
+                )
+            default:
+                throw TorrentEngineClientError.serviceRejected(
+                    "Unexpected operation"
+                )
+            }
+        }
+        let client = try await makeClient(transport: transport)
+
+        #expect(try await client.torrentMetadata(id: torrentID) == metadata)
+        #expect(try await client.torrentMetadata(id: torrentID) == nil)
+        #expect(client.isAvailable)
+    }
+
     @Test("Invalid preview metadata terminates the client")
     func invalidPreviewMetadataIsTerminal() async throws {
         let epoch = epoch
@@ -206,8 +244,7 @@ struct TorrentXPCClientSecurityTests {
             case .handshake:
                 return try successReply(
                     TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: []
+                        libtorrentVersion: "2.1.0"
                     ),
                     for: request,
                     epoch: epoch
@@ -239,485 +276,6 @@ struct TorrentXPCClientSecurityTests {
         #expect(transport.isCancelled)
     }
 
-    @Test("Reconciliation replaces the committed capability map atomically")
-    func reconciliationReplacesCommittedCapabilities() async throws {
-        let oldPath = testPath("old")
-        let firstPath = testPath("first")
-        let secondPath = testPath("second")
-        let oldID = UUID()
-        let firstID = UUID()
-        let secondID = UUID()
-        let epoch = epoch
-        let transport = ScriptedTorrentEngineTransport { request in
-            switch request.header.operation {
-            case .handshake:
-                try successReply(
-                    TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: [
-                            TorrentEngineIPCGrantedFolder(
-                                capabilityID: oldID,
-                                resolvedPath: oldPath
-                            )
-                        ]
-                    ),
-                    for: request,
-                    epoch: epoch
-                )
-            case .replaceFolderCapabilities:
-                try successReply(
-                    TorrentEngineIPCReplaceFoldersResponse(
-                        folders: [
-                            TorrentEngineIPCGrantedFolder(
-                                capabilityID: secondID,
-                                resolvedPath: secondPath
-                            ),
-                            TorrentEngineIPCGrantedFolder(
-                                capabilityID: firstID,
-                                resolvedPath: firstPath
-                            )
-                        ]
-                    ),
-                    for: request,
-                    epoch: epoch
-                )
-            case .addMagnet:
-                throw TorrentEngineClientError.serviceRejected("Rejected for testing")
-            case .restart:
-                try successReply(TorrentEngineIPCEmpty(), for: request, epoch: epoch)
-            default:
-                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
-            }
-        }
-        let client = try await makeClient(
-            transport: transport,
-            authorizations: [authorization(path: oldPath, byte: 1)]
-        )
-
-        let unnormalizedFirstPath = URL(filePath: firstPath)
-            .deletingLastPathComponent()
-            .appending(path: "discarded")
-            .appending(path: "..")
-            .appending(path: URL(filePath: firstPath).lastPathComponent)
-            .path(percentEncoded: false)
-        try await client.reconcileFolderAuthorizations([
-            authorization(path: unnormalizedFirstPath, byte: 2),
-            authorization(path: secondPath, byte: 3)
-        ])
-
-        let replaceRequest = try #require(
-            transport.requests.first { $0.header.operation == .replaceFolderCapabilities }
-        )
-        let replacement: TorrentEngineIPCReplaceFoldersRequest = try decodeRequest(replaceRequest)
-        #expect(replacement.folders.count == 2)
-        #expect(Set(replacement.folders.map(\.bookmark)) == [Data([2]), Data([3])])
-
-        await #expect(throws: TorrentEngineClientError.self) {
-            _ = try await client.addMagnet(
-                "magnet:?xt=urn:btih:\(String(repeating: "b", count: 40))",
-                savePath: firstPath,
-                startsPaused: false,
-                queuePriority: .normal,
-                enablePeerExchange: false,
-                httpsTrackerPolicy: .inherit,
-                httpsWebSeedPolicy: .inherit,
-                allowPreMetadataDHT: false
-            )
-        }
-        #expect(!transport.operations.contains(.revokeFolderCapability))
-
-        try await client.restart(
-            enablePeerExchangePlugin: false,
-            authorizedSavePaths: [secondPath, firstPath]
-        )
-        let restartRequest = try #require(
-            transport.requests.last { $0.header.operation == .restart }
-        )
-        let restart: TorrentEngineIPCRestartRequest = try decodeRequest(restartRequest)
-        #expect(Set(restart.capabilityIDs) == [firstID, secondID])
-
-        let operationCount = transport.operations.count
-        await #expect(throws: TorrentEngineClientError.self) {
-            try await client.restart(
-                enablePeerExchangePlugin: false,
-                authorizedSavePaths: [oldPath]
-            )
-        }
-        #expect(transport.operations.count == operationCount)
-    }
-
-    @Test("Local exact-replacement validation failure terminalizes before the wire")
-    func localReconciliationValidationFailureTerminalizes() async throws {
-        let epoch = epoch
-        let transport = ScriptedTorrentEngineTransport { request in
-            switch request.header.operation {
-            case .handshake:
-                try successReply(
-                    TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: []
-                    ),
-                    for: request,
-                    epoch: epoch
-                )
-            default:
-                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
-            }
-        }
-        let client = try await makeClient(transport: transport)
-
-        await #expect(throws: TorrentEngineClientError.self) {
-            try await client.reconcileFolderAuthorizations([
-                TorrentFolderAuthorization(
-                    path: testPath("invalid-empty-bookmark"),
-                    bookmarkData: Data()
-                ),
-            ])
-        }
-
-        #expect(transport.operations == [.handshake])
-        #expect(transport.isCancelled)
-        #expect(!client.isAvailable)
-    }
-
-    @Test("A rejected reconciliation terminates instead of retaining revoked authority")
-    func rejectedReconciliationTerminates() async throws {
-        let oldPath = testPath("old-rejected")
-        let newPath = testPath("new-rejected")
-        let oldID = UUID()
-        let epoch = epoch
-        let transport = ScriptedTorrentEngineTransport { request in
-            switch request.header.operation {
-            case .handshake:
-                try successReply(
-                    TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: [
-                            TorrentEngineIPCGrantedFolder(
-                                capabilityID: oldID,
-                                resolvedPath: oldPath
-                            )
-                        ]
-                    ),
-                    for: request,
-                    epoch: epoch
-                )
-            case .replaceFolderCapabilities:
-                throw TorrentEngineClientError.serviceRejected("Rejected for testing")
-            default:
-                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
-            }
-        }
-        let client = try await makeClient(
-            transport: transport,
-            authorizations: [authorization(path: oldPath, byte: 1)]
-        )
-
-        await #expect(throws: TorrentEngineClientError.self) {
-            try await client.reconcileFolderAuthorizations([
-                authorization(path: newPath, byte: 2)
-            ])
-        }
-        #expect(!client.isAvailable)
-        #expect(transport.isCancelled)
-        #expect(transport.operations == [.handshake, .replaceFolderCapabilities])
-    }
-
-    @Test("Mismatched replacement paths terminate the client")
-    func mismatchedReconciliationTerminates() async throws {
-        let oldPath = testPath("old-mismatch")
-        let requestedPath = testPath("requested")
-        let wrongPath = testPath("wrong")
-        let epoch = epoch
-        let transport = ScriptedTorrentEngineTransport { request in
-            switch request.header.operation {
-            case .handshake:
-                try successReply(
-                    TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: [
-                            TorrentEngineIPCGrantedFolder(
-                                capabilityID: UUID(),
-                                resolvedPath: oldPath
-                            )
-                        ]
-                    ),
-                    for: request,
-                    epoch: epoch
-                )
-            case .replaceFolderCapabilities:
-                try successReply(
-                    TorrentEngineIPCReplaceFoldersResponse(
-                        folders: [
-                            TorrentEngineIPCGrantedFolder(
-                                capabilityID: UUID(),
-                                resolvedPath: wrongPath
-                            )
-                        ]
-                    ),
-                    for: request,
-                    epoch: epoch
-                )
-            default:
-                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
-            }
-        }
-        let client = try await makeClient(
-            transport: transport,
-            authorizations: [authorization(path: oldPath, byte: 1)]
-        )
-
-        await #expect(throws: TorrentEngineClientError.self) {
-            try await client.reconcileFolderAuthorizations([
-                authorization(path: requestedPath, byte: 2)
-            ])
-        }
-
-        #expect(!client.isAvailable)
-        #expect(transport.isCancelled)
-    }
-
-    @Test("A definite add rejection revokes its provisional capability")
-    func rejectedAddRevokesProvisionalCapability() async throws {
-        let path = testPath("rejected-add")
-        let capabilityID = UUID()
-        let epoch = epoch
-        let transport = ScriptedTorrentEngineTransport { request in
-            switch request.header.operation {
-            case .handshake:
-                try successReply(
-                    TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.0", folders: []),
-                    for: request,
-                    epoch: epoch
-                )
-            case .grantFolderCapability:
-                try successReply(
-                    TorrentEngineIPCGrantFolderResponse(
-                        folder: TorrentEngineIPCGrantedFolder(
-                            capabilityID: capabilityID,
-                            resolvedPath: path
-                        )
-                    ),
-                    for: request,
-                    epoch: epoch
-                )
-            case .addMagnet:
-                throw TorrentEngineClientError.serviceRejected("Rejected for testing")
-            case .revokeFolderCapability:
-                try successReply(TorrentEngineIPCEmpty(), for: request, epoch: epoch)
-            default:
-                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
-            }
-        }
-        let client = try await makeClient(transport: transport)
-        try await client.delegateFolderAuthorization(authorization(path: path, byte: 1))
-
-        await #expect(throws: TorrentEngineClientError.self) {
-            _ = try await addMagnet(client: client, savePath: path)
-        }
-
-        #expect(transport.operations == [
-            .handshake,
-            .grantFolderCapability,
-            .addMagnet,
-            .revokeFolderCapability
-        ])
-        #expect(client.isAvailable)
-        let operationCount = transport.operations.count
-        await #expect(throws: TorrentEngineClientError.self) {
-            _ = try await addMagnet(client: client, savePath: path)
-        }
-        #expect(transport.operations.count == operationCount)
-    }
-
-    @Test("An ambiguous add failure does not revoke a possibly committed capability")
-    func ambiguousAddDoesNotRevoke() async throws {
-        let path = testPath("ambiguous-add")
-        let epoch = epoch
-        let transport = provisionalAddTransport(path: path, epoch: epoch) { _ in
-            throw TorrentEngineClientError.connectionFailed
-        }
-        let client = try await makeClient(transport: transport)
-        try await client.delegateFolderAuthorization(authorization(path: path, byte: 1))
-
-        await #expect(throws: TorrentEngineClientError.self) {
-            _ = try await addMagnet(client: client, savePath: path)
-        }
-
-        #expect(transport.operations == [.handshake, .grantFolderCapability, .addMagnet])
-        #expect(transport.isCancelled)
-        #expect(!client.isAvailable)
-    }
-
-    @Test("Cancellation cannot suppress revoke after a drained definite add rejection")
-    func cancelledDefiniteAddStillRevokes() async throws {
-        let path = testPath("cancelled-definite-add")
-        let epoch = epoch
-        let capabilityID = UUID()
-        let blocker = AsyncRequestBlocker()
-        let transport = ScriptedTorrentEngineTransport { request in
-            switch request.header.operation {
-            case .handshake:
-                return try successReply(
-                    TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: []
-                    ),
-                    for: request,
-                    epoch: epoch
-                )
-            case .grantFolderCapability:
-                return try successReply(
-                    TorrentEngineIPCGrantFolderResponse(
-                        folder: TorrentEngineIPCGrantedFolder(
-                            capabilityID: capabilityID,
-                            resolvedPath: path
-                        )
-                    ),
-                    for: request,
-                    epoch: epoch
-                )
-            case .addMagnet:
-                await blocker.block()
-                throw TorrentEngineClientError.serviceRejected(
-                    "Rejected before commit"
-                )
-            case .revokeFolderCapability:
-                return try successReply(
-                    TorrentEngineIPCEmpty(),
-                    for: request,
-                    epoch: epoch
-                )
-            case .reannounce:
-                return try successReply(
-                    TorrentEngineIPCEmpty(),
-                    for: request,
-                    epoch: epoch
-                )
-            default:
-                throw TorrentEngineClientError.serviceRejected(
-                    "Unexpected operation"
-                )
-            }
-        }
-        let client = try await makeClient(transport: transport)
-        try await client.delegateFolderAuthorization(
-            authorization(path: path, byte: 9)
-        )
-        let add = Task {
-            try await addMagnet(client: client, savePath: path)
-        }
-        await blocker.waitUntilBlocked()
-
-        add.cancel()
-        await blocker.release()
-        await #expect(throws: TorrentEngineClientError.self) {
-            try await add.value
-        }
-
-        #expect(transport.operations == [
-            .handshake,
-            .grantFolderCapability,
-            .addMagnet,
-            .revokeFolderCapability,
-        ])
-        #expect(client.isAvailable)
-        #expect(!transport.isCancelled)
-        try await client.reannounce(id: torrentID)
-        #expect(transport.sequences == [1, 2, 3, 4, 5])
-    }
-
-    @Test("A successful add response round trips its canonical identifier")
-    func successfulAddResponseRoundTripsIdentifier() async throws {
-        let path = testPath("successful-add")
-        let epoch = epoch
-        let torrentID = torrentID
-        let transport = provisionalAddTransport(path: path, epoch: epoch) { request in
-            return try successReply(
-                TorrentEngineIPCAddedTorrentResponse(identifier: torrentID),
-                for: request,
-                epoch: epoch
-            )
-        }
-        let client = try await makeClient(transport: transport)
-        try await client.delegateFolderAuthorization(authorization(path: path, byte: 1))
-
-        let identifier = try await addMagnet(client: client, savePath: path)
-
-        #expect(identifier == torrentID)
-        #expect(transport.operations == [.handshake, .grantFolderCapability, .addMagnet])
-        #expect(!transport.isCancelled)
-        #expect(client.isAvailable)
-    }
-
-    @Test("A successful torrent-file add round trips its canonical identifier")
-    func successfulTorrentFileAddResponseRoundTripsIdentifier() async throws {
-        let path = testPath("successful-file-add")
-        let epoch = epoch
-        let torrentID = torrentID
-        let torrentData = Data("d4:infod4:name4:testee".utf8)
-        let transport = provisionalAddTransport(path: path, epoch: epoch) { request in
-            #expect(request.attachment == torrentData)
-            let metadata: TorrentEngineIPCAddTorrentFileRequest = try decodeRequest(request)
-            #expect(metadata.filePriorities == [
-                TorrentEngineIPCFilePriorityEntry(index: 0, priority: .normal),
-            ])
-            return try successReply(
-                TorrentEngineIPCAddedTorrentResponse(identifier: torrentID),
-                for: request,
-                epoch: epoch
-            )
-        }
-        let client = try await makeClient(transport: transport)
-        try await client.delegateFolderAuthorization(authorization(path: path, byte: 1))
-
-        let identifier = try await client.addTorrentFile(
-            data: torrentData,
-            savePath: path,
-            filePriorities: [0: .normal],
-            startsPaused: false,
-            queuePriority: .normal,
-            enablePeerExchange: false,
-            httpsTrackerPolicy: .inherit,
-            httpsWebSeedPolicy: .inherit
-        )
-
-        #expect(identifier == torrentID)
-        #expect(transport.operations == [.handshake, .grantFolderCapability, .addTorrentFile])
-        #expect(!transport.isCancelled)
-        #expect(client.isAvailable)
-    }
-
-    @Test("A semantically invalid add reply is terminal and never revokes")
-    func invalidAddReplyIsTerminal() async throws {
-        let path = testPath("invalid-add")
-        let epoch = epoch
-        let transport = provisionalAddTransport(path: path, epoch: epoch) { request in
-            try successReply(
-                TorrentEngineIPCAddedTorrentResponse(
-                    identifier: "not-a-canonical-torrent-id"
-                ),
-                for: request,
-                epoch: epoch
-            )
-        }
-        let client = try await makeClient(transport: transport)
-        try await client.delegateFolderAuthorization(authorization(path: path, byte: 1))
-
-        await #expect(throws: TorrentEngineClientError.self) {
-            _ = try await addMagnet(client: client, savePath: path)
-        }
-
-        #expect(transport.operations == [.handshake, .grantFolderCapability, .addMagnet])
-        #expect(transport.isCancelled)
-        #expect(!client.isAvailable)
-        let operationCount = transport.operations.count
-        await #expect(throws: TorrentEngineClientError.self) {
-            try await client.pause(id: torrentID)
-        }
-        #expect(transport.operations.count == operationCount)
-    }
-
     @Test(arguments: InvalidReplyKind.allCases)
     func malformedUnitReplyTerminates(kind: InvalidReplyKind) async throws {
         let epoch = epoch
@@ -725,7 +283,7 @@ struct TorrentXPCClientSecurityTests {
             switch request.header.operation {
             case .handshake:
                 try successReply(
-                    TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.0", folders: []),
+                    TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.0"),
                     for: request,
                     epoch: epoch
                 )
@@ -759,7 +317,7 @@ struct TorrentXPCClientSecurityTests {
             switch request.header.operation {
             case .handshake:
                 try successReply(
-                    TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.0", folders: []),
+                    TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.0"),
                     for: request,
                     epoch: epoch
                 )
@@ -787,7 +345,7 @@ struct TorrentXPCClientSecurityTests {
             switch request.header.operation {
             case .handshake:
                 try successReply(
-                    TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.0", folders: []),
+                    TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.0"),
                     for: request,
                     epoch: epoch
                 )
@@ -838,7 +396,7 @@ struct TorrentXPCClientSecurityTests {
                 throw TorrentEngineClientError.serviceRejected("Unexpected operation")
             }
             return try successReply(
-                TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.0", folders: []),
+                    TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.0"),
                 for: request,
                 epoch: epoch
             )
@@ -861,7 +419,7 @@ struct TorrentXPCClientSecurityTests {
             switch request.header.operation {
             case .handshake:
                 try successReply(
-                    TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.0", folders: []),
+                    TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.0"),
                     for: request,
                     epoch: epoch
                 )
@@ -906,8 +464,7 @@ struct TorrentXPCClientSecurityTests {
             case .handshake:
                 return try successReply(
                     TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: []
+                        libtorrentVersion: "2.1.0"
                     ),
                     for: request,
                     epoch: epoch
@@ -1006,8 +563,7 @@ struct TorrentXPCClientSecurityTests {
             case .handshake:
                 return try successReply(
                     TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: []
+                        libtorrentVersion: "2.1.0"
                     ),
                     for: request,
                     epoch: epoch
@@ -1134,8 +690,7 @@ struct TorrentXPCClientSecurityTests {
             case .handshake:
                 return try successReply(
                     TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: []
+                        libtorrentVersion: "2.1.0"
                     ),
                     for: request,
                     epoch: epoch
@@ -1217,8 +772,7 @@ struct TorrentXPCClientSecurityTests {
             case .handshake:
                 return try successReply(
                     TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: []
+                        libtorrentVersion: "2.1.0"
                     ),
                     for: request,
                     epoch: epoch
@@ -1307,8 +861,7 @@ struct TorrentXPCClientSecurityTests {
             case .handshake:
                 return try successReply(
                     TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: []
+                        libtorrentVersion: "2.1.0"
                     ),
                     for: request,
                     epoch: epoch
@@ -1385,7 +938,6 @@ struct TorrentXPCClientSecurityTests {
         let epoch = epoch
         let snapshotID = UUID()
         let trackerHostID = UUID()
-        let capabilityID = UUID()
         let blocker = AsyncRequestBlocker()
         let closedIDs = Mutex([UUID]())
         let savePath = testPath("cancelled-dataset-poll")
@@ -1395,11 +947,7 @@ struct TorrentXPCClientSecurityTests {
             case .handshake:
                 return try successReply(
                     TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: [TorrentEngineIPCGrantedFolder(
-                            capabilityID: capabilityID,
-                            resolvedPath: savePath
-                        )]
+                        libtorrentVersion: "2.1.0"
                     ),
                     for: request,
                     epoch: epoch
@@ -1470,10 +1018,7 @@ struct TorrentXPCClientSecurityTests {
                 throw TorrentEngineClientError.serviceRejected("Unexpected operation")
             }
         }
-        let client = try await makeClient(
-            transport: transport,
-            authorizations: [authorization(path: savePath, byte: 1)]
-        )
+        let client = try await makeClient(transport: transport)
         let poll = Task {
             try await client.poll(
                 since: nil,
@@ -1506,8 +1051,7 @@ struct TorrentXPCClientSecurityTests {
             case .handshake:
                 return try successReply(
                     TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: []
+                        libtorrentVersion: "2.1.0"
                     ),
                     for: request,
                     epoch: epoch
@@ -1591,8 +1135,7 @@ struct TorrentXPCClientSecurityTests {
             case .handshake:
                 return try successReply(
                     TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: []
+                        libtorrentVersion: "2.1.0"
                     ),
                     for: request,
                     epoch: epoch
@@ -1817,7 +1360,6 @@ struct TorrentXPCClientSecurityTests {
         var rejectionPolicy = TorrentEngineConnectionRetryPolicy()
         #expect(rejectionPolicy.delay(after: .serviceRejected("invalid peer")) == nil)
         #expect(rejectionPolicy.delay(after: .invalidReply) == nil)
-        #expect(rejectionPolicy.delay(after: .invalidBookmark) == nil)
     }
 
     @Test("Replacement startup keeps generic failures in capped cleanup backoff")
@@ -1857,8 +1399,7 @@ struct TorrentXPCClientSecurityTests {
             case .handshake:
                 return try successReply(
                     TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: []
+                        libtorrentVersion: "2.1.0"
                     ),
                     for: request,
                     epoch: epoch
@@ -1919,8 +1460,7 @@ struct TorrentXPCClientSecurityTests {
             case .handshake:
                 try successReply(
                     TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: []
+                        libtorrentVersion: "2.1.0"
                     ),
                     for: request,
                     epoch: epoch
@@ -1950,8 +1490,7 @@ struct TorrentXPCClientSecurityTests {
             case .handshake:
                 try successReply(
                     TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: []
+                        libtorrentVersion: "2.1.0"
                     ),
                     for: request,
                     epoch: epoch
@@ -1987,7 +1526,7 @@ struct TorrentXPCClientSecurityTests {
             switch request.header.operation {
             case .handshake:
                 return try successReply(
-                    TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.0", folders: []),
+                    TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.0"),
                     for: request,
                     epoch: epoch
                 )
@@ -2030,8 +1569,7 @@ struct TorrentXPCClientSecurityTests {
             case .handshake:
                 return try successReply(
                     TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: []
+                        libtorrentVersion: "2.1.0"
                     ),
                     for: request,
                     epoch: epoch
@@ -2081,8 +1619,7 @@ struct TorrentXPCClientSecurityTests {
             case .handshake:
                 return try successReply(
                     TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: []
+                        libtorrentVersion: "2.1.0"
                     ),
                     for: request,
                     epoch: epoch
@@ -2127,8 +1664,7 @@ struct TorrentXPCClientSecurityTests {
             case .handshake:
                 return try successReply(
                     TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: []
+                        libtorrentVersion: "2.1.0"
                     ),
                     for: request,
                     epoch: epoch
@@ -2179,8 +1715,7 @@ struct TorrentXPCClientSecurityTests {
             case .handshake:
                 return try successReply(
                     TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: []
+                        libtorrentVersion: "2.1.0"
                     ),
                     for: request,
                     epoch: epoch
@@ -2220,8 +1755,7 @@ struct TorrentXPCClientSecurityTests {
             case .handshake:
                 return try successReply(
                     TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0",
-                        folders: []
+                        libtorrentVersion: "2.1.0"
                     ),
                     for: request,
                     epoch: epoch
@@ -2244,12 +1778,12 @@ struct TorrentXPCClientSecurityTests {
     }
 
     private func makeClient(
-        transport: ScriptedTorrentEngineTransport,
-        authorizations: [TorrentFolderAuthorization] = []
+        transport: ScriptedTorrentEngineTransport
     ) async throws -> TorrentXPCClient {
         try await TorrentXPCClient.connect(
             enablePeerExchangePlugin: false,
-            folderAuthorizations: authorizations,
+            brokerEndpoint: TorrentEngineClientTestStorageBroker.endpoint,
+            brokerSessionNonce: TorrentEngineClientTestStorageBroker.sessionNonce,
             transport: transport,
             controllerID: UUID()
         )
@@ -2266,10 +1800,6 @@ struct TorrentXPCClientSecurityTests {
             await Task.yield()
         }
         Issue.record("Timed out waiting for queued poll-pipeline acquisitions")
-    }
-
-    private func authorization(path: String, byte: UInt8) -> TorrentFolderAuthorization {
-        TorrentFolderAuthorization(path: path, bookmarkData: Data([byte]))
     }
 
     private func testPath(_ component: String) -> String {
@@ -2321,55 +1851,6 @@ struct TorrentXPCClientSecurityTests {
         )
     }
 
-    private func addMagnet(
-        client: TorrentXPCClient,
-        savePath: String
-    ) async throws -> String {
-        try await client.addMagnet(
-            "magnet:?xt=urn:btih:\(String(repeating: "c", count: 40))",
-            savePath: savePath,
-            startsPaused: false,
-            queuePriority: .normal,
-            enablePeerExchange: false,
-            httpsTrackerPolicy: .inherit,
-            httpsWebSeedPolicy: .inherit,
-            allowPreMetadataDHT: false
-        )
-    }
-
-    private func provisionalAddTransport(
-        path: String,
-        epoch: UUID,
-        addHandler: @escaping @Sendable (TorrentEngineIPCRequest) async throws
-            -> TorrentEngineIPCReply
-    ) -> ScriptedTorrentEngineTransport {
-        let capabilityID = UUID()
-        return ScriptedTorrentEngineTransport { request in
-            switch request.header.operation {
-            case .handshake:
-                try successReply(
-                    TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.0", folders: []),
-                    for: request,
-                    epoch: epoch
-                )
-            case .grantFolderCapability:
-                try successReply(
-                    TorrentEngineIPCGrantFolderResponse(
-                        folder: TorrentEngineIPCGrantedFolder(
-                            capabilityID: capabilityID,
-                            resolvedPath: path
-                        )
-                    ),
-                    for: request,
-                    epoch: epoch
-                )
-            case .addMagnet, .addTorrentFile:
-                try await addHandler(request)
-            default:
-                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
-            }
-        }
-    }
 }
 
 enum InvalidReplyKind: CaseIterable, Sendable {

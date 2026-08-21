@@ -310,51 +310,19 @@ std::vector<std::string> TTorrentClient::removal_ids_for_identity(lt::info_hash_
     return ids;
 }
 
-bool TTorrentClient::delete_pending_for_hashes(lt::info_hash_t const &hashes)
+bool TTorrentClient::resume_cleanup_pending_for_hashes(lt::info_hash_t const &hashes)
 {
     std::scoped_lock io_guard(resume_io_lock);
     std::vector<std::string> const ids = hash_keys(hashes);
     for (std::string const &id : ids) {
-        if (awaiting_delete_resume_ids_by_id.contains(id)) {
-            return true;
-        }
         if (pending_resume_cleanup_ids_by_id.contains(id)) {
-            return true;
-        }
-        if (terminal_delete_cleanup_ids_by_id.contains(id)) {
             return true;
         }
         if (pending_tombstone_clear_ids_by_id.contains(id)) {
             return true;
         }
     }
-
-    for (std::string const &id : ids) {
-        auto const indexed = removal_tombstones_by_id.find(id);
-        if (indexed == removal_tombstones_by_id.end()) {
-            continue;
-        }
-        if (std::ranges::any_of(indexed->second, [](RemovalTombstoneEntry const *entry) {
-                return entry != nullptr
-                    && entry->state == RemovalTombstoneState::awaiting_payload_delete;
-            })) {
-            return true;
-        }
-    }
     return false;
-}
-
-void TTorrentClient::remember_pending_delete(lt::info_hash_t const &hashes, std::vector<std::string> const &resume_ids)
-{
-    ResumeIDListResult normalized = normalized_resume_ids(resume_ids);
-    if (!normalized || normalized->empty()) {
-        return;
-    }
-
-    std::scoped_lock io_guard(resume_io_lock);
-    for (std::string const &id : hash_keys(hashes)) {
-        awaiting_delete_resume_ids_by_id[id] = *normalized;
-    }
 }
 
 void TTorrentClient::remember_pending_resume_cleanup_locked(std::vector<std::string> const &ids)
@@ -492,109 +460,6 @@ std::vector<std::string> TTorrentClient::retry_pending_tombstone_clears(bool rep
     if (reports_errors) {
         for (std::string const &error : errors) {
             queue_alert_error_threadsafe("Removal marker cleanup retry failed: " + error + ".");
-        }
-    }
-    return errors;
-}
-
-std::vector<std::string> TTorrentClient::promote_pending_delete_to_terminal_cleanup(lt::info_hash_t const &hashes)
-{
-    std::vector<std::string> resume_ids;
-    std::vector<std::string> const ids = hash_keys(hashes);
-    std::scoped_lock io_guard(resume_io_lock);
-    for (std::string const &id : ids) {
-        auto const pending = awaiting_delete_resume_ids_by_id.find(id);
-        if (pending == awaiting_delete_resume_ids_by_id.end()) {
-            continue;
-        }
-        for (std::string const &resume_id : pending->second) {
-            append_unique(resume_ids, resume_id);
-        }
-    }
-    if (resume_ids.empty()) {
-        return resume_ids;
-    }
-
-    for (std::string const &id : ids) {
-        awaiting_delete_resume_ids_by_id.erase(id);
-        terminal_delete_cleanup_ids_by_id[id] = resume_ids;
-    }
-    return resume_ids;
-}
-
-std::vector<std::vector<std::string>> TTorrentClient::terminal_delete_cleanup_id_groups()
-{
-    std::vector<std::vector<std::string>> groups;
-    std::scoped_lock io_guard(resume_io_lock);
-    for (auto const &entry : terminal_delete_cleanup_ids_by_id) {
-        if (std::ranges::find(groups, entry.second) == groups.end()) {
-            groups.push_back(entry.second);
-        }
-    }
-    return groups;
-}
-
-void TTorrentClient::forget_pending_delete_resume_ids(std::vector<std::string> const &resume_ids)
-{
-    ResumeIDListResult normalized = normalized_resume_ids(resume_ids);
-    if (!normalized || normalized->empty()) {
-        return;
-    }
-
-    std::scoped_lock io_guard(resume_io_lock);
-    std::erase_if(terminal_delete_cleanup_ids_by_id,
-                  [&normalized](auto const &entry) { return entry.second == *normalized; });
-}
-
-ResumeSaveResult TTorrentClient::complete_pending_delete_cleanup(std::vector<std::string> const &resume_ids)
-{
-    ResumeSaveResult completed = complete_pending_resume_cleanup(resume_ids);
-    if (!completed) {
-        return completed;
-    }
-    forget_pending_delete_resume_ids(resume_ids);
-    return {};
-}
-
-DirtyMask TTorrentClient::complete_pending_delete(lt::info_hash_t const &hashes, std::string const &failure_message)
-{
-    DirtyMask changes = 0;
-    std::vector<std::string> const resume_ids = promote_pending_delete_to_terminal_cleanup(hashes);
-    if (resume_ids.empty()) {
-        if (!failure_message.empty()) {
-            changes |= queue_alert_error(failure_message);
-        }
-        return changes;
-    }
-
-    if (!failure_message.empty()) {
-        changes |= queue_alert_error(failure_message);
-    }
-    ResumeSaveResult completed = complete_pending_delete_cleanup(resume_ids);
-    if (!completed) {
-        changes |= queue_alert_error("Torrent was removed, but " + completed.error() + ".");
-        return changes;
-    }
-    return changes;
-}
-
-std::vector<std::string> TTorrentClient::retry_pending_delete_cleanups(bool reports_errors)
-{
-    std::vector<std::string> errors;
-    if (persistence_is_faulted()) {
-        return errors;
-    }
-
-    for (std::vector<std::string> const &resume_ids : terminal_delete_cleanup_id_groups()) {
-        ResumeSaveResult completed = complete_pending_delete_cleanup(resume_ids);
-        if (!completed) {
-            errors.push_back(completed.error());
-        }
-    }
-
-    if (reports_errors) {
-        for (std::string const &error : errors) {
-            queue_alert_error_threadsafe("Pending deletion cleanup retry failed: " + error + ".");
         }
     }
     return errors;
@@ -755,10 +620,7 @@ TombstoneEntriesResult TTorrentClient::scan_removal_tombstone_entries_locked(
         materialized_id_count += payload->ids.size();
         entries.push_back(RemovalTombstoneEntry{
             .filename = name,
-            .ids = std::move(payload->ids),
-            .state = payload->state,
-            .delete_files = payload->delete_files,
-            .delete_partfile = payload->delete_partfile
+            .ids = std::move(payload->ids)
         });
     }
     return entries;
@@ -887,9 +749,7 @@ ResumeIDListResult TTorrentClient::tombstone_ids_overlapping_locked(std::vector<
     return matched_ids;
 }
 
-TombstoneCommitResult TTorrentClient::persist_removal_tombstones_locked(std::vector<std::string> const &ids,
-                                                        RemovalTombstoneState state, bool delete_files,
-                                                        bool delete_partfile)
+TombstoneCommitResult TTorrentClient::persist_removal_tombstones_locked(std::vector<std::string> const &ids)
 {
     ResumeIDListResult normalized = normalized_resume_ids(ids);
     if (!normalized) {
@@ -899,7 +759,7 @@ TombstoneCommitResult TTorrentClient::persist_removal_tombstones_locked(std::vec
         return TombstoneCommitStatus{};
     }
 
-    std::string const payload = tombstone_payload(*normalized, state, delete_files, delete_partfile);
+    std::string const payload = tombstone_payload(*normalized);
     if (payload.empty() || payload.size() > kMaxRemovalTombstoneBytes) {
         return std::unexpected("Removal tombstone payload is too large.");
     }
@@ -929,10 +789,7 @@ TombstoneCommitResult TTorrentClient::persist_removal_tombstones_locked(std::vec
     RemovalTombstoneEntryMap staged_entries;
     auto staged_entry = std::make_unique<RemovalTombstoneEntry>(RemovalTombstoneEntry{
         .filename = tombstone_filename,
-        .ids = *normalized,
-        .state = state,
-        .delete_files = delete_files,
-        .delete_partfile = delete_partfile
+        .ids = *normalized
     });
     RemovalTombstoneEntry *const raw_staged_entry = staged_entry.get();
     staged_entries.emplace(tombstone_filename, std::move(staged_entry));
@@ -1056,7 +913,6 @@ ResumeSaveResult TTorrentClient::complete_pending_removals()
     }
 
     for (RemovalTombstoneEntry const &entry : *entries) {
-        bool const payload_delete_abandoned = entry.state == RemovalTombstoneState::awaiting_payload_delete;
         bool removed_any = false;
         for (std::string const &id : entry.ids) {
             ResumeRemoveResult removed = remove_resume_files_for_id_checked_locked(id);
@@ -1089,11 +945,6 @@ ResumeSaveResult TTorrentClient::complete_pending_removals()
         auto const indexed_entry = removal_tombstones_by_filename.find(entry.filename);
         if (indexed_entry != removal_tombstones_by_filename.end()) {
             unindex_removal_tombstone_locked(indexed_entry->second.get());
-        }
-        if (payload_delete_abandoned) {
-            static_cast<void>(queue_alert_error(
-                "A previous data deletion did not finish before shutdown. Some downloaded files may remain on disk."
-            ));
         }
     }
     return {};
@@ -1156,11 +1007,11 @@ void TTorrentClient::load_resume_data()
         throw std::runtime_error(names.error());
     }
 
-    std::uint64_t unauthorized_resume_count = 0U;
+    std::uint64_t unclaimed_resume_count = 0U;
     std::size_t restore_add_attempt_count = 0U;
-    auto const record_unauthorized_resume = [&unauthorized_resume_count] {
-        if (unauthorized_resume_count != std::numeric_limits<std::uint64_t>::max()) {
-            ++unauthorized_resume_count;
+    auto const record_unclaimed_resume = [&unclaimed_resume_count] {
+        if (unclaimed_resume_count != std::numeric_limits<std::uint64_t>::max()) {
+            ++unclaimed_resume_count;
         }
     };
     auto const drain_restore_alerts_if_needed = [this, &restore_add_attempt_count] {
@@ -1221,19 +1072,6 @@ void TTorrentClient::load_resume_data()
             continue;
         }
 
-        std::optional<std::string> const authorized_save_path = normalize_authorized_save_path(
-            params.save_path
-        );
-        auto const authorized_root = authorized_save_path
-            ? authorized_save_roots.find(*authorized_save_path)
-            : authorized_save_roots.end();
-        if (!authorized_save_path || authorized_root == authorized_save_roots.end()) {
-            record_unauthorized_resume();
-            continue;
-        }
-        params.save_path = *authorized_save_path;
-        params.storage_root = authorized_root->second;
-
         if (!resume_filename_matches_identity(*resume_id, params)) {
             remove_resume_file_locked(name);
             sync_resume_directory_quietly();
@@ -1256,6 +1094,31 @@ void TTorrentClient::load_resume_data()
         bool const metadata_pending = !params.ti;
         bool const persisted_metadata_pending =
             metadata_validation_pending_from_resume_data(*buffer);
+        std::optional<TTorrentStorageActivation> const storage_activation =
+            storage_activation_from_resume_data(*buffer);
+        if (metadata_pending) {
+            if (storage_activation || !persisted_metadata_pending) {
+                record_unclaimed_resume();
+                continue;
+            }
+            params.save_path = staging_path(params.info_hashes);
+            params.file_provider.reset();
+        } else {
+            if (!storage_activation) {
+                record_unclaimed_resume();
+                continue;
+            }
+            BridgeResult const valid_activation = validate_storage_activation(
+                params,
+                *storage_activation
+            );
+            if (!valid_activation) {
+                record_unclaimed_resume();
+                continue;
+            }
+            params.save_path = part_file_path(*storage_activation);
+            params.file_provider = make_payload_provider(*storage_activation);
+        }
         bool const allow_pre_metadata_dht = metadata_pending
             && persisted_metadata_pending
             && allow_pre_metadata_dht_from_resume_data(*buffer);
@@ -1374,6 +1237,7 @@ void TTorrentClient::load_resume_data()
         params.flags |= lt::torrent_flags::update_subscribe;
 
         TorrentIdentity *identity = attach_identity(params, std::move(canonical_id));
+        identity->storage_activation = storage_activation;
         identity->https_tracker_policy = persisted_https_tracker_policy;
         identity->https_web_seed_policy = persisted_https_web_seed_policy;
         identity->queue_priority = queue_priority;
@@ -1422,11 +1286,11 @@ void TTorrentClient::load_resume_data()
     // cache. This also surfaces restore-time storage and fast-resume errors.
     pump_alerts();
 
-    if (unauthorized_resume_count != 0U) {
-        std::string const noun = unauthorized_resume_count == 1U ? "torrent" : "torrents";
+    if (unclaimed_resume_count != 0U) {
+        std::string const noun = unclaimed_resume_count == 1U ? "torrent" : "torrents";
         static_cast<void>(publish_changes_locked(queue_alert_error(
-            "Skipped restoring " + std::to_string(unauthorized_resume_count) + " saved " + noun
-            + " because download folder access is not authorized. Resume data was preserved."
+            "Skipped restoring " + std::to_string(unclaimed_resume_count) + " saved " + noun
+            + " because brokered storage authority was missing or invalid. Resume data was preserved."
         )));
     }
     static_cast<void>(apply_queue_priority_order_locked());

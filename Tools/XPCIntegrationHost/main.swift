@@ -1,7 +1,62 @@
 import AppKit
 import Foundation
 import TorrentEngineClient
+import TorrentEngineIPC
 import TorrentEngineModel
+import XPC
+
+@safe private final class IntegrationStorageBroker: Sendable {
+    static let shared: IntegrationStorageBroker = {
+        do {
+            return try IntegrationStorageBroker()
+        } catch {
+            fatalError("Could not start the integration storage broker: \(error)")
+        }
+    }()
+
+    let endpoint: XPCEndpoint
+    let sessionNonce = UUID()
+    private let listener: XPCListener
+
+    private init() throws {
+        let configuration = try TorrentEngineXPCIdentity.configuration()
+        let nonce = sessionNonce
+        let listener = XPCListener { request in
+            let accepted: (
+                XPCListener.IncomingSessionRequest.Decision,
+                XPCSession
+            ) = request.accept(
+                incomingMessageHandler: { (dictionary: XPCDictionary) in
+                    guard let brokerRequest = try? TorrentStorageBrokerIPCCodec
+                        .decodeRequest(dictionary),
+                          brokerRequest.common.sessionNonce == nonce,
+                          case .handshake = brokerRequest else {
+                        return nil
+                    }
+                    return try? TorrentStorageBrokerIPCCodec.encode(
+                        .success(
+                            requestID: brokerRequest.common.requestID,
+                            metadata: nil,
+                            statistics: [],
+                            fileDescriptor: nil
+                        ),
+                        for: brokerRequest
+                    )
+                }
+            )
+            if configuration.authentication == .sameTeam {
+                accepted.1.setPeerRequirement(
+                    .isFromSameTeam(
+                        andMatchesSigningIdentifier: configuration.serviceIdentifier
+                    )
+                )
+            }
+            return accepted.0
+        }
+        self.listener = listener
+        endpoint = listener.endpoint
+    }
+}
 
 private enum IntegrationFailure: LocalizedError {
     case invalidArguments
@@ -19,8 +74,6 @@ private enum IntegrationFailure: LocalizedError {
     case torrentWasNotPaused(String)
     case unexpectedEngineAlerts(phase: String, count: Int)
     case applicationRunLoopStopped
-    case malformedBookmarkWasAccepted
-    case malformedBookmarkUnexpectedError(String)
     case forcedExitCoordinationTimedOut
     case forcedExitWasNotObserved
     case missingNetworkInterfaces(String)
@@ -57,10 +110,6 @@ private enum IntegrationFailure: LocalizedError {
             "The \(phase) poll returned \(count) unexpected engine alert errors."
         case .applicationRunLoopStopped:
             "The integration application run loop stopped before the test completed."
-        case .malformedBookmarkWasAccepted:
-            "The service accepted a malformed nonempty folder bookmark."
-        case .malformedBookmarkUnexpectedError(let description):
-            "The malformed bookmark failed outside service authorization: \(description)"
         case .forcedExitCoordinationTimedOut:
             "The integration runner did not force the engine helper to exit in time."
         case .forcedExitWasNotObserved:
@@ -106,7 +155,6 @@ private struct IntegrationConfiguration {
 private struct IntegrationFolder {
     let url: URL
     let scopedURL: URL
-    let authorization: TorrentFolderAuthorization
 
     @MainActor
     static func create(downloadRoot: URL) async throws -> IntegrationFolder {
@@ -139,21 +187,9 @@ private struct IntegrationFolder {
                 .resolvingSymlinksInPath()
                 .standardizedFileURL
 
-            // Match the production cross-process artifact: delegate only the
-            // currently active Powerbox extension to the service. Persistent
-            // app-scoped bookmark ownership remains a GUI responsibility.
-            let delegationBookmark = try canonicalURL.bookmarkData(
-                options: [],
-                includingResourceValuesForKeys: nil,
-                relativeTo: nil
-            )
             return IntegrationFolder(
                 url: canonicalURL,
-                scopedURL: scopedURL,
-                authorization: TorrentFolderAuthorization(
-                    path: canonicalURL.path(percentEncoded: false),
-                    bookmarkData: delegationBookmark
-                )
+                scopedURL: scopedURL
             )
         } catch {
             try? fileManager.removeItem(at: directory)
@@ -254,12 +290,12 @@ private enum TorrentEngineXPCIntegrationHost {
         defer {
             folder.release()
         }
-        print("integration.download_directory=\(folder.authorization.path)")
+        print("integration.download_directory=\(folder.url.path(percentEncoded: false))")
         let totalStart = clock.now
 
         var expectedIDs = Set<String>(minimumCapacity: count)
         let client = try await measure("connect") {
-            try await connect([folder.authorization])
+            try await connect()
         }
         try requireAvailable(client, phase: "initial connection")
 
@@ -273,7 +309,6 @@ private enum TorrentEngineXPCIntegrationHost {
             try await addMagnets(
                 0..<firstCheckpoint,
                 client: client,
-                savePath: folder.authorization.path,
                 totalCount: count
             )
         }
@@ -296,7 +331,6 @@ private enum TorrentEngineXPCIntegrationHost {
                 try await addMagnets(
                     realisticTorrentCount..<count,
                     client: client,
-                    savePath: folder.authorization.path,
                     totalCount: count
                 )
             }
@@ -321,10 +355,7 @@ private enum TorrentEngineXPCIntegrationHost {
         }
 
         try await measure("restart") {
-            try await client.restart(
-                enablePeerExchangePlugin: false,
-                authorizedSavePaths: [folder.authorization.path]
-            )
+            try await client.restart(enablePeerExchangePlugin: false)
         }
         try requireAvailable(client, phase: "restart")
         try await measure("poll_paged_after_restart") {
@@ -341,10 +372,7 @@ private enum TorrentEngineXPCIntegrationHost {
         }
 
         let reconnected = try await measure("reconnect") {
-            try await connect(
-                [folder.authorization],
-                retryMode: .replacingTerminatedController
-            )
+            try await connect(retryMode: .replacingTerminatedController)
         }
         try requireAvailable(reconnected, phase: "reconnection")
         try await measure("poll_paged_after_reconnect") {
@@ -366,7 +394,7 @@ private enum TorrentEngineXPCIntegrationHost {
         let totalStart = clock.now
         let expectedIDs = Set<String>()
         let initialClient = try await measure("connect") {
-            try await connect([])
+            try await connect()
         }
         try requireAvailable(initialClient, phase: "automated initial connection")
 
@@ -384,7 +412,7 @@ private enum TorrentEngineXPCIntegrationHost {
         await initialClient.shutdown()
 
         let client = try await measure("recover_after_forced_exit") {
-            try await connect([], retryMode: .replacingTerminatedController)
+            try await connect(retryMode: .replacingTerminatedController)
         }
         try requireAvailable(client, phase: "automated forced-exit recovery")
         try await measure("poll_empty_after_forced_exit") {
@@ -396,10 +424,7 @@ private enum TorrentEngineXPCIntegrationHost {
             )
         }
         try await measure("restart") {
-            try await client.restart(
-                enablePeerExchangePlugin: false,
-                authorizedSavePaths: []
-            )
+            try await client.restart(enablePeerExchangePlugin: false)
         }
         try requireAvailable(client, phase: "automated restart")
         try await measure("poll_empty_after_restart") {
@@ -415,7 +440,7 @@ private enum TorrentEngineXPCIntegrationHost {
         }
 
         let reconnected = try await measure("reconnect") {
-            try await connect([], retryMode: .replacingTerminatedController)
+            try await connect(retryMode: .replacingTerminatedController)
         }
         try requireAvailable(
             reconnected,
@@ -433,9 +458,6 @@ private enum TorrentEngineXPCIntegrationHost {
             await reconnected.shutdown()
         }
 
-        try await measure("malformed_bookmark_rejection") {
-            try await requireMalformedBookmarkRejection()
-        }
         printTiming("total", duration: totalStart.duration(to: clock.now))
     }
 
@@ -489,36 +511,6 @@ private enum TorrentEngineXPCIntegrationHost {
         print("integration.forced_helper_exit=observed")
     }
 
-    private static func requireMalformedBookmarkRejection() async throws {
-        let malformedAuthorization = TorrentFolderAuthorization(
-            path: "/private/tmp/Torrent7EnhancedSecurityInvalidBookmark",
-            bookmarkData: Data("not-a-bookmark".utf8)
-        )
-        do {
-            let unexpectedClient = try await TorrentXPCClient.connect(
-                enablePeerExchangePlugin: false,
-                folderAuthorizations: [malformedAuthorization],
-                retryMode: .replacingTerminatedController
-            )
-            await unexpectedClient.shutdown()
-            throw IntegrationFailure.malformedBookmarkWasAccepted
-        } catch let failure as IntegrationFailure {
-            throw failure
-        } catch let clientError as TorrentEngineClientError {
-            guard case .serviceRejected(let message) = clientError,
-                  message == "The download folder authorization request is invalid." else {
-                throw IntegrationFailure.malformedBookmarkUnexpectedError(
-                    clientError.localizedDescription
-                )
-            }
-            print("integration.malformed_bookmark=service_rejected")
-        } catch {
-            throw IntegrationFailure.malformedBookmarkUnexpectedError(
-                error.localizedDescription
-            )
-        }
-    }
-
     private static func stopApplicationRunLoop() {
         let application = NSApplication.shared
         application.stop(nil)
@@ -541,7 +533,6 @@ private enum TorrentEngineXPCIntegrationHost {
     private static func addMagnets(
         _ indices: Range<Int>,
         client: TorrentXPCClient,
-        savePath: String,
         totalCount: Int
     ) async throws -> Set<String> {
         var identifiers = Set<String>(minimumCapacity: indices.count)
@@ -549,7 +540,6 @@ private enum TorrentEngineXPCIntegrationHost {
         for index in indices {
             let identifier = try await client.addMagnet(
                 magnet(index: index),
-                savePath: savePath,
                 startsPaused: true,
                 queuePriority: .normal,
                 enablePeerExchange: false,
@@ -569,12 +559,12 @@ private enum TorrentEngineXPCIntegrationHost {
     }
 
     private static func connect(
-        _ authorizations: [TorrentFolderAuthorization],
         retryMode: TorrentEngineConnectionRetryMode = .initial
     ) async throws -> TorrentXPCClient {
         let client = try await TorrentXPCClient.connect(
             enablePeerExchangePlugin: false,
-            folderAuthorizations: authorizations,
+            brokerEndpoint: IntegrationStorageBroker.shared.endpoint,
+            brokerSessionNonce: IntegrationStorageBroker.shared.sessionNonce,
             retryMode: retryMode
         )
         guard client.libtorrentVersion == "2.1.1.0" else {

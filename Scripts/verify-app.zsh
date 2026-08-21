@@ -163,6 +163,14 @@ require_literal_line() {
     /usr/bin/grep -Fqx -- "$value" "$file" || fail "$message"
 }
 
+require_literal_match() {
+    local -r value=$1
+    local -r file=$2
+    local -r message=$3
+
+    /usr/bin/grep -Fq -- "$value" "$file" || fail "$message"
+}
+
 info_plist_value() {
     local -r plist=$1
     local -r key=$2
@@ -594,9 +602,37 @@ extract_disassembly_function \
     "$wake_pac_output"
 verify_nearby_pac_instruction wake.callback "$wake_pac_output" 0x9cc0 callback 40
 verify_nearby_pac_instruction wake.context "$wake_pac_output" 0x8cdb data 4
+
+typeset -r payload_retain_pac_output="$temporary_dir/payload-retain-pac.txt"
+typeset -r payload_release_pac_output="$temporary_dir/payload-release-pac.txt"
+typeset -r payload_open_pac_output="$temporary_dir/payload-open-pac.txt"
+typeset -r payload_size_pac_output="$temporary_dir/payload-size-pac.txt"
+extract_disassembly_function \
+    "$engine_text_output" \
+    "__ZN14torrent_bridge8internal20PayloadBrokerContextC2E30TTorrentPayloadBrokerCallbacks" \
+    "$payload_retain_pac_output"
+extract_disassembly_function \
+    "$engine_text_output" \
+    "__ZNSt3__120__shared_ptr_emplaceIN14torrent_bridge8internal20PayloadBrokerContextENS_9allocatorIS3_EEE16__on_zero_sharedEv" \
+    "$payload_release_pac_output"
+extract_disassembly_function \
+    "$engine_text_output" \
+    "__ZNK14torrent_bridge8internal20PayloadBrokerContext12open_payloadERK25TTorrentStorageActivationN10libtorrent3aux14strong_typedefIiNS6_14file_index_tagEvEEbRN5boost6system10error_codeE" \
+    "$payload_open_pac_output"
+extract_disassembly_function \
+    "$engine_text_output" \
+    "__ZNK14torrent_bridge8internal20PayloadBrokerContext12payload_sizeERK25TTorrentStorageActivationN10libtorrent3aux14strong_typedefIiNS6_14file_index_tagEvEERN5boost6system10error_codeE" \
+    "$payload_size_pac_output"
 verify_nearby_pac_instruction \
-    authorized-root.release "$engine_text_output" 0xc7ee callback 4
-verify_nearby_pac_instruction authorized-root.retain "$engine_text_output" 0xca4d callback 4
+    payload-broker.context "$payload_open_pac_output" 0x33e data 4
+verify_nearby_pac_instruction \
+    payload-broker.retain "$payload_retain_pac_output" 0x5c7 callback 160
+verify_nearby_pac_instruction \
+    payload-broker.release "$payload_release_pac_output" 0x26d6 callback 40
+verify_nearby_pac_instruction \
+    payload-broker.open "$payload_open_pac_output" 0x2285 callback 40
+verify_nearby_pac_instruction \
+    payload-broker.size "$payload_size_pac_output" 0x664f callback 40
 verify_nearby_pac_instruction \
     asio.executor-function.complete "$engine_text_output" 0x9890 callback 4
 verify_nearby_pac_instruction \
@@ -637,7 +673,7 @@ typeset -r expected_native_deps_build_id=$(
     SANITIZER_PROFILE=$native_deps_sanitizer_profile \
         "$root_dir/Scripts/native-deps-build-id.zsh"
 )
-require_literal_line \
+require_literal_match \
     "torrent7-native-deps:$expected_native_deps_build_id" \
     "$engine_strings_output" \
     "Engine extension does not match the current native dependencies"

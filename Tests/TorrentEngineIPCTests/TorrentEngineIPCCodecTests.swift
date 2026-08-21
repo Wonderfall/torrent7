@@ -380,9 +380,10 @@ struct TorrentEngineIPCEnvelopeTests {
 
     @Test("Stable dataset and hint operation numbers")
     func stableOperationNumbers() {
-        #expect(TorrentEngineIPCProtocol.version == 9)
-        #expect(TorrentEngineIPCOperation.replaceFolderCapabilities.rawValue == 7)
+        #expect(TorrentEngineIPCProtocol.version == 10)
+        #expect(TorrentEngineIPCOperation(rawValue: 7) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 10) == nil)
+        #expect(TorrentEngineIPCOperation.torrentMetadata.rawValue == 39)
         #expect(TorrentEngineIPCOperation(rawValue: 41) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 50) == nil)
         #expect(TorrentEngineIPCOperation.readDataset.rawValue == 51)
@@ -393,6 +394,7 @@ struct TorrentEngineIPCEnvelopeTests {
         #expect(TorrentEngineIPCFailureCode.operationRejected.rawValue == 1)
         #expect(TorrentEngineIPCFailureCode.controllerBusy.rawValue == 2)
         #expect(TorrentEngineIPCFailureCode.serviceShuttingDown.rawValue == 3)
+        #expect(TorrentEngineIPCFailureCode.operationOutcomeUnknown.rawValue == 4)
     }
 
     @Test("JSON and raw attachment limits remain independently bounded")
@@ -409,18 +411,30 @@ struct TorrentEngineIPCEnvelopeTests {
         )
         #expect(
             TorrentEngineIPCOperation.handshake.maximumRequestPayloadBytes
-                >= ((TorrentEngineIPCLimits.maximumBookmarkAggregateBytes + 2) / 3) * 4
+                == TorrentEngineIPCLimits.maximumSmallPayloadBytes
         )
         #expect(
             TorrentEngineIPCOperation.readDataset.maximumReplyPayloadBytes
                 >= ((TorrentEngineIPCLimits.maximumDatasetPageBytes + 2) / 3) * 4
+        )
+        #expect(
+            TorrentEngineIPCOperation.torrentMetadata.maximumReplyPayloadBytes
+                == TorrentInputLimits.maxTorrentFileBytes
+        )
+        #expect(
+            TorrentEngineIPCOperation.torrentMetadata.maximumRequestAttachmentBytes
+                == 0
         )
     }
 
     @Test("Maximum file-priority metadata fits its JSON allocation profile")
     func maximumFilePriorityMetadataFits() throws {
         let request = TorrentEngineIPCAddTorrentFileRequest(
-            folderCapabilityID: UUID(),
+            activation: try TorrentStorageActivation(
+                claimID: UUID(),
+                generation: 1,
+                sourceManifestDigest: Data(repeating: 0xA5, count: 32)
+            ),
             filePriorities: (0..<TorrentEngineLimits.maximumFileCount).map {
                 TorrentEngineIPCFilePriorityEntry(index: Int32($0), priority: .normal)
             },
@@ -466,18 +480,11 @@ struct TorrentEngineIPCEnvelopeTests {
         #expect(encoded.count <= TorrentEngineIPCLimits.maximumFileMetadataReplyBytes)
     }
 
-    @Test("Maximum aggregate bookmarks fit without slash expansion")
-    func maximumAggregateBookmarksFit() throws {
-        let bookmarkByteCount =
-            TorrentEngineIPCLimits.maximumBookmarkAggregateBytes
-                / TorrentEngineLimits.maximumAuthorizedSavePathCount
-        let bookmark = Data(repeating: 0xFF, count: bookmarkByteCount)
+    @Test("Handshake carries no filesystem authority")
+    func handshakeCarriesNoFilesystemAuthority() throws {
         let request = TorrentEngineIPCHandshakeRequest(
             enablePeerExchangePlugin: true,
-            folders: Array(
-                repeating: TorrentEngineIPCFolderGrant(bookmark: bookmark),
-                count: TorrentEngineLimits.maximumAuthorizedSavePathCount
-            )
+            brokerSessionNonce: UUID()
         )
 
         let encoded = try TorrentEngineIPCJSONCodec.encode(
@@ -486,7 +493,9 @@ struct TorrentEngineIPCEnvelopeTests {
             limits: TorrentEngineIPCOperation.handshake.requestJSONLimits
         )
 
-        #expect(!String(decoding: encoded, as: UTF8.self).contains(#"\/"#))
+        let json = String(decoding: encoded, as: UTF8.self)
+        #expect(!json.localizedCaseInsensitiveContains("bookmark"))
+        #expect(!json.localizedCaseInsensitiveContains("folder"))
         #expect(encoded.count <= TorrentEngineIPCOperation.handshake.maximumRequestPayloadBytes)
     }
 
@@ -1231,7 +1240,7 @@ private func makeHeader() -> TorrentEngineIPCHeader {
         requestID: UUID(),
         controllerID: UUID(),
         sequence: 1,
-        operation: .handshake,
+        operation: .pause,
         operationID: UUID(),
         expectedEpoch: UUID()
     )

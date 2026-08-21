@@ -3,16 +3,19 @@
 
 #define TORRENT_BRIDGE_IMPLEMENTATION
 #include "TorrentBridge.h"
+
 #undef TORRENT_BRIDGE_IMPLEMENTATION
 
 #include <libtorrent/add_torrent_params.hpp>
 #include <libtorrent/alert.hpp>
 #include <libtorrent/alert_types.hpp>
 #include <libtorrent/aux_/path.hpp>
+#include <libtorrent/aux_/payload_file_provider.hpp>
 #include <libtorrent/bencode.hpp>
 #include <libtorrent/client_data.hpp>
 #include <libtorrent/error_code.hpp>
 #include <libtorrent/file_storage.hpp>
+#include <libtorrent/hasher.hpp>
 #include <libtorrent/load_torrent.hpp>
 #include <libtorrent/magnet_uri.hpp>
 #include <libtorrent/read_resume_data.hpp>
@@ -120,6 +123,9 @@ constexpr std::string_view kTempExtension = ".tmp";
 constexpr std::string_view kRemovalTombstoneExtension = ".remove";
 constexpr std::string_view kRemovalTombstonePrefix = "removal-";
 constexpr std::string_view kCanonicalIDResumeKey = "torrent-app-id";
+constexpr std::string_view kStorageClaimIDResumeKey = "torrent-app-storage-claim-id";
+constexpr std::string_view kStorageClaimGenerationResumeKey = "torrent-app-storage-claim-generation";
+constexpr std::string_view kStorageManifestDigestResumeKey = "torrent-app-storage-manifest-digest";
 constexpr std::string_view kMetadataValidationPendingResumeKey = "torrent-app-metadata-validation-pending";
 constexpr std::string_view kAllowPreMetadataDHTResumeKey = "torrent-app-allow-pre-metadata-dht";
 constexpr std::string_view kHTTPSTrackerPolicyResumeKey = "torrent-app-https-tracker-policy";
@@ -297,14 +303,9 @@ static_assert(
     kSynchronousAddAlertDrainInterval
     < static_cast<std::size_t>(kLibtorrentAlertQueueSize)
 );
-static_assert(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT > 0);
-static_assert(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES > 0);
-static_assert(TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES
-              == TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT
-                  * (TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES + 1));
 static_assert(kMaxTorrentIdentityTokenCount > static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 44U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 46U);
 static_assert(TTORRENT_DHT_DISCOVERY_ALONGSIDE_TRACKERS == 0U);
 static_assert(TTORRENT_DHT_DISCOVERY_AFTER_ALL_TRACKERS_FAIL == 1U);
 static_assert(TTORRENT_DHT_STATUS_DISABLED == 0U);
@@ -360,8 +361,6 @@ static_assert(std::is_standard_layout_v<TTorrentFileSnapshot>);
 static_assert(std::is_trivially_copyable_v<TTorrentFileSnapshot>);
 static_assert(std::is_standard_layout_v<TTorrentFilePriorityEntry>);
 static_assert(std::is_trivially_copyable_v<TTorrentFilePriorityEntry>);
-static_assert(std::is_standard_layout_v<TTorrentRemovalResult>);
-static_assert(std::is_trivially_copyable_v<TTorrentRemovalResult>);
 static_assert(std::is_standard_layout_v<TTorrentPieceMapSnapshot>);
 static_assert(std::is_trivially_copyable_v<TTorrentPieceMapSnapshot>);
 static_assert(std::is_standard_layout_v<TTorrentFilePreview>);
@@ -390,14 +389,13 @@ static_assert(std::is_standard_layout_v<TTorrentWebSeedActivityResult>);
 static_assert(std::is_trivially_copyable_v<TTorrentWebSeedActivityResult>);
 static_assert(std::is_standard_layout_v<TTorrentPeerSourcesResult>);
 static_assert(std::is_trivially_copyable_v<TTorrentPeerSourcesResult>);
-static_assert(std::is_standard_layout_v<TTorrentRemovalReadResult>);
-static_assert(std::is_trivially_copyable_v<TTorrentRemovalReadResult>);
 static_assert(std::is_standard_layout_v<TTorrentNetworkStatusResult>);
 static_assert(std::is_trivially_copyable_v<TTorrentNetworkStatusResult>);
 static_assert(std::is_standard_layout_v<TTorrentBridgeHealthResult>);
 static_assert(std::is_trivially_copyable_v<TTorrentBridgeHealthResult>);
-static_assert(std::is_standard_layout_v<TTorrentAuthorizedSaveRoot>);
-static_assert(std::is_trivially_copyable_v<TTorrentAuthorizedSaveRoot>);
+static_assert(std::is_standard_layout_v<TTorrentPayloadBrokerCallbacks>);
+static_assert(std::is_standard_layout_v<TTorrentStorageActivation>);
+static_assert(std::is_trivially_copyable_v<TTorrentStorageActivation>);
 static_assert(sizeof(TTorrentSnapshot) == 3360U);
 static_assert(alignof(TTorrentSnapshot) == 8U);
 static_assert(offsetof(TTorrentSnapshot, content_kind) == 3358U);
@@ -415,8 +413,6 @@ static_assert(sizeof(TTorrentFileSnapshot) == 1064U);
 static_assert(alignof(TTorrentFileSnapshot) == 8U);
 static_assert(sizeof(TTorrentFilePriorityEntry) == 8U);
 static_assert(alignof(TTorrentFilePriorityEntry) == 4U);
-static_assert(sizeof(TTorrentRemovalResult) == 516U);
-static_assert(alignof(TTorrentRemovalResult) == 4U);
 static_assert(sizeof(TTorrentPieceMapSnapshot) == 16U);
 static_assert(alignof(TTorrentPieceMapSnapshot) == 4U);
 static_assert(sizeof(TTorrentFilePreview) == 616U);
@@ -455,17 +451,17 @@ static_assert(sizeof(TTorrentPeerSourcesResult) == 56U);
 static_assert(alignof(TTorrentPeerSourcesResult) == 8U);
 static_assert(offsetof(TTorrentPeerSourcesResult, revision) == 8U);
 static_assert(offsetof(TTorrentPeerSourcesResult, sources) == 16U);
-static_assert(sizeof(TTorrentRemovalReadResult) == 520U);
-static_assert(alignof(TTorrentRemovalReadResult) == 4U);
-static_assert(offsetof(TTorrentRemovalReadResult, result) == 4U);
 static_assert(sizeof(TTorrentNetworkStatusResult) == 680U);
 static_assert(alignof(TTorrentNetworkStatusResult) == 8U);
 static_assert(offsetof(TTorrentNetworkStatusResult, network_status) == 8U);
 static_assert(sizeof(TTorrentBridgeHealthResult) == 544U);
 static_assert(alignof(TTorrentBridgeHealthResult) == 8U);
 static_assert(offsetof(TTorrentBridgeHealthResult, health) == 8U);
-static_assert(sizeof(TTorrentAuthorizedSaveRoot) == 32U);
-static_assert(alignof(TTorrentAuthorizedSaveRoot) == 8U);
+static_assert(sizeof(TTorrentPayloadBrokerCallbacks) == 40U);
+static_assert(alignof(TTorrentPayloadBrokerCallbacks) == 8U);
+static_assert(sizeof(TTorrentStorageActivation) == 96U);
+static_assert(alignof(TTorrentStorageActivation) == 8U);
+static_assert(offsetof(TTorrentStorageActivation, preserved_torrent_id) == 56U);
 
 enum class FileSystemNodeKind : std::uint8_t {
     file,
@@ -485,11 +481,6 @@ enum class FileReadFailure : std::uint8_t {
     too_large
 };
 
-enum class RemovalTombstoneState : std::uint8_t {
-    resume_cleanup,
-    awaiting_payload_delete
-};
-
 struct BridgeError {
     int32_t code;
     std::string message;
@@ -502,12 +493,6 @@ using ResumeSaveResult = std::expected<void, std::string>;
 using ResumeIDListResult = std::expected<std::vector<std::string>, std::string>;
 using TombstoneIDResult = std::expected<std::set<std::string>, std::string>;
 using TorrentLoadResult = std::expected<lt::add_torrent_params, BridgeError>;
-using AuthorizedSavePathSet = std::set<std::string>;
-using AuthorizedSavePathList = std::vector<std::string>;
-using AuthorizedSavePathListResult = std::expected<AuthorizedSavePathList, BridgeError>;
-using AuthorizedSaveRootMap = std::map<std::string, std::shared_ptr<lt::aux::storage_root>>;
-using AuthorizedSaveRootWeakList = std::vector<std::weak_ptr<lt::aux::storage_root>>;
-using AuthorizedSaveRootResult = std::expected<AuthorizedSaveRootMap, BridgeError>;
 
 [[nodiscard]] constexpr bool torrent_count_allows_admission(std::size_t count) noexcept
 {
@@ -627,6 +612,7 @@ struct TorrentIdentity {
     TorrentIdentityToken *token = nullptr;
     std::uint64_t generation = 0;
     std::string canonical_id;
+    std::optional<TTorrentStorageActivation> storage_activation;
     std::string comment;
     std::time_t creation_date = 0;
     ResumeSaveState resume_save;
@@ -655,6 +641,7 @@ struct TorrentIdentity {
 struct ResumePolicySnapshot {
     bool has_identity = false;
     std::string canonical_id;
+    std::optional<TTorrentStorageActivation> storage_activation;
     HTTPSPolicy https_tracker_policy = HTTPSPolicy::inherit;
     HTTPSPolicy https_web_seed_policy = HTTPSPolicy::inherit;
     bool dht_enabled_by_user = false;
@@ -699,9 +686,6 @@ struct PendingResumeHandle {
 struct RemovalTombstoneEntry {
     std::string filename;
     std::vector<std::string> ids;
-    RemovalTombstoneState state = RemovalTombstoneState::resume_cleanup;
-    bool delete_files = false;
-    bool delete_partfile = false;
 };
 
 struct RemovalTombstoneIndexLimits {
@@ -711,9 +695,6 @@ struct RemovalTombstoneIndexLimits {
 
 struct RemovalTombstonePayload {
     std::vector<std::string> ids;
-    RemovalTombstoneState state = RemovalTombstoneState::resume_cleanup;
-    bool delete_files = false;
-    bool delete_partfile = false;
 };
 
 enum class DetailCacheKind : std::uint8_t {
@@ -761,14 +742,6 @@ struct PieceMapCacheEntry {
     std::vector<std::uint8_t> pieces;
 };
 
-struct RemovalRequestEntry {
-    std::uint64_t request_token = 0;
-    lt::info_hash_t hashes;
-    bool metadata_available = true;
-    int32_t state = TTORRENT_REMOVAL_PENDING;
-    std::array<char, 512> error{};
-};
-
 using TorrentSourceCounts = TTorrentSourceSecurityInspection;
 
 using TombstoneEntriesResult = std::expected<std::vector<RemovalTombstoneEntry>, std::string>;
@@ -782,6 +755,16 @@ using DirtyMask = std::uint32_t;
 // keep each callback capability in role- and address-diversified authenticated
 // storage; the plain-arm64 libFuzzer build retains the same source-level types.
 #if defined(__PTRAUTH__)
+inline constexpr ptrauth_extra_data_t kPayloadRetainCallbackDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.payload.retain");
+inline constexpr ptrauth_extra_data_t kPayloadReleaseCallbackDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.payload.release");
+inline constexpr ptrauth_extra_data_t kPayloadOpenCallbackDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.payload.open");
+inline constexpr ptrauth_extra_data_t kPayloadSizeCallbackDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.payload.size");
+inline constexpr ptrauth_extra_data_t kPayloadContextDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.payload.context");
 inline constexpr ptrauth_extra_data_t kWakeCallbackDiscriminator =
     ptrauth_string_discriminator("torrent.bridge.wake");
 inline constexpr ptrauth_extra_data_t kWakeContextDiscriminator =
@@ -796,10 +779,108 @@ using StoredWakeContext = void * __ptrauth(
     1,
     kWakeContextDiscriminator
 );
+using StoredPayloadRetainCallback = TTorrentPayloadContextRetainCallback __ptrauth(
+    ptrauth_key_function_pointer,
+    1,
+    kPayloadRetainCallbackDiscriminator
+);
+using StoredPayloadReleaseCallback = TTorrentPayloadContextReleaseCallback __ptrauth(
+    ptrauth_key_function_pointer,
+    1,
+    kPayloadReleaseCallbackDiscriminator
+);
+using StoredPayloadOpenCallback = TTorrentPayloadOpenCallback __ptrauth(
+    ptrauth_key_function_pointer,
+    1,
+    kPayloadOpenCallbackDiscriminator
+);
+using StoredPayloadSizeCallback = TTorrentPayloadSizeCallback __ptrauth(
+    ptrauth_key_function_pointer,
+    1,
+    kPayloadSizeCallbackDiscriminator
+);
+using StoredPayloadContext = void * __ptrauth(
+    ptrauth_key_process_dependent_data,
+    1,
+    kPayloadContextDiscriminator
+);
 #else
 using StoredWakeCallback = TTorrentWakeCallback;
 using StoredWakeContext = void *;
+using StoredPayloadRetainCallback = TTorrentPayloadContextRetainCallback;
+using StoredPayloadReleaseCallback = TTorrentPayloadContextReleaseCallback;
+using StoredPayloadOpenCallback = TTorrentPayloadOpenCallback;
+using StoredPayloadSizeCallback = TTorrentPayloadSizeCallback;
+using StoredPayloadContext = void *;
 #endif
+
+struct PayloadBrokerCallbacks {
+    StoredPayloadContext context = nullptr;
+    StoredPayloadRetainCallback retain_context = nullptr;
+    StoredPayloadReleaseCallback release_context = nullptr;
+    StoredPayloadOpenCallback open_payload = nullptr;
+    StoredPayloadSizeCallback payload_size = nullptr;
+};
+
+class PayloadBrokerContext final {
+public:
+    explicit PayloadBrokerContext(TTorrentPayloadBrokerCallbacks callbacks);
+    ~PayloadBrokerContext();
+
+    PayloadBrokerContext(PayloadBrokerContext const &) = delete;
+    PayloadBrokerContext &operator=(PayloadBrokerContext const &) = delete;
+    PayloadBrokerContext(PayloadBrokerContext &&) = delete;
+    PayloadBrokerContext &operator=(PayloadBrokerContext &&) = delete;
+
+    [[nodiscard]] int open_payload(
+        TTorrentStorageActivation const &activation,
+        lt::file_index_t file,
+        bool writable,
+        lt::error_code &error
+    ) const noexcept;
+
+    [[nodiscard]] std::int64_t payload_size(
+        TTorrentStorageActivation const &activation,
+        lt::file_index_t file,
+        lt::error_code &error
+    ) const noexcept;
+
+private:
+    PayloadBrokerCallbacks callbacks_;
+    bool retained_ = false;
+};
+
+class BridgePayloadFileProvider final : public lt::aux::payload_file_provider {
+public:
+    BridgePayloadFileProvider(
+        std::shared_ptr<PayloadBrokerContext> broker,
+        TTorrentStorageActivation activation
+    );
+
+    int open_payload(lt::file_index_t file, bool writable, lt::error_code &error) override;
+    std::int64_t payload_size(lt::file_index_t file, lt::error_code &error) override;
+
+private:
+    std::shared_ptr<PayloadBrokerContext> broker_;
+    TTorrentStorageActivation activation_{};
+};
+
+[[nodiscard]] BridgeResult validate_storage_activation(
+    lt::add_torrent_params const &params,
+    TTorrentStorageActivation const &activation
+);
+
+#if defined(TORRENT_BRIDGE_TESTING)
+[[nodiscard]] lt::sha256_hash testing_logical_manifest_digest(
+    lt::add_torrent_params const &params
+);
+#endif
+
+[[nodiscard]] std::string storage_claim_key(TTorrentStorageActivation const &activation);
+
+[[nodiscard]] std::optional<TTorrentStorageActivation> storage_activation_from_resume_data(
+    std::vector<char> const &buffer
+);
 
 struct WakeCallbackInvocation {
     StoredWakeCallback callback = nullptr;
@@ -1124,14 +1205,7 @@ TombstonePayloadResult tombstone_payload_from_bytes(std::vector<char> const &buf
 
 std::string tombstone_read_error(FileReadFailure failure);
 
-std::string tombstone_state_name(RemovalTombstoneState state);
-
-std::string tombstone_payload(
-    std::vector<std::string> const &ids,
-    RemovalTombstoneState state,
-    bool delete_files,
-    bool delete_partfile
-);
+std::string tombstone_payload(std::vector<std::string> const &ids);
 
 std::string joined_error_messages(std::vector<std::string> const &errors);
 
@@ -1337,16 +1411,6 @@ void restore_source_policy_sources(lt::add_torrent_params &params, ResumePolicyS
 
 void strip_resume_peer_cache(lt::add_torrent_params &params) noexcept;
 
-BridgeResult validate_save_path(std::string_view save_path);
-
-[[nodiscard]] std::optional<std::string> normalize_authorized_save_path(
-    std::string_view save_path
-);
-
-[[nodiscard]] AuthorizedSavePathListResult parse_authorized_save_path_list_blob(
-    std::span<std::uint8_t const> blob
-);
-
 std::string trimmed(std::string_view value);
 
 bool contains_invalid_interface_character(std::string_view value);
@@ -1431,18 +1495,10 @@ BridgeResult apply_file_priorities(
 struct TTorrentClient {
     explicit TTorrentClient(std::string_view state_path, bool enable_peer_exchange_plugin = true);
 
-#if defined(TORRENT_BRIDGE_TESTING)
     TTorrentClient(
         std::string_view state_path,
         bool enable_peer_exchange_plugin,
-        AuthorizedSavePathSet const &authorized_save_paths
-    );
-#endif
-
-    TTorrentClient(
-        std::string_view state_path,
-        bool enable_peer_exchange_plugin,
-        AuthorizedSaveRootMap authorized_roots
+        std::shared_ptr<PayloadBrokerContext> payload_broker
     );
 
     ~TTorrentClient() noexcept;
@@ -1454,16 +1510,26 @@ struct TTorrentClient {
 
     void set_session_shutdown_asynchronous(bool value) noexcept;
 
-    AnalyzedMutex authorized_root_replacement_lock;
-    AnalyzedMutex lock TORRENT_BRIDGE_ACQUIRED_AFTER(authorized_root_replacement_lock);
+    [[nodiscard]] std::shared_ptr<lt::aux::payload_file_provider> make_payload_provider(
+        TTorrentStorageActivation const &activation
+    ) const;
+
+    [[nodiscard]] std::string part_file_path(TTorrentStorageActivation const &activation) const;
+
+    [[nodiscard]] std::string staging_path(lt::info_hash_t const &hashes) const;
+
+    AnalyzedMutex lock;
     AnalyzedMutex resume_capture_lock TORRENT_BRIDGE_ACQUIRED_AFTER(lock);
     mutable AnalyzedMutex resume_io_lock TORRENT_BRIDGE_ACQUIRED_AFTER(resume_capture_lock);
     fs::path state_directory;
     fs::path resume_directory;
-    AuthorizedSaveRootMap authorized_save_roots TORRENT_BRIDGE_GUARDED_BY(lock);
-    AuthorizedSaveRootWeakList authorized_save_root_lifetimes TORRENT_BRIDGE_GUARDED_BY(lock);
+    fs::path part_files_directory;
+    fs::path staging_directory;
+    std::shared_ptr<PayloadBrokerContext> payload_broker;
     UniqueFileDescriptor state_directory_descriptor;
     UniqueFileDescriptor resume_directory_descriptor;
+    UniqueFileDescriptor part_files_directory_descriptor;
+    UniqueFileDescriptor staging_directory_descriptor;
     UniqueFileDescriptor state_lock;
     std::uint64_t next_identity_generation TORRENT_BRIDGE_GUARDED_BY(resume_io_lock) = 1;
     std::vector<std::unique_ptr<TorrentIdentityToken>> identity_tokens TORRENT_BRIDGE_GUARDED_BY(resume_io_lock);
@@ -1484,9 +1550,7 @@ struct TTorrentClient {
     std::set<TorrentIdentity *> peer_exchange_disabled_by_app TORRENT_BRIDGE_GUARDED_BY(lock);
     std::set<TorrentIdentity const *> metadata_validation_pending TORRENT_BRIDGE_GUARDED_BY(lock);
     std::set<TorrentIdentity *> lsd_disabled_by_app TORRENT_BRIDGE_GUARDED_BY(lock);
-    std::unordered_map<std::string, std::vector<std::string>> awaiting_delete_resume_ids_by_id TORRENT_BRIDGE_GUARDED_BY(resume_io_lock);
     std::unordered_map<std::string, std::vector<std::string>> pending_resume_cleanup_ids_by_id TORRENT_BRIDGE_GUARDED_BY(resume_io_lock);
-    std::unordered_map<std::string, std::vector<std::string>> terminal_delete_cleanup_ids_by_id TORRENT_BRIDGE_GUARDED_BY(resume_io_lock);
     std::unordered_map<std::string, std::vector<std::string>> pending_tombstone_clear_ids_by_id TORRENT_BRIDGE_GUARDED_BY(resume_io_lock);
     RemovalTombstoneEntryMap removal_tombstones_by_filename TORRENT_BRIDGE_GUARDED_BY(resume_io_lock);
     RemovalTombstoneIDIndex removal_tombstones_by_id TORRENT_BRIDGE_GUARDED_BY(resume_io_lock);
@@ -1517,8 +1581,6 @@ struct TTorrentClient {
     std::uint64_t piece_map_revision TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
     std::size_t detail_cache_payload_bytes TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
     std::uint64_t next_detail_cache_access_sequence TORRENT_BRIDGE_GUARDED_BY(lock) = 1;
-    std::uint64_t next_removal_request_token TORRENT_BRIDGE_GUARDED_BY(lock) = 1;
-    std::optional<RemovalRequestEntry> removal_request TORRENT_BRIDGE_GUARDED_BY(lock);
     std::uint64_t requested_network_revision TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
     std::uint64_t submitted_network_revision TORRENT_BRIDGE_GUARDED_BY(lock) = 0;
 #if defined(TORRENT_BRIDGE_TESTING)
@@ -1591,12 +1653,23 @@ struct TTorrentClient {
 
     void invoke_wake_callback(WakeCallbackInvocation const &wake) noexcept TORRENT_BRIDGE_REQUIRES_NOT(lock);
 
-    [[nodiscard]] std::string reserve_canonical_torrent_id_locked(std::string canonical_id)
+    [[nodiscard]] std::string reserve_canonical_torrent_id_locked(
+        std::string canonical_id,
+        bool requires_requested_id = false,
+        int32_t *preserved_queue_rank_out = nullptr
+    )
         TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
-    TorrentIdentity *make_identity(std::string canonical_id = {}) TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
+    TorrentIdentity *make_identity(
+        std::string canonical_id = {},
+        bool requires_requested_id = false
+    ) TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
 
-    TorrentIdentity *attach_identity(lt::add_torrent_params &params, std::string canonical_id = {})
+    TorrentIdentity *attach_identity(
+        lt::add_torrent_params &params,
+        std::string canonical_id = {},
+        bool requires_requested_id = false
+    )
         TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
 
     [[nodiscard]] BridgeResult ensure_torrent_admission_available(int32_t code) const
@@ -1669,9 +1742,7 @@ struct TTorrentClient {
                                                       TorrentIdentity *identity)
         TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
 
-    bool delete_pending_for_hashes(lt::info_hash_t const &hashes) TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
-
-    void remember_pending_delete(lt::info_hash_t const &hashes, std::vector<std::string> const &resume_ids)
+    bool resume_cleanup_pending_for_hashes(lt::info_hash_t const &hashes)
         TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
 
     void remember_pending_resume_cleanup_locked(std::vector<std::string> const &ids)
@@ -1704,24 +1775,6 @@ struct TTorrentClient {
     std::vector<std::string> retry_pending_tombstone_clears(bool reports_errors)
         TORRENT_BRIDGE_REQUIRES_NOT(lock) TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
 
-    std::vector<std::string> promote_pending_delete_to_terminal_cleanup(lt::info_hash_t const &hashes)
-        TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
-
-    std::vector<std::vector<std::string>> terminal_delete_cleanup_id_groups()
-        TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
-
-    void forget_pending_delete_resume_ids(std::vector<std::string> const &resume_ids)
-        TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
-
-    ResumeSaveResult complete_pending_delete_cleanup(std::vector<std::string> const &resume_ids)
-        TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
-
-    [[nodiscard]] DirtyMask complete_pending_delete(lt::info_hash_t const &hashes, std::string const &failure_message)
-        TORRENT_BRIDGE_REQUIRES(lock) TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
-
-    std::vector<std::string> retry_pending_delete_cleanups(bool reports_errors)
-        TORRENT_BRIDGE_REQUIRES_NOT(lock) TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
-
     bool remove_resume_file_locked(std::string_view filename) TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
     ResumeRemoveResult remove_resume_file_checked_locked(std::string_view filename)
@@ -1751,9 +1804,7 @@ struct TTorrentClient {
     ResumeIDListResult tombstone_ids_overlapping_locked(std::vector<std::string> const &ids)
         TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
-    TombstoneCommitResult persist_removal_tombstones_locked(std::vector<std::string> const &ids,
-                                                            RemovalTombstoneState state, bool delete_files,
-                                                            bool delete_partfile)
+    TombstoneCommitResult persist_removal_tombstones_locked(std::vector<std::string> const &ids)
         TORRENT_BRIDGE_REQUIRES(resume_io_lock);
 
     ResumeSaveResult clear_removal_tombstones_locked(std::vector<std::string> const &ids)
@@ -2119,28 +2170,6 @@ struct TTorrentClient {
     void finalize_removed(lt::info_hash_t const &hashes, TorrentIdentity *identity)
         TORRENT_BRIDGE_REQUIRES(lock) TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
 
-    std::uint64_t begin_delete_request(lt::info_hash_t const &hashes, bool metadata_available = true)
-        TORRENT_BRIDGE_REQUIRES(lock);
-
-    [[nodiscard]] bool pending_delete_lacked_metadata(lt::info_hash_t const &hashes) const noexcept
-        TORRENT_BRIDGE_REQUIRES(lock);
-
-    void abandon_removal_request(std::uint64_t request_token) noexcept TORRENT_BRIDGE_REQUIRES(lock);
-
-    void complete_delete_request(
-        lt::info_hash_t const &hashes,
-        int32_t terminal_state,
-        std::string_view error = {}
-    ) noexcept TORRENT_BRIDGE_REQUIRES(lock);
-
-    [[nodiscard]] DirtyMask fail_dropped_delete_request(lt::alerts_dropped_alert const &alert)
-        TORRENT_BRIDGE_REQUIRES(lock) TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
-
-    [[nodiscard]] BridgeResult take_removal_result(
-        std::uint64_t request_token,
-        TTorrentRemovalResult *result
-    ) TORRENT_BRIDGE_REQUIRES(lock);
-
     bool resume_write_is_current(lt::info_hash_t const &hashes, TorrentIdentity *identity)
         TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
 
@@ -2257,9 +2286,7 @@ struct TTorrentClient {
     ResumeSaveResult remove_resume_files_for_ids_checked(std::vector<std::string> const &ids)
         TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
 
-    BridgeResult persist_removal_tombstones(std::vector<std::string> const &ids,
-                                            RemovalTombstoneState state = RemovalTombstoneState::resume_cleanup,
-                                            bool delete_files = false, bool delete_partfile = false)
+    BridgeResult persist_removal_tombstones(std::vector<std::string> const &ids)
         TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
 
     ResumeIDListResult tombstone_ids_overlapping(std::vector<std::string> const &ids)

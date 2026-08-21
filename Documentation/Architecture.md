@@ -1,647 +1,345 @@
-# Architecture and Security Decisions
+# Architecture and security decisions
 
-Torrent 7 is a native macOS application split into two separately sandboxed
-executables. The GUI is a pure-Swift controller and presentation process. An
-application-scoped Enhanced Security helper extension owns every torrent-engine
-function, including libtorrent, the C++ bridge, network access, downloaded
-payload I/O, and durable resume state.
+Torrent 7 is split into two separately sandboxed executables and two mutually
+authenticated XPC channels. The split is an authority boundary, not merely a
+deployment detail.
 
 ```mermaid
 flowchart LR
-    User["User consent and UI"] --> GUI["SwiftUI app<br/>TorrentStore + XPC client"]
-    GUI --> Bookmarks["Persistent app-scoped bookmarks<br/>GUI container"]
-    GUI <-->|"Authenticated, versioned,<br/>bounded XPC"| Helper["Enhanced Security engine extension<br/>single active controller"]
-    GUI -. "transient bookmark delegation" .-> Capabilities["Helper capability registry<br/>epoch + controller scoped"]
-
-    subgraph EngineProcess["Enhanced Security helper sandbox"]
-        Helper --> Capabilities
-        Helper --> Authority["Independent network-binding authority"]
-        Helper --> Core["Swift TorrentEngine actor"]
-        Core --> ABI["Bounded C ABI"]
-        ABI --> Native["C++23 bridge + libtorrent"]
-        Native --> State["Helper-owned resume state<br/>and removal tombstones"]
-        Capabilities --> Native
-        Authority --> Native
-    end
-
-    Internet["Untrusted trackers, peers,<br/>web seeds, and metadata"] <--> Native
+    User["User / Powerbox"] --> GUI["SwiftUI GUI\nbookmarks + storage claims"]
+    GUI -->|"versioned command XPC"| Helper["Enhanced Security helper\nnetwork + resume + libtorrent"]
+    Helper -->|"pathless broker XPC"| Broker["GUI exact-file broker"]
+    Broker -->|"one validated regular-file FD"| Helper
+    GUI --> Disk["User-selected payload storage"]
+    Helper --> Private["Helper-private resume + part files"]
+    Helper --> Network["Torrent network"]
 ```
 
-The two important boundaries are different:
+The GUI owns all user-filesystem authority. The helper owns torrent protocol
+execution and network authority. A helper request can identify only a storage
+claim, its immutable generation, a file index, and requested access. It cannot
+name or discover a path.
 
-- XPC is the process isolation and privilege-separation boundary. A native
-  memory-safety failure is contained outside the GUI address space.
-- The C ABI is an internal language boundary inside the helper. It prevents
-  Swift from sharing C++ ownership, templates, exceptions, or ABI details, but
-  it is not the process security boundary.
+## Process and authority split
 
-## Trust boundaries
-
-| Boundary | Trusted fact | Still treated as untrusted |
+| Responsibility | GUI application | Engine helper extension |
 | --- | --- | --- |
-| GUI to engine helper | In identified builds, XPC authenticates the exact app signing identifier from the same Team ID | Every envelope, payload, sequence, and capability reference |
-| Engine helper to GUI | In identified builds, XPC authenticates the exact helper signing identifier from the same Team ID | Every decoded value, count, path, identifier, revision, and dataset page |
-| Swift helper to C++ | The bridge owns one libtorrent client and exposes pinned C layouts | Native output lengths, strings, status codes, and all external protocol input |
-| GUI bookmark store to helper | The GUI currently holds user-approved access | Bookmark bytes, the resolved path, filesystem identity, lifetime, and controller ownership |
-| Controller network request to helper | The request describes user intent | Interface availability, identity, VPN association, and whether networking may be unblocked |
-| Persistent engine state | Files are in the helper container | File type, ownership, size, name, durability, and whether a saved path is currently authorized |
-
-Same-team code signing authenticates a peer; it does not make the peer's data
-safe. The helper validates controller requests before native use, and the GUI
-semantically validates helper responses before publishing them as application
-state. This remains necessary because isolating native parsing explicitly
-allows for the possibility that the engine process has been compromised.
-
-## Decisions
-
-### Use an Enhanced Security helper extension as the outer engine abstraction
-
-The production GUI target depends on the engine model, the XPC client, and the
-UI-facing network model. It does not link `TorrentEngineCore`, `TorrentBridge`,
-libtorrent, or BoringSSL. The engine extension owns those targets and is the only
-production executable that can perform torrent networking.
-
-This split is preferable to placing an XPC facade in front of an engine that
-still runs in the GUI. It produces a real address-space and sandbox boundary:
-
-- malformed torrent data and hostile network input are parsed outside the GUI;
-- C++ memory corruption cannot directly mutate SwiftUI state;
-- the GUI has no network entitlement;
-- the helper has no persistent bookmark or user-selected-file entitlement;
-- a controller disconnect triggers delegated-folder invalidation and blocks the
-  native session before shutdown completes.
-
-The extension point is application-scoped, UI-less, and requires Enhanced
-Security. The helper accepts one active controller. XPC peer, request, and
-queued-byte admission budgets bound work before a request reaches the engine
-actor.
-
-### Let ExtensionFoundation own helper process lifecycle
-
-The GUI has one actor-isolated process coordinator for the application lifetime.
-It retains the extension-point monitor and the current `AppExtensionProcess`,
-coalesces concurrent process acquisition through one generation-checked launch,
-and creates a fresh inactive `XPCSession` for each controller generation. This
-keeps process ownership separate from controller ownership: ordinary session
-cancellation replaces a controller without racing helper teardown.
-The process handle never leaves that single-flight gate: session creation
-atomically revalidates its generation, and a canceled waiter stops before using
-the shared process.
-
-Discovery fails closed unless the application-scoped monitor reports exactly
-one enabled, approved identity with both the expected helper bundle identifier
-and extension-point identifier. The client configures its exact same-team helper
-requirement before activating each session. The helper's `ConnectionHandler`
-configures the reciprocal exact same-team app requirement before accepting the
-inactive session. Application scope is an additional launch boundary, not a
-replacement for mutual code-signing authentication.
-
-`AppExtensionProcess.onInterruption` clears the matching retained generation,
-and a generation check prevents an old callback from clearing a newer process.
-Identity replacement and failed `makeXPCSession()` also forget the stale
-reference so the existing bounded connection policy can rediscover or relaunch.
-Production code never uses `invalidate()` as a restart primitive;
-ExtensionFoundation reports process death and owns the subsequent launch. The
-helper entry point uses `_NSExtensionMain`, matching Xcode's Generic Extension
-product semantics.
-
-### Keep the C++ bridge, but only inside the helper
-
-The C++ bridge remains the right internal abstraction. Libtorrent is a stateful
-C++ library whose types carry C++ ownership, exception, template, and threading
-semantics. Exposing those types directly to Swift would enlarge the unsafe
-surface without removing the underlying C++ dependency.
-
-The bridge therefore remains a narrow C ABI facade with:
-
-- C-compatible values with pinned layouts and no borrowed pointers embedded in
-  value aggregates;
-- explicit RAII ownership for the native client;
-- bounded input and output spans whose C pointer contracts import into Swift as
-  lifetime-scoped `Span`, `MutableSpan`, and `RawSpan` wrappers used by the
-  production engine rather than raw pointer/count pairs;
-- integer status codes and bounded diagnostics;
-- no exception crossing into Swift;
-- an explicit removal-commit output, separate from the optional asynchronous
-  deletion token, so post-commit bookkeeping failures cannot masquerade as
-  rejected removals;
-- native parsing and validation wherever a decision must match libtorrent;
-- native ownership of alert processing, resume durability, and removal
-  tombstones.
-
-The bridge must not become a second presentation or IPC layer. SwiftUI state,
-labels, dialogs, bookmark persistence, XPC protocol state, and semantic response
-validation remain in Swift. Moving the bridge into the helper narrows the
-consequence of a bridge defect; it does not justify relaxing bridge bounds,
-static analysis, compiler hardening, or tests.
-
-### Use a versioned, fail-closed XPC protocol
-
-Requests and replies use typed JSON payloads inside a strict XPC envelope.
-Torrent preview and add operations carry the already-bounded torrent bytes in a
-separate raw XPC-data attachment; add metadata remains typed JSON, and neither
-operation echoes the raw bytes. The protocol includes a version, request ID,
-operation ID, controller ID, strictly increasing sequence, operation, and
-expected engine epoch.
-
-The following are protocol invariants:
-
-- operation-specific JSON, raw-attachment, and reply byte limits are checked
-  before either request resource is copied or decoded;
-- JSON payloads are container-rooted, and nesting depth, decoded value-node
-  count, individual string bytes, and individual primitive bytes are bounded
-  before Foundation decoding; JSON has no aliases or object references, so
-  repeated values necessarily consume repeated bounded wire bytes;
-- duplicate JSON payload names deliberately follow Foundation's decoding
-  behavior; payloads have one receiver, are not signed or canonically hashed,
-  and remain subject to typed decoding plus semantic validation, so the
-  allocation preflight does not grow into a second JSON parser;
-- dense piece maps are bit-packed into a base64 `Data` field with exact length
-  and unused-bit validation rather than represented as millions of JSON numbers;
-- scalar add/remove results are wrapped in explicit keyed response messages to
-  preserve the container-root protocol invariant;
-- unknown, missing, duplicate, mistyped, or unexpected envelope fields fail;
-- request and reply envelopes carry no file descriptors;
-- request IDs and operation IDs are replay checked;
-- post-handshake operations must name the current engine epoch;
-- client requests are serialized, complete paged poll pipelines are serialized
-  through dataset closure, and helper work is serialized per peer;
-- every request owns an operation-specific monotonic deadline; a missing reply
-  terminalizes that controller, and a timed-out mutation is reported as
-  commit-unknown and is never replayed automatically;
-- the deadline includes time waiting for the serialized request slot; expiry
-  before submission consumes no sequence and leaves the controller reusable;
-- cancellation of an observing Swift task does not cancel a transaction that
-  is already on the wire: the connection-owned request drains and validates
-  its reply before releasing the ordered slot; mandatory capability revokes and
-  dataset closes continue from uncancelled, deadline-bounded cleanup tasks,
-  while urgent containment and a missed deadline still terminate the controller;
-- typed busy/shutdown failures permit only a bounded fresh-session reconnect;
-- a second peer racing an in-flight controller is classified as busy or
-  shutting down, rather than as a same-controller protocol violation;
-- an urgent network revocation preempts a long ordered request by terminating
-  the controller and entering the helper's out-of-band disconnect path; the
-  GUI treats that containment as an engine-replacement disposition, lets
-  already-accepted work unwind against the terminated controller without
-  replaying it, and reconnects through a fresh blocked handshake before
-applying only the latest settings;
-- post-terminal calls are rejected before request-slot admission, and lifecycle
-  generation fencing prevents a cancellation-insensitive stale poll from
-  affecting or delaying the replacement controller;
-- malformed uncorrelatable messages and admission-limit violations cancel the
-  session rather than entering the engine;
-- a fatal reply mismatch, invalid epoch, or semantic validation failure
-  terminalizes the GUI transport;
-- helper response serialization failure is commit-ambiguous and therefore
-  terminates the controller without an ordinary rejection reply; helper-made
-  torrent identifiers are validated before a capability is committed;
-- removal warnings are UTF-8 bounded by one shared engine/client contract, so
-  honest containment diagnostics remain semantically valid IPC responses;
-- typed controller-busy and helper-shutdown handshakes retry in the background
-  with capped backoff under one absolute monotonic recovery deadline that
-  includes connection attempts, handshakes, processing, and sleeps; connection
-  invalidation remains transient only after that
-  typed cleanup episode begins, while identity, protocol, and semantic failures
-  are never made retryable;
-- change notifications are coalesced hints only; the client inspects their
-  fixed-size envelope metadata without copying payload resources, and revisions
-  remain authoritative.
-
-Ad-hoc signatures do not have a Team ID. Local development builds therefore use
-an explicit reduced-assurance Info.plist switch on both bundles. Identified
-builds omit that switch and require exact same-team signing identifiers in both
-directions. Packaging verification rejects a mixed mode or a reduced-assurance
-switch in an identified build.
-
-### Retain immutable snapshots and page high-cardinality XPC datasets
-
-Immutable revisioned snapshots remain the correct application model. SwiftUI
-wants stable values, a single revision makes refresh decisions deterministic,
-and a missed or coalesced wake is harmless because the next revision check is
-authoritative.
-
-Snapshot semantics are separate from wire representation. The completed XPC
-transport uses this split:
-
-| Data | Helper representation | XPC transport | Client lifetime |
-| --- | --- | --- | --- |
-| Torrent library rows | Bounded immutable batch with one revision | Short-lived paged dataset returned by `poll` | Fully assembled and validated before replacing GUI state |
-| Tracker-host index | Bounded immutable aggregate with one revision | Short-lived paged dataset returned by `poll` | Fully assembled and validated before replacing sidebar state |
-| Trackers and web seeds | Demand-driven revisioned batch | Bounded inline reply | Detail cache, evictable |
-| Files and piece map | Demand-driven revisioned batch | Bounded inline reply | Detail cache, evictable |
-| Torrent-file preview | Native parse result plus caller-owned input bytes | Raw bounded request; metadata-only reply | The GUI retains its original bytes for the eventual add |
-| Peer sources and web-seed activity | Small typed snapshot | Bounded inline reply | Refreshed on demand |
-| Network status, bridge health, and errors | Small poll snapshot | Bounded inline reply | Replaced on poll |
-| Commands | Serialized operation | Explicit success or bounded failure | No shared mutable native object |
-
-The helper captures the complete immutable high-cardinality value set first,
-then encodes pages of at most 256 items, shrinking a page further when necessary
-to stay under the one-MiB page limit. A descriptor may name at most 256 pages
-and must claim at least the number implied by its item count, preventing a
-hostile helper from amplifying one poll into tens of thousands of serial calls.
-Datasets are owned by the controller, expire after 30 seconds, are limited to
-four open datasets, and share a 128-MiB encoded storage budget. The GUI admits
-only one complete `poll -> page reads -> dataset closes` pipeline per
-controller, preventing overlapping refresh sources from reserving multiple
-dataset pairs. It verifies descriptor kind, revision metadata, page order, page
-identity, aggregate bytes, final item count, item uniqueness, string and numeric
-bounds, canonical paths, and save-path authorization. Successful polls close
-each dataset after assembly. Cancellation and recoverable failures close every
-descriptor returned by that poll from uncancelled cleanup; an unconfirmed close
-forces controller replacement so disconnect cleanup clears the helper budget.
-Fatal reply or semantic validation failures disconnect immediately without
-sending further requests over the untrusted session.
-
-Paging does not expose partially mutable application state. The GUI publishes a
-new torrent or tracker-host array only after every page has decoded and the
-complete dataset has passed semantic validation.
-
-The UI-facing engine contract has one aggregate, throwing poll operation. A
-transport or validation failure is lifecycle information, not an authoritative
-empty snapshot, so the client never manufactures fallback engine state. The
-helper may coalesce wakeups, but every successful poll carries the bounded
-network, health, interface, error, and optional dataset state needed for one
-atomic refresh decision.
-
-Poll results are also scoped to GUI refresh, engine-lifecycle, and capability-
-mutation generations. A response captured before a restart or folder grant is
-discarded before it can update health, network state, snapshots, or bookmark
-ownership.
-
-The native bridge still has to copy and map a changed main snapshot inside the
-helper. At the 20,000-row limit, a 3,360-byte bridge snapshot has a 67,200,000-
-byte raw batch. `Scripts/benchmark-snapshot-transport.zsh` measures that internal
-C-ABI copy, Swift mapping/sorting, and transient footprint. It is no longer a
-model of the XPC wire format. The published native review gates remain:
-
-- native copy p95 at or below 25 ms;
-- end-to-end date-sort median at or below 100 ms and p95 at or below 200 ms;
-- name-sort p95 at or below 250 ms;
-- incremental physical footprint at or below 192 MiB.
-
-Missing a native gate is a reason to compact or page the internal bridge copy,
-not to expose mutable libtorrent state to either Swift process. XPC page limits
-must not be raised without separate end-to-end measurement and a resource-budget
-review.
-
-`Scripts/test-enhanced-security-extension.zsh` supplies that separate transport
-measurement. It assembles an ad-hoc-signed sandboxed host and Enhanced Security
-helper, delegates a real security-scoped folder, adds paused tracker-bearing
-magnets while networking remains blocked, times full paged polls across restart
-and shutdown/reconnect, and samples both processes' peak resident memory. The
-interactive lifecycle uses a genuine Powerbox grant: the practical run exercises
-512 torrents and `--maximum` exercises the 20,000-torrent product bound. CI runs
-the actual signed pair without folder grants. It asserts blocked-network empty
-polls and nonempty interface discovery, reports the VPN-classified count, kills
-the exact helper process, requires a new PID and fresh blocked controller, then
-exercises restart, shutdown/reconnect, and exact malformed-bookmark rejection.
-Positive folder delegation remains interactive; CI does not claim to simulate
-system-owned consent. The integration host/helper bundles and their explicit
-reduced-assurance switch are assembled only by this test; production packaging
-never embeds them and identified builds never enable reduced assurance.
-
-### Separate persistent bookmark ownership from transient delegation
-
-User consent and persistent bookmark authority belong to the GUI. It stores
-app-scoped security bookmarks for the default download directory and active
-torrent-specific directories in its own sandbox container. It restores those
-bookmarks, starts their scopes, refreshes stale persistent bookmark data when
-possible, and keeps access leases alive while the paths remain needed.
-
-The helper receives a different artifact: while the GUI scope is active, the
-GUI creates a transient bookmark that transfers the current sandbox extension
-over XPC without sharing the persistent app-scoped bookmark. The helper:
-
-1. bounds the bookmark and aggregate grant sizes;
-2. resolves without UI, mounting, or implicit scope activation;
-3. explicitly starts and balances the delegated security scope;
-4. requires a canonical directory path;
-5. opens the directory without following the leaf as a symlink;
-6. records and rechecks device and inode identity;
-7. returns an opaque capability ID bound to the engine epoch and controller.
-
-Complete authorization snapshots are prepared before publication. The helper
-applies the corresponding native save-path allowlist before atomically publishing
-the registry replacement; an unrecoverable cross-layer commit or rollback failure
-terminates the controller. A newly selected folder is a provisional capability
-until the add operation succeeds. Validation failures before native add are
-definite and revoke it. The native add ABI reports one of three outcomes:
-rejected, committed, or commit-unknown. It returns to rejected only after a
-pre-accept validation failure or a definite `add_torrent` rejection, and reports
-committed only after native persistence and bookkeeping complete. Every failure
-after libtorrent accepts the torrent remains commit-unknown—even if asynchronous
-rollback has been requested—so the helper keeps the controller only after a
-definite rejection and contains it after an unknown native outcome or a failure
-following committed native success. Ambiguous
-transport failure likewise does not issue a possibly incorrect explicit revoke.
-Controller disconnect is stronger than ordinary revocation: it invalidates the
-server-minted connection generation immediately and later releases outstanding
-scopes and descriptors, including those retained by pins, after native teardown.
-
-The GUI serializes every folder delegation and exact-set replacement through an
-exclusive authorization lane. A prepared add invalidates older polls, holds the
-lane through delegation and commit, and forces an exact replacement after both
-success and every possibly delegated failure. If exact cleanup cannot be
-confirmed—including a local path or bookmark validation failure before any wire
-request—the GUI immediately terminates the controller transport. Restart first
-performs the same exact reconciliation and then reuses the confirmed capability
-IDs; it does not incrementally resend persistent GUI authority. Capability
-snapshots carry their own monotonic revision, and synchronization state is scoped
-to the current engine lifecycle so an old completion cannot bless a new engine.
-
-Paths and resume `save_path` strings are never authority by themselves. Startup
-restores a torrent only when its exact canonical path is present in the current
-helper capability snapshot. Unauthorized resume entries are preserved and
-reported rather than silently deleted.
-
-### Make the helper the sole owner of torrent-engine state
-
-Resume data and removal tombstones live under an owner-only
-`Torrent7/EngineState` directory in the helper's Application Support container.
-Native persistence keeps its existing atomic writes, directory durability
-barriers, generation checks, rollback behavior, and owner-only file permissions.
-The GUI neither opens nor transfers engine persistence files.
-
-Future state-format upgrades belong in the helper that owns this directory.
-They must validate the existing state before native use and publish any
-replacement atomically and durably; they must not grant the helper access to GUI
-container state or add a general file-transfer channel to XPC.
-
-### Keep network authority inside the engine helper and fail closed
-
-The networkless GUI does not inspect interfaces or VPN service state. The
-network-entitled helper is the sole observer and publishes a revisioned,
-bounded presentation snapshot over XPC. Interface fingerprints are fixed-size,
-helper-keyed HMAC-SHA-256 values, so local addresses used to detect identity
-changes do not cross into the GUI and cannot be recovered from an unsalted hash.
-The GUI may echo a selected name, fingerprint, and VPN service ID,
-but the helper validates all three against its private current observation
-before libtorrent can be unblocked.
-
-The unblock sequence is deliberately transactional:
-
-1. The engine starts paused and network-blocked; handshake repeats the block
-   before returning success.
-2. Handshake cannot succeed until the helper-side monitor has produced an
-   initial interface snapshot. Readiness has a bounded timeout and an observed
-   empty list counts as ready while leaving unavailable bindings blocked.
-3. Preparing any replacement first blocks the current authorization.
-4. An unrestricted request must be structurally unbound. A constrained request
-   must match one unique live interface and, when required, an active VPN service.
-5. A constrained decision creates a monitor-generation lease. The helper
-   activates it immediately before applying native settings and confirms it
-   immediately afterwards.
-6. Any monitor update while a constrained lease is active invalidates that lease
-   and blocks the native engine. Its new revision wakes the GUI, which refreshes
-   the picker and requests a fresh authorization even when display values are
-   unchanged. A stopped monitor, controller request,
-   authorization replacement, controller disconnect, or lease race also blocks.
-7. If the native block operation fails, the helper destroys the engine and
-   cancels the controller session; it never continues with uncertain network
-   state.
-
-Disconnect and monitor-invalidation containment do not depend indefinitely on
-Swift actor progress. A five-second process-level containment watchdog is armed
-before either path waits on the runtime or native engine, including the initial
-pre-authority handshake block and helper-initiated failure containment. It is
-disarmed as soon as network containment completes; a separate five-minute cleanup
-deadline bounds native restart, failed-handshake teardown, explicit shutdown,
-queued deletion, scope release, and XPC transaction teardown without mistaking
-slow cleanup for failed network containment. Tokens are independent, so
-connection-handler and runtime deadlines can overlap without disarming one
-another. Missing either
-deadline terminates only the isolated helper. Forced native containment
-invalidates a suspended removal before that task can reuse its captured native
-pointer.
-
-This is an application-level binding policy, not a system-wide VPN kill switch.
-Hostname lookup still uses macOS system DNS, so selecting a libtorrent interface
-does not independently constrain DNS traffic.
-
-If a controller request is already in flight when the GUI must revoke network
-access, the revocation never waits behind that request. The GUI closes the
-controller, which activates the same watchdog-covered disconnect containment
-described above. Once its local ordered queue has unwound, it creates a new
-authenticated controller, delegates a fresh exact folder-capability snapshot,
-and applies the newest settings from the engine's blocked startup state. An
-interrupted or queued user mutation may report that its connection ended, but it
-is not replayed across this boundary because its native commit status may be
-ambiguous. Replacement admission treats typed busy/shutdown replies—and generic
-connection invalidation while the old controller is known to be cleaning up—as
-one bounded retry episode. Normal launch retains short connection retries, and
-definite authentication, protocol, capability, or semantic rejections are never
-retried. After sending a typed transient rejection, the helper immediately
-latches that contender terminal, drains any queued successors without executing
-them, and owns a one-second reply-delivery deadline before closing the peer. A
-stalled client therefore cannot retain or later reuse an admission slot.
-
-### Patch dependencies only at boundaries the application cannot own
-
-Tracker DNS resolution, redirects, proxy target selection, UDP sends, peer
-discovery, and storage path resolution happen inside libtorrent. The application
-cannot reliably secure those paths after the fact, so the pinned dependency
-patch series validates destinations at every relevant transition, blocks
-non-global tracker, DHT, PEX, and resume peer endpoints for each torrent's
-life. NAT64 prefix discovery belongs to the session rather than the DHT
-lifecycle, but starts only after network access is enabled and is canceled when
-the helper blocks networking. IPv4 candidates remain classifiable immediately,
-while IPv6 peer candidates fail closed until a valid RFC 7050 result is
-available, including when DHT is disabled. HTTP and UDP tracker requests consume
-that same session state instead of issuing independent RFC 7050 lookups: they
-wait without reporting an endpoint failure while verification is pending,
-silently restart DNS after a policy-generation change within the original
-request deadline, treat unavailable verification as a skipped announce, and
-report SSRF whenever any rejected answer is positively non-global. UDP tracker
-connection IDs are scoped to the policy generation. Every outgoing peer
-connection revalidates the endpoint under the current session policy, and each
-NAT64 generation transition disconnects and removes policy-scoped IPv6 peers
-before networking resumes. The series also confines storage,
-revalidates redirect and send targets, and keeps pread recheck buffers within
-the configured checking-memory budget. Private torrents discard pre-metadata
-and persisted peer caches and repopulate only from
-one active tracker. Alternate private trackers are eligible only after the
-active tracker fails or is removed; switching disconnects every peer and
-advances a request generation so late tracker responses and peer-name lookups
-cannot repopulate stale peers. Per-endpoint announce bookkeeping records which
-generation owns its in-flight update, so a late callback cannot clear a newer
-request's state. PEX never advertises LAN endpoints, and `ut_holepunch` follows
-the same PEX/private-torrent policy; explicitly enabled LSD remains the sole
-intentional local-peer discovery path. The series also preserves Apple's typed
-allocation metadata across libtorrent's pool and disk-buffer wrappers instead
-of disabling allocator-wrapper diagnostics for the dependency. Application
-source policy separately controls allowed tracker and web-seed schemes.
-
-Authenticated HTTPS contexts use BoringSSL's buffer-only TLS method, keep the
-expected hostname in connection-owned ex-data, and validate the peer's DER chain
-with macOS Security.framework. Trust evaluation is fail-closed and cannot fetch
-missing certificates over the network. BoringSSL's 100 KiB certificate-message
-limit remains in force, and the verifier rejects more than eight server-supplied
-certificates or more than 100 KiB of aggregate DER before creating
-Security.framework objects. A separate buffer-only UPnP context
-preserves UPnP's existing encryption-only semantics without weakening tracker or
-web-seed authentication. SSL-torrent peer support is not compiled because the
-application does not expose the certificate alerts or credential APIs needed to
-operate it safely.
-
-BoringSSL is authenticated as a pristine pinned checkout before an ordered,
-hashed downstream patch series is applied in a profile-local build worktree. In
-the permanent no-assembly configuration, the patch removes unused AES runtime
-dispatch pointers and calls the portable implementations directly. Active TLS,
-cipher, digest, public-key, BIO, and EC method roots use storage-address and role
-diversification on arm64e. BoringSSL's cleansing allocation boundary forwards
-compiler type descriptors to matched `malloc_type_malloc`/`malloc_type_free`
-calls while retaining allocation size and type out of band for checked cleanup
-and realloc. Build verification checks the exact patch tree, compiler flags, and
-archive symbols; focused code-generation and forked replay tests exercise both
-function- and data-pointer PAC plus allocator semantics.
-
-Boost.Asio's small-block recycler also preserves each concrete allocation type
-instead of erasing it to `void *`. Its per-thread cache records the matching
-type descriptor and never returns a block under a different allocation class.
-Focused runtime tests exercise that isolation, while archive and final-product
-verification reject aligned-allocation call sites with a zero semantic summary.
-
-Boost.Asio's active scheduler-completion and reactor-performance operation
-pointers are likewise long-lived dependency-owned dispatch state. On arm64e,
-the pinned Boost patch authenticates each slot with its storage address and a
-distinct role discriminator. A focused code-generation test requires those
-address-and-role blends and rejects generic zero-discriminator branches; a
-forked runtime probe verifies that copying either signed callback to the same
-slot in another operation traps instead of dispatching it.
-
-Dependency patches remain ordered, hashed, reproducible, and covered by focused
-security tests. Both release and sanitizer dependency profiles must record the
-same patched-tree provenance; a stale unpatched profile is not an acceptable
-build input.
-
-### Split signing, entitlements, and quarantine by responsibility
-
-Both bundles use App Sandbox, hardened runtime, `restrict`, library validation,
-Enhanced Security version 2, hardened heap, dyld read-only, platform
-restrictions, and checked allocations with pure-data enforcement. Their
-capabilities otherwise differ:
-
-| Property | GUI application | Engine helper extension |
-| --- | --- | --- |
-| Bundle identifier | `app.torrent7` | `app.torrent7.engine` |
-| Network client/server entitlement | Absent | Present |
-| User-selected read/write entitlement | Present | Absent |
-| App-scoped bookmark entitlement | Present | Absent |
-| C++ bridge and statically linked libtorrent/BoringSSL | Absent | Present |
-| `LSFileQuarantineEnabled` | `true` | `true` |
-
-The nested `.appex` is signed first and the outer app second. Identified
-signatures must expose valid matching Team IDs. The app authenticates the exact
-helper identifier, and the helper authenticates the exact app identifier.
-Quarantine is enabled on the helper because it is the process that creates
-downloaded files.
-
-Bundle verification enforces exactly one `.appex` under `Contents/PlugIns`, one
-exact application-scoped Enhanced Security `.appexpt` under
-`Contents/Extensions`, no legacy `Contents/XPCServices`, exactly the GUI and
-engine Mach-O executables, no symbolic links, exact entitlements, matching
-signing modes and Team IDs, hardened code-signing flags, arm64e/PAC hardening,
-BTI and typed allocation evidence in the native helper, no native torrent
-symbols in the GUI, and allowlisted load commands. RPATHs are limited to local
-loader/executable paths; a development debug bundle may additionally reference
-the explicit ASan runtime and its Xcode RPATH. `LC_DYLD_ENVIRONMENT` is forbidden.
-
-## Non-negotiable security and resource invariants
-
-- Production code never loads the bridge or libtorrent into the GUI process.
-- The GUI has no network entitlement; the helper has no persistent bookmark or
-  user-selected-file entitlement.
-- Identified XPC peers require exact same-team signing identifiers in both
-  directions. Reduced-assurance ad-hoc mode is explicit and development-only.
-- No decoded XPC value becomes engine or GUI state without operation-specific
-  byte bounds, pre-decode JSON depth, value-node, string, and primitive bounds,
-  and semantic validation.
-- JSON wire payloads are container-rooted. Raw torrent attachments for preview
-  and add are independently byte-bounded and are not echoed in responses. A response
-  serialization failure is commit-ambiguous and terminates the controller
-  rather than masquerading as a definite operation rejection.
-- Requests are serialized and bound to one controller, monotonic sequence, and
-  engine epoch; replayed identifiers are rejected.
-- Wake messages are hints. Revisions, not delivery count, determine freshness.
-- Engine and capability-mutation generations reject poll and reconciliation
-  completions captured before a restart, replacement, or prepared add.
-- Main and tracker-host snapshots are immutable and fully validated before
-  publication; XPC dataset pages, page count, open datasets, lifetime, and
-  aggregate storage are bounded.
-- Torrent adds are admitted before expensive native state is retained. Live
-  torrents, sources, files, pieces, snapshots, queues, diagnostics, peers, and
-  file descriptors retain hard caps.
-- Native add bookkeeping is incremental but remains fail-closed: canonical IDs
-  are reserved in a bounded index, queue membership is retained through the
-  exact removal alert, and any divergence or fallible membership transition
-  invalidates the fast queue index before a deterministic full reconciliation.
-- The aggregate tracker-host view keeps bounded per-torrent normalized entries
-  for the verified snapshot prefix. An unavailable tracker query is never
-  negative-cached; publication stops at that prefix and a later alert retries it.
-- Removal tombstones are scanned once through the retained ResumeData directory
-  descriptor at startup. Reserved marker names must be no-follow regular files;
-  the scan, ID-membership index, and total directory enumeration are bounded,
-  and index publication/removal follows the corresponding directory fsync.
-- Persistent bookmark ownership remains in the GUI. The helper holds only
-  transient, controller-scoped delegated access and invalidates it on disconnect.
-- Every possibly delegated prepared folder is followed by a forced exact-set
-  replacement or immediate controller termination before its local lease ends.
-- Exact-set replacement fails closed even before the wire: local bookmark or
-  canonicalization failure also ends the controller, and restart reuses only a
-  freshly reconciled capability set.
-- Canonical path text alone never grants storage authority; a live capability
-  must also match the verified directory descriptor's device and inode.
-- Native root lifetimes use random process-local tokens validated by a locked
-  Swift registry that owns each security-scope anchor; Swift object pointers do
-  not cross the C ABI.
-- Resume restoration requires a currently authorized canonical save path.
-- Resume and removal state is helper-owned, atomic, owner-only, and durable.
-  Unauthorized or temporarily unreadable valid entries are preserved.
-- Future engine-state format upgrades remain local to the helper-owned state
-  directory and preserve atomicity, durability, and fail-closed validation.
-- Native networking starts blocked. Only the independent helper authority may
-  unblock a constrained binding, and every relevant interface change or
-  controller disconnect blocks it again.
-- Failure to establish network containment destroys the native engine and ends
-  the controller session; an independent short watchdog bounds that containment,
-  while a separate longer watchdog bounds native restart and all remaining
-  resource cleanup, including helper-initiated shutdown.
-- Tracker, redirect, proxy, UDP, peer-discovery, storage confinement, typed
-  allocator, and indirect-operation patches remain part of pinned dependency
-  provenance and focused build/test suites.
-- Both bundles retain quarantine, exact entitlements, hardened runtime,
-  library validation, matching identity, and an allowlisted code inventory.
-- Native worker failures back off, publish typed health, and remain
-  stop-token-aware so shutdown cannot inherit an unbounded retry delay.
-- Detail-cache eviction may cause another refresh; it cannot change torrent
-  truth or create an unbounded allocation.
-
-## Completed architecture and ongoing gates
-
-| Area | Current state | Ongoing gate |
-| --- | --- | --- |
-| GUI/engine process isolation | Completed; production GUI is Swift-only and the Enhanced Security helper owns the engine | Bundle metadata, symbol, and exact Mach-O inventory verification |
-| XPC identity and protocol | Completed; mutual identified-peer requirements, epochs, sequences, replay checks, budgets, and response validation | IPC codec/client security tests plus signed-bundle verification |
-| Extension lifecycle | One retained ExtensionFoundation process, fresh controller sessions, generation-checked interruption recovery | Signed integration gate forces helper exit and requires a different PID plus fresh blocked controller |
-| C++ bridge placement | Completed inside the helper only | Bridge static analysis, strict warnings, lifecycle tests, and native symbol audit |
-| Snapshot transport | Immutable revision model retained; main and tracker-host XPC transport is paged and capped at 256 pages | Dataset validation, native snapshot benchmark, and real extension lifecycle/timing/RSS test before changing limits |
-| Folder authority | Persistent GUI bookmarks plus transient helper capabilities completed | Bookmark, transaction, replacement, disconnect, and restoration tests |
-| State ownership | Helper-owned persistence completed; the GUI does not inspect or transfer engine state | Persistence, crash-recovery, and durability-failure tests |
-| Network authority | Independent helper monitor and generation lease completed | Binding-race, monitor-change, disconnect, and libtorrent network-security tests |
-| Packaging split | Separate entitlements, signing, quarantine, and code inventory completed | Production and sanitizer app builds plus verifier; distribution notarization and Gatekeeper |
-| Dependency confinement | Ordered pinned patch series completed | Patch provenance and focused security suite for every dependency or toolchain change |
-
-Capability ownership uses a server-minted per-connection generation with a
-shared one-way invalidation token. Disconnect invalidates the token before its
-first suspension, so stale pins, leases, and prepared replacements fail
-immediately. Final cleanup still retains the exact generation until native
-teardown can safely release its descriptors and security scopes. No
-disconnected-UUID tombstone set remains, and a fresh connection may reuse the
-same wire controller UUID without reviving old authority.
-
-The Enhanced Security extension is the production architecture, not a
-compatibility path. The helper keeps the existing `app.torrent7.engine`
-identifier so its sandbox container and durable engine state remain continuous.
-Future transport or performance work may change encoding and batching within the
-published bounds, but it must preserve the process split, snapshot semantics,
-capability ownership, helper-side network authority, and fail-closed behavior.
+| SwiftUI, Finder, notifications, preferences | Owns | None |
+| User consent and persistent security-scoped bookmarks | Owns | None |
+| Torrent manifest safety parsing | Owns an independent Swift parser | Libtorrent parses independently |
+| Destination selection, reservation, and mapping | Owns | None |
+| Durable storage claims and ownership evidence | Owns | None |
+| Exact payload file access | Brokers individual descriptors | Consumes brokered descriptors |
+| Payload rename, move, and deletion | Owns | None |
+| Torrent networking and discovery | None | Owns |
+| Libtorrent, C++ bridge, resume state | None | Owns |
+| Skipped-file part data | None | Owns in its private container |
+
+The GUI executable has no network entitlement and does not link the C++ bridge
+or libtorrent. The helper has no user-selected-file or bookmark entitlement.
+The former folder-wide authority model was removed at the cutover; there is no
+parallel compatibility path.
+
+## Command channel
+
+The application-scoped Enhanced Security helper is discovered and launched by
+ExtensionFoundation. Each engine generation uses a fresh authenticated XPC
+session. Identified builds require the expected application and helper signing
+identifiers from the same Team ID. Local ad-hoc integration fixtures use an
+explicit reduced-assurance mode.
+
+Command IPC version 10 uses typed, operation-specific envelopes with bounded
+JSON and raw attachments. Requests carry an engine epoch, monotonic sequence,
+and replay identifier. The implementation bounds queue depth, nesting, value
+count, strings, raw torrent bytes, piece-map data, paged datasets, and response
+sizes before allocating or decoding deeply.
+
+Errors after native mutation begins are treated as commit-ambiguous. The client
+does not retry or report a definite rejection when libtorrent may already have
+accepted an operation. Controller replacement always starts from a newly
+blocked network state.
+
+## Independent manifest validation
+
+Before the GUI creates a claim, `TorrentManifestParser` parses the original
+`.torrent` bytes using a bounded, memory-safe Swift bencode reader. It locates
+the exact raw `info` dictionary and produces immutable logical storage data.
+
+Validation includes:
+
+- v1, v2, hybrid, and rootless-v2 layouts;
+- applicable SHA-1 and SHA-256 info hashes;
+- contiguous file indices matching libtorrent;
+- v2 file trees, padding files, and hybrid layout equivalence;
+- metadata, nesting, byte-string, component, and file-count bounds;
+- strict UTF-8 and rejection of NUL, separators, `.`, and `..`;
+- rejection of symlinks and unsafe path attributes; and
+- duplicate, case-insensitive, and normalization-equivalent path detection.
+
+The parser hashes a canonical logical representation into a
+`sourceManifestDigest`. Libtorrent independently derives the same digest. A
+mismatch aborts activation, so neither parser alone decides the physical
+mapping.
+
+For a magnet, metadata discovery happens only in helper-private staging. The
+helper returns the exact received `info` bytes. The GUI verifies them against
+the advertised magnet hash before parsing or creating user-visible storage.
+
+## Destination planning
+
+`TorrentStorageDestinationPlanner` runs only in the GUI. Normal adds reserve a
+new top-level file or directory atomically and choose Finder-style collision
+names through exclusive creation. Libtorrent never chooses or rewrites the
+physical destination.
+
+Filesystem operations start from a GUI-held directory descriptor. Every path
+component is traversed separately with descriptor-relative operations and
+`O_NOFOLLOW`, `O_DIRECTORY`, and `O_CLOEXEC` as appropriate. Creation uses
+exclusive `mkdirat` or `openat` calls. The planner verifies type and filesystem
+identity after opening and rejects symlinks, special files, hidden top-level
+names, and dangerously broad parents.
+
+Normal addition never reuses matching files. “Use Existing Data” is an explicit
+import operation. Imported files are identity-pinned, must be safe regular
+files, and are never marked for automatic deletion. Writable imports additionally
+require user ownership and a single hard link.
+
+## Storage claims
+
+Immutable authority and mutable policy are separate.
+
+`TorrentStorageManifest` records:
+
+- a random claim ID and positive generation;
+- v1 and/or v2 info hashes and the source manifest digest;
+- the GUI parent-authority identifier;
+- logical files and exact index-to-component mappings;
+- expected sizes and padding status;
+- the collision-selected top-level name and pinned filesystem identities;
+- a digest of the complete physical mapping; and
+- random ownership-marker material kept out of the helper.
+
+`TorrentStorageLease` records lifecycle state, policy revision, maximum access,
+provenance, modification permission, and automatic-deletion ownership for each
+file. Padding files are always unavailable and have no physical mapping.
+
+Generation changes only when immutable authority is replaced. Policy changes
+increment the policy revision without pretending to revoke descriptors that a
+compromised helper might already hold.
+
+## Crash-consistent journal
+
+The GUI persists claims in a bounded owner-only journal using descriptor-relative
+I/O, atomic replacement, durability barriers, and a checksum. It does not use
+`UserDefaults` for storage authority.
+
+The principal lifecycle is:
+
+```text
+preparing -> reserved -> activating -> active
+                              |
+                              +-> activationUnknown
+
+active -> removing -> deleting -> deleted
+                         |
+                         +-> deletionPending
+
+unprovable state -> orphaned
+```
+
+Each operation carries an idempotent random nonce. Filesystem mutation and
+journal commits are never treated as one transaction. Recovery checks stored
+identity and authenticated app-ownership evidence. A matching name alone never
+proves ownership.
+
+An `activating` claim found after a crash becomes `activationUnknown`, retains
+its exact broker authority, and is restored without guessing whether native add
+committed. After the first engine snapshot, matching torrents are paused before
+normal network settings are applied. User resume commands exclude them. If the
+pause cannot be confirmed, the app terminates the engine connection and leaves
+the claim unresolved.
+
+If bookmark or root identity restoration fails, an active, activating, or
+unknown claim becomes orphaned and remains preserved. Ambiguous deletion becomes
+`deletionPending`; it is not retried as if ownership were certain.
+
+## Exact-file broker
+
+The GUI creates an anonymous `XPCListener` before constructing or restoring the
+engine. The command handshake carries its typed endpoint and a random session
+nonce. The broker is bound to one engine epoch and accepts only the expected
+helper identity; the helper applies the reciprocal application identity
+requirement.
+
+The broker protocol contains only:
+
+```text
+handshake(engineEpoch, sessionNonce, requestID, deadline)
+openPayload(claimID, generation, fileIndex, access)
+statBatch(claimID, generation, fileIndices)
+```
+
+Requests and replies are bounded and deadline-limited. Work runs off the main
+queue. Request IDs correlate replies but do not grant authority. Claim creation,
+paths, directory descriptors, rename, move, and deletion are deliberately absent.
+
+For every open, the broker validates the current claim and generation, recomputes
+the immutable mapping digest, checks lease policy, traverses each stored
+component from the verified parent descriptor, and compares the opened object
+with its pinned identity. It rejects links, non-regular files, unexpected hard
+links, size violations, stale mappings, and access beyond policy. A successful
+reply carries exactly one descriptor plus bounded `fstat` metadata.
+
+## Engine broker client and native provider
+
+The helper connects to and handshakes with the broker before constructing
+`TorrentEngine`. Its dedicated client has bounded concurrency, five-second
+requests, cancellation that wakes blocked workers, strict reply correlation,
+and `fstat` validation of every returned descriptor. The synchronous C callback
+surface is used only by libtorrent disk workers; no libtorrent network-thread
+lock is held while waiting.
+
+The C ABI stores a retained provider context with explicit retain and release
+callbacks. It passes only the 16-byte claim identifier, generation, file index,
+and read/write intent. Callback errors remain failures; they never become path
+lookups.
+
+The downstream libtorrent patch threads the provider through
+`add_torrent_params`, `storage_params`, `pread_storage`, file handling, stat
+caches, resume checking, recheck, hashing, and file-priority paths. Provider
+mode is accepted only by the patched pread backend.
+
+In provider mode:
+
+- payload opens and size checks use only the provider;
+- padding files never request a descriptor;
+- a synthetic private save location is used only for engine-private part data;
+- skipped-file bytes live under `EngineState/PartFiles/<claimID>`;
+- rename and move are rejected;
+- remove may delete the private part file but never user payloads; and
+- provider failure has no pathname fallback.
+
+## Activation and import
+
+A known torrent follows this order:
+
+```text
+original bytes
+-> independent Swift parse
+-> destination planning and exclusive reservation
+-> durable reserved claim
+-> activating claim
+-> engine add with pathless activation
+-> independent native digest validation
+-> active claim
+```
+
+No claim or journal lock is held across engine add because libtorrent may ask
+the broker for a descriptor immediately. The activation object contains only
+claim ID, generation, source digest, and an optional preserved torrent identity
+used during magnet promotion.
+
+File access is enabled in the broker before priority increases are sent to the
+engine. Restrictions are committed after native handle-release operations.
+Provenance is independent of access: an app-created file can be automatically
+deleted; an imported file cannot.
+
+## Magnet promotion
+
+Metadata-less magnets initially use only helper-private staging. Promotion is a
+durable GUI transaction:
+
+```text
+exact info bytes
+-> advertised-hash verification
+-> Swift manifest parse
+-> destination confirmation and claim creation
+-> internal remove and broker-backed re-add
+```
+
+The re-add preserves the public torrent ID, queue position, pause state,
+priorities, options, source policy, and validated metadata. The journal records
+awaiting-metadata, metadata-ready, promoting, and outcome-unknown states so a
+crash does not silently refetch or guess the result.
+
+## Removal and revocation
+
+The engine removes the torrent from libtorrent and releases file-pool handles
+without deleting payloads. The GUI then verifies claim generation, filesystem
+identity, provenance, and app ownership before deleting any manifest object.
+Imported and unknown files are always preserved.
+
+Hard revocation invalidates command and broker sessions and invalidates the
+helper process. A new engine epoch is not created until the old process is no
+longer authoritative. If immediate termination is uncertain, deletion remains
+pending for clean-launch recovery. A cooperative helper acknowledgement is
+useful operational evidence, not security proof.
+
+## Persistence cutover
+
+Broker-backed resume records contain the pathless storage activation and an
+explicit broker validation marker. Records without that authority are preserved
+on disk but skipped during restore. Payload data is untouched. There is no
+automatic path migration and no old filesystem-authority API in Swift, IPC, the
+C ABI, or native restore logic.
+
+Resume state and removal tombstones remain in the helper's private container.
+The claim journal and security-scoped bookmarks remain in the GUI container.
+
+## Network authority
+
+The helper starts with networking blocked. It unblocks only after its own
+interface monitor validates the selected interface fingerprint and, where
+required, VPN service identity. The networkless GUI receives a bounded picker
+snapshot without raw local addresses.
+
+Disconnects, constrained-interface changes, monitoring failures, failed
+replacement, and revocation return to blocked state. Separate containment and
+cleanup watchdogs cover startup, restart, shutdown, disconnect, and scope
+cleanup so an unresponsive native engine cannot leave network authority active.
+
+## Native and dependency hardening
+
+The C++23 bridge uses RAII, `std::span`, `std::expected`, strict warnings, and no
+exception crossing the Swift boundary. The C ABI documents lifetime-scoped
+borrows and validates every count, pointer, enum, identifier, activation, and
+callback table. Stored callbacks and long-lived opaque contexts use diversified
+pointer authentication in arm64e production builds.
+
+Libtorrent and BoringSSL are pinned, patched, verified, and linked statically.
+The app bundle contains only the GUI and helper Mach-O executables. TLS uses the
+buffer-only BoringSSL client path with macOS system trust and hostname binding.
+The release profiles enable hardened runtime, library validation, checked
+allocations, hardened heap, dyld read-only data, platform restrictions, stack
+protection, fortify, hidden visibility, PAC, BTI, and trap-only sanitizer checks.
+
+## Non-negotiable invariants
+
+1. The helper receives no bookmark, payload path, or parent directory descriptor.
+2. A broker request never contains a path.
+3. Only the GUI creates claims, physical mappings, destinations, or payload files.
+4. A successful broker open grants one exact regular-file descriptor.
+5. Libtorrent has no path fallback while a provider is installed.
+6. Padding files never receive descriptors.
+7. Only the GUI can delete user payloads.
+8. Imported files are never automatically deleted.
+9. Ambiguous activation, ownership, or deletion is preserved and paused.
+10. The helper starts blocked and cannot grant itself network authority.
+
+## Verification
+
+The routine gates are:
+
+```sh
+Scripts/analyze-bridge.zsh
+Scripts/test-bridge.zsh
+Scripts/test-swift.zsh
+```
+
+The bridge analysis gate applies and validates the ordered libtorrent patch
+series. Bridge and Swift tests cover provider routing, no-fallback behavior,
+resume cutover, parser bounds, destination races, broker authentication and FD
+validation, claim recovery, ambiguous activation containment, imports, removal,
+and magnet promotion. Separate fuzz harnesses cover native API and parser input
+surfaces; their expensive build and execution are intentionally independent of
+the routine test gates.

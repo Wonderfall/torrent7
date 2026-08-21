@@ -323,45 +323,6 @@ struct TorrentEngineClientResponseValidatorTests {
         }
     }
 
-    @Test("Snapshot paths must still be authorized by the client")
-    func rejectsUnauthorizedSnapshotPath() {
-        let torrent = makeTorrent(savePath: "/tmp/untrusted")
-
-        #expect(throws: TorrentEngineClientError.self) {
-            try TorrentEngineClientResponseValidator.validateDataset(
-                [torrent],
-                kind: .torrentSnapshots,
-                authorizedSavePaths: ["/tmp/authorized"]
-            )
-        }
-    }
-
-    @Test("Directory slash normalization preserves exact snapshot authorization")
-    func acceptsEquivalentDirectorySlash() throws {
-        let torrent = makeTorrent(savePath: "/private/tmp/authorized")
-
-        try TorrentEngineClientResponseValidator.validateDataset(
-            [torrent],
-            kind: .torrentSnapshots,
-            authorizedSavePaths: ["/private/tmp/authorized/"]
-        )
-    }
-
-    @Test("Torrent display names cannot escape the authorized root")
-    func rejectsPathBearingTorrentName() {
-        for name in ["../outside", "nested/item", ".", ".."] {
-            let torrent = makeTorrent(savePath: "/private/tmp/authorized", name: name)
-
-            #expect(throws: TorrentEngineClientError.self) {
-                try TorrentEngineClientResponseValidator.validateDataset(
-                    [torrent],
-                    kind: .torrentSnapshots,
-                    authorizedSavePaths: ["/private/tmp/authorized"]
-                )
-            }
-        }
-    }
-
     private func roundTrip<Value: Codable & Sendable>(_ value: Value) throws -> Value {
         let data = try TorrentEngineIPCJSONCodec.encode(
             value,
@@ -443,44 +404,4 @@ struct TorrentEngineClientResponseValidatorTests {
         )
     }
 
-    private func makeTorrent(savePath: String, name: String = "Torrent") -> TorrentItem {
-        TorrentItem(
-            id: "t:\(String(repeating: "a", count: 32))",
-            infoHash: "v1:\(String(repeating: "b", count: 40))",
-            name: name,
-            savePath: savePath,
-            error: "",
-            comment: "",
-            progress: 0,
-            totalDone: 0,
-            totalWanted: 100,
-            totalSize: 100,
-            totalUpload: 0,
-            totalDownload: 0,
-            totalPayloadUpload: 0,
-            totalPayloadDownload: 0,
-            allTimeUpload: 0,
-            allTimeDownload: 0,
-            addedTime: 0,
-            createdTime: 0,
-            completedTime: 0,
-            downloadRate: 0,
-            uploadRate: 0,
-            downloadPayloadRate: 0,
-            uploadPayloadRate: 0,
-            peers: 0,
-            knownPeers: 0,
-            seeds: 0,
-            state: .unknown,
-            queuePosition: -1,
-            queuePriority: .normal,
-            paused: false,
-            autoManaged: false,
-            seeding: false,
-            finished: false,
-            contentKind: .singleFile,
-            hasMetadata: true,
-            privateTorrent: false
-        )
-    }
 }

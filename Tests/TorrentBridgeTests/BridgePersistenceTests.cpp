@@ -149,26 +149,18 @@ TEST_CASE("removal tombstone filenames have the expected strict shape")
     CHECK_FALSE(is_removal_tombstone_path(fs::path("resume.fastresume.remove")));
 }
 
-TEST_CASE("tombstone payloads round-trip all metadata")
+TEST_CASE("resume cleanup tombstones round-trip their identifiers")
 {
     std::vector<std::string> const ids{
         bridge_tests::canonical_id('b'),
         bridge_tests::v1_id('3'),
         bridge_tests::v2_id('4')
     };
-    std::string const payload = tombstone_payload(
-        ids,
-        RemovalTombstoneState::awaiting_payload_delete,
-        true,
-        false
-    );
+    std::string const payload = tombstone_payload(ids);
 
     TombstonePayloadResult const parsed = tombstone_payload_from_bytes(bridge_tests::byte_vector(payload));
     REQUIRE(parsed.has_value());
     CHECK(parsed->ids == ids);
-    CHECK(parsed->state == RemovalTombstoneState::awaiting_payload_delete);
-    CHECK(parsed->delete_files);
-    CHECK_FALSE(parsed->delete_partfile);
 }
 
 TEST_CASE("tombstone payload parsing rejects malformed data")
@@ -179,21 +171,27 @@ TEST_CASE("tombstone payload parsing rejects malformed data")
     REQUIRE_FALSE(wrong_version);
     CHECK(wrong_version.error() == "Removal tombstone version is invalid.");
 
-    TombstonePayloadResult const missing_metadata = tombstone_payload_from_bytes(bridge_tests::byte_vector("version=2\nid=" + id + "\n"));
+    TombstonePayloadResult const missing_metadata = tombstone_payload_from_bytes(bridge_tests::byte_vector("version=3\nid=" + id + "\n"));
     REQUIRE_FALSE(missing_metadata);
     CHECK(missing_metadata.error() == "Removal tombstone metadata is incomplete.");
 
     TombstonePayloadResult const invalid_id = tombstone_payload_from_bytes(bridge_tests::byte_vector(
-        "version=2\nstate=resume_cleanup\ndelete_files=0\ndelete_partfile=0\nid=not-a-resume-id\n"
+        "version=3\nkind=resume_cleanup\nid=not-a-resume-id\n"
     ));
     REQUIRE_FALSE(invalid_id);
     CHECK(invalid_id.error() == "Removal tombstone contains an invalid identifier.");
 
     TombstonePayloadResult const empty_field = tombstone_payload_from_bytes(bridge_tests::byte_vector(
-        "version=2\nstate=resume_cleanup\n\ndelete_files=0\ndelete_partfile=0\nid=" + id + "\n"
+        "version=3\nkind=resume_cleanup\n\nid=" + id + "\n"
     ));
     REQUIRE_FALSE(empty_field);
     CHECK(empty_field.error() == "Removal tombstone contains an empty field.");
+
+    TombstonePayloadResult const legacy_deletion_marker = tombstone_payload_from_bytes(bridge_tests::byte_vector(
+        "version=2\nstate=awaiting_payload_delete\ndelete_files=1\ndelete_partfile=1\nid=" + id + "\n"
+    ));
+    REQUIRE_FALSE(legacy_deletion_marker);
+    CHECK(legacy_deletion_marker.error() == "Removal tombstone version is invalid.");
 }
 
 TEST_CASE("joined_error_messages preserves the first failures and truncates long batches")

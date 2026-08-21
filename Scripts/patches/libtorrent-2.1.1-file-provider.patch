@@ -1,0 +1,1019 @@
+diff --git a/include/libtorrent/add_torrent_params.hpp b/include/libtorrent/add_torrent_params.hpp
+index f72017a38539b26e14b0ebcc81e0f4d0eb6dbfdb..7537299e9dd230e928060c56ebb5cbd6a693e7b8 100644
+--- a/include/libtorrent/add_torrent_params.hpp
++++ b/include/libtorrent/add_torrent_params.hpp
+@@ -156,6 +156,11 @@ TORRENT_VERSION_NAMESPACE_3
+ 		// relative path.
+ 		std::string save_path;
+ 
++		// Optional pathless provider for payload files. When present, the pread
++		// storage backend opens and stats payloads exclusively through this
++		// provider. save_path remains the private location for the part file.
++		std::shared_ptr<aux::payload_file_provider> file_provider;
++
+ 		// This is an optional field. If set, the part-file for this torrent
+ 		// will be stored in the specified subdirectory, still inside its
+ 		// download directory. i.e. ``part_file_dir`` is a relative directory.
+diff --git a/include/libtorrent/aux_/file.hpp b/include/libtorrent/aux_/file.hpp
+index 467b5e8eb4c2bd722b55433a3119d90b118152dd..5fb2b3374799ecdd6c9139626fe6c521bc607ffd 100644
+--- a/include/libtorrent/aux_/file.hpp
++++ b/include/libtorrent/aux_/file.hpp
+@@ -83,6 +83,8 @@ namespace libtorrent::aux {
+ 		file_handle(string_view name, std::int64_t size, open_mode_t mode);
+ 		file_handle(string_view root, string_view relative, std::int64_t size
+ 			, open_mode_t mode);
++		// Adopts an already-open descriptor. Ownership transfers immediately.
++		file_handle(handle_type descriptor, std::int64_t size, open_mode_t mode);
+ 		file_handle(file_handle const& rhs) = delete;
+ 		file_handle& operator=(file_handle const& rhs) = delete;
+ 
+@@ -97,6 +99,7 @@ namespace libtorrent::aux {
+ 
+ 		handle_type fd() const { return m_fd; }
+ 	private:
++		void configure(std::int64_t size, open_mode_t mode);
+ 		void close();
+ 		handle_type m_fd;
+ #ifdef TORRENT_WINDOWS
+diff --git a/include/libtorrent/aux_/file_pool.hpp b/include/libtorrent/aux_/file_pool.hpp
+index 48e7ce38d746f757cb0e4c383c38b0dc153fb15c..27e29285e8d3cf78f819b0d9fd154af7e3711584 100644
+--- a/include/libtorrent/aux_/file_pool.hpp
++++ b/include/libtorrent/aux_/file_pool.hpp
+@@ -38,6 +38,13 @@ namespace libtorrent::aux {
+ 			, mode(m)
+ 		{}
+ 
++		file_pool_entry(file_id k, file_handle handle, open_mode_t const m
++			, std::int64_t const)
++			: key(k)
++			, mapping(std::make_shared<file_handle>(std::move(handle)))
++			, mode(m)
++		{}
++
+ 		file_id key;
+ 		std::shared_ptr<file_handle> mapping;
+ 		time_point last_use{aux::time_now()};
+diff --git a/include/libtorrent/aux_/file_pool_impl.hpp b/include/libtorrent/aux_/file_pool_impl.hpp
+index b5cb31534bbc67448478e186b9c3ede2da923c2c..cfb3965d2b384691f082ba8018b14a8d66c078fd 100644
+--- a/include/libtorrent/aux_/file_pool_impl.hpp
++++ b/include/libtorrent/aux_/file_pool_impl.hpp
+@@ -81,6 +81,7 @@ namespace libtorrent::aux {
+ #if TORRENT_HAVE_MAP_VIEW_OF_FILE
+ 			, typename FileEntry::mutex_type open_unmap_lock
+ #endif
++			, std::shared_ptr<payload_file_provider> const& provider = {}
+ 			);
+ 
+ 		// release all file views belonging to the specified storage_interface
+@@ -160,6 +161,7 @@ namespace libtorrent::aux {
+ #if TORRENT_HAVE_MAP_VIEW_OF_FILE
+ 			, typename FileEntry::mutex_type open_unmap_lock
+ #endif
++			, std::shared_ptr<payload_file_provider> const& provider
+ 			);
+ 
+ 		// In order to avoid multiple threads opening the same file in parallel,
+diff --git a/include/libtorrent/aux_/file_view_pool.hpp b/include/libtorrent/aux_/file_view_pool.hpp
+index 87c712a80e21c2c9060c68aa0689d3e6e954448b..d051d3daa380efff2076a00a9cebc1ec89f58295 100644
+--- a/include/libtorrent/aux_/file_view_pool.hpp
++++ b/include/libtorrent/aux_/file_view_pool.hpp
+@@ -44,6 +44,21 @@ namespace libtorrent::aux {
+ 			, mode(m)
+ 		{}
+ 
++		file_view_entry(file_id k, file_handle handle, open_mode_t const m
++			, std::int64_t const size
++#if TORRENT_HAVE_MAP_VIEW_OF_FILE
++			, mutex_type open_unmap_lock
++#endif
++			)
++			: key(k)
++			, mapping(std::make_shared<file_mapping>(std::move(handle), m, size
++#if TORRENT_HAVE_MAP_VIEW_OF_FILE
++				, std::move(open_unmap_lock)
++#endif
++				))
++			, mode(m)
++		{}
++
+ 		file_id key;
+ 		std::shared_ptr<file_mapping> mapping;
+ 		time_point last_use{aux::time_now()};
+diff --git a/include/libtorrent/aux_/payload_file_provider.hpp b/include/libtorrent/aux_/payload_file_provider.hpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..f6de52c20b6375b6afb290b4164b1dd82c9188e9
+--- /dev/null
++++ b/include/libtorrent/aux_/payload_file_provider.hpp
+@@ -0,0 +1,34 @@
++/*
++
++Copyright (c) 2026, Torrent7 contributors
++All rights reserved.
++
++You may use, distribute and modify this code under the terms of the BSD license,
++see LICENSE file.
++*/
++
++#ifndef TORRENT_PAYLOAD_FILE_PROVIDER_HPP
++#define TORRENT_PAYLOAD_FILE_PROVIDER_HPP
++
++#include <cstdint>
++
++#include "libtorrent/config.hpp"
++#include "libtorrent/error_code.hpp"
++#include "libtorrent/units.hpp"
++
++namespace libtorrent::aux {
++
++	// Supplies pathless payload-file access to pread_storage. A successful
++	// open_payload() transfers ownership of the returned descriptor to
++	// libtorrent. Implementations must return -1 and set ec on failure.
++	struct TORRENT_EXTRA_EXPORT payload_file_provider
++	{
++		virtual ~payload_file_provider() = default;
++
++		virtual int open_payload(file_index_t file, bool write, error_code& ec) = 0;
++		virtual std::int64_t payload_size(file_index_t file, error_code& ec) = 0;
++	};
++
++}
++
++#endif // TORRENT_PAYLOAD_FILE_PROVIDER_HPP
+diff --git a/include/libtorrent/aux_/pread_storage.hpp b/include/libtorrent/aux_/pread_storage.hpp
+index 3136db878cb6b74ff6f3bf6f80469a4cfc6ae5c2..49085c24cfd0fdc9f75937470d2f989859f9ddad 100644
+--- a/include/libtorrent/aux_/pread_storage.hpp
++++ b/include/libtorrent/aux_/pread_storage.hpp
+@@ -172,6 +172,7 @@ namespace libtorrent::aux {
+ 		std::string m_save_path;
+ 		std::string m_part_file_dir;
+ 		std::string m_part_file_name;
++		std::shared_ptr<payload_file_provider> m_file_provider;
+ 
+ 		// this this is an array indexed by file-index. Each slot represents
+ 		// whether this file has the part-file enabled for it. This is used for
+diff --git a/include/libtorrent/aux_/stat_cache.hpp b/include/libtorrent/aux_/stat_cache.hpp
+index 7f25b264e689d37d743e42e9ed1ba935edbf6cc7..dc7622a01c7fc75306cd2f1234a7fe685772ca7e 100644
+--- a/include/libtorrent/aux_/stat_cache.hpp
++++ b/include/libtorrent/aux_/stat_cache.hpp
+@@ -15,6 +15,7 @@ see LICENSE file.
+ #include <string>
+ #include <cstdint>
+ #include <mutex>
++#include <memory>
+ 
+ #include "libtorrent/config.hpp"
+ #include "libtorrent/error_code.hpp"
+@@ -34,7 +35,8 @@ namespace libtorrent::aux {
+ 		// returns the size of the file unless an error occurs, in which case ec
+ 		// is set to indicate the error.
+ 		std::int64_t get_filesize(file_index_t i, filenames const& fn
+-			, std::string const& save_path, error_code& ec);
++			, std::string const& save_path, error_code& ec
++			, std::shared_ptr<payload_file_provider> const& provider = {});
+ 
+ 		void set_dirty(file_index_t i);
+ 
+diff --git a/include/libtorrent/aux_/storage_utils.hpp b/include/libtorrent/aux_/storage_utils.hpp
+index e081bec79bbf984e3b7759d331a2b20710ca23ce..35546e02082891adfadcba01563a3ba2cf80f0ba 100644
+--- a/include/libtorrent/aux_/storage_utils.hpp
++++ b/include/libtorrent/aux_/storage_utils.hpp
+@@ -14,6 +14,7 @@ see LICENSE file.
+ #include <cstdint>
+ #include <string>
+ #include <functional>
++#include <memory>
+ 
+ #include "libtorrent/config.hpp"
+ #include "libtorrent/fwd.hpp"
+@@ -50,7 +51,8 @@ namespace libtorrent::aux {
+ 		, aux::vector<download_priority_t, file_index_t> const& file_priority
+ 		, stat_cache& stat
+ 		, std::string const& save_path
+-		, storage_error& ec);
++		, storage_error& ec
++		, std::shared_ptr<payload_file_provider> const& provider = {});
+ 
+ 	// given the save_path, stat all files on file_storage until one exists. If a
+ 	// file exists, return true, otherwise return false.
+@@ -58,7 +60,8 @@ namespace libtorrent::aux {
+ 		filenames const& fs
+ 		, std::string const& save_path
+ 		, stat_cache& cache
+-		, storage_error& ec);
++		, storage_error& ec
++		, std::shared_ptr<payload_file_provider> const& provider = {});
+ 
+ 	TORRENT_EXTRA_EXPORT int read_zeroes(span<char> bufs);
+ 
+@@ -72,7 +75,8 @@ namespace libtorrent::aux {
+ 		, std::function<void(file_index_t, storage_error&)> create_file
+ 		, std::function<void(std::string const&, std::string const&, storage_error&)> create_link
+ 		, std::function<void(file_index_t, std::int64_t)> oversized_file
+-		, storage_error& ec);
++		, storage_error& ec
++		, std::shared_ptr<payload_file_provider> const& provider = {});
+ 
+ 	TORRENT_EXTRA_EXPORT void create_symlink(
+ 		std::string const& target
+diff --git a/include/libtorrent/fwd.hpp b/include/libtorrent/fwd.hpp
+index 5c35cb01abddaca2dd8ca0f262eb4cefa9d28552..480a240579dba9c387a5712d1b4177631de4bcb6 100644
+--- a/include/libtorrent/fwd.hpp
++++ b/include/libtorrent/fwd.hpp
+@@ -16,6 +16,10 @@ see LICENSE file.
+ 
+ namespace libtorrent {
+ 
++namespace aux {
++struct payload_file_provider;
++}
++
+ // include/libtorrent/add_torrent_params.hpp
+ TORRENT_VERSION_NAMESPACE_3
+ struct add_torrent_params;
+diff --git a/include/libtorrent/storage_defs.hpp b/include/libtorrent/storage_defs.hpp
+index 6678860654df230eb9e509a209f450686329c5ee..634d127594ef5f7e5fc826b1ac9de885e84ff321 100644
+--- a/include/libtorrent/storage_defs.hpp
++++ b/include/libtorrent/storage_defs.hpp
+@@ -20,7 +20,9 @@ see LICENSE file.
+ #include "libtorrent/download_priority.hpp"
+ #include "libtorrent/string_view.hpp"
+ #include <functional>
++#include <memory>
+ #include <string>
++#include <utility>
+ 
+ namespace libtorrent {
+ 
+@@ -90,7 +92,8 @@ namespace libtorrent {
+ 		storage_params(file_storage const& f, lt::renamed_files const& mf
+ 			, string_view sp, string_view pfd, storage_mode_t const sm
+ 			, aux::vector<download_priority_t, file_index_t> const& prio
+-			, sha1_hash const& ih, bool v1_torrent, bool v2_torrent)
++			, sha1_hash const& ih, bool v1_torrent, bool v2_torrent
++			, std::shared_ptr<aux::payload_file_provider> provider = {})
+ 			: files(f)
+ 			, renamed_files(mf)
+ 			, path(sp)
+@@ -100,6 +103,7 @@ namespace libtorrent {
+ 			, info_hash(ih)
+ 			, v1(v1_torrent)
+ 			, v2(v2_torrent)
++			, file_provider(std::move(provider))
+ 		{}
+ 		// the file layout (sizes, paths, flags) of the torrent
+ 		file_storage const& files;
+@@ -132,6 +136,9 @@ namespace libtorrent {
+ 		// hybrid torrent has both flags set.
+ 		bool v1;
+ 		bool v2;
++
++		// Pathless payload authority. Only pread_storage supports this.
++		std::shared_ptr<aux::payload_file_provider> file_provider;
+ 	};
+ }
+ 
+diff --git a/src/file.cpp b/src/file.cpp
+index 7e18af0e768633f533063209ad68885fbd1b1a0b..eb9b44bee68fa92b6c8c2aa6f97af6e4ccd3d3c6 100644
+--- a/src/file.cpp
++++ b/src/file.cpp
+@@ -638,6 +638,21 @@ file_handle::file_handle(string_view const root, string_view const relative
+ 	: m_fd(root.empty()
+ 		? open_file(convert_to_native_path_string(std::string(relative)), mode)
+ 		: open_file(std::string(root), std::string(relative), mode))
++{
++	configure(size, mode);
++}
++
++file_handle::file_handle(handle_type const descriptor, std::int64_t const size
++	, open_mode_t const mode)
++	: m_fd(descriptor)
++{
++	if (m_fd == invalid_handle)
++		throw_ex<storage_error>(make_error_code(boost::system::errc::bad_file_descriptor)
++			, operation_t::file_open);
++	configure(size, mode);
++}
++
++void file_handle::configure(std::int64_t const size, open_mode_t const mode)
+ {
+ #ifdef DIRECTIO_ON
+ 	// for solaris
+diff --git a/src/file_pool_impl.cpp b/src/file_pool_impl.cpp
+index 9e99d69c20f66d048147c736b312fc96eed6f152..d434947b79f1ba2d14b46e554b808c6af4d9115f 100644
+--- a/src/file_pool_impl.cpp
++++ b/src/file_pool_impl.cpp
+@@ -18,6 +18,8 @@ see LICENSE file.
+ #include "libtorrent/disk_interface.hpp"
+ #include "libtorrent/aux_/path.hpp"
+ #include "libtorrent/aux_/throw.hpp"
++#include "libtorrent/aux_/file.hpp"
++#include "libtorrent/aux_/payload_file_provider.hpp"
+ #ifdef TORRENT_WINDOWS
+ #include "libtorrent/aux_/win_util.hpp"
+ #endif
+@@ -42,6 +44,7 @@ namespace libtorrent::aux {
+ #if TORRENT_HAVE_MAP_VIEW_OF_FILE
+ 		, typename FileEntry::mutex_type open_unmap_lock
+ #endif
++		, std::shared_ptr<payload_file_provider> const& provider
+ 		)
+ 	{
+ 		// potentially used to hold a reference to a file object that's
+@@ -146,6 +149,7 @@ namespace libtorrent::aux {
+ #if TORRENT_HAVE_MAP_VIEW_OF_FILE
+ 				, std::move(open_unmap_lock)
+ #endif
++				, provider
+ 				);
+ 
+ 			l.lock();
+@@ -247,13 +251,34 @@ namespace libtorrent::aux {
+ #if TORRENT_HAVE_MAP_VIEW_OF_FILE
+ 		, typename FileEntry::mutex_type open_unmap_lock
+ #endif
++		, std::shared_ptr<payload_file_provider> const& provider
+ 		)
+ 	{
+-		std::string const file_path = fn.file_path(file_index);
+ #if TORRENT_HAVE_MAP_VIEW_OF_FILE
+ 		typename FileEntry::lock_type lou(*open_unmap_lock);
+ 		TORRENT_UNUSED(lou);
+ #endif
++		if (provider)
++		{
++			error_code error;
++			int const descriptor = provider->open_payload(
++				file_index, bool(m & open_mode::write), error);
++			if (descriptor < 0 || error)
++			{
++				if (!error)
++					error = make_error_code(boost::system::errc::io_error);
++				throw_ex<storage_error>(error, file_index, operation_t::file_open);
++			}
++			file_handle handle(descriptor, fn.file_size(file_index), m);
++			return FileEntry(file_key, std::move(handle), m
++				, fn.file_size(file_index)
++#if TORRENT_HAVE_MAP_VIEW_OF_FILE
++				, open_unmap_lock
++#endif
++				);
++		}
++
++		std::string const file_path = fn.file_path(file_index);
+ 		try
+ 		{
+ 			return FileEntry(file_key, p, file_path, m, fn.file_size(file_index)
+diff --git a/src/mmap_storage.cpp b/src/mmap_storage.cpp
+index 837a6af5b06df92963960b728b9d0faecec6b580..93b4569a4454acd1cfe4bb597d121094202eddc2 100644
+--- a/src/mmap_storage.cpp
++++ b/src/mmap_storage.cpp
+@@ -42,6 +42,7 @@ see LICENSE file.
+ #include "libtorrent/aux_/readwrite.hpp"
+ #include "libtorrent/hex.hpp" // to_hex
+ #include "libtorrent/aux_/scope_end.hpp"
++#include "libtorrent/aux_/throw.hpp"
+ 
+ #if TORRENT_HAVE_MMAP || TORRENT_HAVE_MAP_VIEW_OF_FILE
+ 
+@@ -97,6 +98,9 @@ mmap_storage::mmap_storage(storage_params const& params, aux::file_view_pool& po
+ 	, m_v1(params.v1)
+ 	, m_v2(params.v2)
+ {
++	if (params.file_provider)
++		throw_ex<storage_error>(make_error_code(boost::system::errc::operation_not_supported)
++			, operation_t::file_open);
+ 	TORRENT_ASSERT(files().num_files() > 0);
+ 	TORRENT_ASSERT(m_v1 || m_v2);
+ 
+diff --git a/src/posix_storage.cpp b/src/posix_storage.cpp
+index da633486ce7480b93d9c2161e3eb81b8233218a3..bcdf7da009e894da346de9c6ff25fd7095ad5f1d 100644
+--- a/src/posix_storage.cpp
++++ b/src/posix_storage.cpp
+@@ -19,6 +19,7 @@ see LICENSE file.
+ #include "libtorrent/torrent_status.hpp"
+ #include "libtorrent/aux_/storage_utils.hpp" // for read_zeroes, move_storage
+ #include "libtorrent/aux_/readwrite.hpp"
++#include "libtorrent/aux_/throw.hpp"
+ 
+ #if defined TORRENT_SIMULATE_SLOW_READ || defined TORRENT_SIMULATE_SLOW_WRITE
+ #include <thread>
+@@ -46,7 +47,11 @@ namespace aux {
+ 		, m_part_file_dir(p.part_file_dir)
+ 		, m_file_priority(p.priorities)
+ 		, m_part_file_name("." + to_hex(p.info_hash) + ".parts")
+-	{}
++	{
++		if (p.file_provider)
++			throw_ex<storage_error>(make_error_code(boost::system::errc::operation_not_supported)
++				, operation_t::file_open);
++	}
+ 
+ 	filenames posix_storage::names() const
+ 	{
+diff --git a/src/pread_storage.cpp b/src/pread_storage.cpp
+index 6edd914f1193830c2df82198189467e3974feffa..1e44644868108a73e81b3c15fce3449627c34cc3 100644
+--- a/src/pread_storage.cpp
++++ b/src/pread_storage.cpp
+@@ -26,6 +26,7 @@ see LICENSE file.
+ #include "libtorrent/aux_/session_impl.hpp"
+ #include "libtorrent/aux_/file_pool.hpp"
+ #include "libtorrent/aux_/file.hpp" // for file_handle, pread_all, pwrite_all
++#include "libtorrent/aux_/payload_file_provider.hpp"
+ #include "libtorrent/disk_buffer_holder.hpp"
+ #include "libtorrent/aux_/stat_cache.hpp"
+ #include "libtorrent/aux_/readwrite.hpp"
+@@ -47,6 +48,7 @@ namespace libtorrent::aux {
+ 		, m_save_path(complete(params.path))
+ 		, m_part_file_dir(params.part_file_dir)
+ 		, m_part_file_name("." + to_hex(params.info_hash) + ".parts")
++		, m_file_provider(params.file_provider)
+ 		, m_pool(pool)
+ 		, m_allocate_files(params.mode == storage_mode_allocate)
+ 		, m_v1(params.v1)
+@@ -173,8 +175,18 @@ namespace libtorrent::aux {
+ 				// this is not implemented yet.
+ 				// so we just don't use a partfile for this file
+ 
+-				bool const file_exists = confined_exists(
+-					m_save_path, fs.file_path(i), ec.ec);
++				bool file_exists;
++				if (m_file_provider)
++				{
++					file_exists = m_file_provider->payload_size(i, ec.ec) >= 0;
++					if (!file_exists && !ec.ec)
++						ec.ec = make_error_code(boost::system::errc::io_error);
++				}
++				else
++				{
++					file_exists = confined_exists(
++						m_save_path, fs.file_path(i), ec.ec);
++				}
+ 				if (ec.ec)
+ 				{
+ 					ec.file(i);
+@@ -222,6 +234,17 @@ namespace libtorrent::aux {
+ 	status_t pread_storage::initialize(settings_interface const& sett, storage_error& ec)
+ 	{
+ 		m_stat_cache.reserve(files().num_files());
++		if (m_file_provider)
++		{
++			for (file_index_t const file : files().file_range())
++			{
++				if (!(files().file_flags(file) & file_storage::flag_symlink)) continue;
++				ec.ec = make_error_code(boost::system::errc::operation_not_supported);
++				ec.file(file);
++				ec.operation = operation_t::symlink;
++				return {};
++			}
++		}
+ 
+ #ifdef TORRENT_WINDOWS
+ 		// don't do full file allocations on network drives
+@@ -248,7 +271,8 @@ namespace libtorrent::aux {
+ 				continue;
+ 
+ 			error_code err;
+-			auto const size = m_stat_cache.get_filesize(i, fs, m_save_path, err);
++			auto const size = m_stat_cache.get_filesize(
++				i, fs, m_save_path, err, m_file_provider);
+ 			if (!err && size > 0)
+ 			{
+ 				use_partfile(i, false);
+@@ -284,7 +308,8 @@ namespace libtorrent::aux {
+ 				if (e.ec) e.operation = operation_t::symlink;
+ 			}
+ 			, [&ret](file_index_t, std::int64_t) { ret = ret | disk_status::oversized_file; }
+-			, ec);
++			, ec
++			, m_file_provider);
+ 
+ 		// close files that were opened in write mode
+ 		m_pool.release(storage_index());
+@@ -295,7 +320,7 @@ namespace libtorrent::aux {
+ 	{
+ 		m_stat_cache.reserve(files().num_files());
+ 
+-		if (aux::has_any_file(names(), m_save_path, m_stat_cache, ec))
++		if (aux::has_any_file(names(), m_save_path, m_stat_cache, ec, m_file_provider))
+ 			return true;
+ 
+ 		if (ec) return false;
+@@ -321,6 +346,13 @@ namespace libtorrent::aux {
+ 		, storage_error& ec)
+ 	{
+ 		if (index < file_index_t(0) || index >= files().end_file()) return;
++		if (m_file_provider)
++		{
++			ec.ec = make_error_code(boost::system::errc::operation_not_supported);
++			ec.file(index);
++			ec.operation = operation_t::file_rename;
++			return;
++		}
+ 		if (m_renamed_files.file_absolute_path(files(), index)
+ 			|| is_complete(new_filename))
+ 		{
+@@ -429,10 +461,17 @@ namespace libtorrent::aux {
+ 			m_part_file_dir.empty() ? m_save_path : combine_path(m_save_path, m_part_file_dir)
+ 			, m_part_file_name);
+ 
++		remove_flags_t safe_options = options;
++		if (m_file_provider)
++		{
++			safe_options = ((options & session::delete_files)
++				|| (options & session::delete_partfile))
++				? session::delete_partfile : remove_flags_t{};
++		}
+ 		aux::delete_files(names()
+ 			, m_save_path
+ 			, part_file
+-			, options
++			, safe_options
+ 			, ec);
+ 	}
+ 
+@@ -441,13 +480,19 @@ namespace libtorrent::aux {
+ 		, storage_error& ec)
+ 	{
+ 		return aux::verify_resume_data(rd, links, names()
+-			, m_file_priority, m_stat_cache, m_save_path, ec);
++			, m_file_priority, m_stat_cache, m_save_path, ec, m_file_provider);
+ 	}
+ 
+ 	std::pair<status_t, std::string> pread_storage::move_storage(std::string save_path
+ 		, move_flags_t const flags, storage_error& ec)
+ 	{
+ 		m_pool.release(storage_index());
++		if (m_file_provider)
++		{
++			ec.ec = make_error_code(boost::system::errc::operation_not_supported);
++			ec.operation = operation_t::file_rename;
++			return {status_t{}, m_save_path};
++		}
+ 
+ 		status_t ret{};
+ 		auto move_partfile = [&](std::string const& new_save_path, error_code& e)
+@@ -858,6 +903,7 @@ namespace libtorrent::aux {
+ #if TORRENT_HAVE_MAP_VIEW_OF_FILE
+ 				, &dummy
+ #endif
++				, m_file_provider
+ 				);
+ 		}
+ 		catch (storage_error const& se)
+diff --git a/src/stat_cache.cpp b/src/stat_cache.cpp
+index 77a0fc241b243dc18f1ee0689868722639255ecc..79b836a2c183cc69a77b76e308934c098f6d968f 100644
+--- a/src/stat_cache.cpp
++++ b/src/stat_cache.cpp
+@@ -13,6 +13,7 @@ see LICENSE file.
+ #include "libtorrent/assert.hpp"
+ #include "libtorrent/error_code.hpp"
+ #include "libtorrent/aux_/path.hpp"
++#include "libtorrent/aux_/payload_file_provider.hpp"
+ 
+ namespace libtorrent::aux {
+ 
+@@ -55,7 +56,8 @@ namespace libtorrent::aux {
+ 	}
+ 
+ 	std::int64_t stat_cache::get_filesize(file_index_t const i, filenames const& fn
+-		, std::string const& save_path, error_code& ec)
++		, std::string const& save_path, error_code& ec
++		, std::shared_ptr<payload_file_provider> const& provider)
+ 	{
+ 		// always pretend symlinks don't exist, to trigger special logic for
+ 		// creating and possibly validating them. There's a risk we'll and up in a
+@@ -67,33 +69,44 @@ namespace libtorrent::aux {
+ 			return -1;
+ 		}
+ 
+-		std::lock_guard<std::mutex> l(m_mutex);
+ 		TORRENT_ASSERT(i < fn.end_file());
+-		if (i >= m_stat_cache.end_index()) m_stat_cache.resize(static_cast<int>(i) + 1
+-			, stat_cache_t{not_in_cache});
+-		std::int64_t sz = m_stat_cache[i].file_size;
+-		if (sz < not_in_cache)
+ 		{
+-			ec = m_errors[std::size_t(-sz + file_error)];
+-			return file_error;
++			std::lock_guard<std::mutex> l(m_mutex);
++			if (i >= m_stat_cache.end_index()) m_stat_cache.resize(static_cast<int>(i) + 1
++				, stat_cache_t{not_in_cache});
++			std::int64_t const cached = m_stat_cache[i].file_size;
++			if (cached < not_in_cache)
++			{
++				ec = m_errors[std::size_t(-cached + file_error)];
++				return file_error;
++			}
++			if (cached != not_in_cache) return cached;
+ 		}
+-		else if (sz == not_in_cache)
++
++		// Provider calls may cross a process boundary. Never wait for one while
++		// holding the stat-cache mutex.
++		std::int64_t size = -1;
++		if (provider)
++		{
++			size = provider->payload_size(i, ec);
++			if (size < 0 && !ec)
++				ec = make_error_code(boost::system::errc::io_error);
++		}
++		else
+ 		{
+-			// query the filesystem
+ 			file_status s;
+ 			confined_stat_file(save_path, fn.file_path(i), &s, ec);
+-			if (ec)
+-			{
+-				set_error_impl(i, ec);
+-				sz = file_error;
+-			}
+-			else
+-			{
+-				set_cache_impl(i, s.file_size);
+-				sz = s.file_size;
+-			}
++			if (!ec) size = s.file_size;
++		}
++
++		std::lock_guard<std::mutex> l(m_mutex);
++		if (ec)
++		{
++			set_error_impl(i, ec);
++			return file_error;
+ 		}
+-		return sz;
++		set_cache_impl(i, size);
++		return size;
+ 	}
+ 
+ 	void stat_cache::reserve(int num_files)
+diff --git a/src/storage_utils.cpp b/src/storage_utils.cpp
+index 2ba9d7765a1f96a1bbeeea8baa03c50bad680fbb..28ffe1779390209bdd24ad13b8ef994f43b9e902 100644
+--- a/src/storage_utils.cpp
++++ b/src/storage_utils.cpp
+@@ -18,6 +18,7 @@ see LICENSE file.
+ #include "libtorrent/aux_/path.hpp"
+ #include "libtorrent/session.hpp" // for session::delete_files
+ #include "libtorrent/aux_/stat_cache.hpp"
++#include "libtorrent/aux_/payload_file_provider.hpp"
+ #include "libtorrent/add_torrent_params.hpp"
+ #include "libtorrent/torrent_status.hpp"
+ #include "libtorrent/error_code.hpp"
+@@ -304,10 +305,11 @@ namespace libtorrent { namespace aux {
+ namespace {
+ 
+ std::int64_t get_filesize(stat_cache& stat, file_index_t const file_index
+-	, filenames const& fs, std::string const& save_path, storage_error& ec)
++	, filenames const& fs, std::string const& save_path, storage_error& ec
++	, std::shared_ptr<payload_file_provider> const& provider)
+ {
+ 	error_code error;
+-	std::int64_t const size = stat.get_filesize(file_index, fs, save_path, error);
++	std::int64_t const size = stat.get_filesize(file_index, fs, save_path, error, provider);
+ 
+ 	if (size >= 0) return size;
+ 	if (error != boost::system::errc::no_such_file_or_directory)
+@@ -333,8 +335,15 @@ std::int64_t get_filesize(stat_cache& stat, file_index_t const file_index
+ 		, aux::vector<download_priority_t, file_index_t> const& file_priority
+ 		, stat_cache& stat
+ 		, std::string const& save_path
+-		, storage_error& ec)
++		, storage_error& ec
++		, std::shared_ptr<payload_file_provider> const& provider)
+ 	{
++		if (provider && !links.empty())
++		{
++			ec.ec = make_error_code(boost::system::errc::operation_not_supported);
++			ec.operation = operation_t::file_hard_link;
++			return false;
++		}
+ #ifdef TORRENT_DISABLE_MUTABLE_TORRENTS
+ 		TORRENT_UNUSED(links);
+ #else
+@@ -413,7 +422,7 @@ std::int64_t get_filesize(stat_cache& stat, file_index_t const file_index
+ 					continue;
+ 
+ 				std::int64_t const size = get_filesize(stat, file_index, fs
+-					, save_path, ec);
++					, save_path, ec, provider);
+ 				if (size < 0) return false;
+ 
+ 				if (size < fs.file_size(file_index))
+@@ -465,7 +474,7 @@ std::int64_t get_filesize(stat_cache& stat, file_index_t const file_index
+ 
+ 			if (!has_completed_resume_piece) continue;
+ 
+-			if (get_filesize(stat, file_index, fs, save_path, ec) < 0) return false;
++			if (get_filesize(stat, file_index, fs, save_path, ec, provider) < 0) return false;
+ 		}
+ 		return true;
+ 	}
+@@ -474,12 +483,14 @@ std::int64_t get_filesize(stat_cache& stat, file_index_t const file_index
+ 		filenames const& fs
+ 		, std::string const& save_path
+ 		, stat_cache& cache
+-		, storage_error& ec)
++		, storage_error& ec
++		, std::shared_ptr<payload_file_provider> const& provider)
+ 	{
+ 		for (auto const i : fs.file_range())
+ 		{
++			if (fs.pad_file_at(i)) continue;
+ 			std::int64_t const sz = cache.get_filesize(
+-				i, fs, save_path, ec.ec);
++				i, fs, save_path, ec.ec, provider);
+ 
+ 			if (sz < 0)
+ 			{
+@@ -521,7 +532,8 @@ std::int64_t get_filesize(stat_cache& stat, file_index_t const file_index
+ 		, std::function<void(file_index_t, storage_error&)> create_file
+ 		, std::function<void(std::string const&, std::string const&, storage_error&)> create_link
+ 		, std::function<void(file_index_t, std::int64_t)> oversized_file
+-		, storage_error& ec)
++		, storage_error& ec
++		, std::shared_ptr<payload_file_provider> const& provider)
+ 	{
+ 		// create zero-sized files
+ 		for (auto const file_index : fs.file_range())
+@@ -538,7 +550,7 @@ std::int64_t get_filesize(stat_cache& stat, file_index_t const file_index
+ 
+ 			// this is just to see if the file exists
+ 			error_code err;
+-			auto const sz = sc.get_filesize(file_index, fs, save_path, err);
++			auto const sz = sc.get_filesize(file_index, fs, save_path, err, provider);
+ 
+ 			if (err && err != boost::system::errc::no_such_file_or_directory)
+ 			{
+diff --git a/src/torrent.cpp b/src/torrent.cpp
+index 0e5909bfc35277a4dcab9f57f4d5ab9e415362ad..bde9188fbadba5f3703a7cdbd5dcbb4058f435b0 100644
+--- a/src/torrent.cpp
++++ b/src/torrent.cpp
+@@ -1913,7 +1913,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 			m_file_priority,
+ 			m_info_hash.get_best(),
+ 			m_torrent_file->v1() && !m_disable_v1_hashes,
+-			m_torrent_file->v2()
++			m_torrent_file->v2(),
++			m_add_torrent_params ? m_add_torrent_params->file_provider : nullptr
+ 		};
+ 
+ 		// the shared_from_this() will create an intentional
+diff --git a/test/test_storage.cpp b/test/test_storage.cpp
+index d976702b9a1dd6a6de4cd6bae6e251a117a5f69f..c699498a07142e45123b26ed520afc0d7fb13dc1 100644
+--- a/test/test_storage.cpp
++++ b/test/test_storage.cpp
+@@ -35,6 +35,7 @@ see LICENSE file.
+ #include "libtorrent/aux_/storage_utils.hpp"
+ #include "libtorrent/aux_/session_settings.hpp"
+ #include "libtorrent/aux_/stat_cache.hpp"
++#include "libtorrent/aux_/payload_file_provider.hpp"
+ #include "libtorrent/aux_/random.hpp"
+ #include "libtorrent/mmap_disk_io.hpp"
+ #include "libtorrent/posix_disk_io.hpp"
+@@ -48,6 +49,12 @@ see LICENSE file.
+ #include <fstream>
+ #include <iostream>
+ 
++#if defined __APPLE__ && defined __MACH__
++#include <fcntl.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#endif
++
+ using namespace std::placeholders;
+ using namespace lt;
+ 
+@@ -333,6 +340,216 @@ std::vector<char> new_piece(std::size_t const size)
+ }
+ 
+ #if defined __APPLE__ && defined __MACH__
++struct test_payload_file_provider final : aux::payload_file_provider
++{
++	explicit test_payload_file_provider(std::vector<std::string> files)
++		: paths(std::move(files))
++	{}
++
++	int open_payload(file_index_t const file, bool const write, error_code& ec) override
++	{
++		int const index = static_cast<int>(file);
++		if (index < 0 || index >= int(paths.size()) || paths[std::size_t(index)].empty())
++		{
++			ec = make_error_code(boost::system::errc::invalid_argument);
++			return -1;
++		}
++		++open_count;
++		opened_files.push_back(file);
++		int const descriptor = ::open(paths[std::size_t(index)].c_str()
++			, (write ? O_RDWR : O_RDONLY) | O_CLOEXEC | O_NOFOLLOW);
++		if (descriptor < 0) ec = error_code(errno, system_category());
++		return descriptor;
++	}
++
++	std::int64_t payload_size(file_index_t const file, error_code& ec) override
++	{
++		int const index = static_cast<int>(file);
++		if (index < 0 || index >= int(paths.size()) || paths[std::size_t(index)].empty())
++		{
++			ec = make_error_code(boost::system::errc::invalid_argument);
++			return -1;
++		}
++		++stat_count;
++		struct ::stat status {};
++		if (::stat(paths[std::size_t(index)].c_str(), &status) != 0)
++		{
++			ec = error_code(errno, system_category());
++			return -1;
++		}
++		return status.st_size;
++	}
++
++	std::vector<std::string> paths;
++	std::vector<file_index_t> opened_files;
++	int open_count = 0;
++	int stat_count = 0;
++};
++
++std::shared_ptr<torrent_info const> setup_provider_torrent(std::vector<char>& metadata)
++{
++	constexpr int size = 0x4000;
++	std::vector<create_file_entry> files;
++	files.emplace_back("root/payload-a.bin", size / 2);
++	files.emplace_back("root/payload-b.bin", size);
++	lt::create_torrent torrent(std::move(files), size);
++	sha1_hash const hash = hasher(std::vector<char>(size, 0)).final();
++	torrent.set_hash(0_piece, hash);
++	torrent.set_hash(1_piece, hash);
++	metadata = bencode(torrent.generate());
++	return load_torrent_buffer(metadata).ti;
++}
++
++void create_empty_file(std::string const& path)
++{
++	int const descriptor = ::open(path.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
++	TEST_CHECK(descriptor >= 0);
++	if (descriptor >= 0) TEST_EQUAL(::close(descriptor), 0);
++}
++
++std::vector<char> read_file_bytes(std::string const& path)
++{
++	std::ifstream input(path, std::ios::binary);
++	return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
++}
++
++void test_payload_provider_rejected_by_non_pread_storage()
++{
++	std::vector<char> metadata;
++	auto const info = setup_provider_torrent(metadata);
++	std::string const private_root = complete("provider-rejected-private");
++	error_code ec;
++	remove_all(private_root, ec);
++	ec.clear();
++	create_directories(private_root, ec);
++	TEST_CHECK(!ec);
++	auto provider = std::make_shared<test_payload_file_provider>(
++		std::vector<std::string>{complete("unused-provider-file"), {}, {}});
++	aux::vector<download_priority_t, file_index_t> priorities;
++	renamed_files renamed;
++	storage_params params{info->layout(), renamed, private_root, {}
++		, storage_mode_sparse, priorities, sha1_hash{}, info->v1(), info->v2(), provider};
++	int posix_pool = 0;
++	bool posix_rejected = false;
++	try
++	{
++		static_cast<void>(make_storage<posix_storage>(params, posix_pool));
++	}
++	catch (storage_error const& error)
++	{
++		posix_rejected = error.ec == boost::system::errc::operation_not_supported;
++	}
++	TEST_CHECK(posix_rejected);
++
++#if TORRENT_HAVE_MMAP || TORRENT_HAVE_MAP_VIEW_OF_FILE
++	aux::file_view_pool mmap_pool;
++	bool mmap_rejected = false;
++	try
++	{
++		static_cast<void>(make_storage<mmap_storage>(params, mmap_pool));
++	}
++	catch (storage_error const& error)
++	{
++		mmap_rejected = error.ec == boost::system::errc::operation_not_supported;
++	}
++	TEST_CHECK(mmap_rejected);
++#endif
++	remove_all(private_root, ec);
++	TEST_CHECK(!ec);
++}
++
++void test_payload_provider_has_no_path_fallback()
++{
++	std::string const private_root = complete("provider-private");
++	std::string const payload = complete("provider-payload");
++	std::string const payload2 = complete("provider-payload-2");
++	error_code ec;
++	remove_all(private_root, ec);
++	ec.clear();
++	remove(payload, ec);
++	ec.clear();
++	remove(payload2, ec);
++	ec.clear();
++	create_directories(private_root, ec);
++	TEST_CHECK(!ec);
++	create_empty_file(payload);
++	create_empty_file(payload2);
++
++	std::vector<char> metadata;
++	auto const info = setup_provider_torrent(metadata);
++	TEST_EQUAL(info->layout().num_files(), 3);
++	TEST_CHECK(info->layout().pad_file_at(1_file));
++	std::string const decoy = combine_path(
++		private_root, info->layout().file_path(0_file));
++	create_directories(parent_path(decoy), ec);
++	TEST_CHECK(!ec);
++	{
++		std::ofstream output(decoy, std::ios::binary);
++		output << "decoy";
++		TEST_CHECK(output.good());
++	}
++
++	auto provider = std::make_shared<test_payload_file_provider>(
++		std::vector<std::string>{payload, {}, payload2});
++	aux::vector<download_priority_t, file_index_t> priorities;
++	renamed_files renamed;
++	storage_params params{info->layout(), renamed, private_root, {}
++		, storage_mode_sparse, priorities, sha1_hash{}, info->v1(), info->v2(), provider};
++	aux::file_pool pool;
++	auto storage = make_storage<pread_storage>(params, pool);
++	aux::session_settings settings;
++	storage_error error;
++	storage->initialize(settings, error);
++	TEST_CHECK(!error);
++	TEST_CHECK(provider->stat_count > 0);
++
++	std::vector<char> bytes(0x4000, 'p');
++	TEST_EQUAL(write(storage, settings, span<char>(bytes), 0_piece, 0
++		, aux::open_mode::write, error), int(bytes.size()));
++	TEST_CHECK(!error);
++	TEST_EQUAL(provider->open_count, 1);
++	TEST_EQUAL(provider->opened_files.front(), 0_file);
++
++	// Piece zero crosses an explicit pad file; only the two payload indices may
++	// ever reach the provider.
++	TEST_EQUAL(write(storage, settings, span<char>(bytes), 1_piece, 0
++		, aux::open_mode::write, error), int(bytes.size()));
++	TEST_CHECK(!error);
++	TEST_EQUAL(provider->open_count, 2);
++	TEST_EQUAL(provider->opened_files.back(), 2_file);
++	TEST_CHECK(std::find(provider->opened_files.begin()
++		, provider->opened_files.end(), 1_file) == provider->opened_files.end());
++	TEST_CHECK(read_file_bytes(payload)
++		== std::vector<char>(bytes.begin(), bytes.begin() + 0x2000));
++	TEST_CHECK(read_file_bytes(payload2) == bytes);
++	TEST_CHECK(read_file_bytes(decoy) == std::vector<char>({'d', 'e', 'c', 'o', 'y'}));
++
++	storage->rename_file(0_file, "renamed.bin", error);
++	TEST_CHECK(error.ec == boost::system::errc::operation_not_supported);
++	error = {};
++	auto const moved = storage->move_storage(complete("provider-other")
++		, move_flags_t::always_replace_files, error);
++	TEST_CHECK(error.ec == boost::system::errc::operation_not_supported);
++	TEST_EQUAL(moved.second, private_root);
++	error = {};
++	storage->delete_files(session::delete_files, error);
++	TEST_CHECK(!error);
++	TEST_CHECK(exists(payload, ec));
++	TEST_CHECK(!ec);
++	TEST_CHECK(exists(payload2, ec));
++	TEST_CHECK(!ec);
++	TEST_CHECK(exists(decoy, ec));
++	TEST_CHECK(!ec);
++
++	storage.reset();
++	remove_all(private_root, ec);
++	TEST_CHECK(!ec);
++	remove(payload, ec);
++	TEST_CHECK(!ec);
++	remove(payload2, ec);
++	TEST_CHECK(!ec);
++}
++
+ template <typename StorageType>
+ void test_confined_hard_link_write(char const* const name)
+ {
+@@ -989,6 +1206,16 @@ TORRENT_TEST(confined_hard_link_write_pread)
+ 	test_confined_hard_link_write<pread_storage>("pread");
+ }
+ 
++TORRENT_TEST(payload_provider_has_no_path_fallback)
++{
++	test_payload_provider_has_no_path_fallback();
++}
++
++TORRENT_TEST(payload_provider_rejects_other_backends)
++{
++	test_payload_provider_rejected_by_non_pread_storage();
++}
++
+ #if TORRENT_HAVE_MMAP || TORRENT_HAVE_MAP_VIEW_OF_FILE
+ TORRENT_TEST(confined_hard_link_write_mmap)
+ {

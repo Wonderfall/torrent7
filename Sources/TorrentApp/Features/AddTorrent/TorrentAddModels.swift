@@ -156,6 +156,23 @@ struct TorrentAddOptions {
     let queuePriority: TorrentQueuePriority
     let labelIDs: Set<TorrentLabel.ID>
     let allowsPreMetadataDHT: Bool
+    let storageMode: TorrentAddStorageMode
+}
+
+enum TorrentAddStorageMode: String, CaseIterable, Identifiable, Sendable {
+    case createNew
+    case useExistingData
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .createNew:
+            "Create New Download"
+        case .useExistingData:
+            "Use Existing Data"
+        }
+    }
 }
 
 enum TorrentSourceSecurityInspector {
@@ -282,28 +299,41 @@ private enum MagnetSourceParser {
     }
 
     private static func isValidExactTopic(_ value: String) -> Bool {
-        let prefix = "urn:btih:"
-        guard value.range(of: prefix, options: [.caseInsensitive, .anchored]) != nil else {
+        let v1Prefix = "urn:btih:"
+        if value.range(
+            of: v1Prefix,
+            options: [.caseInsensitive, .anchored]
+        ) != nil {
+            let hash = value.dropFirst(v1Prefix.count)
+            if hash.count == 40 {
+                return hash.utf8.allSatisfy(isASCIIHexDigit)
+            }
+            if hash.count == 32 {
+                return hash.utf8.allSatisfy { byte in
+                    switch byte {
+                    case Character("A").asciiValue!...Character("Z").asciiValue!,
+                         Character("a").asciiValue!...Character("z").asciiValue!,
+                         Character("2").asciiValue!...Character("7").asciiValue!:
+                        true
+                    default:
+                        false
+                    }
+                }
+            }
             return false
         }
 
-        let hash = value.dropFirst(prefix.count)
-        if hash.count == 40 {
-            return hash.utf8.allSatisfy(isASCIIHexDigit)
+        let v2Prefix = "urn:btmh:"
+        guard value.range(
+            of: v2Prefix,
+            options: [.caseInsensitive, .anchored]
+        ) != nil else {
+            return false
         }
-        if hash.count == 32 {
-            return hash.utf8.allSatisfy { byte in
-                switch byte {
-                case Character("A").asciiValue!...Character("Z").asciiValue!,
-                     Character("a").asciiValue!...Character("z").asciiValue!,
-                     Character("2").asciiValue!...Character("7").asciiValue!:
-                    true
-                default:
-                    false
-                }
-            }
-        }
-        return false
+        let multihash = value.dropFirst(v2Prefix.count)
+        return multihash.count == 68
+            && multihash.prefix(4).caseInsensitiveCompare("1220") == .orderedSame
+            && multihash.dropFirst(4).utf8.allSatisfy(isASCIIHexDigit)
     }
 
     private static func isTrackerParameter(_ name: String) -> Bool {

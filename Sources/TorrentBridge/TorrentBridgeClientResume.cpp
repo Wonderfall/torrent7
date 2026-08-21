@@ -403,12 +403,6 @@ std::vector<std::string> TTorrentClient::retry_terminal_cleanups(bool reports_er
         std::make_move_iterator(resume_cleanup_errors.begin()),
         std::make_move_iterator(resume_cleanup_errors.end())
     );
-    std::vector<std::string> delete_cleanup_errors = retry_pending_delete_cleanups(reports_errors);
-    errors.insert(
-        errors.end(),
-        std::make_move_iterator(delete_cleanup_errors.begin()),
-        std::make_move_iterator(delete_cleanup_errors.end())
-    );
     std::vector<std::string> tombstone_clear_errors = retry_pending_tombstone_clears(reports_errors);
     errors.insert(
         errors.end(),

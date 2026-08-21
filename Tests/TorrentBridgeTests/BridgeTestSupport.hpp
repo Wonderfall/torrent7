@@ -5,17 +5,26 @@
 
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <cstddef>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <iterator>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <unordered_map>
 #include <vector>
+
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 // Bridge tests intentionally exercise the private C++ implementation surface.
 using namespace torrent_bridge::internal;
@@ -82,162 +91,6 @@ private:
     fs::path path_;
 };
 
-struct AuthorizedSaveRootLifetimeProbe {
-    std::atomic<int> retain_count = 0;
-    std::atomic<int> release_count = 0;
-};
-
-inline AnalyzedMutex authorized_save_root_lifetime_registry_lock;
-inline std::unordered_map<std::uint64_t, AuthorizedSaveRootLifetimeProbe *>
-    authorized_save_root_lifetime_registry;
-inline std::atomic<std::uint64_t> next_authorized_save_root_lifetime_token = 1U;
-
-inline std::uint64_t register_authorized_save_root_lifetime(
-    AuthorizedSaveRootLifetimeProbe &probe
-) TORRENT_BRIDGE_REQUIRES_NOT(authorized_save_root_lifetime_registry_lock)
-{
-    std::uint64_t token = next_authorized_save_root_lifetime_token.fetch_add(
-        1U,
-        std::memory_order_relaxed
-    );
-    if (token == 0U) {
-        token = next_authorized_save_root_lifetime_token.fetch_add(
-            1U,
-            std::memory_order_relaxed
-        );
-    }
-    std::scoped_lock guard(authorized_save_root_lifetime_registry_lock);
-    authorized_save_root_lifetime_registry.emplace(token, &probe);
-    return token;
-}
-
-inline void unregister_authorized_save_root_lifetime(
-    std::uint64_t const token,
-    AuthorizedSaveRootLifetimeProbe const &probe
-) TORRENT_BRIDGE_REQUIRES_NOT(authorized_save_root_lifetime_registry_lock)
-{
-    std::scoped_lock guard(authorized_save_root_lifetime_registry_lock);
-    auto const registered = authorized_save_root_lifetime_registry.find(token);
-    if (registered != authorized_save_root_lifetime_registry.end()
-        && registered->second == &probe) {
-        authorized_save_root_lifetime_registry.erase(registered);
-    }
-}
-
-inline std::uint8_t retain_authorized_save_root(std::uint64_t const token)
-    TORRENT_BRIDGE_REQUIRES_NOT(authorized_save_root_lifetime_registry_lock)
-{
-    std::scoped_lock guard(authorized_save_root_lifetime_registry_lock);
-    auto const registered = authorized_save_root_lifetime_registry.find(token);
-    if (registered == authorized_save_root_lifetime_registry.end()) {
-        return 0U;
-    }
-    registered->second->retain_count.fetch_add(1, std::memory_order_relaxed);
-    return 1U;
-}
-
-inline void release_authorized_save_root(std::uint64_t const token)
-    TORRENT_BRIDGE_REQUIRES_NOT(authorized_save_root_lifetime_registry_lock)
-{
-    std::scoped_lock guard(authorized_save_root_lifetime_registry_lock);
-    auto const registered = authorized_save_root_lifetime_registry.find(token);
-    if (registered != authorized_save_root_lifetime_registry.end()) {
-        registered->second->release_count.fetch_add(1, std::memory_order_relaxed);
-    }
-}
-
-class AuthorizedSaveRootLifetimeRegistration {
-public:
-    explicit AuthorizedSaveRootLifetimeRegistration(
-        AuthorizedSaveRootLifetimeProbe &probe
-    ) : probe_(probe), token_(register_authorized_save_root_lifetime(probe))
-    {
-    }
-
-    AuthorizedSaveRootLifetimeRegistration(
-        AuthorizedSaveRootLifetimeRegistration const &
-    ) = delete;
-    AuthorizedSaveRootLifetimeRegistration &operator=(
-        AuthorizedSaveRootLifetimeRegistration const &
-    ) = delete;
-
-    ~AuthorizedSaveRootLifetimeRegistration()
-    {
-        unregister_authorized_save_root_lifetime(token_, probe_);
-    }
-
-    [[nodiscard]] std::uint64_t token() const noexcept
-    {
-        return token_;
-    }
-
-private:
-    AuthorizedSaveRootLifetimeProbe &probe_;
-    std::uint64_t token_;
-};
-
-class AuthorizedSaveRoot {
-public:
-    explicit AuthorizedSaveRoot(fs::path path)
-        : path_(std::move(path)),
-          descriptor_(::open(path_.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC))
-    {
-        if (!descriptor_.is_valid()) {
-            throw std::system_error(errno, std::generic_category(), "Could not open authorized test root");
-        }
-        struct ::stat metadata {};
-        if (::fstat(descriptor_.get(), &metadata) != 0) {
-            throw std::system_error(errno, std::generic_category(), "Could not inspect authorized test root");
-        }
-        if (!S_ISDIR(metadata.st_mode)) {
-            throw std::runtime_error("Authorized test root is not a directory");
-        }
-        device_ = static_cast<std::uint64_t>(metadata.st_dev);
-        inode_ = static_cast<std::uint64_t>(metadata.st_ino);
-    }
-
-    AuthorizedSaveRoot(AuthorizedSaveRoot const &) = delete;
-    AuthorizedSaveRoot &operator=(AuthorizedSaveRoot const &) = delete;
-    AuthorizedSaveRoot(AuthorizedSaveRoot &&) = delete;
-    AuthorizedSaveRoot &operator=(AuthorizedSaveRoot &&) = delete;
-
-    [[nodiscard]] TTorrentAuthorizedSaveRoot record() noexcept
-    {
-        return TTorrentAuthorizedSaveRoot{
-            .directory_descriptor = descriptor_.get(),
-            .device = device_,
-            .inode = inode_,
-            .lifetime_token = lifetime_registration_.token(),
-        };
-    }
-
-    [[nodiscard]] fs::path const &path() const noexcept
-    {
-        return path_;
-    }
-
-    [[nodiscard]] AuthorizedSaveRootLifetimeProbe const &lifetime_probe() const noexcept
-    {
-        return lifetime_probe_;
-    }
-
-    void close_borrowed_descriptor()
-    {
-        std::error_code const error = descriptor_.close();
-        if (error) {
-            throw std::system_error(error, "Could not close authorized test root");
-        }
-    }
-
-private:
-    fs::path path_;
-    UniqueFileDescriptor descriptor_;
-    std::uint64_t device_ = 0U;
-    std::uint64_t inode_ = 0U;
-    AuthorizedSaveRootLifetimeProbe lifetime_probe_;
-    AuthorizedSaveRootLifetimeRegistration lifetime_registration_{lifetime_probe_};
-};
-
 [[nodiscard]] inline std::string string_from_c_buffer(std::span<char const> buffer)
 {
     auto const terminator = std::ranges::find(buffer, '\0');
@@ -273,6 +126,301 @@ private:
     }
     return params;
 }
+
+class TestPayloadBroker final {
+public:
+    explicit TestPayloadBroker(fs::path root)
+        : state_(new State(std::move(root)))
+    {
+    }
+
+    TestPayloadBroker(TestPayloadBroker const &) = delete;
+    TestPayloadBroker &operator=(TestPayloadBroker const &) = delete;
+    TestPayloadBroker(TestPayloadBroker &&) = delete;
+    TestPayloadBroker &operator=(TestPayloadBroker &&) = delete;
+
+    ~TestPayloadBroker()
+    {
+        release_state(state_);
+    }
+
+    [[nodiscard]] TTorrentPayloadBrokerCallbacks callbacks() const noexcept
+    {
+        return TTorrentPayloadBrokerCallbacks{
+            .context = state_,
+            .retain_context = retain_callback,
+            .release_context = release_callback,
+            .open_payload = open_callback,
+            .payload_size = size_callback,
+        };
+    }
+
+    [[nodiscard]] std::shared_ptr<PayloadBrokerContext> context() const
+    {
+        return std::make_shared<PayloadBrokerContext>(callbacks());
+    }
+
+    [[nodiscard]] TTorrentStorageActivation register_torrent(
+        lt::add_torrent_params const &params,
+        std::uint64_t generation = 1U
+    )
+    {
+        if (!params.ti || generation == 0U) {
+            throw std::invalid_argument("A test payload claim requires torrent metadata and a generation.");
+        }
+
+        TTorrentStorageActivation activation{};
+        Claim claim;
+        {
+            std::scoped_lock guard(state_->lock);
+            std::uint64_t const sequence = state_->next_claim++;
+            std::size_t index = 0U;
+            for (std::uint8_t &byte : activation.claim_id) {
+                byte = static_cast<std::uint8_t>(((sequence + index) % 255U) + 1U);
+                ++index;
+            }
+        }
+        activation.claim_generation = generation;
+        std::string const digest = testing_logical_manifest_digest(params).to_string();
+        std::ranges::transform(
+            digest,
+            activation.source_manifest_digest,
+            [](char const byte) { return static_cast<std::uint8_t>(byte); }
+        );
+
+        claim.generation = generation;
+        lt::file_storage const &files = params.ti->layout();
+        for (lt::file_index_t const file : files.file_range()) {
+            if (files.pad_file_at(file)) {
+                continue;
+            }
+            int32_t const index = static_cast<int32_t>(static_cast<int>(file));
+            fs::path const path = state_->root
+                / (storage_claim_key(activation) + "-" + std::to_string(index));
+            int const descriptor = ::open(
+                path.c_str(),
+                O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_NOFOLLOW,
+                S_IRUSR | S_IWUSR
+            );
+            if (descriptor < 0) {
+                throw std::system_error(
+                    std::error_code(errno, std::generic_category()),
+                    "Could not create a test payload file"
+                );
+            }
+            std::int64_t const size = files.file_size(file);
+            if (size < 0 || size > std::numeric_limits<off_t>::max()
+                || ::ftruncate(descriptor, static_cast<off_t>(size)) != 0) {
+                int const error_number = size < 0 ? EINVAL : errno;
+                static_cast<void>(::close(descriptor));
+                throw std::system_error(
+                    std::error_code(error_number, std::generic_category()),
+                    "Could not size a test payload file"
+                );
+            }
+            if (::close(descriptor) != 0) {
+                throw std::system_error(
+                    std::error_code(errno, std::generic_category()),
+                    "Could not close a test payload file"
+                );
+            }
+            claim.files.emplace(index, path);
+        }
+
+        {
+            std::scoped_lock guard(state_->lock);
+            auto const [iterator, inserted] = state_->claims.emplace(
+                storage_claim_key(activation),
+                std::move(claim)
+            );
+            if (!inserted) {
+                throw std::logic_error("A duplicate test payload claim was generated.");
+            }
+            static_cast<void>(iterator);
+        }
+        return activation;
+    }
+
+    void revoke(TTorrentStorageActivation const &activation)
+    {
+        std::scoped_lock guard(state_->lock);
+        state_->claims.erase(storage_claim_key(activation));
+    }
+
+private:
+    struct Claim {
+        std::uint64_t generation = 0U;
+        std::unordered_map<int32_t, fs::path> files;
+    };
+
+    struct State {
+        explicit State(fs::path requested_root)
+            : root(std::move(requested_root))
+        {
+            std::error_code error;
+            if (!fs::create_directories(root, error) && error) {
+                throw std::system_error(error, "Could not create the test payload directory");
+            }
+        }
+
+        std::atomic<std::uint32_t> references{1U};
+        std::mutex lock;
+        fs::path root;
+        std::uint64_t next_claim = 1U;
+        std::unordered_map<std::string, Claim> claims;
+    };
+
+    static void release_state(State *state) noexcept
+    {
+        if (state != nullptr && state->references.fetch_sub(1U, std::memory_order_acq_rel) == 1U) {
+            delete state;
+        }
+    }
+
+    static std::uint8_t retain_callback(void *context) noexcept
+    {
+        auto *state = static_cast<State *>(context);
+        if (state == nullptr) {
+            return 0U;
+        }
+        std::uint32_t count = state->references.load(std::memory_order_acquire);
+        while (count != 0U && count != std::numeric_limits<std::uint32_t>::max()) {
+            if (state->references.compare_exchange_weak(
+                    count,
+                    count + 1U,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire
+                )) {
+                return 1U;
+            }
+        }
+        return 0U;
+    }
+
+    static void release_callback(void *context) noexcept
+    {
+        release_state(static_cast<State *>(context));
+    }
+
+    static std::optional<fs::path> payload_path(
+        State &state,
+        std::span<std::uint8_t const, 16U> claim_id,
+        std::uint64_t generation,
+        int32_t file_index
+    )
+    {
+        TTorrentStorageActivation key{};
+        std::ranges::copy(claim_id, key.claim_id);
+        std::scoped_lock guard(state.lock);
+        auto const claim = state.claims.find(storage_claim_key(key));
+        if (claim == state.claims.end() || claim->second.generation != generation) {
+            return std::nullopt;
+        }
+        auto const file = claim->second.files.find(file_index);
+        return file == claim->second.files.end()
+            ? std::nullopt
+            : std::optional<fs::path>(file->second);
+    }
+
+    [[nodiscard]] static std::array<std::uint8_t, 16U> copy_claim_id(
+        std::uint8_t const *claim_id
+    ) noexcept
+    {
+        std::array<std::uint8_t, 16U> bounded{};
+        // The callback ABI fixes this field at 16 bytes. Keep the raw C-buffer
+        // boundary isolated, then use bounded containers everywhere else.
+        __unsafe_buffer_usage_begin
+        std::memcpy(bounded.data(), claim_id, bounded.size());
+        __unsafe_buffer_usage_end
+        return bounded;
+    }
+
+    static int32_t open_callback(
+        void *context,
+        std::uint8_t const *claim_id,
+        std::uint64_t generation,
+        int32_t file_index,
+        std::uint8_t writable,
+        int32_t *descriptor_out
+    ) noexcept
+    {
+        if (context == nullptr || claim_id == nullptr || descriptor_out == nullptr) {
+            return EINVAL;
+        }
+        *descriptor_out = -1;
+        try {
+            std::array<std::uint8_t, 16U> const bounded_claim_id = copy_claim_id(claim_id);
+            std::optional<fs::path> const path = payload_path(
+                *static_cast<State *>(context),
+                bounded_claim_id,
+                generation,
+                file_index
+            );
+            if (!path) {
+                return ENOENT;
+            }
+            int const descriptor = ::open(
+                path->c_str(),
+                (writable != 0U ? O_RDWR : O_RDONLY) | O_CLOEXEC | O_NOFOLLOW
+            );
+            if (descriptor < 0) {
+                return errno;
+            }
+            *descriptor_out = descriptor;
+            return 0;
+        } catch (...) {
+            return EIO;
+        }
+    }
+
+    static int32_t size_callback(
+        void *context,
+        std::uint8_t const *claim_id,
+        std::uint64_t generation,
+        int32_t file_index,
+        std::int64_t *size_out
+    ) noexcept
+    {
+        if (context == nullptr || claim_id == nullptr || size_out == nullptr) {
+            return EINVAL;
+        }
+        *size_out = -1;
+        try {
+            std::array<std::uint8_t, 16U> const bounded_claim_id = copy_claim_id(claim_id);
+            std::optional<fs::path> const path = payload_path(
+                *static_cast<State *>(context),
+                bounded_claim_id,
+                generation,
+                file_index
+            );
+            if (!path) {
+                return ENOENT;
+            }
+            int const descriptor = ::open(path->c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+            if (descriptor < 0) {
+                return errno;
+            }
+            struct ::stat metadata {};
+            if (::fstat(descriptor, &metadata) != 0) {
+                int const error_number = errno;
+                static_cast<void>(::close(descriptor));
+                return error_number;
+            }
+            if (::close(descriptor) != 0) {
+                return errno;
+            }
+            if (!S_ISREG(metadata.st_mode) || metadata.st_size < 0) {
+                return EFTYPE;
+            }
+            *size_out = metadata.st_size;
+            return 0;
+        } catch (...) {
+            return EIO;
+        }
+    }
+
+    State *state_;
+};
 
 [[nodiscard]] inline std::string read_text_file(fs::path const &path)
 {

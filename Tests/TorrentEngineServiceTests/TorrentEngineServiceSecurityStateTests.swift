@@ -4,7 +4,6 @@ import Testing
 import XPC
 @testable import TorrentEngineIPC
 @testable import TorrentEngineService
-@testable import TorrentEngineServiceSupport
 
 @Suite("Torrent engine extension security state", .serialized)
 struct TorrentEngineServiceSecurityStateTests {
@@ -676,12 +675,48 @@ private func handshakeRequest(
         payload: try TorrentEngineIPCJSONCodec.encode(
             TorrentEngineIPCHandshakeRequest(
                 enablePeerExchangePlugin: false,
-                folders: []
+                brokerSessionNonce: TorrentEngineServiceTestStorageBroker.shared.sessionNonce
             ),
             maximumBytes: operation.maximumRequestPayloadBytes,
             limits: operation.requestJSONLimits
-        )
+        ),
+        brokerEndpoint: TorrentEngineServiceTestStorageBroker.shared.endpoint
     )
+}
+
+@safe private final class TorrentEngineServiceTestStorageBroker: Sendable {
+    static let shared = TorrentEngineServiceTestStorageBroker()
+
+    let sessionNonce = UUID()
+    let endpoint: XPCEndpoint
+    private let listener: XPCListener
+
+    private init() {
+        let nonce = sessionNonce
+        let listener = XPCListener { request in
+            request.accept(
+                incomingMessageHandler: { (dictionary: XPCDictionary) in
+                    guard let brokerRequest = try? TorrentStorageBrokerIPCCodec
+                        .decodeRequest(dictionary),
+                          brokerRequest.common.sessionNonce == nonce,
+                          case .handshake = brokerRequest else {
+                        return nil
+                    }
+                    return try? TorrentStorageBrokerIPCCodec.encode(
+                        .success(
+                            requestID: brokerRequest.common.requestID,
+                            metadata: nil,
+                            statistics: [],
+                            fileDescriptor: nil
+                        ),
+                        for: brokerRequest
+                    )
+                }
+            )
+        }
+        self.listener = listener
+        endpoint = listener.endpoint
+    }
 }
 
 private func invalidHandshakeRequest() -> TorrentEngineIPCRequest {

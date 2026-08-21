@@ -68,14 +68,21 @@ verify_callback_branch() {
 typeset wake="$temporary_directory/wake.txt"
 typeset retain="$temporary_directory/retain.txt"
 typeset release="$temporary_directory/release.txt"
+typeset open_payload="$temporary_directory/open-payload.txt"
+typeset payload_size="$temporary_directory/payload-size.txt"
 extract_function TorrentBridgeTestInvokeWake "$wake"
-extract_function TorrentBridgeTestInvokeAuthorizedRootRetain "$retain"
-extract_function TorrentBridgeTestInvokeAuthorizedRootRelease "$release"
+extract_function TorrentBridgeTestInvokePayloadRetain "$retain"
+extract_function TorrentBridgeTestInvokePayloadRelease "$release"
+extract_function TorrentBridgeTestInvokePayloadOpen "$open_payload"
+extract_function TorrentBridgeTestInvokePayloadSize "$payload_size"
 
 # AppleClang's pinned 16-bit string discriminators for the Bridge-owned slots.
 verify_data_authentication wake.context "$wake" 0x8cdb
 verify_callback_branch wake.callback "$wake" 0x9cc0
-verify_callback_branch authorized-root.retain "$retain" 0xca4d
-verify_callback_branch authorized-root.release "$release" 0xc7ee
+verify_data_authentication payload.context "$retain" 0x33e
+verify_callback_branch payload.retain "$retain" 0x5c7
+verify_callback_branch payload.release "$release" 0x26d6
+verify_callback_branch payload.open "$open_payload" 0x2285
+verify_callback_branch payload.size "$payload_size" 0x664f
 
 print -r -- "Bridge callback/context PAC codegen verification passed"

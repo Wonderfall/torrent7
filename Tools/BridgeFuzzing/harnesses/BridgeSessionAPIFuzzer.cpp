@@ -23,134 +23,6 @@ char const *maybe_null(bridge_fuzz::ByteReader &reader, std::string const &value
     return reader.read_bool() ? nullptr : value.c_str();
 }
 
-void poll_tracked_removal(bridge_fuzz::BridgeClientHarness &harness)
-{
-    std::optional<std::uint64_t> &request_token = harness.tracked_removal_token();
-    if (!request_token.has_value()) {
-        return;
-    }
-
-    bridge_fuzz::ErrorBuffer error;
-    TTorrentRemovalReadResult const read = TorrentClientTakeRemovalResult(
-        harness.client(),
-        *request_token,
-        error.data(),
-        error.capacity()
-    );
-    if (read.status == 0 && read.result.state != TTORRENT_REMOVAL_PENDING) {
-        request_token.reset();
-    }
-}
-
-std::uint64_t malformed_removal_token(
-    bridge_fuzz::ByteReader &reader,
-    std::optional<std::uint64_t> const &tracked_token
-)
-{
-    std::uint64_t token = static_cast<std::uint64_t>(static_cast<std::uint32_t>(reader.read_i32()));
-    if (tracked_token == token) {
-        ++token;
-    }
-    return token;
-}
-
-int32_t authorized_path_blob_size(
-    bridge_fuzz::ByteReader &reader,
-    std::size_t const valid_size
-)
-{
-    switch (reader.read_u8() % 4U) {
-    case 0:
-        return -1;
-    case 1:
-        return 0;
-    case 2:
-        return TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES + 1;
-    default:
-        return static_cast<int32_t>(valid_size);
-    }
-}
-
-int32_t authorized_save_root_count(bridge_fuzz::ByteReader &reader)
-{
-    switch (reader.read_u8() % 5U) {
-    case 0:
-        return -1;
-    case 1:
-        return 0;
-    case 2:
-        return 1;
-    case 3:
-        return TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT;
-    default:
-        return TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT + 1;
-    }
-}
-
-void exercise_authorized_save_path_replacement(
-    bridge_fuzz::ByteReader &reader,
-    bridge_fuzz::BridgeClientHarness &harness,
-    bridge_fuzz::ErrorBuffer &error
-)
-{
-    std::string const path_blob = reader.read_string(512);
-    TTorrentAuthorizedSaveRoot root = harness.authorized_save_root_record();
-    switch (reader.read_u8() % 5U) {
-    case 0:
-        root.directory_descriptor = reader.read_i32();
-        break;
-    case 1:
-        ++root.device;
-        break;
-    case 2:
-        ++root.inode;
-        break;
-    case 3:
-        root.lifetime_token = 0U;
-        break;
-    default:
-        break;
-    }
-
-    constexpr std::size_t root_capacity = static_cast<std::size_t>(
-        TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT
-    );
-    std::array<TTorrentAuthorizedSaveRoot, root_capacity> roots{};
-    roots.fill(root);
-
-    TTorrentAuthorizedRootLifetimeRetainCallback retain = nullptr;
-    TTorrentAuthorizedRootLifetimeReleaseCallback release = nullptr;
-    switch (reader.read_u8() % 4U) {
-    case 0:
-        retain = bridge_fuzz::retain_authorized_save_root;
-        release = bridge_fuzz::release_authorized_save_root;
-        break;
-    case 1:
-        retain = bridge_fuzz::retain_authorized_save_root;
-        break;
-    case 2:
-        release = bridge_fuzz::release_authorized_save_root;
-        break;
-    default:
-        break;
-    }
-
-    auto const *path_data = reinterpret_cast<std::uint8_t const *>(path_blob.data());
-    static_cast<void>(TorrentClientReplaceAuthorizedSavePaths(
-        harness.client(),
-        reader.read_bool() ? nullptr : path_data,
-        authorized_path_blob_size(reader, path_blob.size()),
-        reader.read_bool() ? nullptr : roots.data(),
-        authorized_save_root_count(reader),
-        retain,
-        release,
-        reader.read_bool() ? nullptr : error.data(),
-        reader.read_bool() ? -1 : error.capacity()
-    ));
-
-    harness.restore_authorized_save_path();
-}
-
 } // namespace
 
 extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
@@ -159,7 +31,6 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
 )
 {
     auto &harness = bridge_fuzz::shared_harness("bridge-session-api");
-    poll_tracked_removal(harness);
     bridge_fuzz::ByteReader reader(data, size);
     std::uint8_t const operation_count = static_cast<std::uint8_t>(1U + (reader.read_u8() % 28U));
 
@@ -169,14 +40,12 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
         switch (reader.read_u8() % 20U) {
         case 0: {
             std::string magnet = reader.read_string(2048);
-            std::string save_path = reader.read_bool() ? std::string(harness.save_path()) : reader.read_string(256);
             TTorrentAddOptions options = bridge_fuzz::add_options_from_reader(reader);
             bridge_fuzz::AddedIdBuffer added_id;
             int32_t add_outcome = TTORRENT_ADD_REJECTED;
             static_cast<void>(TorrentClientAddMagnet(
                 harness.client(),
                 maybe_null(reader, magnet),
-                maybe_null(reader, save_path),
                 options,
                 reader.read_bool() ? nullptr : added_id.data(),
                 reader.read_bool() ? -1 : added_id.capacity(),
@@ -188,7 +57,8 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
         }
         case 1: {
             std::vector<std::uint8_t> bytes = reader.read_bytes(8192);
-            std::string save_path = reader.read_bool() ? std::string(harness.save_path()) : reader.read_string(256);
+            TTorrentStorageActivation activation =
+                bridge_fuzz::storage_activation_from_reader(reader);
             TTorrentAddOptions options = bridge_fuzz::add_options_from_reader(reader);
             bridge_fuzz::AddedIdBuffer added_id;
             int32_t add_outcome = TTORRENT_ADD_REJECTED;
@@ -196,7 +66,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
                 harness.client(),
                 bytes.empty() || reader.read_bool() ? nullptr : bytes.data(),
                 reader.read_bool() ? -1 : static_cast<int32_t>(bytes.size()),
-                maybe_null(reader, save_path),
+                activation,
                 options,
                 reader.read_bool() ? nullptr : added_id.data(),
                 reader.read_bool() ? -1 : added_id.capacity(),
@@ -209,7 +79,8 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
         case 2: {
             std::vector<std::uint8_t> bytes = reader.read_bytes(8192);
             std::vector<TTorrentFilePriorityEntry> priorities = bridge_fuzz::file_priorities_from_reader(reader);
-            std::string save_path = reader.read_bool() ? std::string(harness.save_path()) : reader.read_string(256);
+            TTorrentStorageActivation activation =
+                bridge_fuzz::storage_activation_from_reader(reader);
             TTorrentAddOptions options = bridge_fuzz::add_options_from_reader(reader);
             bridge_fuzz::AddedIdBuffer added_id;
             int32_t add_outcome = TTORRENT_ADD_REJECTED;
@@ -220,7 +91,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
                 harness.client(),
                 bytes.empty() || reader.read_bool() ? nullptr : bytes.data(),
                 reader.read_bool() ? -1 : static_cast<int32_t>(bytes.size()),
-                maybe_null(reader, save_path),
+                activation,
                 options,
                 priorities.empty() || reader.read_bool() ? nullptr : priorities.data(),
                 priority_count,
@@ -304,30 +175,15 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             break;
         }
         case 8: {
-            poll_tracked_removal(harness);
             std::string id = selected_id(reader, harness.client());
-            std::uint64_t request_token = 0;
             std::uint8_t removal_committed = 0;
             static_cast<void>(TorrentClientRemove(
                 harness.client(),
                 maybe_null(reader, id),
-                reader.read_u8(),
-                reader.read_u8(),
-                reader.read_bool() ? nullptr : &request_token,
                 reader.read_bool() ? nullptr : &removal_committed,
                 error.data(),
                 error.capacity()
             ));
-            if (request_token != 0) {
-                harness.tracked_removal_token() = request_token;
-            }
-            static_cast<void>(TorrentClientTakeRemovalResult(
-                harness.client(),
-                malformed_removal_token(reader, harness.tracked_removal_token()),
-                error.data(),
-                error.capacity()
-            ));
-            poll_tracked_removal(harness);
             break;
         }
         case 9: {
@@ -449,9 +305,14 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             TorrentClientSaveAll(harness.client());
             static_cast<void>(TorrentBridgeLibtorrentVersion());
             break;
-        case 18:
-            exercise_authorized_save_path_replacement(reader, harness, error);
+        case 18: {
+            std::uint32_t dirty_mask = 0;
+            static_cast<void>(TorrentClientTakeChanges(
+                harness.client(),
+                reader.read_bool() ? nullptr : &dirty_mask
+            ));
             break;
+        }
         default:
             bridge_fuzz::exercise_change_copy(harness.client());
             bridge_fuzz::drain_alert_error(harness.client());
@@ -466,6 +327,5 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
     bridge_fuzz::exercise_snapshot_copy(harness.client());
     bridge_fuzz::exercise_detail_copies(harness.client());
     bridge_fuzz::drain_alert_error(harness.client());
-    poll_tracked_removal(harness);
     return 0;
 }

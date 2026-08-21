@@ -7,8 +7,11 @@ extern "C" {
 
 void TorrentBridgeTestReplayWakeCallback() noexcept;
 void TorrentBridgeTestReplayWakeContext() noexcept;
-void TorrentBridgeTestReplayAuthorizedRootRetain() noexcept;
-void TorrentBridgeTestReplayAuthorizedRootRelease() noexcept;
+void TorrentBridgeTestReplayPayloadRetain() noexcept;
+void TorrentBridgeTestReplayPayloadRelease() noexcept;
+void TorrentBridgeTestReplayPayloadOpen() noexcept;
+void TorrentBridgeTestReplayPayloadSize() noexcept;
+void TorrentBridgeTestReplayPayloadContext() noexcept;
 
 }
 

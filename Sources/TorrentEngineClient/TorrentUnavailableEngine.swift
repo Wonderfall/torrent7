@@ -20,25 +20,9 @@ package actor TorrentUnavailableEngine: TorrentEngineServicing {
     }
 
     package func restart(
-        enablePeerExchangePlugin: Bool,
-        authorizedSavePaths: [String]
+        enablePeerExchangePlugin: Bool
     ) throws {
         _ = enablePeerExchangePlugin
-        _ = authorizedSavePaths
-        throw unavailableError
-    }
-
-    package func delegateFolderAuthorization(
-        _ authorization: TorrentFolderAuthorization
-    ) throws {
-        _ = authorization
-        throw unavailableError
-    }
-
-    package func reconcileFolderAuthorizations(
-        _ authorizations: [TorrentFolderAuthorization]
-    ) throws {
-        _ = authorizations
         throw unavailableError
     }
 
@@ -48,7 +32,6 @@ package actor TorrentUnavailableEngine: TorrentEngineServicing {
 
     package func addMagnet(
         _ magnet: String,
-        savePath: String,
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
         enablePeerExchange: Bool,
@@ -57,7 +40,6 @@ package actor TorrentUnavailableEngine: TorrentEngineServicing {
         allowPreMetadataDHT: Bool
     ) throws -> String {
         _ = magnet
-        _ = savePath
         _ = startsPaused
         _ = queuePriority
         _ = enablePeerExchange
@@ -69,7 +51,7 @@ package actor TorrentUnavailableEngine: TorrentEngineServicing {
 
     package func addTorrentFile(
         data: Data,
-        savePath: String,
+        activation: TorrentStorageActivation,
         filePriorities: [Int32: TorrentFilePriority]?,
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
@@ -78,7 +60,7 @@ package actor TorrentUnavailableEngine: TorrentEngineServicing {
         httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride
     ) throws -> String {
         _ = data
-        _ = savePath
+        _ = activation
         _ = filePriorities
         _ = startsPaused
         _ = queuePriority
@@ -98,9 +80,8 @@ package actor TorrentUnavailableEngine: TorrentEngineServicing {
     package func reannounce(id: String) throws { _ = id; throw unavailableError }
     package func forceRecheck(id: String) throws { _ = id; throw unavailableError }
 
-    package func remove(id: String, deleteFiles: Bool) throws -> TorrentRemovalOutcome {
+    package func remove(id: String) throws -> TorrentRemovalOutcome {
         _ = id
-        _ = deleteFiles
         throw unavailableError
     }
 
@@ -156,6 +137,11 @@ package actor TorrentUnavailableEngine: TorrentEngineServicing {
     }
 
     package func requestFiles(id: String) throws { _ = id; throw unavailableError }
+
+    package func torrentMetadata(id: String) throws -> Data? {
+        _ = id
+        throw unavailableError
+    }
 
     package func setFilePriority(
         id: String,

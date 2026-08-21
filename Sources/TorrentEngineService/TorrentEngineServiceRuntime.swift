@@ -1,9 +1,7 @@
-import Darwin
 import Foundation
 import TorrentEngineCore
 import TorrentEngineIPC
 import TorrentEngineModel
-import TorrentEngineServiceSupport
 import TorrentNetworkSecurity
 import XPC
 
@@ -20,13 +18,12 @@ private enum TorrentEngineServiceRuntimeError: LocalizedError {
     case serviceShuttingDown
     case invalidPayload
     case payloadTooLarge
-    case invalidFolderGrant
-    case invalidFolderCapability
-    case folderAuthorizationInUse
+    case invalidStorageBroker
     case invalidTorrentIdentifier
     case invalidMagnet
     case invalidTorrentFile
     case invalidFilePriorities
+    case operationOutcomeUnknown(String)
     case unsupportedOperation
     case tooManyOpenDatasets
     case datasetStorageLimitExceeded
@@ -60,12 +57,8 @@ private enum TorrentEngineServiceRuntimeError: LocalizedError {
             "The torrent engine request payload is invalid."
         case .payloadTooLarge:
             "The torrent engine request payload exceeds its operation limit."
-        case .invalidFolderGrant:
-            "The download folder authorization request is invalid."
-        case .invalidFolderCapability:
-            "The download folder authorization is unavailable or changed."
-        case .folderAuthorizationInUse:
-            "Too many download folders are still in use by active torrents. Remove affected torrents before replacing these folders."
+        case .invalidStorageBroker:
+            "The torrent storage broker could not be authenticated."
         case .invalidTorrentIdentifier:
             "The torrent identifier is invalid."
         case .invalidMagnet:
@@ -74,6 +67,10 @@ private enum TorrentEngineServiceRuntimeError: LocalizedError {
             "The torrent file is empty or too large."
         case .invalidFilePriorities:
             "The torrent file priorities are invalid."
+        case .operationOutcomeUnknown(let message):
+            message.isEmpty
+                ? "The torrent operation outcome is unknown."
+                : message
         case .unsupportedOperation:
             "The requested torrent engine operation is not supported."
         case .tooManyOpenDatasets:
@@ -131,12 +128,13 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
 
     private let engineEpoch = UUID()
     private let stateDirectory: URL
-    private let capabilityRegistry: TorrentFolderCapabilityRegistry
     private let transactionBegin: @Sendable () -> Void
     private let transactionEnd: @Sendable () -> Void
     private let containmentWatchdog: TorrentEngineServiceContainmentWatchdog
     private let cleanupWatchdog: TorrentEngineServiceContainmentWatchdog
     private let clock = ContinuousClock()
+    private let brokerAppIdentifier: String?
+    private let brokerAuthentication: TorrentEngineIPCPeerAuthentication
 
     private var activePeerToken: UUID?
     private var activeControllerID: UUID?
@@ -150,6 +148,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
     private var hintSequence: UInt64 = 1
     private var hintTask: Task<Void, Never>?
     private var engine: TorrentEngine?
+    private var brokerClient: TorrentStorageBrokerClient?
     private var networkAuthority: TorrentNetworkBindingAuthority?
     private var networkAuthorityID: UUID?
     private var networkAuthorityStartIsPending = false
@@ -164,15 +163,19 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         cleanupWatchdog: TorrentEngineServiceContainmentWatchdog = .init(
             timeout: .seconds(300)
         ),
+        brokerAppIdentifier: String? = nil,
+        brokerAuthentication: TorrentEngineIPCPeerAuthentication =
+            .reducedAssuranceAdHocDevelopment,
         transactionBegin: @escaping @Sendable () -> Void = { xpc_transaction_begin() },
         transactionEnd: @escaping @Sendable () -> Void = { xpc_transaction_end() }
     ) {
         self.stateDirectory = stateDirectory
         self.containmentWatchdog = containmentWatchdog
         self.cleanupWatchdog = cleanupWatchdog
+        self.brokerAppIdentifier = brokerAppIdentifier
+        self.brokerAuthentication = brokerAuthentication
         self.transactionBegin = transactionBegin
         self.transactionEnd = transactionEnd
-        capabilityRegistry = TorrentFolderCapabilityRegistry(engineEpoch: engineEpoch)
     }
 
     func diagnostics() -> TorrentEngineServiceRuntimeDiagnostics {
@@ -212,7 +215,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
                 inFlightError = .controllerBusy
             case .serviceShuttingDown:
                 inFlightError = .serviceShuttingDown
-            case .operationRejected:
+            case .operationRejected, .operationOutcomeUnknown:
                 inFlightError = .concurrentRequest
             }
             do {
@@ -399,7 +402,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         endsTransaction: Bool = true
     ) async {
         guard activePeerToken == peerToken,
-              let scope = activeControllerScope else {
+              activeControllerScope != nil else {
             return
         }
         if !isShuttingDown {
@@ -410,7 +413,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             cleanupWatchdog.disarm(cleanupToken)
         }
         await finishShutDownActiveController(
-            scope: scope,
             endsTransaction: endsTransaction
         )
     }
@@ -526,13 +528,14 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             let value = try decode(TorrentEngineIPCHandshakeRequest.self, from: request)
             return try await handleHandshake(
                 value,
+                brokerEndpoint: request.brokerEndpoint,
                 scope: scope,
                 operation: operation,
                 controllerLease: controllerLease
             )
         case .restart:
             let value = try decode(TorrentEngineIPCRestartRequest.self, from: request)
-            try await handleRestart(value, scope: scope, controllerLease: controllerLease)
+            try await handleRestart(value, controllerLease: controllerLease)
             return try encode(TorrentEngineIPCEmpty(), for: operation)
         case .shutdown:
             _ = try decode(TorrentEngineIPCEmpty.self, from: request)
@@ -546,31 +549,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
                 operation: operation,
                 controllerLease: controllerLease
             )
-        case .grantFolderCapability:
-            let value = try decode(TorrentEngineIPCFolderGrant.self, from: request)
-            return try await handleGrantFolder(
-                value,
-                scope: scope,
-                operation: operation,
-                controllerLease: controllerLease
-            )
-        case .revokeFolderCapability:
-            let value = try decode(TorrentEngineIPCRevokeFolderRequest.self, from: request)
-            try await handleRevokeFolder(
-                value,
-                scope: scope,
-                controllerLease: controllerLease
-            )
-            return try encode(TorrentEngineIPCEmpty(), for: operation)
-        case .replaceFolderCapabilities:
-            let value = try decode(TorrentEngineIPCReplaceFoldersRequest.self, from: request)
-            return try await handleReplaceFolders(
-                value,
-                scope: scope,
-                operation: operation,
-                controllerLease: controllerLease
-            )
-
         case .previewTorrentFile:
             guard let value = request.attachment else {
                 throw TorrentEngineServiceRuntimeError.invalidPayload
@@ -582,7 +560,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             let value = try decode(TorrentEngineIPCAddMagnetRequest.self, from: request)
             let identifier = try await handleAddMagnet(
                 value,
-                scope: scope,
                 controllerLease: controllerLease
             )
             return try encode(
@@ -597,7 +574,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             let identifier = try await handleAddTorrentFile(
                 value,
                 torrentData: torrentData,
-                scope: scope,
                 controllerLease: controllerLease
             )
             return try encode(
@@ -623,10 +599,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         case .remove:
             let value = try decode(TorrentEngineIPCRemoveRequest.self, from: request)
             try Self.validateTorrentID(value.id)
-            let outcome = try await requireEngine().remove(
-                id: value.id,
-                deleteFiles: value.deleteFiles
-            )
+            let outcome = try await requireEngine().remove(id: value.id)
             return try encode(
                 TorrentEngineIPCRemovalResponse(outcome: outcome),
                 for: operation
@@ -705,6 +678,9 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             let value = try decodeTorrentIDRequest(request)
             try await requireEngine().requestPieceMap(id: value.id)
             return try encode(TorrentEngineIPCEmpty(), for: operation)
+        case .torrentMetadata:
+            let value = try decodeTorrentIDRequest(request)
+            return try await requireEngine().torrentMetadata(id: value.id) ?? Data()
 
         case .trackerBatch:
             let value = try decodeTorrentRevisionRequest(request)
@@ -751,6 +727,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
 
     private func handleHandshake(
         _ request: TorrentEngineIPCHandshakeRequest,
+        brokerEndpoint: XPCEndpoint?,
         scope: TorrentEngineServiceScope,
         operation: TorrentEngineIPCOperation,
         controllerLease: TorrentEngineControllerLease
@@ -758,21 +735,10 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         guard engine == nil else {
             throw TorrentEngineServiceRuntimeError.handshakeAlreadyCompleted
         }
-        let replacement: TorrentFolderCapabilityReplacement
-        do {
-            replacement = try capabilityRegistry.prepareCommittedGrantReplacement(
-                bookmarkData: request.folders.map(\.bookmark),
-                scope: scope
-            )
-        } catch {
-            throw TorrentEngineServiceRuntimeError.invalidFolderGrant
+        guard brokerClient == nil, let brokerEndpoint else {
+            throw TorrentEngineServiceRuntimeError.invalidStorageBroker
         }
-        let authorizedRoots: [TorrentAuthorizedSaveRoot]
-        do {
-            authorizedRoots = try Self.authorizedRoots(for: replacement.pins)
-        } catch {
-            throw TorrentEngineServiceRuntimeError.invalidFolderGrant
-        }
+
         // Native construction restores service-owned state and starts the
         // alert worker synchronously. Cover that work, and any cleanup after
         // partial startup, before entering the bridge.
@@ -780,26 +746,40 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         defer {
             cleanupWatchdog.disarm(startupToken)
         }
-        let created = try TorrentEngine(
-            stateDirectory: stateDirectory,
-            enablePeerExchangePlugin: request.enablePeerExchangePlugin,
-            authorizedSaveRoots: authorizedRoots
-        )
+        let connectedBroker: TorrentStorageBrokerClient
+        do {
+            connectedBroker = try await TorrentStorageBrokerClient.connect(
+                endpoint: brokerEndpoint,
+                sessionNonce: request.brokerSessionNonce,
+                engineEpoch: engineEpoch,
+                appIdentifier: brokerAppIdentifier,
+                authentication: brokerAuthentication
+            )
+        } catch {
+            throw TorrentEngineServiceRuntimeError.invalidStorageBroker
+        }
+        brokerClient = connectedBroker
+
+        let created: TorrentEngine
+        do {
+            created = try TorrentEngine(
+                stateDirectory: stateDirectory,
+                enablePeerExchangePlugin: request.enablePeerExchangePlugin,
+                payloadBroker: connectedBroker
+            )
+        } catch {
+            brokerClient = nil
+            connectedBroker.cancel()
+            throw error
+        }
         engine = created
         do {
             // The bridge starts paused and blocked. Repeat the block explicitly
             // at the trust boundary before exposing a successful handshake.
             try await blockNetworkWithinContainmentDeadline(created)
             try requireActiveController(controllerLease)
-            let capabilities = try capabilityRegistry.commit(replacement)
             let response = TorrentEngineIPCHandshakeResponse(
-                libtorrentVersion: created.libtorrentVersion,
-                folders: capabilities.map {
-                    TorrentEngineIPCGrantedFolder(
-                        capabilityID: $0.id,
-                        resolvedPath: $0.canonicalPath
-                    )
-                }
+                libtorrentVersion: created.libtorrentVersion
             )
             let responsePayload = try encode(response, for: operation)
             startChangeHints(for: created, scope: scope)
@@ -819,33 +799,18 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
                 engine = nil
             }
             try? await created.shutdownSafely()
+            if brokerClient === connectedBroker {
+                brokerClient = nil
+            }
+            connectedBroker.cancel()
             throw error
         }
     }
 
     private func handleRestart(
         _ request: TorrentEngineIPCRestartRequest,
-        scope: TorrentEngineServiceScope,
         controllerLease: TorrentEngineControllerLease
     ) async throws {
-        guard request.capabilityIDs.count <= TorrentEngineLimits.maximumAuthorizedSavePathCount,
-              Set(request.capabilityIDs).count == request.capabilityIDs.count else {
-            throw TorrentEngineServiceRuntimeError.invalidFolderCapability
-        }
-
-        var pins = [TorrentFolderCapabilityPin]()
-        let authorizedRoots: [TorrentAuthorizedSaveRoot]
-        pins.reserveCapacity(request.capabilityIDs.count)
-        do {
-            for capabilityID in request.capabilityIDs {
-                let pin = try capabilityRegistry.pin(capabilityID: capabilityID, scope: scope)
-                pins.append(pin)
-            }
-            authorizedRoots = try Self.authorizedRoots(for: pins)
-        } catch {
-            throw TorrentEngineServiceRuntimeError.invalidFolderCapability
-        }
-
         datasetsByID.removeAll()
         do {
             if let networkAuthority {
@@ -858,8 +823,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             let cleanupToken = cleanupWatchdog.arm()
             do {
                 try await restartedEngine.restart(
-                    enablePeerExchangePlugin: request.enablePeerExchangePlugin,
-                    authorizedSaveRoots: authorizedRoots
+                    enablePeerExchangePlugin: request.enablePeerExchangePlugin
                 )
                 cleanupWatchdog.disarm(cleanupToken)
             } catch {
@@ -867,15 +831,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
                 throw error
             }
             try requireActiveController(controllerLease)
-
-            let retainedIDs = Set(request.capabilityIDs)
-            for capabilityID in request.capabilityIDs {
-                _ = try capabilityRegistry.commit(capabilityID: capabilityID, scope: scope)
-            }
-            for capability in capabilityRegistry.capabilities(scope: scope)
-            where !retainedIDs.contains(capability.id) {
-                _ = try capabilityRegistry.revoke(capabilityID: capability.id, scope: scope)
-            }
         } catch {
             await terminateActiveControllerAfterSecurityBoundaryFailure(
                 reason: "Torrent engine restart failed"
@@ -884,139 +839,8 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         }
     }
 
-    private func handleGrantFolder(
-        _ request: TorrentEngineIPCFolderGrant,
-        scope: TorrentEngineServiceScope,
-        operation: TorrentEngineIPCOperation,
-        controllerLease: TorrentEngineControllerLease
-    ) async throws -> Data {
-        let capability: TorrentFolderCapability
-        do {
-            capability = try capabilityRegistry.grantProvisional(
-                bookmarkData: request.bookmark,
-                scope: scope
-            )
-        } catch {
-            throw TorrentEngineServiceRuntimeError.invalidFolderGrant
-        }
-
-        do {
-            let roots = try authorizedRoots(scope: scope)
-            try await requireEngine().replaceAuthorizedSaveRoots(roots)
-            try requireActiveController(controllerLease)
-        } catch {
-            _ = try? capabilityRegistry.revoke(capabilityID: capability.id, scope: scope)
-            await restoreAuthorizedRootsOrTerminate(
-                scope: scope,
-                reason: "Torrent engine folder grant rollback failed"
-            )
-            throw error
-        }
-
-        return try encode(
-            TorrentEngineIPCGrantFolderResponse(
-                folder: TorrentEngineIPCGrantedFolder(
-                    capabilityID: capability.id,
-                    resolvedPath: capability.canonicalPath
-                )
-            ),
-            for: operation
-        )
-    }
-
-    private func handleRevokeFolder(
-        _ request: TorrentEngineIPCRevokeFolderRequest,
-        scope: TorrentEngineServiceScope,
-        controllerLease: TorrentEngineControllerLease
-    ) async throws {
-        guard try capabilityRegistry.capability(
-            capabilityID: request.capabilityID,
-            scope: scope
-        ) != nil else {
-            return
-        }
-        do {
-            let desiredPins = try capabilityRegistry.pins(scope: scope).filter {
-                $0.capabilityID != request.capabilityID
-            }
-            let desiredRoots = try Self.authorizedRoots(for: desiredPins)
-            try await requireEngine().replaceAuthorizedSaveRoots(desiredRoots)
-            try requireActiveController(controllerLease)
-            _ = try capabilityRegistry.revoke(
-                capabilityID: request.capabilityID,
-                scope: scope
-            )
-        } catch {
-            await restoreAuthorizedRootsOrTerminate(
-                scope: scope,
-                reason: "Torrent engine folder revocation rollback failed"
-            )
-            throw error
-        }
-    }
-
-    private func handleReplaceFolders(
-        _ request: TorrentEngineIPCReplaceFoldersRequest,
-        scope: TorrentEngineServiceScope,
-        operation: TorrentEngineIPCOperation,
-        controllerLease: TorrentEngineControllerLease
-    ) async throws -> Data {
-        let replacement: TorrentFolderCapabilityReplacement
-        do {
-            replacement = try capabilityRegistry.prepareCommittedGrantReplacement(
-                bookmarkData: request.folders.map(\.bookmark),
-                scope: scope
-            )
-        } catch {
-            throw TorrentEngineServiceRuntimeError.invalidFolderGrant
-        }
-        try requireActiveController(controllerLease)
-
-        do {
-            let roots = try Self.authorizedRoots(for: replacement.pins)
-            try await requireEngine().replaceAuthorizedSaveRoots(roots)
-            try requireActiveController(controllerLease)
-        } catch let engineError as TorrentEngineError {
-            if case .authorizedRootCapacityReached = engineError {
-                throw TorrentEngineServiceRuntimeError.folderAuthorizationInUse
-            }
-            await terminateActiveControllerAfterSecurityBoundaryFailure(
-                reason: "Torrent engine folder authorization replacement failed"
-            )
-            throw engineError
-        } catch {
-            await terminateActiveControllerAfterSecurityBoundaryFailure(
-                reason: "Torrent engine folder authorization replacement failed"
-            )
-            throw error
-        }
-
-        let capabilities: [TorrentFolderCapability]
-        do {
-            capabilities = try capabilityRegistry.commit(replacement)
-        } catch {
-            await terminateActiveControllerAfterSecurityBoundaryFailure(
-                reason: "Torrent engine folder authorization commit failed"
-            )
-            throw TorrentEngineServiceRuntimeError.invalidFolderGrant
-        }
-
-        return try encode(
-            TorrentEngineIPCReplaceFoldersResponse(
-                folders: capabilities.map {
-                    TorrentEngineIPCGrantedFolder(
-                        capabilityID: $0.id,
-                        resolvedPath: $0.canonicalPath
-                    )
-                }
-            ),
-            for: operation
-        )
-    }
-
     private func handleAddMagnet(
         _ request: TorrentEngineIPCAddMagnetRequest,
-        scope: TorrentEngineServiceScope,
         controllerLease: TorrentEngineControllerLease
     ) async throws -> String {
         guard !request.magnet.isEmpty,
@@ -1025,17 +849,12 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
               !request.magnet.utf8.contains(0) else {
             throw TorrentEngineServiceRuntimeError.invalidMagnet
         }
-        let pin = try authorizedPin(request.folderCapabilityID, scope: scope)
-        let wasProvisional = try capabilityRegistry.capability(
-            capabilityID: request.folderCapabilityID,
-            scope: scope
-        )?.state == .provisional
+
         var nativeAddCommitted = false
         do {
             let addingEngine = try requireEngine()
             let identifier = try await addingEngine.addMagnet(
                 request.magnet,
-                savePath: pin.canonicalPath,
                 startsPaused: request.startsPaused,
                 queuePriority: request.queuePriority,
                 enablePeerExchange: request.enablePeerExchange,
@@ -1046,23 +865,24 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             nativeAddCommitted = true
             try await validateAddedTorrentID(identifier)
             try requireActiveController(controllerLease)
-            _ = try capabilityRegistry.commit(
-                capabilityID: request.folderCapabilityID,
-                scope: scope
-            )
             return identifier
         } catch {
+            let outcomeIsUnknown = Self.addFailureLeavesOutcomeUnknown(
+                error,
+                nativeAddCommitted: nativeAddCommitted
+            )
             await recoverAfterAddFailure(
                 error,
                 nativeAddCommitted: nativeAddCommitted,
-                wasProvisional: wasProvisional,
-                capabilityID: request.folderCapabilityID,
-                scope: scope,
                 containmentReason: nativeAddCommitted
                     ? "Torrent engine magnet post-commit validation failed"
-                    : "Torrent engine magnet add outcome is unknown",
-                authorizationRollbackReason: "Torrent engine magnet authorization rollback failed"
+                    : "Torrent engine magnet add outcome is unknown"
             )
+            if outcomeIsUnknown {
+                throw TorrentEngineServiceRuntimeError.operationOutcomeUnknown(
+                    Self.failureMessage(for: error)
+                )
+            }
             throw error
         }
     }
@@ -1070,22 +890,17 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
     private func handleAddTorrentFile(
         _ request: TorrentEngineIPCAddTorrentFileRequest,
         torrentData: Data,
-        scope: TorrentEngineServiceScope,
         controllerLease: TorrentEngineControllerLease
     ) async throws -> String {
         try Self.validateTorrentData(torrentData)
         let priorities = try Self.validatedFilePriorities(request.filePriorities)
-        let pin = try authorizedPin(request.folderCapabilityID, scope: scope)
-        let wasProvisional = try capabilityRegistry.capability(
-            capabilityID: request.folderCapabilityID,
-            scope: scope
-        )?.state == .provisional
+
         var nativeAddCommitted = false
         do {
             let addingEngine = try requireEngine()
             let identifier = try await addingEngine.addTorrentFile(
                 data: torrentData,
-                savePath: pin.canonicalPath,
+                activation: request.activation,
                 filePriorities: priorities,
                 startsPaused: request.startsPaused,
                 queuePriority: request.queuePriority,
@@ -1096,23 +911,24 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             nativeAddCommitted = true
             try await validateAddedTorrentID(identifier)
             try requireActiveController(controllerLease)
-            _ = try capabilityRegistry.commit(
-                capabilityID: request.folderCapabilityID,
-                scope: scope
-            )
             return identifier
         } catch {
+            let outcomeIsUnknown = Self.addFailureLeavesOutcomeUnknown(
+                error,
+                nativeAddCommitted: nativeAddCommitted
+            )
             await recoverAfterAddFailure(
                 error,
                 nativeAddCommitted: nativeAddCommitted,
-                wasProvisional: wasProvisional,
-                capabilityID: request.folderCapabilityID,
-                scope: scope,
                 containmentReason: nativeAddCommitted
                     ? "Torrent engine torrent-file post-commit validation failed"
-                    : "Torrent engine torrent-file add outcome is unknown",
-                authorizationRollbackReason: "Torrent engine torrent-file authorization rollback failed"
+                    : "Torrent engine torrent-file add outcome is unknown"
             )
+            if outcomeIsUnknown {
+                throw TorrentEngineServiceRuntimeError.operationOutcomeUnknown(
+                    Self.failureMessage(for: error)
+                )
+            }
             throw error
         }
     }
@@ -1120,43 +936,21 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
     private func recoverAfterAddFailure(
         _ error: Error,
         nativeAddCommitted: Bool,
-        wasProvisional: Bool,
-        capabilityID: UUID,
-        scope: TorrentEngineServiceScope,
-        containmentReason: String,
-        authorizationRollbackReason: String
+        containmentReason: String
     ) async {
-        let nativeCommitStatusUnknown = if let addError = error as? TorrentAddError,
-                                           case .commitStatusUnknown = addError {
-            true
-        } else {
-            false
-        }
-        let requiresContainment = Self.addFailureRequiresContainment(
+        let nativeCommitStatusUnknown = Self.addFailureLeavesOutcomeUnknown(
+            error,
+            nativeAddCommitted: false
+        )
+        guard Self.addFailureRequiresContainment(
             nativeAddCommitted: nativeAddCommitted,
             nativeCommitStatusUnknown: nativeCommitStatusUnknown
-        )
-
-        if requiresContainment {
-            // A successfully returned native add, a malformed success result,
-            // or a failed rollback can leave an active torrent retaining the
-            // delegated folder. Destroy the controller before releasing it.
-            await terminateActiveControllerAfterSecurityBoundaryFailure(
-                reason: containmentReason
-            )
+        ) else {
             return
         }
-
-        if wasProvisional, !isShuttingDown {
-            _ = try? capabilityRegistry.revoke(
-                capabilityID: capabilityID,
-                scope: scope
-            )
-            await restoreAuthorizedRootsOrTerminate(
-                scope: scope,
-                reason: authorizationRollbackReason
-            )
-        }
+        await terminateActiveControllerAfterSecurityBoundaryFailure(
+            reason: containmentReason
+        )
     }
 
     nonisolated static func addFailureRequiresContainment(
@@ -1164,6 +958,20 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         nativeCommitStatusUnknown: Bool
     ) -> Bool {
         nativeAddCommitted || nativeCommitStatusUnknown
+    }
+
+    private nonisolated static func addFailureLeavesOutcomeUnknown(
+        _ error: any Error,
+        nativeAddCommitted: Bool
+    ) -> Bool {
+        if nativeAddCommitted {
+            return true
+        }
+        guard let addError = error as? TorrentAddError,
+              case .commitStatusUnknown = addError else {
+            return false
+        }
+        return true
     }
 
     nonisolated static func changeHintBelongsToActiveController(
@@ -1546,85 +1354,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         datasetsByID = datasetsByID.filter { now < $0.value.expiresAt }
     }
 
-    private func authorizedPin(
-        _ capabilityID: UUID,
-        scope: TorrentEngineServiceScope
-    ) throws -> TorrentFolderCapabilityPin {
-        do {
-            let pin = try capabilityRegistry.pin(capabilityID: capabilityID, scope: scope)
-            try Self.validate(pin: pin)
-            return pin
-        } catch {
-            throw TorrentEngineServiceRuntimeError.invalidFolderCapability
-        }
-    }
-
-    private func authorizedRoots(
-        scope: TorrentEngineServiceScope
-    ) throws -> [TorrentAuthorizedSaveRoot] {
-        do {
-            return try Self.authorizedRoots(for: capabilityRegistry.pins(scope: scope))
-        } catch {
-            throw TorrentEngineServiceRuntimeError.invalidFolderCapability
-        }
-    }
-
-    private static func authorizedRoots(
-        for pins: [TorrentFolderCapabilityPin]
-    ) throws -> [TorrentAuthorizedSaveRoot] {
-        // This synchronous conversion duplicates every borrowed registry
-        // descriptor before the resulting values cross into the engine actor.
-        try pins.map { pin in
-            try validate(pin: pin)
-            return try TorrentAuthorizedSaveRoot(
-                canonicalPath: pin.canonicalPath,
-                borrowingDirectoryDescriptor: pin.directoryFileDescriptor(),
-                device: pin.identity.device,
-                inode: pin.identity.inode,
-                retaining: pin.accessLifetimeAnchor
-            )
-        }
-    }
-
-    private func restoreAuthorizedRootsOrTerminate(
-        scope: TorrentEngineServiceScope,
-        reason: String
-    ) async {
-        guard let engine else {
-            await terminateActiveControllerAfterSecurityBoundaryFailure(reason: reason)
-            return
-        }
-        do {
-            let roots = try authorizedRoots(scope: scope)
-            try await engine.replaceAuthorizedSaveRoots(roots)
-        } catch {
-            await terminateActiveControllerAfterSecurityBoundaryFailure(reason: reason)
-        }
-    }
-
-    private static func validate(pin: TorrentFolderCapabilityPin) throws {
-        guard pin.isValid else {
-            throw TorrentEngineServiceRuntimeError.invalidFolderCapability
-        }
-        let descriptor = try pin.directoryFileDescriptor()
-        var descriptorMetadata = stat()
-        var pathMetadata = stat()
-        let descriptorStatus = unsafe Darwin.fstat(descriptor, &descriptorMetadata)
-        let pathStatus = unsafe pin.canonicalPath.withCString {
-            unsafe Darwin.lstat($0, &pathMetadata)
-        }
-        guard descriptorStatus == 0,
-              pathStatus == 0,
-              (descriptorMetadata.st_mode & S_IFMT) == S_IFDIR,
-              (pathMetadata.st_mode & S_IFMT) == S_IFDIR,
-              descriptorMetadata.st_dev == pathMetadata.st_dev,
-              descriptorMetadata.st_ino == pathMetadata.st_ino,
-              pin.identity.device == UInt64(truncatingIfNeeded: descriptorMetadata.st_dev),
-              pin.identity.inode == UInt64(truncatingIfNeeded: descriptorMetadata.st_ino) else {
-            throw TorrentEngineServiceRuntimeError.invalidFolderCapability
-        }
-    }
-
     private func requireEngine() throws -> TorrentEngine {
         guard let engine else {
             throw TorrentEngineServiceRuntimeError.handshakeRequired
@@ -1821,7 +1550,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         switch failureCode {
         case .controllerBusy, .serviceShuttingDown:
             true
-        case .operationRejected:
+        case .operationRejected, .operationOutcomeUnknown:
             false
         }
     }
@@ -1829,6 +1558,14 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
     private static func failureCode(
         for error: any Error
     ) -> TorrentEngineIPCFailureCode {
+        if let runtimeError = error as? TorrentEngineServiceRuntimeError,
+           case .operationOutcomeUnknown = runtimeError {
+            return .operationOutcomeUnknown
+        }
+        if let addError = error as? TorrentAddError,
+           case .commitStatusUnknown = addError {
+            return .operationOutcomeUnknown
+        }
         guard let runtimeError = error as? TorrentEngineServiceRuntimeError else {
             return .operationRejected
         }
@@ -1917,7 +1654,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
     }
 
     private func finishShutDownActiveController(
-        scope: TorrentEngineServiceScope,
         endsTransaction: Bool
     ) async {
         if let networkAuthority {
@@ -1931,8 +1667,9 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             try? await engine.shutdownSafely()
         }
         self.engine = nil
+        brokerClient?.cancel()
+        brokerClient = nil
         datasetsByID.removeAll()
-        capabilityRegistry.disconnect(scope: scope)
 
         activePeerToken = nil
         activeControllerID = nil

@@ -50,14 +50,7 @@ inline constexpr int32_t TTORRENT_MAX_TRACKER_COUNT = 2000;
 inline constexpr int32_t TTORRENT_MAX_WEB_SEED_COUNT = 2000;
 inline constexpr int32_t TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT = 20000;
 inline constexpr int32_t TTORRENT_MAX_TRACKER_HOST_ROW_COUNT = 20000;
-// Each live root authority holds several descriptors. Cap current and
-// torrent-retained historical roots together so a standard 256-FD XPC process
-// retains meaningful headroom for torrent files, sockets, and state.
-inline constexpr int32_t TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT = 32;
-inline constexpr int32_t TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES = 1023;
-inline constexpr int32_t TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES = 32768;
 inline constexpr int32_t TTORRENT_MAX_NETWORK_INTERFACE_BYTES = 64;
-inline constexpr int32_t TTORRENT_ERROR_AUTHORIZED_SAVE_ROOT_CAPACITY = 4;
 inline constexpr int32_t TTORRENT_ID_CAPACITY = 68;
 inline constexpr int32_t TTORRENT_TRACKER_HOST_CAPACITY = 256;
 inline constexpr uint32_t TTORRENT_DIRTY_TORRENTS = 1U << 0U;
@@ -84,9 +77,6 @@ inline constexpr int32_t TTORRENT_QUEUE_MOVE_BOTTOM = 3;
 inline constexpr int32_t TTORRENT_ADD_REJECTED = 0;
 inline constexpr int32_t TTORRENT_ADD_COMMITTED = 1;
 inline constexpr int32_t TTORRENT_ADD_OUTCOME_UNKNOWN = 2;
-inline constexpr int32_t TTORRENT_REMOVAL_PENDING = 0;
-inline constexpr int32_t TTORRENT_REMOVAL_SUCCEEDED = 1;
-inline constexpr int32_t TTORRENT_REMOVAL_FAILED = 2;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_ENABLE_DHT = 0;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_ENABLE_PEER_EXCHANGE = 1;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_ENABLE_LSD = 2;
@@ -105,7 +95,7 @@ inline constexpr uint8_t TTORRENT_DHT_STATUS_RUNNING = 2;
 inline constexpr uint8_t TTORRENT_CONTENT_KIND_UNKNOWN = 0;
 inline constexpr uint8_t TTORRENT_CONTENT_KIND_SINGLE_FILE = 1;
 inline constexpr uint8_t TTORRENT_CONTENT_KIND_DIRECTORY = 2;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 44;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 46;
 namespace torrent_bridge::internal {
 struct TTorrentClient;
 }
@@ -126,11 +116,7 @@ enum {
     TTORRENT_MAX_WEB_SEED_COUNT = 2000,
     TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT = 20000,
     TTORRENT_MAX_TRACKER_HOST_ROW_COUNT = 20000,
-    TTORRENT_MAX_AUTHORIZED_SAVE_PATH_COUNT = 32,
-    TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BYTES = 1023,
-    TTORRENT_MAX_AUTHORIZED_SAVE_PATH_BLOB_BYTES = 32768,
     TTORRENT_MAX_NETWORK_INTERFACE_BYTES = 64,
-    TTORRENT_ERROR_AUTHORIZED_SAVE_ROOT_CAPACITY = 4,
     TTORRENT_ID_CAPACITY = 68,
     TTORRENT_TRACKER_HOST_CAPACITY = 256,
     TTORRENT_DIRTY_TORRENTS = 1U << 0U,
@@ -157,9 +143,6 @@ enum {
     TTORRENT_ADD_REJECTED = 0,
     TTORRENT_ADD_COMMITTED = 1,
     TTORRENT_ADD_OUTCOME_UNKNOWN = 2,
-    TTORRENT_REMOVAL_PENDING = 0,
-    TTORRENT_REMOVAL_SUCCEEDED = 1,
-    TTORRENT_REMOVAL_FAILED = 2,
     TTORRENT_SOURCE_POLICY_ENABLE_DHT = 0,
     TTORRENT_SOURCE_POLICY_ENABLE_PEER_EXCHANGE = 1,
     TTORRENT_SOURCE_POLICY_ENABLE_LSD = 2,
@@ -178,7 +161,7 @@ enum {
     TTORRENT_CONTENT_KIND_UNKNOWN = 0,
     TTORRENT_CONTENT_KIND_SINGLE_FILE = 1,
     TTORRENT_CONTENT_KIND_DIRECTORY = 2,
-    TTORRENT_BRIDGE_ABI_VERSION = 44
+    TTORRENT_BRIDGE_ABI_VERSION = 46
 };
 #endif
 
@@ -281,11 +264,6 @@ typedef struct TTorrentFilePriorityEntry {
     int32_t index;
     int32_t priority;
 } TTorrentFilePriorityEntry;
-
-typedef struct TTorrentRemovalResult {
-    int32_t state;
-    char error[512];
-} TTorrentRemovalResult;
 
 typedef struct TTorrentPieceMapSnapshot {
     int32_t total_pieces;
@@ -416,11 +394,6 @@ typedef struct TTorrentPeerSourcesResult {
     TTorrentPeerSourceSnapshot sources;
 } TTorrentPeerSourcesResult;
 
-typedef struct TTorrentRemovalReadResult {
-    int32_t status;
-    TTorrentRemovalResult result;
-} TTorrentRemovalReadResult;
-
 typedef struct TTorrentNetworkStatusResult {
     int32_t status;
     TTorrentNetworkStatus network_status;
@@ -431,26 +404,55 @@ typedef struct TTorrentBridgeHealthResult {
     TTorrentBridgeHealth health;
 } TTorrentBridgeHealthResult;
 
-typedef uint8_t (* TORRENT_BRIDGE_NULLABLE TTorrentAuthorizedRootLifetimeRetainCallback)(uint64_t token);
-typedef void (* TORRENT_BRIDGE_NULLABLE TTorrentAuthorizedRootLifetimeReleaseCallback)(uint64_t token);
+// The provider is process-local and pathless. Callbacks may run concurrently
+// on libtorrent disk workers, must not throw or reenter TorrentBridge, and must
+// return promptly when the broker session is cancelled. open_payload transfers
+// one owned CLOEXEC regular-file descriptor through descriptor_out on success.
+// payload_size returns the current size independently of open. Both callbacks
+// return zero on success or a positive errno-compatible failure code.
+typedef uint8_t (* TORRENT_BRIDGE_NULLABLE TTorrentPayloadContextRetainCallback)(
+    void * TORRENT_BRIDGE_NULLABLE context
+);
+typedef void (* TORRENT_BRIDGE_NULLABLE TTorrentPayloadContextReleaseCallback)(
+    void * TORRENT_BRIDGE_NULLABLE context
+);
+typedef int32_t (* TORRENT_BRIDGE_NULLABLE TTorrentPayloadOpenCallback)(
+    void * TORRENT_BRIDGE_NULLABLE context,
+    const uint8_t * TORRENT_BRIDGE_NONNULL TORRENT_BRIDGE_COUNTED_BY(16)
+        claim_id TORRENT_BRIDGE_NOESCAPE,
+    uint64_t claim_generation,
+    int32_t file_index,
+    uint8_t writable,
+    int32_t * TORRENT_BRIDGE_NONNULL descriptor_out
+);
+typedef int32_t (* TORRENT_BRIDGE_NULLABLE TTorrentPayloadSizeCallback)(
+    void * TORRENT_BRIDGE_NULLABLE context,
+    const uint8_t * TORRENT_BRIDGE_NONNULL TORRENT_BRIDGE_COUNTED_BY(16)
+        claim_id TORRENT_BRIDGE_NOESCAPE,
+    uint64_t claim_generation,
+    int32_t file_index,
+    int64_t * TORRENT_BRIDGE_NONNULL size_out
+);
 
-// A borrowed, descriptor-backed directory capability corresponding one-to-one
-// with a path in the authorized-save-path blob. The bridge validates the
-// descriptor, identity, and current canonical pathname, then duplicates the
-// descriptor and validates and retains lifetime_token before returning. Input
-// records must remain valid for the synchronous bridge call. Tokens must be
-// unguessable, process-local capabilities owned by the callback registry.
-// Callbacks must be thread-safe, non-throwing, and must not reenter
-// TorrentBridge. The retain callback returns nonzero only for a live token.
-// Every successful retain is balanced by one release; release may run on a
-// libtorrent worker or detached-shutdown thread before blocking client
-// destruction has completed.
-typedef struct TTorrentAuthorizedSaveRoot {
-    int32_t directory_descriptor;
-    uint64_t device;
-    uint64_t inode;
-    uint64_t lifetime_token;
-} TTorrentAuthorizedSaveRoot;
+typedef struct TTorrentPayloadBrokerCallbacks {
+    void * TORRENT_BRIDGE_NULLABLE context;
+    TTorrentPayloadContextRetainCallback retain_context;
+    TTorrentPayloadContextReleaseCallback release_context;
+    TTorrentPayloadOpenCallback open_payload;
+    TTorrentPayloadSizeCallback payload_size;
+} TTorrentPayloadBrokerCallbacks;
+
+// Immutable activation authority for one known torrent. claim_id is the UUID's
+// 16 RFC 4122 bytes. source_manifest_digest is the domain-separated SHA-256
+// digest independently reproduced by Swift and libtorrent before admission.
+// preserved_torrent_id is either all zeroes or an exact canonical 34-byte
+// torrent identity being handed off from an entry already in removal.
+typedef struct TTorrentStorageActivation {
+    uint8_t claim_id[16];
+    uint64_t claim_generation;
+    uint8_t source_manifest_digest[32];
+    uint8_t preserved_torrent_id[34];
+} TTorrentStorageActivation;
 
 const char * TORRENT_BRIDGE_NONNULL TORRENT_BRIDGE_NULL_TERMINATED TorrentBridgeLibtorrentVersion(void)
     TORRENT_BRIDGE_NOEXCEPT;
@@ -462,45 +464,13 @@ TTorrentSourceSecurityInspectionResult TorrentBridgeInspectMagnetSources(
     const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED magnet_uri TORRENT_BRIDGE_NOESCAPE
 ) TORRENT_BRIDGE_NOEXCEPT;
 
-// Returns an owned client handle. Release it exactly once with TorrentClientDestroy.
-// authorized_save_paths_blob is a bounded sequence of non-empty, absolute UTF-8
-// paths, each terminated by NUL. authorized_save_roots contains one matching
-// descriptor-backed capability per path in the same order. Pass NULL/0 for both
-// collections to deny all resume restoration. Pointer/count mismatches,
-// malformed records, and identity mismatches fail creation atomically.
+// Returns an owned client handle. Release it exactly once with
+// TorrentClientDestroy. The broker context is retained synchronously before
+// construction and released after every provider and disk worker is quiescent.
 TTorrentClient * TORRENT_BRIDGE_NULLABLE TorrentClientCreateWithError(
     const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED state_path TORRENT_BRIDGE_NOESCAPE,
     uint8_t enable_pex_plugin,
-    const uint8_t * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(authorized_save_paths_blob_size)
-        authorized_save_paths_blob TORRENT_BRIDGE_NOESCAPE,
-    int32_t authorized_save_paths_blob_size,
-    const TTorrentAuthorizedSaveRoot * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(authorized_save_root_count)
-        authorized_save_roots TORRENT_BRIDGE_NOESCAPE,
-    int32_t authorized_save_root_count,
-    TTorrentAuthorizedRootLifetimeRetainCallback retain_authorized_root,
-    TTorrentAuthorizedRootLifetimeReleaseCallback release_authorized_root,
-    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
-    int32_t error_capacity
-) TORRENT_BRIDGE_NOEXCEPT;
-
-// Atomically replaces the exact normalized save paths accepted by subsequent
-// live add operations. This does not alter already-active torrents or rerun
-// startup resume restoration. The path and root collections have the same
-// bounded format, ordering, and pointer/count rules as
-// TorrentClientCreateWithError; pass NULL/0 for both collections to deny all
-// subsequent live adds. Returns
-// TTORRENT_ERROR_AUTHORIZED_SAVE_ROOT_CAPACITY without changing the current
-// roots if active torrents retain too many historical root generations.
-int32_t TorrentClientReplaceAuthorizedSavePaths(
-    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
-    const uint8_t * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(authorized_save_paths_blob_size)
-        authorized_save_paths_blob TORRENT_BRIDGE_NOESCAPE,
-    int32_t authorized_save_paths_blob_size,
-    const TTorrentAuthorizedSaveRoot * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(authorized_save_root_count)
-        authorized_save_roots TORRENT_BRIDGE_NOESCAPE,
-    int32_t authorized_save_root_count,
-    TTorrentAuthorizedRootLifetimeRetainCallback retain_authorized_root,
-    TTorrentAuthorizedRootLifetimeReleaseCallback release_authorized_root,
+    TTorrentPayloadBrokerCallbacks payload_broker,
     char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
@@ -533,7 +503,6 @@ uint64_t TorrentClientTakeChanges(
 int32_t TorrentClientAddMagnet(
     TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
     const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED magnet_uri TORRENT_BRIDGE_NOESCAPE,
-    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED save_path TORRENT_BRIDGE_NOESCAPE,
     TTorrentAddOptions options,
     char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(added_id_capacity) added_id_out TORRENT_BRIDGE_NOESCAPE,
     int32_t added_id_capacity,
@@ -547,7 +516,7 @@ int32_t TorrentClientAddTorrentFileData(
     const uint8_t * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(torrent_data_size)
         torrent_data TORRENT_BRIDGE_NOESCAPE,
     int32_t torrent_data_size,
-    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED save_path TORRENT_BRIDGE_NOESCAPE,
+    TTorrentStorageActivation activation,
     TTorrentAddOptions options,
     char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(added_id_capacity) added_id_out TORRENT_BRIDGE_NOESCAPE,
     int32_t added_id_capacity,
@@ -561,7 +530,7 @@ int32_t TorrentClientAddTorrentFileDataWithPriorities(
     const uint8_t * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(torrent_data_size)
         torrent_data TORRENT_BRIDGE_NOESCAPE,
     int32_t torrent_data_size,
-    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED save_path TORRENT_BRIDGE_NOESCAPE,
+    TTorrentStorageActivation activation,
     TTorrentAddOptions options,
     const TTorrentFilePriorityEntry * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(file_priority_count)
         file_priorities TORRENT_BRIDGE_NOESCAPE,
@@ -715,6 +684,19 @@ int32_t TorrentClientCopyPieceMap(
     uint8_t * TORRENT_BRIDGE_NULLABLE resident_out TORRENT_BRIDGE_NOESCAPE
 ) TORRENT_BRIDGE_NOEXCEPT;
 
+// Copies the exact immutable bencoded info dictionary retained by libtorrent.
+// The first zero-capacity call reports required_count_out. available_out is
+// false until metadata is resident and valid. The result is the copied byte
+// count and never exceeds the caller-provided capacity.
+int32_t TorrentClientCopyTorrentMetadata(
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED torrent_id TORRENT_BRIDGE_NOESCAPE,
+    uint8_t * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(capacity) metadata TORRENT_BRIDGE_NOESCAPE,
+    int32_t capacity,
+    int32_t * TORRENT_BRIDGE_NULLABLE required_count_out TORRENT_BRIDGE_NOESCAPE,
+    uint8_t * TORRENT_BRIDGE_NULLABLE available_out TORRENT_BRIDGE_NOESCAPE
+) TORRENT_BRIDGE_NOEXCEPT;
+
 int32_t TorrentClientSetFilePriority(
     TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
     const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED torrent_id TORRENT_BRIDGE_NOESCAPE,
@@ -749,28 +731,12 @@ int32_t TorrentClientForceRecheck(
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
-// removal_committed_out becomes true immediately after libtorrent accepts any
-// removal and remains authoritative even if later bridge bookkeeping fails. A
-// nonzero request token additionally identifies an asynchronous payload
-// deletion. After commit, the caller must either consume that token's terminal
-// result when present or blocking-destroy the client before releasing access.
+// removal_committed_out becomes true immediately after libtorrent accepts the
+// removal. Payload files are never deleted by the bridge.
 int32_t TorrentClientRemove(
     TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
     const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED torrent_id TORRENT_BRIDGE_NOESCAPE,
-    uint8_t delete_files,
-    uint8_t delete_partfile,
-    uint64_t * TORRENT_BRIDGE_NULLABLE request_token_out TORRENT_BRIDGE_NOESCAPE,
     uint8_t * TORRENT_BRIDGE_NULLABLE removal_committed_out TORRENT_BRIDGE_NOESCAPE,
-    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
-    int32_t error_capacity
-) TORRENT_BRIDGE_NOEXCEPT;
-
-// A nonzero token is returned only when payload deletion needs an asynchronous
-// terminal result. Pending results remain available; a terminal result is
-// consumed when read. An accepted removal cannot be cancelled.
-TTorrentRemovalReadResult TorrentClientTakeRemovalResult(
-    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
-    uint64_t request_token,
     char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
