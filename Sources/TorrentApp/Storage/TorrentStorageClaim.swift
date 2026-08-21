@@ -52,6 +52,15 @@ struct TorrentFilesystemIdentity: Codable, Equatable, Sendable {
     let device: UInt64
     let inode: UInt64
     let linkCount: UInt64
+    let ownerUserID: UInt32
+    let fileGeneration: UInt32
+
+    func refersToSameObject(as other: Self) -> Bool {
+        device == other.device
+            && inode == other.inode
+            && ownerUserID == other.ownerUserID
+            && fileGeneration == other.fileGeneration
+    }
 }
 
 struct TorrentPhysicalFileMapping: Codable, Equatable, Sendable {
@@ -74,10 +83,104 @@ struct TorrentStorageManifest: Codable, Equatable, Sendable {
     let collisionSelectedTopLevelName: String
     let topLevelIdentity: TorrentFilesystemIdentity
     let claimMappingDigest: Data
-    /// Random authenticated marker material. It is stored only in the GUI's
-    /// protected journal and on app-created filesystem objects, never sent to
-    /// the engine.
-    let ownershipToken: Data
+    /// Secret HMAC key stored only in the GUI's protected journal. Payload
+    /// xattrs contain object-bound authentication tags, never this key.
+    let ownershipKey: Data
+}
+
+enum TorrentStorageOwnershipTag {
+    static let keyByteCount = 32
+    static let tagByteCount = SHA256.byteCount
+
+    private static let domain = Data("Torrent7.StorageOwnership.v1".utf8)
+
+    static func authenticationCode(
+        key: Data,
+        claimID: UUID,
+        claimGeneration: UInt64,
+        relativePathComponents: [String],
+        identity: TorrentFilesystemIdentity,
+        isDirectory: Bool
+    ) -> Data? {
+        guard key.count == keyByteCount else {
+            return nil
+        }
+        return Data(HMAC<SHA256>.authenticationCode(
+            for: authenticatedData(
+                claimID: claimID,
+                claimGeneration: claimGeneration,
+                relativePathComponents: relativePathComponents,
+                identity: identity,
+                isDirectory: isDirectory
+            ),
+            using: SymmetricKey(data: key)
+        ))
+    }
+
+    static func isValid(
+        _ tag: Data,
+        key: Data,
+        claimID: UUID,
+        claimGeneration: UInt64,
+        relativePathComponents: [String],
+        identity: TorrentFilesystemIdentity,
+        isDirectory: Bool
+    ) -> Bool {
+        guard key.count == keyByteCount,
+              tag.count == tagByteCount else {
+            return false
+        }
+        return HMAC<SHA256>.isValidAuthenticationCode(
+            tag,
+            authenticating: authenticatedData(
+                claimID: claimID,
+                claimGeneration: claimGeneration,
+                relativePathComponents: relativePathComponents,
+                identity: identity,
+                isDirectory: isDirectory
+            ),
+            using: SymmetricKey(data: key)
+        )
+    }
+
+    private static func authenticatedData(
+        claimID: UUID,
+        claimGeneration: UInt64,
+        relativePathComponents: [String],
+        identity: TorrentFilesystemIdentity,
+        isDirectory: Bool
+    ) -> Data {
+        var data = domain
+        append(claimID.uuidString.lowercased(), to: &data)
+        append(claimGeneration, to: &data)
+        data.append(isDirectory ? 1 : 0)
+        append(UInt64(relativePathComponents.count), to: &data)
+        for component in relativePathComponents {
+            append(component, to: &data)
+        }
+        append(identity.device, to: &data)
+        append(identity.inode, to: &data)
+        append(UInt64(identity.ownerUserID), to: &data)
+        append(UInt64(identity.fileGeneration), to: &data)
+        return data
+    }
+
+    private static func append(_ value: String, to data: inout Data) {
+        let bytes = Data(value.utf8)
+        append(UInt64(bytes.count), to: &data)
+        data.append(bytes)
+    }
+
+    private static func append(_ value: UInt64, to data: inout Data) {
+        data.append(UInt8(truncatingIfNeeded: value >> 56))
+        data.append(UInt8(truncatingIfNeeded: value >> 48))
+        data.append(UInt8(truncatingIfNeeded: value >> 40))
+        data.append(UInt8(truncatingIfNeeded: value >> 32))
+        data.append(UInt8(truncatingIfNeeded: value >> 24))
+        data.append(UInt8(truncatingIfNeeded: value >> 16))
+        data.append(UInt8(truncatingIfNeeded: value >> 8))
+        data.append(UInt8(truncatingIfNeeded: value))
+    }
 }
 
 enum TorrentPayloadMaximumAccess: String, Codable, Sendable {
@@ -235,6 +338,8 @@ enum TorrentManifestDigest {
             append(identity.device, to: &input)
             append(identity.inode, to: &input)
             append(identity.linkCount, to: &input)
+            append(UInt64(identity.ownerUserID), to: &input)
+            append(UInt64(identity.fileGeneration), to: &input)
         }
         return Data(SHA256.hash(data: input))
     }

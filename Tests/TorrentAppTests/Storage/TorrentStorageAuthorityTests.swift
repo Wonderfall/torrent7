@@ -30,14 +30,14 @@ struct TorrentStorageAuthorityTests {
 
             let claimID = UUID()
             let nonce = UUID()
-            let token = TorrentStorageDestinationPlanner.randomOwnershipToken()
+            let key = TorrentStorageDestinationPlanner.randomOwnershipKey()
             let journal = try TorrentStorageClaimJournal(directory: state)
             try await journal.beginPreparation(TorrentStoragePreparation(
                 claimID: claimID,
                 generation: 1,
                 parentAuthorityID: parent.id,
                 preferredTopLevelName: logical.name,
-                ownershipToken: token,
+                ownershipKey: key,
                 operationNonce: nonce,
                 reservedTopLevelName: nil
             ))
@@ -57,7 +57,7 @@ struct TorrentStorageAuthorityTests {
                 in: parent,
                 claimID: claimID,
                 generation: 1,
-                ownershipToken: token,
+                ownershipKey: key,
                 selectedTopLevelName: selected
             )
             #expect(reservation.storageManifest.collisionSelectedTopLevelName == selected)
@@ -81,14 +81,14 @@ struct TorrentStorageAuthorityTests {
             let selected = try planner.planTopLevelName(for: logical, in: parent)
             let claimID = UUID()
             let nonce = UUID()
-            let token = TorrentStorageDestinationPlanner.randomOwnershipToken()
+            let key = TorrentStorageDestinationPlanner.randomOwnershipKey()
             let journal = try TorrentStorageClaimJournal(directory: state)
             try await journal.beginPreparation(.init(
                 claimID: claimID,
                 generation: 1,
                 parentAuthorityID: parent.id,
                 preferredTopLevelName: logical.name,
-                ownershipToken: token,
+                ownershipKey: key,
                 operationNonce: nonce,
                 reservedTopLevelName: nil
             ))
@@ -107,7 +107,7 @@ struct TorrentStorageAuthorityTests {
                     in: parent,
                     claimID: claimID,
                     generation: 1,
-                    ownershipToken: token,
+                    ownershipKey: key,
                     selectedTopLevelName: selected
                 )
             }
@@ -227,7 +227,7 @@ struct TorrentStorageAuthorityTests {
                 in: parent,
                 claimID: UUID(),
                 generation: 1,
-                ownershipToken: TorrentStorageDestinationPlanner.randomOwnershipToken(),
+                ownershipKey: TorrentStorageDestinationPlanner.randomOwnershipKey(),
                 selectedTopLevelName: selected
             )
             let claim = makeClaim(reservation, state: .active)
@@ -254,7 +254,7 @@ struct TorrentStorageAuthorityTests {
         }
     }
 
-    @Test("GUI deletion requires the recorded inode and ownership marker")
+    @Test("GUI deletion requires the recorded inode and ownership authentication tag")
     func deletionRequiresProofOfOwnership() throws {
         try withTemporaryDirectory { root in
             let fixture = try reserveSingleFile(in: root, name: "delete.bin", size: 8)
@@ -317,7 +317,7 @@ struct TorrentStorageAuthorityTests {
                 in: parent,
                 claimID: UUID(),
                 generation: 1,
-                ownershipToken: TorrentStorageDestinationPlanner.randomOwnershipToken(),
+                ownershipKey: TorrentStorageDestinationPlanner.randomOwnershipKey(),
                 selectedTopLevelName: logical.name
             )
             let policy = try #require(reservation.initialLease.filePolicies.first)
@@ -383,9 +383,185 @@ struct TorrentStorageAuthorityTests {
                     in: parent,
                     claimID: UUID(),
                     generation: 1,
-                    ownershipToken: TorrentStorageDestinationPlanner.randomOwnershipToken(),
+                    ownershipKey: TorrentStorageDestinationPlanner.randomOwnershipKey(),
                     selectedTopLevelName: logical.name
                 )
+            }
+        }
+    }
+
+    @Test("A brokered FD exposes only an object-bound ownership tag")
+    func brokeredDescriptorDoesNotExposeOwnershipKey() throws {
+        try withTemporaryDirectory { root in
+            let fixture = try reserveSingleFile(in: root, name: "payload.bin", size: 16)
+            let claim = makeClaim(fixture.reservation, state: .active)
+            let registry = TorrentStorageBrokerRegistry()
+            try registry.install(parentAuthority: fixture.parent)
+            try registry.install(claim: claim)
+            let opened = try registry.openPayload(
+                claimID: claim.manifest.claimID,
+                generation: claim.manifest.generation,
+                fileIndex: 0,
+                access: .readWrite
+            )
+            defer { _ = Darwin.close(opened.descriptor) }
+
+            let mapping = try #require(claim.manifest.physicalMappings.first)
+            let identity = try #require(mapping.identity)
+            let components = try #require(mapping.relativePathComponents)
+            let tag = try #require(ownershipTag(on: opened.descriptor))
+            #expect(tag != claim.manifest.ownershipKey)
+            #expect(TorrentStorageOwnershipTag.isValid(
+                tag,
+                key: claim.manifest.ownershipKey,
+                claimID: claim.manifest.claimID,
+                claimGeneration: claim.manifest.generation,
+                relativePathComponents: components,
+                identity: identity,
+                isDirectory: false
+            ))
+
+            let differentIdentity = TorrentFilesystemIdentity(
+                device: identity.device,
+                inode: identity.inode &+ 1,
+                linkCount: identity.linkCount,
+                ownerUserID: identity.ownerUserID,
+                fileGeneration: identity.fileGeneration
+            )
+            #expect(!TorrentStorageOwnershipTag.isValid(
+                tag,
+                key: claim.manifest.ownershipKey,
+                claimID: claim.manifest.claimID,
+                claimGeneration: claim.manifest.generation,
+                relativePathComponents: components,
+                identity: differentIdentity,
+                isDirectory: false
+            ))
+            #expect(!TorrentStorageOwnershipTag.isValid(
+                tag,
+                key: claim.manifest.ownershipKey,
+                claimID: claim.manifest.claimID,
+                claimGeneration: claim.manifest.generation,
+                relativePathComponents: ["different.bin"],
+                identity: identity,
+                isDirectory: false
+            ))
+        }
+    }
+
+    @Test("Imported payloads revalidate owner and file generation")
+    func importedIdentityIncludesOwnerAndGeneration() throws {
+        try withTemporaryDirectory { root in
+            let downloads = root.appending(path: "Downloads", directoryHint: .isDirectory)
+            try FileManager.default.createDirectory(
+                at: downloads,
+                withIntermediateDirectories: true
+            )
+            let payload = downloads.appending(path: "sample.bin")
+            try Data("seed".utf8).write(to: payload)
+            let parent = try makeParent(downloads)
+            let logical = try makeLogicalManifest(
+                name: "sample.bin",
+                contentKind: .singleFile,
+                files: [
+                    .init(
+                        index: 0,
+                        pathComponents: ["sample.bin"],
+                        expectedSize: 8,
+                        isPadding: false
+                    ),
+                ]
+            )
+            let reservation = try TorrentStorageDestinationPlanner().importExisting(
+                manifest: logical,
+                in: parent,
+                claimID: UUID(),
+                generation: 1,
+                ownershipKey: TorrentStorageDestinationPlanner.randomOwnershipKey(),
+                selectedTopLevelName: logical.name
+            )
+            let manifest = reservation.storageManifest
+            let mapping = try #require(manifest.physicalMappings.first)
+            let identity = try #require(mapping.identity)
+            var metadata = stat()
+            let statStatus = unsafe payload.path().withCString { pointer in
+                unsafe Darwin.lstat(pointer, &metadata)
+            }
+            #expect(statStatus == 0)
+            #expect(identity.ownerUserID == metadata.st_uid)
+            #expect(identity.fileGeneration == metadata.st_gen)
+
+            let forgedIdentities = [
+                TorrentFilesystemIdentity(
+                    device: identity.device,
+                    inode: identity.inode,
+                    linkCount: identity.linkCount,
+                    ownerUserID: identity.ownerUserID &+ 1,
+                    fileGeneration: identity.fileGeneration
+                ),
+                TorrentFilesystemIdentity(
+                    device: identity.device,
+                    inode: identity.inode,
+                    linkCount: identity.linkCount,
+                    ownerUserID: identity.ownerUserID,
+                    fileGeneration: identity.fileGeneration &+ 1
+                ),
+            ]
+            for forgedIdentity in forgedIdentities {
+                let forgedMapping = TorrentPhysicalFileMapping(
+                    fileIndex: mapping.fileIndex,
+                    relativePathComponents: mapping.relativePathComponents,
+                    identity: forgedIdentity
+                )
+                let forgedMappings = [forgedMapping]
+                let forgedManifest = TorrentStorageManifest(
+                    claimID: manifest.claimID,
+                    generation: manifest.generation,
+                    infoHashes: manifest.infoHashes,
+                    sourceManifestDigest: manifest.sourceManifestDigest,
+                    parentAuthorityID: manifest.parentAuthorityID,
+                    contentKind: manifest.contentKind,
+                    logicalFiles: manifest.logicalFiles,
+                    physicalMappings: forgedMappings,
+                    collisionSelectedTopLevelName:
+                        manifest.collisionSelectedTopLevelName,
+                    topLevelIdentity: manifest.topLevelIdentity,
+                    claimMappingDigest: TorrentManifestDigest.mapping(
+                        claimID: manifest.claimID,
+                        generation: manifest.generation,
+                        parentAuthorityID: manifest.parentAuthorityID,
+                        topLevelName: manifest.collisionSelectedTopLevelName,
+                        mappings: forgedMappings
+                    ),
+                    ownershipKey: manifest.ownershipKey
+                )
+                let forgedClaim = TorrentStorageClaim(
+                    manifest: forgedManifest,
+                    lease: TorrentStorageLease(
+                        state: .active,
+                        policyRevision: reservation.initialLease.policyRevision,
+                        filePolicies: reservation.initialLease.filePolicies
+                    ),
+                    torrentID: "t:\(String(repeating: "c", count: 32))",
+                    operationNonce: UUID()
+                )
+                let registry = TorrentStorageBrokerRegistry()
+                try registry.install(parentAuthority: parent)
+                if forgedIdentity.ownerUserID != identity.ownerUserID {
+                    #expect(throws: TorrentStorageBrokerRegistryError.invalidClaim) {
+                        try registry.install(claim: forgedClaim)
+                    }
+                    continue
+                }
+                try registry.install(claim: forgedClaim)
+                #expect(throws: TorrentStorageBrokerRegistryError.filesystemObjectChanged) {
+                    _ = try registry.openPayload(
+                        claimID: forgedClaim.manifest.claimID,
+                        generation: forgedClaim.manifest.generation,
+                        fileIndex: 0,
+                        access: .readOnly
+                    )
+                }
             }
         }
     }
@@ -543,7 +719,7 @@ struct TorrentStorageAuthorityTests {
                 generation: claim.manifest.generation,
                 parentAuthorityID: claim.manifest.parentAuthorityID,
                 preferredTopLevelName: "journal.bin",
-                ownershipToken: claim.manifest.ownershipToken,
+                ownershipKey: claim.manifest.ownershipKey,
                 operationNonce: nonce,
                 reservedTopLevelName: claim.manifest.collisionSelectedTopLevelName
             )
@@ -719,6 +895,23 @@ struct TorrentStorageAuthorityTests {
         ))
     }
 
+    private func ownershipTag(on descriptor: Int32) -> Data? {
+        var tag = Data(count: TorrentStorageOwnershipTag.tagByteCount)
+        let count = unsafe tag.withUnsafeMutableBytes { bytes in
+            unsafe TorrentStorageDestinationPlanner.ownershipAttribute.withCString { name in
+                unsafe Darwin.fgetxattr(
+                    descriptor,
+                    name,
+                    bytes.baseAddress,
+                    bytes.count,
+                    0,
+                    0
+                )
+            }
+        }
+        return count == tag.count ? tag : nil
+    }
+
     private func reserveSingleFile(
         in root: URL,
         name: String,
@@ -739,7 +932,7 @@ struct TorrentStorageAuthorityTests {
             in: parent,
             claimID: UUID(),
             generation: 1,
-            ownershipToken: TorrentStorageDestinationPlanner.randomOwnershipToken(),
+            ownershipKey: TorrentStorageDestinationPlanner.randomOwnershipKey(),
             selectedTopLevelName: selected
         )
         return SingleFileFixture(

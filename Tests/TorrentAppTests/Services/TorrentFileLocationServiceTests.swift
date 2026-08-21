@@ -232,8 +232,8 @@ struct TorrentFileLocationServiceTests {
             in: parent,
             claimID: UUID(),
             generation: 1,
-            ownershipToken:
-                TorrentStorageDestinationPlanner.randomOwnershipToken(),
+            ownershipKey:
+                TorrentStorageDestinationPlanner.randomOwnershipKey(),
             selectedTopLevelName: selected
         )
         let claim = TorrentStorageClaim(

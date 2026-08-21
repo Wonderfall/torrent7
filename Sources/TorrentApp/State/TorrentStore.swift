@@ -1258,13 +1258,13 @@ final class TorrentStore {
         let parsed = try await Self.parseStorageManifest(data)
         let parent = try await Self.makeStorageParentAuthority(folderLease)
         let generation: UInt64 = 1
-        let ownershipToken = TorrentStorageDestinationPlanner.randomOwnershipToken()
+        let ownershipKey = TorrentStorageDestinationPlanner.randomOwnershipKey()
         let preparation = TorrentStoragePreparation(
             claimID: claimID,
             generation: generation,
             parentAuthorityID: parent.id,
             preferredTopLevelName: parsed.manifest.name,
-            ownershipToken: ownershipToken,
+            ownershipKey: ownershipKey,
             operationNonce: operationNonce,
             reservedTopLevelName: nil
         )
@@ -1277,7 +1277,7 @@ final class TorrentStore {
                 parent: parent,
                 claimID: claimID,
                 generation: generation,
-                ownershipToken: ownershipToken,
+                ownershipKey: ownershipKey,
                 selectedTopLevelName: selectedTopLevelName
             )
         } else {
@@ -1304,7 +1304,7 @@ final class TorrentStore {
                 parent: parent,
                 claimID: claimID,
                 generation: generation,
-                ownershipToken: ownershipToken,
+                ownershipKey: ownershipKey,
                 selectedTopLevelName: selectedTopLevelName
             )
         }
@@ -1437,7 +1437,7 @@ final class TorrentStore {
         parent: TorrentStorageParentAuthority,
         claimID: UUID,
         generation: UInt64,
-        ownershipToken: Data,
+        ownershipKey: Data,
         selectedTopLevelName: String
     ) async throws -> TorrentStorageReservation {
         try TorrentStorageDestinationPlanner().reserve(
@@ -1445,7 +1445,7 @@ final class TorrentStore {
             in: parent,
             claimID: claimID,
             generation: generation,
-            ownershipToken: ownershipToken,
+            ownershipKey: ownershipKey,
             selectedTopLevelName: selectedTopLevelName
         )
     }
@@ -1456,7 +1456,7 @@ final class TorrentStore {
         parent: TorrentStorageParentAuthority,
         claimID: UUID,
         generation: UInt64,
-        ownershipToken: Data,
+        ownershipKey: Data,
         selectedTopLevelName: String
     ) async throws -> TorrentStorageReservation {
         try TorrentStorageDestinationPlanner().importExisting(
@@ -1464,7 +1464,7 @@ final class TorrentStore {
             in: parent,
             claimID: claimID,
             generation: generation,
-            ownershipToken: ownershipToken,
+            ownershipKey: ownershipKey,
             selectedTopLevelName: selectedTopLevelName
         )
     }
