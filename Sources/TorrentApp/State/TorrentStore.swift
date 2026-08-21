@@ -199,6 +199,8 @@ final class TorrentStore {
     private var engine: any TorrentEngineServicing
     private let storageBrokerRegistry = TorrentStorageBrokerRegistry()
     private let storageClaimJournal: TorrentStorageClaimJournal?
+    private let storageClaimJournalInitializationError:
+        TorrentStorageJournalError?
     private var storageParentAuthorities = [UUID: TorrentStorageParentAuthority]()
     @ObservationIgnored
     private var storageBrokerServer: TorrentStorageBrokerServer?
@@ -318,9 +320,18 @@ final class TorrentStore {
         downloadFolderAccessStore = DownloadFolderAccessStore(
             domain: defaultsDomain
         )
-        storageClaimJournal = try? TorrentStorageClaimJournal(
-            directory: Self.storageJournalDirectory()
-        )
+        do {
+            storageClaimJournal = try TorrentStorageClaimJournal(
+                directory: Self.storageJournalDirectory()
+            )
+            storageClaimJournalInitializationError = nil
+        } catch let error as TorrentStorageJournalError {
+            storageClaimJournal = nil
+            storageClaimJournalInitializationError = error
+        } catch {
+            storageClaimJournal = nil
+            storageClaimJournalInitializationError = .unavailable
+        }
         fileLocationService = TorrentFileLocationService()
         preferencesStore = TorrentPreferencesStore(domain: defaultsDomain)
         labelPersistenceStore = TorrentLabelPersistenceStore(domain: defaultsDomain)
@@ -374,6 +385,7 @@ final class TorrentStore {
         self.sleepPreventionService = sleepPreventionService
         self.downloadFolderAccessStore = downloadFolderAccessStore
         self.storageClaimJournal = storageClaimJournal
+        storageClaimJournalInitializationError = nil
         self.fileLocationService = fileLocationService
         preferencesStore = TorrentPreferencesStore(domain: defaultsDomain)
         labelPersistenceStore = TorrentLabelPersistenceStore(domain: defaultsDomain)
@@ -804,7 +816,7 @@ final class TorrentStore {
         maximumAccess: TorrentPayloadMaximumAccess
     ) async throws -> TorrentStorageClaim {
         guard let storageClaimJournal else {
-            throw TorrentStorageJournalError.unavailable
+            throw storageClaimJournalInitializationError ?? .unavailable
         }
         let policies = claim.lease.filePolicies.map { policy in
             guard policy.fileIndex == fileIndex else {
@@ -1054,7 +1066,8 @@ final class TorrentStore {
             }
             await store.commitDownloadFolderForAdd(preparedFolder)
             guard let storageClaimJournal = store.storageClaimJournal else {
-                throw TorrentStorageJournalError.unavailable
+                throw store.storageClaimJournalInitializationError
+                    ?? .unavailable
             }
             let updated = try await storageClaimJournal
                 .replacePromotionDestination(
@@ -1078,7 +1091,8 @@ final class TorrentStore {
         return scheduleMagnetDestinationOperation(request: request) {
             store, promotion in
             guard let storageClaimJournal = store.storageClaimJournal else {
-                throw TorrentStorageJournalError.unavailable
+                throw store.storageClaimJournalInitializationError
+                    ?? .unavailable
             }
             try await storageClaimJournal.completePromotion(
                 id: promotion.id,
@@ -1233,7 +1247,8 @@ final class TorrentStore {
             do {
                 preparedFolder = try await prepareFolder?(store)
                 if preparedFolder != nil, store.storageClaimJournal == nil {
-                    throw TorrentStorageJournalError.unavailable
+                    throw store.storageClaimJournalInitializationError
+                        ?? .unavailable
                 }
                 let descriptor = try preparedFolder.map { _ in
                     try TorrentMagnetDescriptor.parse(magnet)
@@ -1249,7 +1264,8 @@ final class TorrentStore {
                 )
                 if let preparedFolder, let descriptor {
                     guard let storageClaimJournal = store.storageClaimJournal else {
-                        throw TorrentStorageJournalError.unavailable
+                        throw store.storageClaimJournalInitializationError
+                            ?? .unavailable
                     }
                     try await storageClaimJournal.beginPromotion(
                         TorrentMagnetPromotion(
@@ -1430,7 +1446,7 @@ final class TorrentStore {
         destinationChoice: TorrentStorageDestinationChoice = .preferredName
     ) async throws -> String {
         guard let storageClaimJournal else {
-            throw TorrentStorageJournalError.unavailable
+            throw storageClaimJournalInitializationError ?? .unavailable
         }
 
         let parsed = try await Self.parseStorageManifest(data)
@@ -2634,7 +2650,7 @@ final class TorrentStore {
         item: TorrentItem
     ) async throws {
         guard let storageClaimJournal else {
-            throw TorrentStorageJournalError.unavailable
+            throw storageClaimJournalInitializationError ?? .unavailable
         }
         let descriptor = try TorrentMagnetDescriptor.parse(
             initialPromotion.originalMagnet
@@ -3155,7 +3171,10 @@ final class TorrentStore {
 
     private func restoreStorageClaims() async -> String? {
         guard let storageClaimJournal else {
-            return "The storage claim journal is unavailable. Existing payloads were preserved, but brokered torrents cannot be restored."
+            let reason = storageClaimJournalInitializationError?
+                .localizedDescription
+                ?? TorrentStorageJournalError.unavailable.localizedDescription
+            return "\(reason) Existing payloads were preserved, but brokered torrents cannot be restored."
         }
         let accessSnapshot = await downloadFolderAccessStore.makeAccessSnapshot()
         let claims = await storageClaimJournal.allClaims()

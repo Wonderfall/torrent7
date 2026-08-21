@@ -983,6 +983,92 @@ struct TorrentStorageAuthorityTests {
         }
     }
 
+    @Test("Obsolete revoked journal tombstones are retired")
+    func obsoleteRevokedJournalIsRetired() async throws {
+        try await withTemporaryDirectory { root in
+            let state = root.appending(
+                path: "State",
+                directoryHint: .isDirectory
+            )
+            try FileManager.default.createDirectory(
+                at: state,
+                withIntermediateDirectories: true
+            )
+            let journalURL = state.appending(path: "StorageClaims.json")
+            let obsolete = try Self.obsoleteJournalData(
+                schemaVersion: 2,
+                claimState: .deleted
+            )
+            try obsolete.write(to: journalURL)
+
+            let journal = try TorrentStorageClaimJournal(directory: state)
+            #expect(await journal.allClaims().isEmpty)
+            #expect(await journal.unresolvedPreparations().isEmpty)
+            #expect(await journal.allPromotions().isEmpty)
+
+            let persisted = try JSONSerialization.jsonObject(
+                with: Data(contentsOf: journalURL)
+            )
+            let rootObject = try #require(
+                persisted as? [String: Any]
+            )
+            #expect(rootObject["schemaVersion"] as? UInt64 == 4)
+
+            let reloaded = try TorrentStorageClaimJournal(directory: state)
+            #expect(await reloaded.allClaims().isEmpty)
+        }
+    }
+
+    @Test("Obsolete live authority is rejected and preserved")
+    func obsoleteLiveJournalIsPreserved() throws {
+        try withTemporaryDirectory { root in
+            let state = root.appending(
+                path: "State",
+                directoryHint: .isDirectory
+            )
+            try FileManager.default.createDirectory(
+                at: state,
+                withIntermediateDirectories: true
+            )
+            let journalURL = state.appending(path: "StorageClaims.json")
+            let obsolete = try Self.obsoleteJournalData(
+                schemaVersion: 2,
+                claimState: .active
+            )
+            try obsolete.write(to: journalURL)
+
+            #expect(throws: TorrentStorageJournalError.unsupportedVersion(2)) {
+                _ = try TorrentStorageClaimJournal(directory: state)
+            }
+            #expect(try Data(contentsOf: journalURL) == obsolete)
+        }
+    }
+
+    @Test("Future journal versions are never retired")
+    func futureJournalIsPreserved() throws {
+        try withTemporaryDirectory { root in
+            let state = root.appending(
+                path: "State",
+                directoryHint: .isDirectory
+            )
+            try FileManager.default.createDirectory(
+                at: state,
+                withIntermediateDirectories: true
+            )
+            let journalURL = state.appending(path: "StorageClaims.json")
+            let future = try Self.obsoleteJournalData(
+                schemaVersion: 5,
+                claimState: .deleted
+            )
+            try future.write(to: journalURL)
+
+            #expect(throws: TorrentStorageJournalError.unsupportedVersion(5)) {
+                _ = try TorrentStorageClaimJournal(directory: state)
+            }
+            #expect(try Data(contentsOf: journalURL) == future)
+        }
+    }
+
     @Test("Magnet promotion metadata and runtime survive ambiguous outcomes")
     func magnetPromotionIsDurableAndNonceBound() async throws {
         try await withTemporaryDirectory { root in
@@ -1086,6 +1172,21 @@ struct TorrentStorageAuthorityTests {
         let downloads: URL
         let parent: TorrentStorageParentAuthority
         let reservation: TorrentStorageReservation
+    }
+
+    private static func obsoleteJournalData(
+        schemaVersion: UInt64,
+        claimState: TorrentStorageClaimState
+    ) throws -> Data {
+        try JSONSerialization.data(withJSONObject: [
+            "schemaVersion": schemaVersion,
+            "preparations": [],
+            "claims": [
+                UUID().uuidString,
+                ["lease": ["state": claimState.rawValue]]
+            ],
+            "promotions": []
+        ])
     }
 
     private enum FIFOOpenOutcome: Equatable, Sendable {
