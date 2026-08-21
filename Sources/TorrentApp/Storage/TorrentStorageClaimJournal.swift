@@ -7,6 +7,7 @@ import TorrentEngineModel
 enum TorrentStorageJournalError: LocalizedError, Equatable, Sendable {
     case unavailable
     case corrupt
+    case unsupportedVersion(UInt64)
     case capacityExceeded
     case claimAlreadyExists
     case unknownClaim
@@ -20,6 +21,8 @@ enum TorrentStorageJournalError: LocalizedError, Equatable, Sendable {
         switch self {
         case .unavailable: "The storage claim journal is unavailable."
         case .corrupt: "The storage claim journal is corrupt and was preserved."
+        case .unsupportedVersion:
+            "The storage claim journal belongs to an incompatible app version."
         case .capacityExceeded: "The storage claim journal exceeds its safe capacity."
         case .claimAlreadyExists: "The storage claim already exists."
         case .unknownClaim: "The storage claim is unavailable."
@@ -79,7 +82,9 @@ struct TorrentMagnetPromotion: Codable, Equatable, Sendable {
 
 actor TorrentStorageClaimJournal {
     private struct Snapshot: Codable, Sendable {
-        var schemaVersion: UInt64 = 4
+        static let currentSchemaVersion: UInt64 = 4
+
+        var schemaVersion: UInt64 = Self.currentSchemaVersion
         var preparations = [UUID: TorrentStoragePreparation]()
         var claims = [UUID: TorrentStorageClaim]()
         var promotions = [UUID: TorrentMagnetPromotion]()
@@ -111,6 +116,70 @@ actor TorrentStorageClaimJournal {
         }
     }
 
+    private struct LoadedSnapshot: Sendable {
+        let snapshot: Snapshot
+        let requiresPersistence: Bool
+    }
+
+    private struct SchemaProbe: Decodable {
+        let schemaVersion: UInt64
+    }
+
+    /// This does not restore obsolete authority. It recognizes only journals
+    /// whose claims have already reached the terminal, revoked state so their
+    /// stale tombstones can be discarded without weakening containment.
+    private struct ObsoleteTerminalSnapshotProbe: Decodable {
+        struct Claim: Decodable {
+            struct Lease: Decodable {
+                let state: TorrentStorageClaimState
+            }
+
+            let lease: Lease
+        }
+
+        struct IgnoredValue: Decodable {
+            init(from decoder: any Decoder) throws {}
+        }
+
+        let schemaVersion: UInt64
+        let preparations: [UUID: IgnoredValue]
+        let claims: [UUID: Claim]
+        let promotions: [UUID: IgnoredValue]
+
+        private enum CodingKeys: String, CodingKey {
+            case schemaVersion
+            case preparations
+            case claims
+            case promotions
+        }
+
+        init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            schemaVersion = try container.decode(
+                UInt64.self,
+                forKey: .schemaVersion
+            )
+            preparations = try container.decode(
+                [UUID: IgnoredValue].self,
+                forKey: .preparations
+            )
+            claims = try container.decode(
+                [UUID: Claim].self,
+                forKey: .claims
+            )
+            promotions = try container.decodeIfPresent(
+                [UUID: IgnoredValue].self,
+                forKey: .promotions
+            ) ?? [:]
+        }
+
+        var containsOnlyRevokedAuthority: Bool {
+            preparations.isEmpty
+                && promotions.isEmpty
+                && claims.values.allSatisfy { $0.lease.state == .deleted }
+        }
+    }
+
     private static let filename = "StorageClaims.json"
     private static let maximumJournalBytes = 128 * 1_024 * 1_024
     private static let maximumClaimCount = 20_000
@@ -135,8 +204,19 @@ actor TorrentStorageClaimJournal {
         } catch {
             throw TorrentStorageJournalError.unavailable
         }
+        var shouldCloseDescriptor = true
+        defer {
+            if shouldCloseDescriptor {
+                try? descriptor.close()
+            }
+        }
+        let loaded = try Self.load(from: descriptor.rawValue)
+        if loaded.requiresPersistence {
+            try Self.persist(loaded.snapshot, in: descriptor.rawValue)
+        }
         directoryDescriptor = descriptor
-        snapshot = try Self.load(from: descriptor.rawValue)
+        snapshot = loaded.snapshot
+        shouldCloseDescriptor = false
     }
 
     deinit {
@@ -548,6 +628,13 @@ actor TorrentStorageClaimJournal {
     }
 
     private func persist(_ value: Snapshot) throws {
+        try Self.persist(value, in: directoryDescriptor.rawValue)
+    }
+
+    private static func persist(
+        _ value: Snapshot,
+        in directoryDescriptor: Int32
+    ) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(value)
@@ -557,7 +644,7 @@ actor TorrentStorageClaimJournal {
         let temporaryName = ".StorageClaims.\(UUID().uuidString).tmp"
         let descriptor = unsafe temporaryName.withCString { pointer in
             unsafe Darwin.openat(
-                directoryDescriptor.rawValue,
+                directoryDescriptor,
                 pointer,
                 O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
                 mode_t(0o600)
@@ -571,7 +658,7 @@ actor TorrentStorageClaimJournal {
             _ = Darwin.close(descriptor)
             if shouldUnlink {
                 _ = unsafe temporaryName.withCString { pointer in
-                    unsafe Darwin.unlinkat(directoryDescriptor.rawValue, pointer, 0)
+                    unsafe Darwin.unlinkat(directoryDescriptor, pointer, 0)
                 }
             }
         }
@@ -582,21 +669,23 @@ actor TorrentStorageClaimJournal {
         let renamed = unsafe temporaryName.withCString { source in
             unsafe Self.filename.withCString { destination in
                 unsafe Darwin.renameat(
-                    directoryDescriptor.rawValue,
+                    directoryDescriptor,
                     source,
-                    directoryDescriptor.rawValue,
+                    directoryDescriptor,
                     destination
                 )
             }
         }
         guard renamed == 0,
-              Darwin.fsync(directoryDescriptor.rawValue) == 0 else {
+              Darwin.fsync(directoryDescriptor) == 0 else {
             throw TorrentStorageJournalError.unavailable
         }
         shouldUnlink = false
     }
 
-    private static func load(from directoryDescriptor: Int32) throws -> Snapshot {
+    private static func load(
+        from directoryDescriptor: Int32
+    ) throws -> LoadedSnapshot {
         let descriptor = unsafe filename.withCString { pointer in
             unsafe Darwin.openat(
                 directoryDescriptor,
@@ -608,7 +697,10 @@ actor TorrentStorageClaimJournal {
             guard errno == ENOENT else {
                 throw TorrentStorageJournalError.unavailable
             }
-            return Snapshot()
+            return LoadedSnapshot(
+                snapshot: Snapshot(),
+                requiresPersistence: false
+            )
         }
         defer {
             _ = Darwin.close(descriptor)
@@ -626,9 +718,39 @@ actor TorrentStorageClaimJournal {
             from: descriptor,
             expectedSize: Int(metadata.st_size)
         )
+        let decoder = JSONDecoder()
+        let schemaVersion: UInt64
         do {
-            let decoded = try JSONDecoder().decode(Snapshot.self, from: data)
-            guard decoded.schemaVersion == 4,
+            schemaVersion = try decoder.decode(
+                SchemaProbe.self,
+                from: data
+            ).schemaVersion
+        } catch {
+            throw TorrentStorageJournalError.corrupt
+        }
+
+        guard schemaVersion == Snapshot.currentSchemaVersion else {
+            let obsoleteRange = UInt64(1)..<Snapshot.currentSchemaVersion
+            guard obsoleteRange.contains(schemaVersion),
+                  let obsolete = try? decoder.decode(
+                      ObsoleteTerminalSnapshotProbe.self,
+                      from: data
+                  ),
+                  obsolete.schemaVersion == schemaVersion,
+                  obsolete.containsOnlyRevokedAuthority else {
+                throw TorrentStorageJournalError.unsupportedVersion(
+                    schemaVersion
+                )
+            }
+            return LoadedSnapshot(
+                snapshot: Snapshot(),
+                requiresPersistence: true
+            )
+        }
+
+        do {
+            let decoded = try decoder.decode(Snapshot.self, from: data)
+            guard decoded.schemaVersion == Snapshot.currentSchemaVersion,
                   decoded.claims.count + decoded.preparations.count
                     + decoded.promotions.count
                     <= maximumClaimCount,
@@ -642,7 +764,10 @@ actor TorrentStorageClaimJournal {
                     == decoded.promotions.count else {
                 throw TorrentStorageJournalError.corrupt
             }
-            return decoded
+            return LoadedSnapshot(
+                snapshot: decoded,
+                requiresPersistence: false
+            )
         } catch let error as TorrentStorageJournalError {
             throw error
         } catch {
