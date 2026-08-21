@@ -449,6 +449,147 @@ struct TorrentStorageAuthorityTests {
         }
     }
 
+    @Test("A brokered file FD reveals its path but cannot traverse to siblings")
+    func brokeredDescriptorIsNotDirectoryAuthority() throws {
+        try withTemporaryDirectory { root in
+            let fixture = try reserveSingleFile(
+                in: root,
+                name: "payload.bin",
+                size: 16
+            )
+            let sibling = fixture.downloads.appending(path: "sibling.bin")
+            try Data("sibling".utf8).write(to: sibling)
+            let claim = makeClaim(fixture.reservation, state: .active)
+            let registry = TorrentStorageBrokerRegistry()
+            try registry.install(parentAuthority: fixture.parent)
+            try registry.install(claim: claim)
+            let opened = try registry.openPayload(
+                claimID: claim.manifest.claimID,
+                generation: claim.manifest.generation,
+                fileIndex: 0,
+                access: .readOnly
+            )
+            defer { _ = Darwin.close(opened.descriptor) }
+
+            var recoveredPath = [CChar](
+                repeating: 0,
+                count: Int(MAXPATHLEN)
+            )
+            let pathStatus = unsafe Darwin.fcntl(
+                opened.descriptor,
+                F_GETPATH,
+                &recoveredPath
+            )
+            #expect(pathStatus == 0)
+            if pathStatus == 0 {
+                let terminator = recoveredPath.firstIndex(of: 0)
+                    ?? recoveredPath.endIndex
+                let path = String(
+                    decoding: recoveredPath[..<terminator].map {
+                        UInt8(bitPattern: $0)
+                    },
+                    as: UTF8.self
+                )
+                let expected = fixture.downloads.appending(
+                    path: claim.manifest.collisionSelectedTopLevelName
+                )
+                #expect(
+                    URL(filePath: path).resolvingSymlinksInPath()
+                        == expected.resolvingSymlinksInPath()
+                )
+            }
+
+            let traversal = unsafe "../sibling.bin".withCString { name in
+                unsafe Darwin.openat(
+                    opened.descriptor,
+                    name,
+                    O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+                )
+            }
+            if traversal >= 0 {
+                _ = Darwin.close(traversal)
+            }
+            #expect(traversal == -1)
+        }
+    }
+
+    @Test("Removal state blocks future opens but cannot revoke an issued FD")
+    func claimRemovalIsSoftRevocation() throws {
+        try withTemporaryDirectory { root in
+            let fixture = try reserveSingleFile(
+                in: root,
+                name: "payload.bin",
+                size: 16
+            )
+            let claim = makeClaim(fixture.reservation, state: .active)
+            let registry = TorrentStorageBrokerRegistry()
+            try registry.install(parentAuthority: fixture.parent)
+            try registry.install(claim: claim)
+            let opened = try registry.openPayload(
+                claimID: claim.manifest.claimID,
+                generation: claim.manifest.generation,
+                fileIndex: 0,
+                access: .readWrite
+            )
+            defer { _ = Darwin.close(opened.descriptor) }
+
+            let retainedBytes = Data("retained".utf8)
+            let written = unsafe retainedBytes.withUnsafeBytes { bytes in
+                unsafe Darwin.pwrite(
+                    opened.descriptor,
+                    bytes.baseAddress,
+                    bytes.count,
+                    0
+                )
+            }
+            #expect(written == retainedBytes.count)
+
+            let removingClaim = makeClaim(
+                fixture.reservation,
+                state: .removing
+            )
+            try registry.install(claim: removingClaim)
+            #expect(throws: TorrentStorageBrokerRegistryError.claimInactive) {
+                _ = try registry.openPayload(
+                    claimID: claim.manifest.claimID,
+                    generation: claim.manifest.generation,
+                    fileIndex: 0,
+                    access: .readOnly
+                )
+            }
+
+            let payload = fixture.downloads.appending(
+                path: claim.manifest.collisionSelectedTopLevelName
+            )
+            let deletingClaim = makeClaim(
+                fixture.reservation,
+                state: .deleting
+            )
+            try registry.install(claim: deletingClaim)
+            try TorrentStorageDestinationPlanner().deleteOwnedPayload(
+                claim: deletingClaim,
+                from: fixture.parent
+            )
+            try registry.removeClaim(
+                claimID: claim.manifest.claimID,
+                generation: claim.manifest.generation
+            )
+            #expect(!FileManager.default.fileExists(atPath: payload.path()))
+
+            var recoveredBytes = Data(count: retainedBytes.count)
+            let read = unsafe recoveredBytes.withUnsafeMutableBytes { bytes in
+                unsafe Darwin.pread(
+                    opened.descriptor,
+                    bytes.baseAddress,
+                    bytes.count,
+                    0
+                )
+            }
+            #expect(read == recoveredBytes.count)
+            #expect(recoveredBytes == retainedBytes)
+        }
+    }
+
     @Test("Imported payloads revalidate owner and file generation")
     func importedIdentityIncludesOwnerAndGeneration() throws {
         try withTemporaryDirectory { root in

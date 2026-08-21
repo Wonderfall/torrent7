@@ -104,6 +104,9 @@ This mode needs no Powerbox interaction and does not add torrents. Its purpose
 is the signed Enhanced Security process lifecycle, broker authentication,
 recovery path, and network observation. The practical and maximum modes add
 paged-dataset and transport measurements plus a genuine GUI-side Powerbox scope.
+None of these modes currently exercises a broker-returned payload descriptor,
+so they are not a production-identified adversarial proof of Seatbelt behavior
+for descriptor-relative path, link, rename, unlink, xattr, or flag operations.
 
 To run the same lifecycle with the fully instrumented ThreadSanitizer dependency
 profile:
