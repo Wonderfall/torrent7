@@ -1086,6 +1086,24 @@ BridgeResult TTorrentClient::cache_file_metadata(lt::torrent_handle const &handl
     lt::filenames const files(layout, renamed_files);
 
     std::vector<lt::download_priority_t> priorities = handle.get_file_priorities();
+    TorrentIdentity const *const identity = identity_from_handle(handle);
+    if (identity != nullptr && !identity->storage_activation) {
+        priorities.assign(
+            static_cast<std::size_t>(layout.num_files()),
+            identity->intended_default_dont_download
+                ? lt::dont_download
+                : lt::default_priority
+        );
+        std::size_t const explicit_priority_count = std::min(
+            priorities.size(),
+            identity->intended_file_priorities.size()
+        );
+        std::copy_n(
+            identity->intended_file_priorities.begin(),
+            explicit_priority_count,
+            priorities.begin()
+        );
+    }
     auto const previous = file_cache.find(*cache_id);
 
     std::vector<TTorrentFileSnapshot> snapshots;
@@ -1646,25 +1664,10 @@ BridgeResult TTorrentClient::validate_or_remove_loaded_metadata(lt::torrent_hand
         }
         bool const was_pending = metadata_validation_pending.contains(identity);
         if (was_pending) {
-            std::vector<lt::download_priority_t> priorities(
+            handle.prioritize_files(std::vector<lt::download_priority_t>(
                 static_cast<std::size_t>(layout.num_files()),
-                identity->intended_default_dont_download ? lt::dont_download : lt::default_priority
-            );
-            std::size_t const explicit_priority_count = std::min(
-                priorities.size(),
-                identity->intended_file_priorities.size()
-            );
-            std::copy_n(
-                identity->intended_file_priorities.begin(),
-                explicit_priority_count,
-                priorities.begin()
-            );
-            handle.prioritize_files(priorities);
-            if (identity->intended_default_dont_download) {
-                handle.set_flags(lt::torrent_flags::default_dont_download);
-            } else {
-                handle.unset_flags(lt::torrent_flags::default_dont_download);
-            }
+                lt::dont_download
+            ));
         }
         if (torrent_file->priv()) {
             bool const policy_changed = identity->dht_enabled_by_user
@@ -1728,8 +1731,6 @@ BridgeResult TTorrentClient::validate_or_remove_loaded_metadata(lt::torrent_hand
         if (was_pending) {
             metadata_validation_pending.erase(identity);
             identity->allow_pre_metadata_dht = false;
-            identity->intended_default_dont_download = false;
-            identity->intended_file_priorities.clear();
             request_save(handle);
         }
         changes |= enforce_https_source_policy(handle, identity, HTTPSSourcePolicyScope::all);
