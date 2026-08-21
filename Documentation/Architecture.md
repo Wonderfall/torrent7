@@ -121,13 +121,10 @@ Immutable authority and mutable policy are separate.
 - a digest of the complete physical mapping; and
 - a random HMAC key stored only in the GUI journal.
 
-Each claimed object stores an HMAC tag over the claim, generation, canonical
+Each app-created object stores an HMAC tag over the claim, generation, canonical
 relative mapping, object kind, device, inode, owner UID, and file generation.
-For an import, tags are installed only after the complete identity-pinned claim
-has been committed in the journal. This records the explicit ownership transfer
-without claiming unrelated directory contents. The helper can read a tag
-through an issued descriptor, but never receives the key; copying a tag to
-another object or mapping does not authenticate it.
+The helper can read a tag through an issued descriptor, but never receives the
+key; copying a tag to another object or mapping does not authenticate it.
 
 `TorrentStorageLease` records lifecycle state, policy revision, maximum access,
 provenance, modification permission, and automatic-deletion ownership for each
@@ -309,12 +306,12 @@ acknowledgement makes the native operation fail after its durable commit, which
 stops the engine before storage authority is released.
 
 After cooperative acknowledgement, the GUI removes the claim from the live
-broker registry. It then verifies claim generation, filesystem identity,
-provenance, and the object-bound ownership tag before unlinking any manifest
-object. A remove-without-delete operation instead releases the authenticated
-markers and retires the claim while preserving its payload. Imported files are
-also preserved by automatic cleanup, but an explicit **Delete Data Permanently**
-request authorizes deletion of their authenticated manifest objects. Unrelated
+broker registry. It then verifies claim generation, provenance, and filesystem
+identity before unlinking any manifest object; app-created objects additionally
+require their object-bound ownership tag. A remove-without-delete operation
+instead retires the claim while preserving its payload. Imported files are also
+preserved by automatic cleanup, but an explicit **Delete Data Permanently**
+request authorizes deletion of the identity-pinned manifest objects. Unrelated
 directory contents and unknown files are always preserved; claimed directories
 are removed only when empty.
 
