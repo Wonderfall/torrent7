@@ -18,7 +18,9 @@ flowchart LR
 The GUI owns all user-filesystem authority. The helper owns torrent protocol
 execution and network authority. A helper request can identify only a storage
 claim, its immutable generation, a file index, and requested access. It cannot
-name or discover a path.
+submit a path or receive a directory capability. An issued file descriptor may
+reveal its pathname through facilities such as `F_GETPATH`; path knowledge is
+therefore neither treated as secret nor accepted as filesystem authority.
 
 ## Process and authority split
 
@@ -117,7 +119,12 @@ Immutable authority and mutable policy are separate.
 - expected sizes and padding status;
 - the collision-selected top-level name and pinned filesystem identities;
 - a digest of the complete physical mapping; and
-- random ownership-marker material kept out of the helper.
+- a random HMAC key stored only in the GUI journal.
+
+Each app-created object stores an HMAC tag over the claim, generation, canonical
+relative mapping, object kind, device, inode, owner UID, and file generation.
+The helper can read a tag through an issued descriptor, but never receives the
+key; copying a tag to another object or mapping does not authenticate it.
 
 `TorrentStorageLease` records lifecycle state, policy revision, maximum access,
 provenance, modification permission, and automatic-deletion ownership for each
@@ -179,16 +186,26 @@ openPayload(claimID, generation, fileIndex, access)
 statBatch(claimID, generation, fileIndices)
 ```
 
-Requests and replies are bounded and deadline-limited. Work runs off the main
-queue. Request IDs correlate replies but do not grant authority. Claim creation,
-paths, directory descriptors, rename, move, and deletion are deliberately absent.
+Requests and replies are bounded and deadline-limited. Raw XPC lengths are
+checked before values are copied or bridged, and the server rejects excessive
+in-flight work, request rates, and distant deadlines. Malformed or abusive
+sessions are cancelled. Work runs off the main queue. Request IDs correlate
+replies but do not grant authority. Claim creation, paths, directory descriptors,
+rename, move, and deletion are deliberately absent.
 
-For every open, the broker validates the current claim and generation, recomputes
-the immutable mapping digest, checks lease policy, traverses each stored
-component from the verified parent descriptor, and compares the opened object
-with its pinned identity. It rejects links, non-regular files, unexpected hard
-links, size violations, stale mappings, and access beyond policy. A successful
-reply carries exactly one descriptor plus bounded `fstat` metadata.
+Claim installation validates the immutable mapping digest. For every open, the
+broker validates the current claim and generation, checks lease policy, directly
+indexes the immutable mapping, traverses each stored component from the verified
+parent descriptor, and compares the opened object with its pinned device, inode,
+link count, owner UID, and file generation. Leaf opens use `O_NONBLOCK` before
+type validation, so substituted FIFOs cannot occupy a worker waiting for a
+peer. The broker rejects links, non-regular files, unexpected hard links, size
+violations, stale mappings, invalid ownership tags, and access beyond policy. A
+successful reply carries exactly one descriptor plus bounded `fstat` metadata.
+
+`statBatch` can return bounded metadata for a mapped file whose policy is
+`.unavailable`, but cannot return its descriptor or contents. In this model,
+unavailable means content-unavailable rather than entirely unobservable.
 
 ## Engine broker client and native provider
 
@@ -218,6 +235,22 @@ In provider mode:
 - rename and move are rejected;
 - remove may delete the private part file but never user payloads; and
 - provider failure has no pathname fallback.
+
+## Residual file capabilities
+
+The containment boundary is spatial. A compromised helper controls every
+content-authorized file across all `.activating`, `.active`, and
+`.activationUnknown` claims, plus descriptors and bytes it retained earlier.
+For an issued file it may recover the path string, duplicate or map the
+descriptor, read or corrupt allowed contents, lock the file, and attempt
+descriptor-scoped metadata changes. It also retains its private state and
+network authority and can cause availability damage.
+
+Those capabilities do not let it submit an arbitrary path, obtain a parent or
+sibling directory descriptor, traverse from a regular-file descriptor, or ask
+the broker to create, rename, move, link, or unlink a user path. Padding and
+content-unavailable files cannot receive content descriptors, and provider
+failure cannot fall back to a pathname.
 
 ## Activation and import
 
@@ -264,16 +297,20 @@ crash does not silently refetch or guess the result.
 
 ## Removal and revocation
 
-The engine removes the torrent from libtorrent and releases file-pool handles
-without deleting payloads. The GUI then verifies claim generation, filesystem
-identity, provenance, and app ownership before deleting any manifest object.
-Imported and unknown files are always preserved.
+Removal uses soft revocation. The GUI first transitions the claim out of a
+broker-active state, which denies future opens, then asks the engine to remove
+the torrent and release its file-pool handles without deleting payloads. After
+that cooperative acknowledgement, the GUI verifies claim generation,
+filesystem identity, provenance, and the object-bound ownership tag before
+unlinking any manifest object. Imported and unknown files are always preserved.
 
-Hard revocation invalidates command and broker sessions and invalidates the
-helper process. A new engine epoch is not created until the old process is no
-longer authoritative. If immediate termination is uncertain, deletion remains
-pending for clean-launch recovery. A cooperative helper acknowledgement is
-useful operational evidence, not security proof.
+Neither a claim transition nor session cancellation can recall an already
+issued descriptor, an in-flight successful reply, a memory mapping, or copied
+bytes. A retained descriptor can remain usable until it is closed or the helper
+exits, even after the GUI unlinks the pathname. Ordinary torrent removal does
+not terminate the helper process and does not promise temporal revocation or
+secure erasure; terminating it would not recover data already copied. This does
+not expand spatial authority beyond objects the broker previously granted.
 
 ## Persistence cutover
 
@@ -315,7 +352,8 @@ protection, fortify, hidden visibility, PAC, BTI, and trap-only sanitizer checks
 
 ## Non-negotiable invariants
 
-1. The helper receives no bookmark, payload path, or parent directory descriptor.
+1. The GUI sends no bookmark, payload path, or parent directory descriptor to
+   the helper.
 2. A broker request never contains a path.
 3. Only the GUI creates claims, physical mappings, destinations, or payload files.
 4. A successful broker open grants one exact regular-file descriptor.
@@ -339,7 +377,15 @@ Scripts/test-swift.zsh
 The bridge analysis gate applies and validates the ordered libtorrent patch
 series. Bridge and Swift tests cover provider routing, no-fallback behavior,
 resume cutover, parser bounds, destination races, broker authentication and FD
-validation, claim recovery, ambiguous activation containment, imports, removal,
-and magnet promotion. Separate fuzz harnesses cover native API and parser input
-surfaces; their expensive build and execution are intentionally independent of
-the routine test gates.
+validation, hostile XPC bounds, nonblocking special-file rejection, per-object
+ownership authentication, path disclosure, retained-descriptor soft revocation,
+claim recovery, ambiguous activation containment, imports, removal, and magnet
+promotion. Separate fuzz harnesses cover native API and parser input surfaces;
+their expensive build and execution are intentionally independent of the
+routine test gates.
+
+The signed Enhanced Security integration gate currently verifies the real
+process lifecycle and authenticated broker handshake, but its staged dataset
+does not request payload descriptors. A production-identified adversarial
+Seatbelt test covering descriptor-relative path, link, rename, unlink, xattr,
+flag, and raw-XPC attempts remains a release-validation gap.

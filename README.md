@@ -123,7 +123,9 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
   component relative to verified directory descriptors, rejects symlinks and
   non-regular files, and returns only the exact descriptor requested. Libtorrent
   has no pathname fallback. Imported existing data is never automatically
-  deleted.
+  deleted. Path strings are not treated as secret: an issued descriptor may
+  reveal its pathname. Claim revocation denies future broker opens but cannot
+  recall a descriptor or data already delivered.
 - **Helper-authoritative network policy:** the engine starts blocked. A network
   binding can unblock it only after the helper-side interface monitor validates
   the interface fingerprint and VPN service identity. The networkless GUI gets a
@@ -197,7 +199,10 @@ folder and active torrent-specific folders. It resolves those scopes, traverses
 and creates destinations relative to verified directory descriptors, and
 transfers only exact regular-file descriptors through the storage broker. No
 bookmark, parent directory descriptor, payload path, rename authority, or
-deletion authority crosses into the helper.
+deletion authority is transmitted to the helper. A received descriptor may
+reveal its path, but the broker exposes no path-taking operation, the helper
+receives no directory capability, and its sandbox has no user-selected-file
+authority.
 
 Resume data and removal tombstones live in the helper's container and are
 written with owner-only permissions and durability barriers. Both executable
