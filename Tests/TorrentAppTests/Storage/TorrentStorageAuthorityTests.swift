@@ -174,6 +174,53 @@ struct TorrentStorageAuthorityTests {
         }
     }
 
+    @Test("Failed reservations capture their partial cleanup")
+    func failedReservationUsesAtomicCleanup() throws {
+        try withTemporaryDirectory { root in
+            let downloads = root.appending(
+                path: "Downloads",
+                directoryHint: .isDirectory
+            )
+            try FileManager.default.createDirectory(
+                at: downloads,
+                withIntermediateDirectories: true
+            )
+            let parent = try makeParent(downloads)
+            let logical = try makeLogicalManifest(
+                name: "bundle",
+                contentKind: .directory,
+                files: [
+                    .init(
+                        index: 0,
+                        pathComponents: ["duplicate.bin"],
+                        expectedSize: 8,
+                        isPadding: false
+                    ),
+                    .init(
+                        index: 1,
+                        pathComponents: ["duplicate.bin"],
+                        expectedSize: 8,
+                        isPadding: false
+                    ),
+                ]
+            )
+
+            #expect(throws: TorrentStoragePlanningError.self) {
+                _ = try TorrentStorageDestinationPlanner().reserve(
+                    manifest: logical,
+                    in: parent,
+                    claimID: UUID(),
+                    generation: 1,
+                    ownershipKey: TorrentStorageDestinationPlanner.randomOwnershipKey()
+                )
+            }
+            #expect(!FileManager.default.fileExists(
+                atPath: downloads.appending(path: "bundle").path()
+            ))
+            #expect(try deletionQuarantineNames(in: downloads).isEmpty)
+        }
+    }
+
     @Test("Broker opens only the exact claimed inode and enforces policy")
     func brokerEnforcesIdentityAndPolicy() throws {
         try withTemporaryDirectory { root in
@@ -309,6 +356,16 @@ struct TorrentStorageAuthorityTests {
             #expect(statistics[1].size == 8)
             #expect(statistics[1].device == 0)
             #expect(statistics[1].inode == 0)
+
+            try planner.deleteClaimedPayload(
+                claim: makeClaim(reservation, state: .deleting),
+                from: parent,
+                authorizedBy: .automaticCleanup
+            )
+            #expect(!FileManager.default.fileExists(
+                atPath: downloads.appending(path: selected).path()
+            ))
+            #expect(try deletionQuarantineNames(in: downloads).isEmpty)
         }
     }
 
@@ -344,6 +401,117 @@ struct TorrentStorageAuthorityTests {
             }
             #expect(try Data(contentsOf: replacementPath) == foreign)
             #expect(FileManager.default.fileExists(atPath: original.path()))
+            #expect(try deletionQuarantineNames(in: replacement.downloads).isEmpty)
+        }
+    }
+
+    @Test("Atomic deletion capture preserves a replacement file")
+    func deletionCapturePreservesReplacementFile() throws {
+        try withTemporaryDirectory { root in
+            let fixture = try reserveSingleFile(
+                in: root,
+                name: "replace.bin",
+                size: 8
+            )
+            let payload = fixture.downloads.appending(path: "replace.bin")
+            let claimedDescriptor = unsafe payload.path().withCString { pointer in
+                unsafe Darwin.open(
+                    pointer,
+                    O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+                )
+            }
+            try #require(claimedDescriptor >= 0)
+            defer { _ = Darwin.close(claimedDescriptor) }
+
+            let replacement = Data("foreign".utf8)
+            let planner = TorrentStorageDestinationPlanner()
+            try planner.deleteClaimedPayload(
+                claim: makeClaim(fixture.reservation, state: .deleting),
+                from: fixture.parent,
+                authorizedBy: .automaticCleanup,
+                afterCapture: {
+                    try? replacement.write(
+                        to: payload,
+                        options: .withoutOverwriting
+                    )
+                }
+            )
+
+            #expect(try Data(contentsOf: payload) == replacement)
+            var metadata = stat()
+            #expect(unsafe Darwin.fstat(claimedDescriptor, &metadata) == 0)
+            #expect(metadata.st_nlink == 0)
+            #expect(try deletionQuarantineNames(in: fixture.downloads).isEmpty)
+        }
+    }
+
+    @Test("Atomic directory capture preserves a replacement directory")
+    func directoryCapturePreservesReplacementDirectory() throws {
+        try withTemporaryDirectory { root in
+            let downloads = root.appending(
+                path: "Downloads",
+                directoryHint: .isDirectory
+            )
+            let payloadRoot = downloads.appending(
+                path: "bundle",
+                directoryHint: .isDirectory
+            )
+            let nested = payloadRoot.appending(
+                path: "nested",
+                directoryHint: .isDirectory
+            )
+            try FileManager.default.createDirectory(
+                at: nested,
+                withIntermediateDirectories: true
+            )
+            try Data("payload".utf8).write(
+                to: nested.appending(path: "payload.bin")
+            )
+
+            let parent = try makeParent(downloads)
+            let logical = try makeLogicalManifest(
+                name: "bundle",
+                contentKind: .directory,
+                files: [
+                    .init(
+                        index: 0,
+                        pathComponents: ["nested", "payload.bin"],
+                        expectedSize: 8,
+                        isPadding: false
+                    ),
+                ]
+            )
+            let reservation = try TorrentStorageDestinationPlanner().importExisting(
+                manifest: logical,
+                in: parent,
+                claimID: UUID(),
+                generation: 1,
+                ownershipKey: TorrentStorageDestinationPlanner.randomOwnershipKey(),
+                selectedTopLevelName: logical.name
+            )
+            let replacement = Data("foreign".utf8)
+            let planner = TorrentStorageDestinationPlanner()
+            try planner.deleteClaimedPayload(
+                claim: makeClaim(reservation, state: .deleting),
+                from: parent,
+                authorizedBy: .explicitUserRequest,
+                afterCapture: {
+                    try? FileManager.default.createDirectory(
+                        at: payloadRoot,
+                        withIntermediateDirectories: false
+                    )
+                    try? replacement.write(
+                        to: payloadRoot.appending(path: "foreign.txt"),
+                        options: .withoutOverwriting
+                    )
+                }
+            )
+
+            #expect(
+                try Data(contentsOf: payloadRoot.appending(path: "foreign.txt"))
+                    == replacement
+            )
+            #expect(try deletionQuarantineNames(in: downloads).isEmpty)
         }
     }
 
@@ -1324,6 +1492,14 @@ struct TorrentStorageAuthorityTests {
             }
         }
         return count == tag.count ? tag : nil
+    }
+
+    private func deletionQuarantineNames(in directory: URL) throws -> [String] {
+        try FileManager.default.contentsOfDirectory(
+            atPath: directory.path()
+        ).filter {
+            $0.hasPrefix(".torrent7-deletion-")
+        }
     }
 
     private func reserveSingleFile(

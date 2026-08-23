@@ -184,6 +184,9 @@ enum TorrentStorageDestinationChoice: Equatable, Sendable {
 struct TorrentStorageDestinationPlanner: Sendable {
     static let ownershipAttribute = "app.torrent7.storage-claim"
     private static let maximumCollisionAttempts = 10_000
+    private static let deletionRenameFlags = UInt32(
+        RENAME_EXCL | RENAME_NOFOLLOW_ANY | RENAME_RESOLVE_BENEATH
+    )
 
     func planTopLevelName(
         for logicalManifest: TorrentLogicalManifest,
@@ -364,7 +367,11 @@ struct TorrentStorageDestinationPlanner: Sendable {
                 )
             )
         } catch {
-            cleanUp(created, parentDescriptor: parent.descriptor)
+            cleanUp(
+                created,
+                parentDescriptor: parent.descriptor,
+                claimID: claimID
+            )
             throw error
         }
     }
@@ -575,7 +582,8 @@ struct TorrentStorageDestinationPlanner: Sendable {
     func deleteClaimedPayload(
         claim: TorrentStorageClaim,
         from parent: TorrentStorageParentAuthority,
-        authorizedBy authorization: TorrentPayloadDeletionAuthorization
+        authorizedBy authorization: TorrentPayloadDeletionAuthorization,
+        afterCapture: (@Sendable () -> Void)? = nil
     ) throws {
         try parent.validate()
         let manifest = claim.manifest
@@ -633,20 +641,272 @@ struct TorrentStorageDestinationPlanner: Sendable {
             throw TorrentStoragePlanningError.deletionNotProvable
         }
 
-        for mapping in deletableMappings.sorted(by: {
-            ($0.relativePathComponents?.count ?? 0) > ($1.relativePathComponents?.count ?? 0)
-        }) {
+        let quarantine = try makeDeletionQuarantine(
+            in: parent.descriptor,
+            identifier: claim.operationNonce
+        )
+        var removedQuarantine = false
+        defer {
+            if !removedQuarantine {
+                _ = try? removeDeletionQuarantine(
+                    quarantine,
+                    from: parent.descriptor
+                )
+            }
+            _ = Darwin.close(quarantine.descriptor)
+        }
+
+        let topLevelName = manifest.collisionSelectedTopLevelName
+        let captureName = "payload"
+        guard try captureForDeletion(
+            named: topLevelName,
+            from: parent.descriptor,
+            as: captureName,
+            in: quarantine.descriptor
+        ) else {
+            try removeDeletionQuarantine(quarantine, from: parent.descriptor)
+            removedQuarantine = true
+            return
+        }
+        afterCapture?()
+
+        var captureExists = true
+        do {
+            switch manifest.contentKind {
+            case .singleFile:
+                try deleteCapturedSingleFile(
+                    deletableMappings,
+                    manifest: manifest,
+                    captureName: captureName,
+                    quarantineDescriptor: quarantine.descriptor,
+                    requiresOwnershipTag: deletesAppCreatedPayload
+                )
+                captureExists = false
+            case .directory:
+                let removed = try deleteCapturedDirectoryPayload(
+                    deletableMappings,
+                    manifest: manifest,
+                    captureName: captureName,
+                    quarantineDescriptor: quarantine.descriptor,
+                    requiresOwnershipTag: deletesAppCreatedPayload,
+                    preservesUnrelatedContents: deletesImportedPayload
+                )
+                if removed {
+                    captureExists = false
+                } else {
+                    try restoreDeletionCapture(
+                        named: captureName,
+                        from: quarantine.descriptor,
+                        as: topLevelName,
+                        in: parent.descriptor
+                    )
+                    captureExists = false
+                }
+            }
+        } catch {
+            if captureExists {
+                try restoreDeletionCapture(
+                    named: captureName,
+                    from: quarantine.descriptor,
+                    as: topLevelName,
+                    in: parent.descriptor
+                )
+            }
+            throw error
+        }
+
+        try removeDeletionQuarantine(quarantine, from: parent.descriptor)
+        removedQuarantine = true
+    }
+
+    private struct DeletionQuarantine {
+        let name: String
+        let descriptor: Int32
+        let identity: TorrentFilesystemIdentity
+    }
+
+    /// macOS cannot unlink an already-open descriptor. The fresh directory
+    /// turns an exclusive rename into the security boundary: mutable payload
+    /// names are captured before validation, and only quarantine names are
+    /// subsequently unlinked.
+    private func makeDeletionQuarantine(
+        in parentDescriptor: Int32,
+        identifier: UUID
+    ) throws -> DeletionQuarantine {
+        let name = ".torrent7-deletion-\(identifier.uuidString.lowercased())"
+        let status = unsafe name.withCString { pointer in
+            unsafe Darwin.mkdirat(parentDescriptor, pointer, mode_t(0o700))
+        }
+        guard status == 0 else {
+            throw TorrentStoragePlanningError.deletionNotProvable
+        }
+
+        let descriptor = unsafe name.withCString { pointer in
+            unsafe Darwin.openat(
+                parentDescriptor,
+                pointer,
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+            )
+        }
+        guard descriptor >= 0 else {
+            throw TorrentStoragePlanningError.deletionNotProvable
+        }
+        do {
+            return DeletionQuarantine(
+                name: name,
+                descriptor: descriptor,
+                identity: try validateDirectoryDescriptor(descriptor)
+            )
+        } catch {
+            _ = Darwin.close(descriptor)
+            throw error
+        }
+    }
+
+    private func removeDeletionQuarantine(
+        _ quarantine: DeletionQuarantine,
+        from parentDescriptor: Int32
+    ) throws {
+        var descriptorMetadata = stat()
+        var pathMetadata = stat()
+        let descriptorStatus = unsafe Darwin.fstat(
+            quarantine.descriptor,
+            &descriptorMetadata
+        )
+        let pathStatus = unsafe quarantine.name.withCString { pointer in
+            unsafe Darwin.fstatat(
+                parentDescriptor,
+                pointer,
+                &pathMetadata,
+                AT_SYMLINK_NOFOLLOW
+            )
+        }
+        guard descriptorStatus == 0,
+              pathStatus == 0,
+              (pathMetadata.st_mode & S_IFMT) == S_IFDIR,
+              identity(descriptorMetadata).refersToSameObject(
+                as: quarantine.identity
+              ),
+              identity(pathMetadata).refersToSameObject(
+                as: quarantine.identity
+              ) else {
+            throw TorrentStoragePlanningError.deletionNotProvable
+        }
+        let status = unsafe quarantine.name.withCString { pointer in
+            unsafe Darwin.unlinkat(
+                parentDescriptor,
+                pointer,
+                AT_REMOVEDIR
+            )
+        }
+        guard status == 0 else {
+            throw TorrentStoragePlanningError.deletionNotProvable
+        }
+    }
+
+    private func deleteCapturedSingleFile(
+        _ mappings: [TorrentPhysicalFileMapping],
+        manifest: TorrentStorageManifest,
+        captureName: String,
+        quarantineDescriptor: Int32,
+        requiresOwnershipTag: Bool
+    ) throws {
+        guard mappings.count == 1,
+              let mapping = mappings.first,
+              mapping.relativePathComponents
+                == [manifest.collisionSelectedTopLevelName],
+              let expectedIdentity = mapping.identity else {
+            throw TorrentStoragePlanningError.deletionNotProvable
+        }
+        let descriptor = try openCapturedObject(
+            named: captureName,
+            in: quarantineDescriptor,
+            isDirectory: false
+        )
+        defer { _ = Darwin.close(descriptor) }
+        let actualIdentity = try validatePayloadDescriptor(
+            descriptor,
+            writable: true
+        )
+        guard actualIdentity == expectedIdentity,
+              actualIdentity.refersToSameObject(
+                as: manifest.topLevelIdentity
+              ) else {
+            throw TorrentStoragePlanningError.deletionNotProvable
+        }
+        if requiresOwnershipTag {
+            try verifyOwnershipTag(
+                key: manifest.ownershipKey,
+                claimID: manifest.claimID,
+                claimGeneration: manifest.generation,
+                relativePathComponents: [
+                    manifest.collisionSelectedTopLevelName,
+                ],
+                identity: actualIdentity,
+                isDirectory: false,
+                descriptor: descriptor
+            )
+        }
+        let status = unsafe captureName.withCString { pointer in
+            unsafe Darwin.unlinkat(quarantineDescriptor, pointer, 0)
+        }
+        guard status == 0 else {
+            throw TorrentStoragePlanningError.deletionNotProvable
+        }
+    }
+
+    private func deleteCapturedDirectoryPayload(
+        _ mappings: [TorrentPhysicalFileMapping],
+        manifest: TorrentStorageManifest,
+        captureName: String,
+        quarantineDescriptor: Int32,
+        requiresOwnershipTag: Bool,
+        preservesUnrelatedContents: Bool
+    ) throws -> Bool {
+        let rootDescriptor = try openCapturedObject(
+            named: captureName,
+            in: quarantineDescriptor,
+            isDirectory: true
+        )
+        defer { _ = Darwin.close(rootDescriptor) }
+        let rootIdentity = try validateDirectoryDescriptor(rootDescriptor)
+        let topLevelName = manifest.collisionSelectedTopLevelName
+        guard rootIdentity.refersToSameObject(
+            as: manifest.topLevelIdentity
+        ) else {
+            throw TorrentStoragePlanningError.deletionNotProvable
+        }
+        if requiresOwnershipTag {
+            try verifyOwnershipTag(
+                key: manifest.ownershipKey,
+                claimID: manifest.claimID,
+                claimGeneration: manifest.generation,
+                relativePathComponents: [topLevelName],
+                identity: rootIdentity,
+                isDirectory: true,
+                descriptor: rootDescriptor
+            )
+        }
+
+        var directories = Set<[String]>()
+        for mapping in mappings {
             guard let components = mapping.relativePathComponents,
+                  components.first == topLevelName,
+                  components.count > 1,
                   let expectedIdentity = mapping.identity,
                   let leaf = components.last else {
                 throw TorrentStoragePlanningError.deletionNotProvable
             }
+            let relativeComponents = Array(components.dropFirst())
+            for count in 1..<relativeComponents.count {
+                directories.insert(Array(relativeComponents.prefix(count)))
+            }
             let containingDirectory = try openParentDirectory(
-                of: components,
-                startingAt: parent.descriptor
+                of: relativeComponents,
+                startingAt: rootDescriptor
             )
             defer {
-                if containingDirectory != parent.descriptor {
+                if containingDirectory != rootDescriptor {
                     _ = Darwin.close(containingDirectory)
                 }
             }
@@ -654,7 +914,7 @@ struct TorrentStorageDestinationPlanner: Sendable {
                 unsafe Darwin.openat(
                     containingDirectory,
                     pointer,
-                    O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+                    O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
                 )
             }
             if descriptor < 0, errno == ENOENT {
@@ -663,10 +923,15 @@ struct TorrentStorageDestinationPlanner: Sendable {
             guard descriptor >= 0 else {
                 throw TorrentStoragePlanningError.deletionNotProvable
             }
-            let actualIdentity: TorrentFilesystemIdentity
             do {
-                actualIdentity = try validatePayloadDescriptor(descriptor, writable: true)
-                if deletesAppCreatedPayload {
+                let actualIdentity = try validatePayloadDescriptor(
+                    descriptor,
+                    writable: true
+                )
+                guard actualIdentity == expectedIdentity else {
+                    throw TorrentStoragePlanningError.deletionNotProvable
+                }
+                if requiresOwnershipTag {
                     try verifyOwnershipTag(
                         key: manifest.ownershipKey,
                         claimID: manifest.claimID,
@@ -682,9 +947,6 @@ struct TorrentStorageDestinationPlanner: Sendable {
                 throw error
             }
             _ = Darwin.close(descriptor)
-            guard actualIdentity == expectedIdentity else {
-                throw TorrentStoragePlanningError.deletionNotProvable
-            }
             let status = unsafe leaf.withCString { pointer in
                 unsafe Darwin.unlinkat(containingDirectory, pointer, 0)
             }
@@ -693,28 +955,22 @@ struct TorrentStorageDestinationPlanner: Sendable {
             }
         }
 
-        var directories = Set<[String]>()
-        for mapping in deletableMappings {
-            guard let components = mapping.relativePathComponents else {
-                continue
+        let sortedDirectories = directories.sorted { left, right in
+            if left.count != right.count {
+                return left.count > right.count
             }
-            for count in 1..<components.count {
-                directories.insert(Array(components.prefix(count)))
-            }
+            return left.lexicographicallyPrecedes(right)
         }
-        if manifest.contentKind == .directory {
-            directories.insert([manifest.collisionSelectedTopLevelName])
-        }
-        for components in directories.sorted(by: { $0.count > $1.count }) {
+        for components in sortedDirectories {
             guard let leaf = components.last else {
                 continue
             }
             let containingDirectory = try openParentDirectory(
                 of: components,
-                startingAt: parent.descriptor
+                startingAt: rootDescriptor
             )
             defer {
-                if containingDirectory != parent.descriptor {
+                if containingDirectory != rootDescriptor {
                     _ = Darwin.close(containingDirectory)
                 }
             }
@@ -732,24 +988,19 @@ struct TorrentStorageDestinationPlanner: Sendable {
                 throw TorrentStoragePlanningError.deletionNotProvable
             }
             do {
-                let identity = try validateDirectoryDescriptor(descriptor)
-                if deletesAppCreatedPayload {
+                let actualIdentity = try validateDirectoryDescriptor(
+                    descriptor
+                )
+                if requiresOwnershipTag {
                     try verifyOwnershipTag(
                         key: manifest.ownershipKey,
                         claimID: manifest.claimID,
                         claimGeneration: manifest.generation,
-                        relativePathComponents: components,
-                        identity: identity,
+                        relativePathComponents: [topLevelName] + components,
+                        identity: actualIdentity,
                         isDirectory: true,
                         descriptor: descriptor
                     )
-                }
-                if components.count == 1 {
-                    guard identity.refersToSameObject(
-                        as: manifest.topLevelIdentity
-                    ) else {
-                        throw TorrentStoragePlanningError.deletionNotProvable
-                    }
                 }
             } catch {
                 _ = Darwin.close(descriptor)
@@ -757,14 +1008,112 @@ struct TorrentStorageDestinationPlanner: Sendable {
             }
             _ = Darwin.close(descriptor)
             let status = unsafe leaf.withCString { pointer in
-                unsafe Darwin.unlinkat(containingDirectory, pointer, AT_REMOVEDIR)
+                unsafe Darwin.unlinkat(
+                    containingDirectory,
+                    pointer,
+                    AT_REMOVEDIR
+                )
             }
             guard status == 0
                     || errno == ENOENT
-                    || (deletesImportedPayload && errno == ENOTEMPTY) else {
+                    || (preservesUnrelatedContents && errno == ENOTEMPTY) else {
                 throw TorrentStoragePlanningError.deletionNotProvable
             }
         }
+
+        let status = unsafe captureName.withCString { pointer in
+            unsafe Darwin.unlinkat(
+                quarantineDescriptor,
+                pointer,
+                AT_REMOVEDIR
+            )
+        }
+        if status == 0 {
+            return true
+        }
+        guard preservesUnrelatedContents,
+              errno == ENOTEMPTY else {
+            throw TorrentStoragePlanningError.deletionNotProvable
+        }
+        return false
+    }
+
+    private func captureForDeletion(
+        named sourceName: String,
+        from sourceDirectory: Int32,
+        as captureName: String,
+        in quarantineDescriptor: Int32
+    ) throws -> Bool {
+        let status = unsafe sourceName.withCString { source in
+            unsafe captureName.withCString { destination in
+                unsafe Darwin.renameatx_np(
+                    sourceDirectory,
+                    source,
+                    quarantineDescriptor,
+                    destination,
+                    Self.deletionRenameFlags
+                )
+            }
+        }
+        if status == 0 {
+            return true
+        }
+        guard errno == ENOENT else {
+            throw TorrentStoragePlanningError.deletionNotProvable
+        }
+        return false
+    }
+
+    private func restoreDeletionCapture(
+        named captureName: String,
+        from quarantineDescriptor: Int32,
+        as destinationName: String,
+        in destinationDirectory: Int32
+    ) throws {
+        let status = unsafe captureName.withCString { source in
+            unsafe destinationName.withCString { destination in
+                unsafe Darwin.renameatx_np(
+                    quarantineDescriptor,
+                    source,
+                    destinationDirectory,
+                    destination,
+                    Self.deletionRenameFlags
+                )
+            }
+        }
+        guard status == 0 else {
+            throw TorrentStoragePlanningError.deletionNotProvable
+        }
+    }
+
+    private func openCapturedObject(
+        named name: String,
+        in directoryDescriptor: Int32,
+        isDirectory: Bool
+    ) throws -> Int32 {
+        var metadata = stat()
+        let status = unsafe name.withCString { pointer in
+            unsafe Darwin.fstatat(
+                directoryDescriptor,
+                pointer,
+                &metadata,
+                AT_SYMLINK_NOFOLLOW
+            )
+        }
+        let expectedType = isDirectory ? S_IFDIR : S_IFREG
+        guard status == 0,
+              (metadata.st_mode & S_IFMT) == expectedType else {
+            throw TorrentStoragePlanningError.deletionNotProvable
+        }
+        let flags = (isDirectory ? O_RDONLY | O_DIRECTORY : O_RDONLY)
+            | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+        let descriptor = unsafe name.withCString { pointer in
+            unsafe Darwin.openat(directoryDescriptor, pointer, flags)
+        }
+        guard descriptor >= 0 else {
+            throw TorrentStoragePlanningError.deletionNotProvable
+        }
+        return descriptor
     }
 
     private struct ReservedTopLevel {
@@ -1349,47 +1698,134 @@ struct TorrentStorageDestinationPlanner: Sendable {
         return "\(preferredName[..<dot]) \(attempt)\(preferredName[dot...])"
     }
 
-    private func cleanUp(_ objects: [CreatedObject], parentDescriptor: Int32) {
-        for object in objects.reversed() {
-            guard let parent = try? openParentDirectory(
-                of: object.components,
-                startingAt: parentDescriptor
-            ) else {
-                continue
+    private func cleanUp(
+        _ objects: [CreatedObject],
+        parentDescriptor: Int32,
+        claimID: UUID
+    ) {
+        guard let root = objects.first,
+              root.components.count == 1,
+              let rootName = root.components.first,
+              let quarantine = try? makeDeletionQuarantine(
+                  in: parentDescriptor,
+                  identifier: claimID
+              ) else {
+            return
+        }
+        defer {
+            _ = try? removeDeletionQuarantine(
+                quarantine,
+                from: parentDescriptor
+            )
+            _ = Darwin.close(quarantine.descriptor)
+        }
+
+        let captureName = "payload"
+        guard (try? captureForDeletion(
+            named: rootName,
+            from: parentDescriptor,
+            as: captureName,
+            in: quarantine.descriptor
+        )) == true else {
+            return
+        }
+
+        do {
+            let rootDescriptor = try openCapturedObject(
+                named: captureName,
+                in: quarantine.descriptor,
+                isDirectory: root.isDirectory
+            )
+            defer { _ = Darwin.close(rootDescriptor) }
+            let actualRoot = try root.isDirectory
+                ? validateDirectoryDescriptor(rootDescriptor)
+                : validatePayloadDescriptor(rootDescriptor, writable: true)
+            guard actualRoot.refersToSameObject(as: root.identity) else {
+                throw TorrentStoragePlanningError.deletionNotProvable
             }
-            defer {
-                if parent != parentDescriptor {
-                    _ = Darwin.close(parent)
+
+            if root.isDirectory {
+                for object in objects.dropFirst().reversed() {
+                    try deleteCreatedObject(
+                        object,
+                        relativeTo: rootDescriptor
+                    )
                 }
             }
-            guard let leaf = object.components.last else {
-                continue
-            }
-            let current = unsafe leaf.withCString { pointer in
-                unsafe Darwin.openat(
-                    parent,
-                    pointer,
-                    (object.isDirectory ? O_RDONLY | O_DIRECTORY : O_RDONLY)
-                        | O_CLOEXEC | O_NOFOLLOW
-                )
-            }
-            guard current >= 0 else {
-                continue
-            }
-            let actual = object.isDirectory
-                ? try? validateDirectoryDescriptor(current)
-                : try? validatePayloadDescriptor(current, writable: false)
-            _ = Darwin.close(current)
-            guard actual?.refersToSameObject(as: object.identity) == true else {
-                continue
-            }
-            _ = unsafe leaf.withCString { pointer in
+            let status = unsafe captureName.withCString { pointer in
                 unsafe Darwin.unlinkat(
-                    parent,
+                    quarantine.descriptor,
                     pointer,
-                    object.isDirectory ? AT_REMOVEDIR : 0
+                    root.isDirectory ? AT_REMOVEDIR : 0
                 )
             }
+            guard status == 0 else {
+                throw TorrentStoragePlanningError.deletionNotProvable
+            }
+        } catch {
+            try? restoreDeletionCapture(
+                named: captureName,
+                from: quarantine.descriptor,
+                as: rootName,
+                in: parentDescriptor
+            )
+        }
+    }
+
+    private func deleteCreatedObject(
+        _ object: CreatedObject,
+        relativeTo rootDescriptor: Int32
+    ) throws {
+        let components = Array(object.components.dropFirst())
+        guard !components.isEmpty,
+              let leaf = components.last else {
+            throw TorrentStoragePlanningError.deletionNotProvable
+        }
+        let containingDirectory = try openParentDirectory(
+            of: components,
+            startingAt: rootDescriptor
+        )
+        defer {
+            if containingDirectory != rootDescriptor {
+                _ = Darwin.close(containingDirectory)
+            }
+        }
+        let descriptor = unsafe leaf.withCString { pointer in
+            unsafe Darwin.openat(
+                containingDirectory,
+                pointer,
+                (object.isDirectory ? O_RDONLY | O_DIRECTORY : O_RDONLY)
+                    | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+            )
+        }
+        if descriptor < 0, errno == ENOENT {
+            return
+        }
+        guard descriptor >= 0 else {
+            throw TorrentStoragePlanningError.deletionNotProvable
+        }
+        let actual: TorrentFilesystemIdentity
+        do {
+            actual = try object.isDirectory
+                ? validateDirectoryDescriptor(descriptor)
+                : validatePayloadDescriptor(descriptor, writable: true)
+        } catch {
+            _ = Darwin.close(descriptor)
+            throw error
+        }
+        _ = Darwin.close(descriptor)
+        guard actual.refersToSameObject(as: object.identity) else {
+            throw TorrentStoragePlanningError.deletionNotProvable
+        }
+        let status = unsafe leaf.withCString { pointer in
+            unsafe Darwin.unlinkat(
+                containingDirectory,
+                pointer,
+                object.isDirectory ? AT_REMOVEDIR : 0
+            )
+        }
+        guard status == 0 || errno == ENOENT else {
+            throw TorrentStoragePlanningError.deletionNotProvable
         }
     }
 
