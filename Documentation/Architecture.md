@@ -315,6 +315,16 @@ request authorizes deletion of the identity-pinned manifest objects. Unrelated
 directory contents and unknown files are always preserved; claimed directories
 are removed only when empty.
 
+Deletion never validates and then unlinks the mutable user-visible payload
+pathname. The complete top-level payload is first moved atomically and
+exclusively into a fresh GUI-owned quarantine directory using descriptor-relative
+`renameatx_np`. Manifest cleanup then occurs inside that never-delegated captured
+root. A concurrent replacement at the original name is therefore outside the
+deletion target and remains untouched. If capture validation fails, the object
+is restored exclusively or preserved for review. Quarantine names carry the
+durable operation or claim identifier so an interrupted capture remains
+attributable to its journal evidence.
+
 Neither a claim transition nor session cancellation can recall an already
 issued descriptor, an in-flight successful reply, a memory mapping, or copied
 bytes. A retained descriptor can remain usable until it is closed or the helper
