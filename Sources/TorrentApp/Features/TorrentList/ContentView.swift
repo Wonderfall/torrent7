@@ -461,7 +461,9 @@ struct ContentView: View {
     }
 
     private var removeTorrentButtonTitle: String {
-        removalConfirmationRequest?.count == 1 ? "Remove Torrent" : "Remove Torrents"
+        removalConfirmationRequest?.count == 1
+            ? "Remove Torrent, Keep Data"
+            : "Remove Torrents, Keep Data"
     }
 
     private var removeTorrentAndDataButtonTitle: String {
