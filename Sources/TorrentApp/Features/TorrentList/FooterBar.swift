@@ -20,7 +20,7 @@ struct FooterBarContainer: View {
             torrentCount: torrentState.rows.count,
             displayedTorrentCount: displayedTorrentCount,
             selectedTorrentCount: selectionState.ids.count,
-            engineAvailable: store.engineAvailable,
+            engineState: store.engineLifecycleState,
             openNetworkSettings: openNetworkSettings,
             openTransfersSettings: openTransfersSettings
         )
@@ -44,7 +44,11 @@ struct FooterBarContainer: View {
     }
 
     private var networkInterfaceIsWarning: Bool {
-        store.settings.requireNetworkInterface && !store.requiredNetworkInterfaceAvailable
+        guard store.engineLifecycleState == .available else {
+            return false
+        }
+        return store.settings.requireNetworkInterface
+            && !store.requiredNetworkInterfaceAvailable
             || (!store.networkStatus.networkBlocked && !store.networkStatus.lastError.isEmpty)
     }
 
@@ -60,12 +64,22 @@ struct FooterBarContainer: View {
             return "cable.connector.horizontal"
         }
 
-        return store.requiredNetworkInterfaceAvailable ? "lock" : "lock.open"
+        return store.engineLifecycleState != .available
+            || store.requiredNetworkInterfaceAvailable
+            ? "lock"
+            : "lock.open"
     }
 
     private var networkInterfaceHelp: String {
-        guard store.engineAvailable else {
-            return "The torrent engine could not start."
+        switch store.engineLifecycleState {
+        case .starting:
+            return "The torrent engine is starting."
+        case .restarting:
+            return "The torrent engine is restarting."
+        case .unavailable:
+            return "The torrent engine is unavailable."
+        case .available:
+            break
         }
         if store.networkStatus.networkBlocked {
             return "Network traffic is blocked until the selected interface is available."
@@ -96,7 +110,7 @@ private struct FooterBar: View {
     let torrentCount: Int
     let displayedTorrentCount: Int
     let selectedTorrentCount: Int
-    let engineAvailable: Bool
+    let engineState: TorrentEngineLifecycleState
     let openNetworkSettings: () -> Void
     let openTransfersSettings: () -> Void
 
@@ -120,7 +134,11 @@ private struct FooterBar: View {
 
                 Label(footerStatusText, systemImage: footerStatusIcon)
                     .lineLimit(1)
-                    .foregroundStyle(engineAvailable ? Color.secondary : Color.red)
+                    .foregroundStyle(
+                        engineState == .unavailable
+                            ? Color.red
+                            : Color.secondary
+                    )
                     .help(footerStatusHelp)
             }
 
@@ -148,8 +166,15 @@ private struct FooterBar: View {
     }
 
     private var footerStatusText: String {
-        guard engineAvailable else {
+        switch engineState {
+        case .starting:
+            return "Starting engine…"
+        case .restarting:
+            return "Restarting engine…"
+        case .unavailable:
             return "Engine unavailable"
+        case .available:
+            break
         }
         guard selectedTorrentCount > 0 else {
             return displayedTorrentCount == torrentCount ? torrentCountText : "\(displayedTorrentCount) of \(torrentCountText)"
@@ -169,8 +194,15 @@ private struct FooterBar: View {
     }
 
     private var footerStatusHelp: String {
-        guard engineAvailable else {
-            return "The torrent engine could not start."
+        switch engineState {
+        case .starting:
+            return "The torrent engine is starting."
+        case .restarting:
+            return "The torrent engine is restarting."
+        case .unavailable:
+            return "The torrent engine is unavailable."
+        case .available:
+            break
         }
         if selectedTorrentCount > 0 {
             return "Selected transfers out of total registered transfers."
@@ -179,7 +211,16 @@ private struct FooterBar: View {
     }
 
     private var footerStatusIcon: String {
-        engineAvailable ? "tray.full" : "exclamationmark.triangle"
+        switch engineState {
+        case .starting:
+            "hourglass"
+        case .restarting:
+            "arrow.clockwise"
+        case .available:
+            "tray.full"
+        case .unavailable:
+            "exclamationmark.triangle"
+        }
     }
 
     private var torrentCountText: String {

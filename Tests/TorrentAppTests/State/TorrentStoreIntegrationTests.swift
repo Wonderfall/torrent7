@@ -140,6 +140,7 @@ struct TorrentStoreIntegrationTests {
         while !capture.withLock({ $0.didEnter }) {
             await Task.yield()
         }
+        #expect(harness.store.engineLifecycleState == .starting)
 
         var currentSettings = harness.store.settings
         currentSettings.enablePeerExchangePlugin = false
@@ -152,6 +153,7 @@ struct TorrentStoreIntegrationTests {
         #expect(capture.withLock { $0.ranOffMainThread })
         #expect(await harness.engine.shutdownCount == 1)
         #expect(await installedEngine.appliedSettings.last?.settings.enablePeerExchangePlugin == false)
+        #expect(harness.store.engineLifecycleState == .available)
     }
 
     @Test("A superseded startup shuts down the engine it created")
@@ -1922,6 +1924,7 @@ struct TorrentStoreIntegrationTests {
             #expect(await restored.engine.appliedSettings.isEmpty)
             #expect(await restored.engine.shutdownCount == 1)
             #expect(!restored.store.engineAvailable)
+            #expect(restored.store.engineLifecycleState == .unavailable)
             #expect(
                 restored.store.lastError
                     == "Interrupted storage recovery could not finish safely, so the torrent engine was stopped. Removal failed."
@@ -1988,6 +1991,7 @@ struct TorrentStoreIntegrationTests {
 
         harness.store.updateSettings(settings)
         await harness.engine.waitForSuspendedRestart()
+        #expect(harness.store.engineLifecycleState == .restarting)
 
         await harness.engine.resumeSuspendedRestarts()
         await harness.store.saveAll()
@@ -1995,6 +1999,7 @@ struct TorrentStoreIntegrationTests {
         #expect(await harness.engine.blockNetworkCount >= 1)
         #expect(await harness.engine.restartPeerExchangePluginValues == [true])
         #expect(await harness.engine.appliedSettings.last?.settings.enablePeerExchangePlugin == true)
+        #expect(harness.store.engineLifecycleState == .available)
     }
 
 

@@ -15,6 +15,13 @@ private enum TorrentStoreErrorSource {
     case userAction
 }
 
+enum TorrentEngineLifecycleState: Equatable, Sendable {
+    case starting
+    case restarting
+    case available
+    case unavailable
+}
+
 private enum TorrentMagnetPromotionError: LocalizedError {
     case metadataNotReady
     case inconsistentFileMetadata
@@ -355,6 +362,7 @@ final class TorrentStore {
 
         let startingEngine = TorrentUnavailableEngine(message: "Torrent engine startup is in progress.")
         engine = startingEngine
+        isEngineStarting = true
         appliedPeerExchangePluginEnabled =
             initialSettings.enablePeerExchangePlugin
         libtorrentVersion = startingEngine.libtorrentVersion
@@ -470,7 +478,17 @@ final class TorrentStore {
     }
 
     var engineAvailable: Bool {
-        !isEngineStarting && engine.isAvailable
+        engineLifecycleState == .available
+    }
+
+    var engineLifecycleState: TorrentEngineLifecycleState {
+        if isEngineRestarting {
+            return .restarting
+        }
+        if isEngineStarting {
+            return .starting
+        }
+        return engine.isAvailable ? .available : .unavailable
     }
 
     var selectedTorrentIDs: Set<TorrentItem.ID> {
