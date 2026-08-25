@@ -787,6 +787,12 @@ actor TorrentStorageClaimJournal {
             throw TorrentStorageJournalError.corrupt
         }
 
+        if schemaVersion < Snapshot.currentSchemaVersion {
+            let empty = Snapshot()
+            try persist(empty, in: directoryDescriptor)
+            return empty
+        }
+
         guard schemaVersion == Snapshot.currentSchemaVersion else {
             throw TorrentStorageJournalError.unsupportedVersion(schemaVersion)
         }
