@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import System
+import TorrentStorageAuthority
 
 enum TorrentStoragePlanningError: LocalizedError, Equatable, Sendable {
     case unsafeParentDirectory

@@ -264,6 +264,11 @@ let package = Package(
             name: "TorrentEngineIPCFuzzSupport",
             type: .dynamic,
             targets: ["TorrentEngineIPCFuzzSupport"]
+        ),
+        .library(
+            name: "TorrentStorageFuzzSupport",
+            type: .dynamic,
+            targets: ["TorrentStorageFuzzSupport"]
         )
     ],
     targets: [
@@ -274,6 +279,16 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(engineExtensionSwiftFlags)
+            ]
+        ),
+        .target(
+            name: "TorrentStorageAuthority",
+            dependencies: ["TorrentEngineModel"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .treatAllWarnings(as: .error),
+                .strictMemorySafety(),
+                .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
             ]
         ),
         .target(
@@ -400,7 +415,8 @@ let package = Package(
             dependencies: [
                 "TorrentEngineClient",
                 "TorrentEngineIPC",
-                "TorrentEngineModel"
+                "TorrentEngineModel",
+                "TorrentStorageAuthority"
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
@@ -411,7 +427,13 @@ let package = Package(
         ),
         .testTarget(
             name: "TorrentAppTests",
-            dependencies: ["TorrentApp", "TorrentEngineModel", "TorrentEngineCore", "TorrentBridge"],
+            dependencies: [
+                "TorrentApp",
+                "TorrentBridge",
+                "TorrentEngineCore",
+                "TorrentEngineModel",
+                "TorrentStorageAuthority"
+            ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
                 .treatAllWarnings(as: .error),
@@ -463,6 +485,16 @@ let package = Package(
             name: "TorrentEngineIPCFuzzSupport",
             dependencies: ["TorrentEngineIPC"],
             path: "Tools/IPCFuzzing/Support",
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .treatAllWarnings(as: .error),
+                .unsafeFlags(appSwiftStrictnessFlags)
+            ]
+        ),
+        .target(
+            name: "TorrentStorageFuzzSupport",
+            dependencies: ["TorrentStorageAuthority"],
+            path: "Tools/IPCFuzzing/StorageSupport",
             swiftSettings: [
                 .swiftLanguageMode(.v6),
                 .treatAllWarnings(as: .error),

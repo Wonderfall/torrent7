@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 import TorrentEngineModel
 
-enum TorrentManifestError: LocalizedError, Equatable, Sendable {
+package enum TorrentManifestError: LocalizedError, Equatable, Sendable {
     case metadataEmpty
     case metadataTooLarge
     case malformedBencoding
@@ -29,7 +29,7 @@ enum TorrentManifestError: LocalizedError, Equatable, Sendable {
     case inconsistentHybridLayout
     case emptyPayload
 
-    var errorDescription: String? {
+    package var errorDescription: String? {
         switch self {
         case .metadataEmpty: "The torrent metadata is empty."
         case .metadataTooLarge: "The torrent metadata exceeds the safe size limit."
@@ -60,11 +60,11 @@ enum TorrentManifestError: LocalizedError, Equatable, Sendable {
     }
 }
 
-struct TorrentAdvertisedInfoHashes: Equatable, Sendable {
-    let v1: Data?
-    let v2: Data?
+package struct TorrentAdvertisedInfoHashes: Equatable, Sendable {
+    package let v1: Data?
+    package let v2: Data?
 
-    init(v1: Data? = nil, v2: Data? = nil) throws {
+    package init(v1: Data? = nil, v2: Data? = nil) throws {
         guard v1 == nil || v1?.count == Insecure.SHA1.byteCount,
               v2 == nil || v2?.count == SHA256.byteCount,
               v1 != nil || v2 != nil else {
@@ -75,26 +75,26 @@ struct TorrentAdvertisedInfoHashes: Equatable, Sendable {
     }
 }
 
-struct TorrentManifestParser: Sendable {
-    struct Limits: Equatable, Sendable {
-        var maximumMetadataBytes = TorrentInputLimits.maxTorrentFileBytes
-        var maximumNestingDepth = 32
-        var maximumValueCount = 400_000
-        var maximumStringBytes = TorrentInputLimits.maxTorrentFileBytes
-        var maximumPathComponentBytes = 255
-        var maximumPathDepth = 32
-        var maximumFileCount = TorrentEngineLimits.maximumFileCount
+package struct TorrentManifestParser: Sendable {
+    package struct Limits: Equatable, Sendable {
+        package var maximumMetadataBytes = TorrentInputLimits.maxTorrentFileBytes
+        package var maximumNestingDepth = 32
+        package var maximumValueCount = 400_000
+        package var maximumStringBytes = TorrentInputLimits.maxTorrentFileBytes
+        package var maximumPathComponentBytes = 255
+        package var maximumPathDepth = 32
+        package var maximumFileCount = TorrentEngineLimits.maximumFileCount
 
-        static let standard = Limits()
+        package static let standard = Limits()
     }
 
     private let limits: Limits
 
-    init(limits: Limits = .standard) {
+    package init(limits: Limits = .standard) {
         self.limits = limits
     }
 
-    func parse(
+    package func parse(
         _ metadata: Data,
         advertisedHashes: TorrentAdvertisedInfoHashes? = nil
     ) throws -> ParsedTorrentManifest {

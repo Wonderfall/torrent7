@@ -7,6 +7,7 @@ import System
 import TorrentEngineClient
 import TorrentEngineIPC
 import TorrentEngineModel
+import TorrentStorageAuthority
 
 private typealias AppliedNetworkBinding = TorrentNetworkBinding
 

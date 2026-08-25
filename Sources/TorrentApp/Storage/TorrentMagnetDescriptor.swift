@@ -1,5 +1,6 @@
 import Foundation
 import TorrentEngineModel
+import TorrentStorageAuthority
 
 enum TorrentMagnetDescriptorError: LocalizedError, Equatable, Sendable {
     case invalidURI

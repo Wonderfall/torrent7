@@ -5,6 +5,7 @@ import Testing
 import TorrentBridge
 import TorrentEngineClient
 import TorrentEngineModel
+import TorrentStorageAuthority
 @testable import TorrentApp
 
 @MainActor

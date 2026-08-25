@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import TorrentStorageAuthority
 
 private struct StorageAuthorityByteCursor {
     private let bytes: Data

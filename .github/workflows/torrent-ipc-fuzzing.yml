@@ -10,8 +10,7 @@ on:
       - "Scripts/verify-xcode.zsh"
       - "Sources/TorrentEngineIPC/**"
       - "Sources/TorrentEngineModel/**"
-      - "Sources/TorrentApp/Storage/TorrentManifestParser.swift"
-      - "Sources/TorrentApp/Storage/TorrentStorageClaim.swift"
+      - "Sources/TorrentStorageAuthority/**"
       - "Tools/IPCFuzzing/**"
   pull_request:
     types:
@@ -25,8 +24,7 @@ on:
       - "Scripts/verify-xcode.zsh"
       - "Sources/TorrentEngineIPC/**"
       - "Sources/TorrentEngineModel/**"
-      - "Sources/TorrentApp/Storage/TorrentManifestParser.swift"
-      - "Sources/TorrentApp/Storage/TorrentStorageClaim.swift"
+      - "Sources/TorrentStorageAuthority/**"
       - "Tools/IPCFuzzing/**"
   schedule:
     - cron: "17 4 * * 4"
