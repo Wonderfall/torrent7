@@ -424,9 +424,12 @@ metadata, and access validation, hostile XPC bounds, nonblocking special-file
 rejection, per-object ownership authentication, descriptor-relative namespace
 rejection, replacement-safe retained-descriptor soft revocation, claim recovery,
 ambiguous activation containment, imports, removal, and magnet promotion.
-Separate fuzz harnesses cover native API and parser input surfaces; their
-expensive build and execution are intentionally independent of the routine test
-gates.
+Separate sanitizer-backed fuzz targets cover raw broker XPC dictionaries,
+claim and ownership validation, manifest parsing and digest reproduction, the
+native broker callback/descriptor adapter, and the broader native API input
+surfaces. Their expensive build and execution are intentionally independent of
+the routine test gates, and the harness entry points are absent from shipped
+products.
 
 The signed Enhanced Security integration gate currently verifies the real
 process lifecycle and authenticated broker handshake, but its staged dataset

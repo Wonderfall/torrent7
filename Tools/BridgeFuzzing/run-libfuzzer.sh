@@ -22,6 +22,7 @@ all_targets=(
     bridge_torrent_file
     bridge_resume_startup
     bridge_session_api
+    bridge_payload_broker
 )
 
 if [[ "$#" -gt 0 ]]; then

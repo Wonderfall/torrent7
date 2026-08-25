@@ -23,6 +23,7 @@ all_targets=(
     bridge_torrent_file
     bridge_resume_startup
     bridge_session_api
+    bridge_payload_broker
 )
 
 if [[ "$#" -gt 0 ]]; then
@@ -97,6 +98,7 @@ cxx_flags=(
     -DTORRENT_USE_OPENSSL
     -DTORRENT_USE_LIBCRYPTO
     -I"$TOOLS_DIR/harnesses"
+    -I"$ROOT_DIR/Sources/TorrentBridge"
     -I"$ROOT_DIR/Sources/TorrentBridge/include"
     -I"$DEPS_PREFIX/include"
     -I"$BOOST_PREFIX"
@@ -124,6 +126,9 @@ source_for_target() {
             ;;
         bridge_session_api)
             printf '%s\n' "$TOOLS_DIR/harnesses/BridgeSessionAPIFuzzer.cpp"
+            ;;
+        bridge_payload_broker)
+            printf '%s\n' "$TOOLS_DIR/harnesses/BridgePayloadBrokerFuzzer.cpp"
             ;;
         *)
             echo "Unknown fuzz target: $1" >&2

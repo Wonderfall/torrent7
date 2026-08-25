@@ -24,6 +24,13 @@ tooling self-contained.
   preview, file priorities, settings, snapshots, detail batches, torrent
   options, queue movement, piece maps, wake/change, pause/resume/remove, save,
   network, health, payload-broker lifecycle, and alert APIs.
+- `bridge_payload_broker`: drives the production native payload-provider
+  adapter with valid and hostile callback tables, regular files in both access
+  modes, directories, pipes, device files, closed descriptors, descriptors
+  returned alongside errors, invalid sizes, and mutated callback arguments. It
+  asserts descriptor closure, `CLOEXEC`, regular-file and write-access checks,
+  errno propagation, exact activation forwarding, and balanced context
+  retention.
 
 All harness runtime state is written to temporary directories and removed on
 normal exit. Network access is blocked or disabled by the bridge settings used
