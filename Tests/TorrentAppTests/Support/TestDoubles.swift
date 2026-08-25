@@ -422,7 +422,6 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private var addMagnetSuspensionCount = 0
     private var addMagnetContinuations = [CheckedContinuation<Void, Never>]()
     private(set) var pausedIDs = [String]()
-    private var pauseError: Error?
     private(set) var pauseAppliedDHTValues = [Bool?]()
     private(set) var pauseNetworkBlockedValues = [Bool]()
     private(set) var resumedIDs = [String]()
@@ -463,13 +462,11 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         keepsWakeStreamOpen: Bool = false,
         networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot? = nil,
         suspendsInitialSnapshotBatch: Bool = false,
-        initialSnapshotBatch: TorrentSnapshotBatch? = nil,
-        initialPauseError: Error? = nil
+        initialSnapshotBatch: TorrentSnapshotBatch? = nil
     ) {
         self.keepsWakeStreamOpen = keepsWakeStreamOpen
         networkInterfaceSnapshotValue = networkInterfaceSnapshot
         snapshotBatch = initialSnapshotBatch
-        pauseError = initialPauseError
         snapshotBatchSuspensionCount = suspendsInitialSnapshotBatch ? 1 : 0
     }
 
@@ -905,9 +902,6 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         pausedIDs.append(id)
         pauseAppliedDHTValues.append(appliedSettings.last?.settings.enableDHTNetwork)
         pauseNetworkBlockedValues.append(currentNetworkBlocked)
-        if let pauseError {
-            throw pauseError
-        }
     }
 
     func resume(id: String) async throws {

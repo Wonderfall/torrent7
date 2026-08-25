@@ -423,7 +423,7 @@ actor TorrentStorageClaimJournal {
         return promotion
     }
 
-    func completePromotion(
+    func retirePromotion(
         id: UUID,
         operationNonce: UUID
     ) throws {
@@ -432,11 +432,6 @@ actor TorrentStorageClaimJournal {
         }
         guard promotion.operationNonce == operationNonce else {
             throw TorrentStorageJournalError.operationNonceMismatch
-        }
-        guard promotion.state == .promoting
-                || promotion.state == .awaitingDestination
-                || promotion.state == .outcomeUnknown else {
-            throw TorrentStorageJournalError.invalidTransition
         }
         var updated = snapshot
         updated.promotions.removeValue(forKey: id)
@@ -661,6 +656,25 @@ actor TorrentStorageClaimJournal {
                   && claim.removalIntent == .deletePayload
                   && claim.deletionEvidence != nil) else {
             throw TorrentStorageJournalError.invalidTransition
+        }
+        var updated = snapshot
+        updated.claims.removeValue(forKey: claimID)
+        try persist(updated)
+        snapshot = updated
+    }
+
+    /// Relinquishes broker authority without asserting that any payload was
+    /// removed. Generation binding prevents stale recovery work from retiring
+    /// a replacement claim.
+    func retireClaimPreservingPayload(
+        claimID: UUID,
+        generation: UInt64
+    ) throws {
+        guard let claim = snapshot.claims[claimID] else {
+            return
+        }
+        guard claim.manifest.generation == generation else {
+            throw TorrentStorageJournalError.generationMismatch
         }
         var updated = snapshot
         updated.claims.removeValue(forKey: claimID)

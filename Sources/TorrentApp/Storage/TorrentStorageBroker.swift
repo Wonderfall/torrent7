@@ -108,6 +108,10 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
         }
     }
 
+    func installedClaimIDs() -> Set<UUID> {
+        state.withLock { Set($0.registrations.keys) }
+    }
+
     func locationsByTorrentID() -> [String: TorrentStorageLocation] {
         state.withLock { state in
             var locations = [String: TorrentStorageLocation]()

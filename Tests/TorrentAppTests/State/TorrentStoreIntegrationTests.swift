@@ -1193,13 +1193,25 @@ struct TorrentStoreIntegrationTests {
                 removalIntent: .keepPayload
             )
 
+            let productionEngine = FakeTorrentEngine(
+                initialSnapshotBatch: TorrentSnapshotBatch(
+                    revision: 1,
+                    torrents: [makeTorrent(
+                        id: "interrupted",
+                        name: "sample.bin",
+                        contentKind: .singleFile,
+                        hasMetadata: true
+                    )]
+                )
+            )
             TorrentStore.engineStartupFactoryOverride.withLock { factory in
-                factory = { _ in FakeTorrentEngine() }
+                factory = { _ in productionEngine }
             }
             let restored = makeStoreHarness(storageClaimJournal: journal)
             restored.store.start()
             await restored.store.saveAll()
 
+            #expect(await productionEngine.removedIDs == ["interrupted"])
             #expect(await journal.allClaims().isEmpty)
             #expect(restored.store.lastError == nil)
             #expect(FileManager.default.fileExists(
@@ -1208,8 +1220,135 @@ struct TorrentStoreIntegrationTests {
         }
     }
 
-    @Test("Orphaned claims remain preserved without a recurring recovery warning")
-    func orphanedClaimsAreTerminallyPreserved() async throws {
+    @Test("Restart retains a valid active storage claim")
+    func restartRetainsActiveStorageClaim() async throws {
+        defer {
+            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
+        }
+        try await withKnownTorrentHarness { harness, downloadFolder in
+            await harness.engine.setNextAddedTorrentFileID("restored")
+            await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+                revision: 1,
+                torrents: [makeTorrent(
+                    id: "restored",
+                    name: "sample.bin",
+                    contentKind: .singleFile,
+                    hasMetadata: true
+                )]
+            ))
+            #expect(harness.store.addTorrentFile(
+                downloadFolder.appending(path: "sample.torrent"),
+                torrentData: validSingleFileTorrentData(),
+                savePath: downloadFolder.torrentFilePath
+            ))
+            await harness.store.saveAll()
+
+            let journal = try #require(harness.storageClaimJournal)
+            let productionEngine = FakeTorrentEngine(
+                initialSnapshotBatch: TorrentSnapshotBatch(
+                    revision: 1,
+                    torrents: [makeTorrent(
+                        id: "restored",
+                        name: "sample.bin",
+                        contentKind: .singleFile,
+                        hasMetadata: true
+                    )]
+                )
+            )
+            TorrentStore.engineStartupFactoryOverride.withLock { factory in
+                factory = { _ in productionEngine }
+            }
+            let restored = makeStoreHarness(storageClaimJournal: journal)
+            restored.accessStore.restoreDefaultResult = .success(downloadFolder)
+            restored.store.start()
+            await restored.store.saveAll()
+
+            #expect(await productionEngine.removedIDs.isEmpty)
+            #expect(await journal.allClaims().first?.lease.state == .active)
+            #expect(
+                restored.store.downloadLocationPath(for: "restored")
+                    == downloadFolder.appending(path: "sample.bin")
+                        .torrentFilePath
+            )
+            #expect(restored.store.lastError == nil)
+        }
+    }
+
+    @Test("Restart resumes an acknowledged payload deletion")
+    func restartResumesAcknowledgedPayloadDeletion() async throws {
+        defer {
+            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
+        }
+        try await withKnownTorrentHarness { harness, downloadFolder in
+            await harness.engine.setNextAddedTorrentFileID("deleting")
+            await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+                revision: 1,
+                torrents: [makeTorrent(
+                    id: "deleting",
+                    name: "sample.bin",
+                    contentKind: .singleFile,
+                    hasMetadata: true
+                )]
+            ))
+            #expect(harness.store.addTorrentFile(
+                downloadFolder.appending(path: "sample.torrent"),
+                torrentData: validSingleFileTorrentData(),
+                savePath: downloadFolder.torrentFilePath
+            ))
+            await harness.store.saveAll()
+
+            let journal = try #require(harness.storageClaimJournal)
+            let active = try #require(await journal.allClaims().first)
+            let nonce = UUID()
+            _ = try await journal.transition(
+                claimID: active.manifest.claimID,
+                generation: active.manifest.generation,
+                operationNonce: nonce,
+                from: [.active],
+                to: .removing,
+                removalIntent: .deletePayload
+            )
+            _ = try await journal.transition(
+                claimID: active.manifest.claimID,
+                generation: active.manifest.generation,
+                operationNonce: nonce,
+                from: [.removing],
+                to: .deleting
+            )
+            _ = try await journal.transition(
+                claimID: active.manifest.claimID,
+                generation: active.manifest.generation,
+                operationNonce: nonce,
+                from: [.deleting],
+                to: .deletionPending
+            )
+
+            let productionEngine = FakeTorrentEngine(
+                initialSnapshotBatch: TorrentSnapshotBatch(
+                    revision: 1,
+                    torrents: []
+                )
+            )
+            TorrentStore.engineStartupFactoryOverride.withLock { factory in
+                factory = { _ in productionEngine }
+            }
+            let restored = makeStoreHarness(storageClaimJournal: journal)
+            restored.accessStore.restoreDefaultResult = .success(downloadFolder)
+            restored.store.start()
+            await restored.store.saveAll()
+
+            #expect(await productionEngine.removedIDs.isEmpty)
+            #expect(await journal.allClaims().isEmpty)
+            #expect(restored.store.lastError == nil)
+            #expect(!FileManager.default.fileExists(
+                atPath: downloadFolder.appending(path: "sample.bin")
+                    .torrentFilePath
+            ))
+        }
+    }
+
+    @Test("Orphaned claims relinquish authority while preserving payloads")
+    func orphanedClaimsAreRetired() async throws {
         let suiteName = "app.torrent7.orphaned-claim.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
@@ -1248,7 +1387,12 @@ struct TorrentStoreIntegrationTests {
                 to: .orphaned
             )
 
-            let productionEngine = FakeTorrentEngine()
+            let productionEngine = FakeTorrentEngine(
+                initialSnapshotBatch: TorrentSnapshotBatch(
+                    revision: 1,
+                    torrents: []
+                )
+            )
             TorrentStore.engineStartupFactoryOverride.withLock { factory in
                 factory = { _ in productionEngine }
             }
@@ -1260,7 +1404,7 @@ struct TorrentStoreIntegrationTests {
             await restored.store.saveAll()
 
             #expect(restored.store.lastError == nil)
-            #expect(await journal.allClaims().first?.lease.state == .orphaned)
+            #expect(await journal.allClaims().isEmpty)
             #expect(FileManager.default.fileExists(
                 atPath: downloadFolder.appending(path: "sample.bin")
                     .torrentFilePath
@@ -1614,8 +1758,8 @@ struct TorrentStoreIntegrationTests {
         #expect(await harness.engine.resumedIDs == ["paused"])
     }
 
-    @Test("Unresolved storage activation is paused before settings and cannot be resumed")
-    func unresolvedStorageActivationRemainsPaused() async throws {
+    @Test("Unresolved storage activation is untracked before settings")
+    func unresolvedStorageActivationIsRetired() async throws {
         try await withTemporaryDirectory { root in
             let downloads = root.appending(
                 path: "Downloads",
@@ -1647,22 +1791,12 @@ struct TorrentStoreIntegrationTests {
             let claim = try #require(await journal.allClaims().first)
             #expect(claim.lease.state == .activationUnknown)
             #expect(claim.torrentID == nil)
-            let digest = try #require(claim.manifest.infoHashes.v1)
-            let alphabet = Array("0123456789abcdef".utf8)
-            var encodedHash = [UInt8]()
-            encodedHash.reserveCapacity(digest.count * 2)
-            for byte in digest {
-                encodedHash.append(alphabet[Int(byte >> 4)])
-                encodedHash.append(alphabet[Int(byte & 0x0f)])
-            }
-            let infoHash = "v1:" + String(decoding: encodedHash, as: UTF8.self)
             let restoredID = "t:\(String(repeating: "d", count: 32))"
             let restored = makeStoreHarness(
                 initialSnapshotBatch: TorrentSnapshotBatch(
                     revision: 1,
                     torrents: [makeTorrent(
                         id: restoredID,
-                        infoHash: infoHash,
                         state: .downloading,
                         paused: false,
                         autoManaged: true
@@ -1674,57 +1808,152 @@ struct TorrentStoreIntegrationTests {
 
             await restored.store.saveAll()
 
-            #expect(await restored.engine.pausedIDs == [restoredID])
-            #expect(await restored.engine.pauseAppliedDHTValues == [nil])
+            #expect(await restored.engine.removedIDs == [restoredID])
+            #expect(await restored.engine.pausedIDs.isEmpty)
             #expect(await restored.engine.appliedSettings.count == 1)
-
-            await restored.engine.setSnapshotBatch(TorrentSnapshotBatch(
-                revision: 2,
-                torrents: [makeTorrent(
-                    id: restoredID,
-                    infoHash: infoHash,
-                    paused: true,
-                    autoManaged: false
-                )]
+            #expect(await journal.allClaims().isEmpty)
+            #expect(restored.store.lastError == nil)
+            #expect(FileManager.default.fileExists(
+                atPath: downloads.appending(path: "sample.bin")
+                    .torrentFilePath
             ))
-            await restored.store.refreshNow()
-            restored.store.resumeTorrent(id: restoredID)
-            await restored.store.saveAll()
+        }
+    }
 
-            #expect(await restored.engine.resumedIDs.isEmpty)
-
-            let failedID = "t:\(String(repeating: "e", count: 32))"
-            let failed = makeStoreHarness(
+    @Test("Engine resume records without journal authority are discarded")
+    func unownedEngineResumeRecordIsRemoved() async throws {
+        try await withTemporaryDirectory { root in
+            let journal = try TorrentStorageClaimJournal(
+                directory: root.appending(
+                    path: "Journal",
+                    directoryHint: .isDirectory
+                )
+            )
+            let staleID = "t:\(String(repeating: "e", count: 32))"
+            let restored = makeStoreHarness(
                 initialSnapshotBatch: TorrentSnapshotBatch(
                     revision: 1,
                     torrents: [makeTorrent(
-                        id: failedID,
-                        infoHash: infoHash,
-                        state: .downloading,
-                        paused: false,
-                        autoManaged: true
+                        id: staleID,
+                        state: .downloading
                     )]
-                ),
-                initialPauseError: TorrentEngineClientError.serviceRejected(
-                    "Pause failed."
                 ),
                 startsTasks: true,
                 storageClaimJournal: journal
             )
 
-            await failed.store.saveAll()
+            await restored.store.saveAll()
 
-            #expect(await failed.engine.pausedIDs == [failedID])
-            #expect(await failed.engine.appliedSettings.isEmpty)
-            #expect(await failed.engine.shutdownCount == 1)
-            #expect(!failed.store.engineAvailable)
+            #expect(await restored.engine.removedIDs == [staleID])
+            #expect(await restored.engine.appliedSettings.count == 1)
+            #expect(restored.store.lastError == nil)
+        }
+    }
+
+    @Test("Magnet journal entries without engine state are retired")
+    func staleMagnetPromotionIsRetired() async throws {
+        try await withTemporaryDirectory { root in
+            let journal = try TorrentStorageClaimJournal(
+                directory: root.appending(
+                    path: "Journal",
+                    directoryHint: .isDirectory
+                )
+            )
+            let fixture = try magnetPromotionFixture()
+            let operationNonce = UUID()
+            try await journal.beginPromotion(TorrentMagnetPromotion(
+                id: UUID(),
+                torrentID: fixture.torrentID,
+                originalMagnet: fixture.magnet,
+                advertisedInfoHashes: try TorrentMagnetDescriptor
+                    .parse(fixture.magnet).infoHashes,
+                destinationPath: root.torrentFilePath,
+                operationNonce: operationNonce,
+                state: .awaitingMetadata,
+                exactInfoDictionary: nil,
+                activation: nil
+            ))
+            let restored = makeStoreHarness(
+                initialSnapshotBatch: TorrentSnapshotBatch(
+                    revision: 1,
+                    torrents: []
+                ),
+                startsTasks: true,
+                storageClaimJournal: journal
+            )
+
+            await restored.store.saveAll()
+
+            #expect(await journal.allPromotions().isEmpty)
+            #expect(await restored.engine.removedIDs.isEmpty)
+            #expect(await restored.engine.appliedSettings.count == 1)
+            #expect(restored.store.lastError == nil)
+        }
+    }
+
+    @Test("Failed startup storage recovery stops the engine")
+    func failedStorageRecoveryStopsEngine() async throws {
+        try await withTemporaryDirectory { root in
+            let journal = try TorrentStorageClaimJournal(
+                directory: root.appending(
+                    path: "Journal",
+                    directoryHint: .isDirectory
+                )
+            )
+            let staleID = "t:\(String(repeating: "f", count: 32))"
+            let restored = makeStoreHarness(
+                initialSnapshotBatch: TorrentSnapshotBatch(
+                    revision: 1,
+                    torrents: [makeTorrent(id: staleID)]
+                ),
+                startsTasks: true,
+                suspendsInitialSnapshotBatch: true,
+                storageClaimJournal: journal
+            )
+            await restored.engine.waitForSuspendedSnapshotBatchCall()
+            await restored.engine.setRemoveError(
+                TorrentEngineClientError.serviceRejected("Removal failed.")
+            )
+            await restored.engine.resumeSuspendedSnapshotBatchCalls()
+
+            await restored.store.saveAll()
+
+            #expect(await restored.engine.removedIDs.isEmpty)
+            #expect(await restored.engine.appliedSettings.isEmpty)
+            #expect(await restored.engine.shutdownCount == 1)
+            #expect(!restored.store.engineAvailable)
             #expect(
-                failed.store.lastError
-                    == "A torrent with unresolved storage activation could not be kept paused. The torrent engine was stopped. Pause failed."
+                restored.store.lastError
+                    == "Interrupted storage recovery could not finish safely, so the torrent engine was stopped. Removal failed."
             )
         }
     }
 
+    @Test("Storage recovery requires an authoritative startup snapshot")
+    func storageRecoveryRejectsMissingSnapshot() async throws {
+        try await withTemporaryDirectory { root in
+            let journal = try TorrentStorageClaimJournal(
+                directory: root.appending(
+                    path: "Journal",
+                    directoryHint: .isDirectory
+                )
+            )
+            let restored = makeStoreHarness(
+                startsTasks: true,
+                storageClaimJournal: journal
+            )
+
+            await restored.store.saveAll()
+
+            #expect(await restored.engine.appliedSettings.isEmpty)
+            #expect(await restored.engine.shutdownCount == 1)
+            #expect(!restored.store.engineAvailable)
+            #expect(
+                restored.store.lastError
+                    == "Interrupted storage recovery could not finish safely, so the torrent engine was stopped. The torrent engine did not provide an authoritative startup snapshot."
+            )
+        }
+    }
 
     @Test("Updating settings clears disabled completion badge and applies blocked network policy")
     func updatingSettingsClearsDisabledCompletionBadgeAndAppliesBlockedNetworkPolicy() async throws {
@@ -2792,7 +3021,6 @@ private func makeStoreHarness(
     networkInterfaces: [NetworkInterfaceOption] = [],
     networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot? = nil,
     initialSnapshotBatch: TorrentSnapshotBatch? = nil,
-    initialPauseError: Error? = nil,
     startsTasks: Bool = false,
     keepsWakeStreamOpen: Bool = false,
     suspendsInitialSnapshotBatch: Bool = false,
@@ -2802,8 +3030,7 @@ private func makeStoreHarness(
         keepsWakeStreamOpen: keepsWakeStreamOpen,
         networkInterfaceSnapshot: networkInterfaceSnapshot,
         suspendsInitialSnapshotBatch: suspendsInitialSnapshotBatch,
-        initialSnapshotBatch: initialSnapshotBatch,
-        initialPauseError: initialPauseError
+        initialSnapshotBatch: initialSnapshotBatch
     )
     let dock = RecordingDockTileService()
     let notifications = RecordingNotificationService()

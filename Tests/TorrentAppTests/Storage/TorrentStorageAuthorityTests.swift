@@ -2033,7 +2033,7 @@ struct TorrentStorageAuthorityTests {
             #expect(durable.exactInfoDictionary == info)
             #expect(durable.activation == activation)
 
-            try await reloaded.completePromotion(
+            try await reloaded.retirePromotion(
                 id: promotionID,
                 operationNonce: operationNonce
             )
