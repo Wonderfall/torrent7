@@ -116,6 +116,27 @@ struct TorrentStorageBrokerIPCCodecTests {
         }
     }
 
+    @Test("Failure replies remove every embedded NUL")
+    func failureRepliesRemoveEveryEmbeddedNUL() throws {
+        let request = TorrentStorageBrokerRequest.handshake(makeCommon())
+        let encoded = try TorrentStorageBrokerIPCCodec.encode(
+            .failure(
+                requestID: request.common.requestID,
+                code: .internalFailure,
+                message: "\0\0\0ࠠ"
+            ),
+            for: request
+        )
+
+        let decoded = try TorrentStorageBrokerIPCCodec.decodeReply(encoded, for: request)
+        guard case .failure(_, _, let message) = decoded else {
+            Issue.record("Expected a failure reply")
+            return
+        }
+        #expect(message == "ࠠ")
+        #expect(!message.utf8.contains(0))
+    }
+
     private func makeCommon() -> TorrentStorageBrokerRequest.Common {
         TorrentStorageBrokerRequest.Common(
             requestID: UUID(),
