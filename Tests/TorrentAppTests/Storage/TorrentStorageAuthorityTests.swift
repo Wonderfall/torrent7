@@ -254,6 +254,106 @@ struct TorrentStorageAuthorityTests {
         }
     }
 
+    @Test("Broker claims remain isolated by claim and parent authority")
+    func brokerClaimsAreIsolated() throws {
+        try withTemporaryDirectory { root in
+            let firstFixture = try reserveSingleFile(
+                in: root,
+                name: "first.bin",
+                size: 8
+            )
+            let secondFixture = try reserveSingleFile(
+                in: root,
+                name: "second.bin",
+                size: 8
+            )
+            let firstClaim = makeClaim(
+                firstFixture.reservation,
+                state: .active
+            )
+            let secondClaim = makeClaim(
+                secondFixture.reservation,
+                state: .active
+            )
+            let firstPayload = firstFixture.downloads.appending(
+                path: firstClaim.manifest.collisionSelectedTopLevelName
+            )
+            let secondPayload = secondFixture.downloads.appending(
+                path: secondClaim.manifest.collisionSelectedTopLevelName
+            )
+            try Data("first---".utf8).write(to: firstPayload)
+            try Data("second--".utf8).write(to: secondPayload)
+
+            let registry = TorrentStorageBrokerRegistry()
+            try registry.install(claim: firstClaim, parent: firstFixture.parent)
+            try registry.install(claim: secondClaim, parent: secondFixture.parent)
+
+            let first = try registry.openPayload(
+                claimID: firstClaim.manifest.claimID,
+                generation: firstClaim.manifest.generation,
+                fileIndex: 0,
+                access: .readOnly
+            )
+            defer { _ = Darwin.close(first.descriptor) }
+            let second = try registry.openPayload(
+                claimID: secondClaim.manifest.claimID,
+                generation: secondClaim.manifest.generation,
+                fileIndex: 0,
+                access: .readOnly
+            )
+            defer { _ = Darwin.close(second.descriptor) }
+
+            #expect(
+                try contents(of: first.descriptor, count: 8)
+                    == Data("first---".utf8)
+            )
+            #expect(
+                try contents(of: second.descriptor, count: 8)
+                    == Data("second--".utf8)
+            )
+
+            let unrelatedDirectory = root.appending(
+                path: "Other Downloads",
+                directoryHint: .isDirectory
+            )
+            try FileManager.default.createDirectory(
+                at: unrelatedDirectory,
+                withIntermediateDirectories: true
+            )
+            let unrelatedParent = try makeParent(unrelatedDirectory)
+            #expect(throws: TorrentStorageBrokerRegistryError.invalidClaim) {
+                try TorrentStorageBrokerRegistry().install(
+                    claim: firstClaim,
+                    parent: unrelatedParent
+                )
+            }
+
+            try registry.removeClaim(
+                claimID: firstClaim.manifest.claimID,
+                generation: firstClaim.manifest.generation
+            )
+            #expect(throws: TorrentStorageBrokerRegistryError.claimUnavailable) {
+                _ = try registry.openPayload(
+                    claimID: firstClaim.manifest.claimID,
+                    generation: firstClaim.manifest.generation,
+                    fileIndex: 0,
+                    access: .readOnly
+                )
+            }
+            let surviving = try registry.openPayload(
+                claimID: secondClaim.manifest.claimID,
+                generation: secondClaim.manifest.generation,
+                fileIndex: 0,
+                access: .readOnly
+            )
+            defer { _ = Darwin.close(surviving.descriptor) }
+            #expect(
+                try contents(of: surviving.descriptor, count: 8)
+                    == Data("second--".utf8)
+            )
+        }
+    }
+
     @Test("Authority digest binds logical paths to pinned identities")
     func authorityDigestBindsLogicalMapping() throws {
         try withTemporaryDirectory { root in
@@ -1133,7 +1233,7 @@ struct TorrentStorageAuthorityTests {
         }
     }
 
-    @Test("A brokered file FD reveals its path but cannot traverse to siblings")
+    @Test("A brokered file FD cannot act as directory namespace authority")
     func brokeredDescriptorIsNotDirectoryAuthority() throws {
         try withTemporaryDirectory { root in
             let fixture = try reserveSingleFile(
@@ -1193,10 +1293,53 @@ struct TorrentStorageAuthorityTests {
                 _ = Darwin.close(traversal)
             }
             #expect(traversal == -1)
+
+            #expect(Darwin.fchdir(opened.descriptor) == -1)
+            let mkdirStatus = unsafe "child".withCString { name in
+                unsafe Darwin.mkdirat(opened.descriptor, name, 0o700)
+            }
+            #expect(mkdirStatus == -1)
+            let unlinkStatus = unsafe "../sibling.bin".withCString { name in
+                unsafe Darwin.unlinkat(opened.descriptor, name, 0)
+            }
+            #expect(unlinkStatus == -1)
+            let renameStatus = unsafe "payload.bin".withCString { source in
+                unsafe "renamed.bin".withCString { destination in
+                    unsafe Darwin.renameat(
+                        opened.descriptor,
+                        source,
+                        opened.descriptor,
+                        destination
+                    )
+                }
+            }
+            #expect(renameStatus == -1)
+            let linkStatus = unsafe "payload.bin".withCString { source in
+                unsafe "linked.bin".withCString { destination in
+                    unsafe Darwin.linkat(
+                        opened.descriptor,
+                        source,
+                        opened.descriptor,
+                        destination,
+                        0
+                    )
+                }
+            }
+            #expect(linkStatus == -1)
+            #expect(try Data(contentsOf: sibling) == Data("sibling".utf8))
+            #expect(!FileManager.default.fileExists(
+                atPath: fixture.downloads.appending(path: "child").path()
+            ))
+            #expect(!FileManager.default.fileExists(
+                atPath: fixture.downloads.appending(path: "renamed.bin").path()
+            ))
+            #expect(!FileManager.default.fileExists(
+                atPath: fixture.downloads.appending(path: "linked.bin").path()
+            ))
         }
     }
 
-    @Test("Removal state blocks future opens but cannot revoke an issued FD")
+    @Test("A stale issued FD remains bound to its unlinked inode")
     func claimRemovalIsSoftRevocation() throws {
         try withTemporaryDirectory { root in
             let fixture = try reserveSingleFile(
@@ -1269,6 +1412,24 @@ struct TorrentStorageAuthorityTests {
             }
             #expect(read == recoveredBytes.count)
             #expect(recoveredBytes == retainedBytes)
+
+            let replacementBytes = Data("replacement".utf8)
+            try replacementBytes.write(to: payload)
+            let staleBytes = Data("stale-fd".utf8)
+            let staleWrite = unsafe staleBytes.withUnsafeBytes { bytes in
+                unsafe Darwin.pwrite(
+                    opened.descriptor,
+                    bytes.baseAddress,
+                    bytes.count,
+                    0
+                )
+            }
+            #expect(staleWrite == staleBytes.count)
+            #expect(try Data(contentsOf: payload) == replacementBytes)
+            #expect(try contents(
+                of: opened.descriptor,
+                count: staleBytes.count
+            ) == staleBytes)
         }
     }
 
@@ -1467,6 +1628,82 @@ struct TorrentStorageAuthorityTests {
         )
         #expect(gate.handle(XPCDictionary()) == nil)
         #expect(gate.handle(handshakeDictionary(nonce: nonce)) == nil)
+    }
+
+    @Test("Broker sessions bind the nonce and first engine epoch")
+    func brokerSessionRejectsNonceAndEpochReplay() throws {
+        let nonce = UUID()
+        let engineEpoch = UUID()
+        let gate = TorrentStorageBrokerSessionGate(
+            registry: TorrentStorageBrokerRegistry(),
+            sessionNonce: nonce
+        )
+
+        let wrongNonce = handshakeRequest(
+            nonce: UUID(),
+            engineEpoch: engineEpoch
+        )
+        let wrongNonceReply = try brokerReply(for: wrongNonce, from: gate)
+        guard case .failure(_, let wrongNonceCode, _) = wrongNonceReply else {
+            Issue.record("Expected the wrong nonce to be rejected")
+            return
+        }
+        #expect(wrongNonceCode == .sessionRejected)
+
+        let handshake = handshakeRequest(
+            nonce: nonce,
+            engineEpoch: engineEpoch
+        )
+        let handshakeReply = try brokerReply(for: handshake, from: gate)
+        guard case .success(_, nil, let statistics, nil) = handshakeReply else {
+            Issue.record("Expected the matching session to authenticate")
+            return
+        }
+        #expect(statistics.isEmpty)
+
+        let replay = TorrentStorageBrokerRequest.openPayload(
+            .init(
+                requestID: UUID(),
+                engineEpoch: UUID(),
+                sessionNonce: nonce,
+                deadlineUptimeNanoseconds:
+                    DispatchTime.now().uptimeNanoseconds + 5_000_000_000
+            ),
+            claimID: UUID(),
+            generation: 1,
+            fileIndex: 0,
+            access: .readOnly
+        )
+        let replayReply = try brokerReply(for: replay, from: gate)
+        guard case .failure(_, let replayCode, _) = replayReply else {
+            Issue.record("Expected a different engine epoch to be rejected")
+            return
+        }
+        #expect(replayCode == .sessionRejected)
+
+        let unknownClaim = TorrentStorageBrokerRequest.openPayload(
+            .init(
+                requestID: UUID(),
+                engineEpoch: engineEpoch,
+                sessionNonce: nonce,
+                deadlineUptimeNanoseconds:
+                    DispatchTime.now().uptimeNanoseconds + 5_000_000_000
+            ),
+            claimID: UUID(),
+            generation: 1,
+            fileIndex: 0,
+            access: .readOnly
+        )
+        let unknownClaimReply = try brokerReply(for: unknownClaim, from: gate)
+        guard case .failure(
+            _,
+            let unknownClaimCode,
+            _
+        ) = unknownClaimReply else {
+            Issue.record("Expected an unknown claim to be rejected")
+            return
+        }
+        #expect(unknownClaimCode == .claimUnavailable)
     }
 
     @Test("Broker request rate is enforced independently of the client")
@@ -1835,14 +2072,44 @@ struct TorrentStorageAuthorityTests {
 
     private func handshakeRequest(
         nonce: UUID,
+        engineEpoch: UUID = UUID(),
         deadline: UInt64 = DispatchTime.now().uptimeNanoseconds + 5_000_000_000
     ) -> TorrentStorageBrokerRequest {
         .handshake(.init(
             requestID: UUID(),
-            engineEpoch: UUID(),
+            engineEpoch: engineEpoch,
             sessionNonce: nonce,
             deadlineUptimeNanoseconds: deadline
         ))
+    }
+
+    private func brokerReply(
+        for request: TorrentStorageBrokerRequest,
+        from gate: TorrentStorageBrokerSessionGate
+    ) throws -> TorrentStorageBrokerReply {
+        let dictionary = try #require(gate.handle(
+            TorrentStorageBrokerIPCCodec.encode(request)
+        ))
+        return try TorrentStorageBrokerIPCCodec.decodeReply(
+            dictionary,
+            for: request
+        )
+    }
+
+    private func contents(of descriptor: Int32, count: Int) throws -> Data {
+        var result = Data(count: count)
+        let bytesRead = unsafe result.withUnsafeMutableBytes { bytes in
+            unsafe Darwin.pread(
+                descriptor,
+                bytes.baseAddress,
+                bytes.count,
+                0
+            )
+        }
+        guard bytesRead == count else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        return result
     }
 
     private func ownershipTag(on descriptor: Int32) -> Data? {
