@@ -187,30 +187,41 @@ struct TorrentDestinationConflictView: View {
                         systemImage: "exclamationmark.triangle"
                     )
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
 
-            HStack {
-                Button("Choose Another Folder\u{2026}", action: chooseAnotherFolder)
-
-                Spacer()
-
-                Button("Cancel", role: .cancel, action: cancel)
-                    .keyboardShortcut(.cancelAction)
-
-                if conflict.canUseExistingFiles {
-                    Button("Use Existing Files", action: useExistingFiles)
+            HStack(spacing: 8) {
+                Button(action: chooseAnotherFolder) {
+                    Text("Choose Another Folder\u{2026}")
+                        .fixedSize()
                 }
 
-                Button(
-                    "Download a Separate Copy",
-                    action: downloadSeparateCopy
-                )
+                Spacer(minLength: 24)
+
+                Button(role: .cancel, action: cancel) {
+                    Text("Cancel")
+                        .fixedSize()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                if conflict.canUseExistingFiles {
+                    Button(action: useExistingFiles) {
+                        Text("Use Existing Files")
+                            .fixedSize()
+                    }
+                }
+
+                Button(action: downloadSeparateCopy) {
+                    Text("Download a Separate Copy")
+                        .fixedSize()
+                }
                 .keyboardShortcut(.defaultAction)
             }
         }
         .padding(24)
-        .frame(width: 580)
+        .frame(width: 700)
         .interactiveDismissDisabled()
     }
 
