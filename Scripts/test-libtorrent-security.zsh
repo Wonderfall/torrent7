@@ -169,19 +169,13 @@ restore_configuration=0
     ./test_file --no-redirect \
         "$source_dir/test/test_file.cpp.confined_filesystem_operations"
     ./test_file --no-redirect \
-        "$source_dir/test/test_file.cpp.descriptor_backed_root_rejects_symlink_replacement"
-    ./test_file --no-redirect \
-        "$source_dir/test/test_file.cpp.descriptor_backed_root_rejects_directory_replacement"
-    ./test_file --no-redirect \
         "$source_dir/test/test_file.cpp.pwrite_all_short_write"
     ./test_storage --no-redirect \
         "$source_dir/test/test_storage.cpp.confined_hard_link_write_pread"
     ./test_storage --no-redirect \
-        "$source_dir/test/test_storage.cpp.descriptor_backed_torrent_storage_pread"
-    ./test_storage --no-redirect \
-        "$source_dir/test/test_storage.cpp.descriptor_backed_torrent_storage_rejects_posix"
+        "$source_dir/test/test_storage.cpp.payload_provider_has_no_path_fallback"
     ./test_storage --no-redirect \
         "$source_dir/test/test_storage.cpp.confined_hard_link_write_mmap"
     ./test_storage --no-redirect \
-        "$source_dir/test/test_storage.cpp.descriptor_backed_torrent_storage_rejects_mmap"
+        "$source_dir/test/test_storage.cpp.payload_provider_rejects_other_backends"
 )
