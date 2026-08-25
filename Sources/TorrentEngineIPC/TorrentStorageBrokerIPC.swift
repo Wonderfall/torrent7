@@ -583,7 +583,7 @@ package enum TorrentStorageBrokerIPCCodec {
     }
 
     private static func boundedError(_ source: String) -> String {
-        var value = source.replacingOccurrences(of: "\0", with: "")
+        var value = String(source.unicodeScalars.filter { $0.value != 0 })
         if value.isEmpty {
             value = "The storage broker rejected the request."
         }
