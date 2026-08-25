@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import Testing
+import TorrentStorageAuthority
 @testable import TorrentApp
 
 @Suite("Torrent storage manifest parser")

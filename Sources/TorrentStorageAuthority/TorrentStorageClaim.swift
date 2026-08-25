@@ -2,16 +2,16 @@ import Darwin
 import CryptoKit
 import Foundation
 
-enum TorrentStorageContentKind: String, Codable, Sendable {
+package enum TorrentStorageContentKind: String, Codable, Sendable {
     case singleFile
     case directory
 }
 
-struct TorrentStorageInfoHashes: Codable, Equatable, Sendable {
-    let v1: Data?
-    let v2: Data?
+package struct TorrentStorageInfoHashes: Codable, Equatable, Sendable {
+    package let v1: Data?
+    package let v2: Data?
 
-    init(v1: Data?, v2: Data?) throws {
+    package init(v1: Data?, v2: Data?) throws {
         guard v1 == nil || v1?.count == Insecure.SHA1.byteCount,
               v2 == nil || v2?.count == SHA256.byteCount,
               v1 != nil || v2 != nil else {
@@ -22,55 +22,97 @@ struct TorrentStorageInfoHashes: Codable, Equatable, Sendable {
     }
 }
 
-struct TorrentLogicalFile: Codable, Equatable, Sendable {
-    let index: Int32
-    let pathComponents: [String]
-    let expectedSize: Int64
-    let isPadding: Bool
+package struct TorrentLogicalFile: Codable, Equatable, Sendable {
+    package let index: Int32
+    package let pathComponents: [String]
+    package let expectedSize: Int64
+    package let isPadding: Bool
+
+    package init(
+        index: Int32,
+        pathComponents: [String],
+        expectedSize: Int64,
+        isPadding: Bool
+    ) {
+        self.index = index
+        self.pathComponents = pathComponents
+        self.expectedSize = expectedSize
+        self.isPadding = isPadding
+    }
 }
 
-struct TorrentLogicalManifest: Codable, Equatable, Sendable {
-    let name: String
-    let contentKind: TorrentStorageContentKind
-    let infoHashes: TorrentStorageInfoHashes
-    let pieceLength: Int64
-    let files: [TorrentLogicalFile]
-    let sourceManifestDigest: Data
+package struct TorrentLogicalManifest: Codable, Equatable, Sendable {
+    package let name: String
+    package let contentKind: TorrentStorageContentKind
+    package let infoHashes: TorrentStorageInfoHashes
+    package let pieceLength: Int64
+    package let files: [TorrentLogicalFile]
+    package let sourceManifestDigest: Data
 
-    var totalSize: Int64 {
+    package var totalSize: Int64 {
         files.reduce(into: 0) { total, file in
             total += file.expectedSize
         }
     }
+
+    package init(
+        name: String,
+        contentKind: TorrentStorageContentKind,
+        infoHashes: TorrentStorageInfoHashes,
+        pieceLength: Int64,
+        files: [TorrentLogicalFile],
+        sourceManifestDigest: Data
+    ) {
+        self.name = name
+        self.contentKind = contentKind
+        self.infoHashes = infoHashes
+        self.pieceLength = pieceLength
+        self.files = files
+        self.sourceManifestDigest = sourceManifestDigest
+    }
 }
 
-struct ParsedTorrentManifest: Sendable {
-    let manifest: TorrentLogicalManifest
-    let rawInfoDictionary: Data
+package struct ParsedTorrentManifest: Sendable {
+    package let manifest: TorrentLogicalManifest
+    package let rawInfoDictionary: Data
 }
 
-struct TorrentFilesystemIdentity: Codable, Equatable, Sendable {
-    let device: UInt64
-    let inode: UInt64
-    let linkCount: UInt64
-    let ownerUserID: UInt32
-    let fileGeneration: UInt32
+package struct TorrentFilesystemIdentity: Codable, Equatable, Sendable {
+    package let device: UInt64
+    package let inode: UInt64
+    package let linkCount: UInt64
+    package let ownerUserID: UInt32
+    package let fileGeneration: UInt32
 
-    func refersToSameObject(as other: Self) -> Bool {
+    package func refersToSameObject(as other: Self) -> Bool {
         device == other.device
             && inode == other.inode
             && ownerUserID == other.ownerUserID
             && fileGeneration == other.fileGeneration
     }
+
+    package init(
+        device: UInt64,
+        inode: UInt64,
+        linkCount: UInt64,
+        ownerUserID: UInt32,
+        fileGeneration: UInt32
+    ) {
+        self.device = device
+        self.inode = inode
+        self.linkCount = linkCount
+        self.ownerUserID = ownerUserID
+        self.fileGeneration = fileGeneration
+    }
 }
 
-struct TorrentStorageParentID: Codable, Equatable, Hashable, Sendable {
-    let device: UInt64
-    let inode: UInt64
-    let ownerUserID: UInt32
-    let fileGeneration: UInt32
+package struct TorrentStorageParentID: Codable, Equatable, Hashable, Sendable {
+    package let device: UInt64
+    package let inode: UInt64
+    package let ownerUserID: UInt32
+    package let fileGeneration: UInt32
 
-    init(identity: TorrentFilesystemIdentity) {
+    package init(identity: TorrentFilesystemIdentity) {
         device = identity.device
         inode = identity.inode
         ownerUserID = identity.ownerUserID
@@ -78,18 +120,26 @@ struct TorrentStorageParentID: Codable, Equatable, Hashable, Sendable {
     }
 }
 
-struct TorrentPhysicalDirectoryIdentity: Codable, Equatable, Sendable {
+package struct TorrentPhysicalDirectoryIdentity: Codable, Equatable, Sendable {
     /// Components relative to the torrent's top-level directory. The root is
     /// represented by an empty array.
-    let relativePathComponents: [String]
-    let identity: TorrentFilesystemIdentity
+    package let relativePathComponents: [String]
+    package let identity: TorrentFilesystemIdentity
+
+    package init(
+        relativePathComponents: [String],
+        identity: TorrentFilesystemIdentity
+    ) {
+        self.relativePathComponents = relativePathComponents
+        self.identity = identity
+    }
 }
 
-enum TorrentStorageOwnership: Codable, Equatable, Sendable {
+package enum TorrentStorageOwnership: Codable, Equatable, Sendable {
     case appCreated(key: Data)
     case imported
 
-    var ownershipKey: Data? {
+    package var ownershipKey: Data? {
         guard case .appCreated(let key) = self else {
             return nil
         }
@@ -97,25 +147,25 @@ enum TorrentStorageOwnership: Codable, Equatable, Sendable {
     }
 }
 
-struct TorrentStorageManifest: Codable, Equatable, Sendable {
-    let claimID: UUID
-    let generation: UInt64
-    let infoHashes: TorrentStorageInfoHashes
-    let sourceManifestDigest: Data
-    let parentID: TorrentStorageParentID
-    let contentKind: TorrentStorageContentKind
-    let logicalFiles: [TorrentLogicalFile]
+package struct TorrentStorageManifest: Codable, Equatable, Sendable {
+    package let claimID: UUID
+    package let generation: UInt64
+    package let infoHashes: TorrentStorageInfoHashes
+    package let sourceManifestDigest: Data
+    package let parentID: TorrentStorageParentID
+    package let contentKind: TorrentStorageContentKind
+    package let logicalFiles: [TorrentLogicalFile]
     /// Canonically indexed with `logicalFiles`. Padding files have no identity
     /// and can never receive an FD.
-    let physicalFileIdentities: [TorrentFilesystemIdentity?]
+    package let physicalFileIdentities: [TorrentFilesystemIdentity?]
     /// Canonically ordered by depth and then lexicographically. Directory
     /// torrents include their top-level root as the empty relative path.
-    let physicalDirectoryIdentities: [TorrentPhysicalDirectoryIdentity]
-    let collisionSelectedTopLevelName: String
-    let authorityDigest: Data
-    let ownership: TorrentStorageOwnership
+    package let physicalDirectoryIdentities: [TorrentPhysicalDirectoryIdentity]
+    package let collisionSelectedTopLevelName: String
+    package let authorityDigest: Data
+    package let ownership: TorrentStorageOwnership
 
-    var topLevelIdentity: TorrentFilesystemIdentity? {
+    package var topLevelIdentity: TorrentFilesystemIdentity? {
         switch contentKind {
         case .singleFile:
             physicalFileIdentities.first.flatMap { $0 }
@@ -126,7 +176,7 @@ struct TorrentStorageManifest: Codable, Equatable, Sendable {
         }
     }
 
-    func relativePathComponents(forFileAt index: Int) -> [String]? {
+    package func relativePathComponents(forFileAt index: Int) -> [String]? {
         guard logicalFiles.indices.contains(index),
               physicalFileIdentities.indices.contains(index),
               !logicalFiles[index].isPadding,
@@ -141,15 +191,43 @@ struct TorrentStorageManifest: Codable, Equatable, Sendable {
                 + logicalFiles[index].pathComponents
         }
     }
+
+    package init(
+        claimID: UUID,
+        generation: UInt64,
+        infoHashes: TorrentStorageInfoHashes,
+        sourceManifestDigest: Data,
+        parentID: TorrentStorageParentID,
+        contentKind: TorrentStorageContentKind,
+        logicalFiles: [TorrentLogicalFile],
+        physicalFileIdentities: [TorrentFilesystemIdentity?],
+        physicalDirectoryIdentities: [TorrentPhysicalDirectoryIdentity],
+        collisionSelectedTopLevelName: String,
+        authorityDigest: Data,
+        ownership: TorrentStorageOwnership
+    ) {
+        self.claimID = claimID
+        self.generation = generation
+        self.infoHashes = infoHashes
+        self.sourceManifestDigest = sourceManifestDigest
+        self.parentID = parentID
+        self.contentKind = contentKind
+        self.logicalFiles = logicalFiles
+        self.physicalFileIdentities = physicalFileIdentities
+        self.physicalDirectoryIdentities = physicalDirectoryIdentities
+        self.collisionSelectedTopLevelName = collisionSelectedTopLevelName
+        self.authorityDigest = authorityDigest
+        self.ownership = ownership
+    }
 }
 
-enum TorrentStorageOwnershipTag {
-    static let keyByteCount = 32
-    static let tagByteCount = SHA256.byteCount
+package enum TorrentStorageOwnershipTag {
+    package static let keyByteCount = 32
+    package static let tagByteCount = SHA256.byteCount
 
     private static let domain = Data("Torrent7.StorageOwnership.v1".utf8)
 
-    static func authenticationCode(
+    package static func authenticationCode(
         key: Data,
         claimID: UUID,
         claimGeneration: UInt64,
@@ -172,7 +250,7 @@ enum TorrentStorageOwnershipTag {
         ))
     }
 
-    static func isValid(
+    package static func isValid(
         _ tag: Data,
         key: Data,
         claimID: UUID,
@@ -238,7 +316,7 @@ enum TorrentStorageOwnershipTag {
     }
 }
 
-enum TorrentStorageClaimState: String, Codable, Sendable {
+package enum TorrentStorageClaimState: String, Codable, Sendable {
     case reserved
     case activating
     case active
@@ -249,34 +327,70 @@ enum TorrentStorageClaimState: String, Codable, Sendable {
     case orphaned
 }
 
-struct TorrentStorageLease: Codable, Equatable, Sendable {
-    var state: TorrentStorageClaimState
-    var availabilityRevision: UInt64
-    var fileAvailability: [Bool]
+package struct TorrentStorageLease: Codable, Equatable, Sendable {
+    package var state: TorrentStorageClaimState
+    package var availabilityRevision: UInt64
+    package var fileAvailability: [Bool]
+
+    package init(
+        state: TorrentStorageClaimState,
+        availabilityRevision: UInt64,
+        fileAvailability: [Bool]
+    ) {
+        self.state = state
+        self.availabilityRevision = availabilityRevision
+        self.fileAvailability = fileAvailability
+    }
 }
 
-enum TorrentStorageRemovalIntent: String, Codable, Sendable {
+package enum TorrentStorageRemovalIntent: String, Codable, Sendable {
     case keepPayload
     case deletePayload
 }
 
-struct TorrentStorageDeletionEvidence: Codable, Equatable, Sendable {
-    let operationNonce: UUID
-    let quarantineIdentity: TorrentFilesystemIdentity
-    let entriesIdentity: TorrentFilesystemIdentity
+package struct TorrentStorageDeletionEvidence: Codable, Equatable, Sendable {
+    package let operationNonce: UUID
+    package let quarantineIdentity: TorrentFilesystemIdentity
+    package let entriesIdentity: TorrentFilesystemIdentity
+
+    package init(
+        operationNonce: UUID,
+        quarantineIdentity: TorrentFilesystemIdentity,
+        entriesIdentity: TorrentFilesystemIdentity
+    ) {
+        self.operationNonce = operationNonce
+        self.quarantineIdentity = quarantineIdentity
+        self.entriesIdentity = entriesIdentity
+    }
 }
 
-struct TorrentStorageClaim: Codable, Equatable, Sendable {
-    let manifest: TorrentStorageManifest
-    var lease: TorrentStorageLease
-    var torrentID: String?
-    var operationNonce: UUID
-    var removalIntent: TorrentStorageRemovalIntent?
-    var deletionEvidence: TorrentStorageDeletionEvidence?
+package struct TorrentStorageClaim: Codable, Equatable, Sendable {
+    package let manifest: TorrentStorageManifest
+    package var lease: TorrentStorageLease
+    package var torrentID: String?
+    package var operationNonce: UUID
+    package var removalIntent: TorrentStorageRemovalIntent?
+    package var deletionEvidence: TorrentStorageDeletionEvidence?
+
+    package init(
+        manifest: TorrentStorageManifest,
+        lease: TorrentStorageLease,
+        torrentID: String?,
+        operationNonce: UUID,
+        removalIntent: TorrentStorageRemovalIntent?,
+        deletionEvidence: TorrentStorageDeletionEvidence?
+    ) {
+        self.manifest = manifest
+        self.lease = lease
+        self.torrentID = torrentID
+        self.operationNonce = operationNonce
+        self.removalIntent = removalIntent
+        self.deletionEvidence = deletionEvidence
+    }
 }
 
-enum TorrentStorageLeaseValidation {
-    static func isValid(
+package enum TorrentStorageLeaseValidation {
+    package static func isValid(
         logicalFiles: [TorrentLogicalFile],
         fileAvailability: [Bool]
     ) -> Bool {
@@ -289,8 +403,8 @@ enum TorrentStorageLeaseValidation {
     }
 }
 
-enum TorrentStoragePathComponent {
-    static func isSafe(_ component: String) -> Bool {
+package enum TorrentStoragePathComponent {
+    package static func isSafe(_ component: String) -> Bool {
         !component.isEmpty
             && component != "."
             && component != ".."
@@ -300,8 +414,8 @@ enum TorrentStoragePathComponent {
     }
 }
 
-enum TorrentStorageClaimValidation {
-    static func isValid(
+package enum TorrentStorageClaimValidation {
+    package static func isValid(
         _ claim: TorrentStorageClaim,
         ownerUserID: UInt32 = geteuid()
     ) -> Bool {
@@ -447,11 +561,11 @@ enum TorrentStorageClaimValidation {
     }
 }
 
-enum TorrentManifestDigest {
+package enum TorrentManifestDigest {
     private static let domain = Data("Torrent7 logical storage manifest\0v1".utf8)
     private static let authorityDomain = Data("Torrent7 physical claim authority\0v2".utf8)
 
-    static func source(
+    package static func source(
         name: String,
         contentKind: TorrentStorageContentKind,
         infoHashes: TorrentStorageInfoHashes,
@@ -477,7 +591,7 @@ enum TorrentManifestDigest {
         return Data(SHA256.hash(data: input))
     }
 
-    static func authority(
+    package static func authority(
         claimID: UUID,
         generation: UInt64,
         infoHashes: TorrentStorageInfoHashes,

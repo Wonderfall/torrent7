@@ -9,7 +9,6 @@ SWIFT_BIN_DIR="${SWIFT_BIN_DIR:-$SWIFT_BUILD_DIR/arm64-apple-macosx/debug}"
 SDK_PATH="${SDK_PATH:-$(xcrun --sdk macosx --show-sdk-path)}"
 TARGET_TRIPLE="${TARGET_TRIPLE:-arm64-apple-macosx26.0}"
 CXX="${CXX:-$(xcrun --find clang++)}"
-SWIFTC="${SWIFTC:-$(xcrun --find swiftc)}"
 LLVM_PREFIX="${LLVM_PREFIX:-$(brew --prefix llvm 2>/dev/null || true)}"
 FUZZER_RUNTIME="${FUZZER_RUNTIME:-}"
 if [[ -z "$FUZZER_RUNTIME" && -n "$LLVM_PREFIX" ]]; then
@@ -70,12 +69,14 @@ support_for_target() {
     esac
 }
 
+needs_ipc_support=false
 needs_storage_support=false
 for target in "${targets[@]}"; do
     harness_for_target "$target" >/dev/null
-    if [[ "$(support_for_target "$target")" == TorrentStorageFuzzSupport ]]; then
-        needs_storage_support=true
-    fi
+    case "$(support_for_target "$target")" in
+        TorrentEngineIPCFuzzSupport) needs_ipc_support=true ;;
+        TorrentStorageFuzzSupport) needs_storage_support=true ;;
+    esac
 done
 
 swift_build_flags=(
@@ -88,47 +89,26 @@ swift_build_flags=(
     -Xswiftc -sanitize-coverage=edge,indirect-calls,inline-8bit-counters,pc-table
 )
 
-swift build \
-    "${swift_build_flags[@]}" \
-    --product TorrentEngineIPCFuzzSupport
-
-support_library="$SWIFT_BIN_DIR/libTorrentEngineIPCFuzzSupport.dylib"
-if [[ ! -f "$support_library" ]]; then
-    echo "Missing Swift fuzz support library: $support_library" >&2
-    exit 1
+if [[ "$needs_ipc_support" == true ]]; then
+    swift build \
+        "${swift_build_flags[@]}" \
+        --product TorrentEngineIPCFuzzSupport
+    ipc_support_library="$SWIFT_BIN_DIR/libTorrentEngineIPCFuzzSupport.dylib"
+    if [[ ! -f "$ipc_support_library" ]]; then
+        echo "Missing Swift fuzz support library: $ipc_support_library" >&2
+        exit 1
+    fi
 fi
 
 if [[ "$needs_storage_support" == true ]]; then
-    model_object="$SWIFT_BIN_DIR/TorrentEngineModel.build/TorrentEngineLimits.swift.o"
-    if [[ ! -f "$model_object" ]]; then
-        echo "Missing TorrentEngineModel limits object under $SWIFT_BIN_DIR" >&2
+    swift build \
+        "${swift_build_flags[@]}" \
+        --product TorrentStorageFuzzSupport
+    storage_support_library="$SWIFT_BIN_DIR/libTorrentStorageFuzzSupport.dylib"
+    if [[ ! -f "$storage_support_library" ]]; then
+        echo "Missing Swift fuzz support library: $storage_support_library" >&2
         exit 1
     fi
-
-    storage_support_library="$SWIFT_BIN_DIR/libTorrentStorageFuzzSupport.dylib"
-    "$SWIFTC" \
-        -target "$TARGET_TRIPLE" \
-        -sdk "$SDK_PATH" \
-        -swift-version 6 \
-        -parse-as-library \
-        -emit-library \
-        -module-name TorrentStorageFuzzSupport \
-        -package-name swiftui_torrent \
-        -g \
-        -Onone \
-        -sanitize=address \
-        -sanitize-coverage=edge,indirect-calls,inline-8bit-counters,pc-table \
-        -strict-concurrency=complete \
-        -warn-soft-deprecated \
-        -warnings-as-errors \
-        -I "$SWIFT_BIN_DIR/Modules" \
-        "$ROOT_DIR/Sources/TorrentApp/Storage/TorrentStorageClaim.swift" \
-        "$ROOT_DIR/Sources/TorrentApp/Storage/TorrentManifestParser.swift" \
-        "$TOOLS_DIR/StorageSupport/StorageAuthorityFuzzSupport.swift" \
-        "$model_object" \
-        -Xlinker -install_name \
-        -Xlinker @rpath/libTorrentStorageFuzzSupport.dylib \
-        -o "$storage_support_library"
 fi
 
 mkdir -p "$BUILD_DIR"

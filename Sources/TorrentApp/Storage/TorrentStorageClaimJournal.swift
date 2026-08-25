@@ -3,6 +3,7 @@ import CryptoKit
 import Foundation
 import System
 import TorrentEngineModel
+import TorrentStorageAuthority
 
 enum TorrentStorageJournalError: LocalizedError, Equatable, Sendable {
     case unavailable

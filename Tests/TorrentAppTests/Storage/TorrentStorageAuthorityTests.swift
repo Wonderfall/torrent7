@@ -4,6 +4,7 @@ import Foundation
 import Synchronization
 import Testing
 import TorrentEngineIPC
+import TorrentStorageAuthority
 import XPC
 @testable import TorrentApp
 

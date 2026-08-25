@@ -3,6 +3,7 @@ import Foundation
 import Synchronization
 import TorrentEngineClient
 import TorrentEngineIPC
+import TorrentStorageAuthority
 import XPC
 
 enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {

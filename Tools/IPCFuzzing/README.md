@@ -25,9 +25,9 @@ Scripts/verify-xcode.zsh
   deterministic parsing, advertised hash enforcement, canonical file indices,
   safe paths, and independently reproduced source digests.
 
-The claim and manifest targets compile the exact production
-`TorrentStorageClaim.swift` and `TorrentManifestParser.swift` sources into a
-fuzz-only dynamic library. No fuzz hook or conditional is linked into the app.
+The claim and manifest targets depend on the same `TorrentStorageAuthority`
+module used by the app. SwiftPM links that production module into a fuzz-only
+dynamic library; no fuzz hook or conditional is linked into the app.
 
 ## Build and run
 
