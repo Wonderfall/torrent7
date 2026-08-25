@@ -1,12 +1,7 @@
-# TorrentEngineIPC JSON Fuzzing
+# Swift storage-boundary fuzzing
 
-Developer-only coverage-guided fuzzing for the bounded JSON allocation
-preflight used on the XPC trust boundary.
-
-The target builds the production `TorrentEngineIPC` scanner with Swift
-sanitizer coverage and AddressSanitizer, then links a small C++ libFuzzer
-harness with Homebrew LLVM's libFuzzer runtime. It exercises both the smallest
-common operation profile and the absolute protocol profile for every input.
+Developer-only coverage-guided fuzzing for the Swift parsers and authority
+validators on the file-broker trust boundary.
 
 The latest project Xcode and Homebrew LLVM are required:
 
@@ -15,21 +10,45 @@ brew install llvm
 Scripts/verify-xcode.zsh
 ```
 
-## Run
+## Targets
+
+- `ipc_json_preflight` feeds arbitrary bytes and both limit profiles to the
+  production bounded JSON allocation preflight.
+- `storage_broker_ipc` generates typed, malformed raw XPC dictionaries and
+  exercises strict request/reply decoding, exact-key rejection, bounded binary
+  fields, descriptor ownership, and canonical round trips.
+- `storage_claim_validation` mutates structurally valid claims across digest,
+  ownership, lifecycle, availability, file identity, directory topology, and
+  path invariants. It also fuzzes hostile persisted JSON and ownership HMACs.
+- `storage_manifest` feeds arbitrary bencoding to the production torrent
+  manifest parser under standard and mutated tighter bounds, then checks
+  deterministic parsing, advertised hash enforcement, canonical file indices,
+  safe paths, and independently reproduced source digests.
+
+The claim and manifest targets compile the exact production
+`TorrentStorageClaim.swift` and `TorrentManifestParser.swift` sources into a
+fuzz-only dynamic library. No fuzz hook or conditional is linked into the app.
+
+## Build and run
 
 ```sh
+Tools/IPCFuzzing/build-libfuzzer.sh
 Tools/IPCFuzzing/run-libfuzzer.sh
 ```
 
-Useful overrides:
+One or more targets can be selected explicitly:
 
 ```sh
-RUNS=1000000 Tools/IPCFuzzing/run-libfuzzer.sh
-MAX_LEN=4194304 LIBFUZZER_ARGS="-timeout=10" \
-  Tools/IPCFuzzing/run-libfuzzer.sh
+Tools/IPCFuzzing/build-libfuzzer.sh storage_broker_ipc storage_claim_validation
+RUNS=1000000 Tools/IPCFuzzing/run-libfuzzer.sh storage_manifest
+MAX_LEN=131072 LIBFUZZER_ARGS="-timeout=10" \
+  Tools/IPCFuzzing/run-libfuzzer.sh storage_claim_validation
 ```
 
-Crash artifacts and the learned corpus are written below
-`Tools/IPCFuzzing/libfuzzer-artifacts`. The checked-in corpus is seed input
-only. The fuzz support dynamic library is a developer tool product and is not
-linked into any shipped app or extension.
+Crash artifacts are written to per-target directories below
+`Tools/IPCFuzzing/libfuzzer-artifacts`. Learned corpus units live under its
+`corpus` child; the checked-in `Tools/IPCFuzzing/corpus` tree contains seed
+inputs only.
+
+The fuzz support libraries are developer tools. Neither is linked into any
+shipped app or extension.

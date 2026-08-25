@@ -20,15 +20,17 @@ public func torrentEngineIPCJSONPreflightFuzzOneInput(
         data = Data()
     }
 
-    // Exercise both early operation-sized rejection and the largest profile
-    // accepted anywhere in the protocol. The scanner must remain linear and
-    // safe for arbitrary bytes whether either profile accepts or rejects.
-    _ = try? TorrentEngineIPCJSONCodec.preflightForFuzzing(
-        data,
-        limits: TorrentEngineIPCLimits.smallJSONLimits
-    )
-    _ = try? TorrentEngineIPCJSONCodec.preflightForFuzzing(
-        data,
-        limits: TorrentEngineIPCLimits.maximumJSONLimits
-    )
+    autoreleasepool {
+        // Exercise both early operation-sized rejection and the largest profile
+        // accepted anywhere in the protocol. The scanner must remain linear and
+        // safe for arbitrary bytes whether either profile accepts or rejects.
+        _ = try? TorrentEngineIPCJSONCodec.preflightForFuzzing(
+            data,
+            limits: TorrentEngineIPCLimits.smallJSONLimits
+        )
+        _ = try? TorrentEngineIPCJSONCodec.preflightForFuzzing(
+            data,
+            limits: TorrentEngineIPCLimits.maximumJSONLimits
+        )
+    }
 }

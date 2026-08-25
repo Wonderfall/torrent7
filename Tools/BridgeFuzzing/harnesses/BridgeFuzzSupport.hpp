@@ -1,7 +1,12 @@
 #ifndef TORRENT_APP_TOOLS_FUZZING_BRIDGE_FUZZ_SUPPORT_HPP
 #define TORRENT_APP_TOOLS_FUZZING_BRIDGE_FUZZ_SUPPORT_HPP
 
+// These harnesses compile the bridge implementation directly, so use the same
+// conventional C callback types as its translation units. The public header's
+// Swift-importer lifetime attributes intentionally describe consumers instead.
+#define TORRENT_BRIDGE_IMPLEMENTATION
 #include "TorrentBridge.h"
+#undef TORRENT_BRIDGE_IMPLEMENTATION
 
 #include <algorithm>
 #include <array>
