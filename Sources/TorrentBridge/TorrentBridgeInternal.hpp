@@ -829,7 +829,7 @@ struct PayloadBrokerCallbacks {
 class PayloadBrokerContext final {
 public:
     explicit PayloadBrokerContext(TTorrentPayloadBrokerCallbacks callbacks);
-    ~PayloadBrokerContext();
+    __attribute__((noinline)) ~PayloadBrokerContext();
 
     PayloadBrokerContext(PayloadBrokerContext const &) = delete;
     PayloadBrokerContext &operator=(PayloadBrokerContext const &) = delete;

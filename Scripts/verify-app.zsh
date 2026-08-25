@@ -613,7 +613,7 @@ extract_disassembly_function \
     "$payload_retain_pac_output"
 extract_disassembly_function \
     "$engine_text_output" \
-    "__ZNSt3__120__shared_ptr_emplaceIN14torrent_bridge8internal20PayloadBrokerContextENS_9allocatorIS3_EEE16__on_zero_sharedEv" \
+    "__ZN14torrent_bridge8internal20PayloadBrokerContextD2Ev" \
     "$payload_release_pac_output"
 extract_disassembly_function \
     "$engine_text_output" \
