@@ -1,5 +1,4 @@
 import Foundation
-import TorrentEngineModel
 
 struct PreparedDownloadFolder: Sendable {
     let path: String
@@ -79,59 +78,33 @@ struct DownloadFolderDefaultUpdate: Sendable {
     let didChange: Bool
 }
 
-struct DownloadFolderPruneSnapshot: Sendable {
-    let accessRevision: UInt64
-    let candidateAccessKeys: Set<String>
-}
-
-struct DownloadFolderPrunePlan: Sendable {
-    let accessRevision: UInt64
-    let retainedAccessKeys: Set<String>
-
-    @concurrent
-    static func prepare(
-        snapshot: DownloadFolderPruneSnapshot,
-        activeTorrents: [TorrentItem]
-    ) async throws -> DownloadFolderPrunePlan {
-        try Task.checkCancellation()
-        _ = activeTorrents
-        try Task.checkCancellation()
-        return DownloadFolderPrunePlan(
-            accessRevision: snapshot.accessRevision,
-            retainedAccessKeys: snapshot.candidateAccessKeys
-        )
-    }
-}
-
 protocol DownloadFolderAccessStoring: AnyObject, Sendable {
     func bootstrap() async -> DownloadFolderBootstrapResult
     func currentDefaultURL() async -> URL?
-    func currentAccessRevision() async -> UInt64
     func makeAccessSnapshot() async -> DownloadFolderAccessSnapshot
-    func makePruneSnapshot() async -> DownloadFolderPruneSnapshot
     func clearDefaultBookmarkAndAccess() async
     func validateSelection(_ url: URL) async throws
     @discardableResult
     func setDefault(
         _ url: URL,
-        activeTorrents: [TorrentItem]
+        retaining paths: Set<String>
     ) async throws -> DownloadFolderDefaultUpdate
-    func clearDefault(activeTorrents: [TorrentItem]) async
+    func clearDefault(retaining paths: Set<String>) async
     func prepareForAdd(
         _ url: URL,
         setsDefault: Bool,
-        activeTorrents: [TorrentItem]
+        retaining paths: Set<String>
     ) async throws -> PreparedDownloadFolder
     @discardableResult
     func commitPreparedForAdd(
         _ preparedFolder: PreparedDownloadFolder,
-        activeTorrents: [TorrentItem]
+        retaining paths: Set<String>
     ) async -> URL?
     func lease(forSavePath path: String) async throws -> DownloadFolderAccessLease
     @discardableResult
-    func applyPrunePlan(
-        _ plan: DownloadFolderPrunePlan,
-        activeTorrents: [TorrentItem]
+    func prune(
+        retaining paths: Set<String>,
+        ifRevisionMatches revision: UInt64
     ) async -> Bool
 }
 
@@ -196,25 +169,12 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
         defaultAccess?.url
     }
 
-    func currentAccessRevision() async -> UInt64 {
-        restoreAdditionalAccessesIfNeeded()
-        return accessRevision
-    }
-
     func makeAccessSnapshot() async -> DownloadFolderAccessSnapshot {
         restoreAdditionalAccessesIfNeeded()
         return DownloadFolderAccessSnapshot(
             revision: accessRevision,
             defaultAccess: defaultAccess,
             additionalAccesses: Array(additionalAccesses.values)
-        )
-    }
-
-    func makePruneSnapshot() async -> DownloadFolderPruneSnapshot {
-        restoreAdditionalAccessesIfNeeded()
-        return DownloadFolderPruneSnapshot(
-            accessRevision: accessRevision,
-            candidateAccessKeys: Set(additionalAccesses.keys)
         )
     }
 
@@ -237,9 +197,12 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
     @discardableResult
     func setDefault(
         _ url: URL,
-        activeTorrents: [TorrentItem]
+        retaining paths: Set<String>
     ) async throws -> DownloadFolderDefaultUpdate {
         restoreAdditionalAccessesIfNeeded()
+        let previousIdentity = accessIdentity
+        defer { advanceAccessRevision(ifChangedFrom: previousIdentity) }
+        pruneAdditionalAccesses(retaining: paths)
         if let defaultAccess,
            Self.accessKey(url) == Self.accessKey(defaultAccess.url) {
             return DownloadFolderDefaultUpdate(
@@ -248,8 +211,6 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
             )
         }
 
-        let previousIdentity = accessIdentity
-        defer { advanceAccessRevision(ifChangedFrom: previousIdentity) }
         let previousAccess = defaultAccess
         let previousURL = previousAccess?.url
         let newAccess = try accessProvider.createAccess(
@@ -257,7 +218,7 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
             savesBookmark: false,
             defaults: defaults
         )
-        try validateProjectedDefault(newAccess, activeTorrents: activeTorrents)
+        try validateProjectedDefault(newAccess, retaining: paths)
         let bookmarkData = try newAccess.bookmarkData()
 
         defaults.set(bookmarkData, forKey: SecurityScopedFolder.defaultsKey)
@@ -266,18 +227,18 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
         preserveAdditionalAccessIfNeeded(
             previousAccess,
             url: previousURL,
-            activeTorrents: activeTorrents
+            retaining: paths
         )
         removeAdditionalDownloadFolderBookmark(for: newAccess.url)
         additionalAccesses.removeValue(forKey: Self.accessKey(newAccess.url))
-        pruneSynchronously(activeTorrents: activeTorrents)
+        pruneAdditionalAccesses(retaining: paths)
         return DownloadFolderDefaultUpdate(
             url: newAccess.url,
             didChange: true
         )
     }
 
-    func clearDefault(activeTorrents: [TorrentItem]) async {
+    func clearDefault(retaining paths: Set<String>) async {
         restoreAdditionalAccessesIfNeeded()
         let previousIdentity = accessIdentity
         defer { advanceAccessRevision(ifChangedFrom: previousIdentity) }
@@ -290,16 +251,16 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
         preserveAdditionalAccessIfNeeded(
             previousAccess,
             url: previousURL,
-            activeTorrents: activeTorrents
+            retaining: paths
         )
-        pruneSynchronously(activeTorrents: activeTorrents)
+        pruneAdditionalAccesses(retaining: paths)
         enforceAdditionalAccessLimit()
     }
 
     func prepareForAdd(
         _ url: URL,
         setsDefault: Bool,
-        activeTorrents: [TorrentItem]
+        retaining paths: Set<String>
     ) async throws -> PreparedDownloadFolder {
         restoreAdditionalAccessesIfNeeded()
         if let defaultAccess,
@@ -317,9 +278,12 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
             defaults: defaults
         )
         if setsDefault {
-            try validateProjectedDefault(access, activeTorrents: activeTorrents)
+            try validateProjectedDefault(access, retaining: paths)
         } else {
-            var projectedAdditionalAccesses = additionalAccesses
+            let retainedKeys = Self.accessKeys(for: paths)
+            var projectedAdditionalAccesses = additionalAccesses.filter {
+                retainedKeys.contains($0.key)
+            }
             projectedAdditionalAccesses[Self.accessKey(access.url)] = access
             try validateAccessCount(
                 defaultAccess: defaultAccess,
@@ -337,11 +301,12 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
     @discardableResult
     func commitPreparedForAdd(
         _ preparedFolder: PreparedDownloadFolder,
-        activeTorrents: [TorrentItem]
+        retaining paths: Set<String>
     ) async -> URL? {
         restoreAdditionalAccessesIfNeeded()
         let previousIdentity = accessIdentity
         defer { advanceAccessRevision(ifChangedFrom: previousIdentity) }
+        pruneAdditionalAccesses(retaining: paths)
         guard let bookmarkData = preparedFolder.bookmarkData else {
             return nil
         }
@@ -356,7 +321,7 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
             preserveAdditionalAccessIfNeeded(
                 previousAccess,
                 url: previousURL,
-                activeTorrents: activeTorrents
+                retaining: paths
             )
             removeAdditionalDownloadFolderBookmark(
                 for: preparedFolder.lease.access.url
@@ -364,7 +329,7 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
             additionalAccesses.removeValue(
                 forKey: Self.accessKey(preparedFolder.lease.access.url)
             )
-            pruneSynchronously(activeTorrents: activeTorrents)
+            pruneAdditionalAccesses(retaining: paths)
             return preparedFolder.lease.access.url
         }
 
@@ -399,16 +364,17 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
         return DownloadFolderAccessLease(access: access)
     }
 
-    @discardableResult
-    func applyPrunePlan(
-        _ plan: DownloadFolderPrunePlan,
-        activeTorrents _: [TorrentItem]
+    func prune(
+        retaining paths: Set<String>,
+        ifRevisionMatches revision: UInt64
     ) async -> Bool {
         restoreAdditionalAccessesIfNeeded()
-        guard plan.accessRevision == accessRevision else {
+        guard revision == accessRevision else {
             return false
         }
-        prune(retainingActiveKeys: plan.retainedAccessKeys)
+        let previousIdentity = accessIdentity
+        defer { advanceAccessRevision(ifChangedFrom: previousIdentity) }
+        pruneAdditionalAccesses(retaining: paths)
         return true
     }
 
@@ -423,14 +389,8 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
         )
     }
 
-    private func pruneSynchronously(activeTorrents: [TorrentItem]) {
-        _ = activeTorrents
-        enforceAdditionalAccessLimit()
-    }
-
-    private func prune(retainingActiveKeys activeKeys: Set<String>) {
-        let previousIdentity = accessIdentity
-        defer { advanceAccessRevision(ifChangedFrom: previousIdentity) }
+    private func pruneAdditionalAccesses(retaining paths: Set<String>) {
+        let activeKeys = Self.accessKeys(for: paths)
         let staleKeys = Set(additionalAccesses.keys).subtracting(activeKeys)
         guard !staleKeys.isEmpty else {
             return
@@ -461,10 +421,7 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
         guard accessIdentity != previousIdentity else {
             return
         }
-        precondition(
-            accessRevision != UInt64.max,
-            "Download-folder access revision exhausted"
-        )
+        precondition(accessRevision != UInt64.max)
         accessRevision += 1
     }
 
@@ -474,15 +431,18 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
 
     private func validateProjectedDefault(
         _ projectedDefaultAccess: DownloadFolderAccessing,
-        activeTorrents: [TorrentItem]
+        retaining paths: Set<String>
     ) throws {
-        var projectedAdditionalAccesses = additionalAccesses
         let projectedDefaultKey = Self.accessKey(projectedDefaultAccess.url)
-        _ = activeTorrents
+        let retainedKeys = Self.accessKeys(for: paths)
+        var projectedAdditionalAccesses = additionalAccesses.filter {
+            retainedKeys.contains($0.key)
+        }
 
         if let defaultAccess {
             let previousDefaultKey = Self.accessKey(defaultAccess.url)
-            if previousDefaultKey != projectedDefaultKey {
+            if previousDefaultKey != projectedDefaultKey,
+               retainedKeys.contains(previousDefaultKey) {
                 projectedAdditionalAccesses[previousDefaultKey] = defaultAccess
             }
         }
@@ -510,17 +470,25 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
     private func preserveAdditionalAccessIfNeeded(
         _ access: DownloadFolderAccessing?,
         url: URL?,
-        activeTorrents: [TorrentItem]
+        retaining paths: Set<String>
     ) {
         guard let access, let url else {
             return
         }
 
         let key = Self.accessKey(url)
-        _ = activeTorrents
+        guard Self.accessKeys(for: paths).contains(key) else {
+            return
+        }
 
         additionalAccesses[key] = access
         try? saveAdditionalDownloadFolderBookmark(for: access)
+    }
+
+    private static func accessKeys(for paths: Set<String>) -> Set<String> {
+        Set(paths.map {
+            accessKey(URL(filePath: $0, directoryHint: .isDirectory))
+        })
     }
 
     private static func restoreAdditionalDownloadFoldersFromDefaults(

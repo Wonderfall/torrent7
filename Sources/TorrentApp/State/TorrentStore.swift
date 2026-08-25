@@ -201,7 +201,9 @@ final class TorrentStore {
     private let storageClaimJournal: TorrentStorageClaimJournal?
     private let storageClaimJournalInitializationError:
         TorrentStorageJournalError?
-    private var storageParentAuthorities = [UUID: TorrentStorageParentAuthority]()
+    private var storageParents = [
+        TorrentStorageParentID: TorrentStorageParentAuthority
+    ]()
     @ObservationIgnored
     private var storageBrokerServer: TorrentStorageBrokerServer?
     private let dockTileService: TorrentDockTileServicing
@@ -748,10 +750,7 @@ final class TorrentStore {
         guard claims.count <= 1 else {
             throw TorrentStorageJournalError.corrupt
         }
-        guard let claim = claims.first,
-              let currentPolicy = claim.lease.filePolicies.first(where: {
-                  $0.fileIndex == fileIndex
-              }) else {
+        guard let claim = claims.first else {
             try await engine.setFilePriority(
                 id: torrentID,
                 fileIndex: fileIndex,
@@ -761,23 +760,21 @@ final class TorrentStore {
         }
         guard fileIndex >= 0,
               Int(fileIndex) < claim.manifest.logicalFiles.count,
+              Int(fileIndex) < claim.lease.fileAvailability.count,
               !claim.manifest.logicalFiles[Int(fileIndex)].isPadding else {
             throw TorrentStorageBrokerRegistryError.fileUnavailable
         }
 
-        let enablesPayload = currentPolicy.maximumAccess == .unavailable
+        let isAvailable = claim.lease.fileAvailability[Int(fileIndex)]
+        let enablesPayload = !isAvailable
             && priority != .skip
-        let restrictsPayload = currentPolicy.maximumAccess != .unavailable
+        let restrictsPayload = isAvailable
             && priority == .skip
         if enablesPayload {
-            let updated = try await replacePayloadPolicy(
+            let updated = try await replacePayloadAvailability(
                 claim: claim,
                 fileIndex: fileIndex,
-                maximumAccess: currentPolicy.provenance == .appCreated
-                    ? .appOwnedWritable
-                    : (currentPolicy.mayModify
-                        ? .explicitlyImportedWritable
-                        : .verificationReadOnly)
+                isAvailable: true
             )
             do {
                 try await engine.setFilePriority(
@@ -786,10 +783,10 @@ final class TorrentStore {
                     priority: priority
                 )
             } catch {
-                _ = try? await replacePayloadPolicy(
+                _ = try? await replacePayloadAvailability(
                     claim: updated,
                     fileIndex: fileIndex,
-                    maximumAccess: .unavailable
+                    isAvailable: false
                 )
                 throw error
             }
@@ -802,46 +799,35 @@ final class TorrentStore {
             priority: priority
         )
         if restrictsPayload {
-            _ = try await replacePayloadPolicy(
+            _ = try await replacePayloadAvailability(
                 claim: claim,
                 fileIndex: fileIndex,
-                maximumAccess: .unavailable
+                isAvailable: false
             )
         }
     }
 
-    private func replacePayloadPolicy(
+    private func replacePayloadAvailability(
         claim: TorrentStorageClaim,
         fileIndex: Int32,
-        maximumAccess: TorrentPayloadMaximumAccess
+        isAvailable: Bool
     ) async throws -> TorrentStorageClaim {
         guard let storageClaimJournal else {
             throw storageClaimJournalInitializationError ?? .unavailable
         }
-        let policies = claim.lease.filePolicies.map { policy in
-            guard policy.fileIndex == fileIndex else {
-                return policy
-            }
-            return TorrentPayloadFilePolicy(
-                fileIndex: policy.fileIndex,
-                maximumAccess: maximumAccess,
-                provenance: policy.provenance,
-                mayModify: policy.mayModify,
-                mayDeleteAutomatically: policy.mayDeleteAutomatically
-            )
+        guard fileIndex >= 0,
+              claim.lease.fileAvailability.indices.contains(Int(fileIndex)) else {
+            throw TorrentStorageBrokerRegistryError.fileUnavailable
         }
-        let updated = try await storageClaimJournal.replacePolicy(
+        var availability = claim.lease.fileAvailability
+        availability[Int(fileIndex)] = isAvailable
+        let updated = try await storageClaimJournal.replaceAvailability(
             claimID: claim.manifest.claimID,
             generation: claim.manifest.generation,
-            operationNonce: UUID(),
-            policies: policies
+            expectedAvailabilityRevision: claim.lease.availabilityRevision,
+            fileAvailability: availability
         )
-        try storageBrokerRegistry.replaceLease(
-            claimID: claim.manifest.claimID,
-            generation: claim.manifest.generation,
-            expectedPolicyRevision: claim.lease.policyRevision,
-            with: updated.lease
-        )
+        try storageBrokerRegistry.replace(claim: updated)
         return updated
     }
 
@@ -999,7 +985,7 @@ final class TorrentStore {
         let preparedFolder = try await downloadFolderAccessStore.prepareForAdd(
             downloadFolder,
             setsDefault: setsDownloadFolderAsDefault,
-            activeTorrents: torrents
+            retaining: await requiredDownloadFolderPaths()
         )
         defer {
             withExtendedLifetime(preparedFolder.lease) {}
@@ -1059,7 +1045,7 @@ final class TorrentStore {
                 .prepareForAdd(
                     folder,
                     setsDefault: false,
-                    activeTorrents: store.torrents
+                    retaining: await store.requiredDownloadFolderPaths()
                 )
             defer {
                 withExtendedLifetime(preparedFolder.lease) {}
@@ -1129,6 +1115,7 @@ final class TorrentStore {
                     throw TorrentStorageJournalError.invalidTransition
                 }
                 try await operation(store, promotion)
+                await store.pruneDownloadFolderAccess()
                 await store.refreshFromEngine(notifiesCompletions: false)
                 store.clearLastError(ifUnchangedSince: errorGeneration)
             } catch {
@@ -1215,7 +1202,7 @@ final class TorrentStore {
                 try await store.downloadFolderAccessStore.prepareForAdd(
                     downloadFolder,
                     setsDefault: setsDownloadFolderAsDefault,
-                    activeTorrents: store.torrents
+                    retaining: await store.requiredDownloadFolderPaths()
                 )
             },
             startsPaused: startsPaused,
@@ -1290,6 +1277,7 @@ final class TorrentStore {
                 await store.refreshFromEngine()
                 store.clearLastError(ifUnchangedSince: errorGeneration)
             } catch {
+                await store.pruneDownloadFolderAccess()
                 store.setLastError(error.localizedDescription, source: .userAction)
             }
         }
@@ -1353,7 +1341,7 @@ final class TorrentStore {
                 try await store.downloadFolderAccessStore.prepareForAdd(
                     downloadFolder,
                     setsDefault: setsDownloadFolderAsDefault,
-                    activeTorrents: store.torrents
+                    retaining: await store.requiredDownloadFolderPaths()
                 )
             },
             filePriorities: filePriorities,
@@ -1426,6 +1414,7 @@ final class TorrentStore {
                 await store.refreshFromEngine()
                 store.clearLastError(ifUnchangedSince: errorGeneration)
             } catch {
+                await store.pruneDownloadFolderAccess()
                 store.setLastError(error.localizedDescription, source: .userAction)
             }
         }
@@ -1451,14 +1440,17 @@ final class TorrentStore {
 
         let parsed = try await Self.parseStorageManifest(data)
         let parent = try await Self.makeStorageParentAuthority(folderLease)
+        storageParents[parent.id] = parent
         let generation: UInt64 = 1
         let ownershipKey = TorrentStorageDestinationPlanner.randomOwnershipKey()
         let preparation = TorrentStoragePreparation(
             claimID: claimID,
             generation: generation,
-            parentAuthorityID: parent.id,
+            parentID: parent.id,
             preferredTopLevelName: parsed.manifest.name,
-            ownershipKey: ownershipKey,
+            ownershipKey: destinationChoice == .useExistingFiles
+                ? nil
+                : ownershipKey,
             operationNonce: operationNonce,
             reservedTopLevelName: nil
         )
@@ -1481,18 +1473,26 @@ final class TorrentStore {
                 parent: parent,
                 claimID: claimID,
                 generation: generation,
-                ownershipKey: ownershipKey,
                 selectedTopLevelName: selectedTopLevelName
             )
         }
 
         try await storageClaimJournal.beginPreparation(preparation)
-        try await storageClaimJournal.noteReservation(
-            claimID: claimID,
-            generation: generation,
-            operationNonce: operationNonce,
-            topLevelName: selectedTopLevelName
-        )
+        do {
+            try await storageClaimJournal.noteReservation(
+                claimID: claimID,
+                generation: generation,
+                operationNonce: operationNonce,
+                topLevelName: selectedTopLevelName
+            )
+        } catch {
+            try? await storageClaimJournal.cancelPreparation(
+                claimID: claimID,
+                generation: generation,
+                operationNonce: operationNonce
+            )
+            throw error
+        }
         let reservation: TorrentStorageReservation
         if let inspectedImport {
             reservation = inspectedImport
@@ -1507,27 +1507,23 @@ final class TorrentStore {
             )
         }
 
-        let requestedPolicies = reservation.initialLease.filePolicies.map { policy in
-            guard filePriorities?[policy.fileIndex] == .skip else {
-                return policy
-            }
-            return TorrentPayloadFilePolicy(
-                fileIndex: policy.fileIndex,
-                maximumAccess: .unavailable,
-                provenance: policy.provenance,
-                mayModify: policy.mayModify,
-                mayDeleteAutomatically: policy.mayDeleteAutomatically
-            )
+        let requestedAvailability = zip(
+            parsed.manifest.files,
+            reservation.initialLease.fileAvailability
+        ).map { file, isAvailable in
+            isAvailable && filePriorities?[file.index] != .skip
         }
         var claim = TorrentStorageClaim(
             manifest: reservation.storageManifest,
             lease: TorrentStorageLease(
                 state: .reserved,
-                policyRevision: reservation.initialLease.policyRevision,
-                filePolicies: requestedPolicies
+                availabilityRevision: reservation.initialLease.availabilityRevision,
+                fileAvailability: requestedAvailability
             ),
             torrentID: nil,
-            operationNonce: operationNonce
+            operationNonce: operationNonce,
+            removalIntent: nil,
+            deletionEvidence: nil
         )
         try await storageClaimJournal.commitReserved(claim)
         claim = try await storageClaimJournal.transition(
@@ -1538,9 +1534,8 @@ final class TorrentStore {
             to: .activating
         )
 
-        try storageBrokerRegistry.install(parentAuthority: parent)
-        try storageBrokerRegistry.install(claim: claim)
-        storageParentAuthorities[parent.id] = parent
+        try storageBrokerRegistry.install(claim: claim, parent: parent)
+        storageParents[parent.id] = parent
 
         let activation = try TorrentStorageActivation(
             claimID: claimID,
@@ -1573,7 +1568,7 @@ final class TorrentStore {
                 to: failureState
             )
             if let unresolved {
-                try? storageBrokerRegistry.install(claim: unresolved)
+                try? storageBrokerRegistry.replace(claim: unresolved)
             }
             throw error
         }
@@ -1586,7 +1581,7 @@ final class TorrentStore {
             to: .active,
             torrentID: torrentID
         )
-        try storageBrokerRegistry.install(claim: active)
+        try storageBrokerRegistry.replace(claim: active)
         return torrentID
     }
 
@@ -1623,10 +1618,9 @@ final class TorrentStore {
 
     @concurrent
     private static func makeStorageParentAuthority(
-        _ lease: DownloadFolderAccessLease,
-        id: UUID = UUID()
+        _ lease: DownloadFolderAccessLease
     ) async throws -> TorrentStorageParentAuthority {
-        try TorrentStorageParentAuthority(id: id, lease: lease)
+        try TorrentStorageParentAuthority(lease: lease)
     }
 
     @concurrent
@@ -1654,7 +1648,6 @@ final class TorrentStore {
         parent: TorrentStorageParentAuthority,
         claimID: UUID,
         generation: UInt64,
-        ownershipKey: Data,
         selectedTopLevelName: String
     ) async throws -> TorrentStorageReservation {
         try TorrentStorageDestinationPlanner().importExisting(
@@ -1662,7 +1655,6 @@ final class TorrentStore {
             in: parent,
             claimID: claimID,
             generation: generation,
-            ownershipKey: ownershipKey,
             selectedTopLevelName: selectedTopLevelName
         )
     }
@@ -1807,6 +1799,7 @@ final class TorrentStore {
                 )
                 try await store.removeFromSelection(removedIDs)
                 await store.finalizeRemovalPresentation(removedIDs)
+                await store.pruneDownloadFolderAccess()
                 if removalWarnings.isEmpty {
                     store.clearLastError(ifUnchangedSince: errorGeneration)
                 } else {
@@ -1818,6 +1811,7 @@ final class TorrentStore {
                 )
                 try? await store.removeFromSelection(removedIDs)
                 await store.finalizeRemovalPresentation(removedIDs)
+                await store.pruneDownloadFolderAccess()
                 removalWarnings.append(error.localizedDescription)
                 store.setLastError(removalWarnings.joined(separator: "\n"), source: .userAction)
             }
@@ -1839,7 +1833,7 @@ final class TorrentStore {
             )
         }
         let matchingClaims = await storageClaimJournal.allClaims().filter {
-            $0.torrentID == torrent.id && $0.lease.state != .deleted
+            $0.torrentID == torrent.id
         }
         guard matchingClaims.count == 1, let storedClaim = matchingClaims.first else {
             let outcome = try await engine.remove(id: torrent.id)
@@ -1857,7 +1851,8 @@ final class TorrentStore {
             generation: storedClaim.manifest.generation,
             operationNonce: nonce,
             from: [.active, .activationUnknown],
-            to: .removing
+            to: .removing,
+            removalIntent: deleteFiles ? .deletePayload : .keepPayload
         )
 
         let outcome: TorrentRemovalOutcome
@@ -1890,19 +1885,10 @@ final class TorrentStore {
         )
 
         guard deleteFiles else {
-            claim = try await storageClaimJournal.transition(
+            try await storageClaimJournal.completeClaimRemoval(
                 claimID: claim.manifest.claimID,
                 generation: claim.manifest.generation,
-                operationNonce: nonce,
-                from: [.removing],
-                to: .deleting
-            )
-            _ = try await storageClaimJournal.transition(
-                claimID: claim.manifest.claimID,
-                generation: claim.manifest.generation,
-                operationNonce: nonce,
-                from: [.deleting],
-                to: .deleted
+                operationNonce: nonce
             )
             return outcome
         }
@@ -1926,16 +1912,24 @@ final class TorrentStore {
             to: .deleting
         )
         do {
-            guard let parent = storageParentAuthorities[claim.manifest.parentAuthorityID] else {
+            guard let parent = storageParents[claim.manifest.parentID] else {
                 throw TorrentStoragePlanningError.deletionNotProvable
             }
-            try await Self.deleteStorageClaim(claim, from: parent)
-            claim = try await storageClaimJournal.transition(
+            let evidence = try await Self.prepareStorageDeletion(
+                claim,
+                from: parent
+            )
+            claim = try await storageClaimJournal.recordDeletionEvidence(
                 claimID: claim.manifest.claimID,
                 generation: claim.manifest.generation,
                 operationNonce: nonce,
-                from: [.deleting],
-                to: .deleted
+                evidence: evidence
+            )
+            try await Self.deleteStorageClaim(claim, from: parent)
+            try await storageClaimJournal.completeClaimRemoval(
+                claimID: claim.manifest.claimID,
+                generation: claim.manifest.generation,
+                operationNonce: nonce
             )
             return .removed
         } catch {
@@ -1951,14 +1945,24 @@ final class TorrentStore {
     }
 
     @concurrent
+    private static func prepareStorageDeletion(
+        _ claim: TorrentStorageClaim,
+        from parent: TorrentStorageParentAuthority
+    ) async throws -> TorrentStorageDeletionEvidence {
+        try TorrentStorageDestinationPlanner().prepareDeletion(
+            claim: claim,
+            from: parent
+        )
+    }
+
+    @concurrent
     private static func deleteStorageClaim(
         _ claim: TorrentStorageClaim,
         from parent: TorrentStorageParentAuthority
     ) async throws {
         try TorrentStorageDestinationPlanner().deleteClaimedPayload(
             claim: claim,
-            from: parent,
-            authorizedBy: .explicitUserRequest
+            from: parent
         )
     }
 
@@ -2006,12 +2010,6 @@ final class TorrentStore {
         applyTorrentPresentation(presentation)
         updateDockTransferRates()
         updateSleepPrevention()
-        let appliedPresentationRevision = torrentPresentationRevision
-        await pruneDownloadFolderAccess(activeTorrents: torrents)
-        guard !Task.isCancelled,
-              appliedPresentationRevision == torrentPresentationRevision else {
-            return
-        }
         try? await pruneTrackerHosts(activeTorrentIDs: presentation.activeIDs)
     }
 
@@ -2104,7 +2102,7 @@ final class TorrentStore {
     private func setDownloadFolder(_ url: URL) async throws {
         let update = try await downloadFolderAccessStore.setDefault(
             url,
-            activeTorrents: torrents
+            retaining: await requiredDownloadFolderPaths()
         )
         downloadFolder = update.url
         settingsState.downloadFolder = downloadFolder
@@ -2116,7 +2114,7 @@ final class TorrentStore {
     ) async {
         guard let defaultURL = await downloadFolderAccessStore.commitPreparedForAdd(
             preparedFolder,
-            activeTorrents: torrents
+            retaining: await requiredDownloadFolderPaths()
         ) else {
             return
         }
@@ -2125,7 +2123,9 @@ final class TorrentStore {
     }
 
     private func clearDownloadFolder() async throws {
-        await downloadFolderAccessStore.clearDefault(activeTorrents: torrents)
+        await downloadFolderAccessStore.clearDefault(
+            retaining: await requiredDownloadFolderPaths()
+        )
         downloadFolder = nil
         settingsState.downloadFolder = nil
     }
@@ -2463,29 +2463,6 @@ final class TorrentStore {
                 torrents: sortedSnapshots,
                 previousTorrents: previousTorrents,
                 previousRows: torrentState.rows
-            )
-        } catch is CancellationError {
-            return
-        } catch {
-            setLastError(error.localizedDescription, source: .userAction)
-            return
-        }
-        guard generation == refreshGeneration,
-              lifecycleGeneration == engineLifecycleGeneration,
-              mutationGeneration == engineMutationGeneration,
-              presentationRevision == torrentPresentationRevision else {
-            return
-        }
-
-        // Release stale GUI-held security scopes before publishing the new
-        // presentation. The engine never receives these folder authorities.
-        do {
-            try await pruneDownloadFolderAccesses(
-                activeTorrents: sortedSnapshots,
-                generation: generation,
-                lifecycleGeneration: lifecycleGeneration,
-                mutationGeneration: mutationGeneration,
-                presentationRevision: presentationRevision
             )
         } catch is CancellationError {
             return
@@ -3163,6 +3140,14 @@ final class TorrentStore {
         }
         let accessSnapshot = await downloadFolderAccessStore.makeAccessSnapshot()
         let claims = await storageClaimJournal.allClaims()
+        storageParents.removeAll(keepingCapacity: true)
+        for lease in accessSnapshot.leases {
+            guard let parent = try? await Self.makeStorageParentAuthority(lease)
+            else {
+                continue
+            }
+            storageParents[parent.id] = parent
+        }
         var unresolvedCount = 0
 
         for originalClaim in claims {
@@ -3181,71 +3166,41 @@ final class TorrentStore {
                 unresolvedCount += 1
             case .activationUnknown:
                 unresolvedCount += 1
-            case .removing, .deleting:
-                _ = try? await storageClaimJournal.transition(
-                    claimID: claim.manifest.claimID,
-                    generation: claim.manifest.generation,
-                    operationNonce: claim.operationNonce,
-                    from: [claim.lease.state],
-                    to: .deletionPending
-                )
-                unresolvedCount += 1
+            case .removing:
+                if claim.removalIntent == .keepPayload {
+                    do {
+                        try await storageClaimJournal.completeClaimRemoval(
+                            claimID: claim.manifest.claimID,
+                            generation: claim.manifest.generation,
+                            operationNonce: claim.operationNonce
+                        )
+                    } catch {
+                        unresolvedCount += 1
+                    }
+                } else {
+                    _ = try? await storageClaimJournal.transition(
+                        claimID: claim.manifest.claimID,
+                        generation: claim.manifest.generation,
+                        operationNonce: claim.operationNonce,
+                        from: [claim.lease.state],
+                        to: .deletionPending
+                    )
+                    unresolvedCount += 1
+                }
                 continue
+            case .deleting:
+                break
             case .active:
                 break
-            case .preparing, .reserved, .deletionPending:
+            case .reserved, .deletionPending:
                 unresolvedCount += 1
                 continue
-            case .deleted, .orphaned:
-                // Both states are durable fail-closed dispositions. They
-                // retain no broker authority and require no recovery action;
-                // their payloads and journal evidence remain untouched.
+            case .orphaned:
                 continue
             }
 
-            var restoredParent: TorrentStorageParentAuthority?
-            for lease in accessSnapshot.leases {
-                guard let candidate = try? await Self.makeStorageParentAuthority(
-                    lease,
-                    id: claim.manifest.parentAuthorityID
-                ),
-                (try? TorrentStorageDestinationPlanner().validateClaimRoot(
-                    claim,
-                    in: candidate
-                )) != nil else {
-                    continue
-                }
-                do {
-                    try storageBrokerRegistry.install(parentAuthority: candidate)
-                    try storageBrokerRegistry.install(claim: claim)
-                    let indices = claim.manifest.logicalFiles.map(\.index)
-                    for start in stride(
-                        from: 0,
-                        to: indices.count,
-                        by: TorrentStorageBrokerProtocol.maximumStatBatchCount
-                    ) {
-                        let end = min(
-                            indices.count,
-                            start + TorrentStorageBrokerProtocol.maximumStatBatchCount
-                        )
-                        _ = try storageBrokerRegistry.statBatch(
-                            claimID: claim.manifest.claimID,
-                            generation: claim.manifest.generation,
-                            fileIndices: Array(indices[start..<end])
-                        )
-                    }
-                    guard restoredParent == nil else {
-                        throw TorrentStoragePlanningError.invalidParentAuthority
-                    }
-                    restoredParent = candidate
-                } catch {
-                    try? storageBrokerRegistry.removeClaim(
-                        claimID: claim.manifest.claimID,
-                        generation: claim.manifest.generation
-                    )
-                }
-            }
-            guard let restoredParent else {
+            guard let restoredParent = storageParents[claim.manifest.parentID]
+            else {
                 _ = try? await storageClaimJournal.transition(
                     claimID: claim.manifest.claimID,
                     generation: claim.manifest.generation,
@@ -3256,13 +3211,81 @@ final class TorrentStore {
                 unresolvedCount += 1
                 continue
             }
-            try? storageBrokerRegistry.install(parentAuthority: restoredParent)
-            try? storageBrokerRegistry.install(claim: claim)
-            storageParentAuthorities[restoredParent.id] = restoredParent
+            if claim.lease.state == .deleting {
+                do {
+                    let deletionIsComplete = try
+                        TorrentStorageDestinationPlanner()
+                            .deletionIsComplete(
+                                claim: claim,
+                                in: restoredParent
+                            )
+                    if !deletionIsComplete {
+                        try await Self.deleteStorageClaim(
+                            claim,
+                            from: restoredParent
+                        )
+                    }
+                    try await storageClaimJournal.completeClaimRemoval(
+                        claimID: claim.manifest.claimID,
+                        generation: claim.manifest.generation,
+                        operationNonce: claim.operationNonce
+                    )
+                } catch {
+                    _ = try? await storageClaimJournal.transition(
+                        claimID: claim.manifest.claimID,
+                        generation: claim.manifest.generation,
+                        operationNonce: claim.operationNonce,
+                        from: [.deleting],
+                        to: .deletionPending
+                    )
+                    unresolvedCount += 1
+                }
+                continue
+            }
+            do {
+                try TorrentStorageDestinationPlanner().validateClaimRoot(
+                    claim,
+                    in: restoredParent
+                )
+                try storageBrokerRegistry.install(
+                    claim: claim,
+                    parent: restoredParent
+                )
+                let indices = claim.manifest.logicalFiles.map(\.index)
+                for start in stride(
+                    from: 0,
+                    to: indices.count,
+                    by: TorrentStorageBrokerProtocol.maximumStatBatchCount
+                ) {
+                    let end = min(
+                        indices.count,
+                        start + TorrentStorageBrokerProtocol.maximumStatBatchCount
+                    )
+                    _ = try storageBrokerRegistry.statBatch(
+                        claimID: claim.manifest.claimID,
+                        generation: claim.manifest.generation,
+                        fileIndices: Array(indices[start..<end])
+                    )
+                }
+            } catch {
+                try? storageBrokerRegistry.removeClaim(
+                    claimID: claim.manifest.claimID,
+                    generation: claim.manifest.generation
+                )
+                _ = try? await storageClaimJournal.transition(
+                    claimID: claim.manifest.claimID,
+                    generation: claim.manifest.generation,
+                    operationNonce: claim.operationNonce,
+                    from: [.activating, .active, .activationUnknown],
+                    to: .orphaned
+                )
+                unresolvedCount += 1
+            }
         }
 
         let preparationCount = await storageClaimJournal.unresolvedPreparations().count
         unresolvedCount += preparationCount
+        await pruneDownloadFolderAccess()
         guard unresolvedCount > 0 else {
             return nil
         }
@@ -3576,9 +3599,6 @@ final class TorrentStore {
                 await store.refreshFromEngine()
                 store.clearLastError(ifUnchangedSince: errorGeneration)
             } catch {
-                await store.pruneDownloadFolderAccess(
-                    activeTorrents: store.torrents
-                )
                 store.setLastError(error.localizedDescription, source: .userAction)
             }
         }
@@ -3621,9 +3641,6 @@ final class TorrentStore {
                     ifUnchangedSince: errorGeneration
                 )
             } catch {
-                await store.pruneDownloadFolderAccess(
-                    activeTorrents: store.torrents
-                )
                 store.setLastError(
                     error.localizedDescription,
                     source: .userAction
@@ -4621,56 +4638,36 @@ final class TorrentStore {
         engineMutationGeneration += 1
     }
 
-    private func pruneDownloadFolderAccess(
-        activeTorrents: [TorrentItem]
-    ) async {
-        do {
-            while true {
-                let snapshot = await downloadFolderAccessStore
-                    .makePruneSnapshot()
-                let plan = try await DownloadFolderPrunePlan.prepare(
-                    snapshot: snapshot,
-                    activeTorrents: activeTorrents
-                )
-                try Task.checkCancellation()
-                if await downloadFolderAccessStore.applyPrunePlan(
-                    plan,
-                    activeTorrents: activeTorrents
-                ) {
-                    break
-                }
-            }
-        } catch is CancellationError {
-            return
-        } catch {
-            setLastError(error.localizedDescription, source: .userAction)
+    private func requiredDownloadFolderPaths() async -> Set<String> {
+        guard let storageClaimJournal else {
+            return Set(
+                await downloadFolderAccessStore.makeAccessSnapshot().paths
+            )
         }
+        let requirements = await storageClaimJournal.requiredFolderAccess()
+        var paths = requirements.paths
+        for parentID in requirements.parentIDs {
+            if let parent = storageParents[parentID] {
+                paths.insert(parent.canonicalPath)
+            }
+        }
+        return paths
     }
 
-    private func pruneDownloadFolderAccesses(
-        activeTorrents: [TorrentItem],
-        generation: Int,
-        lifecycleGeneration: UInt64,
-        mutationGeneration: UInt64,
-        presentationRevision: UInt64
-    ) async throws {
-        while true {
-            let snapshot = await downloadFolderAccessStore.makePruneSnapshot()
-            let plan = try await DownloadFolderPrunePlan.prepare(
-                snapshot: snapshot,
-                activeTorrents: activeTorrents
-            )
-            try Task.checkCancellation()
-            guard generation == refreshGeneration,
-                  lifecycleGeneration == engineLifecycleGeneration,
-                  mutationGeneration == engineMutationGeneration,
-                  presentationRevision == torrentPresentationRevision else {
-                throw CancellationError()
+    private func pruneDownloadFolderAccess() async {
+        while !Task.isCancelled {
+            let snapshot = await downloadFolderAccessStore.makeAccessSnapshot()
+            let retainedPaths = await requiredDownloadFolderPaths()
+            guard !Task.isCancelled else {
+                return
             }
-            if await downloadFolderAccessStore.applyPrunePlan(
-                plan,
-                activeTorrents: activeTorrents
+            if await downloadFolderAccessStore.prune(
+                retaining: retainedPaths,
+                ifRevisionMatches: snapshot.revision
             ) {
+                storageParents = storageParents.filter { _, parent in
+                    retainedPaths.contains(parent.canonicalPath)
+                }
                 return
             }
         }

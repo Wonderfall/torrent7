@@ -101,63 +101,72 @@ exclusive `mkdirat` or `openat` calls. The planner verifies type and filesystem
 identity after opening and rejects symlinks, special files, hidden top-level
 names, and dangerously broad parents.
 
-Normal addition never reuses matching files. “Use Existing Data” is an explicit
-import operation. Imported files are identity-pinned, must be safe regular
-files, and are never marked for automatic deletion. Writable imports additionally
-require user ownership and a single hard link.
+Normal addition never reuses matching files. “Use Existing Files” appears only
+after a destination conflict and is an explicit import operation. Imported
+files are identity-pinned safe regular files owned by the current user with a
+single hard link. They are preserved unless the user later explicitly requests
+payload deletion; unrelated imported directory contents are always preserved.
 
 ## Storage claims
 
-Immutable authority and mutable policy are separate.
+Immutable authority and mutable lease state are separate.
 
 `TorrentStorageManifest` records:
 
 - a random claim ID and positive generation;
 - v1 and/or v2 info hashes and the source manifest digest;
-- the GUI parent-authority identifier;
-- logical files and exact index-to-component mappings;
-- expected sizes and padding status;
-- the collision-selected top-level name and pinned filesystem identities;
-- a digest of the complete physical mapping; and
-- a random HMAC key stored only in the GUI journal.
+- the parent directory's pinned filesystem identity;
+- logical files with expected sizes and padding status;
+- canonically indexed file and directory identities;
+- the collision-selected top-level name;
+- a digest of the complete physical authority; and
+- claim-wide ownership: imported, or app-created with a random HMAC key stored
+  only in the GUI journal.
 
 Each app-created object stores an HMAC tag over the claim, generation, canonical
 relative mapping, object kind, device, inode, owner UID, and file generation.
 The helper can read a tag through an issued descriptor, but never receives the
 key; copying a tag to another object or mapping does not authenticate it.
 
-`TorrentStorageLease` records lifecycle state, policy revision, maximum access,
-provenance, modification permission, and automatic-deletion ownership for each
-file. Padding files are always unavailable and have no physical mapping.
+`TorrentStorageLease` records lifecycle state, availability revision, and one
+availability bit per logical file. Claim-wide ownership determines whether
+object-bound HMAC tags are required. Imported objects are writable only after
+the explicit conflict choice and remain identity- and hard-link-pinned. Padding
+files are always unavailable and have no physical identity.
 
-Generation changes only when immutable authority is replaced. Policy changes
-increment the policy revision without pretending to revoke descriptors that a
-compromised helper might already hold.
+Generation changes only when immutable authority is replaced. Availability
+changes increment the availability revision without pretending to revoke
+descriptors that a compromised helper might already hold.
 
 ## Crash-consistent journal
 
-The GUI persists claims in a bounded owner-only journal using descriptor-relative
-I/O, atomic replacement, durability barriers, and a checksum. It does not use
-`UserDefaults` for storage authority.
+The GUI persists claims in a bounded owner-only journal using
+descriptor-relative I/O, atomic replacement, and durability barriers. It does
+not use `UserDefaults` for storage authority.
 
 The principal lifecycle is:
 
 ```text
-preparing -> reserved -> activating -> active
-                              |
-                              +-> activationUnknown
+preparation -> reserved -> activating -> active
+                                |
+                                +-> activationUnknown
 
-active -> removing -> deleting -> deleted
-                         |
-                         +-> deletionPending
+active -> removing -> claim retired (keep payload)
+                    |
+                    +-> deleting -> claim retired
+                             |
+                             +-> deletionPending
 
 unprovable state -> orphaned
 ```
 
-Each operation carries an idempotent random nonce. Filesystem mutation and
-journal commits are never treated as one transaction. Recovery checks stored
-identity and authenticated app-ownership evidence. A matching name alone never
-proves ownership.
+Preparation is a separate durable record rather than a claim state. Each
+operation carries an idempotent random nonce. Filesystem mutation and journal
+commits are never treated as one transaction. Successful removal deletes the
+claim record instead of retaining a tombstone. Recovery checks stored identity
+and authenticated app-ownership evidence; a matching name alone never proves
+ownership. An interrupted keep-payload removal can retire its claim without
+touching the payload.
 
 An `activating` claim found after a crash becomes `activationUnknown`, retains
 its exact broker authority, and is restored without guessing whether native add
@@ -193,18 +202,19 @@ sessions are cancelled. Work runs off the main queue. Request IDs correlate
 replies but do not grant authority. Claim creation, paths, directory descriptors,
 rename, move, and deletion are deliberately absent.
 
-Claim installation validates the immutable mapping digest. For every open, the
-broker validates the current claim and generation, checks lease policy, directly
-indexes the immutable mapping, traverses each stored component from the verified
-parent descriptor, and compares the opened object with its pinned device, inode,
-link count, owner UID, and file generation. Leaf opens use `O_NONBLOCK` before
-type validation, so substituted FIFOs cannot occupy a worker waiting for a
-peer. The broker rejects links, non-regular files, unexpected hard links, size
-violations, stale mappings, invalid ownership tags, and access beyond policy. A
-successful reply carries exactly one descriptor plus bounded `fstat` metadata.
+Claim installation uses the same central validator as journal loading. For
+every open, the broker validates the current claim and generation, checks
+availability, directly indexes the immutable mapping, traverses each stored
+component from the verified parent descriptor, and compares the opened object
+with its pinned device, inode, link count, owner UID, and file generation. Leaf
+opens use `O_NONBLOCK` before type validation, so substituted FIFOs cannot
+occupy a worker waiting for a peer. The broker rejects links, non-regular files,
+unexpected hard links, size violations, stale mappings, invalid ownership tags,
+and unavailable content. A successful reply carries exactly one descriptor
+plus bounded `fstat` metadata.
 
-`statBatch` can return bounded metadata for a mapped file whose policy is
-`.unavailable`, but cannot return its descriptor or contents. In this model,
+`statBatch` can return bounded metadata for a mapped unavailable file, but
+cannot return its descriptor or contents. In this model,
 unavailable means content-unavailable rather than entirely unobservable.
 
 ## Engine broker client and native provider
@@ -272,10 +282,11 @@ the broker for a descriptor immediately. The activation object contains only
 claim ID, generation, source digest, and an optional preserved torrent identity
 used during magnet promotion.
 
-File access is enabled in the broker before priority increases are sent to the
-engine. Restrictions are committed after native handle-release operations.
-Provenance is independent of access: an app-created file can be automatically
-deleted; an imported file cannot.
+File availability is enabled in the broker before priority increases are sent
+to the engine. Restrictions are committed after native handle-release
+operations. Ownership is claim-wide and independent of availability: automatic
+cleanup requires app-created ownership evidence, while an explicit user delete
+may remove identity-pinned imported manifest objects.
 
 ## Magnet promotion
 
@@ -306,7 +317,7 @@ acknowledgement makes the native operation fail after its durable commit, which
 stops the engine before storage authority is released.
 
 After cooperative acknowledgement, the GUI removes the claim from the live
-broker registry. It then verifies claim generation, provenance, and filesystem
+broker registry. It then verifies claim generation, ownership, and filesystem
 identity before unlinking any manifest object; app-created objects additionally
 require their object-bound ownership tag. A remove-without-delete operation
 instead retires the claim while preserving its payload. Imported files are also
@@ -322,8 +333,18 @@ exclusively into a fresh GUI-owned quarantine directory using descriptor-relativ
 root. A concurrent replacement at the original name is therefore outside the
 deletion target and remains untouched. If capture validation fails, the object
 is restored exclusively or preserved for review. Quarantine names carry the
-durable operation or claim identifier so an interrupted capture remains
-attributable to its journal evidence.
+durable operation nonce, and the journal pins both quarantine directory
+identities before any payload capture. Recovery resumes only an exact pinned
+quarantine. If cleanup already removed both quarantine and payload, recovery
+may retire the claim; any recreated or ambiguous pathname is preserved for
+review.
+
+Persistent folder grants are derived from durable claims, preparations, and
+magnet promotions—not from the transient engine torrent list. The parent ID is
+the directory's stable filesystem identity, so restoration resolves each
+bookmark once and joins it directly to its records. Grant pruning happens only
+at serialized storage lifecycle boundaries; a periodic presentation refresh
+never revokes durable filesystem authority.
 
 Neither a claim transition nor session cancellation can recall an already
 issued descriptor, an in-flight successful reply, a memory mapping, or copied

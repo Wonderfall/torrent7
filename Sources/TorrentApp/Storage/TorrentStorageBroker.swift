@@ -39,84 +39,72 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
 
 @safe final class TorrentStorageBrokerRegistry: Sendable {
     private struct State: Sendable {
-        var parentAuthorities = [UUID: TorrentStorageParentAuthority]()
-        var claims = [UUID: TorrentStorageClaim]()
+        var registrations = [UUID: Registration]()
+    }
+
+    private struct Registration: Sendable {
+        var claim: TorrentStorageClaim
+        let parent: TorrentStorageParentAuthority
     }
 
     private struct ResolvedFile: Sendable {
         let claimID: UUID
         let claimGeneration: UInt64
         let parent: TorrentStorageParentAuthority
-        let mapping: TorrentPhysicalFileMapping
         let logicalFile: TorrentLogicalFile
-        let policy: TorrentPayloadFilePolicy
-        let ownershipKey: Data
+        let relativePathComponents: [String]?
+        let expectedIdentity: TorrentFilesystemIdentity?
+        let ownership: TorrentStorageOwnership
     }
 
     private let state = Mutex(State())
 
-    func install(parentAuthority: TorrentStorageParentAuthority) throws {
-        try parentAuthority.validate()
-        state.withLock { state in
-            state.parentAuthorities[parentAuthority.id] = parentAuthority
-        }
-    }
-
-    func install(claim: TorrentStorageClaim) throws {
+    func install(
+        claim: TorrentStorageClaim,
+        parent: TorrentStorageParentAuthority
+    ) throws {
         try Self.validate(claim)
-        let hasParent = state.withLock { state in
-            guard state.parentAuthorities[claim.manifest.parentAuthorityID] != nil else {
-                return false
-            }
-            state.claims[claim.manifest.claimID] = claim
-            return true
-        }
-        guard hasParent else {
+        try parent.validate()
+        guard claim.manifest.parentID == parent.id else {
             throw TorrentStorageBrokerRegistryError.invalidClaim
         }
+        try state.withLock { state in
+            if let existing = state.registrations[claim.manifest.claimID] {
+                guard existing.claim == claim else {
+                    throw TorrentStorageBrokerRegistryError.invalidClaim
+                }
+                return
+            }
+            state.registrations[claim.manifest.claimID] = Registration(
+                claim: claim,
+                parent: parent
+            )
+        }
     }
 
-    func replaceLease(
-        claimID: UUID,
-        generation: UInt64,
-        expectedPolicyRevision: UInt64,
-        with lease: TorrentStorageLease
-    ) throws {
+    func replace(claim: TorrentStorageClaim) throws {
+        try Self.validate(claim)
         try state.withLock { state in
-            guard var claim = state.claims[claimID] else {
+            guard var registration = state.registrations[
+                claim.manifest.claimID
+            ], registration.claim.manifest == claim.manifest else {
                 throw TorrentStorageBrokerRegistryError.claimUnavailable
             }
-            guard claim.manifest.generation == generation else {
-                throw TorrentStorageBrokerRegistryError.generationMismatch
-            }
-            guard claim.lease.policyRevision == expectedPolicyRevision,
-                  lease.policyRevision > expectedPolicyRevision,
-                  claim.lease.state == .active,
-                  lease.state == claim.lease.state,
-                  TorrentStoragePolicyValidation.isValid(
-                      logicalFiles: claim.manifest.logicalFiles,
-                      policies: lease.filePolicies
-                  ),
-                  TorrentStoragePolicyValidation.preservesAuthorityMetadata(
-                      existing: claim.lease.filePolicies,
-                      replacement: lease.filePolicies
-                  ) else {
-                throw TorrentStorageBrokerRegistryError.invalidClaim
-            }
-            claim.lease = lease
-            state.claims[claimID] = claim
+            registration.claim = claim
+            state.registrations[claim.manifest.claimID] = registration
         }
     }
 
     func removeClaim(claimID: UUID, generation: UInt64) throws {
         try state.withLock { state in
-            guard let claim = state.claims[claimID] else {
+            guard let registration = state.registrations[claimID] else {
                 return
             }
+            let claim = registration.claim
             guard claim.manifest.generation == generation else {
                 throw TorrentStorageBrokerRegistryError.generationMismatch
             }
-            state.claims.removeValue(forKey: claimID)
+            state.registrations.removeValue(forKey: claimID)
         }
     }
 
@@ -124,17 +112,15 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
         state.withLock { state in
             var locations = [String: TorrentStorageLocation]()
             var ambiguousIDs = Set<String>()
-            locations.reserveCapacity(state.claims.count)
-            for claim in state.claims.values {
+            locations.reserveCapacity(state.registrations.count)
+            for registration in state.registrations.values {
+                let claim = registration.claim
                 guard claim.lease.state == .activating
                         || claim.lease.state == .active
                         || claim.lease.state == .activationUnknown,
-                      let parent = state.parentAuthorities[
-                          claim.manifest.parentAuthorityID
-                      ],
                       let location = TorrentStorageLocation(
                           claim: claim,
-                          parent: parent
+                          parent: registration.parent
                       ),
                       !ambiguousIDs.contains(location.torrentID) else {
                     continue
@@ -161,14 +147,14 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
             claimID: claimID,
             generation: generation,
             fileIndex: fileIndex,
-            requiresActiveClaim: true
+            requiresActiveClaim: true,
+            requiresAvailableFile: true
         )
         guard !resolved.logicalFile.isPadding,
-              resolved.mapping.relativePathComponents != nil,
-              resolved.mapping.identity != nil else {
+              resolved.relativePathComponents != nil,
+              resolved.expectedIdentity != nil else {
             throw TorrentStorageBrokerRegistryError.fileUnavailable
         }
-        try Self.validate(access: access, against: resolved.policy)
 
         let descriptor = try Self.open(
             resolved,
@@ -203,7 +189,8 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
                 claimID: claimID,
                 generation: generation,
                 fileIndex: fileIndex,
-                requiresActiveClaim: true
+                requiresActiveClaim: true,
+                requiresAvailableFile: false
             )
             if resolved.logicalFile.isPadding {
                 return TorrentStorageBrokerFileMetadata(
@@ -231,13 +218,14 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
         claimID: UUID,
         generation: UInt64,
         fileIndex: Int32,
-        requiresActiveClaim: Bool
+        requiresActiveClaim: Bool,
+        requiresAvailableFile: Bool
     ) throws -> ResolvedFile {
         try state.withLock { state in
-            guard let claim = state.claims[claimID],
-                  let parent = state.parentAuthorities[claim.manifest.parentAuthorityID] else {
+            guard let registration = state.registrations[claimID] else {
                 throw TorrentStorageBrokerRegistryError.claimUnavailable
             }
+            let claim = registration.claim
             guard claim.manifest.generation == generation else {
                 throw TorrentStorageBrokerRegistryError.generationMismatch
             }
@@ -252,95 +240,36 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
                 throw TorrentStorageBrokerRegistryError.fileUnavailable
             }
             let index = Int(fileIndex)
-            guard index < claim.manifest.physicalMappings.count,
+            guard index < claim.manifest.physicalFileIdentities.count,
                   index < claim.manifest.logicalFiles.count,
-                  index < claim.lease.filePolicies.count else {
+                  index < claim.lease.fileAvailability.count else {
                 throw TorrentStorageBrokerRegistryError.fileUnavailable
             }
-            let mapping = claim.manifest.physicalMappings[index]
             let logicalFile = claim.manifest.logicalFiles[index]
-            let policy = claim.lease.filePolicies[index]
-            guard mapping.fileIndex == fileIndex,
-                  logicalFile.index == fileIndex,
-                  policy.fileIndex == fileIndex else {
+            guard logicalFile.index == fileIndex else {
                 throw TorrentStorageBrokerRegistryError.invalidClaim
+            }
+            guard !requiresAvailableFile
+                    || logicalFile.isPadding
+                    || claim.lease.fileAvailability[index] else {
+                throw TorrentStorageBrokerRegistryError.accessDenied
             }
             return ResolvedFile(
                 claimID: claim.manifest.claimID,
                 claimGeneration: claim.manifest.generation,
-                parent: parent,
-                mapping: mapping,
+                parent: registration.parent,
                 logicalFile: logicalFile,
-                policy: policy,
-                ownershipKey: claim.manifest.ownershipKey
+                relativePathComponents: claim.manifest
+                    .relativePathComponents(forFileAt: index),
+                expectedIdentity: claim.manifest.physicalFileIdentities[index],
+                ownership: claim.manifest.ownership
             )
         }
     }
 
     private static func validate(_ claim: TorrentStorageClaim) throws {
-        let manifest = claim.manifest
-        guard manifest.generation > 0,
-              manifest.ownershipKey.count
-                == TorrentStorageOwnershipTag.keyByteCount,
-              manifest.sourceManifestDigest.count == 32,
-              manifest.claimMappingDigest.count == 32,
-              !manifest.logicalFiles.isEmpty,
-              manifest.topLevelIdentity.ownerUserID == geteuid(),
-              manifest.logicalFiles.map(\.index)
-                == Array(0..<Int32(manifest.logicalFiles.count)),
-              manifest.physicalMappings.map(\.fileIndex)
-                == manifest.logicalFiles.map(\.index),
-              claim.lease.policyRevision > 0,
-              claim.lease.filePolicies.map(\.fileIndex)
-                == manifest.logicalFiles.map(\.index),
-              TorrentStoragePolicyValidation.isValid(
-                  logicalFiles: manifest.logicalFiles,
-                  policies: claim.lease.filePolicies
-              ),
-              TorrentManifestDigest.mapping(
-                claimID: manifest.claimID,
-                generation: manifest.generation,
-                parentAuthorityID: manifest.parentAuthorityID,
-                topLevelName: manifest.collisionSelectedTopLevelName,
-                mappings: manifest.physicalMappings
-              ) == manifest.claimMappingDigest else {
+        guard TorrentStorageClaimValidation.isValid(claim) else {
             throw TorrentStorageBrokerRegistryError.invalidClaim
-        }
-        for (logicalFile, mapping) in zip(
-            manifest.logicalFiles,
-            manifest.physicalMappings
-        ) {
-            guard logicalFile.expectedSize >= 0,
-                  logicalFile.isPadding
-                    == (mapping.relativePathComponents == nil),
-                  (mapping.relativePathComponents == nil)
-                    == (mapping.identity == nil),
-                  mapping.identity.map({ $0.ownerUserID == geteuid() })
-                    ?? true else {
-                throw TorrentStorageBrokerRegistryError.invalidClaim
-            }
-        }
-    }
-
-    private static func validate(
-        access: TorrentStorageBrokerAccess,
-        against policy: TorrentPayloadFilePolicy
-    ) throws {
-        switch (policy.maximumAccess, access) {
-        case (.unavailable, _):
-            throw TorrentStorageBrokerRegistryError.accessDenied
-        case (.verificationReadOnly, .readWrite):
-            throw TorrentStorageBrokerRegistryError.accessDenied
-        case (.verificationReadOnly, .readOnly):
-            return
-        case (.appOwnedWritable, .readOnly),
-             (.explicitlyImportedWritable, .readOnly):
-            return
-        case (.appOwnedWritable, .readWrite),
-             (.explicitlyImportedWritable, .readWrite):
-            guard policy.mayModify else {
-                throw TorrentStorageBrokerRegistryError.accessDenied
-            }
         }
     }
 
@@ -349,9 +278,9 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
         access: TorrentStorageBrokerAccess
     ) throws -> Int32 {
         try resolved.parent.validate()
-        guard let components = resolved.mapping.relativePathComponents,
+        guard let components = resolved.relativePathComponents,
               !components.isEmpty,
-              components.allSatisfy(isSafeComponent) else {
+              components.allSatisfy(TorrentStoragePathComponent.isSafe) else {
             throw TorrentStorageBrokerRegistryError.fileUnavailable
         }
 
@@ -398,7 +327,7 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
         resolved: ResolvedFile,
         access: TorrentStorageBrokerAccess
     ) throws -> TorrentStorageBrokerFileMetadata {
-        guard let expectedIdentity = resolved.mapping.identity else {
+        guard let expectedIdentity = resolved.expectedIdentity else {
             throw TorrentStorageBrokerRegistryError.fileUnavailable
         }
         var metadata = stat()
@@ -419,14 +348,14 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
             throw TorrentStorageBrokerRegistryError.filesystemObjectChanged
         }
 
-        switch resolved.policy.provenance {
-        case .appCreated:
+        switch resolved.ownership {
+        case .appCreated(let key):
             guard metadata.st_uid == geteuid(), metadata.st_nlink == 1,
-                  let components = resolved.mapping.relativePathComponents,
+                  let components = resolved.relativePathComponents,
                   let tag = ownershipTag(on: descriptor),
                   TorrentStorageOwnershipTag.isValid(
                       tag,
-                      key: resolved.ownershipKey,
+                      key: key,
                       claimID: resolved.claimID,
                       claimGeneration: resolved.claimGeneration,
                       relativePathComponents: components,
@@ -437,8 +366,7 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
             }
         case .imported:
             if access == .readWrite {
-                guard resolved.policy.mayModify,
-                      metadata.st_uid == geteuid(),
+                guard metadata.st_uid == geteuid(),
                       metadata.st_nlink == 1 else {
                     throw TorrentStorageBrokerRegistryError.accessDenied
                 }
@@ -487,14 +415,6 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
         }
     }
 
-    private static func isSafeComponent(_ component: String) -> Bool {
-        !component.isEmpty
-            && component != "."
-            && component != ".."
-            && !component.utf8.contains(0)
-            && !component.contains("/")
-            && !component.contains("\\")
-    }
 }
 
 @safe final class TorrentStorageBrokerSessionGate: Sendable {

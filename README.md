@@ -195,8 +195,9 @@ Torrent 7 splits authority between two App Sandbox profiles:
 | Hardened process, hardened heap, dyld read-only, platform restrictions, checked allocations | Yes | Yes |
 
 The GUI stores persistent app-scoped bookmarks only for the default download
-folder and active torrent-specific folders. It resolves those scopes, traverses
-and creates destinations relative to verified directory descriptors, and
+folder and folders required by durable claims, preparations, or magnet
+promotions. It resolves those scopes, traverses and creates destinations
+relative to verified directory descriptors, and
 transfers only exact regular-file descriptors through the storage broker. No
 bookmark, parent directory descriptor, payload path, rename authority, or
 deletion authority is transmitted to the helper. A received descriptor may

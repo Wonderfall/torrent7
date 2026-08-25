@@ -240,11 +240,13 @@ struct TorrentFileLocationServiceTests {
             manifest: reservation.storageManifest,
             lease: TorrentStorageLease(
                 state: .active,
-                policyRevision: reservation.initialLease.policyRevision,
-                filePolicies: reservation.initialLease.filePolicies
+                availabilityRevision: reservation.initialLease.availabilityRevision,
+                fileAvailability: reservation.initialLease.fileAvailability
             ),
             torrentID: "t:\(String(repeating: "a", count: 32))",
-            operationNonce: UUID()
+            operationNonce: UUID(),
+            removalIntent: nil,
+            deletionEvidence: nil
         )
         guard let location = TorrentStorageLocation(
             claim: claim,
