@@ -38,9 +38,9 @@ enum TorrentStorageJournalError: LocalizedError, Equatable, Sendable {
 struct TorrentStoragePreparation: Codable, Equatable, Sendable {
     let claimID: UUID
     let generation: UInt64
-    let parentAuthorityID: UUID
+    let parentID: TorrentStorageParentID
     let preferredTopLevelName: String
-    let ownershipKey: Data
+    let ownershipKey: Data?
     let operationNonce: UUID
     var reservedTopLevelName: String?
 }
@@ -82,7 +82,7 @@ struct TorrentMagnetPromotion: Codable, Equatable, Sendable {
 
 actor TorrentStorageClaimJournal {
     private struct Snapshot: Codable, Sendable {
-        static let currentSchemaVersion: UInt64 = 4
+        static let currentSchemaVersion: UInt64 = 5
 
         var schemaVersion: UInt64 = Self.currentSchemaVersion
         var preparations = [UUID: TorrentStoragePreparation]()
@@ -116,68 +116,8 @@ actor TorrentStorageClaimJournal {
         }
     }
 
-    private struct LoadedSnapshot: Sendable {
-        let snapshot: Snapshot
-        let requiresPersistence: Bool
-    }
-
     private struct SchemaProbe: Decodable {
         let schemaVersion: UInt64
-    }
-
-    /// This does not restore obsolete authority. It recognizes only journals
-    /// whose claims have already reached the terminal, revoked state so their
-    /// stale tombstones can be discarded without weakening containment.
-    private struct ObsoleteTerminalSnapshotProbe: Decodable {
-        struct Claim: Decodable {
-            struct Lease: Decodable {
-                let state: TorrentStorageClaimState
-            }
-
-            let lease: Lease
-        }
-
-        struct IgnoredValue: Decodable {
-            init(from decoder: any Decoder) throws {}
-        }
-
-        let schemaVersion: UInt64
-        let preparations: [UUID: IgnoredValue]
-        let claims: [UUID: Claim]
-        let promotions: [UUID: IgnoredValue]
-
-        private enum CodingKeys: String, CodingKey {
-            case schemaVersion
-            case preparations
-            case claims
-            case promotions
-        }
-
-        init(from decoder: any Decoder) throws {
-            let container = try decoder.container(keyedBy: CodingKeys.self)
-            schemaVersion = try container.decode(
-                UInt64.self,
-                forKey: .schemaVersion
-            )
-            preparations = try container.decode(
-                [UUID: IgnoredValue].self,
-                forKey: .preparations
-            )
-            claims = try container.decode(
-                [UUID: Claim].self,
-                forKey: .claims
-            )
-            promotions = try container.decodeIfPresent(
-                [UUID: IgnoredValue].self,
-                forKey: .promotions
-            ) ?? [:]
-        }
-
-        var containsOnlyRevokedAuthority: Bool {
-            preparations.isEmpty
-                && promotions.isEmpty
-                && claims.values.allSatisfy { $0.lease.state == .deleted }
-        }
     }
 
     private static let filename = "StorageClaims.json"
@@ -210,12 +150,8 @@ actor TorrentStorageClaimJournal {
                 try? descriptor.close()
             }
         }
-        let loaded = try Self.load(from: descriptor.rawValue)
-        if loaded.requiresPersistence {
-            try Self.persist(loaded.snapshot, in: descriptor.rawValue)
-        }
         directoryDescriptor = descriptor
-        snapshot = loaded.snapshot
+        snapshot = try Self.load(from: descriptor.rawValue)
         shouldCloseDescriptor = false
     }
 
@@ -241,6 +177,20 @@ actor TorrentStorageClaimJournal {
         }
     }
 
+    func requiredFolderAccess() -> (
+        parentIDs: Set<TorrentStorageParentID>,
+        paths: Set<String>
+    ) {
+        let parentIDs = Set(snapshot.claims.values.lazy
+            .filter { $0.lease.state != .orphaned }
+            .map(\.manifest.parentID))
+            .union(snapshot.preparations.values.map(\.parentID))
+        return (
+            parentIDs,
+            Set(snapshot.promotions.values.map(\.destinationPath))
+        )
+    }
+
     func promotion(id: UUID) -> TorrentMagnetPromotion? {
         snapshot.promotions[id]
     }
@@ -254,6 +204,9 @@ actor TorrentStorageClaimJournal {
                 + snapshot.promotions.count
                 < Self.maximumClaimCount else {
             throw TorrentStorageJournalError.capacityExceeded
+        }
+        guard Self.isValid(preparation) else {
+            throw TorrentStorageJournalError.invalidTransition
         }
         if let existing = snapshot.preparations[preparation.claimID] {
             guard existing == preparation else {
@@ -497,6 +450,9 @@ actor TorrentStorageClaimJournal {
         operationNonce: UUID,
         topLevelName: String
     ) throws {
+        guard TorrentStoragePathComponent.isSafe(topLevelName) else {
+            throw TorrentStorageJournalError.invalidTransition
+        }
         guard var preparation = snapshot.preparations[claimID] else {
             throw TorrentStorageJournalError.unknownClaim
         }
@@ -534,11 +490,13 @@ actor TorrentStorageClaimJournal {
             throw TorrentStorageJournalError.generationMismatch
         }
         guard preparation.operationNonce == claim.operationNonce,
-              preparation.parentAuthorityID == claim.manifest.parentAuthorityID,
-              preparation.ownershipKey == claim.manifest.ownershipKey,
+              preparation.parentID == claim.manifest.parentID,
+              claim.manifest.ownership.ownershipKey == preparation.ownershipKey,
               preparation.reservedTopLevelName
                 == claim.manifest.collisionSelectedTopLevelName,
               claim.lease.state == .reserved,
+              claim.removalIntent == nil,
+              claim.deletionEvidence == nil,
               Self.isValid(claim) else {
             throw TorrentStorageJournalError.invalidTransition
         }
@@ -556,7 +514,8 @@ actor TorrentStorageClaimJournal {
         operationNonce: UUID,
         from expectedStates: Set<TorrentStorageClaimState>,
         to newState: TorrentStorageClaimState,
-        torrentID: String? = nil
+        torrentID: String? = nil,
+        removalIntent: TorrentStorageRemovalIntent? = nil
     ) throws -> TorrentStorageClaim {
         guard var claim = snapshot.claims[claimID] else {
             throw TorrentStorageJournalError.unknownClaim
@@ -579,10 +538,28 @@ actor TorrentStorageClaimJournal {
                 throw TorrentStorageJournalError.invalidTransition
             }
         }
+        if newState == .removing {
+            guard removalIntent != nil else {
+                throw TorrentStorageJournalError.invalidTransition
+            }
+        } else if removalIntent != nil {
+            throw TorrentStorageJournalError.invalidTransition
+        }
+        if newState == .deleting {
+            guard claim.removalIntent == .deletePayload else {
+                throw TorrentStorageJournalError.invalidTransition
+            }
+        }
         claim.operationNonce = operationNonce
         claim.lease.state = newState
+        if let removalIntent {
+            claim.removalIntent = removalIntent
+        }
         if let torrentID {
             claim.torrentID = torrentID
+        }
+        guard Self.isValid(claim) else {
+            throw TorrentStorageJournalError.invalidTransition
         }
         var updated = snapshot
         updated.claims[claimID] = claim
@@ -592,11 +569,11 @@ actor TorrentStorageClaimJournal {
     }
 
     @discardableResult
-    func replacePolicy(
+    func replaceAvailability(
         claimID: UUID,
         generation: UInt64,
-        operationNonce: UUID,
-        policies: [TorrentPayloadFilePolicy]
+        expectedAvailabilityRevision: UInt64,
+        fileAvailability: [Bool]
     ) throws -> TorrentStorageClaim {
         guard var claim = snapshot.claims[claimID] else {
             throw TorrentStorageJournalError.unknownClaim
@@ -604,27 +581,111 @@ actor TorrentStorageClaimJournal {
         guard claim.manifest.generation == generation else {
             throw TorrentStorageJournalError.generationMismatch
         }
-        guard policies.map(\.fileIndex) == claim.manifest.logicalFiles.map(\.index),
+        let nextRevision = expectedAvailabilityRevision.addingReportingOverflow(1)
+        if !nextRevision.overflow,
+           claim.lease.availabilityRevision == nextRevision.partialValue,
+           claim.lease.fileAvailability == fileAvailability {
+            return claim
+        }
+        guard claim.lease.availabilityRevision == expectedAvailabilityRevision,
               claim.lease.state == .active,
-              TorrentStoragePolicyValidation.isValid(
+              TorrentStorageLeaseValidation.isValid(
                   logicalFiles: claim.manifest.logicalFiles,
-                  policies: policies
+                  fileAvailability: fileAvailability
               ),
-              TorrentStoragePolicyValidation.preservesAuthorityMetadata(
-                  existing: claim.lease.filePolicies,
-                  replacement: policies
-              ),
-              claim.lease.policyRevision != UInt64.max else {
+              claim.lease.availabilityRevision != UInt64.max else {
             throw TorrentStorageJournalError.invalidTransition
         }
-        claim.operationNonce = operationNonce
-        claim.lease.policyRevision += 1
-        claim.lease.filePolicies = policies
+        claim.lease.availabilityRevision += 1
+        claim.lease.fileAvailability = fileAvailability
+        guard Self.isValid(claim) else {
+            throw TorrentStorageJournalError.invalidTransition
+        }
         var updated = snapshot
         updated.claims[claimID] = claim
         try persist(updated)
         snapshot = updated
         return claim
+    }
+
+    @discardableResult
+    func recordDeletionEvidence(
+        claimID: UUID,
+        generation: UInt64,
+        operationNonce: UUID,
+        evidence: TorrentStorageDeletionEvidence
+    ) throws -> TorrentStorageClaim {
+        guard var claim = snapshot.claims[claimID] else {
+            throw TorrentStorageJournalError.unknownClaim
+        }
+        guard claim.manifest.generation == generation else {
+            throw TorrentStorageJournalError.generationMismatch
+        }
+        guard claim.operationNonce == operationNonce,
+              claim.lease.state == .deleting,
+              claim.removalIntent == .deletePayload else {
+            throw TorrentStorageJournalError.invalidTransition
+        }
+        if let existing = claim.deletionEvidence {
+            guard existing == evidence else {
+                throw TorrentStorageJournalError.invalidTransition
+            }
+            return claim
+        }
+        claim.deletionEvidence = evidence
+        guard Self.isValid(claim) else {
+            throw TorrentStorageJournalError.invalidTransition
+        }
+        var updated = snapshot
+        updated.claims[claimID] = claim
+        try persist(updated)
+        snapshot = updated
+        return claim
+    }
+
+    func completeClaimRemoval(
+        claimID: UUID,
+        generation: UInt64,
+        operationNonce: UUID
+    ) throws {
+        guard let claim = snapshot.claims[claimID] else {
+            return
+        }
+        guard claim.manifest.generation == generation else {
+            throw TorrentStorageJournalError.generationMismatch
+        }
+        guard claim.operationNonce == operationNonce,
+              (claim.lease.state == .removing
+                  && claim.removalIntent == .keepPayload
+               || claim.lease.state == .deleting
+                  && claim.removalIntent == .deletePayload
+                  && claim.deletionEvidence != nil) else {
+            throw TorrentStorageJournalError.invalidTransition
+        }
+        var updated = snapshot
+        updated.claims.removeValue(forKey: claimID)
+        try persist(updated)
+        snapshot = updated
+    }
+
+    func cancelPreparation(
+        claimID: UUID,
+        generation: UInt64,
+        operationNonce: UUID
+    ) throws {
+        guard let preparation = snapshot.preparations[claimID] else {
+            return
+        }
+        guard preparation.generation == generation else {
+            throw TorrentStorageJournalError.generationMismatch
+        }
+        guard preparation.operationNonce == operationNonce else {
+            throw TorrentStorageJournalError.operationNonceMismatch
+        }
+        var updated = snapshot
+        updated.preparations.removeValue(forKey: claimID)
+        try persist(updated)
+        snapshot = updated
     }
 
     private func persist(_ value: Snapshot) throws {
@@ -685,7 +746,7 @@ actor TorrentStorageClaimJournal {
 
     private static func load(
         from directoryDescriptor: Int32
-    ) throws -> LoadedSnapshot {
+    ) throws -> Snapshot {
         let descriptor = unsafe filename.withCString { pointer in
             unsafe Darwin.openat(
                 directoryDescriptor,
@@ -697,10 +758,7 @@ actor TorrentStorageClaimJournal {
             guard errno == ENOENT else {
                 throw TorrentStorageJournalError.unavailable
             }
-            return LoadedSnapshot(
-                snapshot: Snapshot(),
-                requiresPersistence: false
-            )
+            return Snapshot()
         }
         defer {
             _ = Darwin.close(descriptor)
@@ -730,22 +788,7 @@ actor TorrentStorageClaimJournal {
         }
 
         guard schemaVersion == Snapshot.currentSchemaVersion else {
-            let obsoleteRange = UInt64(1)..<Snapshot.currentSchemaVersion
-            guard obsoleteRange.contains(schemaVersion),
-                  let obsolete = try? decoder.decode(
-                      ObsoleteTerminalSnapshotProbe.self,
-                      from: data
-                  ),
-                  obsolete.schemaVersion == schemaVersion,
-                  obsolete.containsOnlyRevokedAuthority else {
-                throw TorrentStorageJournalError.unsupportedVersion(
-                    schemaVersion
-                )
-            }
-            return LoadedSnapshot(
-                snapshot: Snapshot(),
-                requiresPersistence: true
-            )
+            throw TorrentStorageJournalError.unsupportedVersion(schemaVersion)
         }
 
         do {
@@ -764,10 +807,7 @@ actor TorrentStorageClaimJournal {
                     == decoded.promotions.count else {
                 throw TorrentStorageJournalError.corrupt
             }
-            return LoadedSnapshot(
-                snapshot: decoded,
-                requiresPersistence: false
-            )
+            return decoded
         } catch let error as TorrentStorageJournalError {
             throw error
         } catch {
@@ -832,8 +872,6 @@ actor TorrentStorageClaimJournal {
         to newState: TorrentStorageClaimState
     ) -> Bool {
         switch state {
-        case .preparing:
-            false
         case .reserved:
             newState == .activating || newState == .orphaned
         case .activating:
@@ -849,13 +887,11 @@ actor TorrentStorageClaimJournal {
                 || newState == .deletionPending
                 || newState == .orphaned
         case .deleting:
-            newState == .deleted || newState == .deletionPending
+            newState == .deletionPending
         case .deletionPending:
             newState == .deleting || newState == .orphaned
         case .orphaned:
             newState == .deleting
-        case .deleted:
-            false
         }
     }
 
@@ -865,62 +901,27 @@ actor TorrentStorageClaimJournal {
         switch state {
         case .reserved, .activating, .removing, .deleting:
             true
-        case .preparing, .active, .activationUnknown, .deletionPending,
-             .deleted, .orphaned:
+        case .active, .activationUnknown, .deletionPending, .orphaned:
             false
         }
     }
 
     private static func isValid(_ preparation: TorrentStoragePreparation) -> Bool {
         preparation.generation > 0
-            && preparation.ownershipKey.count
+            && preparation.parentID.ownerUserID == geteuid()
+            && (preparation.ownershipKey?.count
                 == TorrentStorageOwnershipTag.keyByteCount
-            && isSafeComponent(preparation.preferredTopLevelName)
-            && (preparation.reservedTopLevelName.map(isSafeComponent) ?? true)
+                || preparation.ownershipKey == nil)
+            && TorrentStoragePathComponent.isSafe(
+                preparation.preferredTopLevelName
+            )
+            && (preparation.reservedTopLevelName.map(
+                TorrentStoragePathComponent.isSafe
+            ) ?? true)
     }
 
     private static func isValid(_ claim: TorrentStorageClaim) -> Bool {
-        let manifest = claim.manifest
-        let expectedIndices = Array(0..<Int32(manifest.logicalFiles.count))
-        guard manifest.generation > 0,
-              manifest.infoHashes.v1.map({ $0.count == 20 }) ?? true,
-              manifest.infoHashes.v2.map({ $0.count == 32 }) ?? true,
-              manifest.infoHashes.v1 != nil || manifest.infoHashes.v2 != nil,
-              manifest.sourceManifestDigest.count == 32,
-              manifest.claimMappingDigest.count == 32,
-              manifest.ownershipKey.count
-                == TorrentStorageOwnershipTag.keyByteCount,
-              !manifest.logicalFiles.isEmpty,
-              manifest.topLevelIdentity.ownerUserID == geteuid(),
-              manifest.logicalFiles.map(\.index) == expectedIndices,
-              manifest.physicalMappings.map(\.fileIndex) == expectedIndices,
-              claim.lease.policyRevision > 0,
-              claim.lease.filePolicies.map(\.fileIndex) == expectedIndices,
-              TorrentStoragePolicyValidation.isValid(
-                  logicalFiles: manifest.logicalFiles,
-                  policies: claim.lease.filePolicies
-              ),
-              claim.lease.state != .preparing,
-              isSafeComponent(manifest.collisionSelectedTopLevelName),
-              TorrentManifestDigest.mapping(
-                claimID: manifest.claimID,
-                generation: manifest.generation,
-                parentAuthorityID: manifest.parentAuthorityID,
-                topLevelName: manifest.collisionSelectedTopLevelName,
-                mappings: manifest.physicalMappings
-              ) == manifest.claimMappingDigest else {
-            return false
-        }
-        return zip(manifest.logicalFiles, manifest.physicalMappings).allSatisfy {
-            logicalFile, mapping in
-            logicalFile.expectedSize >= 0
-                && !logicalFile.pathComponents.isEmpty
-                && logicalFile.pathComponents.allSatisfy(isSafeComponent)
-                && logicalFile.isPadding == (mapping.relativePathComponents == nil)
-                && (mapping.relativePathComponents == nil) == (mapping.identity == nil)
-                && (mapping.identity.map({ $0.ownerUserID == geteuid() }) ?? true)
-                && (mapping.relativePathComponents?.allSatisfy(isSafeComponent) ?? true)
-        }
+        TorrentStorageClaimValidation.isValid(claim)
     }
 
     private static func isValid(_ promotion: TorrentMagnetPromotion) -> Bool {
@@ -984,12 +985,4 @@ actor TorrentStorageClaimJournal {
         return true
     }
 
-    private static func isSafeComponent(_ component: String) -> Bool {
-        !component.isEmpty
-            && component != "."
-            && component != ".."
-            && !component.utf8.contains(0)
-            && !component.contains("/")
-            && !component.contains("\\")
-    }
 }

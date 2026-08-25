@@ -1,3 +1,4 @@
+import Darwin
 import CryptoKit
 import Foundation
 
@@ -63,12 +64,37 @@ struct TorrentFilesystemIdentity: Codable, Equatable, Sendable {
     }
 }
 
-struct TorrentPhysicalFileMapping: Codable, Equatable, Sendable {
-    let fileIndex: Int32
-    /// Components relative to the parent-authority descriptor. Padding files
-    /// deliberately have no physical mapping and can never receive an FD.
-    let relativePathComponents: [String]?
-    let identity: TorrentFilesystemIdentity?
+struct TorrentStorageParentID: Codable, Equatable, Hashable, Sendable {
+    let device: UInt64
+    let inode: UInt64
+    let ownerUserID: UInt32
+    let fileGeneration: UInt32
+
+    init(identity: TorrentFilesystemIdentity) {
+        device = identity.device
+        inode = identity.inode
+        ownerUserID = identity.ownerUserID
+        fileGeneration = identity.fileGeneration
+    }
+}
+
+struct TorrentPhysicalDirectoryIdentity: Codable, Equatable, Sendable {
+    /// Components relative to the torrent's top-level directory. The root is
+    /// represented by an empty array.
+    let relativePathComponents: [String]
+    let identity: TorrentFilesystemIdentity
+}
+
+enum TorrentStorageOwnership: Codable, Equatable, Sendable {
+    case appCreated(key: Data)
+    case imported
+
+    var ownershipKey: Data? {
+        guard case .appCreated(let key) = self else {
+            return nil
+        }
+        return key
+    }
 }
 
 struct TorrentStorageManifest: Codable, Equatable, Sendable {
@@ -76,16 +102,45 @@ struct TorrentStorageManifest: Codable, Equatable, Sendable {
     let generation: UInt64
     let infoHashes: TorrentStorageInfoHashes
     let sourceManifestDigest: Data
-    let parentAuthorityID: UUID
+    let parentID: TorrentStorageParentID
     let contentKind: TorrentStorageContentKind
     let logicalFiles: [TorrentLogicalFile]
-    let physicalMappings: [TorrentPhysicalFileMapping]
+    /// Canonically indexed with `logicalFiles`. Padding files have no identity
+    /// and can never receive an FD.
+    let physicalFileIdentities: [TorrentFilesystemIdentity?]
+    /// Canonically ordered by depth and then lexicographically. Directory
+    /// torrents include their top-level root as the empty relative path.
+    let physicalDirectoryIdentities: [TorrentPhysicalDirectoryIdentity]
     let collisionSelectedTopLevelName: String
-    let topLevelIdentity: TorrentFilesystemIdentity
-    let claimMappingDigest: Data
-    /// Secret HMAC key stored only in the GUI's protected journal. Payload
-    /// xattrs contain object-bound authentication tags, never this key.
-    let ownershipKey: Data
+    let authorityDigest: Data
+    let ownership: TorrentStorageOwnership
+
+    var topLevelIdentity: TorrentFilesystemIdentity? {
+        switch contentKind {
+        case .singleFile:
+            physicalFileIdentities.first.flatMap { $0 }
+        case .directory:
+            physicalDirectoryIdentities.first(where: {
+                $0.relativePathComponents.isEmpty
+            })?.identity
+        }
+    }
+
+    func relativePathComponents(forFileAt index: Int) -> [String]? {
+        guard logicalFiles.indices.contains(index),
+              physicalFileIdentities.indices.contains(index),
+              !logicalFiles[index].isPadding,
+              physicalFileIdentities[index] != nil else {
+            return nil
+        }
+        switch contentKind {
+        case .singleFile:
+            return [collisionSelectedTopLevelName]
+        case .directory:
+            return [collisionSelectedTopLevelName]
+                + logicalFiles[index].pathComponents
+        }
+    }
 }
 
 enum TorrentStorageOwnershipTag {
@@ -183,59 +238,32 @@ enum TorrentStorageOwnershipTag {
     }
 }
 
-enum TorrentPayloadMaximumAccess: String, Codable, Sendable {
-    case unavailable
-    case verificationReadOnly
-    case appOwnedWritable
-    case explicitlyImportedWritable
-}
-
-enum TorrentPayloadProvenance: String, Codable, Sendable {
-    case appCreated
-    case imported
-}
-
-enum TorrentPayloadDeletionAuthorization: Equatable, Sendable {
-    case automaticCleanup
-    case explicitUserRequest
-}
-
-struct TorrentPayloadFilePolicy: Codable, Equatable, Sendable {
-    let fileIndex: Int32
-    var maximumAccess: TorrentPayloadMaximumAccess
-    let provenance: TorrentPayloadProvenance
-    let mayModify: Bool
-    let mayDeleteAutomatically: Bool
-
-    func permitsDeletion(
-        authorizedBy authorization: TorrentPayloadDeletionAuthorization
-    ) -> Bool {
-        if mayDeleteAutomatically {
-            return true
-        }
-        return authorization == .explicitUserRequest
-            && provenance == .imported
-            && mayModify
-    }
-}
-
 enum TorrentStorageClaimState: String, Codable, Sendable {
-    case preparing
     case reserved
     case activating
     case active
     case activationUnknown
     case removing
     case deleting
-    case deleted
     case deletionPending
     case orphaned
 }
 
 struct TorrentStorageLease: Codable, Equatable, Sendable {
     var state: TorrentStorageClaimState
-    var policyRevision: UInt64
-    var filePolicies: [TorrentPayloadFilePolicy]
+    var availabilityRevision: UInt64
+    var fileAvailability: [Bool]
+}
+
+enum TorrentStorageRemovalIntent: String, Codable, Sendable {
+    case keepPayload
+    case deletePayload
+}
+
+struct TorrentStorageDeletionEvidence: Codable, Equatable, Sendable {
+    let operationNonce: UUID
+    let quarantineIdentity: TorrentFilesystemIdentity
+    let entriesIdentity: TorrentFilesystemIdentity
 }
 
 struct TorrentStorageClaim: Codable, Equatable, Sendable {
@@ -243,62 +271,185 @@ struct TorrentStorageClaim: Codable, Equatable, Sendable {
     var lease: TorrentStorageLease
     var torrentID: String?
     var operationNonce: UUID
+    var removalIntent: TorrentStorageRemovalIntent?
+    var deletionEvidence: TorrentStorageDeletionEvidence?
 }
 
-enum TorrentStoragePolicyValidation {
+enum TorrentStorageLeaseValidation {
     static func isValid(
         logicalFiles: [TorrentLogicalFile],
-        policies: [TorrentPayloadFilePolicy]
+        fileAvailability: [Bool]
     ) -> Bool {
-        guard policies.map(\.fileIndex) == logicalFiles.map(\.index) else {
+        guard fileAvailability.count == logicalFiles.count else {
             return false
         }
-        return zip(logicalFiles, policies).allSatisfy { logicalFile, policy in
-            if logicalFile.isPadding {
-                return policy.maximumAccess == .unavailable
-                    && !policy.mayModify
-                    && !policy.mayDeleteAutomatically
-            }
+        return zip(logicalFiles, fileAvailability).allSatisfy {
+            logicalFile, isAvailable in !logicalFile.isPadding || !isAvailable
+        }
+    }
+}
 
-            switch policy.provenance {
-            case .appCreated:
-                return policy.mayModify
-                    && policy.mayDeleteAutomatically
-                    && (policy.maximumAccess == .appOwnedWritable
-                        || policy.maximumAccess == .unavailable)
-            case .imported:
-                guard !policy.mayDeleteAutomatically else {
-                    return false
-                }
-                if policy.mayModify {
-                    return policy.maximumAccess == .explicitlyImportedWritable
-                        || policy.maximumAccess == .unavailable
-                }
-                return policy.maximumAccess == .verificationReadOnly
-                    || policy.maximumAccess == .unavailable
+enum TorrentStoragePathComponent {
+    static func isSafe(_ component: String) -> Bool {
+        !component.isEmpty
+            && component != "."
+            && component != ".."
+            && !component.utf8.contains(0)
+            && !component.contains("/")
+            && !component.contains("\\")
+    }
+}
+
+enum TorrentStorageClaimValidation {
+    static func isValid(
+        _ claim: TorrentStorageClaim,
+        ownerUserID: UInt32 = geteuid()
+    ) -> Bool {
+        let manifest = claim.manifest
+        guard manifest.logicalFiles.count <= Int(Int32.max) else {
+            return false
+        }
+        let expectedIndices = manifest.logicalFiles.indices.map(Int32.init)
+        guard manifest.generation > 0,
+              manifest.infoHashes.v1.map({ $0.count == Insecure.SHA1.byteCount })
+                ?? true,
+              manifest.infoHashes.v2.map({ $0.count == SHA256.byteCount })
+                ?? true,
+              manifest.infoHashes.v1 != nil || manifest.infoHashes.v2 != nil,
+              manifest.sourceManifestDigest.count == SHA256.byteCount,
+              manifest.authorityDigest.count == SHA256.byteCount,
+              !manifest.logicalFiles.isEmpty,
+              manifest.parentID.ownerUserID == ownerUserID,
+              manifest.topLevelIdentity?.ownerUserID == ownerUserID,
+              manifest.logicalFiles.map(\.index) == expectedIndices,
+              manifest.physicalFileIdentities.count
+                == manifest.logicalFiles.count,
+              claim.lease.availabilityRevision > 0,
+              TorrentStorageLeaseValidation.isValid(
+                  logicalFiles: manifest.logicalFiles,
+                  fileAvailability: claim.lease.fileAvailability
+              ),
+              TorrentStoragePathComponent.isSafe(
+                  manifest.collisionSelectedTopLevelName
+              ),
+              hasValidOwnership(manifest.ownership),
+              TorrentManifestDigest.authority(
+                  claimID: manifest.claimID,
+                  generation: manifest.generation,
+                  infoHashes: manifest.infoHashes,
+                  sourceManifestDigest: manifest.sourceManifestDigest,
+                  parentID: manifest.parentID,
+                  contentKind: manifest.contentKind,
+                  logicalFiles: manifest.logicalFiles,
+                  topLevelName: manifest.collisionSelectedTopLevelName,
+                  fileIdentities: manifest.physicalFileIdentities,
+                  directoryIdentities: manifest.physicalDirectoryIdentities,
+                  ownership: manifest.ownership
+              ) == manifest.authorityDigest else {
+            return false
+        }
+
+        guard zip(
+            manifest.logicalFiles,
+            manifest.physicalFileIdentities
+        ).allSatisfy({ logicalFile, fileIdentity in
+            logicalFile.expectedSize >= 0
+                && !logicalFile.pathComponents.isEmpty
+                && logicalFile.pathComponents.allSatisfy(
+                    TorrentStoragePathComponent.isSafe
+                )
+                && logicalFile.isPadding == (fileIdentity == nil)
+                && (fileIdentity.map({
+                    $0.ownerUserID == ownerUserID && $0.linkCount == 1
+                }) ?? true)
+        }) else {
+            return false
+        }
+
+        let directoryPaths = manifest.physicalDirectoryIdentities.map(
+            \.relativePathComponents
+        )
+        let canonicalDirectoryPaths = directoryPaths.sorted { left, right in
+            if left.count != right.count {
+                return left.count < right.count
             }
+            return left.lexicographicallyPrecedes(right)
+        }
+        guard directoryPaths == canonicalDirectoryPaths,
+              Set(directoryPaths).count == directoryPaths.count,
+              manifest.physicalDirectoryIdentities.allSatisfy({ directory in
+                  directory.relativePathComponents.allSatisfy(
+                      TorrentStoragePathComponent.isSafe
+                  )
+                      && directory.identity.ownerUserID == ownerUserID
+              }) else {
+            return false
+        }
+
+        switch manifest.contentKind {
+        case .singleFile:
+            guard manifest.logicalFiles.count == 1,
+                  manifest.logicalFiles[0].pathComponents.count == 1,
+                  !manifest.logicalFiles[0].isPadding,
+                  manifest.physicalDirectoryIdentities.isEmpty else {
+                return false
+            }
+        case .directory:
+            var expectedDirectoryPaths: Set<[String]> = [[]]
+            for logicalFile in manifest.logicalFiles
+            where !logicalFile.isPadding {
+                for depth in 1..<logicalFile.pathComponents.count {
+                    expectedDirectoryPaths.insert(Array(
+                        logicalFile.pathComponents.prefix(depth)
+                    ))
+                }
+            }
+            guard directoryPaths.first == [],
+                  Set(directoryPaths) == expectedDirectoryPaths else {
+                return false
+            }
+        }
+
+        if let evidence = claim.deletionEvidence {
+            guard evidence.operationNonce == claim.operationNonce,
+                  evidence.quarantineIdentity.ownerUserID == ownerUserID,
+                  evidence.entriesIdentity.ownerUserID == ownerUserID else {
+                return false
+            }
+        }
+        switch claim.lease.state {
+        case .active:
+            return claim.torrentID?.isEmpty == false
+                && claim.removalIntent == nil
+                && claim.deletionEvidence == nil
+        case .reserved, .activating, .activationUnknown:
+            return claim.removalIntent == nil
+                && claim.deletionEvidence == nil
+        case .removing:
+            return claim.removalIntent != nil
+                && claim.deletionEvidence == nil
+        case .deleting, .deletionPending:
+            return claim.removalIntent == .deletePayload
+        case .orphaned:
+            return claim.deletionEvidence == nil
         }
     }
 
-    static func preservesAuthorityMetadata(
-        existing: [TorrentPayloadFilePolicy],
-        replacement: [TorrentPayloadFilePolicy]
+    private static func hasValidOwnership(
+        _ ownership: TorrentStorageOwnership
     ) -> Bool {
-        guard existing.count == replacement.count else {
-            return false
-        }
-        return zip(existing, replacement).allSatisfy { current, proposed in
-            current.fileIndex == proposed.fileIndex
-                && current.provenance == proposed.provenance
-                && current.mayModify == proposed.mayModify
-                && current.mayDeleteAutomatically == proposed.mayDeleteAutomatically
+        switch ownership {
+        case .appCreated(let key):
+            key.count == TorrentStorageOwnershipTag.keyByteCount
+        case .imported:
+            true
         }
     }
 }
 
 enum TorrentManifestDigest {
     private static let domain = Data("Torrent7 logical storage manifest\0v1".utf8)
-    private static let mappingDomain = Data("Torrent7 physical claim mapping\0v1".utf8)
+    private static let authorityDomain = Data("Torrent7 physical claim authority\0v2".utf8)
 
     static func source(
         name: String,
@@ -326,38 +477,72 @@ enum TorrentManifestDigest {
         return Data(SHA256.hash(data: input))
     }
 
-    static func mapping(
+    static func authority(
         claimID: UUID,
         generation: UInt64,
-        parentAuthorityID: UUID,
+        infoHashes: TorrentStorageInfoHashes,
+        sourceManifestDigest: Data,
+        parentID: TorrentStorageParentID,
+        contentKind: TorrentStorageContentKind,
+        logicalFiles: [TorrentLogicalFile],
         topLevelName: String,
-        mappings: [TorrentPhysicalFileMapping]
+        fileIdentities: [TorrentFilesystemIdentity?],
+        directoryIdentities: [TorrentPhysicalDirectoryIdentity],
+        ownership: TorrentStorageOwnership
     ) -> Data {
-        var input = mappingDomain
+        var input = authorityDomain
         append(claimID.uuidString.lowercased(), to: &input)
         append(generation, to: &input)
-        append(parentAuthorityID.uuidString.lowercased(), to: &input)
+        appendOptional(infoHashes.v1, to: &input)
+        appendOptional(infoHashes.v2, to: &input)
+        append(UInt64(sourceManifestDigest.count), to: &input)
+        input.append(sourceManifestDigest)
+        append(parentID.device, to: &input)
+        append(parentID.inode, to: &input)
+        append(UInt64(parentID.ownerUserID), to: &input)
+        append(UInt64(parentID.fileGeneration), to: &input)
+        input.append(contentKind == .singleFile ? 0 : 1)
+        append(UInt64(logicalFiles.count), to: &input)
+        for file in logicalFiles {
+            append(UInt64(bitPattern: Int64(file.index)), to: &input)
+            append(UInt64(file.pathComponents.count), to: &input)
+            for component in file.pathComponents {
+                append(component, to: &input)
+            }
+            append(UInt64(bitPattern: file.expectedSize), to: &input)
+            input.append(file.isPadding ? 1 : 0)
+        }
         append(topLevelName, to: &input)
-        append(UInt64(mappings.count), to: &input)
-        for mapping in mappings {
-            append(UInt64(bitPattern: Int64(mapping.fileIndex)), to: &input)
-            guard let components = mapping.relativePathComponents,
-                  let identity = mapping.identity else {
+        input.append(ownership.ownershipKey == nil ? 0 : 1)
+        append(UInt64(fileIdentities.count), to: &input)
+        for identity in fileIdentities {
+            guard let identity else {
                 input.append(0)
                 continue
             }
             input.append(1)
-            append(UInt64(components.count), to: &input)
-            for component in components {
+            append(identity, to: &input)
+        }
+        append(UInt64(directoryIdentities.count), to: &input)
+        for directory in directoryIdentities {
+            append(UInt64(directory.relativePathComponents.count), to: &input)
+            for component in directory.relativePathComponents {
                 append(component, to: &input)
             }
-            append(identity.device, to: &input)
-            append(identity.inode, to: &input)
-            append(identity.linkCount, to: &input)
-            append(UInt64(identity.ownerUserID), to: &input)
-            append(UInt64(identity.fileGeneration), to: &input)
+            append(directory.identity, to: &input)
         }
         return Data(SHA256.hash(data: input))
+    }
+
+    private static func append(
+        _ identity: TorrentFilesystemIdentity,
+        to data: inout Data
+    ) {
+        append(identity.device, to: &data)
+        append(identity.inode, to: &data)
+        append(identity.linkCount, to: &data)
+        append(UInt64(identity.ownerUserID), to: &data)
+        append(UInt64(identity.fileGeneration), to: &data)
     }
 
     private static func appendOptional(_ value: Data?, to data: inout Data) {

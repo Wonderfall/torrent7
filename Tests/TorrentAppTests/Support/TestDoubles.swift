@@ -127,53 +127,20 @@ final class RecordingSleepPreventionService: SleepPreventionServicing {
 @MainActor
 final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
     var defaultURL: URL?
-    private(set) var capabilityRevision: UInt64 = 0
-    var capabilityDefaultAccess: DownloadFolderAccessing?
-    var capabilityAdditionalAccesses = [DownloadFolderAccessing]()
-    var mirrorsCapabilityMutations = false
-    var capabilitySnapshot: DownloadFolderAccessSnapshot {
-        DownloadFolderAccessSnapshot(
-            revision: capabilityRevision,
-            defaultAccess: capabilityDefaultAccess,
-            additionalAccesses: capabilityAdditionalAccesses
-        )
-    }
-    var pruneSnapshot: DownloadFolderPruneSnapshot {
-        DownloadFolderPruneSnapshot(
-            accessRevision: capabilityRevision,
-            candidateAccessKeys: Set(capabilityAdditionalAccesses.map {
-                Self.accessKey($0.url)
-            })
-        )
-    }
+    private(set) var accessRevision: UInt64 = 0
     var restoreDefaultResult: Result<URL?, Error> = .success(nil)
     var validateSelectionResult: Result<Void, Error> = .success(())
     var setDefaultResult: Result<URL, Error>?
     var prepareForAddResult: Result<PreparedDownloadFolder, Error>?
     var leaseResult: Result<DownloadFolderAccessLease, Error>?
-    var nextCapabilityDelegationBookmarkError: (any Error)?
     private(set) var clearedDefaultCount = 0
-    private(set) var clearDefaultCalls = [[TorrentItem]]()
-    private(set) var setDefaultCalls = [(url: URL, activeTorrents: [TorrentItem])]()
-    private(set) var prepareForAddCalls = [(url: URL, setsDefault: Bool, activeTorrents: [TorrentItem])]()
-    private(set) var commitPreparedForAddCalls = [(folder: PreparedDownloadFolder, activeTorrents: [TorrentItem])]()
+    private(set) var clearDefaultCalls = [Set<String>]()
+    private(set) var setDefaultCalls = [(url: URL, retainedPaths: Set<String>)]()
+    private(set) var prepareForAddCalls = [(url: URL, setsDefault: Bool, retainedPaths: Set<String>)]()
+    private(set) var commitPreparedForAddCalls = [(folder: PreparedDownloadFolder, retainedPaths: Set<String>)]()
     private(set) var leaseCalls = [String]()
-    private(set) var pruneCalls = [[TorrentItem]]()
-    var onPrune: (() -> Void)?
-    var onMakeCapabilitySnapshot: (() -> Void)?
+    private(set) var pruneCalls = [Set<String>]()
     private(set) var bootstrapCount = 0
-    private(set) var capabilitySnapshotIsSuspended = false
-    private var suspendsNextCapabilitySnapshot = false
-    private var capabilitySnapshotContinuation:
-        CheckedContinuation<Void, Never>?
-
-    func setCapabilityPaths(_ paths: [String]) {
-        capabilityDefaultAccess = nil
-        capabilityAdditionalAccesses = paths.map { path in
-            FakeDownloadFolderAccess(url: URL(filePath: path, directoryHint: .isDirectory))
-        }
-        advanceCapabilityRevision()
-    }
 
     func bootstrap() async -> DownloadFolderBootstrapResult {
         bootstrapCount += 1
@@ -197,45 +164,21 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
         defaultURL
     }
 
-    func currentAccessRevision() async -> UInt64 {
-        capabilityRevision
-    }
-
     func makeAccessSnapshot() async -> DownloadFolderAccessSnapshot {
-        let snapshot = capabilitySnapshot
-        onMakeCapabilitySnapshot?()
-        if suspendsNextCapabilitySnapshot {
-            suspendsNextCapabilitySnapshot = false
-            capabilitySnapshotIsSuspended = true
-            await withCheckedContinuation { continuation in
-                precondition(capabilitySnapshotContinuation == nil)
-                capabilitySnapshotContinuation = continuation
-            }
-            capabilitySnapshotIsSuspended = false
-        }
-        return snapshot
-    }
-
-    func suspendNextCapabilitySnapshot() {
-        precondition(!suspendsNextCapabilitySnapshot)
-        precondition(capabilitySnapshotContinuation == nil)
-        suspendsNextCapabilitySnapshot = true
-    }
-
-    func resumeSuspendedCapabilitySnapshot() {
-        guard let capabilitySnapshotContinuation else {
-            return
-        }
-        self.capabilitySnapshotContinuation = nil
-        capabilitySnapshotContinuation.resume()
-    }
-
-    func makePruneSnapshot() async -> DownloadFolderPruneSnapshot {
-        pruneSnapshot
+        DownloadFolderAccessSnapshot(
+            revision: accessRevision,
+            defaultAccess: defaultURL.map {
+                FakeDownloadFolderAccess(url: $0)
+            },
+            additionalAccesses: []
+        )
     }
 
     func clearDefaultBookmarkAndAccess() async {
         clearedDefaultCount += 1
+        if defaultURL != nil {
+            advanceAccessRevision()
+        }
         defaultURL = nil
     }
 
@@ -243,35 +186,17 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
         try validateSelectionResult.get()
     }
 
-    func isCurrentDefault(_ url: URL?) -> Bool {
-        guard let url, let defaultURL else {
-            return false
-        }
-        return url.torrentFilePath == defaultURL.torrentFilePath
-    }
-
     @discardableResult
     func setDefault(
         _ url: URL,
-        activeTorrents: [TorrentItem]
+        retaining paths: Set<String>
     ) async throws -> DownloadFolderDefaultUpdate {
-        setDefaultCalls.append((url, activeTorrents))
+        setDefaultCalls.append((url, paths))
         let previousURL = defaultURL
         let result = try (setDefaultResult ?? .success(url)).get()
         defaultURL = result
-        if mirrorsCapabilityMutations {
-            let previousDefaultAccess = capabilityDefaultAccess
-            capabilityDefaultAccess = FakeDownloadFolderAccess(
-                url: result,
-                delegationBookmarkError: nextCapabilityDelegationBookmarkError
-            )
-            nextCapabilityDelegationBookmarkError = nil
-            preserveCapabilityIfNeeded(previousDefaultAccess, activeTorrents: activeTorrents)
-            capabilityAdditionalAccesses.removeAll {
-                Self.accessKey($0.url) == Self.accessKey(result)
-            }
-            pruneCapabilities(activeTorrents: activeTorrents)
-            advanceCapabilityRevision()
+        if previousURL?.torrentFilePath != result.torrentFilePath {
+            advanceAccessRevision()
         }
         return DownloadFolderDefaultUpdate(
             url: result,
@@ -279,29 +204,20 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
         )
     }
 
-    func clearDefault(activeTorrents: [TorrentItem]) async {
-        clearDefaultCalls.append(activeTorrents)
-        defaultURL = nil
-        if mirrorsCapabilityMutations {
-            let hadDefaultCapability = capabilityDefaultAccess != nil
-            let previousPaths = Set(capabilitySnapshot.paths)
-            let previousDefaultAccess = capabilityDefaultAccess
-            capabilityDefaultAccess = nil
-            preserveCapabilityIfNeeded(previousDefaultAccess, activeTorrents: activeTorrents)
-            pruneCapabilities(activeTorrents: activeTorrents)
-            if hadDefaultCapability
-                || Set(capabilitySnapshot.paths) != previousPaths {
-                advanceCapabilityRevision()
-            }
+    func clearDefault(retaining paths: Set<String>) async {
+        clearDefaultCalls.append(paths)
+        if defaultURL != nil {
+            advanceAccessRevision()
         }
+        defaultURL = nil
     }
 
     func prepareForAdd(
         _ url: URL,
         setsDefault: Bool,
-        activeTorrents: [TorrentItem]
+        retaining paths: Set<String>
     ) async throws -> PreparedDownloadFolder {
-        prepareForAddCalls.append((url, setsDefault, activeTorrents))
+        prepareForAddCalls.append((url, setsDefault, paths))
         let access = FakeDownloadFolderAccess(url: url)
         let fallback = PreparedDownloadFolder(
             access: access,
@@ -315,29 +231,14 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
 
     func commitPreparedForAdd(
         _ preparedFolder: PreparedDownloadFolder,
-        activeTorrents: [TorrentItem]
+        retaining paths: Set<String>
     ) async -> URL? {
-        commitPreparedForAddCalls.append((preparedFolder, activeTorrents))
+        commitPreparedForAddCalls.append((preparedFolder, paths))
         if let defaultURL = preparedFolder.defaultURL {
-            self.defaultURL = defaultURL
-        }
-        if mirrorsCapabilityMutations, preparedFolder.bookmarkData != nil {
-            let access = FakeDownloadFolderAccess(
-                url: URL(filePath: preparedFolder.path, directoryHint: .isDirectory)
-            )
-            if preparedFolder.defaultURL != nil {
-                capabilityDefaultAccess = access
-                capabilityAdditionalAccesses.removeAll {
-                    Self.accessKey($0.url) == Self.accessKey(access.url)
-                }
-                pruneCapabilities(activeTorrents: activeTorrents)
-            } else {
-                capabilityAdditionalAccesses.removeAll {
-                    Self.accessKey($0.url) == Self.accessKey(access.url)
-                }
-                capabilityAdditionalAccesses.append(access)
+            if self.defaultURL?.torrentFilePath != defaultURL.torrentFilePath {
+                advanceAccessRevision()
             }
-            advanceCapabilityRevision()
+            self.defaultURL = defaultURL
         }
         return preparedFolder.defaultURL
     }
@@ -354,64 +255,22 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
     }
 
     @discardableResult
-    func applyPrunePlan(
-        _ plan: DownloadFolderPrunePlan,
-        activeTorrents: [TorrentItem]
+    func prune(
+        retaining paths: Set<String>,
+        ifRevisionMatches revision: UInt64
     ) async -> Bool {
-        guard plan.accessRevision == capabilityRevision else {
+        guard revision == accessRevision else {
             return false
         }
-        pruneCalls.append(activeTorrents)
-        if mirrorsCapabilityMutations {
-            let previousPaths = Set(capabilitySnapshot.paths)
-            capabilityAdditionalAccesses.removeAll {
-                !plan.retainedAccessKeys.contains(Self.accessKey($0.url))
-            }
-            if Set(capabilitySnapshot.paths) != previousPaths {
-                advanceCapabilityRevision()
-            }
-        }
-        onPrune?()
+        pruneCalls.append(paths)
         return true
     }
 
-    private func advanceCapabilityRevision() {
-        precondition(capabilityRevision != UInt64.max)
-        capabilityRevision += 1
+    private func advanceAccessRevision() {
+        precondition(accessRevision != UInt64.max)
+        accessRevision += 1
     }
 
-    private func preserveCapabilityIfNeeded(
-        _ access: DownloadFolderAccessing?,
-        activeTorrents: [TorrentItem]
-    ) {
-        guard let access else {
-            return
-        }
-        let key = Self.accessKey(access.url)
-        guard activeTorrents.contains(where: {
-            Self.accessKey(URL(filePath: $0.savePath, directoryHint: .isDirectory)) == key
-        }), !capabilityAdditionalAccesses.contains(where: {
-            Self.accessKey($0.url) == key
-        }) else {
-            return
-        }
-        capabilityAdditionalAccesses.append(access)
-    }
-
-    private func pruneCapabilities(activeTorrents: [TorrentItem]) {
-        let activeKeys = Set(activeTorrents.map {
-            Self.accessKey(URL(filePath: $0.savePath, directoryHint: .isDirectory))
-        })
-        let defaultKey = capabilityDefaultAccess.map { Self.accessKey($0.url) }
-        capabilityAdditionalAccesses.removeAll { access in
-            let key = Self.accessKey(access.url)
-            return key == defaultKey || !activeKeys.contains(key)
-        }
-    }
-
-    private static func accessKey(_ url: URL) -> String {
-        url.standardizedFileURL.resolvingSymlinksInPath().torrentFilePath
-    }
 }
 
 @MainActor

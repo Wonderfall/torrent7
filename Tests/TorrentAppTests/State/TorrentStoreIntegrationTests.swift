@@ -260,8 +260,8 @@ struct TorrentStoreIntegrationTests {
         await harness.store.saveAll()
     }
 
-    @Test("Refresh updates torrents, dependent services, selection, and bookmark pruning")
-    func refreshUpdatesTorrentsDependentServicesSelectionAndBookmarkPruning() async {
+    @Test("Refresh updates presentation without mutating durable folder grants")
+    func refreshUpdatesPresentationWithoutMutatingFolderGrants() async {
         let harness = makeStoreHarness()
         let beta = makeTorrent(
             id: "beta",
@@ -281,7 +281,7 @@ struct TorrentStoreIntegrationTests {
         #expect(harness.dock.transferRateUpdates.map(\.uploadRate) == [3])
         #expect(harness.sleep.updates.count == 1)
         #expect(harness.sleep.updates.first?.hasActiveTransfers == true)
-        #expect(harness.accessStore.pruneCalls.map { $0.map(\.id) } == [["alpha", "beta"]])
+        #expect(harness.accessStore.pruneCalls.isEmpty)
         #expect(await harness.engine.snapshotRequests.last?.sortOrder == .name)
     }
 
@@ -818,10 +818,8 @@ struct TorrentStoreIntegrationTests {
 
             let journal = try #require(harness.storageClaimJournal)
             let claim = try #require(await journal.allClaims().first)
-            let policy = try #require(claim.lease.filePolicies.first)
-            #expect(policy.provenance == .imported)
-            #expect(policy.mayModify)
-            #expect(!policy.mayDeleteAutomatically)
+            #expect(claim.manifest.ownership == .imported)
+            #expect(claim.lease.fileAvailability == [true])
             #expect(try Data(contentsOf: existingPayload) == original)
             #expect(harness.store.magnetDestinationConflict == nil)
             #expect(await journal.allPromotions().isEmpty)
@@ -1110,11 +1108,9 @@ struct TorrentStoreIntegrationTests {
 
             let journal = try #require(harness.storageClaimJournal)
             let activeClaim = try #require(await journal.allClaims().first)
-            let policy = try #require(activeClaim.lease.filePolicies.first)
             #expect(activeClaim.lease.state == .active)
-            #expect(policy.provenance == .imported)
-            #expect(policy.maximumAccess == .explicitlyImportedWritable)
-            #expect(!policy.mayDeleteAutomatically)
+            #expect(activeClaim.manifest.ownership == .imported)
+            #expect(activeClaim.lease.fileAvailability == [true])
             #expect(try Data(contentsOf: payload) == original)
 
             harness.store.removeTorrent(id: "imported", deleteFiles: true)
@@ -1123,7 +1119,7 @@ struct TorrentStoreIntegrationTests {
             #expect(await harness.engine.removedIDs == ["imported"])
             #expect(!FileManager.default.fileExists(atPath: payload.torrentFilePath))
             #expect(harness.store.lastError == nil)
-            #expect(await journal.allClaims().first?.lease.state == .deleted)
+            #expect(await journal.allClaims().isEmpty)
         }
     }
 
@@ -1158,8 +1154,57 @@ struct TorrentStoreIntegrationTests {
 
             #expect(await harness.engine.removedIDs == ["kept"])
             #expect(FileManager.default.fileExists(atPath: payload.torrentFilePath))
-            #expect(await journal.allClaims().first?.lease.state == .deleted)
+            #expect(await journal.allClaims().isEmpty)
             #expect(harness.store.lastError == nil)
+        }
+    }
+
+    @Test("Restart finishes an interrupted keep-payload removal")
+    func restartCompletesInterruptedKeepPayloadRemoval() async throws {
+        defer {
+            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
+        }
+        try await withKnownTorrentHarness { harness, downloadFolder in
+            await harness.engine.setNextAddedTorrentFileID("interrupted")
+            await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+                revision: 1,
+                torrents: [makeTorrent(
+                    id: "interrupted",
+                    name: "sample.bin",
+                    contentKind: .singleFile,
+                    hasMetadata: true
+                )]
+            ))
+            #expect(harness.store.addTorrentFile(
+                downloadFolder.appending(path: "sample.torrent"),
+                torrentData: validSingleFileTorrentData(),
+                savePath: downloadFolder.torrentFilePath
+            ))
+            await harness.store.saveAll()
+
+            let journal = try #require(harness.storageClaimJournal)
+            let active = try #require(await journal.allClaims().first)
+            _ = try await journal.transition(
+                claimID: active.manifest.claimID,
+                generation: active.manifest.generation,
+                operationNonce: UUID(),
+                from: [.active],
+                to: .removing,
+                removalIntent: .keepPayload
+            )
+
+            TorrentStore.engineStartupFactoryOverride.withLock { factory in
+                factory = { _ in FakeTorrentEngine() }
+            }
+            let restored = makeStoreHarness(storageClaimJournal: journal)
+            restored.store.start()
+            await restored.store.saveAll()
+
+            #expect(await journal.allClaims().isEmpty)
+            #expect(restored.store.lastError == nil)
+            #expect(FileManager.default.fileExists(
+                atPath: downloadFolder.appending(path: "sample.bin").path()
+            ))
         }
     }
 
