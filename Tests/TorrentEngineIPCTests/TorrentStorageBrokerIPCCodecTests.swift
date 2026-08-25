@@ -84,6 +84,17 @@ struct TorrentStorageBrokerIPCCodecTests {
         }
     }
 
+    @Test("Broker requests reject injected path fields")
+    func pathFieldsAreRejected() {
+        let request = TorrentStorageBrokerRequest.handshake(makeCommon())
+        var dictionary = TorrentStorageBrokerIPCCodec.encode(request)
+        dictionary["path"] = "/etc/passwd"
+
+        #expect(throws: TorrentStorageBrokerIPCError.malformedMessage) {
+            _ = try TorrentStorageBrokerIPCCodec.decodeRequest(dictionary)
+        }
+    }
+
     @Test("Oversized reply messages are rejected before bridging")
     func oversizedReplyMessageIsRejected() throws {
         let request = TorrentStorageBrokerRequest.handshake(makeCommon())

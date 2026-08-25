@@ -418,13 +418,15 @@ Scripts/test-swift.zsh
 
 The bridge analysis gate applies and validates the ordered libtorrent patch
 series. Bridge and Swift tests cover provider routing, no-fallback behavior,
-resume cutover, parser bounds, destination races, broker authentication and FD
-validation, hostile XPC bounds, nonblocking special-file rejection, per-object
-ownership authentication, path disclosure, retained-descriptor soft revocation,
-claim recovery, ambiguous activation containment, imports, removal, and magnet
-promotion. Separate fuzz harnesses cover native API and parser input surfaces;
-their expensive build and execution are intentionally independent of the
-routine test gates.
+resume cutover, parser bounds, destination races, broker nonce, epoch, claim,
+and parent isolation, pathless exact-key XPC decoding, returned-FD type,
+metadata, and access validation, hostile XPC bounds, nonblocking special-file
+rejection, per-object ownership authentication, descriptor-relative namespace
+rejection, replacement-safe retained-descriptor soft revocation, claim recovery,
+ambiguous activation containment, imports, removal, and magnet promotion.
+Separate fuzz harnesses cover native API and parser input surfaces; their
+expensive build and execution are intentionally independent of the routine test
+gates.
 
 The signed Enhanced Security integration gate currently verifies the real
 process lifecycle and authenticated broker handshake, but its staged dataset
