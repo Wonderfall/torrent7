@@ -84,6 +84,7 @@ jobs:
         shell: zsh {0}
         env:
           DEPENDENCY_COOLDOWN_DAYS: "4"
+          BORINGSSL_COOLDOWN_DAYS: "30"
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail

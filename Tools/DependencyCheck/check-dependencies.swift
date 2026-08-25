@@ -70,6 +70,7 @@ final class DependencyChecker {
     private let summaryPath: URL?
     private let now: Date
     private let cooldownDays: Int
+    private let boringSSLCooldownDays: Int
     private let userAgent = "torrent7-dependency-check"
     private let githubToken: String?
     private let secondsPerDay: TimeInterval = 86_400
@@ -100,6 +101,18 @@ final class DependencyChecker {
             throw CheckFailure.message("DEPENDENCY_COOLDOWN_DAYS must be a non-negative integer")
         }
         self.cooldownDays = parsedCooldown
+
+        let configuredBoringSSLCooldown = ProcessInfo.processInfo.environment[
+            "BORINGSSL_COOLDOWN_DAYS",
+            default: "30"
+        ]
+        guard let parsedBoringSSLCooldown = Int(configuredBoringSSLCooldown),
+              parsedBoringSSLCooldown >= 0 else {
+            throw CheckFailure.message(
+                "BORINGSSL_COOLDOWN_DAYS must be a non-negative integer"
+            )
+        }
+        self.boringSSLCooldownDays = parsedBoringSSLCooldown
 
         let configuredGitHubToken = ProcessInfo.processInfo.environment["GITHUB_TOKEN"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -179,7 +192,7 @@ final class DependencyChecker {
         }
 
         if failures.isEmpty {
-            ok("All pinned dependencies are current under the \(cooldownDays)-day cooldown")
+            ok("All pinned dependencies are current under the configured cooldowns")
         } else {
             print("")
             print("\(failures.count) dependency check(s) failed:")
@@ -238,7 +251,8 @@ final class DependencyChecker {
         var lines: [String] = [
             "# Dependency Check",
             "",
-            "- Cooldown: \(cooldownDays) day\(cooldownDays == 1 ? "" : "s")",
+            "- Release cooldown: \(cooldownDays) day\(cooldownDays == 1 ? "" : "s")",
+            "- BoringSSL cooldown: \(boringSSLCooldownDays) day\(boringSSLCooldownDays == 1 ? "" : "s")",
             "- Pins source: `Scripts/build-deps.zsh`, `Scripts/boost-patch-series.sh`, and `Scripts/libtorrent-patch-series.sh`",
             ""
         ]
@@ -377,7 +391,7 @@ final class DependencyChecker {
         }
     }
 
-    private func releaseIsEligible(_ publishedAt: Date) -> Bool {
+    private func isEligible(_ publishedAt: Date, cooldownDays: Int) -> Bool {
         now.timeIntervalSince(publishedAt) >= TimeInterval(cooldownDays) * secondsPerDay
     }
 
@@ -389,13 +403,13 @@ final class DependencyChecker {
         return formatter.string(from: date)
     }
 
-    private func coolingUntil(_ publishedAt: Date) -> String {
+    private func coolingUntil(_ publishedAt: Date, cooldownDays: Int) -> String {
         dateString(publishedAt.addingTimeInterval(TimeInterval(cooldownDays) * secondsPerDay))
     }
 
     private func checkLatestVersion(name: String, pinnedVersion: String, observed: Release?, eligible: Release?) {
-        if let observed, !releaseIsEligible(observed.publishedAt) {
-            info("\(name) \(observed.version) was published \(dateString(observed.publishedAt)); ignoring until \(coolingUntil(observed.publishedAt))")
+        if let observed, !isEligible(observed.publishedAt, cooldownDays: cooldownDays) {
+            info("\(name) \(observed.version) was published \(dateString(observed.publishedAt)); ignoring until \(coolingUntil(observed.publishedAt, cooldownDays: cooldownDays))")
         } else if let observed, let eligible, compareVersions(observed.version, eligible.version) > 0 {
             info("\(name) \(observed.version) is newer than the eligible \(eligible.version) but still cooling down")
         }
@@ -536,7 +550,9 @@ final class DependencyChecker {
         }
 
         let observed = maxByVersion(stable2x)
-        let eligible = maxByVersion(stable2x.filter { releaseIsEligible($0.publishedAt) })
+        let eligible = maxByVersion(stable2x.filter {
+            isEligible($0.publishedAt, cooldownDays: cooldownDays)
+        })
         checkLatestVersion(name: "libtorrent", pinnedVersion: String(pinnedTag.dropFirst()), observed: observed, eligible: eligible)
 
         let result = try runProcess("git", [
@@ -624,7 +640,9 @@ final class DependencyChecker {
             }
 
             let hasPinnedCommit = history.contains { $0.sha == pinnedCommit }
-            let hasEligibleCommit = history.contains { releaseIsEligible($0.date) }
+            let hasEligibleCommit = history.contains {
+                isEligible($0.date, cooldownDays: boringSSLCooldownDays)
+            }
             if commits.count < 100 || (hasPinnedCommit && hasEligibleCommit) {
                 break
             }
@@ -645,8 +663,13 @@ final class DependencyChecker {
             recordFailure("BoringSSL pinned commit is not in the recent upstream history")
             return
         }
-        guard let eligibleIndex = history.firstIndex(where: { releaseIsEligible($0.date) }) else {
-            ok("BoringSSL has no commit older than the \(cooldownDays)-day cooldown")
+        guard let eligibleIndex = history.firstIndex(where: {
+            isEligible($0.date, cooldownDays: boringSSLCooldownDays)
+        }) else {
+            ok(
+                "BoringSSL has no commit older than the "
+                    + "\(boringSSLCooldownDays)-day cooldown"
+            )
             return
         }
 
@@ -663,9 +686,14 @@ final class DependencyChecker {
             )
         }
 
-        if remoteHead != pinnedCommit, !releaseIsEligible(observed.date) {
+        if remoteHead != pinnedCommit,
+           !isEligible(observed.date, cooldownDays: boringSSLCooldownDays) {
             info(
-                "BoringSSL HEAD \(remoteHead) is cooling down until \(coolingUntil(observed.date))"
+                "BoringSSL HEAD \(remoteHead) is cooling down until "
+                    + coolingUntil(
+                        observed.date,
+                        cooldownDays: boringSSLCooldownDays
+                    )
             )
         }
     }
@@ -703,7 +731,9 @@ final class DependencyChecker {
         }
 
         let observed = Release(version: latestVersion, publishedAt: publishedAt)
-        let eligible = releaseIsEligible(publishedAt) ? observed : nil
+        let eligible = isEligible(publishedAt, cooldownDays: cooldownDays)
+            ? observed
+            : nil
         checkLatestVersion(name: "Boost", pinnedVersion: pinnedVersion, observed: observed, eligible: eligible)
 
         guard let upstreamSHA256 = pinnedMetadata["sha256"]?.lowercased() else {
