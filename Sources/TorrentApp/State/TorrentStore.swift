@@ -35,6 +35,17 @@ private enum TorrentMagnetPromotionError: LocalizedError {
     }
 }
 
+private enum TorrentStorageRecoveryError: LocalizedError {
+    case missingStartupSnapshot
+
+    var errorDescription: String? {
+        switch self {
+        case .missingStartupSnapshot:
+            "The torrent engine did not provide an authoritative startup snapshot."
+        }
+    }
+}
+
 struct TorrentMagnetDestinationConflict: Identifiable, Equatable, Sendable {
     let id: UUID
     let conflict: TorrentStorageDestinationConflict
@@ -280,7 +291,6 @@ final class TorrentStore {
     private var confirmedNetworkBlockLifecycleGeneration: UInt64?
     private var torrentsByID = [TorrentItem.ID: TorrentItem]()
     private var activeTorrentIDs = Set<TorrentItem.ID>()
-    private var unresolvedStorageTorrentIDs = Set<TorrentItem.ID>()
     private var sortDirectionsByOrder = [
         TorrentSortOrder: TorrentSortDirection
     ]()
@@ -1080,7 +1090,7 @@ final class TorrentStore {
                 throw store.storageClaimJournalInitializationError
                     ?? .unavailable
             }
-            try await storageClaimJournal.completePromotion(
+            try await storageClaimJournal.retirePromotion(
                 id: promotion.id,
                 operationNonce: promotion.operationNonce
             )
@@ -1703,7 +1713,6 @@ final class TorrentStore {
         scheduleBulkOperation(
             requestedIDs: nil,
             filter: .resumable,
-            excludesUnresolvedStorageActivations: true,
             operation: Self.resume
         )
     }
@@ -1728,7 +1737,6 @@ final class TorrentStore {
         scheduleBulkOperation(
             requestedIDs: ids,
             filter: .resumable,
-            excludesUnresolvedStorageActivations: true,
             operation: Self.resume
         )
     }
@@ -2790,7 +2798,7 @@ final class TorrentStore {
                 activation.runtime,
                 torrentID: promotedID
             )
-            try await storageClaimJournal.completePromotion(
+            try await storageClaimJournal.retirePromotion(
                 id: promotion.id,
                 operationNonce: promotion.operationNonce
             )
@@ -2826,7 +2834,7 @@ final class TorrentStore {
             activation.runtime,
             torrentID: promotion.torrentID
         )
-        try await storageClaimJournal.completePromotion(
+        try await storageClaimJournal.retirePromotion(
             id: promotion.id,
             operationNonce: promotion.operationNonce
         )
@@ -3148,98 +3156,9 @@ final class TorrentStore {
             }
             storageParents[parent.id] = parent
         }
-        var unresolvedCount = 0
-
-        for originalClaim in claims {
-            var claim = originalClaim
-            switch claim.lease.state {
-            case .activating:
-                if let unresolved = try? await storageClaimJournal.transition(
-                    claimID: claim.manifest.claimID,
-                    generation: claim.manifest.generation,
-                    operationNonce: claim.operationNonce,
-                    from: [.activating],
-                    to: .activationUnknown
-                ) {
-                    claim = unresolved
-                }
-                unresolvedCount += 1
-            case .activationUnknown:
-                unresolvedCount += 1
-            case .removing:
-                if claim.removalIntent == .keepPayload {
-                    do {
-                        try await storageClaimJournal.completeClaimRemoval(
-                            claimID: claim.manifest.claimID,
-                            generation: claim.manifest.generation,
-                            operationNonce: claim.operationNonce
-                        )
-                    } catch {
-                        unresolvedCount += 1
-                    }
-                } else {
-                    _ = try? await storageClaimJournal.transition(
-                        claimID: claim.manifest.claimID,
-                        generation: claim.manifest.generation,
-                        operationNonce: claim.operationNonce,
-                        from: [claim.lease.state],
-                        to: .deletionPending
-                    )
-                    unresolvedCount += 1
-                }
-                continue
-            case .deleting:
-                break
-            case .active:
-                break
-            case .reserved, .deletionPending:
-                unresolvedCount += 1
-                continue
-            case .orphaned:
-                continue
-            }
-
+        for claim in claims where claim.lease.state == .active {
             guard let restoredParent = storageParents[claim.manifest.parentID]
             else {
-                _ = try? await storageClaimJournal.transition(
-                    claimID: claim.manifest.claimID,
-                    generation: claim.manifest.generation,
-                    operationNonce: claim.operationNonce,
-                    from: [.activating, .active, .activationUnknown],
-                    to: .orphaned
-                )
-                unresolvedCount += 1
-                continue
-            }
-            if claim.lease.state == .deleting {
-                do {
-                    let deletionIsComplete = try
-                        TorrentStorageDestinationPlanner()
-                            .deletionIsComplete(
-                                claim: claim,
-                                in: restoredParent
-                            )
-                    if !deletionIsComplete {
-                        try await Self.deleteStorageClaim(
-                            claim,
-                            from: restoredParent
-                        )
-                    }
-                    try await storageClaimJournal.completeClaimRemoval(
-                        claimID: claim.manifest.claimID,
-                        generation: claim.manifest.generation,
-                        operationNonce: claim.operationNonce
-                    )
-                } catch {
-                    _ = try? await storageClaimJournal.transition(
-                        claimID: claim.manifest.claimID,
-                        generation: claim.manifest.generation,
-                        operationNonce: claim.operationNonce,
-                        from: [.deleting],
-                        to: .deletionPending
-                    )
-                    unresolvedCount += 1
-                }
                 continue
             }
             do {
@@ -3272,92 +3191,230 @@ final class TorrentStore {
                     claimID: claim.manifest.claimID,
                     generation: claim.manifest.generation
                 )
-                _ = try? await storageClaimJournal.transition(
-                    claimID: claim.manifest.claimID,
-                    generation: claim.manifest.generation,
-                    operationNonce: claim.operationNonce,
-                    from: [.activating, .active, .activationUnknown],
-                    to: .orphaned
-                )
-                unresolvedCount += 1
             }
         }
 
-        let preparationCount = await storageClaimJournal.unresolvedPreparations().count
-        unresolvedCount += preparationCount
-        await pruneDownloadFolderAccess()
-        guard unresolvedCount > 0 else {
-            return nil
-        }
-        return "\(unresolvedCount) storage operation(s) require review. Their payloads were preserved and no authority was guessed."
+        return nil
     }
 
-    /// Recovered `activationUnknown` claims retain their exact broker
-    /// authority so libtorrent can identify the corresponding resume record,
-    /// but they must never become network-active without explicit review.
-    private func pauseUnresolvedStorageTorrents() async -> Bool {
+    /// Reconciles the journal against the first fail-closed engine snapshot.
+    /// Anything without current GUI authority is untracked before settings can
+    /// enable networking. Ambiguous payloads are preserved; only an already
+    /// durable delete intent is resumed.
+    private func recoverInterruptedStorageOperations() async -> Bool {
         guard let storageClaimJournal else {
-            unresolvedStorageTorrentIDs.removeAll()
             return true
         }
-
-        let claims = await storageClaimJournal.allClaims().filter {
-            $0.lease.state == .activating
-                || $0.lease.state == .activationUnknown
+        guard lastSnapshotRevision != nil else {
+            await stopEngineAfterStorageRecoveryFailure(
+                TorrentStorageRecoveryError.missingStartupSnapshot
+            )
+            return false
         }
-        let unresolvedInfoHashes = Set(claims.flatMap {
-            Self.resumeIDs(for: $0.manifest.infoHashes)
-        })
-        var unresolvedIDs = Set(claims.compactMap(\.torrentID))
-        for torrent in torrents where unresolvedInfoHashes.contains(torrent.infoHash) {
-            unresolvedIDs.insert(torrent.id)
-        }
-        unresolvedStorageTorrentIDs = unresolvedIDs
 
-        for id in unresolvedIDs.sorted() {
-            guard let torrent = torrentsByID[id], !torrent.manuallyPaused else {
-                continue
+        let claims = await storageClaimJournal.allClaims()
+        let promotions = await storageClaimJournal.allPromotions()
+        let installedClaimIDs = storageBrokerRegistry.installedClaimIDs()
+        let locations = storageBrokerRegistry.locationsByTorrentID()
+        let retainedClaims = claims.filter { claim in
+            claim.lease.state == .active
+                && installedClaimIDs.contains(claim.manifest.claimID)
+                && claim.torrentID.map { locations[$0] != nil } == true
+        }
+        let retainedClaimIDs = Set(retainedClaims.map(\.manifest.claimID))
+        let retainedClaimsByID = Dictionary(
+            uniqueKeysWithValues: retainedClaims.map {
+                ($0.manifest.claimID, $0)
             }
+        )
+
+        do {
+            for claim in claims where !retainedClaimIDs.contains(
+                claim.manifest.claimID
+            ) {
+                try storageBrokerRegistry.removeClaim(
+                    claimID: claim.manifest.claimID,
+                    generation: claim.manifest.generation
+                )
+            }
+        } catch {
+            await stopEngineAfterStorageRecoveryFailure(error)
+            return false
+        }
+
+        let currentTorrentIDs = Set(torrents.map(\.id))
+        let metadataPromotionIDs = Set(promotions.compactMap { promotion in
+            switch promotion.state {
+            case .awaitingMetadata, .metadataReady:
+                currentTorrentIDs.contains(promotion.torrentID)
+                    ? promotion.torrentID
+                    : nil
+            case .awaitingDestination, .promoting, .outcomeUnknown:
+                nil
+            }
+        })
+        let authorizedTorrentIDs = Set(retainedClaims.compactMap(\.torrentID))
+            .union(metadataPromotionIDs)
+        let unownedTorrentIDs = torrents.lazy
+            .map(\.id)
+            .filter { !authorizedTorrentIDs.contains($0) }
+            .sorted()
+
+        for id in unownedTorrentIDs {
             do {
-                try await engine.pause(id: id)
+                switch try await engine.remove(id: id) {
+                case .removed:
+                    break
+                case .removedWithWarning(let warning):
+                    await engine.terminateConnection(
+                        recoveryDisposition: .terminal
+                    )
+                    preventAutomaticEngineRecoveryAfterTerminalFailure()
+                    setLastError(warning, source: .userAction)
+                    return false
+                }
             } catch {
-                await engine.terminateConnection(
-                    recoveryDisposition: .terminal
-                )
-                preventAutomaticEngineRecoveryAfterTerminalFailure()
-                setLastError(
-                    "A torrent with unresolved storage activation could not be kept paused. The torrent engine was stopped. \(error.localizedDescription)",
-                    source: .userAction
-                )
+                await stopEngineAfterStorageRecoveryFailure(error)
                 return false
             }
         }
+
+        do {
+            for preparation in await storageClaimJournal
+                .unresolvedPreparations() {
+                try await storageClaimJournal.cancelPreparation(
+                    claimID: preparation.claimID,
+                    generation: preparation.generation,
+                    operationNonce: preparation.operationNonce
+                )
+            }
+
+            for originalClaim in claims where !retainedClaimIDs.contains(
+                originalClaim.manifest.claimID
+            ) {
+                let resumesDeletion = switch originalClaim.lease.state {
+                case .removing, .deleting, .deletionPending, .orphaned:
+                    true
+                case .reserved, .activating, .active, .activationUnknown:
+                    false
+                }
+                if originalClaim.removalIntent == .deletePayload,
+                   resumesDeletion {
+                    var claim = originalClaim
+                    if claim.lease.state != .deleting {
+                        claim = try await storageClaimJournal.transition(
+                            claimID: claim.manifest.claimID,
+                            generation: claim.manifest.generation,
+                            operationNonce: claim.operationNonce,
+                            from: [claim.lease.state],
+                            to: .deleting
+                        )
+                    }
+                    try await resumeInterruptedStorageDeletion(
+                        claim,
+                        journal: storageClaimJournal
+                    )
+                } else {
+                    try await storageClaimJournal
+                        .retireClaimPreservingPayload(
+                            claimID: originalClaim.manifest.claimID,
+                            generation: originalClaim.manifest.generation
+                        )
+                }
+            }
+
+            for promotion in promotions {
+                let shouldRetain = switch promotion.state {
+                case .awaitingMetadata, .metadataReady:
+                    currentTorrentIDs.contains(promotion.torrentID)
+                case .awaitingDestination:
+                    true
+                case .promoting, .outcomeUnknown:
+                    promotion.activation.map {
+                        retainedClaimsByID[$0.claimID]?.torrentID
+                            == promotion.torrentID
+                    } ?? false
+                }
+                guard !shouldRetain else {
+                    continue
+                }
+                try await storageClaimJournal.retirePromotion(
+                    id: promotion.id,
+                    operationNonce: promotion.operationNonce
+                )
+            }
+        } catch {
+            await stopEngineAfterStorageRecoveryFailure(error)
+            return false
+        }
+
+        await pruneDownloadFolderAccess()
         return true
     }
 
-    private static func resumeIDs(
-        for infoHashes: TorrentStorageInfoHashes
-    ) -> [String] {
-        var ids = [String]()
-        ids.reserveCapacity(2)
-        if let v1 = infoHashes.v1 {
-            ids.append(resumeID(prefix: "v1:", digest: v1))
+    private func resumeInterruptedStorageDeletion(
+        _ initialClaim: TorrentStorageClaim,
+        journal: TorrentStorageClaimJournal
+    ) async throws {
+        guard let parent = storageParents[initialClaim.manifest.parentID] else {
+            if initialClaim.lease.state == .deleting {
+                _ = try await journal.transition(
+                    claimID: initialClaim.manifest.claimID,
+                    generation: initialClaim.manifest.generation,
+                    operationNonce: initialClaim.operationNonce,
+                    from: [.deleting],
+                    to: .deletionPending
+                )
+            }
+            return
         }
-        if let v2 = infoHashes.v2 {
-            ids.append(resumeID(prefix: "v2:", digest: v2))
+
+        var claim = initialClaim
+        do {
+            if claim.deletionEvidence == nil {
+                let evidence = try await Self.prepareStorageDeletion(
+                    claim,
+                    from: parent
+                )
+                claim = try await journal.recordDeletionEvidence(
+                    claimID: claim.manifest.claimID,
+                    generation: claim.manifest.generation,
+                    operationNonce: claim.operationNonce,
+                    evidence: evidence
+                )
+            }
+            let deletionIsComplete = try TorrentStorageDestinationPlanner()
+                .deletionIsComplete(claim: claim, in: parent)
+            if !deletionIsComplete {
+                try await Self.deleteStorageClaim(claim, from: parent)
+            }
+            try await journal.completeClaimRemoval(
+                claimID: claim.manifest.claimID,
+                generation: claim.manifest.generation,
+                operationNonce: claim.operationNonce
+            )
+        } catch let error as TorrentStorageJournalError {
+            throw error
+        } catch {
+            _ = try await journal.transition(
+                claimID: claim.manifest.claimID,
+                generation: claim.manifest.generation,
+                operationNonce: claim.operationNonce,
+                from: [.deleting],
+                to: .deletionPending
+            )
         }
-        return ids
     }
 
-    private static func resumeID(prefix: String, digest: Data) -> String {
-        let digits = Array("0123456789abcdef".utf8)
-        var encoded = Array(prefix.utf8)
-        encoded.reserveCapacity(encoded.count + digest.count * 2)
-        for byte in digest {
-            encoded.append(digits[Int(byte >> 4)])
-            encoded.append(digits[Int(byte & 0x0f)])
-        }
-        return String(decoding: encoded, as: UTF8.self)
+    private func stopEngineAfterStorageRecoveryFailure(
+        _ error: any Error
+    ) async {
+        await engine.terminateConnection(recoveryDisposition: .terminal)
+        preventAutomaticEngineRecoveryAfterTerminalFailure()
+        setLastError(
+            "Interrupted storage recovery could not finish safely, so the torrent engine was stopped. \(error.localizedDescription)",
+            source: .userAction
+        )
     }
 
     private func startProductionEngine(
@@ -3497,7 +3554,7 @@ final class TorrentStore {
                 guard store.engine.isAvailable, !store.engineReplacementRequested else {
                     return
                 }
-                guard await store.pauseUnresolvedStorageTorrents() else {
+                guard await store.recoverInterruptedStorageOperations() else {
                     return
                 }
                 store.prioritizeCurrentSettingsApplication(
@@ -3608,7 +3665,6 @@ final class TorrentStore {
         requestedIDs: Set<TorrentItem.ID>?,
         filter: TorrentStoreBulkCommandFilter,
         reversesOrder: Bool = false,
-        excludesUnresolvedStorageActivations: Bool = false,
         operation: @escaping @Sendable (
             any TorrentEngineServicing,
             [TorrentItem.ID]
@@ -3620,18 +3676,13 @@ final class TorrentStore {
         let errorGeneration = lastErrorGeneration
         scheduleUserOperation { store in
             do {
-                var ids = try await Self.prepareBulkCommandIDs(
+                let ids = try await Self.prepareBulkCommandIDs(
                     torrents: store.torrents,
                     requestedIDs: requestedIDs,
                     filter: filter,
                     reversesOrder: reversesOrder
                 )
                 try Task.checkCancellation()
-                if excludesUnresolvedStorageActivations {
-                    ids.removeAll {
-                        store.unresolvedStorageTorrentIDs.contains($0)
-                    }
-                }
                 guard !ids.isEmpty else {
                     return
                 }
