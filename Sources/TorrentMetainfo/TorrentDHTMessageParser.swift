@@ -567,6 +567,7 @@ package struct TorrentDHTMessageParser: Sendable {
         guard completeCount <= limits.maximumNodeCount - nodes.count else {
             throw TorrentDHTMessageError.tooManyNodes
         }
+        nodes.reserveCapacity(nodes.count + completeCount)
         let addressSize = family == .ipv4 ? 4 : 16
         var offset = range.lowerBound
         for _ in 0..<completeCount {
@@ -593,12 +594,13 @@ package struct TorrentDHTMessageParser: Sendable {
             return []
         }
         var peers = [TorrentDHTEndpoint]()
-        peers.reserveCapacity(min(document.childCount(of: value), 32))
+        let childCount = document.childCount(of: value)
         let first = document.firstChild(of: value)
         if sourceFamily == .ipv4,
-           document.childCount(of: value) == 1,
+           childCount == 1,
            let first,
            let range = document.stringRange(at: first) {
+            peers.reserveCapacity(min(range.count / 6, limits.maximumPeerCount))
             var offset = range.lowerBound
             while range.upperBound - offset >= 6 {
                 try appendEndpoint(
@@ -611,6 +613,7 @@ package struct TorrentDHTMessageParser: Sendable {
             return peers
         }
 
+        peers.reserveCapacity(min(childCount, limits.maximumPeerCount))
         var child = first
         while let index = child {
             guard let range = document.stringRange(at: index) else {

@@ -311,47 +311,41 @@ package struct TorrentPeerProtocolParser: Sendable {
         )
         let root = try dictionaryRoot(document)
 
-        let added4 = try optionalString(
+        let added4 = try optionalStringRange(
             named: "added",
             in: root,
             document: document,
-            maximumBytes: limits.maximumPeerExchangeBytes,
-            requiresUTF8: false
+            maximumBytes: limits.maximumPeerExchangeBytes
         )
-        let added4Flags = try optionalString(
+        let added4Flags = try optionalStringRange(
             named: "added.f",
             in: root,
             document: document,
-            maximumBytes: limits.maximumInitialAddedContacts,
-            requiresUTF8: false
+            maximumBytes: limits.maximumInitialAddedContacts
         )
-        let added6 = try optionalString(
+        let added6 = try optionalStringRange(
             named: "added6",
             in: root,
             document: document,
-            maximumBytes: limits.maximumPeerExchangeBytes,
-            requiresUTF8: false
+            maximumBytes: limits.maximumPeerExchangeBytes
         )
-        let added6Flags = try optionalString(
+        let added6Flags = try optionalStringRange(
             named: "added6.f",
             in: root,
             document: document,
-            maximumBytes: limits.maximumInitialAddedContacts,
-            requiresUTF8: false
+            maximumBytes: limits.maximumInitialAddedContacts
         )
-        let dropped4 = try optionalString(
+        let dropped4 = try optionalStringRange(
             named: "dropped",
             in: root,
             document: document,
-            maximumBytes: limits.maximumPeerExchangeBytes,
-            requiresUTF8: false
+            maximumBytes: limits.maximumPeerExchangeBytes
         )
-        let dropped6 = try optionalString(
+        let dropped6 = try optionalStringRange(
             named: "dropped6",
             in: root,
             document: document,
-            maximumBytes: limits.maximumPeerExchangeBytes,
-            requiresUTF8: false
+            maximumBytes: limits.maximumPeerExchangeBytes
         )
 
         let added4Count = try contactCount(added4, stride: 6)
@@ -372,14 +366,17 @@ package struct TorrentPeerProtocolParser: Sendable {
         }
 
         var contacts = [TorrentPeerExchangeContact]()
-        contacts.reserveCapacity(try checkedSum(addedCount, droppedCount))
+        let contactCount = try checkedSum(addedCount, droppedCount)
+        contacts.reserveCapacity(contactCount)
         var seenAddresses = Set<TorrentPeerAddress>()
+        seenAddresses.reserveCapacity(contactCount)
         try appendContacts(
             added4,
             flags: added4Flags,
             family: .ipv4,
             action: .add,
             stride: 6,
+            document: document,
             to: &contacts,
             seenAddresses: &seenAddresses
         )
@@ -389,6 +386,7 @@ package struct TorrentPeerProtocolParser: Sendable {
             family: .ipv6,
             action: .add,
             stride: 18,
+            document: document,
             to: &contacts,
             seenAddresses: &seenAddresses
         )
@@ -398,6 +396,7 @@ package struct TorrentPeerProtocolParser: Sendable {
             family: .ipv4,
             action: .drop,
             stride: 6,
+            document: document,
             to: &contacts,
             seenAddresses: &seenAddresses
         )
@@ -407,6 +406,7 @@ package struct TorrentPeerProtocolParser: Sendable {
             family: .ipv6,
             action: .drop,
             stride: 18,
+            document: document,
             to: &contacts,
             seenAddresses: &seenAddresses
         )
@@ -500,12 +500,13 @@ package struct TorrentPeerProtocolParser: Sendable {
         maximumBytes: Int,
         requiresUTF8: Bool
     ) throws -> Data? {
-        guard let value = document.value(named: name, inDictionaryAt: dictionary) else {
+        guard let range = try optionalStringRange(
+            named: name,
+            in: dictionary,
+            document: document,
+            maximumBytes: maximumBytes
+        ) else {
             return nil
-        }
-        guard let range = document.stringRange(at: value),
-              range.count <= maximumBytes else {
-            throw TorrentPeerProtocolError.invalidField
         }
         let bytes = Data(document.data[range])
         if requiresUTF8,
@@ -515,20 +516,36 @@ package struct TorrentPeerProtocolParser: Sendable {
         return bytes
     }
 
-    private func contactCount(_ bytes: Data?, stride: Int) throws -> Int {
-        guard let bytes else {
-            return 0
+    private func optionalStringRange(
+        named name: String,
+        in dictionary: Int,
+        document: BencodeRangeDocument,
+        maximumBytes: Int
+    ) throws -> Range<Int>? {
+        guard let value = document.value(named: name, inDictionaryAt: dictionary) else {
+            return nil
         }
-        guard bytes.count.isMultiple(of: stride) else {
+        guard let range = document.stringRange(at: value),
+              range.count <= maximumBytes else {
             throw TorrentPeerProtocolError.invalidField
         }
-        return bytes.count / stride
+        return range
+    }
+
+    private func contactCount(_ range: Range<Int>?, stride: Int) throws -> Int {
+        guard let range else {
+            return 0
+        }
+        guard range.count.isMultiple(of: stride) else {
+            throw TorrentPeerProtocolError.invalidField
+        }
+        return range.count / stride
     }
 
     private func validateFlags(
-        _ flags: Data?,
+        _ flags: Range<Int>?,
         contactCount: Int,
-        contacts: Data?
+        contacts: Range<Int>?
     ) throws {
         guard let flags else {
             return
@@ -540,11 +557,12 @@ package struct TorrentPeerProtocolParser: Sendable {
     }
 
     private func appendContacts(
-        _ encoded: Data?,
-        flags: Data?,
+        _ encoded: Range<Int>?,
+        flags: Range<Int>?,
         family: TorrentPeerAddressFamily,
         action: TorrentPeerExchangeAction,
         stride: Int,
+        document: BencodeRangeDocument,
         to contacts: inout [TorrentPeerExchangeContact],
         seenAddresses: inout Set<TorrentPeerAddress>
     ) throws {
@@ -552,21 +570,21 @@ package struct TorrentPeerProtocolParser: Sendable {
             return
         }
         let addressSize = stride - 2
-        var offset = 0
+        var offset = encoded.lowerBound
         var contactIndex = 0
-        while offset < encoded.count {
-            let address = try decodeAddress(
-                encoded.subdata(in: offset..<(offset + addressSize))
-            )
+        while offset < encoded.upperBound {
+            let address = try decodeAddress(document.data[offset..<(offset + addressSize)])
             guard seenAddresses.insert(address).inserted else {
                 throw TorrentPeerProtocolError.duplicatePeerExchangeContact
             }
-            let port = UInt16(encoded[offset + addressSize]) << 8
-                | UInt16(encoded[offset + addressSize + 1])
+            let port = UInt16(document.data[offset + addressSize]) << 8
+                | UInt16(document.data[offset + addressSize + 1])
             guard port != 0 else {
                 throw TorrentPeerProtocolError.invalidField
             }
-            let rawFlags = flags.map { $0[contactIndex] } ?? 0
+            let rawFlags = flags.map {
+                document.data[$0.lowerBound + contactIndex]
+            } ?? 0
             contacts.append(TorrentPeerExchangeContact(
                 address: address,
                 port: port,
@@ -580,7 +598,7 @@ package struct TorrentPeerProtocolParser: Sendable {
         }
     }
 
-    private func decodeAddress(_ bytes: Data) throws -> TorrentPeerAddress {
+    private func decodeAddress(_ bytes: Data.SubSequence) throws -> TorrentPeerAddress {
         switch bytes.count {
         case 4:
             let low = bytes.reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }

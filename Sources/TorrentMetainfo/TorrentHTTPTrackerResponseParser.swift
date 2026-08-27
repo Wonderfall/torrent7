@@ -195,7 +195,6 @@ package struct TorrentHTTPTrackerResponseParser: Sendable {
             document: document
         )
         var peers = [TorrentTrackerPeer]()
-        peers.reserveCapacity(min(limits.maximumPeerCount, 256))
         try parseIPv4OrHostnamePeers(
             in: root,
             document: document,
@@ -395,6 +394,7 @@ package struct TorrentHTTPTrackerResponseParser: Sendable {
             guard document.childCount(of: value) <= limits.maximumPeerCount else {
                 throw TorrentHTTPTrackerResponseError.tooManyPeers
             }
+            peers.reserveCapacity(document.childCount(of: value))
             var foundInvalidEntry = false
             var child = document.firstChild(of: value)
             while let index = child {
@@ -452,6 +452,7 @@ package struct TorrentHTTPTrackerResponseParser: Sendable {
         guard count <= limits.maximumPeerCount - peers.count else {
             throw TorrentHTTPTrackerResponseError.tooManyPeers
         }
+        peers.reserveCapacity(peers.count + count)
         let addressSize = stride - 2
         var offset = range.lowerBound
         while offset < range.upperBound {

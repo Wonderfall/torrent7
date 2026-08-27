@@ -82,6 +82,9 @@ package struct ParsedMagnet: Codable, Equatable, Sendable {
     private static let maximumSourceURLBytes = 16 * 1_024
     private static let maximumRetainedFieldBytes = TorrentInputLimits.maxMagnetURIBytes
     private static let maximumFileSelectionWork = TorrentEngineLimits.maximumFileCount * 4
+    private static let trackerSchemes: Set<String> = ["http", "https", "udp"]
+    private static let webSeedSchemes: Set<String> = ["http", "https"]
+    private static let fieldCancellationInterval = 256
 
     package let v1InfoHash: Data?
     package let v2InfoHash: Data?
@@ -173,8 +176,6 @@ package struct ParsedMagnet: Codable, Equatable, Sendable {
         var webSeeds = [String]()
         var selectedFiles: [Bool]?
         var selectionWork = 0
-        trackers.reserveCapacity(32)
-        webSeeds.reserveCapacity(8)
 
         while true {
             parameterCount += 1
@@ -232,7 +233,7 @@ package struct ParsedMagnet: Codable, Equatable, Sendable {
                 guard TorrentSourceURLValidator.isValid(
                     value,
                     maximumBytes: maximumSourceURLBytes,
-                    allowedSchemes: ["http", "https", "udp"]
+                    allowedSchemes: trackerSchemes
                 ) else {
                     throw ParsedMagnetError.invalidSourceURL
                 }
@@ -248,7 +249,7 @@ package struct ParsedMagnet: Codable, Equatable, Sendable {
                 guard TorrentSourceURLValidator.isValid(
                     value,
                     maximumBytes: maximumSourceURLBytes,
-                    allowedSchemes: ["http", "https"]
+                    allowedSchemes: webSeedSchemes
                 ) else {
                     throw ParsedMagnetError.invalidSourceURL
                 }
@@ -330,7 +331,7 @@ package struct ParsedMagnet: Codable, Equatable, Sendable {
                   TorrentSourceURLValidator.isValid(
                     tracker.url,
                     maximumBytes: maximumSourceURLBytes,
-                    allowedSchemes: ["http", "https", "udp"]
+                    allowedSchemes: trackerSchemes
                   ) else {
                 throw ParsedMagnetError.invalidSourceURL
             }
@@ -340,7 +341,7 @@ package struct ParsedMagnet: Codable, Equatable, Sendable {
             guard TorrentSourceURLValidator.isValid(
                 webSeed,
                 maximumBytes: maximumSourceURLBytes,
-                allowedSchemes: ["http", "https"]
+                allowedSchemes: webSeedSchemes
             ) else {
                 throw ParsedMagnetError.invalidSourceURL
             }
@@ -489,12 +490,27 @@ package struct ParsedMagnet: Codable, Equatable, Sendable {
         _ value: Substring,
         checkCancellation: () throws -> Void
     ) throws -> String? {
-        let input = Array(value.utf8)
+        guard !value.isEmpty else {
+            return ""
+        }
+        try checkCancellation()
+        let source = value.utf8
+        if source.count <= fieldCancellationInterval,
+           !source.contains(where: {
+               $0 == UInt8(ascii: "+") || $0 == UInt8(ascii: "%")
+           }) {
+            // A Substring already contains valid UTF-8. Preserve the full
+            // decoding and cancellation path whenever form escapes exist.
+            return String(value)
+        }
+
+        let input = Array(source)
         var output = [UInt8]()
         output.reserveCapacity(input.count)
         var index = 0
         while index < input.count {
-            if index.isMultiple(of: 256) {
+            if index > 0,
+               index.isMultiple(of: fieldCancellationInterval) {
                 try checkCancellation()
             }
             switch input[index] {
