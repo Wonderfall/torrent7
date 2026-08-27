@@ -263,6 +263,14 @@ let package = Package(
             name: "DHTMessageParserBenchmark",
             targets: ["DHTMessageParserBenchmark"]
         ),
+        .executable(
+            name: "SwiftParserBenchmark",
+            targets: ["SwiftParserBenchmark"]
+        ),
+        .executable(
+            name: "LibtorrentParserBenchmark",
+            targets: ["LibtorrentParserBenchmark"]
+        ),
         .executable(name: "TorrentBridgeTests", targets: ["TorrentBridgeTests"]),
         .library(
             name: "TorrentEngineIPCFuzzSupport",
@@ -346,6 +354,31 @@ let package = Package(
                 .strictMemorySafety(),
                 .unsafeFlags(engineExtensionSwiftFlags)
             ] + bridgeSafeInteropSwiftSettings + engineBridgeSafeInteropWorkaround
+        ),
+        .executableTarget(
+            name: "SwiftParserBenchmark",
+            dependencies: ["TorrentMetainfo"],
+            path: "Tools/ParserBenchmarks/Swift",
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .treatAllWarnings(as: .error),
+                .strictMemorySafety(),
+                .unsafeFlags(engineExtensionSwiftFlags)
+            ]
+        ),
+        .executableTarget(
+            name: "LibtorrentParserBenchmark",
+            path: "Tools/ParserBenchmarks/Native",
+            cxxSettings: [
+                .treatAllWarnings(as: .error),
+                .unsafeFlags(bridgeCompilerFlags)
+            ] + bridgeWarnings + bridgeTargetWarnings + bridgeDefines,
+            linkerSettings: [
+                .linkedFramework("CoreFoundation"),
+                .linkedFramework("Security"),
+                .linkedFramework("SystemConfiguration"),
+                .unsafeFlags(bridgeStaticLibraryFlags + bridgeLinkerHardeningFlags)
+            ]
         ),
         .target(
             name: "TorrentNetworkSecurity",

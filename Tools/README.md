@@ -19,3 +19,6 @@ interactive dataset and scale checks with an explicitly authorized folder.
 
 `DependencyCheck/` contains the read-only upstream dependency monitor for pinned
 third-party source dependencies.
+
+`ParserBenchmarks/` contains reproducible native-versus-Swift parser
+microbenchmarks, their recorded baseline, and the raw-result summarizer.
