@@ -975,16 +975,9 @@ final class TorrentStore {
         try Task.checkCancellation()
         let torrentData = try await Self.readTorrentFile(url)
         try Task.checkCancellation()
-        let previewEngine = engine
-        let lifecycleGeneration = engineLifecycleGeneration
-        let preview = try await previewEngine.previewTorrentFile(
-            data: torrentData
-        )
+        let parsed = try await Self.parseStorageManifest(torrentData)
         try Task.checkCancellation()
-        guard lifecycleGeneration == engineLifecycleGeneration else {
-            throw CancellationError()
-        }
-        return preview
+        return parsed.filePreview(torrentData: torrentData)
     }
 
     func inspectTorrentDestination(

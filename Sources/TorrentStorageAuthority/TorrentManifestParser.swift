@@ -24,6 +24,9 @@ package enum TorrentManifestError: LocalizedError, Equatable, Sendable {
     case invalidFilePath
     case symlinkNotSupported
     case invalidV2PiecesRoot
+    case invalidSourceURL
+    case tooManyTrackers
+    case tooManyWebSeeds
     case duplicatePath
     case conflictingPath
     case inconsistentHybridLayout
@@ -52,6 +55,9 @@ package enum TorrentManifestError: LocalizedError, Equatable, Sendable {
         case .invalidFilePath: "A torrent file has an unsafe path."
         case .symlinkNotSupported: "Torrent symlinks are not supported."
         case .invalidV2PiecesRoot: "A v2 torrent file has an invalid pieces root."
+        case .invalidSourceURL: "The torrent contains an invalid tracker or web seed URL."
+        case .tooManyTrackers: "The torrent contains too many trackers."
+        case .tooManyWebSeeds: "The torrent contains too many web seeds."
         case .duplicatePath: "The torrent contains duplicate or equivalent file paths."
         case .conflictingPath: "A torrent file path conflicts with another file or directory."
         case .inconsistentHybridLayout: "The v1 and v2 torrent layouts do not match."
@@ -84,6 +90,9 @@ package struct TorrentManifestParser: Sendable {
         package var maximumPathComponentBytes = 255
         package var maximumPathDepth = 32
         package var maximumFileCount = TorrentEngineLimits.maximumFileCount
+        package var maximumTrackerCount = TorrentEngineLimits.maximumTrackerCount
+        package var maximumWebSeedCount = TorrentEngineLimits.maximumWebSeedCount
+        package var maximumSourceURLBytes = 16 * 1_024
 
         package static let standard = Limits()
     }
@@ -143,6 +152,9 @@ package struct TorrentManifestParser: Sendable {
             }
         }
 
+        let isPrivate = try optionalInteger(named: "private", in: infoValues)
+            .map { $0 != 0 } ?? false
+
         let parsedName = try parseOptionalName(infoValues)
         let v1Layout = hasV1Layout
             ? try parseV1Layout(infoValues, name: parsedName)
@@ -169,15 +181,17 @@ package struct TorrentManifestParser: Sendable {
             throw TorrentManifestError.emptyPayload
         }
         try validatePathSet(selected.files)
+        let totalSize = try selected.files.reduce(Int64(0)) { total, file in
+            try adding(total, file.expectedSize)
+        }
         if hasV1Layout {
             try validateV1PieceHashes(
                 infoValues,
-                totalSize: selected.files.reduce(into: Int64(0)) {
-                    $0 = tryAdding($0, $1.expectedSize)
-                },
+                totalSize: totalSize,
                 pieceLength: pieceLength
             )
         }
+        let envelope = try parseEnvelope(topLevel)
 
         let name: String
         if let parsedName {
@@ -213,8 +227,126 @@ package struct TorrentManifestParser: Sendable {
                 files: indexed,
                 sourceManifestDigest: digest
             ),
-            rawInfoDictionary: rawInfo
+            rawInfoDictionary: rawInfo,
+            envelope: envelope,
+            isPrivate: isPrivate
         )
+    }
+
+    private func parseEnvelope(
+        _ topLevel: [BencodeEntry]
+    ) throws -> TorrentMetainfoEnvelope {
+        let trackers = try parseTrackers(topLevel)
+        let webSeeds = try parseWebSeeds(topLevel)
+        return TorrentMetainfoEnvelope(trackers: trackers, webSeeds: webSeeds)
+    }
+
+    private func parseTrackers(
+        _ topLevel: [BencodeEntry]
+    ) throws -> [TorrentMetainfoTracker] {
+        var trackers = [TorrentMetainfoTracker]()
+        if let announceList = value(named: "announce-list", in: topLevel) {
+            guard case .list(let tiers, _) = announceList else {
+                throw TorrentManifestError.malformedBencoding
+            }
+            trackers.reserveCapacity(min(tiers.count, limits.maximumTrackerCount))
+            for (tierIndex, tierNode) in tiers.enumerated() {
+                guard case .list(let entries, _) = tierNode else {
+                    throw TorrentManifestError.malformedBencoding
+                }
+                for entry in entries {
+                    guard case .string(let data, _) = entry else {
+                        throw TorrentManifestError.malformedBencoding
+                    }
+                    guard let url = try parsedSourceURL(data, allowedSchemes: ["http", "https", "udp"]) else {
+                        continue
+                    }
+                    guard trackers.count < limits.maximumTrackerCount else {
+                        throw TorrentManifestError.tooManyTrackers
+                    }
+                    trackers.append(TorrentMetainfoTracker(
+                        url: url,
+                        tier: Int32(tierIndex)
+                    ))
+                }
+            }
+        }
+
+        if trackers.isEmpty,
+           let announce = value(named: "announce", in: topLevel) {
+            guard case .string(let data, _) = announce else {
+                throw TorrentManifestError.malformedBencoding
+            }
+            if let url = try parsedSourceURL(data, allowedSchemes: ["http", "https", "udp"]) {
+                guard limits.maximumTrackerCount > 0 else {
+                    throw TorrentManifestError.tooManyTrackers
+                }
+                trackers.append(TorrentMetainfoTracker(url: url, tier: 0))
+            }
+        }
+        return trackers
+    }
+
+    private func parseWebSeeds(
+        _ topLevel: [BencodeEntry]
+    ) throws -> [String] {
+        guard let node = value(named: "url-list", in: topLevel) else {
+            return []
+        }
+
+        let candidates: [Data]
+        switch node {
+        case .string(let data, _):
+            candidates = data.isEmpty ? [] : [data]
+        case .list(let values, _):
+            candidates = try values.compactMap { value in
+                guard case .string(let data, _) = value else {
+                    throw TorrentManifestError.malformedBencoding
+                }
+                return data.isEmpty ? nil : data
+            }
+        default:
+            throw TorrentManifestError.malformedBencoding
+        }
+
+        var seen = Set<String>()
+        var webSeeds = [String]()
+        webSeeds.reserveCapacity(min(candidates.count, limits.maximumWebSeedCount))
+        for candidate in candidates {
+            guard let url = try parsedSourceURL(candidate, allowedSchemes: ["http", "https"]) else {
+                continue
+            }
+            guard seen.insert(url).inserted else {
+                continue
+            }
+            guard webSeeds.count < limits.maximumWebSeedCount else {
+                throw TorrentManifestError.tooManyWebSeeds
+            }
+            webSeeds.append(url)
+        }
+        return webSeeds
+    }
+
+    private func parsedSourceURL(
+        _ data: Data,
+        allowedSchemes: Set<String>
+    ) throws -> String? {
+        guard data.count <= limits.maximumSourceURLBytes else {
+            throw TorrentManifestError.invalidSourceURL
+        }
+        guard let url = String(data: data, encoding: .utf8),
+              !url.isEmpty,
+              !url.contains("\\"),
+              !url.unicodeScalars.contains(where: {
+                  $0.properties.isWhitespace || $0.value < 0x20 || $0.value == 0x7f
+              }),
+              let components = URLComponents(string: url),
+              let scheme = components.scheme?.lowercased(),
+              allowedSchemes.contains(scheme),
+              components.host?.isEmpty == false else {
+            return nil
+        }
+        return url
     }
 
     private struct UnindexedFile: Equatable {
@@ -587,9 +719,12 @@ package struct TorrentManifestParser: Sendable {
         return String(decoding: result, as: UTF8.self)
     }
 
-    private func tryAdding(_ lhs: Int64, _ rhs: Int64) -> Int64 {
+    private func adding(_ lhs: Int64, _ rhs: Int64) throws -> Int64 {
         let result = lhs.addingReportingOverflow(rhs)
-        return result.overflow ? Int64.max : result.partialValue
+        guard !result.overflow else {
+            throw TorrentManifestError.invalidFileLength
+        }
+        return result.partialValue
     }
 
     private func value(named name: String, in entries: [BencodeEntry]) -> BencodeNode? {

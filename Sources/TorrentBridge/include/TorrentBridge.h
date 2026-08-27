@@ -311,17 +311,6 @@ typedef struct TTorrentPieceMapSnapshot {
     uint8_t map_truncated;
 } TTorrentPieceMapSnapshot;
 
-typedef struct TTorrentFilePreview {
-    char name[512];
-    char id[68];
-    int64_t total_size;
-    int32_t file_count;
-    int32_t tracker_count;
-    int32_t https_tracker_count;
-    int32_t web_seed_count;
-    int32_t https_web_seed_count;
-} TTorrentFilePreview;
-
 typedef struct TTorrentSourceSecurityInspection {
     int32_t tracker_count;
     int32_t https_tracker_count;
@@ -608,19 +597,6 @@ int32_t TorrentClientAddTorrentFileDataWithPriorities(
     int32_t added_id_capacity,
     uint64_t * TORRENT_BRIDGE_NULLABLE native_token_out TORRENT_BRIDGE_NOESCAPE,
     int32_t * TORRENT_BRIDGE_NULLABLE add_outcome_out TORRENT_BRIDGE_NOESCAPE,
-    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
-    int32_t error_capacity
-) TORRENT_BRIDGE_NOEXCEPT;
-
-int32_t TorrentClientPreviewTorrentFileData(
-    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
-    const uint8_t * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(torrent_data_size)
-        torrent_data TORRENT_BRIDGE_NOESCAPE,
-    int32_t torrent_data_size,
-    TTorrentFilePreview * TORRENT_BRIDGE_NULLABLE preview TORRENT_BRIDGE_NOESCAPE,
-    TTorrentFileSnapshot * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(capacity) files TORRENT_BRIDGE_NOESCAPE,
-    int32_t capacity,
-    int32_t * TORRENT_BRIDGE_NULLABLE required_count_out TORRENT_BRIDGE_NOESCAPE,
     char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;

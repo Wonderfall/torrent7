@@ -1,6 +1,7 @@
 import Darwin
 import CryptoKit
 import Foundation
+import TorrentEngineModel
 
 package enum TorrentStorageContentKind: String, Codable, Sendable {
     case singleFile
@@ -72,9 +73,50 @@ package struct TorrentLogicalManifest: Codable, Equatable, Sendable {
     }
 }
 
+package struct TorrentMetainfoTracker: Equatable, Sendable {
+    package let url: String
+    package let tier: Int32
+
+    package init(url: String, tier: Int32) {
+        self.url = url
+        self.tier = tier
+    }
+}
+
+package struct TorrentMetainfoEnvelope: Equatable, Sendable {
+    package let trackers: [TorrentMetainfoTracker]
+    package let webSeeds: [String]
+
+    package init(
+        trackers: [TorrentMetainfoTracker],
+        webSeeds: [String]
+    ) {
+        self.trackers = trackers
+        self.webSeeds = webSeeds
+    }
+
+    package var sourceSecuritySummary: TorrentSourceSecuritySummary {
+        TorrentSourceSecuritySummary(
+            trackerCount: trackers.count,
+            httpsTrackerCount: trackers.count(where: { Self.isHTTPS($0.url) }),
+            webSeedCount: webSeeds.count,
+            httpsWebSeedCount: webSeeds.count(where: Self.isHTTPS)
+        )
+    }
+
+    private static func isHTTPS(_ url: String) -> Bool {
+        guard let separator = url.firstIndex(of: ":") else {
+            return false
+        }
+        return url[..<separator].caseInsensitiveCompare("https") == .orderedSame
+    }
+}
+
 package struct ParsedTorrentManifest: Sendable {
     package let manifest: TorrentLogicalManifest
     package let rawInfoDictionary: Data
+    package let envelope: TorrentMetainfoEnvelope
+    package let isPrivate: Bool
 }
 
 package struct TorrentFilesystemIdentity: Codable, Equatable, Sendable {

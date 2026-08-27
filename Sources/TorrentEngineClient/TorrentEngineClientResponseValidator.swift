@@ -25,8 +25,6 @@ enum TorrentEngineClientResponseValidator {
             try validate(response)
         case let response as TorrentEngineIPCPollResponse:
             try validate(response)
-        case let response as TorrentEngineIPCFilePreviewResponse:
-            try validate(response)
         case let response as TorrentEngineIPCAddedTorrentResponse:
             guard isCanonicalTorrentID(response.identifier) else {
                 throw TorrentEngineClientError.invalidReply
@@ -146,29 +144,6 @@ enum TorrentEngineClientResponseValidator {
               (descriptor.itemCount == 0) == (descriptor.pageCount == 0),
               descriptor.pageCount >= minimumPageCount,
               descriptor.pageCount <= descriptor.itemCount else {
-            throw TorrentEngineClientError.invalidReply
-        }
-    }
-
-    private static func validate(_ preview: TorrentEngineIPCFilePreviewResponse) throws {
-        guard isBoundedLeafName(
-            preview.name,
-            maximumBytes: maximumTorrentNameBytes
-        ),
-        isHashKey(preview.id),
-        preview.totalSize >= 0,
-        preview.files.count <= TorrentEngineLimits.maximumFileCount else {
-            throw TorrentEngineClientError.invalidReply
-        }
-        try validate(preview.sourceSecuritySummary)
-        try validate(files: preview.files)
-    }
-
-    private static func validate(_ summary: TorrentSourceSecuritySummary) throws {
-        guard (0...TorrentEngineLimits.maximumTrackerCount).contains(summary.trackerCount),
-              (0...summary.trackerCount).contains(summary.httpsTrackerCount),
-              (0...TorrentEngineLimits.maximumWebSeedCount).contains(summary.webSeedCount),
-              (0...summary.webSeedCount).contains(summary.httpsWebSeedCount) else {
             throw TorrentEngineClientError.invalidReply
         }
     }

@@ -70,11 +70,6 @@ package actor TorrentUnavailableEngine: TorrentEngineServicing {
         throw unavailableError
     }
 
-    package func previewTorrentFile(data: Data) throws -> TorrentFilePreview {
-        _ = data
-        throw unavailableError
-    }
-
     package func pause(id: String) throws { _ = id; throw unavailableError }
     package func resume(id: String) throws { _ = id; throw unavailableError }
     package func reannounce(id: String) throws { _ = id; throw unavailableError }

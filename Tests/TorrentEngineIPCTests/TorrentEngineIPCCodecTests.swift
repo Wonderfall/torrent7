@@ -383,6 +383,7 @@ struct TorrentEngineIPCEnvelopeTests {
         #expect(TorrentEngineIPCProtocol.version == 11)
         #expect(TorrentEngineIPCOperation(rawValue: 7) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 10) == nil)
+        #expect(TorrentEngineIPCOperation(rawValue: 11) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 30) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 36) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 38) == nil)
@@ -402,9 +403,8 @@ struct TorrentEngineIPCEnvelopeTests {
 
     @Test("JSON and raw attachment limits remain independently bounded")
     func JSONAndAttachmentLimits() {
-        #expect(TorrentEngineIPCOperation.previewTorrentFile.maximumRequestPayloadBytes == 0)
         #expect(
-            TorrentEngineIPCOperation.previewTorrentFile.maximumRequestAttachmentBytes
+            TorrentEngineIPCOperation.addTorrentFile.maximumRequestAttachmentBytes
                 == TorrentInputLimits.maxTorrentFileBytes
         )
         #expect(

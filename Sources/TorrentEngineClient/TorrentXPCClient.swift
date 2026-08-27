@@ -482,24 +482,6 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         return metadata.isEmpty ? nil : metadata
     }
 
-    package func previewTorrentFile(data: Data) async throws -> TorrentFilePreview {
-        guard !data.isEmpty else {
-            throw TorrentEngineClientError.serviceRejected("The torrent file is empty.")
-        }
-        let response: TorrentEngineIPCFilePreviewResponse = try await invokeRaw(
-            .previewTorrentFile,
-            attachment: data
-        )
-        return TorrentFilePreview(
-            name: response.name,
-            id: response.id,
-            totalSize: response.totalSize,
-            sourceSecuritySummary: response.sourceSecuritySummary,
-            files: response.files,
-            torrentData: data
-        )
-    }
-
     package func pause(id: String) async throws {
         try await invokeUnit(.pause, TorrentEngineIPCTorrentIDRequest(id: id))
     }

@@ -157,8 +157,6 @@ struct TorrentBridgeContractTests {
         #expect(MemoryLayout<TTorrentStorageActivation>.offset(of: \.preserved_torrent_id) == 56)
         #expect(MemoryLayout<TTorrentPieceMapSnapshot>.size == 16)
         #expect(MemoryLayout<TTorrentPieceMapSnapshot>.alignment == 4)
-        #expect(MemoryLayout<TTorrentFilePreview>.size == 616)
-        #expect(MemoryLayout<TTorrentFilePreview>.alignment == 8)
         #expect(MemoryLayout<TTorrentSourceSecurityInspection>.size == 16)
         #expect(MemoryLayout<TTorrentSourceSecurityInspection>.alignment == 4)
         #expect(MemoryLayout<TTorrentSessionSettings>.size == 48)
@@ -206,7 +204,6 @@ struct TorrentBridgeContractTests {
         let trackerHost = TTorrentTrackerHostSnapshot()
         let webSeed = TTorrentWebSeedSnapshot()
         let file = TTorrentFileSnapshot()
-        let preview = TTorrentFilePreview()
         let network = TTorrentNetworkStatus()
         let health = TTorrentBridgeHealth()
 
@@ -222,8 +219,6 @@ struct TorrentBridgeContractTests {
         #expect(MemoryLayout.size(ofValue: trackerHost.host) == Int(TTORRENT_TRACKER_HOST_CAPACITY))
         #expect(MemoryLayout.size(ofValue: webSeed.url) == 1_024)
         #expect(MemoryLayout.size(ofValue: file.path) == 1_024)
-        #expect(MemoryLayout.size(ofValue: preview.name) == 512)
-        #expect(MemoryLayout.size(ofValue: preview.id) == 68)
         #expect(MemoryLayout.size(ofValue: network.endpoint) == 128)
         #expect(MemoryLayout.size(ofValue: network.last_error) == 512)
         #expect(MemoryLayout.size(ofValue: health.last_alert_worker_error) == 512)
@@ -399,24 +394,8 @@ struct TorrentBridgeContractTests {
         #expect(requiredCount == 0)
         #expect(available == 0)
 
-        let torrentBytes: [UInt8] = [0x64, 0x34, 0x3A, 0x69, 0x6E, 0x66, 0x6F]
-        let torrentData: Span<UInt8>? = torrentBytes.span
-        var preview = TTorrentFilePreview()
-        var files: MutableSpan<TTorrentFileSnapshot>?
-        var previewRequiredCount: Int32 = 0
         var errorStorage = [CChar](repeating: 0, count: 128)
         var error: MutableSpan<CChar>? = errorStorage.mutableSpan
-
-        let previewResult = unsafe TorrentClientPreviewTorrentFileData(
-            nil,
-            torrentData,
-            &preview,
-            &files,
-            &previewRequiredCount,
-            &error
-        )
-
-        #expect(previewResult != 0)
 
         let settings = TTorrentSessionSettings()
         let interfaceStorage = "utun4".utf8.map { CChar(bitPattern: $0) }

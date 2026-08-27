@@ -549,13 +549,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
                 operation: operation,
                 controllerLease: controllerLease
             )
-        case .previewTorrentFile:
-            guard let value = request.attachment else {
-                throw TorrentEngineServiceRuntimeError.invalidPayload
-            }
-            try Self.validateTorrentData(value)
-            let preview = try await requireEngine().previewTorrentFile(data: value)
-            return try encode(TorrentEngineIPCFilePreviewResponse(preview), for: operation)
         case .addMagnet:
             let value = try decode(TorrentEngineIPCAddMagnetRequest.self, from: request)
             let identifier = try await handleAddMagnet(

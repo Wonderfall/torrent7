@@ -131,71 +131,6 @@ struct TorrentXPCClientSecurityTests {
         #expect(!timeoutCompletion.finish(.success(reply)))
     }
 
-    @Test("Empty preview data is rejected before transport")
-    func emptyPreviewIsRejectedLocally() async throws {
-        let epoch = epoch
-        let transport = ScriptedTorrentEngineTransport { request in
-            guard request.header.operation == .handshake else {
-                Issue.record("Empty preview data reached the transport")
-                throw TorrentEngineClientError.serviceRejected("Unexpected request")
-            }
-            return try successReply(
-                TorrentEngineIPCHandshakeResponse(
-                    libtorrentVersion: "2.1.0"
-                ),
-                for: request,
-                epoch: epoch
-            )
-        }
-        let client = try await makeClient(transport: transport)
-
-        await #expect(throws: TorrentEngineClientError.self) {
-            try await client.previewTorrentFile(data: Data())
-        }
-    }
-
-    @Test("Preview metadata preserves the original client torrent bytes")
-    func previewPreservesOriginalTorrentBytes() async throws {
-        let epoch = epoch
-        let input = Data([0x64, 0x34, 0x3A, 0x69, 0x6E, 0x66, 0x6F])
-        let transport = ScriptedTorrentEngineTransport { request in
-            switch request.header.operation {
-            case .handshake:
-                return try successReply(
-                    TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0"
-                    ),
-                    for: request,
-                    epoch: epoch
-                )
-            case .previewTorrentFile:
-                #expect(request.payload == nil)
-                #expect(request.attachment == input)
-                return try successReply(
-                    TorrentEngineIPCFilePreviewResponse(TorrentFilePreview(
-                        name: "Preview",
-                        id: "v1:\(String(repeating: "b", count: 40))",
-                        totalSize: 42,
-                        sourceSecuritySummary: .empty,
-                        files: [],
-                        torrentData: Data([0xFF])
-                    )),
-                    for: request,
-                    epoch: epoch
-                )
-            default:
-                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
-            }
-        }
-        let client = try await makeClient(transport: transport)
-
-        let preview = try await client.previewTorrentFile(data: input)
-
-        #expect(preview.name == "Preview")
-        #expect(preview.totalSize == 42)
-        #expect(preview.torrentData == input)
-    }
-
     @Test("Torrent metadata uses an exact bounded raw reply")
     func torrentMetadataUsesRawReply() async throws {
         let epoch = epoch
@@ -233,47 +168,6 @@ struct TorrentXPCClientSecurityTests {
         #expect(try await client.torrentMetadata(id: torrentID) == metadata)
         #expect(try await client.torrentMetadata(id: torrentID) == nil)
         #expect(client.isAvailable)
-    }
-
-    @Test("Invalid preview metadata terminates the client")
-    func invalidPreviewMetadataIsTerminal() async throws {
-        let epoch = epoch
-        let input = Data([0x64])
-        let transport = ScriptedTorrentEngineTransport { request in
-            switch request.header.operation {
-            case .handshake:
-                return try successReply(
-                    TorrentEngineIPCHandshakeResponse(
-                        libtorrentVersion: "2.1.0"
-                    ),
-                    for: request,
-                    epoch: epoch
-                )
-            case .previewTorrentFile:
-                return try successReply(
-                    TorrentEngineIPCFilePreviewResponse(TorrentFilePreview(
-                        name: "Preview",
-                        id: "v1:\(String(repeating: "b", count: 40))",
-                        totalSize: -1,
-                        sourceSecuritySummary: .empty,
-                        files: [],
-                        torrentData: input
-                    )),
-                    for: request,
-                    epoch: epoch
-                )
-            default:
-                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
-            }
-        }
-        let client = try await makeClient(transport: transport)
-
-        await #expect(throws: TorrentEngineClientError.self) {
-            try await client.previewTorrentFile(data: input)
-        }
-        #expect(!client.isAvailable)
-        #expect(client.recoveryDisposition == .terminal)
-        #expect(transport.isCancelled)
     }
 
     @Test(arguments: InvalidReplyKind.allCases)

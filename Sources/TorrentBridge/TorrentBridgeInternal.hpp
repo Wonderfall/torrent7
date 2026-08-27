@@ -343,8 +343,6 @@ static_assert(sizeof(TTorrentTrackerSnapshot::message) == 512U);
 static_assert(sizeof(TTorrentTrackerHostSnapshot::host) == TTORRENT_TRACKER_HOST_CAPACITY);
 static_assert(sizeof(TTorrentWebSeedSnapshot::url) == 1024U);
 static_assert(sizeof(TTorrentFileSnapshot::path) == 1024U);
-static_assert(sizeof(TTorrentFilePreview::name) == 512U);
-static_assert(sizeof(TTorrentFilePreview::id) == TTORRENT_ID_CAPACITY);
 static_assert(sizeof(std::uint8_t) == 1U);
 static_assert(sizeof(std::int32_t) == 4U);
 static_assert(sizeof(std::int64_t) == 8U);
@@ -370,8 +368,6 @@ static_assert(std::is_standard_layout_v<TTorrentFilePriorityEntry>);
 static_assert(std::is_trivially_copyable_v<TTorrentFilePriorityEntry>);
 static_assert(std::is_standard_layout_v<TTorrentPieceMapSnapshot>);
 static_assert(std::is_trivially_copyable_v<TTorrentPieceMapSnapshot>);
-static_assert(std::is_standard_layout_v<TTorrentFilePreview>);
-static_assert(std::is_trivially_copyable_v<TTorrentFilePreview>);
 static_assert(std::is_standard_layout_v<TTorrentSourceSecurityInspection>);
 static_assert(std::is_trivially_copyable_v<TTorrentSourceSecurityInspection>);
 static_assert(std::is_standard_layout_v<TTorrentSessionSettings>);
@@ -428,8 +424,6 @@ static_assert(sizeof(TTorrentFilePriorityEntry) == 8U);
 static_assert(alignof(TTorrentFilePriorityEntry) == 4U);
 static_assert(sizeof(TTorrentPieceMapSnapshot) == 16U);
 static_assert(alignof(TTorrentPieceMapSnapshot) == 4U);
-static_assert(sizeof(TTorrentFilePreview) == 616U);
-static_assert(alignof(TTorrentFilePreview) == 8U);
 static_assert(sizeof(TTorrentSourceSecurityInspection) == 16U);
 static_assert(alignof(TTorrentSourceSecurityInspection) == 4U);
 static_assert(sizeof(TTorrentSessionSettings) == 48U);
@@ -1351,13 +1345,6 @@ BridgeResult validate_torrent_info(
 );
 
 BridgeResult validate_torrent_info(lt::add_torrent_params const &params);
-
-void copy_torrent_preview(lt::add_torrent_params const &params, TTorrentFilePreview *preview) noexcept;
-
-void copy_torrent_preview_files(
-    lt::add_torrent_params const &params,
-    std::span<TTorrentFileSnapshot> output
-);
 
 bool is_valid_file_priority(int32_t priority) noexcept;
 

@@ -1582,39 +1582,6 @@ struct TorrentStoreIntegrationTests {
         } catch {
             Issue.record("Expected TorrentStoreError.unreadableTorrentFile, got \(error)")
         }
-
-        #expect(await harness.engine.previewedTorrentFiles.isEmpty)
-    }
-
-    @Test("Cancellation rejects a torrent preview result drained from the engine")
-    func cancellationRejectsDrainedTorrentPreviewResult() async throws {
-        let harness = makeStoreHarness()
-        let directory = FileManager.default.temporaryDirectory
-            .appending(path: "TorrentAppTests-\(UUID().uuidString)", directoryHint: .isDirectory)
-        try FileManager.default.createDirectory(
-            at: directory,
-            withIntermediateDirectories: true,
-            attributes: nil
-        )
-        defer {
-            try? FileManager.default.removeItem(at: directory)
-        }
-
-        let torrentURL = directory.appending(path: "sample.torrent")
-        try Data("torrent bytes".utf8).write(to: torrentURL)
-        await harness.engine.suspendNextTorrentPreview()
-
-        let previewTask = Task { @MainActor in
-            try await harness.store.previewTorrentFile(torrentURL)
-        }
-        await harness.engine.waitForSuspendedTorrentPreview()
-        previewTask.cancel()
-        await harness.engine.resumeSuspendedTorrentPreviews()
-
-        await #expect(throws: CancellationError.self) {
-            try await previewTask.value
-        }
-        #expect(await harness.engine.previewedTorrentFiles.count == 1)
     }
 
     @Test("Add torrent file forwards file priorities")

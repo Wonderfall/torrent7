@@ -423,60 +423,6 @@ private struct AddedTorrentIdentity: Sendable {
         return added.id
     }
 
-    package func previewTorrentFile(data: Data) throws -> TorrentFilePreview {
-        let client = try unsafe requireClient()
-        try Self.validateTorrentData(data)
-        var preview = TTorrentFilePreview()
-        var requiredCount: Int32 = 0
-        try throwingBridgeCall { errorBuffer in
-            let torrentData: Span<UInt8>? = data.span
-            var files: MutableSpan<TTorrentFileSnapshot>?
-            return unsafe TorrentClientPreviewTorrentFileData(
-                client,
-                torrentData,
-                &preview,
-                &files,
-                &requiredCount,
-                &errorBuffer
-            )
-        }
-
-        let capacity = max(0, Int(requiredCount))
-        guard capacity <= Int(TTORRENT_MAX_FILE_COUNT) else {
-            throw TorrentEngineError.bridgeError("The torrent contains too many files. The maximum is \(TTORRENT_MAX_FILE_COUNT).")
-        }
-
-        var fileSnapshots = Array(repeating: TTorrentFileSnapshot(), count: capacity)
-        if capacity > 0 {
-            try throwingBridgeCall { errorBuffer in
-                let torrentData: Span<UInt8>? = data.span
-                var files: MutableSpan<TTorrentFileSnapshot>? = fileSnapshots.mutableSpan
-                return unsafe TorrentClientPreviewTorrentFileData(
-                    client,
-                    torrentData,
-                    &preview,
-                    &files,
-                    &requiredCount,
-                    &errorBuffer
-                )
-            }
-        }
-
-        return TorrentFilePreview(
-            name: String(cStringTuple: preview.name),
-            id: String(cStringTuple: preview.id),
-            totalSize: preview.total_size,
-            sourceSecuritySummary: TorrentSourceSecuritySummary(
-                trackerCount: Int(preview.tracker_count),
-                httpsTrackerCount: Int(preview.https_tracker_count),
-                webSeedCount: Int(preview.web_seed_count),
-                httpsWebSeedCount: Int(preview.https_web_seed_count)
-            ),
-            files: fileSnapshots.prefix(capacity).map(TorrentFileItem.init(snapshot:)),
-            torrentData: data
-        )
-    }
-
     package func pause(id: String) throws {
         let client = try unsafe requireClient()
         let nativeToken = try nativeToken(for: id)

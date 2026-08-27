@@ -13,22 +13,6 @@ package struct TorrentEngineIPCOptionalValue<Value: Codable & Sendable>: Codable
     }
 }
 
-package struct TorrentEngineIPCFilePreviewResponse: Codable, Sendable {
-    package let name: String
-    package let id: String
-    package let totalSize: Int64
-    package let sourceSecuritySummary: TorrentSourceSecuritySummary
-    package let files: [TorrentFileItem]
-
-    package init(_ preview: TorrentFilePreview) {
-        name = preview.name
-        id = preview.id
-        totalSize = preview.totalSize
-        sourceSecuritySummary = preview.sourceSecuritySummary
-        files = preview.files
-    }
-}
-
 package enum TorrentEngineIPCPeerAuthentication: Equatable, Sendable {
     case sameTeam
     case reducedAssuranceAdHocDevelopment

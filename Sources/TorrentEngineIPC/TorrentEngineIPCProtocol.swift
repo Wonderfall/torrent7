@@ -119,7 +119,6 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
     case restart = 2
     case shutdown = 3
     case poll = 4
-    case previewTorrentFile = 11
     case addMagnet = 12
     case addTorrentFile = 13
     case pause = 14
@@ -156,8 +155,6 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
         switch self {
         case .handshake:
             TorrentEngineIPCLimits.maximumSmallPayloadBytes
-        case .previewTorrentFile:
-            0
         case .addMagnet:
             TorrentEngineIPCLimits.maximumMagnetRequestBytes
         case .addTorrentFile:
@@ -171,7 +168,7 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
 
     package var maximumRequestAttachmentBytes: Int {
         switch self {
-        case .previewTorrentFile, .addTorrentFile:
+        case .addTorrentFile:
             TorrentInputLimits.maxTorrentFileBytes
         default:
             0
@@ -193,7 +190,7 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
 
     package var replyJSONLimits: TorrentEngineIPCJSONLimits {
         switch self {
-        case .previewTorrentFile, .fileBatch:
+        case .fileBatch:
             TorrentEngineIPCLimits.fileMetadataReplyJSONLimits
         case .poll:
             TorrentEngineIPCLimits.pollReplyJSONLimits
@@ -212,8 +209,6 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
 
     package var maximumReplyPayloadBytes: Int {
         switch self {
-        case .previewTorrentFile:
-            TorrentEngineIPCLimits.maximumFileMetadataReplyBytes
         case .poll:
             TorrentEngineIPCLimits.maximumPollReplyBytes
         case .trackerBatch:

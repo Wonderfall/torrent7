@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import Testing
+import TorrentEngineModel
 import TorrentStorageAuthority
 @testable import TorrentApp
 
@@ -43,6 +44,105 @@ struct TorrentManifestParserTests {
         #expect(rootless.manifest.name.count == 20)
         #expect(rootless.manifest.contentKind == .directory)
         #expect(rootless.manifest.files[0].pathComponents == ["leaf.bin"])
+    }
+
+    @Test("Swift preview uses the validated manifest and source envelope")
+    func buildsSwiftPreview() throws {
+        let metadata = Self.torrent(
+            info: Self.v1SingleFileInfo(name: "sample.bin", size: 5),
+            topLevel: [
+                Self.key("announce", .string("udp://fallback.example:80/announce")),
+                Self.key("announce-list", .list([
+                    .list([.string("https://tracker.example/announce")]),
+                    .list([.string("udp://tracker.example:80/announce")]),
+                    .list([.string("ftp://ignored.example/announce")]),
+                ])),
+                Self.key("url-list", .list([
+                    .string("https://seed.example/sample.bin"),
+                    .string("http://seed.example/sample.bin"),
+                    .string("https://seed.example/sample.bin"),
+                ])),
+            ]
+        )
+
+        let parsed = try TorrentManifestParser().parse(metadata)
+        let preview = parsed.filePreview(torrentData: metadata)
+
+        #expect(parsed.envelope.trackers == [
+            TorrentMetainfoTracker(
+                url: "https://tracker.example/announce",
+                tier: 0
+            ),
+            TorrentMetainfoTracker(
+                url: "udp://tracker.example:80/announce",
+                tier: 1
+            ),
+        ])
+        #expect(parsed.envelope.webSeeds == [
+            "https://seed.example/sample.bin",
+            "http://seed.example/sample.bin",
+        ])
+        #expect(!parsed.isPrivate)
+        #expect(preview.name == "sample.bin")
+        #expect(preview.id.hasPrefix("v1:"))
+        #expect(preview.totalSize == 5)
+        #expect(preview.sourceSecuritySummary == TorrentSourceSecuritySummary(
+            trackerCount: 2,
+            httpsTrackerCount: 1,
+            webSeedCount: 2,
+            httpsWebSeedCount: 1
+        ))
+        #expect(preview.files.map(\.path) == ["sample.bin"])
+        #expect(preview.torrentData == metadata)
+    }
+
+    @Test("Source envelope parsing enforces independent resource limits")
+    func sourceEnvelopeLimits() throws {
+        let info = Self.v1SingleFileInfo(
+            name: "private.bin",
+            size: 5,
+            isPrivate: true
+        )
+        let twoTrackers = Self.torrent(
+            info: info,
+            topLevel: [Self.key("announce-list", .list([
+                .list([.string("https://one.example/announce")]),
+                .list([.string("https://two.example/announce")]),
+            ]))]
+        )
+        var limits = TorrentManifestParser.Limits.standard
+        limits.maximumTrackerCount = 1
+        try expectManifestError(.tooManyTrackers) {
+            _ = try TorrentManifestParser(limits: limits).parse(twoTrackers)
+        }
+
+        let fallbackTracker = Self.torrent(
+            info: info,
+            topLevel: [Self.key(
+                "announce",
+                .string("https://fallback.example/announce")
+            )]
+        )
+        limits.maximumTrackerCount = 0
+        try expectManifestError(.tooManyTrackers) {
+            _ = try TorrentManifestParser(limits: limits).parse(fallbackTracker)
+        }
+
+        let oversizedSource = Self.torrent(
+            info: info,
+            topLevel: [Self.key(
+                "url-list",
+                .string("https://seed.example/private.bin")
+            )]
+        )
+        limits = .standard
+        limits.maximumSourceURLBytes = 8
+        try expectManifestError(.invalidSourceURL) {
+            _ = try TorrentManifestParser(limits: limits).parse(oversizedSource)
+        }
+
+        let parsed = try TorrentManifestParser().parse(Self.torrent(info: info))
+        #expect(parsed.isPrivate)
     }
 
     @Test("Padding paths use libtorrent's synthetic canonical representation")
@@ -215,12 +315,24 @@ struct TorrentManifestParserTests {
     }
 
     private static func v1SingleFile(name: String, size: Int64) -> Data {
-        torrent(info: .dictionary([
+        torrent(info: v1SingleFileInfo(name: name, size: size))
+    }
+
+    private static func v1SingleFileInfo(
+        name: String,
+        size: Int64,
+        isPrivate: Bool = false
+    ) -> TestBencode {
+        var values = [
             key("length", .integer(size)),
             key("name", .string(name)),
             key("piece length", .integer(16_384)),
             key("pieces", .bytes(Data(repeating: 0x11, count: 20)))
-        ]))
+        ]
+        if isPrivate {
+            values.append(key("private", .integer(1)))
+        }
+        return .dictionary(values)
     }
 
     private static func v1Directory(name: String, files: [V1File]) -> Data {
@@ -287,8 +399,11 @@ struct TorrentManifestParserTests {
         return .dictionary(values)
     }
 
-    private static func torrent(info: TestBencode) -> Data {
-        TestBencode.dictionary([key("info", info)]).encoded()
+    private static func torrent(
+        info: TestBencode,
+        topLevel: [(Data, TestBencode)] = []
+    ) -> Data {
+        TestBencode.dictionary(topLevel + [key("info", info)]).encoded()
     }
 
     private static func key(

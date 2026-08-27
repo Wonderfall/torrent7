@@ -50,17 +50,6 @@ namespace {
     return bridge_tests::load_torrent_params(buffer, "file priority test torrent info").ti;
 }
 
-[[nodiscard]] std::vector<char> make_http_tracker_torrent_buffer()
-{
-    std::vector<lt::create_file_entry> files;
-    files.emplace_back("http-tracker-test.bin", 4);
-
-    lt::create_torrent creator(std::move(files), 16 * 1024, lt::create_torrent::v1_only);
-    creator.set_hash(lt::piece_index_t(0), bridge_tests::sha1_hash_from_seed(13U));
-    creator.add_tracker("http://tracker.example/announce", 0);
-    return creator.generate_buf();
-}
-
 [[nodiscard]] std::string source_inspection_magnet(std::string_view query = {})
 {
     std::string magnet = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
@@ -105,23 +94,6 @@ void append_bencoded_string(std::string &buffer, std::string_view value)
     buffer += std::to_string(value.size());
     buffer.push_back(':');
     buffer.append(value);
-}
-
-[[nodiscard]] std::vector<char> make_duplicate_file_torrent_buffer()
-{
-    std::vector<char> buffer;
-    auto append = [&buffer](std::string_view value) {
-        buffer.insert(buffer.end(), value.begin(), value.end());
-    };
-
-    append("d4:infod5:filesl");
-    for (int index = 0; index < 2; ++index) {
-        append("d6:lengthi4e4:pathl8:same.binee");
-    }
-    append("e4:name9:duplicate12:piece lengthi16384e6:pieces");
-    append_bencoded_string(buffer, std::string(20U, '\0'));
-    append("ee");
-    return buffer;
 }
 
 [[nodiscard]] std::shared_ptr<lt::torrent_info const> make_raw_v1_torrent_info(std::string_view files_payload)
@@ -550,76 +522,6 @@ TEST_CASE("source restoration preserves all originals for explicit validation")
     CHECK(params.url_seeds.size() == static_cast<std::size_t>(TTORRENT_MAX_WEB_SEED_COUNT) + 1U);
     CHECK(params.url_seeds.back() == "https://secure-seed.example/file");
     CHECK_FALSE(validate_torrent_sources(params));
-}
-
-TEST_CASE("torrent file data preview counts sources drained into add params")
-{
-    bridge_tests::TemporaryDirectory temporary_directory;
-    std::vector<char> const torrent_data = make_http_tracker_torrent_buffer();
-
-    TTorrentClient client((temporary_directory.path() / "State").string());
-    client.set_session_shutdown_asynchronous(false);
-
-    TTorrentFilePreview preview{};
-    int32_t required_count = 0;
-    char error[512]{};
-    REQUIRE(TorrentClientPreviewTorrentFileData(
-        &client,
-        bridge_tests::byte_data(torrent_data),
-        static_cast<int32_t>(torrent_data.size()),
-        &preview,
-        nullptr,
-        0,
-        &required_count,
-        error,
-        static_cast<int32_t>(sizeof(error))
-    ) == 0);
-
-    CHECK(required_count == 1);
-    CHECK(preview.tracker_count == 1);
-    CHECK(preview.https_tracker_count == 0);
-    CHECK(preview.web_seed_count == 0);
-    CHECK(preview.https_web_seed_count == 0);
-}
-
-TEST_CASE("torrent file data preview applies duplicate filename renames from add params")
-{
-    bridge_tests::TemporaryDirectory temporary_directory;
-    std::vector<char> const torrent_data = make_duplicate_file_torrent_buffer();
-    lt::add_torrent_params const params =
-        bridge_tests::load_torrent_params(torrent_data, "duplicate filename torrent info");
-    REQUIRE(params.ti != nullptr);
-    REQUIRE(params.ti->layout().num_files() == 2);
-    CHECK(params.ti->layout().file_path(lt::file_index_t(0)) == "duplicate/same.bin");
-    CHECK(params.ti->layout().file_path(lt::file_index_t(1)) == "duplicate/same.bin");
-
-    auto const renamed = params.renamed_files.find(lt::file_index_t(1));
-    REQUIRE(renamed != params.renamed_files.end());
-    REQUIRE(renamed->second == "duplicate/same.1.bin");
-
-    TTorrentClient client((temporary_directory.path() / "State").string());
-    client.set_session_shutdown_asynchronous(false);
-
-    TTorrentFilePreview preview{};
-    std::array<TTorrentFileSnapshot, 2> files{};
-    int32_t required_count = 0;
-    char error[512]{};
-    REQUIRE(TorrentClientPreviewTorrentFileData(
-        &client,
-        bridge_tests::byte_data(torrent_data),
-        static_cast<int32_t>(torrent_data.size()),
-        &preview,
-        files.data(),
-        static_cast<int32_t>(files.size()),
-        &required_count,
-        error,
-        static_cast<int32_t>(sizeof(error))
-    ) == 0);
-
-    CHECK(required_count == 2);
-    CHECK(preview.file_count == 2);
-    CHECK(std::string(files.at(0).path) == "duplicate/same.bin");
-    CHECK(std::string(files.at(1).path) == renamed->second);
 }
 
 TEST_CASE("requiring HTTPS sources keeps tracker tiers aligned")

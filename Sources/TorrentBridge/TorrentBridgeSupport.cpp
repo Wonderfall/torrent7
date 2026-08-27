@@ -2747,45 +2747,6 @@ BridgeResult validate_torrent_info(lt::add_torrent_params const &params)
     return validate_torrent_info(*params.ti, params.renamed_files);
 }
 
-void copy_torrent_preview(lt::add_torrent_params const &params, TTorrentFilePreview *preview) noexcept
-{
-    if (preview == nullptr) {
-        return;
-    }
-
-    lt::torrent_info const &info = *params.ti;
-    copy_string(std::span{preview->name}, info.name());
-    copy_primary_hash_key(std::span{preview->id}, info.info_hashes());
-    preview->total_size = info.total_size();
-    preview->file_count = info.layout().num_files();
-    TorrentSourceCounts const counts = torrent_source_counts(params);
-    preview->tracker_count = counts.tracker_count;
-    preview->https_tracker_count = counts.https_tracker_count;
-    preview->web_seed_count = counts.web_seed_count;
-    preview->https_web_seed_count = counts.https_web_seed_count;
-}
-
-void copy_torrent_preview_files(
-    lt::add_torrent_params const &params,
-    std::span<TTorrentFileSnapshot> output
-)
-{
-    lt::file_storage const &layout = params.ti->layout();
-    lt::renamed_files renamed_files;
-    renamed_files.import_filenames(layout, params.renamed_files);
-    lt::filenames const files(layout, renamed_files);
-    std::size_t const count = std::min(output.size(), static_cast<std::size_t>(files.num_files()));
-    for (std::size_t index = 0; index < count; ++index) {
-        auto const file = lt::file_index_t(static_cast<int>(index));
-        auto destination = std::next(output.begin(), static_cast<std::ptrdiff_t>(index));
-        *destination = file_snapshot_from_files(
-            files,
-            file,
-            static_cast<int32_t>(static_cast<std::uint8_t>(lt::default_priority))
-        );
-    }
-}
-
 bool is_valid_file_priority(int32_t priority) noexcept
 {
     return priority == TTORRENT_FILE_PRIORITY_SKIP

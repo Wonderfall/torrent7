@@ -37,7 +37,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
     for (std::uint8_t operation = 0; operation < operation_count; ++operation) {
         bridge_fuzz::ErrorBuffer error;
 
-        switch (reader.read_u8() % 20U) {
+        switch (reader.read_u8() % 18U) {
         case 0: {
             std::string magnet = reader.read_string(2048);
             TTorrentAddOptions options = bridge_fuzz::add_options_from_reader(reader);
@@ -110,24 +110,6 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             break;
         }
         case 3: {
-            std::vector<std::uint8_t> bytes = reader.read_bytes(8192);
-            std::array<TTorrentFileSnapshot, 16> files{};
-            TTorrentFilePreview preview{};
-            int32_t required_count = 0;
-            static_cast<void>(TorrentClientPreviewTorrentFileData(
-                harness.client(),
-                bytes.empty() || reader.read_bool() ? nullptr : bytes.data(),
-                reader.read_bool() ? -1 : static_cast<int32_t>(bytes.size()),
-                reader.read_bool() ? nullptr : &preview,
-                reader.read_bool() ? nullptr : files.data(),
-                reader.read_bool() ? -1 : static_cast<int32_t>(files.size()),
-                reader.read_bool() ? nullptr : &required_count,
-                error.data(),
-                error.capacity()
-            ));
-            break;
-        }
-        case 4: {
             std::string network_interface;
             TTorrentSessionSettings settings = bridge_fuzz::settings_from_reader(reader, network_interface);
             static_cast<void>(TorrentClientApplySettings(
@@ -141,7 +123,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             static_cast<void>(TorrentClientBlockNetwork(harness.client(), error.data(), error.capacity()));
             break;
         }
-        case 5: {
+        case 4: {
             std::uint64_t const token = selected_token(reader, harness.client());
             static_cast<void>(TorrentClientPause(
                 harness.client(),
@@ -151,7 +133,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             ));
             break;
         }
-        case 6: {
+        case 5: {
             std::uint64_t const token = selected_token(reader, harness.client());
             static_cast<void>(TorrentClientResume(
                 harness.client(),
@@ -161,7 +143,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             ));
             break;
         }
-        case 7: {
+        case 6: {
             std::uint64_t const token = selected_token(reader, harness.client());
             if (reader.read_bool()) {
                 static_cast<void>(TorrentClientReannounce(
@@ -180,7 +162,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             }
             break;
         }
-        case 8: {
+        case 7: {
             std::uint64_t const token = selected_token(reader, harness.client());
             std::uint8_t removal_committed = 0;
             static_cast<void>(TorrentClientRemove(
@@ -192,7 +174,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             ));
             break;
         }
-        case 9: {
+        case 8: {
             std::uint64_t const token = selected_token(reader, harness.client());
             int32_t required_count = 0;
             std::uint8_t available = 0;
@@ -225,7 +207,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             ));
             break;
         }
-        case 10: {
+        case 9: {
             std::uint64_t const token = selected_token(reader, harness.client());
             TTorrentOptions options = bridge_fuzz::torrent_options_from_reader(reader);
             static_cast<void>(TorrentClientCopyTorrentOptions(
@@ -243,7 +225,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             ));
             break;
         }
-        case 11: {
+        case 10: {
             std::uint64_t const token = selected_token(reader, harness.client());
             TTorrentQueuePlacement placement{};
             placement.native_token = token;
@@ -257,7 +239,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             ));
             break;
         }
-        case 12: {
+        case 11: {
             std::uint64_t const token = selected_token(reader, harness.client());
             static_cast<void>(TorrentClientSetFilePriority(
                 harness.client(),
@@ -269,7 +251,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             ));
             break;
         }
-        case 13: {
+        case 12: {
             std::uint64_t const token = selected_token(reader, harness.client());
             TTorrentPieceMapSnapshot piece_map{};
             std::array<std::uint8_t, 256> pieces{};
@@ -286,11 +268,11 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             ));
             break;
         }
-        case 14:
+        case 13:
             bridge_fuzz::exercise_snapshot_copy(harness.client());
             bridge_fuzz::exercise_detail_copies(harness.client());
             break;
-        case 15:
+        case 14:
             if (reader.read_bool()) {
                 static_cast<void>(TorrentClientRecoverPendingRemovalsChecked(
                     harness.client(),
@@ -302,7 +284,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             }
             bridge_fuzz::drain_alert_error(harness.client());
             break;
-        case 16: {
+        case 15: {
             std::uint64_t const token = selected_token(reader, harness.client());
             if (reader.read_bool()) {
                 static_cast<void>(TorrentClientCopyWebSeedActivity(
@@ -317,7 +299,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             }
             break;
         }
-        case 17: {
+        case 16: {
             static_cast<void>(TorrentClientSaveResumeDataChecked(
                 harness.client(),
                 selected_token(reader, harness.client()),
@@ -328,7 +310,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             static_cast<void>(TorrentBridgeLibtorrentVersion());
             break;
         }
-        case 18: {
+        case 17: {
             std::array<TTorrentEvent, 8> events{};
             int32_t required_count = 0;
             std::uint8_t available = 0;

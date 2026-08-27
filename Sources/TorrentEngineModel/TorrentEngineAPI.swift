@@ -85,7 +85,6 @@ package protocol TorrentEngineServicing: Sendable {
         httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride,
         httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride
     ) async throws -> String
-    func previewTorrentFile(data: Data) async throws -> TorrentFilePreview
     func pause(id: String) async throws
     func resume(id: String) async throws
     func reannounce(id: String) async throws

@@ -441,7 +441,7 @@ extension TorrentEngineIPCOperation {
             .seconds(120)
         case .shutdown, .remove, .saveAll:
             .seconds(60)
-        case .poll, .previewTorrentFile, .addMagnet, .addTorrentFile,
+        case .poll, .addMagnet, .addTorrentFile,
              .applySettings, .blockNetwork:
             .seconds(30)
         default:
@@ -451,7 +451,7 @@ extension TorrentEngineIPCOperation {
 
     package var timeoutCanLeaveOutcomeUnknown: Bool {
         switch self {
-        case .poll, .previewTorrentFile, .sourcePolicy, .torrentOptions,
+        case .poll, .sourcePolicy, .torrentOptions,
              .torrentMetadata, .trackerBatch, .webSeedBatch,
              .webSeedActivity, .peerSources, .fileBatch,
              .pieceMapBatch, .readDataset, .closeDataset, .changeHint:
