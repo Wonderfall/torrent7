@@ -370,6 +370,25 @@ void write_capsule_range(
     return info;
 }
 
+[[nodiscard]] TTorrentAddOptions metainfo_capsule_add_options()
+{
+    TTorrentAddOptions options{
+        .starts_paused = bridge_bool(false),
+        .queue_priority = static_cast<std::uint8_t>(TTORRENT_QUEUE_PRIORITY_NORMAL),
+        .enable_dht = bridge_bool(true),
+        .enable_peer_exchange = bridge_bool(true),
+        .enable_lsd = bridge_bool(true),
+        .https_tracker_policy = TTORRENT_HTTPS_POLICY_INHERIT,
+        .https_web_seed_policy = TTORRENT_HTTPS_POLICY_INHERIT,
+        .effective_https_tracker_policy = TTORRENT_HTTPS_POLICY_PREFER,
+        .effective_https_web_seed_policy = TTORRENT_HTTPS_POLICY_REQUIRE,
+        .allow_pre_metadata_dht = bridge_bool(false),
+    };
+    constexpr std::string_view canonical_id = "t:0123456789abcdef0123456789abcdef";
+    std::ranges::copy(canonical_id, options.canonical_id);
+    return options;
+}
+
 [[nodiscard]] std::array<std::uint8_t, 32U> v2_root(
     std::span<std::uint8_t const> const piece_hashes
 )
@@ -483,6 +502,81 @@ TEST_CASE("preparsed v1 metainfo capsule constructs narrow native state")
     CHECK(imported->dht_nodes.empty());
     CHECK(imported->file_priorities.empty());
     CHECK(imported->piece_priorities.empty());
+}
+
+TEST_CASE("metainfo capsule C ABI rejects raw bytes and commits typed priorities")
+{
+    std::uint32_t piece_hash_offset = 0U;
+    std::string const info = v1_capsule_info(piece_hash_offset);
+    MetainfoCapsuleFixture const fixture = make_metainfo_capsule(
+        info,
+        "file.bin",
+        TTORRENT_METAINFO_KIND_V1,
+        TTORRENT_CONTENT_KIND_SINGLE_FILE,
+        {CapsuleFileFixture{.components = {"file.bin"}, .size = 4}},
+        std::pair{piece_hash_offset, 20U}
+    );
+    TorrentLoadResult const decoded = import_preparsed_metainfo_capsule(fixture.bytes);
+    REQUIRE(decoded);
+
+    bridge_tests::TemporaryDirectory temporary_directory;
+    bridge_tests::TestPayloadBroker broker(temporary_directory.path() / "Payload");
+    TTorrentStorageActivation const activation = broker.register_torrent(*decoded);
+    TTorrentClient client(
+        (temporary_directory.path() / "State").string(),
+        true,
+        broker.context()
+    );
+    client.set_session_shutdown_asynchronous(false);
+
+    TTorrentAddOptions const options = metainfo_capsule_add_options();
+    char added_id[TTORRENT_ID_CAPACITY]{};
+    char error[512]{};
+    std::uint64_t native_token = 1U;
+    int32_t add_outcome = TTORRENT_ADD_OUTCOME_UNKNOWN;
+    std::array<std::uint8_t, 1U> const raw_bencode{{'d'}};
+    CHECK(::TorrentClientAddMetainfoCapsule(
+        &client,
+        raw_bencode.data(),
+        static_cast<int32_t>(raw_bencode.size()),
+        activation,
+        options,
+        added_id,
+        static_cast<int32_t>(sizeof(added_id)),
+        &native_token,
+        &add_outcome,
+        error,
+        static_cast<int32_t>(sizeof(error))
+    ) != 0);
+    CHECK(native_token == 0U);
+    CHECK(add_outcome == TTORRENT_ADD_REJECTED);
+    CHECK(added_id[0] == '\0');
+
+    TTorrentFilePriorityEntry const priority{
+        .index = 0,
+        .priority = TTORRENT_FILE_PRIORITY_HIGH,
+    };
+    REQUIRE(::TorrentClientAddMetainfoCapsuleWithPriorities(
+        &client,
+        fixture.bytes.data(),
+        static_cast<int32_t>(fixture.bytes.size()),
+        activation,
+        options,
+        &priority,
+        1,
+        added_id,
+        static_cast<int32_t>(sizeof(added_id)),
+        &native_token,
+        &add_outcome,
+        error,
+        static_cast<int32_t>(sizeof(error))
+    ) == 0);
+    CHECK(add_outcome == TTORRENT_ADD_COMMITTED);
+    CHECK(native_token != 0U);
+    CHECK(std::string_view(added_id) == "t:0123456789abcdef0123456789abcdef");
+    std::optional<lt::torrent_handle> const handle = client.find(native_token);
+    REQUIRE(handle.has_value());
+    CHECK(handle->file_priority(lt::file_index_t(0)) == lt::top_priority);
 }
 
 TEST_CASE("preparsed v2 capsule imports verified piece layers with owned roots")
@@ -775,22 +869,6 @@ TEST_CASE("torrent metadata rejects unsafe renamed file layouts")
     std::string overlong_path = "files/";
     overlong_path.append(sizeof(TTorrentFileSnapshot::path), 'x');
     expect_rejected(RenameMap{{lt::file_index_t(0), std::move(overlong_path)}});
-}
-
-TEST_CASE("torrent loading never interprets an embedded magnet URI")
-{
-    std::string const magnet =
-        "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
-    std::vector<char> input{'d'};
-    append_bencoded_string(input, "magnet-uri");
-    append_bencoded_string(input, magnet);
-    input.push_back('e');
-
-    TorrentLoadResult const loaded = load_torrent_data(input);
-
-    REQUIRE_FALSE(loaded);
-    CHECK(loaded.error().code == 2);
-    CHECK(loaded.error().message == "The torrent file is invalid.");
 }
 
 TEST_CASE("peer source snapshots count overlapping libtorrent source flags")

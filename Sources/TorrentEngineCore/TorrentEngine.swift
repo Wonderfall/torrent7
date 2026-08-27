@@ -364,6 +364,8 @@ private struct AddedTorrentIdentity: Sendable {
     ) throws -> String {
         let client = try unsafe requireClient()
         try Self.validateTorrentData(data)
+        let metainfo = try TorrentMetainfoParser().parse(data)
+        let capsule = try TorrentMetainfoBridgeCapsule(metainfo)
         guard let requestedID = activation.preservedTorrentID ?? identityStore.makeCanonicalID() else {
             throw TorrentEngineError.bridgeError(
                 "A unique Swift torrent identifier could not be generated."
@@ -393,11 +395,11 @@ private struct AddedTorrentIdentity: Sendable {
         let added: AddedTorrentIdentity
         if let priorityEntries {
             added = try unsafe throwingBridgeAdd(capacity: Int(TTORRENT_ID_CAPACITY)) { outputBuffer, nativeToken, addOutcome, errorBuffer in
-                let torrentData: Span<UInt8>? = data.span
+                let capsuleBytes: Span<UInt8>? = capsule.bytes.span
                 let priorities: Span<TTorrentFilePriorityEntry>? = priorityEntries.span
-                return unsafe TorrentClientAddTorrentFileDataWithPriorities(
+                return unsafe TorrentClientAddMetainfoCapsuleWithPriorities(
                     client,
-                    torrentData,
+                    capsuleBytes,
                     nativeActivation,
                     options,
                     priorities,
@@ -409,10 +411,10 @@ private struct AddedTorrentIdentity: Sendable {
             }
         } else {
             added = try unsafe throwingBridgeAdd(capacity: Int(TTORRENT_ID_CAPACITY)) { outputBuffer, nativeToken, addOutcome, errorBuffer in
-                let torrentData: Span<UInt8>? = data.span
-                return unsafe TorrentClientAddTorrentFileData(
+                let capsuleBytes: Span<UInt8>? = capsule.bytes.span
+                return unsafe TorrentClientAddMetainfoCapsule(
                     client,
-                    torrentData,
+                    capsuleBytes,
                     nativeActivation,
                     options,
                     &outputBuffer,

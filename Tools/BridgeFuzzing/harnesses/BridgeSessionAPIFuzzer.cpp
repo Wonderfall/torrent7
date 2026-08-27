@@ -69,7 +69,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             bridge_fuzz::AddedIdBuffer added_id;
             std::uint64_t native_token = 0;
             int32_t add_outcome = TTORRENT_ADD_REJECTED;
-            static_cast<void>(TorrentClientAddTorrentFileData(
+            static_cast<void>(TorrentClientAddMetainfoCapsule(
                 harness.client(),
                 bytes.empty() || reader.read_bool() ? nullptr : bytes.data(),
                 reader.read_bool() ? -1 : static_cast<int32_t>(bytes.size()),
@@ -96,7 +96,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             int32_t const priority_count = reader.read_bool()
                 ? -1
                 : static_cast<int32_t>(priorities.size());
-            static_cast<void>(TorrentClientAddTorrentFileDataWithPriorities(
+            static_cast<void>(TorrentClientAddMetainfoCapsuleWithPriorities(
                 harness.client(),
                 bytes.empty() || reader.read_bool() ? nullptr : bytes.data(),
                 reader.read_bool() ? -1 : static_cast<int32_t>(bytes.size()),

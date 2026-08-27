@@ -227,10 +227,9 @@ int32_t TorrentClientAddMagnet(
     );
 }
 
-int32_t TorrentClientAddTorrentFileData(
+int32_t add_test_torrent(
     TTorrentClient *client,
-    std::uint8_t const *data,
-    int32_t data_size,
+    lt::add_torrent_params params,
     TTorrentStorageActivation activation,
     TTorrentAddOptions options,
     char *added_id,
@@ -241,10 +240,9 @@ int32_t TorrentClientAddTorrentFileData(
 )
 {
     std::uint64_t token = 0;
-    return ::TorrentClientAddTorrentFileData(
+    return add_torrent_params_for_testing(
         client,
-        data,
-        data_size,
+        std::move(params),
         activation,
         options,
         added_id,
@@ -2270,10 +2268,9 @@ TEST_CASE("resume metadata flows through add, Swift-directed save, and reload")
         char added_id[TTORRENT_ID_CAPACITY]{};
         char error[512]{};
         int32_t add_outcome = TTORRENT_ADD_REJECTED;
-        REQUIRE(TorrentClientAddTorrentFileData(
+        REQUIRE(add_test_torrent(
             &client,
-            bridge_tests::byte_data(torrent_data),
-            static_cast<int32_t>(torrent_data.size()),
+            claim_params,
             activation,
             add_options,
             added_id,
@@ -2341,10 +2338,9 @@ TEST_CASE("exact torrent metadata can be copied without re-encoding")
     char added_id[TTORRENT_ID_CAPACITY]{};
     char error[512]{};
     int32_t add_outcome = TTORRENT_ADD_REJECTED;
-    REQUIRE(TorrentClientAddTorrentFileData(
+    REQUIRE(add_test_torrent(
         &client,
-        bridge_tests::byte_data(torrent_data),
-        static_cast<int32_t>(torrent_data.size()),
+        claim_params,
         activation,
         default_add_options(),
         added_id,
@@ -2421,10 +2417,9 @@ TEST_CASE("known torrent activation hands off an identity only from removal")
     char first_id[TTORRENT_ID_CAPACITY]{};
     char error[512]{};
     int32_t add_outcome = TTORRENT_ADD_REJECTED;
-    REQUIRE(TorrentClientAddTorrentFileData(
+    REQUIRE(add_test_torrent(
         &client,
-        bridge_tests::byte_data(torrent_data),
-        static_cast<int32_t>(torrent_data.size()),
+        claim_params,
         first_activation,
         default_add_options(),
         first_id,
@@ -2443,10 +2438,9 @@ TEST_CASE("known torrent activation hands off an identity only from removal")
 
     char duplicate_id[TTORRENT_ID_CAPACITY]{};
     add_outcome = TTORRENT_ADD_REJECTED;
-    CHECK(TorrentClientAddTorrentFileData(
+    CHECK(add_test_torrent(
         &client,
-        bridge_tests::byte_data(torrent_data),
-        static_cast<int32_t>(torrent_data.size()),
+        claim_params,
         second_activation,
         add_options_with_id(canonical_id),
         duplicate_id,
@@ -2469,10 +2463,9 @@ TEST_CASE("known torrent activation hands off an identity only from removal")
 
     char promoted_id[TTORRENT_ID_CAPACITY]{};
     add_outcome = TTORRENT_ADD_REJECTED;
-    REQUIRE(TorrentClientAddTorrentFileData(
+    REQUIRE(add_test_torrent(
         &client,
-        bridge_tests::byte_data(torrent_data),
-        static_cast<int32_t>(torrent_data.size()),
+        claim_params,
         second_activation,
         add_options_with_id(canonical_id),
         promoted_id,

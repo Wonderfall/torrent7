@@ -59,6 +59,11 @@ BEP 9 input is decoded through the same core path directly from the exact bare
 `info` dictionary; no synthetic envelope is created and no tracker, web-seed,
 or piece-layer state can enter through swarm metadata.
 
+The production local-file route is now raw `.torrent` bytes to the isolated
+Swift parser, then a validated metainfo capsule to native code. The public C ABI
+has no raw-torrent add operation. Passing bencoded data where a capsule is
+required fails capsule framing before any libtorrent construction occurs.
+
 Variable-sized native imports use a versioned flat capsule containing fixed-
 width records and checked offsets into one byte blob. Capsules contain no
 pointers, nested spans, Swift objects, C++ objects, function pointers, or

@@ -14,6 +14,28 @@ typeset -r boost_prefix=${BOOST_PREFIX:-$deps_prefix}
 typeset -r boringssl_prefix=${BORINGSSL_PREFIX:-$deps_prefix}
 typeset -r native_deps_build_id=$("$root_dir/Scripts/native-deps-build-id.zsh")
 typeset clang_tidy=${CLANG_TIDY:-$homebrew_prefix/opt/llvm/bin/clang-tidy}
+typeset -r ripgrep=${commands[rg]:-}
+
+[[ -n $ripgrep && -x $ripgrep ]] || fail "Missing ripgrep."
+
+# Retired untrusted-input parsers may remain in tests as compatibility oracles,
+# but no production source may make them reachable again.
+typeset -a retired_parser_symbols=(
+    "TorrentClientAddTorrentFileData"
+    "load_torrent_buffer"
+    "parse_magnet_uri"
+)
+for symbol in "${retired_parser_symbols[@]}"; do
+    if "$ripgrep" -n --fixed-strings \
+        --glob '*.cpp' \
+        --glob '*.hpp' \
+        --glob '*.h' \
+        --glob '*.swift' \
+        "$symbol" \
+        "$root_dir/Sources"; then
+        fail "Retired native parser route is reachable from production sources: $symbol"
+    fi
+done
 
 if [[ ! -x $clang_tidy ]]; then
     clang_tidy=${commands[clang-tidy]:-}

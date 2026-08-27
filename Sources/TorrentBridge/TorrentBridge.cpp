@@ -1899,23 +1899,25 @@ extern "C" int32_t TorrentClientAddParsedMagnet(
 
 namespace {
 
-TorrentLoadResult load_torrent_data_from_c_buffer(void const *torrent_data, int32_t torrent_data_size)
+TorrentLoadResult load_metainfo_capsule_from_c_buffer(
+    std::uint8_t const *capsule,
+    int32_t capsule_size
+)
 {
-    if (torrent_data == nullptr) {
-        return std::unexpected(BridgeError{.code = 1, .message = "Missing torrent data."});
+    if (capsule == nullptr) {
+        return std::unexpected(BridgeError{.code = 1, .message = "Missing metainfo capsule."});
     }
-    if (torrent_data_size < 0) {
-        return std::unexpected(BridgeError{.code = 1, .message = "Invalid torrent data size."});
+    if (capsule_size < 0) {
+        return std::unexpected(BridgeError{.code = 1, .message = "Invalid metainfo capsule size."});
     }
 
-    return load_torrent_data(input_span_from_c_buffer(
-        static_cast<char const *>(torrent_data),
-        torrent_data_size
-    ));
+    return import_preparsed_metainfo_capsule(
+        input_span_from_c_buffer(capsule, capsule_size)
+    );
 }
 
 template <typename LoadTorrent>
-int32_t add_torrent_file_data_with_priorities(
+int32_t add_torrent_with_loader(
     TTorrentClient *client,
     TTorrentStorageActivation const activation,
     TTorrentAddOptions const &options,
@@ -2215,12 +2217,12 @@ int32_t add_torrent_file_data_with_priorities(
 
 } // namespace
 
-extern "C" int32_t TorrentClientAddTorrentFileData(
+#ifdef TORRENT_BRIDGE_TESTING
+int32_t add_torrent_params_for_testing(
     TTorrentClient *client,
-    std::uint8_t const *torrent_data,
-    int32_t torrent_data_size,
+    lt::add_torrent_params params,
     TTorrentStorageActivation activation,
-    TTorrentAddOptions options,
+    TTorrentAddOptions const &options,
     char *added_id_out,
     int32_t added_id_capacity,
     std::uint64_t *native_token_out,
@@ -2229,7 +2231,7 @@ extern "C" int32_t TorrentClientAddTorrentFileData(
     int32_t error_capacity
 ) noexcept
 {
-    return add_torrent_file_data_with_priorities(
+    return add_torrent_with_loader(
         client,
         activation,
         options,
@@ -2242,16 +2244,50 @@ extern "C" int32_t TorrentClientAddTorrentFileData(
         add_outcome_out,
         error_out,
         error_capacity,
-        [torrent_data, torrent_data_size]() {
-            return load_torrent_data_from_c_buffer(torrent_data, torrent_data_size);
+        [params = std::move(params)]() mutable -> TorrentLoadResult {
+            return std::move(params);
+        }
+    );
+}
+#endif
+
+extern "C" int32_t TorrentClientAddMetainfoCapsule(
+    TTorrentClient *client,
+    std::uint8_t const *capsule,
+    int32_t capsule_size,
+    TTorrentStorageActivation activation,
+    TTorrentAddOptions options,
+    char *added_id_out,
+    int32_t added_id_capacity,
+    std::uint64_t *native_token_out,
+    int32_t *add_outcome_out,
+    char *error_out,
+    int32_t error_capacity
+) noexcept
+{
+    return add_torrent_with_loader(
+        client,
+        activation,
+        options,
+        false,
+        nullptr,
+        0,
+        added_id_out,
+        added_id_capacity,
+        native_token_out,
+        add_outcome_out,
+        error_out,
+        error_capacity,
+        [capsule, capsule_size]() {
+            return load_metainfo_capsule_from_c_buffer(capsule, capsule_size);
         }
     );
 }
 
-extern "C" int32_t TorrentClientAddTorrentFileDataWithPriorities(
+extern "C" int32_t TorrentClientAddMetainfoCapsuleWithPriorities(
     TTorrentClient *client,
-    std::uint8_t const *torrent_data,
-    int32_t torrent_data_size,
+    std::uint8_t const *capsule,
+    int32_t capsule_size,
     TTorrentStorageActivation activation,
     TTorrentAddOptions options,
     const TTorrentFilePriorityEntry *file_priorities,
@@ -2264,7 +2300,7 @@ extern "C" int32_t TorrentClientAddTorrentFileDataWithPriorities(
     int32_t error_capacity
 ) noexcept
 {
-    return add_torrent_file_data_with_priorities(
+    return add_torrent_with_loader(
         client,
         activation,
         options,
@@ -2277,8 +2313,8 @@ extern "C" int32_t TorrentClientAddTorrentFileDataWithPriorities(
         add_outcome_out,
         error_out,
         error_capacity,
-        [torrent_data, torrent_data_size]() {
-            return load_torrent_data_from_c_buffer(torrent_data, torrent_data_size);
+        [capsule, capsule_size]() {
+            return load_metainfo_capsule_from_c_buffer(capsule, capsule_size);
         }
     );
 }

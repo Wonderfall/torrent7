@@ -434,10 +434,13 @@ module before XPC. The typed result is revalidated during decoding, then lowered
 to a versioned flat C ABI containing fixed hashes, fixed-width records, and
 checked ranges into one byte blob. Native code copies only those narrow fields;
 the production engine contains neither the former raw-magnet C entry point nor
-a reachable `parse_magnet_uri`. Local torrent-file acceptance still passes raw
-metainfo through libtorrent until its later typed-import cutover. The boundary
-uses Swift 6.3 safe-interop annotations and does not depend on a Swift 6.4
-language feature.
+a reachable `parse_magnet_uri`. Local torrent files are independently parsed in
+the isolated Swift engine, lowered to a versioned metainfo capsule, and passed
+through a capsule-only C ABI. Native code validates the capsule framing and
+reconstructs the narrow libtorrent state without bdecoding the retained exact
+`info` bytes. No production bridge entry point accepts raw magnet or `.torrent`
+bytes. The boundary uses Swift 6.3 safe-interop annotations and does not depend
+on a Swift 6.4 language feature.
 
 Libtorrent and BoringSSL are pinned, patched, verified, and linked statically.
 The app bundle contains only the GUI and helper Mach-O executables. TLS uses the

@@ -2799,26 +2799,6 @@ UniqueFileDescriptor acquire_state_directory_lock(int state_directory_descriptor
     return descriptor;
 }
 
-TorrentLoadResult load_torrent_data(std::span<char const> torrent_data)
-{
-    if (torrent_data.empty()) {
-        return std::unexpected(BridgeError{.code = 2, .message = "The torrent file is empty."});
-    }
-    if (torrent_data.size() > kMaxTorrentFileBytes) {
-        return std::unexpected(BridgeError{.code = 2, .message = "The torrent file is too large."});
-    }
-
-    try {
-        return lt::load_torrent_buffer(
-            lt::span<char const>(torrent_data.data(), static_cast<int>(torrent_data.size()))
-        );
-    } catch (std::exception const &) {
-        return std::unexpected(BridgeError{.code = 2, .message = "The torrent file is invalid."});
-    } catch (...) {
-        return std::unexpected(BridgeError{.code = 2, .message = "The torrent file is invalid."});
-    }
-}
-
 namespace {
 
 BridgeResult validate_relative_torrent_path(std::string_view path)

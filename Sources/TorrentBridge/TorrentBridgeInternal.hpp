@@ -17,7 +17,6 @@
 #include <libtorrent/error_code.hpp>
 #include <libtorrent/file_storage.hpp>
 #include <libtorrent/hasher.hpp>
-#include <libtorrent/load_torrent.hpp>
 #include <libtorrent/read_resume_data.hpp>
 #include <libtorrent/session.hpp>
 #include <libtorrent/session_handle.hpp>
@@ -307,7 +306,7 @@ static_assert(
 );
 static_assert(kMaxTorrentIdentityTokenCount > static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 59U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 60U);
 static_assert(
     TORRENT_ABI_VERSION > 1,
     "Deprecated libtorrent ABIs can parse add_torrent_params.url as a raw magnet."
@@ -1150,6 +1149,21 @@ TorrentLoadResult import_preparsed_metainfo_capsule(
     std::span<std::uint8_t const> capsule
 );
 
+#ifdef TORRENT_BRIDGE_TESTING
+int32_t add_torrent_params_for_testing(
+    TTorrentClient *client,
+    lt::add_torrent_params params,
+    TTorrentStorageActivation activation,
+    TTorrentAddOptions const &options,
+    char *added_id_out,
+    int32_t added_id_capacity,
+    std::uint64_t *native_token_out,
+    int32_t *add_outcome_out,
+    char *error_out,
+    int32_t error_capacity
+) noexcept;
+#endif
+
 void sanitize_resume_endpoint_hints(lt::add_torrent_params &params) noexcept;
 
 HTTPSPolicy https_tracker_policy_from_resume_data(std::vector<char> const &buffer);
@@ -1360,8 +1374,6 @@ void restrict_permissions(fs::path const &path, FileSystemNodeKind kind);
 void restrict_permissions(int descriptor, std::string_view description, FileSystemNodeKind kind);
 
 UniqueFileDescriptor acquire_state_directory_lock(int state_directory_descriptor);
-
-TorrentLoadResult load_torrent_data(std::span<char const> torrent_data);
 
 BridgeResult validate_torrent_info(lt::torrent_info const &info);
 

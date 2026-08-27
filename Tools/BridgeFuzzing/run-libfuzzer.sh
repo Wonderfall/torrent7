@@ -19,7 +19,7 @@ esac
 
 all_targets=(
     bridge_magnet
-    bridge_torrent_file
+    bridge_metainfo_capsule
     bridge_resume_startup
     bridge_session_api
     bridge_payload_broker
@@ -33,7 +33,7 @@ fi
 
 default_max_len() {
     case "$1" in
-        bridge_torrent_file)
+        bridge_metainfo_capsule)
             printf '%s\n' 1048576
             ;;
         *)

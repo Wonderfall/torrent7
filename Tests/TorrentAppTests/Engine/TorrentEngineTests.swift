@@ -614,6 +614,29 @@ struct TorrentEngineTests {
         #expect(batch?.webSeeds.isEmpty == true)
     }
 
+    @Test("Local torrent add rejects raw bytes in the isolated Swift parser")
+    func localTorrentAddRejectsRawBytesInSwift() async throws {
+        let stateDirectory = try temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let engine = try TorrentEngine(
+            stateDirectory: stateDirectory,
+            enablePeerExchangePlugin: true,
+            payloadBroker: TestPayloadBroker()
+        )
+        let activation = try TorrentStorageActivation(
+            claimID: UUID(),
+            generation: 1,
+            sourceManifestDigest: Data(repeating: 1, count: 32)
+        )
+
+        await #expect(throws: TorrentManifestError.malformedBencoding) {
+            _ = try await engine.addTorrentFile(
+                data: Data([UInt8(ascii: "d")]),
+                activation: activation
+            )
+        }
+    }
+
     @Test("Startup failure engine throws startup error for mutations")
     func startupFailureEngineThrowsStartupErrorForMutations() async throws {
         let engine = TorrentEngine(startupFailureMessage: "boom")

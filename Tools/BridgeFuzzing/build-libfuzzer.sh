@@ -20,7 +20,7 @@ TARGET_TRIPLE="${TARGET_TRIPLE:-arm64-apple-macosx26.0}"
 
 all_targets=(
     bridge_magnet
-    bridge_torrent_file
+    bridge_metainfo_capsule
     bridge_resume_startup
     bridge_session_api
     bridge_payload_broker
@@ -118,8 +118,8 @@ source_for_target() {
         bridge_magnet)
             printf '%s\n' "$TOOLS_DIR/harnesses/BridgeMagnetFuzzer.cpp"
             ;;
-        bridge_torrent_file)
-            printf '%s\n' "$TOOLS_DIR/harnesses/BridgeTorrentFileFuzzer.cpp"
+        bridge_metainfo_capsule)
+            printf '%s\n' "$TOOLS_DIR/harnesses/BridgeMetainfoCapsuleFuzzer.cpp"
             ;;
         bridge_resume_startup)
             printf '%s\n' "$TOOLS_DIR/harnesses/BridgeResumeStartupFuzzer.cpp"

@@ -4,6 +4,7 @@
 #include "TorrentBridgeInternal.hpp"
 
 #include <libtorrent/magnet_uri.hpp>
+#include <libtorrent/load_torrent.hpp>
 
 #include <array>
 #include <atomic>

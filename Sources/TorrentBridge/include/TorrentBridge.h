@@ -130,7 +130,7 @@ inline constexpr uint16_t TTORRENT_METAINFO_FIELD_COMMENT = 1U << 4U;
 inline constexpr uint16_t TTORRENT_METAINFO_FIELD_CREATED_BY = 1U << 5U;
 inline constexpr uint16_t TTORRENT_METAINFO_FIELD_CREATION_DATE = 1U << 6U;
 inline constexpr uint16_t TTORRENT_METAINFO_FIELD_DHT_NODES = 1U << 7U;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 59;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 60;
 namespace torrent_bridge::internal {
 struct TTorrentClient;
 }
@@ -231,7 +231,7 @@ enum {
     TTORRENT_METAINFO_FIELD_CREATED_BY = 1U << 5U,
     TTORRENT_METAINFO_FIELD_CREATION_DATE = 1U << 6U,
     TTORRENT_METAINFO_FIELD_DHT_NODES = 1U << 7U,
-    TTORRENT_BRIDGE_ABI_VERSION = 59
+    TTORRENT_BRIDGE_ABI_VERSION = 60
 };
 #endif
 
@@ -649,11 +649,13 @@ int32_t TorrentClientAddParsedMagnet(
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
-int32_t TorrentClientAddTorrentFileData(
+// Adds only a schema-checked capsule emitted from validated Swift metainfo.
+// Raw bencoded torrent bytes are not accepted by the native bridge.
+int32_t TorrentClientAddMetainfoCapsule(
     TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
-    const uint8_t * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(torrent_data_size)
-        torrent_data TORRENT_BRIDGE_NOESCAPE,
-    int32_t torrent_data_size,
+    const uint8_t * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(capsule_size)
+        capsule TORRENT_BRIDGE_NOESCAPE,
+    int32_t capsule_size,
     TTorrentStorageActivation activation,
     TTorrentAddOptions options,
     char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(added_id_capacity) added_id_out TORRENT_BRIDGE_NOESCAPE,
@@ -664,11 +666,11 @@ int32_t TorrentClientAddTorrentFileData(
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
-int32_t TorrentClientAddTorrentFileDataWithPriorities(
+int32_t TorrentClientAddMetainfoCapsuleWithPriorities(
     TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
-    const uint8_t * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(torrent_data_size)
-        torrent_data TORRENT_BRIDGE_NOESCAPE,
-    int32_t torrent_data_size,
+    const uint8_t * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(capsule_size)
+        capsule TORRENT_BRIDGE_NOESCAPE,
+    int32_t capsule_size,
     TTorrentStorageActivation activation,
     TTorrentAddOptions options,
     const TTorrentFilePriorityEntry * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(file_priority_count)

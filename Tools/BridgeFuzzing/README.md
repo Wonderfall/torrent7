@@ -15,8 +15,8 @@ tooling self-contained.
 
 - `bridge_magnet`: mutates the flat parsed-magnet records, byte ranges, and
   session-backed native import path.
-- `bridge_torrent_file`: passes mutated `.torrent` bytes to
-  `TorrentClientAddTorrentFileData`.
+- `bridge_metainfo_capsule`: passes mutated typed-capsule bytes to
+  `TorrentClientAddMetainfoCapsule`.
 - `bridge_resume_startup`: creates a temporary state directory with mutated
   `.fastresume` bytes, then exercises blocking and bounded asynchronous client
   destruction.
@@ -36,6 +36,10 @@ All harness runtime state is written to temporary directories and removed on
 normal exit. Network access is blocked or disabled by the bridge settings used
 by the harnesses.
 
+The capsule corpus may use a `hex:` prefix for checked-in binary seeds; the
+capsule harness decodes those units before calling the production C ABI. Other
+inputs are passed through unchanged.
+
 ## Build
 
 The build creates separate fuzz-only BoringSSL/libtorrent archives under
@@ -50,7 +54,7 @@ Tools/BridgeFuzzing/build-libfuzzer.sh
 Useful overrides:
 
 ```sh
-Tools/BridgeFuzzing/build-libfuzzer.sh bridge_torrent_file
+Tools/BridgeFuzzing/build-libfuzzer.sh bridge_metainfo_capsule
 JOBS=4 Tools/BridgeFuzzing/build-libfuzzer-deps.sh
 ALLOW_EXTERNAL_LIBFUZZER_DEPS=1 \
   LIBFUZZER_DEPS_ROOT=/absolute/path/to/an/empty/cache \
@@ -71,7 +75,7 @@ Useful overrides:
 
 ```sh
 RUNS=1000000 Tools/BridgeFuzzing/run-libfuzzer.sh bridge_magnet
-RUNS=10000 MAX_LEN=1048576 Tools/BridgeFuzzing/run-libfuzzer.sh bridge_torrent_file
+RUNS=10000 MAX_LEN=1048576 Tools/BridgeFuzzing/run-libfuzzer.sh bridge_metainfo_capsule
 LIBFUZZER_ARGS="-jobs=4 -workers=4" Tools/BridgeFuzzing/run-libfuzzer.sh bridge_session_api
 ```
 
