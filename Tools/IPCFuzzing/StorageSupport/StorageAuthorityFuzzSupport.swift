@@ -968,6 +968,93 @@ private enum HTTPTrackerResponseParserFuzzer {
     }
 }
 
+private enum DHTMessageParserFuzzer {
+    static func exercise(_ data: Data) {
+        guard let selector = data.first else {
+            return
+        }
+        let sourceFamily: TorrentPeerAddressFamily = selector.isMultiple(of: 2)
+            ? .ipv4
+            : .ipv6
+        let body = Data(data.dropFirst())
+        let parser = TorrentDHTMessageParser()
+        guard let parsed = try? parser.parse(body, sourceFamily: sourceFamily) else {
+            return
+        }
+        fuzzAssert((try? parser.parse(body, sourceFamily: sourceFamily)) == parsed)
+        fuzzAssert(parsed.body == body)
+        fuzzAssert(parsed.nodes.count <= 64)
+        fuzzAssert(parsed.peers.count <= 256)
+        fuzzAssert(parsed.sampleCount <= 64)
+        checkRange(parsed.transactionRange, maximumCount: 64, in: body)
+        checkRange(parsed.queryNameRange, maximumCount: 32, in: body)
+        checkRange(parsed.nodeIDRange, exactCount: 20, in: body)
+        checkRange(parsed.targetRange, exactCount: 20, in: body)
+        checkRange(parsed.tokenRange, maximumCount: 64, in: body)
+        checkRange(parsed.nameRange, maximumCount: 255, in: body)
+        checkRange(parsed.errorMessageRange, maximumCount: 256, in: body)
+
+        if let samples = parsed.sampleHashesRange {
+            checkRange(samples, maximumCount: 64 * 20, in: body)
+            fuzzAssert(samples.count == parsed.sampleCount * 20)
+        } else {
+            fuzzAssert(parsed.sampleCount == 0)
+        }
+        if parsed.kind == .query {
+            fuzzAssert(parsed.queryKind != .none)
+            fuzzAssert(parsed.nodes.isEmpty)
+            fuzzAssert(parsed.peers.isEmpty)
+            fuzzAssert(parsed.sampleHashesRange == nil)
+            fuzzAssert(parsed.errorCode == nil)
+            fuzzAssert(parsed.errorMessageRange == nil)
+        } else {
+            fuzzAssert(parsed.queryKind == .none)
+            fuzzAssert(parsed.queryNameRange == nil)
+            fuzzAssert(parsed.targetRange == nil)
+            fuzzAssert(parsed.nameRange == nil)
+            fuzzAssert(parsed.port == nil)
+        }
+        if parsed.kind == .error {
+            fuzzAssert(parsed.nodes.isEmpty)
+            fuzzAssert(parsed.peers.isEmpty)
+        }
+        if let address = parsed.externalAddress {
+            checkAddress(address)
+        }
+        for node in parsed.nodes {
+            checkRange(node.idRange, exactCount: 20, in: body)
+            checkAddress(node.address)
+        }
+        for peer in parsed.peers {
+            checkAddress(peer.address)
+        }
+    }
+
+    private static func checkAddress(_ address: TorrentPeerAddress) {
+        fuzzAssert(address.family == .ipv4 ? address.high == 0 : true)
+    }
+
+    private static func checkRange(
+        _ range: Range<Int>?,
+        maximumCount: Int? = nil,
+        exactCount: Int? = nil,
+        in body: Data
+    ) {
+        guard let range else {
+            return
+        }
+        fuzzAssert(range.lowerBound >= 0)
+        fuzzAssert(range.upperBound >= range.lowerBound)
+        fuzzAssert(range.upperBound <= body.count)
+        if let maximumCount {
+            fuzzAssert(range.count <= maximumCount)
+        }
+        if let exactCount {
+            fuzzAssert(range.count == exactCount)
+        }
+    }
+}
+
 private func fuzzData(
     _ bytes: UnsafePointer<UInt8>?,
     _ byteCount: UInt
@@ -1050,5 +1137,18 @@ public func torrentHTTPTrackerResponseParserFuzzOneInput(
     }
     autoreleasepool {
         HTTPTrackerResponseParserFuzzer.exercise(data)
+    }
+}
+
+@_cdecl("TorrentDHTMessageParserFuzzOneInput")
+public func torrentDHTMessageParserFuzzOneInput(
+    _ bytes: UnsafePointer<UInt8>?,
+    _ byteCount: UInt
+) {
+    guard let data = fuzzData(bytes, byteCount) else {
+        return
+    }
+    autoreleasepool {
+        DHTMessageParserFuzzer.exercise(data)
     }
 }

@@ -33,6 +33,7 @@ therefore neither treated as secret nor accepted as filesystem authority.
 | Swarm info-dictionary parsing | None | Hashes in libtorrent, parses synchronously in Swift, imports a typed capsule |
 | Peer extension message parsing | None | Parses BEP 10, BEP 9 control, and BEP 11 synchronously in Swift; applies native state and policy |
 | HTTP tracker body parsing | None | Bounds the decompressed body, parses it synchronously in Swift, imports typed peers and statistics |
+| DHT KRPC parsing | None | Parses bounded datagrams synchronously in Swift; imports typed queries, responses, errors, nodes, and peers |
 | Destination selection, reservation, and mapping | Owns | None |
 | Durable storage claims and ownership evidence | Owns | None |
 | Exact payload file access | Brokers individual descriptors | Consumes brokered descriptors |
@@ -473,6 +474,19 @@ tracker bdecode implementation is absent and build-gated. UDP tracker replies
 remain native by design: they are fixed binary, length-checked span parsing,
 not another generic bencode surface. WebTorrent and I2P are disabled.
 
+Inbound Mainline DHT datagrams terminate in another synchronous Swift callback.
+The canonical scanner has a 1,500-byte envelope and independent limits for
+nesting, tokens, keys, transaction IDs, tokens, human-readable text, compact
+nodes, peers, and sample hashes. Swift writes one fixed result and caller-owned
+node and peer arrays; C++ revalidates the schema, ranges, enums, presence bits,
+address families, ports, and record counts, then atomically installs an owning
+KRPC message. Libtorrent retains UDP transport, source admission, routing,
+transactions, tokens, rate limiting, and query/response state. Missing or
+rejected callbacks drop the packet without a native bdecode fallback. BEP 44
+get/put envelopes are classified but their arbitrary values are never decoded;
+the node returns an unsupported-method error. Generic DHT request plugins and
+direct-response payloads are not exposed by Torrent7.
+
 Libtorrent and BoringSSL are pinned, patched, verified, and linked statically.
 The app bundle contains only the GUI and helper Mach-O executables. TLS uses the
 buffer-only BoringSSL client path with macOS system trust and hostname binding.
@@ -514,8 +528,9 @@ rejection, replacement-safe retained-descriptor soft revocation, claim recovery,
 ambiguous activation containment, imports, removal, and magnet promotion.
 Separate sanitizer-backed fuzz targets cover raw broker XPC dictionaries,
 claim and ownership validation, manifest parsing and digest reproduction,
-peer-extension and HTTP tracker-body parsing and typed invariants, the native broker
-callback/descriptor adapter, and the broader native API input surfaces. Their
+peer-extension, HTTP tracker-body, and DHT KRPC parsing and typed invariants,
+the native broker callback/descriptor adapter, and the broader native API input
+surfaces. Their
 expensive build and execution are intentionally independent of the routine test
 gates, and the harness entry points are absent from shipped products.
 

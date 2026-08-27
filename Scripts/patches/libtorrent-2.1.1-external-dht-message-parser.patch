@@ -1,0 +1,2012 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0c637c81473c58f6f22a15c0feb749895a395a10..86e3d82cb4cd988b6ffa7c57ad5daeb1d9ed97f9 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -114,6 +114,7 @@ set(libtorrent_kademlia_include_files
+ 	get_peers.hpp
+ 	io.hpp
+ 	item.hpp
++	krpc_message.hpp
+ 	msg.hpp
+ 	node.hpp
+ 	node_entry.hpp
+@@ -164,6 +165,7 @@ set(libtorrent_aux_include_files
+ 	deprecated.hpp
+ 	deque.hpp
+ 	dev_random.hpp
++	dht_message_parser.hpp
+ 	directory.hpp
+ 	disable_warnings_pop.hpp
+ 	disable_warnings_push.hpp
+diff --git a/include/libtorrent/aux_/dht_message_parser.hpp b/include/libtorrent/aux_/dht_message_parser.hpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..b43196c11f344814dac530d3add4bbc322997d8e
+--- /dev/null
++++ b/include/libtorrent/aux_/dht_message_parser.hpp
+@@ -0,0 +1,34 @@
++/*
++
++Copyright (c) 2026, Torrent7 contributors
++All rights reserved.
++
++You may use, distribute and modify this code under the terms of the BSD license,
++see LICENSE file.
++*/
++
++#ifndef TORRENT_DHT_MESSAGE_PARSER_HPP
++#define TORRENT_DHT_MESSAGE_PARSER_HPP
++
++#include "libtorrent/aux_/export.hpp"
++#include "libtorrent/kademlia/krpc_message.hpp"
++#include "libtorrent/span.hpp"
++
++namespace libtorrent::aux {
++
++	// Parses exactly one complete inbound DHT datagram into owning KRPC syntax.
++	// The parser is supplied by the embedding application. No native bdecode
++	// fallback is used when it is absent or rejects a message.
++	struct TORRENT_EXTRA_EXPORT dht_message_parser
++	{
++		static constexpr int maximum_message_size = 1500;
++
++		virtual ~dht_message_parser() = default;
++
++		virtual bool parse_message(span<char const> body, bool source_is_ipv6
++			, dht::krpc_message& result) noexcept = 0;
++	};
++
++}
++
++#endif // TORRENT_DHT_MESSAGE_PARSER_HPP
+diff --git a/include/libtorrent/aux_/session_impl.hpp b/include/libtorrent/aux_/session_impl.hpp
+index 2985eec077ae9e8620b801f8dbc41862c12e7dfa..776a7e867c5aacc6a08660870536b088fd11bd9c 100644
+--- a/include/libtorrent/aux_/session_impl.hpp
++++ b/include/libtorrent/aux_/session_impl.hpp
+@@ -506,6 +506,7 @@ namespace aux {
+ 			void set_dht_state(dht::dht_state&& state);
+ 
+ 			void set_dht_storage(dht::dht_storage_constructor_type sc);
++			void set_dht_message_parser(std::shared_ptr<dht_message_parser> parser);
+ 			void start_dht();
+ 			void stop_dht();
+ 			bool has_dht() const override;
+@@ -1205,6 +1206,7 @@ namespace aux {
+ 			std::shared_ptr<dht::dht_tracker> m_dht;
+ 			dht::dht_storage_constructor_type m_dht_storage_constructor
+ 				= dht::dht_default_storage_constructor;
++			std::shared_ptr<dht_message_parser> m_dht_message_parser;
+ 			// these are used when starting the DHT
+ 			// (and bootstrapping it), and then erased
+ 			std::vector<udp::endpoint> m_dht_router_nodes;
+diff --git a/include/libtorrent/fwd.hpp b/include/libtorrent/fwd.hpp
+index 6713e9f0c236f846469f2243b78d1cdff5b01a2b..d29711d719e42ac2ff0b3d9153eb318e54f8f92b 100644
+--- a/include/libtorrent/fwd.hpp
++++ b/include/libtorrent/fwd.hpp
+@@ -18,6 +18,7 @@ namespace libtorrent {
+ 
+ namespace aux {
+ struct extension_handshake;
++struct dht_message_parser;
+ struct peer_message_parser;
+ struct tracker_response_parser;
+ struct payload_file_provider;
+diff --git a/include/libtorrent/kademlia/dht_tracker.hpp b/include/libtorrent/kademlia/dht_tracker.hpp
+index e825527e066c36aec1f33e7506335cb9d9f1f6d4..f45e9eb82302d50a75250aa74f25ab9be9148b55 100644
+--- a/include/libtorrent/kademlia/dht_tracker.hpp
++++ b/include/libtorrent/kademlia/dht_tracker.hpp
+@@ -15,6 +15,7 @@ see LICENSE file.
+ #define TORRENT_DHT_TRACKER
+ 
+ #include <functional>
++#include <memory>
+ 
+ #include <libtorrent/kademlia/node.hpp>
+ #include <libtorrent/kademlia/dos_blocker.hpp>
+@@ -35,6 +36,7 @@ namespace libtorrent {
+ 	struct session_status;
+ #endif
+ namespace aux {
++	struct dht_message_parser;
+ 	struct session_settings;
+ }
+ }
+@@ -55,7 +57,8 @@ namespace libtorrent::dht {
+ 			, aux::session_settings const& settings
+ 			, counters& cnt
+ 			, dht_storage_interface& storage
+-			, dht_state&& state);
++			, dht_state&& state
++			, std::shared_ptr<aux::dht_message_parser> message_parser = nullptr);
+ 
+ 		// the dht_state must be moved in!
+ 		dht_tracker(dht_observer* observer
+@@ -64,7 +67,8 @@ namespace libtorrent::dht {
+ 			, aux::session_settings const& settings
+ 			, counters& cnt
+ 			, dht_storage_interface& storage
+-			, dht_state const& state) = delete;
++			, dht_state const& state
++			, std::shared_ptr<aux::dht_message_parser> message_parser = nullptr) = delete;
+ 
+ #if defined(_MSC_VER) && _MSC_VER < 1910
+ 		// workaround for a bug in msvc 14.0
+@@ -171,13 +175,9 @@ namespace libtorrent::dht {
+ 		bool has_quota() override;
+ 		bool send_packet(aux::listen_socket_handle const& s, entry& e, udp::endpoint const& addr) override;
+ 
+-		// this is the bdecode_node DHT messages are parsed into. It's a member
+-		// in order to avoid having to deallocate and re-allocate it for every
+-		// message.
+-		bdecode_node m_msg;
+-
+ 		counters& m_counters;
+ 		dht_storage_interface& m_storage;
++		std::shared_ptr<aux::dht_message_parser> m_message_parser;
+ 		dht_state m_state; // to be used only once
+ 		tracker_nodes_t m_nodes;
+ 		send_fun_t m_send_fun;
+diff --git a/include/libtorrent/kademlia/direct_request.hpp b/include/libtorrent/kademlia/direct_request.hpp
+index a6d1f63e50cb876388f7d962a53a39bfd2854394..1680b30b5c201ab24fa747fecb7975df2bd2eb93 100644
+--- a/include/libtorrent/kademlia/direct_request.hpp
++++ b/include/libtorrent/kademlia/direct_request.hpp
+@@ -63,8 +63,8 @@ struct direct_observer : observer
+ 	{
+ 		if (flags & flag_done) return;
+ 		flags |= flag_done;
+-		bdecode_node e;
+-		msg m(e, target_ep());
++		krpc_message message;
++		msg m(message, target_ep());
+ 		static_cast<direct_traversal*>(algorithm())->invoke_cb(m);
+ 	}
+ };
+diff --git a/include/libtorrent/kademlia/get_peers.hpp b/include/libtorrent/kademlia/get_peers.hpp
+index 9f29beca88dd6d7078712fd5a073f3265d01131b..e57d6cd597359990a098a7741f1dc820d9320dcd 100644
+--- a/include/libtorrent/kademlia/get_peers.hpp
++++ b/include/libtorrent/kademlia/get_peers.hpp
+@@ -72,7 +72,7 @@ struct get_peers_observer : find_data_observer
+ 	void reply(msg const&) override;
+ #ifndef TORRENT_DISABLE_LOGGING
+ private:
+-	void log_peers(msg const& m, bdecode_node const& r, int size) const;
++	void log_peers(msg const& m, int size) const;
+ #endif
+ };
+ 
+diff --git a/include/libtorrent/kademlia/krpc_message.hpp b/include/libtorrent/kademlia/krpc_message.hpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..506f88cef1cce81a36305a06a6f6d0557c0b4634
+--- /dev/null
++++ b/include/libtorrent/kademlia/krpc_message.hpp
+@@ -0,0 +1,86 @@
++/*
++
++Copyright (c) 2026, Torrent7 contributors
++All rights reserved.
++
++You may use, distribute and modify this code under the terms of the BSD license,
++see LICENSE file.
++*/
++
++#ifndef TORRENT_KADEMLIA_KRPC_MESSAGE_HPP
++#define TORRENT_KADEMLIA_KRPC_MESSAGE_HPP
++
++#include <cstdint>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "libtorrent/kademlia/node_id.hpp"
++#include "libtorrent/socket.hpp"
++
++namespace libtorrent::dht {
++
++	enum class krpc_message_kind : std::uint8_t
++	{
++		none = 0,
++		query = 1,
++		response = 2,
++		error = 3,
++	};
++
++	enum class krpc_query_kind : std::uint8_t
++	{
++		none = 0,
++		ping = 1,
++		find_node = 2,
++		get_peers = 3,
++		announce_peer = 4,
++		sample_infohashes = 5,
++		get_item = 6,
++		put_item = 7,
++		unknown = 255,
++	};
++
++	struct krpc_node
++	{
++		node_id id;
++		udp::endpoint endpoint;
++	};
++
++	// Fully owning typed syntax for one inbound KRPC datagram. Stateful routing,
++	// transaction, token, endpoint, and admission decisions remain in the DHT.
++	struct krpc_message
++	{
++		krpc_message_kind kind = krpc_message_kind::none;
++		krpc_query_kind query = krpc_query_kind::none;
++		bool query_valid = false;
++		std::string transaction_id;
++		std::string query_name;
++		std::optional<node_id> sender_id;
++		std::optional<sha1_hash> target;
++		std::optional<std::string> token;
++		std::string name;
++		std::optional<std::int32_t> error_code;
++		std::string error_message;
++		std::optional<address> external_address;
++		std::optional<std::uint16_t> port;
++		bool read_only = false;
++		bool noseed = false;
++		bool scrape = false;
++		bool seed = false;
++		bool implied_port = false;
++		bool wants_specified = false;
++		bool wants_ipv4 = false;
++		bool wants_ipv6 = false;
++		std::optional<std::int32_t> interval;
++		std::optional<std::int32_t> total_infohash_count;
++		std::vector<krpc_node> nodes;
++		bool peers_present = false;
++		std::vector<tcp::endpoint> peers;
++		bool samples_present = false;
++		std::vector<sha1_hash> samples;
++	};
++
++}
++
++#endif // TORRENT_KADEMLIA_KRPC_MESSAGE_HPP
+diff --git a/include/libtorrent/kademlia/msg.hpp b/include/libtorrent/kademlia/msg.hpp
+index b97bc3c7c741e0d88f76164ad4f0c487ca0cb9af..5f41ca9893216128d1ae78fcba87e8de1a84a17b 100644
+--- a/include/libtorrent/kademlia/msg.hpp
++++ b/include/libtorrent/kademlia/msg.hpp
+@@ -14,6 +14,7 @@ see LICENSE file.
+ 
+ #include "libtorrent/socket.hpp"
+ #include "libtorrent/span.hpp"
++#include "libtorrent/kademlia/krpc_message.hpp"
+ 
+ namespace libtorrent {
+ 
+@@ -23,13 +24,13 @@ namespace dht {
+ 
+ struct msg
+ {
+-	msg(bdecode_node const& m, udp::endpoint const& ep): message(m), addr(ep) {}
++	msg(krpc_message const& m, udp::endpoint const& ep): message(m), addr(ep) {}
+ 
+ 	// explicitly disallow assignment, to silence msvc warning
+ 	msg& operator=(msg const&) = delete;
+ 
+ 	// the message
+-	bdecode_node const& message;
++	krpc_message const& message;
+ 
+ 	// the address of the process sending or receiving
+ 	// the message.
+diff --git a/include/libtorrent/kademlia/node.hpp b/include/libtorrent/kademlia/node.hpp
+index 276a1fba5096bd878a2218eddf49ee7465575d79..a8b28c5c66945c141c1ec5e1dc7fad77be191dee 100644
+--- a/include/libtorrent/kademlia/node.hpp
++++ b/include/libtorrent/kademlia/node.hpp
+@@ -230,7 +230,7 @@ private:
+ 	void incoming_request(msg const&, entry&);
+ 
+ 	void write_nodes_entries(sha1_hash const& info_hash
+-		, bdecode_node const& want, entry& r);
++		, bool wants_specified, bool wants_ipv4, bool wants_ipv6, entry& r);
+ 
+ 	node_id m_id;
+ 
+diff --git a/include/libtorrent/kademlia/traversal_algorithm.hpp b/include/libtorrent/kademlia/traversal_algorithm.hpp
+index e47acfe96d81a72e8bdd1680c843f12c671b66d7..36dcf6cb499ca49a427384b27f9e8e47469f6004 100644
+--- a/include/libtorrent/kademlia/traversal_algorithm.hpp
++++ b/include/libtorrent/kademlia/traversal_algorithm.hpp
+@@ -24,7 +24,7 @@ see LICENSE file.
+ #include <libtorrent/kademlia/observer.hpp>
+ #include <libtorrent/address.hpp>
+ #include <libtorrent/flags.hpp>
+-#include <libtorrent/bdecode.hpp>
++#include <libtorrent/kademlia/krpc_message.hpp>
+ #include <libtorrent/aux_/invariant_check.hpp>
+ 
+ namespace libtorrent {
+@@ -151,8 +151,8 @@ private:
+ #endif
+ };
+ 
+-void look_for_nodes(char const* nodes_key, udp const& protocol
+-	, bdecode_node const& r, std::function<void(node_endpoint const&)> f);
++void look_for_nodes(udp const& protocol, krpc_message const& message
++	, std::function<void(node_endpoint const&)> f);
+ 
+ struct traversal_observer : observer
+ {
+diff --git a/include/libtorrent/session_params.hpp b/include/libtorrent/session_params.hpp
+index a5b2f04116d7514aed348b7b79810c3e2b2b8fff..25a37b77a4dc2ae4b08537d975f7acb4f0e2f2d9 100644
+--- a/include/libtorrent/session_params.hpp
++++ b/include/libtorrent/session_params.hpp
+@@ -38,6 +38,9 @@ TORRENT_VERSION_NAMESPACE_3_END
+ 
+ struct disk_interface;
+ struct counters;
++namespace aux {
++struct dht_message_parser;
++}
+ 
+ using disk_io_constructor_type = std::function<std::unique_ptr<disk_interface>(
+ 	io_context&, settings_interface const&, counters&)>;
+@@ -87,6 +90,10 @@ struct TORRENT_EXPORT session_params
+ 	// function object to construct the storage object for DHT items.
+ 	dht::dht_storage_constructor_type dht_storage_constructor;
+ 
++	// Required to accept inbound DHT packets. The embedding application parses
++	// each datagram into a narrow owning KRPC message before DHT state changes.
++	std::shared_ptr<aux::dht_message_parser> dht_message_parser;
++
+ 	// function object to create the disk I/O subsystem. Defaults to
+ 	// default_disk_io_constructor, which is implied by leaving the field default
+ 	// initialized. Built-in options are:
+diff --git a/src/kademlia/dht_tracker.cpp b/src/kademlia/dht_tracker.cpp
+index 8359ae20aaac97dd495bac79c9d5f50dde9b6dba..cbc8983a81609d6d2e85aac44a3cae813c4fe3ab 100644
+--- a/src/kademlia/dht_tracker.cpp
++++ b/src/kademlia/dht_tracker.cpp
+@@ -26,6 +26,7 @@ see LICENSE file.
+ #include <libtorrent/time.hpp>
+ #include <libtorrent/performance_counters.hpp> // for counters
+ #include <libtorrent/aux_/time.hpp>
++#include <libtorrent/aux_/dht_message_parser.hpp>
+ #include <libtorrent/session_status.hpp>
+ #include <libtorrent/aux_/ip_helpers.hpp> // for is_v6
+ #include <libtorrent/ip_filter.hpp>
+@@ -71,9 +72,11 @@ namespace libtorrent::dht {
+ 		, aux::session_settings const& settings
+ 		, counters& cnt
+ 		, dht_storage_interface& storage
+-		, dht_state&& state)
++		, dht_state&& state
++		, std::shared_ptr<aux::dht_message_parser> message_parser)
+ 		: m_counters(cnt)
+ 		, m_storage(storage)
++		, m_message_parser(std::move(message_parser))
+ 		, m_state(std::move(state))
+ 		, m_send_fun(std::move(send_fun))
+ 		, m_log(observer)
+@@ -536,10 +539,9 @@ namespace libtorrent::dht {
+ 
+ 		TORRENT_ASSERT(buf_size > 0);
+ 
+-		int pos;
+-		error_code err;
+-		int const ret = bdecode(buf.data(), buf.data() + buf_size, m_msg, err, &pos, 10, 500);
+-		if (ret != 0)
++		krpc_message message;
++		if (m_message_parser == nullptr
++			|| !m_message_parser->parse_message(buf, aux::is_v6(ep), message))
+ 		{
+ 			m_counters.inc_stats_counter(counters::dht_messages_in_dropped);
+ #ifndef TORRENT_DISABLE_LOGGING
+@@ -548,21 +550,11 @@ namespace libtorrent::dht {
+ 			return false;
+ 		}
+ 
+-		if (m_msg.type() != bdecode_node::dict_t)
+-		{
+-			m_counters.inc_stats_counter(counters::dht_messages_in_dropped);
+-#ifndef TORRENT_DISABLE_LOGGING
+-			m_log->log_packet(dht_logger::incoming_message, buf, ep);
+-#endif
+-			// it's not a good idea to send a response to an invalid messages
+-			return false;
+-		}
+-
+ #ifndef TORRENT_DISABLE_LOGGING
+ 		m_log->log_packet(dht_logger::incoming_message, buf, ep);
+ #endif
+ 
+-		libtorrent::dht::msg const m(m_msg, ep);
++		libtorrent::dht::msg const m(message, ep);
+ 		for (auto& n : m_nodes)
+ 			n.second.dht.incoming(s, m);
+ 		return true;
+diff --git a/src/kademlia/find_data.cpp b/src/kademlia/find_data.cpp
+index e69eae5847bf47b7001d941c7f4872a34a87b298..4b8ab4ae6cbb9ffd047f9783633ad44af1b4ad84 100644
+--- a/src/kademlia/find_data.cpp
++++ b/src/kademlia/find_data.cpp
+@@ -26,19 +26,7 @@ namespace libtorrent::dht {
+ 
+ void find_data_observer::reply(msg const& m)
+ {
+-	bdecode_node const r = m.message.dict_find_dict("r");
+-	if (!r)
+-	{
+-#ifndef TORRENT_DISABLE_LOGGING
+-		get_observer()->log(dht_logger::traversal, "[%u] missing response dict"
+-			, algorithm()->id());
+-#endif
+-		timeout();
+-		return;
+-	}
+-
+-	bdecode_node const id = r.dict_find_string("id");
+-	if (!id || id.string_length() != 20)
++	if (!m.message.sender_id)
+ 	{
+ #ifndef TORRENT_DISABLE_LOGGING
+ 		get_observer()->log(dht_logger::traversal, "[%u] invalid id in response"
+@@ -47,11 +35,10 @@ void find_data_observer::reply(msg const& m)
+ 		timeout();
+ 		return;
+ 	}
+-	bdecode_node const token = r.dict_find_string("token");
+-	if (token)
++	if (m.message.token)
+ 	{
+ 		static_cast<find_data*>(algorithm())->got_write_token(
+-			node_id(id.string_ptr()), std::string(token.string_value()));
++			*m.message.sender_id, *m.message.token);
+ 	}
+ 
+ 	traversal_observer::reply(m);
+diff --git a/src/kademlia/get_item.cpp b/src/kademlia/get_item.cpp
+index 93cef2ddabe33cd23d5de39d0d76f0bcc7f40fb0..e915bfcf08f5a94079a3a7dd82b6f5323c5df2d6 100644
+--- a/src/kademlia/get_item.cpp
++++ b/src/kademlia/get_item.cpp
+@@ -153,46 +153,8 @@ void get_item::done()
+ 
+ void get_item_observer::reply(msg const& m)
+ {
+-	public_key pk{};
+-	signature sig{};
+-	sequence_number seq{0};
+-
+-	bdecode_node const r = m.message.dict_find_dict("r");
+-	if (!r)
+-	{
+-#ifndef TORRENT_DISABLE_LOGGING
+-		get_observer()->log(dht_logger::traversal, "[%p] missing response dict"
+-			, static_cast<void*>(algorithm()));
+-#endif
+-		timeout();
+-		return;
+-	}
+-
+-	bdecode_node const k = r.dict_find_string("k");
+-	if (k && k.string_length() == public_key::len)
+-		std::memcpy(pk.bytes.data(), k.string_ptr(), public_key::len);
+-
+-	bdecode_node const s = r.dict_find_string("sig");
+-	if (s && s.string_length() == signature::len)
+-		std::memcpy(sig.bytes.data(), s.string_ptr(), signature::len);
+-
+-	bdecode_node const q = r.dict_find_int("seq");
+-	if (q)
+-	{
+-		seq = sequence_number(q.int_value());
+-	}
+-	else if (k && s)
+-	{
+-		timeout();
+-		return;
+-	}
+-
+-	bdecode_node v = r.dict_find("v");
+-	if (v)
+-	{
+-		static_cast<get_item*>(algorithm())->got_data(v, pk, seq, sig);
+-	}
+-
++	// Torrent7's typed DHT dialect intentionally excludes arbitrary BEP 44
++	// values. Keep the public traversal safe and empty if invoked indirectly.
+ 	find_data_observer::reply(m);
+ }
+ 
+diff --git a/src/kademlia/get_peers.cpp b/src/kademlia/get_peers.cpp
+index 36521b4761460a599a44f680b724cea94549f760..83a4975eb7f08406217cc4b1b661b492086eb788 100644
+--- a/src/kademlia/get_peers.cpp
++++ b/src/kademlia/get_peers.cpp
+@@ -30,56 +30,24 @@ namespace libtorrent::dht {
+ 
+ void get_peers_observer::reply(msg const& m)
+ {
+-	bdecode_node const r = m.message.dict_find_dict("r");
+-	if (!r)
+-	{
+-#ifndef TORRENT_DISABLE_LOGGING
+-		get_observer()->log(dht_logger::traversal, "[%u] missing response dict"
+-			, algorithm()->id());
+-#endif
+-		timeout();
+-		return;
+-	}
+-
+ 	// look for peers
+-	bdecode_node const n = r.dict_find_list("values");
+-	if (n)
++	if (m.message.peers_present)
+ 	{
+-		std::vector<tcp::endpoint> peer_list;
+-		if (n.list_size() == 1 && n.list_at(0).type() == bdecode_node::string_t
+-			&& aux::is_v4(m.addr))
+-		{
+-			// assume it's mainline format
+-			char const* peers = n.list_at(0).string_ptr();
+-			char const* end = peers + n.list_at(0).string_length();
+-
+ #ifndef TORRENT_DISABLE_LOGGING
+-			log_peers(m, r, int((end - peers) / 6));
++		log_peers(m, int(m.message.peers.size()));
+ #endif
+-			while (end - peers >= 6)
+-				peer_list.push_back(aux::read_v4_endpoint<tcp::endpoint>(peers));
+-		}
+-		else
+-		{
+-			// assume it's uTorrent/libtorrent format
+-			peer_list = aux::read_endpoint_list<tcp::endpoint>(n);
+-#ifndef TORRENT_DISABLE_LOGGING
+-			log_peers(m, r, n.list_size());
+-#endif
+-		}
+-		static_cast<get_peers*>(algorithm())->got_peers(peer_list);
++		static_cast<get_peers*>(algorithm())->got_peers(m.message.peers);
+ 	}
+ 
+ 	find_data_observer::reply(m);
+ }
+ #ifndef TORRENT_DISABLE_LOGGING
+-void get_peers_observer::log_peers(msg const& m, bdecode_node const& r, int const size) const
++void get_peers_observer::log_peers(msg const& m, int const size) const
+ {
+ 			auto* logger = get_observer();
+ 			if (logger != nullptr && logger->should_log(dht_logger::traversal))
+ 			{
+-				bdecode_node const id = r.dict_find_string("id");
+-				if (id && id.string_length() == 20)
++				if (m.message.sender_id)
+ 				{
+ 					logger->log(dht_logger::traversal, "[%u] PEERS "
+ 						"invoke-count: %d branch-factor: %d addr: %s id: %s distance: %d p: %d"
+@@ -87,8 +55,8 @@ void get_peers_observer::log_peers(msg const& m, bdecode_node const& r, int cons
+ 						, algorithm()->invoke_count()
+ 						, algorithm()->branch_factor()
+ 						, aux::print_endpoint(m.addr).c_str()
+-						, aux::to_hex({id.string_ptr(), id.string_length()}).c_str()
+-						, distance_exp(algorithm()->target(), node_id(id.string_ptr()))
++						, aux::to_hex({m.message.sender_id->data(), 20}).c_str()
++						, distance_exp(algorithm()->target(), *m.message.sender_id)
+ 						, size);
+ 				}
+ 			}
+@@ -270,19 +238,7 @@ void obfuscated_get_peers::done()
+ 
+ void obfuscated_get_peers_observer::reply(msg const& m)
+ {
+-	bdecode_node const r = m.message.dict_find_dict("r");
+-	if (!r)
+-	{
+-#ifndef TORRENT_DISABLE_LOGGING
+-		get_observer()->log(dht_logger::traversal, "[%u] missing response dict"
+-			, algorithm()->id());
+-#endif
+-		timeout();
+-		return;
+-	}
+-
+-	bdecode_node const id = r.dict_find_string("id");
+-	if (!id || id.string_length() != 20)
++	if (!m.message.sender_id)
+ 	{
+ #ifndef TORRENT_DISABLE_LOGGING
+ 		get_observer()->log(dht_logger::traversal, "[%u] invalid id in response"
+diff --git a/src/kademlia/node.cpp b/src/kademlia/node.cpp
+index c760478a6d64b55209e2cd557bf0289eddcb2c11..eb1d726701df62e78a2882d771b4507afca1445e 100644
+--- a/src/kademlia/node.cpp
++++ b/src/kademlia/node.cpp
+@@ -248,54 +248,30 @@ void node::unreachable(udp::endpoint const& ep)
+ 
+ void node::incoming(aux::listen_socket_handle const& s, msg const& m)
+ {
+-	// is this a reply?
+-	bdecode_node const y_ent = m.message.dict_find_string("y");
+-	if (!y_ent || y_ent.string_length() != 1)
++	if (m.message.kind == krpc_message_kind::none)
+ 	{
+-		// don't respond to this obviously broken messages. We don't
+-		// want to open up a magnification opportunity
+-//		entry e;
+-//		incoming_error(e, "missing 'y' entry");
+-//		m_sock.send_packet(e, m.addr);
+ 		return;
+ 	}
+ 
+-	char const y = *(y_ent.string_ptr());
+-
+ 	// we can only ascribe the external IP this node is saying we have to the
+ 	// listen socket the packet was received on
+-	if (s == m_sock)
++	if (s == m_sock && m.message.external_address)
+ 	{
+-		bdecode_node ext_ip = m.message.dict_find_string("ip");
+-
+-		if (ext_ip && ext_ip.string_length() >= int(aux::address_size(udp::v6())))
+-		{
+-			// this node claims we use the wrong node-ID!
+-			char const* ptr = ext_ip.string_ptr();
+-			if (m_observer != nullptr)
+-				m_observer->set_external_address(m_sock, aux::read_v6_address(ptr)
+-					, m.addr.address());
+-		}
+-		else if (ext_ip && ext_ip.string_length() >= int(aux::address_size(udp::v4())))
+-		{
+-			char const* ptr = ext_ip.string_ptr();
+-			if (m_observer != nullptr)
+-				m_observer->set_external_address(m_sock, aux::read_v4_address(ptr)
+-					, m.addr.address());
+-		}
++		if (m_observer != nullptr)
++			m_observer->set_external_address(m_sock, *m.message.external_address
++				, m.addr.address());
+ 	}
+ 
+-	switch (y)
++	switch (m.message.kind)
+ 	{
+-		case 'r':
++		case krpc_message_kind::response:
+ 		{
+ 			node_id id;
+ 			m_rpc.incoming(m, &id);
+ 			break;
+ 		}
+-		case 'q':
++		case krpc_message_kind::query:
+ 		{
+-			TORRENT_ASSERT(m.message.dict_find_string_value("y") == "q");
+ 			// When a DHT node enters the read-only state, it no longer
+ 			// responds to 'query' messages that it receives.
+ 			if (m_settings.get_bool(settings_pack::dht_read_only)) break;
+@@ -315,19 +291,16 @@ void node::incoming(aux::listen_socket_handle const& s, msg const& m)
+ 			m_sock_man->send_packet(m_sock, e, m.addr);
+ 			break;
+ 		}
+-		case 'e':
++		case krpc_message_kind::error:
+ 		{
+ #ifndef TORRENT_DISABLE_LOGGING
+ 			if (m_observer != nullptr && m_observer->should_log(dht_logger::node))
+ 			{
+-				bdecode_node const err = m.message.dict_find_list("e");
+-				if (err && err.list_size() >= 2
+-					&& err.list_at(0).type() == bdecode_node::int_t
+-					&& err.list_at(1).type() == bdecode_node::string_t)
++				if (m.message.error_code)
+ 				{
+ 					m_observer->log(dht_logger::node, "INCOMING ERROR: (%" PRId64 ") %s"
+-						, err.list_int_value_at(0)
+-						, std::string(err.list_string_value_at(1)).c_str());
++						, std::int64_t(*m.message.error_code)
++						, m.message.error_message.c_str());
+ 				}
+ 				else
+ 				{
+@@ -339,6 +312,8 @@ void node::incoming(aux::listen_socket_handle const& s, msg const& m)
+ 			m_rpc.incoming(m, &id);
+ 			break;
+ 		}
++		case krpc_message_kind::none:
++			break;
+ 	}
+ }
+ 
+@@ -626,20 +601,7 @@ struct ping_observer : observer
+ 	{
+ 		flags |= flag_done;
+ 
+-		bdecode_node const r = m.message.dict_find_dict("r");
+-		if (!r)
+-		{
+-#ifndef TORRENT_DISABLE_LOGGING
+-			if (get_observer())
+-			{
+-				get_observer()->log(dht_logger::node
+-					, "[%p] missing response dict"
+-					, static_cast<void*>(algorithm()));
+-			}
+-#endif
+-			return;
+-		}
+-		look_for_nodes(algorithm()->get_node().protocol_nodes_key(), algorithm()->get_node().protocol(), r,
++		look_for_nodes(algorithm()->get_node().protocol(), m.message,
+ 			[this](node_endpoint const& nep) { algorithm()->get_node().m_table.heard_about(nep.id, nep.ep); });
+ 	}
+ };
+@@ -796,28 +758,43 @@ void node::incoming_request(msg const& m, entry& e)
+ {
+ 	e = entry(entry::dictionary_t);
+ 	e["y"] = "r";
+-	e["t"] = m.message.dict_find_string_value("t");
+-
+-	static key_desc_t const top_desc[] = {
+-		{"q", bdecode_node::string_t, 0, 0},
+-		{"ro", bdecode_node::int_t, 0, key_desc_t::optional},
+-		{"a", bdecode_node::dict_t, 0, key_desc_t::parse_children},
+-			{"id", bdecode_node::string_t, 20, key_desc_t::last_child},
+-	};
+-
+-	bdecode_node top_level[4];
+-	char error_string[200];
+-	if (!verify_message(m.message, top_desc, top_level, error_string))
++	e["t"] = m.message.transaction_id;
++
++	if (!m.message.query_valid || !m.message.sender_id)
+ 	{
+-		incoming_error(e, error_string);
++		switch (m.message.query)
++		{
++			case krpc_query_kind::get_peers:
++				m_counters.inc_stats_counter(counters::dht_invalid_get_peers);
++				break;
++			case krpc_query_kind::find_node:
++				m_counters.inc_stats_counter(counters::dht_invalid_find_node);
++				break;
++			case krpc_query_kind::announce_peer:
++				m_counters.inc_stats_counter(counters::dht_invalid_announce);
++				break;
++			case krpc_query_kind::sample_infohashes:
++				m_counters.inc_stats_counter(counters::dht_invalid_sample_infohashes);
++				break;
++			case krpc_query_kind::get_item:
++				m_counters.inc_stats_counter(counters::dht_invalid_get);
++				break;
++			case krpc_query_kind::put_item:
++				m_counters.inc_stats_counter(counters::dht_invalid_put);
++				break;
++			case krpc_query_kind::none:
++			case krpc_query_kind::ping:
++			case krpc_query_kind::unknown:
++				break;
++		}
++		incoming_error(e, "invalid query");
+ 		return;
+ 	}
+ 
+ 	e["ip"] = aux::endpoint_to_bytes(m.addr);
+ 
+-	bdecode_node const arg_ent = top_level[2];
+-	bool const read_only = top_level[1] && top_level[1].int_value() != 0;
+-	node_id const id(top_level[3].string_ptr());
++	bool const read_only = m.message.read_only;
++	node_id const id = *m.message.sender_id;
+ 
+ 	// if this nodes ID doesn't match its IP, tell it what
+ 	// its IP is with an error
+@@ -837,47 +814,28 @@ void node::incoming_request(msg const& m, entry& e)
+ 	// mirror back the other node's external port
+ 	reply["p"] = m.addr.port();
+ 
+-	string_view const query = top_level[0].string_value();
+-
+-	if (m_observer && m_observer->on_dht_request(query, m, e))
+-		return;
+-
+-	if (query == "ping")
++	if (m.message.query == krpc_query_kind::ping)
+ 	{
+ 		m_counters.inc_stats_counter(counters::dht_ping_in);
+ 		// we already have 't' and 'id' in the response
+ 		// no more left to add
+ 	}
+-	else if (query == "get_peers")
++	else if (m.message.query == krpc_query_kind::get_peers)
+ 	{
+-		static key_desc_t const msg_desc[] = {
+-			{"info_hash", bdecode_node::string_t, 20, 0},
+-			{"noseed", bdecode_node::int_t, 0, key_desc_t::optional},
+-			{"scrape", bdecode_node::int_t, 0, key_desc_t::optional},
+-			{"want", bdecode_node::list_t, 0, key_desc_t::optional},
+-		};
+-
+-		bdecode_node msg_keys[4];
+-		if (!verify_message(arg_ent, msg_desc, msg_keys, error_string))
+-		{
+-			m_counters.inc_stats_counter(counters::dht_invalid_get_peers);
+-			incoming_error(e, error_string);
+-			return;
+-		}
+-
+-		sha1_hash const info_hash(msg_keys[0].string_ptr());
++		TORRENT_ASSERT(m.message.target);
++		sha1_hash const info_hash = *m.message.target;
+ 
+ 		m_counters.inc_stats_counter(counters::dht_get_peers_in);
+ 
+ 		// always return nodes as well as peers
+-		write_nodes_entries(info_hash, msg_keys[3], reply);
++		write_nodes_entries(info_hash, m.message.wants_specified
++			, m.message.wants_ipv4, m.message.wants_ipv6, reply);
+ 
+-		bool const noseed = msg_keys[1] && msg_keys[1].int_value() != 0;
+-		bool const scrape = msg_keys[2] && msg_keys[2].int_value() != 0;
+ 		// If our storage is full we want to withhold the write token so that
+ 		// announces will spill over to our neighbors. This widens the
+ 		// perimeter of nodes which store peers for this torrent
+-		bool const full = lookup_peers(info_hash, reply, noseed, scrape, m.addr.address());
++		bool const full = lookup_peers(info_hash, reply, m.message.noseed
++			, m.message.scrape, m.addr.address());
+ 		if (!full) reply["token"] = generate_token(m.addr, info_hash);
+ 
+ #ifndef TORRENT_DISABLE_LOGGING
+@@ -888,66 +846,31 @@ void node::incoming_request(msg const& m, entry& e)
+ 		}
+ #endif
+ 	}
+-	else if (query == "find_node")
++	else if (m.message.query == krpc_query_kind::find_node)
+ 	{
+-		static key_desc_t const msg_desc[] = {
+-			{"target", bdecode_node::string_t, 20, 0},
+-			{"want", bdecode_node::list_t, 0, key_desc_t::optional},
+-		};
+-
+-		bdecode_node msg_keys[2];
+-		if (!verify_message(arg_ent, msg_desc, msg_keys, error_string))
+-		{
+-			m_counters.inc_stats_counter(counters::dht_invalid_find_node);
+-			incoming_error(e, error_string);
+-			return;
+-		}
+-
++		TORRENT_ASSERT(m.message.target);
+ 		m_counters.inc_stats_counter(counters::dht_find_node_in);
+-		sha1_hash const target(msg_keys[0].string_ptr());
+-
+-		write_nodes_entries(target, msg_keys[1], reply);
++		write_nodes_entries(*m.message.target, m.message.wants_specified
++			, m.message.wants_ipv4, m.message.wants_ipv6, reply);
+ 	}
+-	else if (query == "announce_peer")
++	else if (m.message.query == krpc_query_kind::announce_peer)
+ 	{
+-		static key_desc_t const msg_desc[] = {
+-			{"info_hash", bdecode_node::string_t, 20, 0},
+-			{"port", bdecode_node::int_t, 0, 0},
+-			{"token", bdecode_node::string_t, 0, 0},
+-			{"n", bdecode_node::string_t, 0, key_desc_t::optional},
+-			{"seed", bdecode_node::int_t, 0, key_desc_t::optional},
+-			{"implied_port", bdecode_node::int_t, 0, key_desc_t::optional},
+-		};
+-
+-		bdecode_node msg_keys[6];
+-		if (!verify_message(arg_ent, msg_desc, msg_keys, error_string))
+-		{
+-			m_counters.inc_stats_counter(counters::dht_invalid_announce);
+-			incoming_error(e, error_string);
+-			return;
+-		}
+-
+-		auto port = int(msg_keys[1].int_value());
++		TORRENT_ASSERT(m.message.target);
++		TORRENT_ASSERT(m.message.port);
++		auto port = int(*m.message.port);
+ 
+ 		// is the announcer asking to ignore the explicit
+ 		// listen port and instead use the source port of the packet?
+-		if (msg_keys[5] && msg_keys[5].int_value() != 0)
++		if (m.message.implied_port)
+ 			port = m.addr.port();
+ 
+-		if (port < 0 || port >= 65536)
+-		{
+-			m_counters.inc_stats_counter(counters::dht_invalid_announce);
+-			incoming_error(e, "invalid port");
+-			return;
+-		}
+-
+-		sha1_hash const info_hash(msg_keys[0].string_ptr());
++		sha1_hash const info_hash = *m.message.target;
+ 
+ 		if (m_observer)
+ 			m_observer->announce(info_hash, m.addr.address(), port);
+ 
+-		if (!verify_token(msg_keys[2].string_value()
+-			, sha1_hash(msg_keys[0].string_ptr()), m.addr))
++		TORRENT_ASSERT(m.message.token);
++		if (!verify_token(*m.message.token, info_hash, m.addr))
+ 		{
+ 			m_counters.inc_stats_counter(counters::dht_invalid_announce);
+ 			incoming_error(e, "invalid token");
+@@ -962,270 +885,67 @@ void node::incoming_request(msg const& m, entry& e)
+ 		m_table.node_seen(id, m.addr, 0xffff);
+ 
+ 		tcp::endpoint const addr = tcp::endpoint(m.addr.address(), std::uint16_t(port));
+-		string_view const name = msg_keys[3] ? msg_keys[3].string_value() : string_view();
+-		bool const seed = msg_keys[4] && msg_keys[4].int_value();
+-
+-		m_storage.announce_peer(info_hash, addr, name, seed);
++		m_storage.announce_peer(info_hash, addr, m.message.name, m.message.seed);
+ 	}
+-	else if (query == "put")
++	else if (m.message.query == krpc_query_kind::put_item
++		|| m.message.query == krpc_query_kind::get_item)
+ 	{
+-		// the first 2 entries are for both mutable and
+-		// immutable puts
+-		static key_desc_t const msg_desc[] = {
+-			{"token", bdecode_node::string_t, 0, 0},
+-			{"v", bdecode_node::none_t, 0, 0},
+-			{"seq", bdecode_node::int_t, 0, key_desc_t::optional},
+-			// public key
+-			{"k", bdecode_node::string_t, public_key::len, key_desc_t::optional},
+-			{"sig", bdecode_node::string_t, signature::len, key_desc_t::optional},
+-			{"cas", bdecode_node::int_t, 0, key_desc_t::optional},
+-			{"salt", bdecode_node::string_t, 0, key_desc_t::optional},
+-		};
+-
+-		// attempt to parse the message
+-		// also reject the message if it has any non-fatal encoding errors
+-		// because put messages contain a signed value they must have correct bencoding
+-		// otherwise the value will not round-trip without breaking the signature
+-		bdecode_node msg_keys[7];
+-		if (!verify_message(arg_ent, msg_desc, msg_keys, error_string)
+-			|| arg_ent.has_soft_error(error_string))
+-		{
+-			m_counters.inc_stats_counter(counters::dht_invalid_put);
+-			incoming_error(e, error_string);
+-			return;
+-		}
+-
+-		m_counters.inc_stats_counter(counters::dht_put_in);
+-
+-		// is this a mutable put?
+-		bool const mutable_put = (msg_keys[2] && msg_keys[3] && msg_keys[4]);
+-
+-		// public key (only set if it's a mutable put)
+-		char const* pub_key = nullptr;
+-		if (msg_keys[3]) pub_key = msg_keys[3].string_ptr();
+-
+-		// signature (only set if it's a mutable put)
+-		char const* sign = nullptr;
+-		if (msg_keys[4]) sign = msg_keys[4].string_ptr();
+-
+-		// pointer and length to the whole entry
+-		span<char const> buf = msg_keys[1].data_section();
+-		if (buf.size() > 1000 || buf.empty())
+-		{
+-			m_counters.inc_stats_counter(counters::dht_invalid_put);
+-			incoming_error(e, "message too big", 205);
+-			return;
+-		}
+-
+-		span<char const> salt;
+-		if (msg_keys[6])
+-			salt = {msg_keys[6].string_ptr(), msg_keys[6].string_length()};
+-		if (salt.size() > 64)
+-		{
++		// Torrent7 uses DHT for peer discovery only. Reject BEP 44 item
++		// storage rather than importing an arbitrary generic bencoded value.
++		if (m.message.query == krpc_query_kind::put_item)
+ 			m_counters.inc_stats_counter(counters::dht_invalid_put);
+-			incoming_error(e, "salt too big", 207);
+-			return;
+-		}
+-
+-		sha1_hash const target = pub_key
+-			? item_target_id(salt, public_key(pub_key))
+-			: item_target_id(buf);
+-
+-//		std::fprintf(stderr, "%s PUT target: %s salt: %s key: %s\n"
+-//			, mutable_put ? "mutable":"immutable"
+-//			, aux::to_hex(target).c_str()
+-//			, salt.second > 0 ? std::string(salt.first, salt.second).c_str() : ""
+-//			, pk ? aux::to_hex(pk).c_str() : "");
+-
+-		// verify the write-token. tokens are only valid to write to
+-		// specific target hashes. it must match the one we got a "get" for
+-		if (!verify_token(msg_keys[0].string_value(), target, m.addr))
+-		{
+-			m_counters.inc_stats_counter(counters::dht_invalid_put);
+-			incoming_error(e, "invalid token");
+-			return;
+-		}
+-
+-		if (!mutable_put)
+-		{
+-			m_storage.put_immutable_item(target, buf, m.addr.address());
+-		}
+ 		else
+-		{
+-			// mutable put, we must verify the signature
+-			sequence_number const seq(msg_keys[2].int_value());
+-			public_key const pk(pub_key);
+-			signature const sig(sign);
+-
+-			if (seq < sequence_number(0))
+-			{
+-				m_counters.inc_stats_counter(counters::dht_invalid_put);
+-				incoming_error(e, "invalid (negative) sequence number");
+-				return;
+-			}
+-
+-			// msg_keys[4] is the signature, msg_keys[3] is the public key
+-			if (!verify_mutable_item(buf, salt, seq, pk, sig))
+-			{
+-				m_counters.inc_stats_counter(counters::dht_invalid_put);
+-				incoming_error(e, "invalid signature", 206);
+-				return;
+-			}
+-
+-			TORRENT_ASSERT(signature::len == msg_keys[4].string_length());
+-
+-			sequence_number item_seq;
+-			if (!m_storage.get_mutable_item_seq(target, item_seq))
+-			{
+-				m_storage.put_mutable_item(target, buf, sig, seq, pk, salt
+-					, m.addr.address());
+-			}
+-			else
+-			{
+-				// this is the "cas" field in the put message
+-				// if it was specified, we MUST make sure the current sequence
+-				// number matches the expected value before replacing it
+-				// this is critical for avoiding race conditions when multiple
+-				// writers are accessing the same slot
+-				if (msg_keys[5] && item_seq.value != msg_keys[5].int_value())
+-				{
+-					m_counters.inc_stats_counter(counters::dht_invalid_put);
+-					incoming_error(e, "CAS mismatch", 301);
+-					return;
+-				}
+-
+-				if (item_seq > seq)
+-				{
+-					m_counters.inc_stats_counter(counters::dht_invalid_put);
+-					incoming_error(e, "old sequence number", 302);
+-					return;
+-				}
+-
+-				m_storage.put_mutable_item(target, buf, sig, seq, pk, salt
+-					, m.addr.address());
+-			}
+-		}
+-
+-		m_table.node_seen(id, m.addr, 0xffff);
+-	}
+-	else if (query == "get")
+-	{
+-		static key_desc_t const msg_desc[] = {
+-			{"seq", bdecode_node::int_t, 0, key_desc_t::optional},
+-			{"target", bdecode_node::string_t, 20, 0},
+-			{"want", bdecode_node::list_t, 0, key_desc_t::optional},
+-		};
+-
+-		// k is not used for now
+-
+-		// attempt to parse the message
+-		bdecode_node msg_keys[3];
+-		if (!verify_message(arg_ent, msg_desc, msg_keys, error_string))
+-		{
+ 			m_counters.inc_stats_counter(counters::dht_invalid_get);
+-			incoming_error(e, error_string);
+-			return;
+-		}
+-
+-		m_counters.inc_stats_counter(counters::dht_get_in);
+-		sha1_hash const target(msg_keys[1].string_ptr());
+-
+-//		std::fprintf(stderr, "%s GET target: %s\n"
+-//			, msg_keys[1] ? "mutable":"immutable"
+-//			, aux::to_hex(target).c_str());
+-
+-		reply["token"] = generate_token(m.addr, target);
+-
+-		// always return nodes as well as peers
+-		write_nodes_entries(target, msg_keys[2], reply);
+-
+-		// if the get has a sequence number it must be for a mutable item
+-		// so don't bother searching the immutable table
+-		if (!msg_keys[0])
+-		{
+-			if (!m_storage.get_immutable_item(target, reply)) // ok, check for a mutable one
+-			{
+-				m_storage.get_mutable_item(target, sequence_number(0)
+-					, true, reply);
+-			}
+-		}
+-		else
+-		{
+-			m_storage.get_mutable_item(target
+-				, sequence_number(msg_keys[0].int_value()), false
+-				, reply);
+-		}
++		incoming_error(e, "DHT item storage is unsupported");
+ 	}
+-	else if (query == "sample_infohashes")
++	else if (m.message.query == krpc_query_kind::sample_infohashes)
+ 	{
+-		static key_desc_t const msg_desc[] = {
+-			{"target", bdecode_node::string_t, 20, 0},
+-			{"want", bdecode_node::list_t, 0, key_desc_t::optional},
+-		};
+-
+-		bdecode_node msg_keys[2];
+-		if (!verify_message(arg_ent, msg_desc, msg_keys, error_string))
+-		{
+-			m_counters.inc_stats_counter(counters::dht_invalid_sample_infohashes);
+-			incoming_error(e, error_string);
+-			return;
+-		}
+-
++		TORRENT_ASSERT(m.message.target);
+ 		m_counters.inc_stats_counter(counters::dht_sample_infohashes_in);
+-		sha1_hash const target(msg_keys[0].string_ptr());
+ 
+ 		// TODO: keep the returned value to pass as a limit
+ 		// to write_nodes_entries when implemented
+ 		m_storage.get_infohashes_sample(reply);
+ 
+-		write_nodes_entries(target, msg_keys[1], reply);
++		write_nodes_entries(*m.message.target, m.message.wants_specified
++			, m.message.wants_ipv4, m.message.wants_ipv6, reply);
+ 	}
+ 	else
+ 	{
+ 		// if we don't recognize the message but there's a
+ 		// 'target' or 'info_hash' in the arguments, treat it
+ 		// as find_node to be future compatible
+-		bdecode_node target_ent = arg_ent.dict_find_string("target");
+-		if (!target_ent || target_ent.string_length() != 20)
++		if (!m.message.target)
+ 		{
+-			target_ent = arg_ent.dict_find_string("info_hash");
+-			if (!target_ent || target_ent.string_length() != 20)
+-			{
+-				incoming_error(e, "unknown message");
+-				return;
+-			}
++			incoming_error(e, "unknown message");
++			return;
+ 		}
+ 
+-		sha1_hash const target(target_ent.string_ptr());
+ 		// always return nodes as well as peers
+-		write_nodes_entries(target, arg_ent.dict_find_list("want"), reply);
++		write_nodes_entries(*m.message.target, m.message.wants_specified
++			, m.message.wants_ipv4, m.message.wants_ipv6, reply);
+ 	}
+ }
+ 
+ // TODO: limit number of entries in the result
+ void node::write_nodes_entries(sha1_hash const& info_hash
+-	, bdecode_node const& want, entry& r)
++	, bool const wants_specified, bool const wants_ipv4, bool const wants_ipv6, entry& r)
+ {
+ 	// if no wants entry was specified, include a nodes
+ 	// entry based on the protocol the request came in with
+-	if (want.type() != bdecode_node::list_t)
++	if (!wants_specified)
+ 	{
+ 		std::vector<node_entry> const n = m_table.find_node(info_hash, {});
+ 		r[protocol_nodes_key()] = write_nodes_entry(n);
+ 		return;
+ 	}
+ 
+-	// if there is a wants entry then we may need to reach into
+-	// another node's routing table to get nodes of the requested type
+-	// we use a map maintained by the owning dht_tracker to find the
+-	// node associated with each string in the want list, which may
+-	// include this node
+-	for (int i = 0; i < want.list_size(); ++i)
++	for (auto const [wanted, requested] : {
++		std::pair<string_view, bool>{"n4", wants_ipv4},
++		std::pair<string_view, bool>{"n6", wants_ipv6}})
+ 	{
+-		bdecode_node wanted = want.list_at(i);
+-		if (wanted.type() != bdecode_node::string_t)
+-			continue;
+-		node* wanted_node = m_get_foreign_node(info_hash, wanted.string_value());
++		if (!requested) continue;
++		node* wanted_node = m_get_foreign_node(info_hash, wanted);
+ 		if (!wanted_node) continue;
+ 		std::vector<node_entry> const n = wanted_node->m_table.find_node(info_hash, {});
+ 		r[wanted_node->protocol_nodes_key()] = write_nodes_entry(n);
+diff --git a/src/kademlia/rpc_manager.cpp b/src/kademlia/rpc_manager.cpp
+index 869d266369d6767160341241303ed05dca1e79d8..4bab1e2033b7aa2f660e60ace99c8b3bca7d7718 100644
+--- a/src/kademlia/rpc_manager.cpp
++++ b/src/kademlia/rpc_manager.cpp
+@@ -227,13 +227,13 @@ bool rpc_manager::incoming(msg const& m, node_id* id)
+ 	if (m_destructing) return false;
+ 
+ 	// we only deal with replies and errors, not queries
+-	TORRENT_ASSERT(m.message.dict_find_string_value("y") == "r"
+-		|| m.message.dict_find_string_value("y") == "e");
++	TORRENT_ASSERT(m.message.kind == krpc_message_kind::response
++		|| m.message.kind == krpc_message_kind::error);
+ 
+ 	// if we don't have the transaction id in our
+ 	// request list, ignore the packet
+ 
+-	auto const transaction_id = m.message.dict_find_string_value("t");
++	auto const& transaction_id = m.message.transaction_id;
+ 	if (transaction_id.empty()) return false;
+ 
+ 	auto const* ptr = transaction_id.data();
+@@ -280,22 +280,19 @@ bool rpc_manager::incoming(msg const& m, node_id* id)
+ 	}
+ #endif
+ 
+-	if (m.message.dict_find_string_value("y") == "e")
++	if (m.message.kind == krpc_message_kind::error)
+ 	{
+ 		// It's an error.
+ #ifndef TORRENT_DISABLE_LOGGING
+ 		if (m_log->should_log(dht_logger::rpc_manager))
+ 		{
+-			bdecode_node err = m.message.dict_find_list("e");
+-			if (err && err.list_size() >= 2
+-				&& err.list_at(0).type() == bdecode_node::int_t
+-				&& err.list_at(1).type() == bdecode_node::string_t)
++			if (m.message.error_code)
+ 			{
+ 				m_log->log(dht_logger::rpc_manager, "[%u] reply with error from %s: (%" PRId64 ") %s"
+ 					, o->algorithm()->id()
+ 					, aux::print_endpoint(m.addr).c_str()
+-					, err.list_int_value_at(0)
+-					, std::string(err.list_string_value_at(1)).c_str());
++					, std::int64_t(*m.message.error_code)
++					, m.message.error_message.c_str());
+ 			}
+ 			else
+ 			{
+@@ -317,21 +314,13 @@ bool rpc_manager::incoming(msg const& m, node_id* id)
+ 		return false;
+ 	}
+ 
+-	bdecode_node const ret_ent = m.message.dict_find_dict("r");
+-	if (!ret_ent)
++	if (!m.message.sender_id)
+ 	{
+ 		o->timeout();
+ 		return false;
+ 	}
+ 
+-	bdecode_node const node_id_ent = ret_ent.dict_find_string("id");
+-	if (!node_id_ent || node_id_ent.string_length() != 20)
+-	{
+-		o->timeout();
+-		return false;
+-	}
+-
+-	node_id const nid = node_id(node_id_ent.string_ptr());
++	node_id const nid = *m.message.sender_id;
+ 	if (m_settings.get_bool(settings_pack::dht_enforce_node_id) && !verify_id(nid, m.addr.address()))
+ 	{
+ 		o->timeout();
+diff --git a/src/kademlia/sample_infohashes.cpp b/src/kademlia/sample_infohashes.cpp
+index dce848f4a51b8686a18ce6034d0afbe9b5b3e9ba..e34f379bf3a2986132edeaa73a5bc383d3462d1d 100644
+--- a/src/kademlia/sample_infohashes.cpp
++++ b/src/kademlia/sample_infohashes.cpp
+@@ -48,38 +48,17 @@ sample_infohashes_observer::sample_infohashes_observer(
+ 
+ void sample_infohashes_observer::reply(msg const& m)
+ {
+-	bdecode_node r = m.message.dict_find_dict("r");
+-	if (!r)
+-	{
+-#ifndef TORRENT_DISABLE_LOGGING
+-		get_observer()->log(dht_logger::traversal, "[%u] missing response dict"
+-			, algorithm()->id());
+-#endif
+-		timeout();
+-		return;
+-	}
+-
+ 	// look for nodes
+ 	std::vector<std::pair<sha1_hash, udp::endpoint>> nodes;
+ 	udp const protocol = algorithm()->get_node().protocol();
+-	int const protocol_size = int(aux::address_size(protocol));
+-	char const* nodes_key = algorithm()->get_node().protocol_nodes_key();
+-	bdecode_node const n = r.dict_find_string(nodes_key);
+-	if (n)
++	for (krpc_node const& node : m.message.nodes)
+ 	{
+-		char const* ptr = n.string_ptr();
+-		char const* end = ptr + n.string_length();
+-
+-		while (end - ptr >= 20 + protocol_size + 2)
+-		{
+-			node_endpoint nep = read_node_endpoint(protocol, ptr);
+-			if (!algorithm()->filtered(nep.ep))
+-				nodes.emplace_back(nep.id, nep.ep);
+-		}
++		if (node.endpoint.protocol() != protocol) continue;
++		if (!algorithm()->filtered(node.endpoint))
++			nodes.emplace_back(node.id, node.endpoint);
+ 	}
+ 
+-	bdecode_node const id = r.dict_find_string("id");
+-	if (!id || id.string_length() != 20)
++	if (!m.message.sender_id)
+ 	{
+ #ifndef TORRENT_DISABLE_LOGGING
+ 		get_observer()->log(dht_logger::traversal, "[%u] wrong or missing id value"
+@@ -89,8 +68,8 @@ void sample_infohashes_observer::reply(msg const& m)
+ 		return;
+ 	}
+ 
+-	std::int64_t const interval = r.dict_find_int_value("interval", -1);
+-	if (interval < 0 || interval > 21600) // TODO: put constant in a common place
++	if (!m.message.interval || *m.message.interval < 0
++		|| *m.message.interval > 21600) // TODO: put constant in a common place
+ 	{
+ #ifndef TORRENT_DISABLE_LOGGING
+ 		get_observer()->log(dht_logger::traversal, "[%u] wrong or missing interval value"
+@@ -100,8 +79,7 @@ void sample_infohashes_observer::reply(msg const& m)
+ 		return;
+ 	}
+ 
+-	std::int64_t const num = r.dict_find_int_value("num", -1);
+-	if (num < 0 || num > std::numeric_limits<int>::max())
++	if (!m.message.total_infohash_count || *m.message.total_infohash_count < 0)
+ 	{
+ #ifndef TORRENT_DISABLE_LOGGING
+ 		get_observer()->log(dht_logger::traversal, "[%u] wrong or missing num value"
+@@ -111,14 +89,11 @@ void sample_infohashes_observer::reply(msg const& m)
+ 		return;
+ 	}
+ 
+-	bdecode_node samples = r.dict_find_string("samples");
+-	if (samples && (samples.string_length() % 20 == 0))
++	if (m.message.samples_present)
+ 	{
+-		std::vector<sha1_hash> v(aux::numeric_cast<std::size_t>(samples.string_length() / 20));
+-		std::memcpy(v.data(), samples.string_ptr(), v.size() * 20);
+-
+ 		static_cast<sample_infohashes*>(algorithm())->got_samples(
+-			node_id(id.string_ptr()), seconds(interval), int(num), std::move(v), std::move(nodes));
++			*m.message.sender_id, seconds(*m.message.interval)
++			, int(*m.message.total_infohash_count), m.message.samples, std::move(nodes));
+ 	}
+ 	else
+ 	{
+diff --git a/src/kademlia/traversal_algorithm.cpp b/src/kademlia/traversal_algorithm.cpp
+index 28bbeba28b82d905edb2ec4ea34e4213eb56b34a..9d7d5aac092065ff5272a59242b8b970dbcc6057 100644
+--- a/src/kademlia/traversal_algorithm.cpp
++++ b/src/kademlia/traversal_algorithm.cpp
+@@ -681,47 +681,25 @@ void traversal_algorithm::check_invariant() const
+ }
+ #endif
+ 
+-void look_for_nodes(char const* nodes_key, udp const& protocol, bdecode_node const& r, std::function<void(const node_endpoint&)> f)
++void look_for_nodes(udp const& protocol, krpc_message const& message
++	, std::function<void(node_endpoint const&)> f)
+ {
+-	bdecode_node const n = r.dict_find_string(nodes_key);
+-	if (n)
++	for (krpc_node const& node : message.nodes)
+ 	{
+-		char const* nodes = n.string_ptr();
+-		char const* end = nodes + n.string_length();
+-		int const protocol_size = int(aux::address_size(protocol));
+-
+-		while (end - nodes >= 20 + protocol_size + 2)
+-		{
+-			f(read_node_endpoint(protocol, nodes));
+-		}
++		if (node.endpoint.protocol() != protocol) continue;
++		f(node_endpoint{node.id, node.endpoint});
+ 	}
+ }
+ 
+ void traversal_observer::reply(msg const& m)
+ {
+-	bdecode_node const r = m.message.dict_find_dict("r");
+-	if (!r)
+-	{
+-		timeout();
+-#ifndef TORRENT_DISABLE_LOGGING
+-		if (get_observer() != nullptr)
+-		{
+-			get_observer()->log(dht_logger::traversal
+-				, "[%u] missing response dict"
+-				, algorithm()->id());
+-		}
+-#endif
+-		return;
+-	}
+-
+-	bdecode_node const id = r.dict_find_string("id");
+-
+ #ifndef TORRENT_DISABLE_LOGGING
+ 	dht_observer* logger = get_observer();
+-	if (logger != nullptr && logger->should_log(dht_logger::traversal))
++	if (m.message.sender_id && logger != nullptr
++		&& logger->should_log(dht_logger::traversal))
+ 	{
+ 		char hex_id[41];
+-		aux::to_hex({id.string_ptr(), 20}, hex_id);
++		aux::to_hex({m.message.sender_id->data(), 20}, hex_id);
+ 		logger->log(dht_logger::traversal
+ 			, "[%u] RESPONSE id: %s invoke-count: %d addr: %s type: %s"
+ 			, algorithm()->id(), hex_id, algorithm()->invoke_count()
+@@ -729,10 +707,10 @@ void traversal_observer::reply(msg const& m)
+ 	}
+ #endif
+ 
+-	look_for_nodes(algorithm()->get_node().protocol_nodes_key(), algorithm()->get_node().protocol(), r,
++	look_for_nodes(algorithm()->get_node().protocol(), m.message,
+ 		[this](node_endpoint const& nep) { algorithm()->traverse(nep.id, nep.ep); });
+ 
+-	if (!id || id.string_length() != 20)
++	if (!m.message.sender_id)
+ 	{
+ 		timeout();
+ #ifndef TORRENT_DISABLE_LOGGING
+@@ -747,7 +725,7 @@ void traversal_observer::reply(msg const& m)
+ 
+ 	// in case we didn't know the id of this peer when we sent the message to
+ 	// it. For instance if it's a bootstrap node.
+-	set_id(node_id(id.string_ptr()));
++	set_id(*m.message.sender_id);
+ }
+ 
+ } // namespace libtorrent::dht
+diff --git a/src/session.cpp b/src/session.cpp
+index 837ea360d0ce3978ade6753fd1057733da907622..9fc770ef73b2af66337ed733772f10861a55dead 100644
+--- a/src/session.cpp
++++ b/src/session.cpp
+@@ -278,6 +278,7 @@ namespace {
+ 
+ 		TORRENT_ASSERT(params.dht_storage_constructor);
+ 		m_impl->set_dht_storage(std::move(params.dht_storage_constructor));
++		m_impl->set_dht_message_parser(std::move(params.dht_message_parser));
+ #endif
+ 
+ 		if (!params.ip_filter.empty())
+diff --git a/src/session_impl.cpp b/src/session_impl.cpp
+index f197bcc6d3dfe5183a760888c4353ecb4c0fee40..c0d5ee092fa688265123427918b54432ac58d1dc 100644
+--- a/src/session_impl.cpp
++++ b/src/session_impl.cpp
+@@ -6285,7 +6285,8 @@ retry:
+ 			, m_settings
+ 			, m_stats_counters
+ 			, *m_dht_storage
+-			, std::move(m_dht_state));
++			, std::move(m_dht_state)
++			, m_dht_message_parser);
+ 
+ 		for (auto& s : m_listen_sockets)
+ 		{
+@@ -6420,6 +6421,11 @@ retry:
+ 		m_dht_storage_constructor = std::move(sc);
+ 	}
+ 
++	void session_impl::set_dht_message_parser(std::shared_ptr<dht_message_parser> parser)
++	{
++		m_dht_message_parser = std::move(parser);
++	}
++
+ #if TORRENT_ABI_VERSION == 1
+ 	entry session_impl::dht_state() const
+ 	{
+@@ -6587,10 +6593,9 @@ retry:
+ 
+ 		void on_direct_response(aux::alert_manager& alerts, client_data_t userdata, dht::msg const& msg)
+ 		{
+-			if (msg.message.type() == bdecode_node::none_t)
+-				alerts.emplace_alert<dht_direct_response_alert>(userdata, msg.addr);
+-			else
+-				alerts.emplace_alert<dht_direct_response_alert>(userdata, msg.addr, msg.message);
++			// Torrent7 does not expose generic DHT requests. Typed KRPC responses
++			// deliberately cannot be reconstituted as an arbitrary bdecode tree.
++			alerts.emplace_alert<dht_direct_response_alert>(userdata, msg.addr);
+ 		}
+ 
+ 	} // anonymous namespace
+@@ -7484,18 +7489,11 @@ retry:
+ 	bool session_impl::on_dht_request(string_view query
+ 		, dht::msg const& request, entry& response)
+ 	{
+-#ifndef TORRENT_DISABLE_EXTENSIONS
+-		for (auto const& ext : m_ses_extensions[plugins_dht_request_idx])
+-		{
+-			if (ext->on_dht_request(query
+-				, request.addr, request.message, response))
+-				return true;
+-		}
+-#else
++		// Torrent7 installs no generic DHT request extensions. Keeping this hook
++		// inert prevents typed, bounded input from re-entering a generic parser.
+ 		TORRENT_UNUSED(query);
+ 		TORRENT_UNUSED(request);
+ 		TORRENT_UNUSED(response);
+-#endif
+ 		return false;
+ 	}
+ 
+diff --git a/test/test_dht.cpp b/test/test_dht.cpp
+index 809cd18eb82209fc58bbabfd697d57c09eab252a..ad919aab8fb3e3608c37237590cedd968d5a1ae4 100644
+--- a/test/test_dht.cpp
++++ b/test/test_dht.cpp
+@@ -23,6 +23,7 @@ see LICENSE file.
+ #include "libtorrent/bencode.hpp"
+ #include "libtorrent/bdecode.hpp"
+ #include "libtorrent/aux_/socket_io.hpp" // for hash_address
++#include "libtorrent/aux_/dht_message_parser.hpp"
+ #include "libtorrent/aux_/ip_helpers.hpp"
+ #include "libtorrent/performance_counters.hpp" // for counters
+ #include "libtorrent/aux_/random.hpp"
+@@ -40,9 +41,12 @@ see LICENSE file.
+ #include "libtorrent/kademlia/dht_observer.hpp"
+ #include "libtorrent/kademlia/dht_tracker.hpp"
+ #include "libtorrent/kademlia/get_peers.hpp"
++#include "libtorrent/kademlia/io.hpp"
+ 
+ #include <numeric>
+ #include <cstdarg>
++#include <limits>
++#include <memory>
+ #include <tuple>
+ #include <iostream>
+ #include <iomanip>
+@@ -148,6 +152,330 @@ sha1_hash generate_next()
+ 	return ret;
+ }
+ 
++// The application supplies the production DHT parser. These helpers keep the
++// upstream DHT unit tests self-contained without restoring a native parser to
++// the production packet path.
++krpc_query_kind test_query_kind(string_view const name)
++{
++	if (name == "ping") return krpc_query_kind::ping;
++	if (name == "find_node") return krpc_query_kind::find_node;
++	if (name == "get_peers") return krpc_query_kind::get_peers;
++	if (name == "announce_peer") return krpc_query_kind::announce_peer;
++	if (name == "sample_infohashes") return krpc_query_kind::sample_infohashes;
++	if (name == "get") return krpc_query_kind::get_item;
++	if (name == "put") return krpc_query_kind::put_item;
++	return krpc_query_kind::unknown;
++}
++
++std::optional<sha1_hash> test_hash(bdecode_node const& dict, string_view const key)
++{
++	bdecode_node const value = dict.dict_find_string(key);
++	if (!value || value.string_length() != 20) return std::nullopt;
++	return sha1_hash(value.string_ptr());
++}
++
++bool test_optional_flag(bdecode_node const& dict, string_view const key, bool& result)
++{
++	bdecode_node const value = dict.dict_find(key);
++	if (!value) return true;
++	if (value.type() != bdecode_node::int_t) return false;
++	result = value.int_value() != 0;
++	return true;
++}
++
++bool test_parse_want(bdecode_node const& arguments, krpc_message& message)
++{
++	bdecode_node const want = arguments.dict_find("want");
++	if (!want) return true;
++	message.wants_specified = true;
++	if (want.type() != bdecode_node::list_t) return false;
++	for (int i = 0; i < want.list_size(); ++i)
++	{
++		bdecode_node const item = want.list_at(i);
++		if (item.type() != bdecode_node::string_t) continue;
++		if (item.string_value() == "n4") message.wants_ipv4 = true;
++		else if (item.string_value() == "n6") message.wants_ipv6 = true;
++	}
++	return true;
++}
++
++bool test_append_nodes(bdecode_node const& response, string_view const key
++	, udp const protocol, krpc_message& message)
++{
++	bdecode_node const encoded = response.dict_find_string(key);
++	if (!encoded) return true;
++	char const* cursor = encoded.string_ptr();
++	char const* const end = cursor + encoded.string_length();
++	std::ptrdiff_t const stride = protocol == udp::v4() ? 26 : 38;
++	while (end - cursor >= stride)
++	{
++		if (message.nodes.size() == 64) return false;
++		node_endpoint const endpoint = read_node_endpoint(protocol, cursor);
++		message.nodes.push_back({endpoint.id, endpoint.ep});
++	}
++	return true;
++}
++
++bool test_append_peer(string_view const encoded, krpc_message& message)
++{
++	if (message.peers.size() == 256) return false;
++	char const* cursor = encoded.data();
++	if (encoded.size() == 6)
++		message.peers.push_back(aux::read_v4_endpoint<tcp::endpoint>(cursor));
++	else if (encoded.size() == 18)
++		message.peers.push_back(aux::read_v6_endpoint<tcp::endpoint>(cursor));
++	return true;
++}
++
++bool test_parse_peers(bdecode_node const& response, bool const source_is_ipv6
++	, krpc_message& message)
++{
++	bdecode_node const values = response.dict_find("values");
++	if (!values || values.type() != bdecode_node::list_t) return true;
++	message.peers_present = true;
++
++	if (!source_is_ipv6 && values.list_size() == 1)
++	{
++		bdecode_node const aggregate = values.list_at(0);
++		if (aggregate.type() != bdecode_node::string_t) return true;
++		string_view encoded = aggregate.string_value();
++		while (encoded.size() >= 6)
++		{
++			if (!test_append_peer(encoded.substr(0, 6), message)) return false;
++			encoded.remove_prefix(6);
++		}
++		return true;
++	}
++
++	for (int i = 0; i < values.list_size(); ++i)
++	{
++		bdecode_node const item = values.list_at(i);
++		if (item.type() != bdecode_node::string_t)
++		{
++			message.peers.clear();
++			return true;
++		}
++		if (!test_append_peer(item.string_value(), message)) return false;
++	}
++	return true;
++}
++
++bool test_parse_query(bdecode_node const& root, krpc_message& message)
++{
++	bdecode_node const query = root.dict_find_string("q");
++	if (!query || query.string_length() == 0 || query.string_length() > 32)
++		return true;
++	message.query_name.assign(query.string_ptr(), std::size_t(query.string_length()));
++	message.query = test_query_kind(query.string_value());
++
++	bdecode_node const arguments = root.dict_find_dict("a");
++	if (!arguments) return true;
++	message.sender_id = test_hash(arguments, "id");
++	bool valid = message.sender_id.has_value()
++		&& test_optional_flag(root, "ro", message.read_only);
++
++	auto const target = [&]
++	{
++		message.target = test_hash(arguments, "target");
++		return message.target.has_value();
++	};
++	auto const info_hash = [&]
++	{
++		message.target = test_hash(arguments, "info_hash");
++		return message.target.has_value();
++	};
++
++	switch (message.query)
++	{
++		case krpc_query_kind::ping:
++		case krpc_query_kind::get_item:
++		case krpc_query_kind::put_item:
++			break;
++		case krpc_query_kind::find_node:
++		case krpc_query_kind::sample_infohashes:
++			valid = target() && valid;
++			valid = test_parse_want(arguments, message) && valid;
++			break;
++		case krpc_query_kind::get_peers:
++			valid = info_hash() && valid;
++			valid = test_optional_flag(arguments, "noseed", message.noseed) && valid;
++			valid = test_optional_flag(arguments, "scrape", message.scrape) && valid;
++			valid = test_parse_want(arguments, message) && valid;
++			break;
++		case krpc_query_kind::announce_peer:
++		{
++			valid = info_hash() && valid;
++			bdecode_node const port = arguments.dict_find_int("port");
++			if (port && port.int_value() >= 0 && port.int_value() <= 65535)
++				message.port = std::uint16_t(port.int_value());
++			else
++				valid = false;
++			bdecode_node const token = arguments.dict_find_string("token");
++			if (token && token.string_length() <= 64)
++				message.token = std::string(token.string_value());
++			else
++				valid = false;
++			bdecode_node const name = arguments.dict_find("n");
++			if (name)
++			{
++				if (name.type() != bdecode_node::string_t || name.string_length() > 255
++					|| name.string_value().find('\0') != string_view::npos)
++					valid = false;
++				else
++					message.name.assign(name.string_ptr(), std::size_t(name.string_length()));
++			}
++			valid = test_optional_flag(arguments, "seed", message.seed) && valid;
++			valid = test_optional_flag(arguments, "implied_port", message.implied_port) && valid;
++			break;
++		}
++		case krpc_query_kind::unknown:
++			message.target = test_hash(arguments, "target");
++			if (!message.target) message.target = test_hash(arguments, "info_hash");
++			valid = message.target.has_value() && valid;
++			valid = test_parse_want(arguments, message) && valid;
++			break;
++		case krpc_query_kind::none:
++			valid = false;
++			break;
++	}
++	message.query_valid = valid;
++	return true;
++}
++
++bool test_parse_response(bdecode_node const& root, bool const source_is_ipv6
++	, krpc_message& message)
++{
++	bdecode_node const response = root.dict_find_dict("r");
++	if (!response) return true;
++	message.sender_id = test_hash(response, "id");
++	bdecode_node const token = response.dict_find_string("token");
++	if (token && token.string_length() <= 64)
++		message.token = std::string(token.string_value());
++	if (!test_append_nodes(response, "nodes", udp::v4(), message)
++		|| !test_append_nodes(response, "nodes6", udp::v6(), message)
++		|| !test_parse_peers(response, source_is_ipv6, message))
++		return false;
++
++	auto const nonnegative_int32 = [&response](string_view const key)
++		-> std::optional<std::int32_t>
++	{
++		bdecode_node const value = response.dict_find_int(key);
++		if (!value || value.int_value() < 0
++			|| value.int_value() > std::numeric_limits<std::int32_t>::max())
++			return std::nullopt;
++		return std::int32_t(value.int_value());
++	};
++	message.interval = nonnegative_int32("interval");
++	message.total_infohash_count = nonnegative_int32("num");
++
++	bdecode_node const samples = response.dict_find_string("samples");
++	if (samples && samples.string_length() % 20 == 0
++		&& samples.string_length() / 20 <= 64)
++	{
++		message.samples_present = true;
++		char const* cursor = samples.string_ptr();
++		for (int i = 0; i < samples.string_length() / 20; ++i, cursor += 20)
++			message.samples.emplace_back(cursor);
++	}
++	return true;
++}
++
++bool test_parse_error(bdecode_node const& root, krpc_message& message)
++{
++	bdecode_node const error = root.dict_find_list("e");
++	if (!error || error.list_size() < 2) return true;
++	bdecode_node const code = error.list_at(0);
++	bdecode_node const text = error.list_at(1);
++	if (code.type() != bdecode_node::int_t
++		|| code.int_value() < std::numeric_limits<std::int32_t>::min()
++		|| code.int_value() > std::numeric_limits<std::int32_t>::max()
++		|| text.type() != bdecode_node::string_t || text.string_length() > 256
++		|| text.string_value().find('\0') != string_view::npos)
++		return true;
++	message.error_code = std::int32_t(code.int_value());
++	message.error_message.assign(text.string_ptr(), std::size_t(text.string_length()));
++	return true;
++}
++
++bool test_parse_krpc_message(bdecode_node const& root, bool const source_is_ipv6
++	, krpc_message& result)
++{
++	if (root.type() != bdecode_node::dict_t) return false;
++	bdecode_node const type = root.dict_find_string("y");
++	if (!type || type.string_length() != 1) return false;
++
++	krpc_message message;
++	if (bdecode_node const transaction = root.dict_find_string("t")
++		; transaction && transaction.string_length() <= 64)
++		message.transaction_id.assign(transaction.string_ptr()
++			, std::size_t(transaction.string_length()));
++	if (bdecode_node const ip = root.dict_find_string("ip"))
++	{
++		char const* cursor = ip.string_ptr();
++		if (ip.string_length() == 6)
++			message.external_address = aux::read_v4_endpoint<udp::endpoint>(cursor).address();
++		else if (ip.string_length() == 18)
++			message.external_address = aux::read_v6_endpoint<udp::endpoint>(cursor).address();
++	}
++
++	switch (type.string_ptr()[0])
++	{
++		case 'q':
++			message.kind = krpc_message_kind::query;
++			if (!test_parse_query(root, message)) return false;
++			break;
++		case 'r':
++			message.kind = krpc_message_kind::response;
++			message.query_valid = true;
++			if (!test_parse_response(root, source_is_ipv6, message)) return false;
++			break;
++		case 'e':
++			message.kind = krpc_message_kind::error;
++			message.query_valid = true;
++			if (!test_parse_error(root, message)) return false;
++			break;
++		default:
++			return false;
++	}
++	result = std::move(message);
++	return true;
++}
++
++krpc_message test_krpc_message(bdecode_node const& root, bool const source_is_ipv6)
++{
++	krpc_message result;
++	TEST_CHECK(test_parse_krpc_message(root, source_is_ipv6, result));
++	return result;
++}
++
++struct test_dht_message_parser final : aux::dht_message_parser
++{
++	bool parse_message(span<char const> const body, bool const source_is_ipv6
++		, krpc_message& result) noexcept override
++	{
++		try
++		{
++			if (body.empty() || body.size() > maximum_message_size) return false;
++			bdecode_node root;
++			error_code error;
++			int position = 0;
++			if (bdecode(body.data(), body.data() + body.size(), root, error
++					, &position, 10, 500) != 0 || error)
++				return false;
++			return test_parse_krpc_message(root, source_is_ipv6, result);
++		}
++		catch (...)
++		{
++			return false;
++		}
++	}
++};
++
++std::shared_ptr<aux::dht_message_parser> test_dht_parser()
++{
++	return std::make_shared<test_dht_message_parser>();
++}
++
+ std::list<std::pair<udp::endpoint, entry>>::iterator
+ find_packet(udp::endpoint ep)
+ {
+@@ -177,7 +505,8 @@ bool incoming_rpc_message(
+ 	TEST_CHECK(!ec);
+ 	if (ec) return false;
+ 
+-	dht::msg m(decoded, source);
++	auto const message = test_krpc_message(decoded, source.address().is_v6());
++	dht::msg m(message, source);
+ 	return rpc.incoming(m, id);
+ }
+ 
+@@ -290,7 +619,8 @@ void send_dht_request(node& node, char const* msg, udp::endpoint const& ep
+ 	bdecode(msg_buf, msg_buf + size, decoded, ec);
+ 	if (ec) std::printf("bdecode failed: %s\n", ec.message().c_str());
+ 
+-	dht::msg m(decoded, ep);
++	auto const message = test_krpc_message(decoded, ep.address().is_v6());
++	dht::msg m(message, ep);
+ 	node.incoming(node.m_sock, m);
+ 
+ 	// If the request is supposed to get a response, by now the node should have
+@@ -336,7 +666,8 @@ void send_dht_response(node& node, bdecode_node const& request, udp::endpoint co
+ 	bdecode(msg_buf, msg_buf + size, decoded, ec);
+ 	if (ec) std::printf("bdecode failed: %s\n", ec.message().c_str());
+ 
+-	dht::msg m(decoded, ep);
++	auto const message = test_krpc_message(decoded, ep.address().is_v6());
++	dht::msg m(message, ep);
+ 	node.incoming(node.m_sock, m);
+ }
+ 
+@@ -2807,7 +3138,8 @@ TORRENT_TEST(multi_home)
+ 	bdecode(msg_buf, msg_buf + size, decoded, ec);
+ 	if (ec) std::printf("bdecode failed: %s\n", ec.message().c_str());
+ 
+-	dht::msg m(decoded, t.source);
++	auto const message = test_krpc_message(decoded, t.source.address().is_v6());
++	dht::msg m(message, t.source);
+ 	t.dht_node.incoming(dummy_listen_socket(udp::endpoint(rand_v4(), 21)), m);
+ 	TEST_CHECK(g_sent_packets.empty());
+ 	g_sent_packets.clear();
+@@ -3389,7 +3721,8 @@ TORRENT_TEST(invalid_error_msg)
+ 	bdecode(msg_buf, msg_buf + size, decoded, ec);
+ 	if (ec) std::printf("bdecode failed: %s\n", ec.message().c_str());
+ 
+-	dht::msg m(decoded, source);
++	auto const message = test_krpc_message(decoded, source.address().is_v6());
++	dht::msg m(message, source);
+ 	node.incoming(node.m_sock, m);
+ 
+ 	bool found = false;
+@@ -3669,7 +4002,8 @@ TORRENT_TEST(dht_tracker_ip_filter)
+ 											 error_code&,
+ 											 aux::udp_send_flags_t) { sent = true; };
+ 
+-	dht_tracker dht(&observer, ios, send, sett, cnt, *dht_storage, std::move(state));
++	dht_tracker dht(&observer, ios, send, sett, cnt, *dht_storage
++		, std::move(state), test_dht_parser());
+ 	auto ls = dummy_listen_socket(udp::endpoint(addr("10.0.0.1"), 6881));
+ 	aux::listen_socket_handle const handle(ls);
+ 	dht.new_socket(handle);
+@@ -3693,6 +4027,41 @@ TORRENT_TEST(dht_tracker_ip_filter)
+ 	TEST_EQUAL(sent, true);
+ }
+ 
++TORRENT_TEST(dht_parser_is_required)
++{
++	io_context ios;
++	obs observer;
++	aux::session_settings const sett = test_settings();
++	counters cnt;
++	auto dht_storage = dht_default_storage_constructor(sett);
++	dht_state state;
++	bool sent = false;
++	dht_tracker::send_fun_t const send = [&sent](aux::listen_socket_handle const&,
++		udp::endpoint const&, span<char const>, error_code&,
++		aux::udp_send_flags_t) { sent = true; };
++
++	// Deliberately omit the application parser. A syntactically valid packet
++	// must be dropped rather than reaching a legacy native bdecode fallback.
++	dht_tracker dht(&observer, ios, send, sett, cnt, *dht_storage, std::move(state));
++	auto ls = dummy_listen_socket(udp::endpoint(addr("10.0.0.1"), 6881));
++	aux::listen_socket_handle const handle(ls);
++	dht.new_socket(handle);
++
++	entry packet;
++	packet["y"] = "q";
++	packet["q"] = "ping";
++	packet["t"] = "aa";
++	packet["a"]["id"] = std::string(20, 'a');
++	std::vector<char> encoded;
++	bencode(std::back_inserter(encoded), packet);
++
++	std::int64_t const dropped_before = cnt[counters::dht_messages_in_dropped];
++	TEST_EQUAL(dht.incoming_packet(handle, udp::endpoint(addr("4.4.4.5"), 4)
++		, {encoded.data(), int(encoded.size())}), false);
++	TEST_EQUAL(cnt[counters::dht_messages_in_dropped], dropped_before + 1);
++	TEST_EQUAL(sent, false);
++}
++
+ TORRENT_TEST(dht_global_address_policy)
+ {
+ 	// Incoming DHT UDP packets are rejected before parsing or dispatch.
+@@ -3708,7 +4077,8 @@ TORRENT_TEST(dht_global_address_policy)
+ 		dht_tracker::send_fun_t const send = [&sent](aux::listen_socket_handle const&,
+ 			udp::endpoint const&, span<char const>, error_code&,
+ 			aux::udp_send_flags_t) { sent = true; };
+-		dht_tracker dht(&observer, ios, send, sett, cnt, *dht_storage, std::move(state));
++		dht_tracker dht(&observer, ios, send, sett, cnt, *dht_storage
++			, std::move(state), test_dht_parser());
+ 		auto ls = dummy_listen_socket(udp::endpoint(addr("10.0.0.1"), 6881));
+ 		aux::listen_socket_handle const handle(ls);
+ 		dht.new_socket(handle);
+@@ -4412,7 +4782,8 @@ void test_rate_limit(aux::session_settings const& sett, std::function<void(lt::d
+ 
+ 	lt::dht::dht_tracker::send_fun_t send;
+ 
+-	dht_tracker dht(&observer, ios, send, sett, cnt, *dht_storage, std::move(s));
++	dht_tracker dht(&observer, ios, send, sett, cnt, *dht_storage
++		, std::move(s), test_dht_parser());
+ 	f(dht);
+ }
+ }

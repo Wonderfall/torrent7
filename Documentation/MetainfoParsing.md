@@ -101,6 +101,34 @@ libtorrent because they are fixed binary records parsed from bounded,
 length-checked spans and do not expose the same generic bencode surface.
 WebTorrent and I2P are disabled in the product build.
 
+## Accepted DHT KRPC dialect
+
+- One complete canonical bencoded dictionary is accepted per UDP datagram, up
+  to 1,500 bytes, nesting depth 10, 500 values, 128 containers, and bounded key
+  and integer syntax. Transaction IDs and binary hashes remain bytes.
+- Query envelopes recognize `ping`, `find_node`, `get_peers`, `announce_peer`,
+  and `sample_infohashes`. Unknown queries are future-compatible only when they
+  carry a fixed 20-byte target. `want`, read-only, scrape, seed, and announce
+  controls are returned as typed fields for native policy and state handling.
+- BEP 44 `get` and `put` are identified, but their arbitrary values are not
+  decoded. Torrent7 uses DHT only for peer discovery and returns an explicit
+  unsupported-method error for those queries.
+- Responses may contain at most 64 compact nodes, 256 peers, and 64 sample
+  hashes. Both IPv4 and IPv6 compact records are decoded. The Mainline
+  single-string aggregate IPv4 peer form is interpreted only for an IPv4
+  source, matching the pinned libtorrent behavior.
+- Error messages and announced names must be bounded valid UTF-8 without NUL.
+  Missing or malformed query-specific fields retain the typed query identity so
+  libtorrent can issue a protocol error; a malformed envelope is dropped.
+
+The Swift callback is synchronous and stateless. Libtorrent retains UDP
+transport, global-address and IP-filter admission, routing tables, transaction
+matching, token verification, rate limits, and all outgoing bencoding. C++
+revalidates and copies the fixed callback result before dispatch. If the parser
+is absent or rejects a datagram, the packet is dropped; no production native
+bdecode fallback exists. Generic request plugins, direct-response payloads, and
+BEP 44 item APIs are not exposed through Torrent7's bridge.
+
 ## Native interoperability
 
 Swift parsers emit narrow types such as `ParsedMagnet`, `ValidatedInfoCore`,
@@ -144,8 +172,18 @@ commits it only after the full import succeeds. Swift retains no pointer and
 transfers no allocation. The context and all callback roles have separate
 arm64e pointer-authentication discriminators.
 
+DHT messages use a still narrower synchronous boundary. Libtorrent supplies one
+borrowed datagram and its source address family. Swift fills a fixed result and
+caller-owned arrays of at most 64 nodes and 256 peers; sample hashes remain one
+checked range of at most 64 fixed-width values. C++ rederives the query kind,
+validates every optional-field combination and record, copies all retained
+bytes, and commits only a complete owning `krpc_message`. Swift retains no
+pointer and transfers no allocation. The context and all callback roles have
+separate arm64e pointer-authentication discriminators.
+
 The incoming BEP 10 handshake, BEP 9 control dictionary, BEP 11 compact-peer
-dictionary, and final HTTP tracker body have no native bdecode fallback.
+dictionary, final HTTP tracker body, and inbound DHT KRPC datagram have no
+native bdecode fallback.
 Libtorrent still owns connection state, additive update semantics, metadata
 hash verification and assembly, message-rate rules, peer filtering, tracker
 transport, and admission. Its bencoding of outgoing self-generated messages is

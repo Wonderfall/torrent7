@@ -12,6 +12,10 @@ Scripts/verify-xcode.zsh
 
 ## Targets
 
+- `dht_message_parser` selects an IPv4 or IPv6 source context and feeds one
+  arbitrary datagram to the production Swift KRPC parser. It checks exact
+  body-relative ranges, typed query/response/error shapes, compact nodes and
+  peers, sample hashes, determinism, and the 1,500-byte work envelope.
 - `http_tracker_response_parser` selects announce or scrape mode and feeds
   arbitrary final decompressed bodies to the production Swift parser. It
   checks determinism, exact body-relative ranges, typed address/peer shapes,
@@ -36,10 +40,10 @@ Scripts/verify-xcode.zsh
   deterministic parsing, advertised hash enforcement, canonical file indices,
   safe paths, and independently reproduced source digests.
 
-The HTTP tracker, magnet, peer-protocol, claim, and manifest targets depend on
-the same `TorrentMetainfo` and `TorrentStorageAuthority` modules used by the
-app. SwiftPM links those production modules into a fuzz-only dynamic library;
-no fuzz hook or conditional is linked into the app.
+The DHT, HTTP tracker, magnet, peer-protocol, claim, and manifest targets
+depend on the same `TorrentMetainfo` and `TorrentStorageAuthority` modules used
+by the app. SwiftPM links those production modules into a fuzz-only dynamic
+library; no fuzz hook or conditional is linked into the app.
 
 ## Build and run
 

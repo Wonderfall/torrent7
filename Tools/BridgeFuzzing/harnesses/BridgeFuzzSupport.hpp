@@ -451,6 +451,29 @@ inline TTorrentTrackerResponseParserCallbacks rejecting_tracker_response_parser(
     };
 }
 
+inline TTorrentDHTMessageParserCallbacks rejecting_dht_message_parser() noexcept
+{
+    static int context = 0;
+    return TTorrentDHTMessageParserCallbacks{
+        .context = &context,
+        .retain_context = [](void *value) noexcept -> std::uint8_t {
+            return value == nullptr ? 0U : 1U;
+        },
+        .release_context = [](void *) noexcept {},
+        .parse_message = [](
+            void *, char const *, int32_t, std::uint8_t,
+            TTorrentDHTNodeRecord *, int32_t,
+            TTorrentDHTPeerRecord *, int32_t,
+            TTorrentDHTMessageResult *result
+        ) noexcept -> int32_t {
+            if (result != nullptr) {
+                *result = TTorrentDHTMessageResult{};
+            }
+            return EINVAL;
+        },
+    };
+}
+
 class BridgeClientHarness {
 public:
     explicit BridgeClientHarness(std::string_view label)
@@ -467,6 +490,7 @@ public:
             rejecting_swarm_metainfo_parser(),
             rejecting_peer_protocol_parser(),
             rejecting_tracker_response_parser(),
+            rejecting_dht_message_parser(),
             error.data(),
             error.capacity()
         );

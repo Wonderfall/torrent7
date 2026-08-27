@@ -36,4 +36,8 @@ TEST_CASE("Bridge indirect pointer PAC rejects cross-storage replay")
     CHECK(replay_triggers_pointer_authentication_failure(TorrentBridgeTestReplayTrackerParserRelease));
     CHECK(replay_triggers_pointer_authentication_failure(TorrentBridgeTestReplayTrackerParserHTTP));
     CHECK(replay_triggers_pointer_authentication_failure(TorrentBridgeTestReplayTrackerParserContext));
+    CHECK(replay_triggers_pointer_authentication_failure(TorrentBridgeTestReplayDHTParserRetain));
+    CHECK(replay_triggers_pointer_authentication_failure(TorrentBridgeTestReplayDHTParserRelease));
+    CHECK(replay_triggers_pointer_authentication_failure(TorrentBridgeTestReplayDHTParserMessage));
+    CHECK(replay_triggers_pointer_authentication_failure(TorrentBridgeTestReplayDHTParserContext));
 }

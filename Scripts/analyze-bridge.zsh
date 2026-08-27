@@ -100,6 +100,35 @@ done
     "tracker_response_parser::maximum_http_body_size" "$http_tracker_source" \
     || fail "Patched libtorrent does not cap the final HTTP tracker body before parsing"
 
+typeset -r dht_tracker_source="$libtorrent_source/src/kademlia/dht_tracker.cpp"
+typeset -r dht_parser_header="$libtorrent_source/include/libtorrent/aux_/dht_message_parser.hpp"
+typeset -a typed_dht_consumer_sources=(
+    "$dht_tracker_source"
+    "$libtorrent_source/src/kademlia/find_data.cpp"
+    "$libtorrent_source/src/kademlia/get_peers.cpp"
+    "$libtorrent_source/src/kademlia/node.cpp"
+    "$libtorrent_source/src/kademlia/rpc_manager.cpp"
+    "$libtorrent_source/src/kademlia/sample_infohashes.cpp"
+    "$libtorrent_source/src/kademlia/traversal_algorithm.cpp"
+)
+for source in "${typed_dht_consumer_sources[@]}"; do
+    if "$ripgrep" -n "bdecode|bdecode_node|dict_find|verify_message" "$source"; then
+        fail "Retired native KRPC parser route is reachable: $source"
+    fi
+done
+[[ $("$ripgrep" --count-matches --fixed-strings \
+    "m_message_parser->parse_message(buf" "$dht_tracker_source") == 1 ]] \
+    || fail "Patched libtorrent must call the external DHT parser exactly once"
+"$ripgrep" -q --fixed-strings \
+    "m_message_parser == nullptr" "$dht_tracker_source" \
+    || fail "Patched libtorrent must fail closed when the DHT parser is absent"
+"$ripgrep" -q --fixed-strings \
+    "static constexpr int maximum_message_size = 1500" "$dht_parser_header" \
+    || fail "Patched libtorrent does not declare the bounded DHT datagram contract"
+"$ripgrep" -q --fixed-strings \
+    "find_data_observer::reply(m)" "$libtorrent_source/src/kademlia/get_item.cpp" \
+    || fail "Patched libtorrent must not import arbitrary BEP 44 response values"
+
 if [[ ! -x $clang_tidy ]]; then
     clang_tidy=${commands[clang-tidy]:-}
 fi

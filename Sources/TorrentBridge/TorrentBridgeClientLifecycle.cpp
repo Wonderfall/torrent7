@@ -71,7 +71,15 @@ bool wait_for_alert_worker_backoff(
 }
 
 TTorrentClient::TTorrentClient(std::string_view state_path, bool enable_peer_exchange_plugin)
-    : TTorrentClient(state_path, enable_peer_exchange_plugin, nullptr, nullptr, nullptr, nullptr)
+    : TTorrentClient(
+        state_path,
+        enable_peer_exchange_plugin,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr
+    )
 {
 }
 
@@ -81,7 +89,8 @@ TTorrentClient::TTorrentClient(
     std::shared_ptr<PayloadBrokerContext> broker,
     std::shared_ptr<lt::aux::swarm_metadata_parser> swarm_parser,
     std::shared_ptr<lt::aux::peer_message_parser> peer_parser,
-    std::shared_ptr<lt::aux::tracker_response_parser> tracker_parser
+    std::shared_ptr<lt::aux::tracker_response_parser> tracker_parser,
+    std::shared_ptr<lt::aux::dht_message_parser> dht_parser
 )
     : part_files_directory(fs::path{std::string(state_path)} / "PartFiles"),
       staging_directory(fs::path{std::string(state_path)} / "Staging"),
@@ -89,7 +98,8 @@ TTorrentClient::TTorrentClient(
       swarm_metadata_parser(std::move(swarm_parser)),
       peer_message_parser(std::move(peer_parser)),
       tracker_response_parser(std::move(tracker_parser)),
-      session(make_session_params(enable_peer_exchange_plugin)),
+      dht_message_parser(std::move(dht_parser)),
+      session(make_session_params(enable_peer_exchange_plugin, dht_message_parser)),
       peer_exchange_plugin_enabled(enable_peer_exchange_plugin)
 {
     fs::path const state_directory{std::string(state_path)};

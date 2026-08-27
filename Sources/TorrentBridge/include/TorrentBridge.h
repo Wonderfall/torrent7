@@ -160,7 +160,50 @@ inline constexpr uint32_t TTORRENT_TRACKER_HAS_ID = 1U << 0U;
 inline constexpr uint32_t TTORRENT_TRACKER_HAS_FAILURE_REASON = 1U << 1U;
 inline constexpr uint32_t TTORRENT_TRACKER_HAS_WARNING_MESSAGE = 1U << 2U;
 inline constexpr uint32_t TTORRENT_TRACKER_HAS_EXTERNAL_ADDRESS = 1U << 3U;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 63;
+inline constexpr int32_t TTORRENT_MAX_DHT_MESSAGE_BYTES = 1500;
+inline constexpr int32_t TTORRENT_MAX_DHT_MESSAGE_NODES = 64;
+inline constexpr int32_t TTORRENT_MAX_DHT_MESSAGE_PEERS = 256;
+inline constexpr int32_t TTORRENT_MAX_DHT_MESSAGE_SAMPLES = 64;
+inline constexpr int32_t TTORRENT_MAX_DHT_TRANSACTION_BYTES = 64;
+inline constexpr int32_t TTORRENT_MAX_DHT_QUERY_NAME_BYTES = 32;
+inline constexpr int32_t TTORRENT_MAX_DHT_TOKEN_BYTES = 64;
+inline constexpr int32_t TTORRENT_MAX_DHT_ANNOUNCED_NAME_BYTES = 255;
+inline constexpr int32_t TTORRENT_MAX_DHT_ERROR_MESSAGE_BYTES = 256;
+inline constexpr uint8_t TTORRENT_DHT_MESSAGE_QUERY = 1;
+inline constexpr uint8_t TTORRENT_DHT_MESSAGE_RESPONSE = 2;
+inline constexpr uint8_t TTORRENT_DHT_MESSAGE_ERROR = 3;
+inline constexpr uint8_t TTORRENT_DHT_QUERY_NONE = 0;
+inline constexpr uint8_t TTORRENT_DHT_QUERY_PING = 1;
+inline constexpr uint8_t TTORRENT_DHT_QUERY_FIND_NODE = 2;
+inline constexpr uint8_t TTORRENT_DHT_QUERY_GET_PEERS = 3;
+inline constexpr uint8_t TTORRENT_DHT_QUERY_ANNOUNCE_PEER = 4;
+inline constexpr uint8_t TTORRENT_DHT_QUERY_SAMPLE_INFOHASHES = 5;
+inline constexpr uint8_t TTORRENT_DHT_QUERY_GET_ITEM = 6;
+inline constexpr uint8_t TTORRENT_DHT_QUERY_PUT_ITEM = 7;
+inline constexpr uint8_t TTORRENT_DHT_QUERY_UNKNOWN = 255;
+inline constexpr uint32_t TTORRENT_DHT_HAS_TRANSACTION = 1U << 0U;
+inline constexpr uint32_t TTORRENT_DHT_HAS_QUERY_NAME = 1U << 1U;
+inline constexpr uint32_t TTORRENT_DHT_HAS_SENDER_ID = 1U << 2U;
+inline constexpr uint32_t TTORRENT_DHT_HAS_TARGET = 1U << 3U;
+inline constexpr uint32_t TTORRENT_DHT_HAS_TOKEN = 1U << 4U;
+inline constexpr uint32_t TTORRENT_DHT_HAS_NAME = 1U << 5U;
+inline constexpr uint32_t TTORRENT_DHT_HAS_ERROR_CODE = 1U << 6U;
+inline constexpr uint32_t TTORRENT_DHT_HAS_ERROR_MESSAGE = 1U << 7U;
+inline constexpr uint32_t TTORRENT_DHT_HAS_EXTERNAL_ADDRESS = 1U << 8U;
+inline constexpr uint32_t TTORRENT_DHT_HAS_PORT = 1U << 9U;
+inline constexpr uint32_t TTORRENT_DHT_HAS_INTERVAL = 1U << 10U;
+inline constexpr uint32_t TTORRENT_DHT_HAS_INFOHASH_COUNT = 1U << 11U;
+inline constexpr uint32_t TTORRENT_DHT_HAS_PEERS = 1U << 12U;
+inline constexpr uint32_t TTORRENT_DHT_HAS_SAMPLES = 1U << 13U;
+inline constexpr uint32_t TTORRENT_DHT_FLAG_READ_ONLY = 1U << 0U;
+inline constexpr uint32_t TTORRENT_DHT_FLAG_NOSEED = 1U << 1U;
+inline constexpr uint32_t TTORRENT_DHT_FLAG_SCRAPE = 1U << 2U;
+inline constexpr uint32_t TTORRENT_DHT_FLAG_SEED = 1U << 3U;
+inline constexpr uint32_t TTORRENT_DHT_FLAG_IMPLIED_PORT = 1U << 4U;
+inline constexpr uint32_t TTORRENT_DHT_FLAG_WANT_SPECIFIED = 1U << 5U;
+inline constexpr uint32_t TTORRENT_DHT_FLAG_WANT_IPV4 = 1U << 6U;
+inline constexpr uint32_t TTORRENT_DHT_FLAG_WANT_IPV6 = 1U << 7U;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 64;
 namespace torrent_bridge::internal {
 struct TTorrentClient;
 }
@@ -291,7 +334,50 @@ enum {
     TTORRENT_TRACKER_HAS_FAILURE_REASON = 1U << 1U,
     TTORRENT_TRACKER_HAS_WARNING_MESSAGE = 1U << 2U,
     TTORRENT_TRACKER_HAS_EXTERNAL_ADDRESS = 1U << 3U,
-    TTORRENT_BRIDGE_ABI_VERSION = 63
+    TTORRENT_MAX_DHT_MESSAGE_BYTES = 1500,
+    TTORRENT_MAX_DHT_MESSAGE_NODES = 64,
+    TTORRENT_MAX_DHT_MESSAGE_PEERS = 256,
+    TTORRENT_MAX_DHT_MESSAGE_SAMPLES = 64,
+    TTORRENT_MAX_DHT_TRANSACTION_BYTES = 64,
+    TTORRENT_MAX_DHT_QUERY_NAME_BYTES = 32,
+    TTORRENT_MAX_DHT_TOKEN_BYTES = 64,
+    TTORRENT_MAX_DHT_ANNOUNCED_NAME_BYTES = 255,
+    TTORRENT_MAX_DHT_ERROR_MESSAGE_BYTES = 256,
+    TTORRENT_DHT_MESSAGE_QUERY = 1,
+    TTORRENT_DHT_MESSAGE_RESPONSE = 2,
+    TTORRENT_DHT_MESSAGE_ERROR = 3,
+    TTORRENT_DHT_QUERY_NONE = 0,
+    TTORRENT_DHT_QUERY_PING = 1,
+    TTORRENT_DHT_QUERY_FIND_NODE = 2,
+    TTORRENT_DHT_QUERY_GET_PEERS = 3,
+    TTORRENT_DHT_QUERY_ANNOUNCE_PEER = 4,
+    TTORRENT_DHT_QUERY_SAMPLE_INFOHASHES = 5,
+    TTORRENT_DHT_QUERY_GET_ITEM = 6,
+    TTORRENT_DHT_QUERY_PUT_ITEM = 7,
+    TTORRENT_DHT_QUERY_UNKNOWN = 255,
+    TTORRENT_DHT_HAS_TRANSACTION = 1U << 0U,
+    TTORRENT_DHT_HAS_QUERY_NAME = 1U << 1U,
+    TTORRENT_DHT_HAS_SENDER_ID = 1U << 2U,
+    TTORRENT_DHT_HAS_TARGET = 1U << 3U,
+    TTORRENT_DHT_HAS_TOKEN = 1U << 4U,
+    TTORRENT_DHT_HAS_NAME = 1U << 5U,
+    TTORRENT_DHT_HAS_ERROR_CODE = 1U << 6U,
+    TTORRENT_DHT_HAS_ERROR_MESSAGE = 1U << 7U,
+    TTORRENT_DHT_HAS_EXTERNAL_ADDRESS = 1U << 8U,
+    TTORRENT_DHT_HAS_PORT = 1U << 9U,
+    TTORRENT_DHT_HAS_INTERVAL = 1U << 10U,
+    TTORRENT_DHT_HAS_INFOHASH_COUNT = 1U << 11U,
+    TTORRENT_DHT_HAS_PEERS = 1U << 12U,
+    TTORRENT_DHT_HAS_SAMPLES = 1U << 13U,
+    TTORRENT_DHT_FLAG_READ_ONLY = 1U << 0U,
+    TTORRENT_DHT_FLAG_NOSEED = 1U << 1U,
+    TTORRENT_DHT_FLAG_SCRAPE = 1U << 2U,
+    TTORRENT_DHT_FLAG_SEED = 1U << 3U,
+    TTORRENT_DHT_FLAG_IMPLIED_PORT = 1U << 4U,
+    TTORRENT_DHT_FLAG_WANT_SPECIFIED = 1U << 5U,
+    TTORRENT_DHT_FLAG_WANT_IPV4 = 1U << 6U,
+    TTORRENT_DHT_FLAG_WANT_IPV6 = 1U << 7U,
+    TTORRENT_BRIDGE_ABI_VERSION = 64
 };
 #endif
 
@@ -815,6 +901,90 @@ typedef struct TTorrentTrackerResponseParserCallbacks {
     TTorrentHTTPTrackerResponseParseCallback parse_http_response;
 } TTorrentTrackerResponseParserCallbacks;
 
+// Fixed, caller-owned syntax for one complete inbound DHT KRPC datagram.
+// Offsets refer to the borrowed body. Swift synchronously parses and fills
+// temporary records; native validates every field before atomically replacing
+// the destination message. Stateful routing and endpoint policy remain native.
+typedef struct TTorrentDHTNodeRecord {
+    uint64_t address_high;
+    uint64_t address_low;
+    int32_t id_offset;
+    uint16_t port;
+    uint8_t address_family;
+    uint8_t reserved0;
+    uint32_t reserved1;
+} TTorrentDHTNodeRecord;
+
+typedef struct TTorrentDHTPeerRecord {
+    uint64_t address_high;
+    uint64_t address_low;
+    uint16_t port;
+    uint8_t address_family;
+    uint8_t reserved0;
+    uint32_t reserved1;
+} TTorrentDHTPeerRecord;
+
+typedef struct TTorrentDHTMessageResult {
+    uint64_t external_address_high;
+    uint64_t external_address_low;
+    int32_t transaction_offset;
+    int32_t transaction_size;
+    int32_t query_name_offset;
+    int32_t query_name_size;
+    int32_t sender_id_offset;
+    int32_t target_offset;
+    int32_t token_offset;
+    int32_t token_size;
+    int32_t name_offset;
+    int32_t name_size;
+    int32_t error_message_offset;
+    int32_t error_message_size;
+    int32_t sample_hashes_offset;
+    int32_t node_count;
+    int32_t peer_count;
+    int32_t sample_count;
+    int32_t error_code;
+    int32_t interval;
+    int32_t total_infohash_count;
+    uint32_t present_fields;
+    uint32_t flags;
+    uint16_t port;
+    uint8_t message_kind;
+    uint8_t query_kind;
+    uint8_t external_address_family;
+    uint8_t query_is_valid;
+    uint16_t reserved0;
+    uint32_t reserved1;
+} TTorrentDHTMessageResult;
+
+typedef uint8_t (* TORRENT_BRIDGE_NULLABLE TTorrentDHTParserContextRetainCallback)(
+    void * TORRENT_BRIDGE_NULLABLE context
+);
+typedef void (* TORRENT_BRIDGE_NULLABLE TTorrentDHTParserContextReleaseCallback)(
+    void * TORRENT_BRIDGE_NULLABLE context
+);
+typedef int32_t (* TORRENT_BRIDGE_NULLABLE TTorrentDHTMessageParseCallback)(
+    void * TORRENT_BRIDGE_NULLABLE context,
+    const char * TORRENT_BRIDGE_NONNULL TORRENT_BRIDGE_COUNTED_BY(body_size)
+        body TORRENT_BRIDGE_NOESCAPE,
+    int32_t body_size,
+    uint8_t source_address_family,
+    TTorrentDHTNodeRecord * TORRENT_BRIDGE_NONNULL TORRENT_BRIDGE_COUNTED_BY(node_capacity)
+        nodes_out TORRENT_BRIDGE_NOESCAPE,
+    int32_t node_capacity,
+    TTorrentDHTPeerRecord * TORRENT_BRIDGE_NONNULL TORRENT_BRIDGE_COUNTED_BY(peer_capacity)
+        peers_out TORRENT_BRIDGE_NOESCAPE,
+    int32_t peer_capacity,
+    TTorrentDHTMessageResult * TORRENT_BRIDGE_NONNULL result_out TORRENT_BRIDGE_NOESCAPE
+);
+
+typedef struct TTorrentDHTMessageParserCallbacks {
+    void * TORRENT_BRIDGE_NULLABLE context;
+    TTorrentDHTParserContextRetainCallback retain_context;
+    TTorrentDHTParserContextReleaseCallback release_context;
+    TTorrentDHTMessageParseCallback parse_message;
+} TTorrentDHTMessageParserCallbacks;
+
 // Immutable activation authority for one known torrent. claim_id is the UUID's
 // 16 RFC 4122 bytes. source_manifest_digest is the domain-separated SHA-256
 // digest independently reproduced by Swift and libtorrent before admission.
@@ -842,6 +1012,7 @@ TTorrentClient * TORRENT_BRIDGE_NULLABLE TorrentClientCreateWithError(
     TTorrentSwarmMetainfoParserCallbacks swarm_metainfo_parser,
     TTorrentPeerProtocolParserCallbacks peer_protocol_parser,
     TTorrentTrackerResponseParserCallbacks tracker_response_parser,
+    TTorrentDHTMessageParserCallbacks dht_message_parser,
     char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;

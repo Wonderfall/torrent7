@@ -163,6 +163,39 @@ private func contractTrackerResponseParserCallbacks()
     return unsafe callbacks
 }
 
+private func contractDHTParserContextRetain(
+    _ context: UnsafeMutableRawPointer?
+) -> UInt8 {
+    unsafe context == nil ? 0 : 1
+}
+
+private func contractDHTParserContextRelease(_ context: UnsafeMutableRawPointer?) {}
+
+private func contractDHTMessageParse(
+    _ context: UnsafeMutableRawPointer?,
+    _ body: UnsafePointer<CChar>,
+    _ bodySize: Int32,
+    _ sourceAddressFamily: UInt8,
+    _ nodesOut: UnsafeMutablePointer<TTorrentDHTNodeRecord>,
+    _ nodeCapacity: Int32,
+    _ peersOut: UnsafeMutablePointer<TTorrentDHTPeerRecord>,
+    _ peerCapacity: Int32,
+    _ resultOut: UnsafeMutablePointer<TTorrentDHTMessageResult>
+) -> Int32 {
+    unsafe resultOut.pointee = TTorrentDHTMessageResult()
+    return EINVAL
+}
+
+private func contractDHTMessageParserCallbacks()
+    -> TTorrentDHTMessageParserCallbacks {
+    var callbacks = unsafe TTorrentDHTMessageParserCallbacks()
+    unsafe callbacks.context = UnsafeMutableRawPointer(bitPattern: 1)
+    unsafe callbacks.retain_context = contractDHTParserContextRetain
+    unsafe callbacks.release_context = contractDHTParserContextRelease
+    unsafe callbacks.parse_message = contractDHTMessageParse
+    return unsafe callbacks
+}
+
 private func bridgeString(_ buffer: [CChar]) -> String {
     String(decoding: buffer.prefix { $0 != 0 }.map(UInt8.init(bitPattern:)), as: UTF8.self)
 }
@@ -171,7 +204,7 @@ private func bridgeString(_ buffer: [CChar]) -> String {
 struct TorrentBridgeContractTests {
     @Test("Pins bridge ABI version, limits, states, and native event kinds")
     func pinsBridgeConstants() {
-        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 63)
+        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 64)
         #expect(UInt32(TTORRENT_MAGNET_IMPORT_SCHEMA_VERSION) == 1)
         #expect(UInt32(TTORRENT_METAINFO_CAPSULE_MAGIC) == 0x494d_3754)
         #expect(UInt16(TTORRENT_METAINFO_CAPSULE_SCHEMA_VERSION) == 1)
@@ -263,6 +296,14 @@ struct TorrentBridgeContractTests {
         #expect(UInt8(TTORRENT_DHT_STATUS_DISABLED) == 0)
         #expect(UInt8(TTORRENT_DHT_STATUS_STARTING) == 1)
         #expect(UInt8(TTORRENT_DHT_STATUS_RUNNING) == 2)
+        #expect(Int(TTORRENT_MAX_DHT_MESSAGE_BYTES) == 1_500)
+        #expect(Int(TTORRENT_MAX_DHT_MESSAGE_NODES) == 64)
+        #expect(Int(TTORRENT_MAX_DHT_MESSAGE_PEERS) == 256)
+        #expect(Int(TTORRENT_MAX_DHT_MESSAGE_SAMPLES) == 64)
+        #expect(UInt8(TTORRENT_DHT_MESSAGE_QUERY) == 1)
+        #expect(UInt8(TTORRENT_DHT_MESSAGE_RESPONSE) == 2)
+        #expect(UInt8(TTORRENT_DHT_MESSAGE_ERROR) == 3)
+        #expect(UInt8(TTORRENT_DHT_QUERY_UNKNOWN) == 255)
         #expect(UInt8(TTORRENT_CONTENT_KIND_UNKNOWN) == 0)
         #expect(UInt8(TTORRENT_CONTENT_KIND_SINGLE_FILE) == 1)
         #expect(UInt8(TTORRENT_CONTENT_KIND_DIRECTORY) == 2)
@@ -316,6 +357,7 @@ struct TorrentBridgeContractTests {
         let trackerPeerRecordSize = MemoryLayout<TTorrentTrackerPeerRecord>.size
         let trackerResultSize = MemoryLayout<TTorrentHTTPTrackerResponseResult>.size
         let trackerParserCallbacksSize = unsafe MemoryLayout<TTorrentTrackerResponseParserCallbacks>.size
+        let dhtParserCallbacksSize = unsafe MemoryLayout<TTorrentDHTMessageParserCallbacks>.size
         #expect(payloadBrokerCallbacksSize == 40)
         #expect(payloadBrokerCallbacksAlignment == 8)
         #expect(ownedMetainfoCapsuleSize == 16)
@@ -332,6 +374,13 @@ struct TorrentBridgeContractTests {
         #expect(trackerResultSize == 80)
         #expect(MemoryLayout<TTorrentHTTPTrackerResponseResult>.alignment == 8)
         #expect(trackerParserCallbacksSize == 32)
+        #expect(MemoryLayout<TTorrentDHTNodeRecord>.size == 32)
+        #expect(MemoryLayout<TTorrentDHTNodeRecord>.alignment == 8)
+        #expect(MemoryLayout<TTorrentDHTPeerRecord>.size == 24)
+        #expect(MemoryLayout<TTorrentDHTPeerRecord>.alignment == 8)
+        #expect(MemoryLayout<TTorrentDHTMessageResult>.size == 112)
+        #expect(MemoryLayout<TTorrentDHTMessageResult>.alignment == 8)
+        #expect(dhtParserCallbacksSize == 32)
         #expect(MemoryLayout<TTorrentStorageActivation>.size == 96)
         #expect(MemoryLayout<TTorrentStorageActivation>.alignment == 8)
         #expect(MemoryLayout<TTorrentStorageActivation>.offset(of: \.claim_generation) == 16)
@@ -442,6 +491,7 @@ struct TorrentBridgeContractTests {
                         TTorrentSwarmMetainfoParserCallbacks(),
                         contractPeerProtocolParserCallbacks(),
                         contractTrackerResponseParserCallbacks(),
+                        contractDHTMessageParserCallbacks(),
                         &error
                     )
                 }
@@ -474,6 +524,7 @@ struct TorrentBridgeContractTests {
                         contractSwarmMetainfoParserCallbacks(),
                         TTorrentPeerProtocolParserCallbacks(),
                         contractTrackerResponseParserCallbacks(),
+                        contractDHTMessageParserCallbacks(),
                         &error
                     )
                 }
@@ -504,6 +555,7 @@ struct TorrentBridgeContractTests {
                         contractSwarmMetainfoParserCallbacks(),
                         contractPeerProtocolParserCallbacks(),
                         TTorrentTrackerResponseParserCallbacks(),
+                        contractDHTMessageParserCallbacks(),
                         &error
                     )
                 }
@@ -515,6 +567,37 @@ struct TorrentBridgeContractTests {
             #expect(
                 errorBuffer.string
                     == "The tracker response parser callback table is incomplete."
+            )
+        }
+    }
+
+    @Test("Create rejects an incomplete DHT message parser table")
+    func createRejectsIncompleteDHTMessageParser() throws {
+        try withTemporaryDirectory { stateDirectory in
+            var errorBuffer = BridgeErrorBuffer()
+            let maybeClient = unsafe errorBuffer.withMutableBuffer { buffer in
+                var error: MutableSpan<CChar>? = buffer.mutableSpan
+                defer { error = nil }
+                return unsafe stateDirectory.torrentFilePath.withCString { path in
+                    unsafe TorrentClientCreateWithError(
+                        path,
+                        1,
+                        contractPayloadBrokerCallbacks(),
+                        contractSwarmMetainfoParserCallbacks(),
+                        contractPeerProtocolParserCallbacks(),
+                        contractTrackerResponseParserCallbacks(),
+                        TTorrentDHTMessageParserCallbacks(),
+                        &error
+                    )
+                }
+            }
+            if let client = unsafe maybeClient {
+                unsafe TorrentClientDestroyBlocking(client)
+            }
+            #expect(unsafe maybeClient == nil)
+            #expect(
+                errorBuffer.string
+                    == "The DHT message parser callback table is incomplete."
             )
         }
     }
@@ -802,6 +885,7 @@ private func invalidCreateResult(path: String?) -> (didCreate: Bool, error: Stri
                     contractSwarmMetainfoParserCallbacks(),
                     contractPeerProtocolParserCallbacks(),
                     contractTrackerResponseParserCallbacks(),
+                    contractDHTMessageParserCallbacks(),
                     &error
                 )
             }
@@ -818,6 +902,7 @@ private func invalidCreateResult(path: String?) -> (didCreate: Bool, error: Stri
             contractSwarmMetainfoParserCallbacks(),
             contractPeerProtocolParserCallbacks(),
             contractTrackerResponseParserCallbacks(),
+            contractDHTMessageParserCallbacks(),
             &error
         )
         if let client = unsafe client {
@@ -887,6 +972,7 @@ private func emptyClientSmokeResult(statePath: String) -> EmptyClientSmokeResult
                 contractSwarmMetainfoParserCallbacks(),
                 contractPeerProtocolParserCallbacks(),
                 contractTrackerResponseParserCallbacks(),
+                contractDHTMessageParserCallbacks(),
                 &error
             )
         }

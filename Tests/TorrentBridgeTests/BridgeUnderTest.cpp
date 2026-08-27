@@ -38,6 +38,9 @@ struct PointerAuthenticationProbe {
     int tracker_retain_count = 0;
     int tracker_release_count = 0;
     int tracker_http_count = 0;
+    int dht_retain_count = 0;
+    int dht_release_count = 0;
+    int dht_message_count = 0;
 };
 
 std::uint8_t pointer_authentication_retain(void *context)
@@ -186,6 +189,34 @@ int32_t pointer_authentication_tracker_http(
     return EINVAL;
 }
 
+std::uint8_t pointer_authentication_dht_retain(void *context)
+{
+    ++static_cast<PointerAuthenticationProbe *>(context)->dht_retain_count;
+    return 1U;
+}
+
+void pointer_authentication_dht_release(void *context)
+{
+    ++static_cast<PointerAuthenticationProbe *>(context)->dht_release_count;
+}
+
+int32_t pointer_authentication_dht_message(
+    void *context,
+    char const *,
+    int32_t,
+    std::uint8_t,
+    TTorrentDHTNodeRecord *,
+    int32_t,
+    TTorrentDHTPeerRecord *,
+    int32_t,
+    TTorrentDHTMessageResult *result
+)
+{
+    ++static_cast<PointerAuthenticationProbe *>(context)->dht_message_count;
+    *result = TTorrentDHTMessageResult{};
+    return EINVAL;
+}
+
 void pointer_authentication_wake(void *context)
 {
     ++static_cast<PointerAuthenticationProbe *>(context)->wake_count;
@@ -253,6 +284,18 @@ __attribute__((noinline)) void replay_object_bytes(
         .retain_context = pointer_authentication_tracker_retain,
         .release_context = pointer_authentication_tracker_release,
         .parse_http_response = pointer_authentication_tracker_http,
+    };
+}
+
+[[nodiscard]] DHTMessageParserCallbacks make_dht_pointer_authentication_callbacks(
+    PointerAuthenticationProbe *context
+)
+{
+    return DHTMessageParserCallbacks{
+        .context = context,
+        .retain_context = pointer_authentication_dht_retain,
+        .release_context = pointer_authentication_dht_release,
+        .parse_message = pointer_authentication_dht_message,
     };
 }
 
@@ -441,6 +484,41 @@ extern "C" __attribute__((noinline, used)) void TorrentBridgeTestInvokeTrackerPa
     ));
 }
 
+extern "C" __attribute__((noinline, used)) void TorrentBridgeTestInvokeDHTParserRetain(
+    DHTMessageParserCallbacks const *callbacks
+) noexcept
+{
+    static_cast<void>(callbacks->retain_context(callbacks->context));
+}
+
+extern "C" __attribute__((noinline, used)) void TorrentBridgeTestInvokeDHTParserRelease(
+    DHTMessageParserCallbacks const *callbacks
+) noexcept
+{
+    callbacks->release_context(callbacks->context);
+}
+
+extern "C" __attribute__((noinline, used)) void TorrentBridgeTestInvokeDHTParserMessage(
+    DHTMessageParserCallbacks const *callbacks
+) noexcept
+{
+    std::array<char, 2U> body{{'d', 'e'}};
+    std::array<TTorrentDHTNodeRecord, 1U> nodes{};
+    std::array<TTorrentDHTPeerRecord, 1U> peers{};
+    TTorrentDHTMessageResult result{};
+    static_cast<void>(callbacks->parse_message(
+        callbacks->context,
+        body.data(),
+        static_cast<int32_t>(body.size()),
+        TTORRENT_PEER_ADDRESS_IPV4,
+        nodes.data(),
+        static_cast<int32_t>(nodes.size()),
+        peers.data(),
+        static_cast<int32_t>(peers.size()),
+        &result
+    ));
+}
+
 extern "C" bool TorrentBridgeTestPACSlotsInvokeNormally() noexcept
 {
     PointerAuthenticationProbe probe;
@@ -455,6 +533,8 @@ extern "C" bool TorrentBridgeTestPACSlotsInvokeNormally() noexcept
         make_peer_pointer_authentication_callbacks(&probe);
     TrackerResponseParserCallbacks const tracker_callbacks =
         make_tracker_pointer_authentication_callbacks(&probe);
+    DHTMessageParserCallbacks const dht_callbacks =
+        make_dht_pointer_authentication_callbacks(&probe);
 
     TorrentBridgeTestInvokeWake(&wake);
     TorrentBridgeTestInvokePayloadRetain(&callbacks);
@@ -473,6 +553,9 @@ extern "C" bool TorrentBridgeTestPACSlotsInvokeNormally() noexcept
     TorrentBridgeTestInvokeTrackerParserRetain(&tracker_callbacks);
     TorrentBridgeTestInvokeTrackerParserRelease(&tracker_callbacks);
     TorrentBridgeTestInvokeTrackerParserHTTP(&tracker_callbacks);
+    TorrentBridgeTestInvokeDHTParserRetain(&dht_callbacks);
+    TorrentBridgeTestInvokeDHTParserRelease(&dht_callbacks);
+    TorrentBridgeTestInvokeDHTParserMessage(&dht_callbacks);
     return probe.wake_count == 1
         && probe.retain_count == 1
         && probe.release_count == 1
@@ -489,7 +572,10 @@ extern "C" bool TorrentBridgeTestPACSlotsInvokeNormally() noexcept
         && probe.peer_pex_count == 1
         && probe.tracker_retain_count == 1
         && probe.tracker_release_count == 1
-        && probe.tracker_http_count == 1;
+        && probe.tracker_http_count == 1
+        && probe.dht_retain_count == 1
+        && probe.dht_release_count == 1
+        && probe.dht_message_count == 1;
 }
 
 extern "C" void TorrentBridgeTestReplayWakeCallback() noexcept
@@ -836,6 +922,66 @@ extern "C" void TorrentBridgeTestReplayTrackerParserContext() noexcept
     destination.release_context = pointer_authentication_tracker_release;
     destination.parse_http_response = pointer_authentication_tracker_http;
     TorrentBridgeTestInvokeTrackerParserRetain(&destination);
+}
+
+extern "C" void TorrentBridgeTestReplayDHTParserRetain() noexcept
+{
+    PointerAuthenticationProbe source_context;
+    PointerAuthenticationProbe destination_context;
+    DHTMessageParserCallbacks source =
+        make_dht_pointer_authentication_callbacks(&source_context);
+    DHTMessageParserCallbacks destination =
+        make_dht_pointer_authentication_callbacks(&destination_context);
+    replay_object_bytes(&destination, &source, sizeof(destination));
+    destination.context = &destination_context;
+    destination.release_context = pointer_authentication_dht_release;
+    destination.parse_message = pointer_authentication_dht_message;
+    TorrentBridgeTestInvokeDHTParserRetain(&destination);
+}
+
+extern "C" void TorrentBridgeTestReplayDHTParserRelease() noexcept
+{
+    PointerAuthenticationProbe source_context;
+    PointerAuthenticationProbe destination_context;
+    DHTMessageParserCallbacks source =
+        make_dht_pointer_authentication_callbacks(&source_context);
+    DHTMessageParserCallbacks destination =
+        make_dht_pointer_authentication_callbacks(&destination_context);
+    replay_object_bytes(&destination, &source, sizeof(destination));
+    destination.context = &destination_context;
+    destination.retain_context = pointer_authentication_dht_retain;
+    destination.parse_message = pointer_authentication_dht_message;
+    TorrentBridgeTestInvokeDHTParserRelease(&destination);
+}
+
+extern "C" void TorrentBridgeTestReplayDHTParserMessage() noexcept
+{
+    PointerAuthenticationProbe source_context;
+    PointerAuthenticationProbe destination_context;
+    DHTMessageParserCallbacks source =
+        make_dht_pointer_authentication_callbacks(&source_context);
+    DHTMessageParserCallbacks destination =
+        make_dht_pointer_authentication_callbacks(&destination_context);
+    replay_object_bytes(&destination, &source, sizeof(destination));
+    destination.context = &destination_context;
+    destination.retain_context = pointer_authentication_dht_retain;
+    destination.release_context = pointer_authentication_dht_release;
+    TorrentBridgeTestInvokeDHTParserMessage(&destination);
+}
+
+extern "C" void TorrentBridgeTestReplayDHTParserContext() noexcept
+{
+    PointerAuthenticationProbe source_context;
+    PointerAuthenticationProbe destination_context;
+    DHTMessageParserCallbacks source =
+        make_dht_pointer_authentication_callbacks(&source_context);
+    DHTMessageParserCallbacks destination =
+        make_dht_pointer_authentication_callbacks(&destination_context);
+    replay_object_bytes(&destination, &source, sizeof(destination));
+    destination.retain_context = pointer_authentication_dht_retain;
+    destination.release_context = pointer_authentication_dht_release;
+    destination.parse_message = pointer_authentication_dht_message;
+    TorrentBridgeTestInvokeDHTParserRetain(&destination);
 }
 
 } // namespace torrent_bridge::internal

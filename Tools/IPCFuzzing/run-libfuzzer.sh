@@ -9,6 +9,7 @@ WORK_CORPUS_DIR="${WORK_CORPUS_DIR:-$ARTIFACTS_DIR/corpus}"
 RUNS="${RUNS:-100000}"
 
 all_targets=(
+    dht_message_parser
     http_tracker_response_parser
     ipc_json_preflight
     magnet_parser
@@ -26,6 +27,9 @@ fi
 
 default_max_len() {
     case "$1" in
+        dht_message_parser)
+            printf '%s\n' 1501
+            ;;
         http_tracker_response_parser)
             printf '%s\n' 524309
             ;;

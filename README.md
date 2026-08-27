@@ -139,9 +139,17 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
   revalidates and commits atomically. The body is capped at 512 KiB before the
   callback and output at 3,000 peers. UDP tracker replies remain native as
   fixed binary, length-checked span parsing.
+- **Typed DHT boundary:** every inbound Mainline DHT KRPC datagram terminates in
+  a canonical bounded Swift parser. Swift returns a query-, response-, or
+  error-specific result plus caller-owned compact node and peer records; C++
+  revalidates and copies them into an owning message before DHT dispatch. The
+  datagram is capped at 1,500 bytes, with 64 nodes, 256 peers, and 64 sample
+  hashes. There is no native bdecode fallback. BEP 44 item get/put is recognized
+  only to return an unsupported-method error, and the app exposes no generic
+  DHT request or item-storage API.
 - **Input bounds:** caps for torrent files, magnets, file counts, tracker/web-seed
   counts, peer-extension messages and contacts, HTTP tracker bodies and peers,
-  tracker host rows, snapshots,
+  DHT datagrams and records, tracker host rows, snapshots,
   piece-map data, XPC payloads, paged datasets, queued requests, file
   descriptors, and open peers.
 - **Exact-file storage broker:** the GUI alone persists bookmarks, plans
@@ -412,6 +420,19 @@ and incremental footprint measurements inside the engine implementation. The
 XPC boundary now pages the resulting high-cardinality datasets independently.
 The probe does not use wall-clock assertions; review gates are documented in
 [Architecture and Security Decisions](Documentation/Architecture.md).
+
+Run the opt-in DHT message callback probe in release mode:
+
+```sh
+Scripts/benchmark-dht-message-parser.zsh
+```
+
+The probe measures the indirect Swift callback with a small query, the densest
+node response that fits the datagram cap, and a valid envelope that exhausts
+the 500-value traversal budget. It also reports retained allocator bytes after
+an additional warmed maximum-work batch. Timings and allocator telemetry are
+diagnostic; fixed byte, value, container, record-count, and native workspace
+limits remain test assertions.
 
 `clang-tidy` support is optional:
 

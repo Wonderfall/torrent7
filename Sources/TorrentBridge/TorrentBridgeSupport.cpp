@@ -2420,7 +2420,10 @@ lt::settings_pack make_settings()
     return settings;
 }
 
-lt::session_params make_session_params(bool enable_peer_exchange_plugin)
+lt::session_params make_session_params(
+    bool enable_peer_exchange_plugin,
+    std::shared_ptr<lt::aux::dht_message_parser> const &dht_message_parser
+)
 {
     lt::session_params params{
         make_settings(),
@@ -2430,6 +2433,7 @@ lt::session_params make_session_params(bool enable_peer_exchange_plugin)
     // backend. Select it explicitly so a future libtorrent build default
     // cannot silently fall back to pathname-only POSIX storage.
     params.disk_io_constructor = lt::pread_disk_io_constructor;
+    params.dht_message_parser = dht_message_parser;
     return params;
 }
 

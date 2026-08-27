@@ -259,6 +259,10 @@ let package = Package(
             name: "TorrentEngineXPCIntegrationHost",
             targets: ["TorrentEngineXPCIntegrationHost"]
         ),
+        .executable(
+            name: "DHTMessageParserBenchmark",
+            targets: ["DHTMessageParserBenchmark"]
+        ),
         .executable(name: "TorrentBridgeTests", targets: ["TorrentBridgeTests"]),
         .library(
             name: "TorrentEngineIPCFuzzSupport",
@@ -331,6 +335,17 @@ let package = Package(
                 .strictMemorySafety(),
                 .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
             ]
+        ),
+        .executableTarget(
+            name: "DHTMessageParserBenchmark",
+            dependencies: ["TorrentBridge", "TorrentEngineCore"],
+            path: "Tools/DHTMessageBenchmark",
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .treatAllWarnings(as: .error),
+                .strictMemorySafety(),
+                .unsafeFlags(engineExtensionSwiftFlags)
+            ] + bridgeSafeInteropSwiftSettings + engineBridgeSafeInteropWorkaround
         ),
         .target(
             name: "TorrentNetworkSecurity",

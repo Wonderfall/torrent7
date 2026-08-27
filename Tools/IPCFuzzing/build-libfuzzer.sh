@@ -25,6 +25,7 @@ if [[ ! -f "$FUZZER_RUNTIME" ]]; then
 fi
 
 all_targets=(
+    dht_message_parser
     http_tracker_response_parser
     ipc_json_preflight
     magnet_parser
@@ -42,6 +43,9 @@ fi
 
 harness_for_target() {
     case "$1" in
+        dht_message_parser)
+            printf '%s\n' "$TOOLS_DIR/harnesses/DHTMessageParserFuzzer.cpp"
+            ;;
         http_tracker_response_parser)
             printf '%s\n' "$TOOLS_DIR/harnesses/HTTPTrackerResponseParserFuzzer.cpp"
             ;;
@@ -75,7 +79,7 @@ support_for_target() {
         ipc_json_preflight | storage_broker_ipc)
             printf '%s\n' TorrentEngineIPCFuzzSupport
             ;;
-        http_tracker_response_parser | magnet_parser | peer_protocol_parser | storage_claim_validation | storage_manifest)
+        dht_message_parser | http_tracker_response_parser | magnet_parser | peer_protocol_parser | storage_claim_validation | storage_manifest)
             printf '%s\n' TorrentStorageFuzzSupport
             ;;
     esac

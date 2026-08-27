@@ -27,6 +27,10 @@ void TorrentBridgeTestReplayTrackerParserRetain() noexcept;
 void TorrentBridgeTestReplayTrackerParserRelease() noexcept;
 void TorrentBridgeTestReplayTrackerParserHTTP() noexcept;
 void TorrentBridgeTestReplayTrackerParserContext() noexcept;
+void TorrentBridgeTestReplayDHTParserRetain() noexcept;
+void TorrentBridgeTestReplayDHTParserRelease() noexcept;
+void TorrentBridgeTestReplayDHTParserMessage() noexcept;
+void TorrentBridgeTestReplayDHTParserContext() noexcept;
 
 }
 

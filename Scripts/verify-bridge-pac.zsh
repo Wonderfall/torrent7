@@ -82,6 +82,9 @@ typeset peer_pex="$temporary_directory/peer-pex.txt"
 typeset tracker_retain="$temporary_directory/tracker-retain.txt"
 typeset tracker_release="$temporary_directory/tracker-release.txt"
 typeset tracker_http="$temporary_directory/tracker-http.txt"
+typeset dht_retain="$temporary_directory/dht-retain.txt"
+typeset dht_release="$temporary_directory/dht-release.txt"
+typeset dht_message="$temporary_directory/dht-message.txt"
 extract_function TorrentBridgeTestInvokeWake "$wake"
 extract_function TorrentBridgeTestInvokePayloadRetain "$retain"
 extract_function TorrentBridgeTestInvokePayloadRelease "$release"
@@ -99,6 +102,9 @@ extract_function TorrentBridgeTestInvokePeerProtocolPEX "$peer_pex"
 extract_function TorrentBridgeTestInvokeTrackerParserRetain "$tracker_retain"
 extract_function TorrentBridgeTestInvokeTrackerParserRelease "$tracker_release"
 extract_function TorrentBridgeTestInvokeTrackerParserHTTP "$tracker_http"
+extract_function TorrentBridgeTestInvokeDHTParserRetain "$dht_retain"
+extract_function TorrentBridgeTestInvokeDHTParserRelease "$dht_release"
+extract_function TorrentBridgeTestInvokeDHTParserMessage "$dht_message"
 
 # AppleClang's pinned 16-bit string discriminators for the Bridge-owned slots.
 verify_data_authentication wake.context "$wake" 0x8cdb
@@ -123,5 +129,9 @@ verify_data_authentication tracker-parser.context "$tracker_retain" 0x2226
 verify_callback_branch tracker-parser.retain "$tracker_retain" 0x5643
 verify_callback_branch tracker-parser.release "$tracker_release" 0x10fd
 verify_callback_branch tracker-parser.http "$tracker_http" 0xa3a7
+verify_data_authentication dht-parser.context "$dht_retain" 0x13ee
+verify_callback_branch dht-parser.retain "$dht_retain" 0x46a9
+verify_callback_branch dht-parser.release "$dht_release" 0xbeff
+verify_callback_branch dht-parser.message "$dht_message" 0x6d75
 
 print -r -- "Bridge callback/context PAC codegen verification passed"

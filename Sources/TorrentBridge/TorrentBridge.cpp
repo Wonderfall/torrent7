@@ -1167,7 +1167,502 @@ struct TrackerAddressBits {
     return true;
 }
 
+[[nodiscard]] bool valid_dht_message_kind(std::uint8_t const kind) noexcept
+{
+    return kind == TTORRENT_DHT_MESSAGE_QUERY
+        || kind == TTORRENT_DHT_MESSAGE_RESPONSE
+        || kind == TTORRENT_DHT_MESSAGE_ERROR;
+}
+
+[[nodiscard]] bool valid_dht_query_kind(std::uint8_t const kind) noexcept
+{
+    return kind <= TTORRENT_DHT_QUERY_PUT_ITEM
+        || kind == TTORRENT_DHT_QUERY_UNKNOWN;
+}
+
+[[nodiscard]] std::uint8_t dht_query_kind(lt::span<char const> const name) noexcept
+{
+    std::string_view const query(name.data(), static_cast<std::size_t>(name.size()));
+    if (query == "ping") {
+        return TTORRENT_DHT_QUERY_PING;
+    }
+    if (query == "find_node") {
+        return TTORRENT_DHT_QUERY_FIND_NODE;
+    }
+    if (query == "get_peers") {
+        return TTORRENT_DHT_QUERY_GET_PEERS;
+    }
+    if (query == "announce_peer") {
+        return TTORRENT_DHT_QUERY_ANNOUNCE_PEER;
+    }
+    if (query == "sample_infohashes") {
+        return TTORRENT_DHT_QUERY_SAMPLE_INFOHASHES;
+    }
+    if (query == "get") {
+        return TTORRENT_DHT_QUERY_GET_ITEM;
+    }
+    if (query == "put") {
+        return TTORRENT_DHT_QUERY_PUT_ITEM;
+    }
+    return TTORRENT_DHT_QUERY_UNKNOWN;
+}
+
 } // namespace
+
+BridgeDHTMessageParser::BridgeDHTMessageParser(
+    TTorrentDHTMessageParserCallbacks const callbacks
+)
+    : callbacks_{
+        .context = callbacks.context,
+        .retain_context = callbacks.retain_context,
+        .release_context = callbacks.release_context,
+        .parse_message = callbacks.parse_message,
+    }
+{
+    if (callbacks_.context == nullptr
+        || callbacks_.retain_context == nullptr
+        || callbacks_.release_context == nullptr
+        || callbacks_.parse_message == nullptr) {
+        throw std::invalid_argument("The DHT message parser callback table is incomplete.");
+    }
+    retained_ = callbacks_.retain_context(callbacks_.context) != 0U;
+    if (!retained_) {
+        throw std::invalid_argument("The DHT message parser context is unavailable.");
+    }
+}
+
+BridgeDHTMessageParser::~BridgeDHTMessageParser()
+{
+    if (retained_) {
+        callbacks_.release_context(callbacks_.context);
+    }
+}
+
+bool BridgeDHTMessageParser::parse_message(
+    lt::span<char const> const body,
+    bool const source_is_ipv6,
+    lt::dht::krpc_message &result
+) noexcept
+{
+    try {
+        if (body.empty()
+            || std::cmp_greater(body.size(), TTORRENT_MAX_DHT_MESSAGE_BYTES)) {
+            return false;
+        }
+
+        std::array<TTorrentDHTNodeRecord, TTORRENT_MAX_DHT_MESSAGE_NODES> nodes{};
+        std::array<TTorrentDHTPeerRecord, TTORRENT_MAX_DHT_MESSAGE_PEERS> peers{};
+        TTorrentDHTMessageResult parsed{};
+        int32_t const status = callbacks_.parse_message(
+            callbacks_.context,
+            body.data(),
+            static_cast<int32_t>(body.size()),
+            source_is_ipv6 ? TTORRENT_PEER_ADDRESS_IPV6 : TTORRENT_PEER_ADDRESS_IPV4,
+            nodes.data(),
+            static_cast<int32_t>(nodes.size()),
+            peers.data(),
+            static_cast<int32_t>(peers.size()),
+            &parsed
+        );
+        constexpr std::uint32_t known_fields =
+            TTORRENT_DHT_HAS_TRANSACTION
+            | TTORRENT_DHT_HAS_QUERY_NAME
+            | TTORRENT_DHT_HAS_SENDER_ID
+            | TTORRENT_DHT_HAS_TARGET
+            | TTORRENT_DHT_HAS_TOKEN
+            | TTORRENT_DHT_HAS_NAME
+            | TTORRENT_DHT_HAS_ERROR_CODE
+            | TTORRENT_DHT_HAS_ERROR_MESSAGE
+            | TTORRENT_DHT_HAS_EXTERNAL_ADDRESS
+            | TTORRENT_DHT_HAS_PORT
+            | TTORRENT_DHT_HAS_INTERVAL
+            | TTORRENT_DHT_HAS_INFOHASH_COUNT
+            | TTORRENT_DHT_HAS_PEERS
+            | TTORRENT_DHT_HAS_SAMPLES;
+        constexpr std::uint32_t known_flags =
+            TTORRENT_DHT_FLAG_READ_ONLY
+            | TTORRENT_DHT_FLAG_NOSEED
+            | TTORRENT_DHT_FLAG_SCRAPE
+            | TTORRENT_DHT_FLAG_SEED
+            | TTORRENT_DHT_FLAG_IMPLIED_PORT
+            | TTORRENT_DHT_FLAG_WANT_SPECIFIED
+            | TTORRENT_DHT_FLAG_WANT_IPV4
+            | TTORRENT_DHT_FLAG_WANT_IPV6;
+        if (status != 0
+            || parsed.reserved0 != 0U || parsed.reserved1 != 0U
+            || !valid_dht_message_kind(parsed.message_kind)
+            || !valid_dht_query_kind(parsed.query_kind)
+            || parsed.query_is_valid > 1U
+            || (parsed.present_fields & ~known_fields) != 0U
+            || (parsed.flags & ~known_flags) != 0U
+            || parsed.node_count < 0
+            || std::cmp_greater(parsed.node_count, nodes.size())
+            || parsed.peer_count < 0
+            || std::cmp_greater(parsed.peer_count, peers.size())
+            || parsed.sample_count < 0
+            || parsed.sample_count > TTORRENT_MAX_DHT_MESSAGE_SAMPLES) {
+            return false;
+        }
+
+        auto const has = [&](std::uint32_t const field) {
+            return (parsed.present_fields & field) != 0U;
+        };
+        struct OptionalDHTRangeSpecification {
+            std::uint32_t field;
+            int32_t offset;
+            int32_t size;
+            int32_t maximum_size;
+            bool allow_empty;
+        };
+        auto const optional_range = [&body, &has](
+            OptionalDHTRangeSpecification const specification
+        ) -> std::optional<lt::span<char const>> {
+            if (!has(specification.field)) {
+                if (specification.offset != 0 || specification.size != 0) {
+                    return std::nullopt;
+                }
+                return lt::span<char const>{};
+            }
+            return tracker_body_range(
+                body,
+                specification.offset,
+                specification.size,
+                specification.maximum_size,
+                specification.allow_empty
+            );
+        };
+        struct OptionalDHTFixedRangeSpecification {
+            std::uint32_t field;
+            int32_t offset;
+            int32_t size;
+        };
+        auto const optional_fixed_range = [&body, &has](
+            OptionalDHTFixedRangeSpecification const specification
+        ) -> std::optional<lt::span<char const>> {
+            if (!has(specification.field)) {
+                if (specification.offset != 0) {
+                    return std::nullopt;
+                }
+                return lt::span<char const>{};
+            }
+            return tracker_body_range(
+                body,
+                specification.offset,
+                specification.size,
+                specification.size,
+                false
+            );
+        };
+
+        auto const transaction = optional_range(OptionalDHTRangeSpecification{
+            .field = TTORRENT_DHT_HAS_TRANSACTION,
+            .offset = parsed.transaction_offset,
+            .size = parsed.transaction_size,
+            .maximum_size = TTORRENT_MAX_DHT_TRANSACTION_BYTES,
+            .allow_empty = true,
+        });
+        auto const query_name = optional_range(OptionalDHTRangeSpecification{
+            .field = TTORRENT_DHT_HAS_QUERY_NAME,
+            .offset = parsed.query_name_offset,
+            .size = parsed.query_name_size,
+            .maximum_size = TTORRENT_MAX_DHT_QUERY_NAME_BYTES,
+            .allow_empty = false,
+        });
+        auto const sender_id = optional_fixed_range(OptionalDHTFixedRangeSpecification{
+            .field = TTORRENT_DHT_HAS_SENDER_ID,
+            .offset = parsed.sender_id_offset,
+            .size = 20,
+        });
+        auto const target = optional_fixed_range(OptionalDHTFixedRangeSpecification{
+            .field = TTORRENT_DHT_HAS_TARGET,
+            .offset = parsed.target_offset,
+            .size = 20,
+        });
+        auto const token = optional_range(OptionalDHTRangeSpecification{
+            .field = TTORRENT_DHT_HAS_TOKEN,
+            .offset = parsed.token_offset,
+            .size = parsed.token_size,
+            .maximum_size = TTORRENT_MAX_DHT_TOKEN_BYTES,
+            .allow_empty = true,
+        });
+        auto const name = optional_range(OptionalDHTRangeSpecification{
+            .field = TTORRENT_DHT_HAS_NAME,
+            .offset = parsed.name_offset,
+            .size = parsed.name_size,
+            .maximum_size = TTORRENT_MAX_DHT_ANNOUNCED_NAME_BYTES,
+            .allow_empty = true,
+        });
+        auto const error_message = optional_range(OptionalDHTRangeSpecification{
+            .field = TTORRENT_DHT_HAS_ERROR_MESSAGE,
+            .offset = parsed.error_message_offset,
+            .size = parsed.error_message_size,
+            .maximum_size = TTORRENT_MAX_DHT_ERROR_MESSAGE_BYTES,
+            .allow_empty = true,
+        });
+        auto const sample_hashes = optional_range(OptionalDHTRangeSpecification{
+            .field = TTORRENT_DHT_HAS_SAMPLES,
+            .offset = parsed.sample_hashes_offset,
+            .size = parsed.sample_count * 20,
+            .maximum_size = TTORRENT_MAX_DHT_MESSAGE_SAMPLES * 20,
+            .allow_empty = true,
+        });
+        if (!transaction || !query_name || !sender_id || !target || !token
+            || !name || !error_message || !sample_hashes) {
+            return false;
+        }
+
+        if ((!has(TTORRENT_DHT_HAS_ERROR_CODE) && parsed.error_code != 0)
+            || (!has(TTORRENT_DHT_HAS_INTERVAL) && parsed.interval != 0)
+            || (!has(TTORRENT_DHT_HAS_INFOHASH_COUNT)
+                && parsed.total_infohash_count != 0)
+            || (!has(TTORRENT_DHT_HAS_PORT) && parsed.port != 0U)
+            || (!has(TTORRENT_DHT_HAS_PEERS) && parsed.peer_count != 0)
+            || (!has(TTORRENT_DHT_HAS_SAMPLES)
+                && (parsed.sample_count != 0 || parsed.sample_hashes_offset != 0))) {
+            return false;
+        }
+        std::optional<lt::address> external_address;
+        if (has(TTORRENT_DHT_HAS_EXTERNAL_ADDRESS)) {
+            external_address = tracker_address(TrackerAddressBits{
+                .high = parsed.external_address_high,
+                .low = parsed.external_address_low,
+                .family = parsed.external_address_family,
+            });
+            if (!external_address) {
+                return false;
+            }
+        } else if (parsed.external_address_high != 0U
+            || parsed.external_address_low != 0U
+            || parsed.external_address_family != 0U) {
+            return false;
+        }
+
+        bool const is_query = parsed.message_kind == TTORRENT_DHT_MESSAGE_QUERY;
+        bool const is_response = parsed.message_kind == TTORRENT_DHT_MESSAGE_RESPONSE;
+        bool const is_error = parsed.message_kind == TTORRENT_DHT_MESSAGE_ERROR;
+        constexpr std::uint32_t common_fields =
+            TTORRENT_DHT_HAS_TRANSACTION | TTORRENT_DHT_HAS_EXTERNAL_ADDRESS;
+        constexpr std::uint32_t query_fields = common_fields
+            | TTORRENT_DHT_HAS_QUERY_NAME | TTORRENT_DHT_HAS_SENDER_ID
+            | TTORRENT_DHT_HAS_TARGET | TTORRENT_DHT_HAS_TOKEN
+            | TTORRENT_DHT_HAS_NAME | TTORRENT_DHT_HAS_PORT;
+        constexpr std::uint32_t response_fields = common_fields
+            | TTORRENT_DHT_HAS_SENDER_ID | TTORRENT_DHT_HAS_TOKEN
+            | TTORRENT_DHT_HAS_INTERVAL | TTORRENT_DHT_HAS_INFOHASH_COUNT
+            | TTORRENT_DHT_HAS_PEERS | TTORRENT_DHT_HAS_SAMPLES;
+        constexpr std::uint32_t error_fields = common_fields
+            | TTORRENT_DHT_HAS_ERROR_CODE | TTORRENT_DHT_HAS_ERROR_MESSAGE;
+        if ((is_query && (parsed.present_fields & ~query_fields) != 0U)
+            || (is_response && (parsed.present_fields & ~response_fields) != 0U)
+            || (is_error && (parsed.present_fields & ~error_fields) != 0U)
+            || (!is_query && (parsed.query_kind != TTORRENT_DHT_QUERY_NONE
+                || parsed.flags != 0U || parsed.query_is_valid != 1U))
+            || (!is_response && (parsed.node_count != 0 || parsed.peer_count != 0
+                || parsed.sample_count != 0))
+            || (is_error
+                && has(TTORRENT_DHT_HAS_ERROR_CODE)
+                    != has(TTORRENT_DHT_HAS_ERROR_MESSAGE))) {
+            return false;
+        }
+
+        if (is_query) {
+            if (has(TTORRENT_DHT_HAS_QUERY_NAME)) {
+                if (dht_query_kind(*query_name) != parsed.query_kind) {
+                    return false;
+                }
+            } else if (parsed.query_kind != TTORRENT_DHT_QUERY_NONE
+                || parsed.query_is_valid != 0U) {
+                return false;
+            }
+
+            std::uint32_t allowed_fields = common_fields;
+            std::uint32_t allowed_query_flags = 0U;
+            if (has(TTORRENT_DHT_HAS_QUERY_NAME)) {
+                allowed_fields |= TTORRENT_DHT_HAS_QUERY_NAME
+                    | TTORRENT_DHT_HAS_SENDER_ID;
+                allowed_query_flags |= TTORRENT_DHT_FLAG_READ_ONLY;
+                switch (parsed.query_kind) {
+                    case TTORRENT_DHT_QUERY_PING:
+                    case TTORRENT_DHT_QUERY_GET_ITEM:
+                    case TTORRENT_DHT_QUERY_PUT_ITEM:
+                        break;
+                    case TTORRENT_DHT_QUERY_FIND_NODE:
+                    case TTORRENT_DHT_QUERY_SAMPLE_INFOHASHES:
+                    case TTORRENT_DHT_QUERY_UNKNOWN:
+                        allowed_fields |= TTORRENT_DHT_HAS_TARGET;
+                        allowed_query_flags |= TTORRENT_DHT_FLAG_WANT_SPECIFIED
+                            | TTORRENT_DHT_FLAG_WANT_IPV4
+                            | TTORRENT_DHT_FLAG_WANT_IPV6;
+                        break;
+                    case TTORRENT_DHT_QUERY_GET_PEERS:
+                        allowed_fields |= TTORRENT_DHT_HAS_TARGET;
+                        allowed_query_flags |= TTORRENT_DHT_FLAG_NOSEED
+                            | TTORRENT_DHT_FLAG_SCRAPE
+                            | TTORRENT_DHT_FLAG_WANT_SPECIFIED
+                            | TTORRENT_DHT_FLAG_WANT_IPV4
+                            | TTORRENT_DHT_FLAG_WANT_IPV6;
+                        break;
+                    case TTORRENT_DHT_QUERY_ANNOUNCE_PEER:
+                        allowed_fields |= TTORRENT_DHT_HAS_TARGET
+                            | TTORRENT_DHT_HAS_TOKEN
+                            | TTORRENT_DHT_HAS_NAME
+                            | TTORRENT_DHT_HAS_PORT;
+                        allowed_query_flags |= TTORRENT_DHT_FLAG_SEED
+                            | TTORRENT_DHT_FLAG_IMPLIED_PORT;
+                        break;
+                    case TTORRENT_DHT_QUERY_NONE:
+                    default:
+                        return false;
+                }
+            }
+            bool const wants_family = (parsed.flags
+                & (TTORRENT_DHT_FLAG_WANT_IPV4 | TTORRENT_DHT_FLAG_WANT_IPV6)) != 0U;
+            if ((parsed.present_fields & ~allowed_fields) != 0U
+                || (parsed.flags & ~allowed_query_flags) != 0U
+                || (wants_family
+                    && (parsed.flags & TTORRENT_DHT_FLAG_WANT_SPECIFIED) == 0U)) {
+                return false;
+            }
+
+            if (parsed.query_is_valid != 0U) {
+                if (!has(TTORRENT_DHT_HAS_QUERY_NAME)
+                    || !has(TTORRENT_DHT_HAS_SENDER_ID)) {
+                    return false;
+                }
+                bool const has_target = has(TTORRENT_DHT_HAS_TARGET);
+                switch (parsed.query_kind) {
+                    case TTORRENT_DHT_QUERY_PING:
+                    case TTORRENT_DHT_QUERY_GET_ITEM:
+                    case TTORRENT_DHT_QUERY_PUT_ITEM:
+                        break;
+                    case TTORRENT_DHT_QUERY_FIND_NODE:
+                    case TTORRENT_DHT_QUERY_GET_PEERS:
+                    case TTORRENT_DHT_QUERY_SAMPLE_INFOHASHES:
+                    case TTORRENT_DHT_QUERY_UNKNOWN:
+                        if (!has_target) {
+                            return false;
+                        }
+                        break;
+                    case TTORRENT_DHT_QUERY_ANNOUNCE_PEER:
+                        if (!has_target || !has(TTORRENT_DHT_HAS_TOKEN)
+                            || !has(TTORRENT_DHT_HAS_PORT)) {
+                            return false;
+                        }
+                        break;
+                    case TTORRENT_DHT_QUERY_NONE:
+                    default:
+                        return false;
+                }
+            }
+        }
+
+        if (has(TTORRENT_DHT_HAS_NAME) && !valid_tracker_message(*name)) {
+            return false;
+        }
+        if (has(TTORRENT_DHT_HAS_ERROR_MESSAGE)
+            && !valid_tracker_message(*error_message)) {
+            return false;
+        }
+
+        lt::dht::krpc_message imported;
+        imported.kind = static_cast<lt::dht::krpc_message_kind>(parsed.message_kind);
+        imported.query = static_cast<lt::dht::krpc_query_kind>(parsed.query_kind);
+        imported.query_valid = parsed.query_is_valid != 0U;
+        if (has(TTORRENT_DHT_HAS_TRANSACTION)) {
+            imported.transaction_id.assign(transaction->begin(), transaction->end());
+        }
+        if (has(TTORRENT_DHT_HAS_QUERY_NAME)) {
+            imported.query_name.assign(query_name->begin(), query_name->end());
+        }
+        if (has(TTORRENT_DHT_HAS_SENDER_ID)) {
+            imported.sender_id = lt::dht::node_id(sender_id->data());
+        }
+        if (has(TTORRENT_DHT_HAS_TARGET)) {
+            imported.target = lt::sha1_hash(target->data());
+        }
+        if (has(TTORRENT_DHT_HAS_TOKEN)) {
+            imported.token.emplace(token->begin(), token->end());
+        }
+        if (has(TTORRENT_DHT_HAS_NAME)) {
+            imported.name.assign(name->begin(), name->end());
+        }
+        if (has(TTORRENT_DHT_HAS_ERROR_CODE)) {
+            imported.error_code = parsed.error_code;
+        }
+        if (has(TTORRENT_DHT_HAS_ERROR_MESSAGE)) {
+            imported.error_message.assign(error_message->begin(), error_message->end());
+        }
+        imported.external_address = external_address;
+        if (has(TTORRENT_DHT_HAS_PORT)) {
+            imported.port = parsed.port;
+        }
+        imported.read_only = (parsed.flags & TTORRENT_DHT_FLAG_READ_ONLY) != 0U;
+        imported.noseed = (parsed.flags & TTORRENT_DHT_FLAG_NOSEED) != 0U;
+        imported.scrape = (parsed.flags & TTORRENT_DHT_FLAG_SCRAPE) != 0U;
+        imported.seed = (parsed.flags & TTORRENT_DHT_FLAG_SEED) != 0U;
+        imported.implied_port = (parsed.flags & TTORRENT_DHT_FLAG_IMPLIED_PORT) != 0U;
+        imported.wants_specified =
+            (parsed.flags & TTORRENT_DHT_FLAG_WANT_SPECIFIED) != 0U;
+        imported.wants_ipv4 = (parsed.flags & TTORRENT_DHT_FLAG_WANT_IPV4) != 0U;
+        imported.wants_ipv6 = (parsed.flags & TTORRENT_DHT_FLAG_WANT_IPV6) != 0U;
+        if (has(TTORRENT_DHT_HAS_INTERVAL)) {
+            imported.interval = parsed.interval;
+        }
+        if (has(TTORRENT_DHT_HAS_INFOHASH_COUNT)) {
+            imported.total_infohash_count = parsed.total_infohash_count;
+        }
+
+        imported.nodes.reserve(static_cast<std::size_t>(parsed.node_count));
+        for (int32_t index = 0; index < parsed.node_count; ++index) {
+            TTorrentDHTNodeRecord const &node = nodes.at(static_cast<std::size_t>(index));
+            if (node.reserved0 != 0U || node.reserved1 != 0U) {
+                return false;
+            }
+            auto const id = tracker_body_range(body, node.id_offset, 20, 20, false);
+            auto const address = tracker_address(TrackerAddressBits{
+                .high = node.address_high,
+                .low = node.address_low,
+                .family = node.address_family,
+            });
+            if (!id || !address) {
+                return false;
+            }
+            imported.nodes.push_back(lt::dht::krpc_node{
+                .id = lt::dht::node_id(id->data()),
+                .endpoint = lt::udp::endpoint(*address, node.port),
+            });
+        }
+        imported.peers_present = has(TTORRENT_DHT_HAS_PEERS);
+        imported.peers.reserve(static_cast<std::size_t>(parsed.peer_count));
+        for (int32_t index = 0; index < parsed.peer_count; ++index) {
+            TTorrentDHTPeerRecord const &peer = peers.at(static_cast<std::size_t>(index));
+            if (peer.reserved0 != 0U || peer.reserved1 != 0U) {
+                return false;
+            }
+            auto const address = tracker_address(TrackerAddressBits{
+                .high = peer.address_high,
+                .low = peer.address_low,
+                .family = peer.address_family,
+            });
+            if (!address) {
+                return false;
+            }
+            imported.peers.emplace_back(*address, peer.port);
+        }
+        imported.samples_present = has(TTORRENT_DHT_HAS_SAMPLES);
+        imported.samples.reserve(static_cast<std::size_t>(parsed.sample_count));
+        for (int32_t index = 0; index < parsed.sample_count; ++index) {
+            auto const offset = static_cast<std::ptrdiff_t>(index) * 20;
+            lt::span<char const> const hash = sample_hashes->subspan(offset, 20);
+            imported.samples.emplace_back(hash.data());
+        }
+
+        result = std::move(imported);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
 
 BridgeTrackerResponseParser::BridgeTrackerResponseParser(
     TTorrentTrackerResponseParserCallbacks const callbacks
@@ -2369,6 +2864,7 @@ extern "C" TTorrentClient *TorrentClientCreateWithError(
     TTorrentSwarmMetainfoParserCallbacks swarm_metainfo_parser,
     TTorrentPeerProtocolParserCallbacks peer_protocol_parser,
     TTorrentTrackerResponseParserCallbacks tracker_response_parser,
+    TTorrentDHTMessageParserCallbacks dht_message_parser,
     char *error_out,
     int32_t error_capacity
 ) noexcept
@@ -2395,6 +2891,9 @@ extern "C" TTorrentClient *TorrentClientCreateWithError(
         auto tracker_parser = std::make_shared<BridgeTrackerResponseParser>(
             tracker_response_parser
         );
+        auto dht_parser = std::make_shared<BridgeDHTMessageParser>(
+            dht_message_parser
+        );
 
         return std::make_unique<TTorrentClient>(
             normalized_state_path,
@@ -2402,7 +2901,8 @@ extern "C" TTorrentClient *TorrentClientCreateWithError(
             std::move(broker),
             std::move(parser),
             std::move(peer_parser),
-            std::move(tracker_parser)
+            std::move(tracker_parser),
+            std::move(dht_parser)
         ).release();
     } catch (std::exception const &exception) {
         copy_error(error_buffer, exception.what());

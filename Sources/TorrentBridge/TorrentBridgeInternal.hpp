@@ -10,6 +10,7 @@
 #include <libtorrent/alert.hpp>
 #include <libtorrent/alert_types.hpp>
 #include <libtorrent/aux_/path.hpp>
+#include <libtorrent/aux_/dht_message_parser.hpp>
 #include <libtorrent/aux_/payload_file_provider.hpp>
 #include <libtorrent/aux_/peer_message_parser.hpp>
 #include <libtorrent/aux_/preparsed_metainfo.hpp>
@@ -311,7 +312,7 @@ static_assert(
 );
 static_assert(kMaxTorrentIdentityTokenCount > static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 63U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 64U);
 static_assert(
     TORRENT_ABI_VERSION > 1,
     "Deprecated libtorrent ABIs can parse add_torrent_params.url as a raw magnet."
@@ -426,6 +427,13 @@ static_assert(std::is_trivially_copyable_v<TTorrentTrackerPeerRecord>);
 static_assert(std::is_standard_layout_v<TTorrentHTTPTrackerResponseResult>);
 static_assert(std::is_trivially_copyable_v<TTorrentHTTPTrackerResponseResult>);
 static_assert(std::is_standard_layout_v<TTorrentTrackerResponseParserCallbacks>);
+static_assert(std::is_standard_layout_v<TTorrentDHTNodeRecord>);
+static_assert(std::is_trivially_copyable_v<TTorrentDHTNodeRecord>);
+static_assert(std::is_standard_layout_v<TTorrentDHTPeerRecord>);
+static_assert(std::is_trivially_copyable_v<TTorrentDHTPeerRecord>);
+static_assert(std::is_standard_layout_v<TTorrentDHTMessageResult>);
+static_assert(std::is_trivially_copyable_v<TTorrentDHTMessageResult>);
+static_assert(std::is_standard_layout_v<TTorrentDHTMessageParserCallbacks>);
 static_assert(std::is_standard_layout_v<TTorrentStorageActivation>);
 static_assert(std::is_trivially_copyable_v<TTorrentStorageActivation>);
 static_assert(sizeof(TTorrentSnapshot) == 2336U);
@@ -515,6 +523,14 @@ static_assert(sizeof(TTorrentHTTPTrackerResponseResult) == 80U);
 static_assert(alignof(TTorrentHTTPTrackerResponseResult) == 8U);
 static_assert(sizeof(TTorrentTrackerResponseParserCallbacks) == 32U);
 static_assert(alignof(TTorrentTrackerResponseParserCallbacks) == 8U);
+static_assert(sizeof(TTorrentDHTNodeRecord) == 32U);
+static_assert(alignof(TTorrentDHTNodeRecord) == 8U);
+static_assert(sizeof(TTorrentDHTPeerRecord) == 24U);
+static_assert(alignof(TTorrentDHTPeerRecord) == 8U);
+static_assert(sizeof(TTorrentDHTMessageResult) == 112U);
+static_assert(alignof(TTorrentDHTMessageResult) == 8U);
+static_assert(sizeof(TTorrentDHTMessageParserCallbacks) == 32U);
+static_assert(alignof(TTorrentDHTMessageParserCallbacks) == 8U);
 static_assert(sizeof(TTorrentStorageActivation) == 96U);
 static_assert(alignof(TTorrentStorageActivation) == 8U);
 static_assert(offsetof(TTorrentStorageActivation, preserved_torrent_id) == 56U);
@@ -747,6 +763,14 @@ inline constexpr ptrauth_extra_data_t kTrackerParserHTTPCallbackDiscriminator =
     ptrauth_string_discriminator("torrent.bridge.tracker-parser.http");
 inline constexpr ptrauth_extra_data_t kTrackerParserContextDiscriminator =
     ptrauth_string_discriminator("torrent.bridge.tracker-parser.context");
+inline constexpr ptrauth_extra_data_t kDHTParserRetainCallbackDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.dht-parser.retain");
+inline constexpr ptrauth_extra_data_t kDHTParserReleaseCallbackDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.dht-parser.release");
+inline constexpr ptrauth_extra_data_t kDHTParserMessageCallbackDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.dht-parser.message");
+inline constexpr ptrauth_extra_data_t kDHTParserContextDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.dht-parser.context");
 inline constexpr ptrauth_extra_data_t kWakeCallbackDiscriminator =
     ptrauth_string_discriminator("torrent.bridge.wake");
 inline constexpr ptrauth_extra_data_t kWakeContextDiscriminator =
@@ -873,6 +897,28 @@ using StoredTrackerParserContext = void * __ptrauth(
     1,
     kTrackerParserContextDiscriminator
 );
+using StoredDHTParserRetainCallback =
+    TTorrentDHTParserContextRetainCallback __ptrauth(
+        ptrauth_key_function_pointer,
+        1,
+        kDHTParserRetainCallbackDiscriminator
+    );
+using StoredDHTParserReleaseCallback =
+    TTorrentDHTParserContextReleaseCallback __ptrauth(
+        ptrauth_key_function_pointer,
+        1,
+        kDHTParserReleaseCallbackDiscriminator
+    );
+using StoredDHTParserMessageCallback = TTorrentDHTMessageParseCallback __ptrauth(
+    ptrauth_key_function_pointer,
+    1,
+    kDHTParserMessageCallbackDiscriminator
+);
+using StoredDHTParserContext = void * __ptrauth(
+    ptrauth_key_process_dependent_data,
+    1,
+    kDHTParserContextDiscriminator
+);
 #else
 using StoredWakeCallback = TTorrentWakeCallback;
 using StoredWakeContext = void *;
@@ -897,6 +943,10 @@ using StoredTrackerParserRetainCallback = TTorrentTrackerParserContextRetainCall
 using StoredTrackerParserReleaseCallback = TTorrentTrackerParserContextReleaseCallback;
 using StoredTrackerParserHTTPCallback = TTorrentHTTPTrackerResponseParseCallback;
 using StoredTrackerParserContext = void *;
+using StoredDHTParserRetainCallback = TTorrentDHTParserContextRetainCallback;
+using StoredDHTParserReleaseCallback = TTorrentDHTParserContextReleaseCallback;
+using StoredDHTParserMessageCallback = TTorrentDHTMessageParseCallback;
+using StoredDHTParserContext = void *;
 #endif
 
 struct PayloadBrokerCallbacks {
@@ -929,6 +979,34 @@ struct TrackerResponseParserCallbacks {
     StoredTrackerParserRetainCallback retain_context = nullptr;
     StoredTrackerParserReleaseCallback release_context = nullptr;
     StoredTrackerParserHTTPCallback parse_http_response = nullptr;
+};
+
+struct DHTMessageParserCallbacks {
+    StoredDHTParserContext context = nullptr;
+    StoredDHTParserRetainCallback retain_context = nullptr;
+    StoredDHTParserReleaseCallback release_context = nullptr;
+    StoredDHTParserMessageCallback parse_message = nullptr;
+};
+
+class BridgeDHTMessageParser final : public lt::aux::dht_message_parser {
+public:
+    explicit BridgeDHTMessageParser(TTorrentDHTMessageParserCallbacks callbacks);
+    __attribute__((noinline)) ~BridgeDHTMessageParser() override;
+
+    BridgeDHTMessageParser(BridgeDHTMessageParser const &) = delete;
+    BridgeDHTMessageParser &operator=(BridgeDHTMessageParser const &) = delete;
+    BridgeDHTMessageParser(BridgeDHTMessageParser &&) = delete;
+    BridgeDHTMessageParser &operator=(BridgeDHTMessageParser &&) = delete;
+
+    [[nodiscard]] bool parse_message(
+        lt::span<char const> body,
+        bool source_is_ipv6,
+        lt::dht::krpc_message &result
+    ) noexcept override;
+
+private:
+    DHTMessageParserCallbacks callbacks_;
+    bool retained_ = false;
 };
 
 class BridgeTrackerResponseParser final : public lt::aux::tracker_response_parser {
@@ -1563,7 +1641,10 @@ TTorrentPeerSourceSnapshot peer_source_snapshot(std::vector<lt::peer_info> const
 
 lt::settings_pack make_settings();
 
-lt::session_params make_session_params(bool enable_peer_exchange_plugin);
+lt::session_params make_session_params(
+    bool enable_peer_exchange_plugin,
+    std::shared_ptr<lt::aux::dht_message_parser> const &dht_message_parser = nullptr
+);
 
 void prepare_add_params(
     lt::add_torrent_params &params,
@@ -1691,7 +1772,8 @@ struct TTorrentClient {
         std::shared_ptr<PayloadBrokerContext> payload_broker,
         std::shared_ptr<lt::aux::swarm_metadata_parser> swarm_parser = nullptr,
         std::shared_ptr<lt::aux::peer_message_parser> peer_parser = nullptr,
-        std::shared_ptr<lt::aux::tracker_response_parser> tracker_parser = nullptr
+        std::shared_ptr<lt::aux::tracker_response_parser> tracker_parser = nullptr,
+        std::shared_ptr<lt::aux::dht_message_parser> dht_parser = nullptr
     );
 
     ~TTorrentClient() noexcept;
@@ -1720,6 +1802,7 @@ struct TTorrentClient {
     std::shared_ptr<lt::aux::swarm_metadata_parser> swarm_metadata_parser;
     std::shared_ptr<lt::aux::peer_message_parser> peer_message_parser;
     std::shared_ptr<lt::aux::tracker_response_parser> tracker_response_parser;
+    std::shared_ptr<lt::aux::dht_message_parser> dht_message_parser;
     UniqueFileDescriptor state_directory_descriptor;
     UniqueFileDescriptor resume_directory_descriptor;
     UniqueFileDescriptor part_files_directory_descriptor;

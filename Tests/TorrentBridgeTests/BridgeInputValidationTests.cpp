@@ -690,6 +690,95 @@ private:
     }
 };
 
+class DHTMessageParserProbe final {
+public:
+    [[nodiscard]] TTorrentDHTMessageParserCallbacks callbacks() noexcept
+    {
+        return TTorrentDHTMessageParserCallbacks{
+            .context = this,
+            .retain_context = retain_callback,
+            .release_context = release_callback,
+            .parse_message = parse_callback,
+        };
+    }
+
+    TTorrentDHTMessageResult result{};
+    std::vector<TTorrentDHTNodeRecord> nodes;
+    std::vector<TTorrentDHTPeerRecord> peers;
+    int32_t status = 0;
+    std::atomic_int retain_count = 0;
+    std::atomic_int release_count = 0;
+    std::atomic_int parse_count = 0;
+    std::atomic_int last_node_capacity = 0;
+    std::atomic_int last_peer_capacity = 0;
+    std::atomic_int last_source_family = 0;
+    std::string last_body;
+
+private:
+    static std::uint8_t retain_callback(void *context) noexcept
+    {
+        auto *probe = static_cast<DHTMessageParserProbe *>(context);
+        if (probe == nullptr) {
+            return 0U;
+        }
+        ++probe->retain_count;
+        return 1U;
+    }
+
+    static void release_callback(void *context) noexcept
+    {
+        auto *probe = static_cast<DHTMessageParserProbe *>(context);
+        if (probe != nullptr) {
+            ++probe->release_count;
+        }
+    }
+
+    static int32_t parse_callback(
+        void *context,
+        char const *body,
+        int32_t const body_size,
+        std::uint8_t const source_address_family,
+        TTorrentDHTNodeRecord *nodes_out,
+        int32_t const node_capacity,
+        TTorrentDHTPeerRecord *peers_out,
+        int32_t const peer_capacity,
+        TTorrentDHTMessageResult *result_out
+    ) noexcept
+    {
+        auto *probe = static_cast<DHTMessageParserProbe *>(context);
+        if (probe == nullptr || body == nullptr || body_size <= 0
+            || nodes_out == nullptr || node_capacity < 0
+            || peers_out == nullptr || peer_capacity < 0
+            || result_out == nullptr) {
+            return EINVAL;
+        }
+        ++probe->parse_count;
+        probe->last_node_capacity = node_capacity;
+        probe->last_peer_capacity = peer_capacity;
+        probe->last_source_family = source_address_family;
+        __unsafe_buffer_usage_begin
+        std::span<char const> const input(body, static_cast<std::size_t>(body_size));
+        std::span<TTorrentDHTNodeRecord> const node_output(
+            nodes_out,
+            static_cast<std::size_t>(node_capacity)
+        );
+        std::span<TTorrentDHTPeerRecord> const peer_output(
+            peers_out,
+            static_cast<std::size_t>(peer_capacity)
+        );
+        __unsafe_buffer_usage_end
+        probe->last_body.assign(input.begin(), input.end());
+        *result_out = probe->result;
+        if (std::cmp_greater(probe->nodes.size(), node_capacity)
+            || std::cmp_greater(probe->peers.size(), peer_capacity)) {
+            return EOVERFLOW;
+        }
+        std::ranges::copy(probe->nodes, node_output.begin());
+        std::ranges::copy(probe->peers, peer_output.begin());
+        return probe->status;
+    }
+};
+
 [[nodiscard]] std::string v1_capsule_info(std::uint32_t &piece_hash_offset)
 {
     std::string info = "d6:lengthi4e4:name8:file.bin12:piece lengthi16384e6:pieces20:";
@@ -2503,6 +2592,168 @@ TEST_CASE("DHT security settings are explicit")
     CHECK(settings.get_bool(lt::settings_pack::dht_restrict_search_ips));
     CHECK(settings.get_bool(lt::settings_pack::dht_ignore_dark_internet));
     CHECK(settings.get_bool(lt::settings_pack::apply_filter_to_dht));
+}
+
+TEST_CASE("DHT callback ownership and typed KRPC response import are exact")
+{
+    std::string body = "tx";
+    int32_t const sender_offset = static_cast<int32_t>(body.size());
+    body.append(20U, 's');
+    int32_t const token_offset = static_cast<int32_t>(body.size());
+    body += "token";
+    int32_t const node_id_offset = static_cast<int32_t>(body.size());
+    body.append(20U, 'n');
+    int32_t const samples_offset = static_cast<int32_t>(body.size());
+    body.append(20U, 'a');
+    body.append(20U, 'b');
+
+    DHTMessageParserProbe probe;
+    probe.result.external_address_low = 0xcb00'7105U;
+    probe.result.transaction_offset = 0;
+    probe.result.transaction_size = 2;
+    probe.result.sender_id_offset = sender_offset;
+    probe.result.token_offset = token_offset;
+    probe.result.token_size = 5;
+    probe.result.sample_hashes_offset = samples_offset;
+    probe.result.node_count = 1;
+    probe.result.peer_count = 1;
+    probe.result.sample_count = 2;
+    probe.result.interval = 300;
+    probe.result.total_infohash_count = 12;
+    probe.result.present_fields = TTORRENT_DHT_HAS_TRANSACTION
+        | TTORRENT_DHT_HAS_SENDER_ID
+        | TTORRENT_DHT_HAS_TOKEN
+        | TTORRENT_DHT_HAS_EXTERNAL_ADDRESS
+        | TTORRENT_DHT_HAS_INTERVAL
+        | TTORRENT_DHT_HAS_INFOHASH_COUNT
+        | TTORRENT_DHT_HAS_PEERS
+        | TTORRENT_DHT_HAS_SAMPLES;
+    probe.result.message_kind = TTORRENT_DHT_MESSAGE_RESPONSE;
+    probe.result.query_kind = TTORRENT_DHT_QUERY_NONE;
+    probe.result.external_address_family = TTORRENT_PEER_ADDRESS_IPV4;
+    probe.result.query_is_valid = 1U;
+    probe.nodes = {TTorrentDHTNodeRecord{
+        .address_high = 0x2001'0db8'0000'0000U,
+        .address_low = 7U,
+        .id_offset = node_id_offset,
+        .port = 6'881U,
+        .address_family = TTORRENT_PEER_ADDRESS_IPV6,
+        .reserved0 = 0U,
+        .reserved1 = 0U,
+    }};
+    probe.peers = {TTorrentDHTPeerRecord{
+        .address_high = 0U,
+        .address_low = 0xcb00'7109U,
+        .port = 6'882U,
+        .address_family = TTORRENT_PEER_ADDRESS_IPV4,
+        .reserved0 = 0U,
+        .reserved1 = 0U,
+    }};
+
+    {
+        BridgeDHTMessageParser parser(probe.callbacks());
+        CHECK(probe.retain_count == 1);
+        CHECK(probe.release_count == 0);
+        lt::dht::krpc_message imported;
+        REQUIRE(parser.parse_message(body, true, imported));
+        CHECK(imported.kind == lt::dht::krpc_message_kind::response);
+        CHECK(imported.query == lt::dht::krpc_query_kind::none);
+        CHECK(imported.query_valid);
+        CHECK(imported.transaction_id == "tx");
+        REQUIRE(imported.sender_id.has_value());
+        CHECK(imported.sender_id->to_string() == std::string(20U, 's'));
+        REQUIRE(imported.token.has_value());
+        CHECK(*imported.token == "token");
+        REQUIRE(imported.external_address.has_value());
+        CHECK(imported.external_address->to_string() == "203.0.113.5");
+        REQUIRE(imported.interval.has_value());
+        CHECK(*imported.interval == 300);
+        REQUIRE(imported.total_infohash_count.has_value());
+        CHECK(*imported.total_infohash_count == 12);
+        REQUIRE(imported.nodes.size() == 1U);
+        CHECK(imported.nodes.at(0).id.to_string() == std::string(20U, 'n'));
+        CHECK(imported.nodes.at(0).endpoint.address().to_string() == "2001:db8::7");
+        CHECK(imported.nodes.at(0).endpoint.port() == 6'881U);
+        CHECK(imported.peers_present);
+        REQUIRE(imported.peers.size() == 1U);
+        CHECK(imported.peers.at(0).address().to_string() == "203.0.113.9");
+        CHECK(imported.peers.at(0).port() == 6'882U);
+        CHECK(imported.samples_present);
+        REQUIRE(imported.samples.size() == 2U);
+        CHECK(imported.samples.at(0).to_string() == std::string(20U, 'a'));
+        CHECK(imported.samples.at(1).to_string() == std::string(20U, 'b'));
+        CHECK(probe.last_body == body);
+        CHECK(probe.last_source_family == TTORRENT_PEER_ADDRESS_IPV6);
+        CHECK(probe.last_node_capacity == TTORRENT_MAX_DHT_MESSAGE_NODES);
+        CHECK(probe.last_peer_capacity == TTORRENT_MAX_DHT_MESSAGE_PEERS);
+    }
+
+    CHECK(probe.parse_count == 1);
+    CHECK(probe.release_count == 1);
+}
+
+TEST_CASE("DHT malformed callback output fails atomically")
+{
+    DHTMessageParserProbe probe;
+    probe.result.message_kind = TTORRENT_DHT_MESSAGE_RESPONSE;
+    probe.result.query_kind = TTORRENT_DHT_QUERY_NONE;
+    probe.result.query_is_valid = 1U;
+    probe.result.node_count = 1;
+    probe.nodes = {TTorrentDHTNodeRecord{
+        .address_high = 0U,
+        .address_low = 0xcb00'7109U,
+        .id_offset = 99,
+        .port = 6'881U,
+        .address_family = TTORRENT_PEER_ADDRESS_IPV4,
+        .reserved0 = 0U,
+        .reserved1 = 0U,
+    }};
+
+    BridgeDHTMessageParser parser(probe.callbacks());
+    lt::dht::krpc_message imported;
+    imported.kind = lt::dht::krpc_message_kind::error;
+    imported.transaction_id = "sentinel";
+    imported.error_code = 777;
+    imported.nodes.push_back(lt::dht::krpc_node{});
+
+    CHECK_FALSE(parser.parse_message("de", false, imported));
+    CHECK(imported.kind == lt::dht::krpc_message_kind::error);
+    CHECK(imported.transaction_id == "sentinel");
+    REQUIRE(imported.error_code.has_value());
+    CHECK(*imported.error_code == 777);
+    CHECK(imported.nodes.size() == 1U);
+
+    int const calls_before_oversize = probe.parse_count;
+    std::string const oversized(
+        static_cast<std::size_t>(TTORRENT_MAX_DHT_MESSAGE_BYTES) + 1U,
+        'x'
+    );
+    CHECK_FALSE(parser.parse_message(oversized, false, imported));
+    CHECK(probe.parse_count == calls_before_oversize);
+    CHECK(imported.transaction_id == "sentinel");
+
+    std::string query_body = "ping";
+    int32_t const sender_offset = static_cast<int32_t>(query_body.size());
+    query_body.append(20U, 's');
+    int32_t const target_offset = static_cast<int32_t>(query_body.size());
+    query_body.append(20U, 't');
+    probe.result = TTorrentDHTMessageResult{};
+    probe.nodes.clear();
+    probe.result.message_kind = TTORRENT_DHT_MESSAGE_QUERY;
+    probe.result.query_kind = TTORRENT_DHT_QUERY_PING;
+    probe.result.query_is_valid = 1U;
+    probe.result.present_fields = TTORRENT_DHT_HAS_QUERY_NAME
+        | TTORRENT_DHT_HAS_SENDER_ID
+        | TTORRENT_DHT_HAS_TARGET;
+    probe.result.query_name_offset = 0;
+    probe.result.query_name_size = 4;
+    probe.result.sender_id_offset = sender_offset;
+    probe.result.target_offset = target_offset;
+
+    CHECK_FALSE(parser.parse_message(query_body, false, imported));
+    CHECK(imported.kind == lt::dht::krpc_message_kind::error);
+    CHECK(imported.transaction_id == "sentinel");
+    CHECK(imported.nodes.size() == 1U);
 }
 
 TEST_CASE("untrusted magnet endpoint hints are discarded")

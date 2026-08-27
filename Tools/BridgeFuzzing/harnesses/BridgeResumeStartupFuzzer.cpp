@@ -28,6 +28,7 @@ void exercise_asynchronous_destroy_once(std::filesystem::path const &root)
         bridge_fuzz::rejecting_swarm_metainfo_parser(),
         bridge_fuzz::rejecting_peer_protocol_parser(),
         bridge_fuzz::rejecting_tracker_response_parser(),
+        bridge_fuzz::rejecting_dht_message_parser(),
         create_error.data(),
         create_error.capacity()
     );
@@ -68,6 +69,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
         bridge_fuzz::rejecting_swarm_metainfo_parser(),
         bridge_fuzz::rejecting_peer_protocol_parser(),
         bridge_fuzz::rejecting_tracker_response_parser(),
+        bridge_fuzz::rejecting_dht_message_parser(),
         create_error.data(),
         create_error.capacity()
     );
