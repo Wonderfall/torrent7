@@ -47,6 +47,181 @@ struct TorrentManifestParserTests {
         #expect(rootless.manifest.files[0].pathComponents == ["leaf.bin"])
     }
 
+    @Test("Shared metainfo core retains exact hash-defining ranges")
+    func retainsExactCoreRanges() throws {
+        let v1Metadata = Self.v1SingleFile(name: "sample.bin", size: 5)
+        let v1 = try TorrentManifestParser().parse(v1Metadata)
+        #expect(v1.infoCore.kind == .v1)
+        #expect(v1.infoCore.contentKind == .singleFile)
+        #expect(v1.infoCore.wireName == "sample.bin")
+        #expect(v1.infoCore.effectiveName == v1.manifest.name)
+        #expect(Data(v1.metadata[v1.infoCore.infoDictionaryRange.range])
+            == v1.rawInfoDictionary)
+        let v1HashesRange = try #require(v1.infoCore.v1PieceHashesRange)
+        #expect(Data(v1.metadata[v1HashesRange.range])
+            == Data(repeating: 0x11, count: Insecure.SHA1.byteCount))
+
+        let fixture = Self.v2PieceLayerFixture()
+        let v2 = try TorrentMetainfoParser().parse(fixture.metadata)
+        #expect(v2.infoCore.kind == .v2)
+        #expect(v2.infoCore.v1PieceHashesRange == nil)
+        #expect(v2.infoCore.files.map(\.index) == [0])
+        #expect(v2.infoCore.files[0].isExecutable)
+        #expect(v2.infoCore.files[0].isHidden)
+        let rootRange = try #require(v2.infoCore.files[0].piecesRootRange)
+        #expect(Data(v2.metadata[rootRange.range]) == fixture.root)
+        let layer = try #require(v2.envelope.pieceLayers.first)
+        #expect(Data(v2.metadata[layer.piecesRootRange.range]) == fixture.root)
+        #expect(Data(v2.metadata[layer.hashesRange.range]) == fixture.hashes)
+        #expect(layer.fileIndices == [0])
+    }
+
+    @Test("Bare BEP 9 info dictionaries use the same shared core parser")
+    func parsesBareInfoDictionary() throws {
+        let fixture = Self.v2PieceLayerFixture()
+        let local = try TorrentMetainfoParser().parse(fixture.metadata)
+        let infoBytes = Data(local.infoDictionary)
+        let advertised = try TorrentAdvertisedInfoHashes(
+            v2: local.infoCore.v2InfoHash
+        )
+
+        let swarm = try TorrentMetainfoParser().parseInfoDictionary(
+            infoBytes,
+            advertisedHashes: advertised
+        )
+        #expect(swarm.infoCore.infoDictionaryRange.range == infoBytes.indices)
+        #expect(swarm.infoDictionary == infoBytes)
+        #expect(swarm.infoCore.kind == local.infoCore.kind)
+        #expect(swarm.infoCore.effectiveName == local.infoCore.effectiveName)
+        #expect(swarm.infoCore.pieceLength == local.infoCore.pieceLength)
+        #expect(swarm.infoCore.totalSize == local.infoCore.totalSize)
+        #expect(swarm.infoCore.v2InfoHash == local.infoCore.v2InfoHash)
+        #expect(swarm.infoCore.files.map(\.pathComponents)
+            == local.infoCore.files.map(\.pathComponents))
+        let rootRange = try #require(swarm.infoCore.files[0].piecesRootRange)
+        #expect(Data(swarm.bytes[rootRange.range]) == fixture.root)
+
+        var wrapped = Data("prefix".utf8)
+        wrapped.append(fixture.info.encoded())
+        wrapped.append(Data("suffix".utf8))
+        let slicedInfo = wrapped[6..<(wrapped.count - 6)]
+        #expect(slicedInfo.startIndex == 6)
+        let sliced = try TorrentMetainfoParser().parseInfoDictionary(slicedInfo)
+        #expect(sliced.bytes.startIndex == 0)
+        #expect(sliced.infoCore.infoDictionaryRange.range == sliced.bytes.indices)
+        #expect(sliced.infoCore.v2InfoHash == local.infoCore.v2InfoHash)
+    }
+
+    @Test("Envelope records field presence and bounded descriptive metadata")
+    func parsesEnvelopeMetadataAndPresence() throws {
+        let metadata = Self.torrent(
+            info: Self.v1SingleFileInfo(name: "sample.bin", size: 5),
+            topLevel: [
+                Self.key("announce", .string("https://tracker.example/announce")),
+                Self.key("announce-list", .list([])),
+                Self.key("comment", .string("fallback comment")),
+                Self.key("comment.utf-8", .string("")),
+                Self.key("created by", .string("Torrent fixture")),
+                Self.key("creation date", .integer(1_700_000_000)),
+                Self.key("nodes", .list([])),
+                Self.key("url-list", .list([])),
+            ]
+        )
+
+        let envelope = try TorrentManifestParser().parse(metadata).envelope
+        #expect(envelope.presentFields.contains(.announce))
+        #expect(envelope.presentFields.contains(.announceList))
+        #expect(envelope.presentFields.contains(.urlList))
+        #expect(envelope.presentFields.contains(.comment))
+        #expect(envelope.presentFields.contains(.createdBy))
+        #expect(envelope.presentFields.contains(.creationDate))
+        #expect(envelope.presentFields.contains(.dhtNodes))
+        #expect(!envelope.presentFields.contains(.pieceLayers))
+        #expect(envelope.comment == "fallback comment")
+        #expect(envelope.createdBy == "Torrent fixture")
+        #expect(envelope.creationDate == 1_700_000_000)
+        #expect(envelope.hasIgnoredDHTNodesField)
+    }
+
+    @Test("Supplied v2 piece layers must be complete and root-valid")
+    func validatesPieceLayers() throws {
+        let fixture = Self.v2PieceLayerFixture()
+        let parsed = try TorrentManifestParser().parse(fixture.metadata)
+        #expect(parsed.envelope.presentFields.contains(.pieceLayers))
+        #expect(parsed.envelope.pieceLayers.count == 1)
+
+        let sharedFixture = Self.v2PieceLayerFixture(fileNames: ["a.bin", "b.bin"])
+        let shared = try TorrentManifestParser().parse(sharedFixture.metadata)
+        #expect(shared.envelope.pieceLayers.count == 1)
+        #expect(shared.envelope.pieceLayers[0].fileIndices == [0, 1])
+
+        let absent = Self.torrent(info: fixture.info)
+        let parsedAbsent = try TorrentManifestParser().parse(absent)
+        #expect(parsedAbsent.envelope.pieceLayers.isEmpty)
+        #expect(!parsedAbsent.envelope.presentFields.contains(.pieceLayers))
+
+        try expectManifestError(.invalidPieceLayers) {
+            _ = try TorrentManifestParser().parse(Self.torrent(
+                info: fixture.info,
+                topLevel: [Self.key("piece layers", .dictionary([]))]
+            ))
+        }
+        try expectManifestError(.invalidPieceLayers) {
+            var wrongHashes = fixture.hashes
+            wrongHashes[0] ^= 1
+            _ = try TorrentManifestParser().parse(Self.torrent(
+                info: fixture.info,
+                topLevel: [(
+                    Data("piece layers".utf8),
+                    .dictionary([(fixture.root, .bytes(wrongHashes))])
+                )]
+            ))
+        }
+        try expectManifestError(.invalidPieceLayers) {
+            _ = try TorrentManifestParser().parse(Self.torrent(
+                info: fixture.info,
+                topLevel: [(
+                    Data("piece layers".utf8),
+                    .dictionary([(
+                        Data(repeating: 0x99, count: SHA256.byteCount),
+                        .bytes(fixture.hashes)
+                    )])
+                )]
+            ))
+        }
+    }
+
+    @Test("Empty v2 files do not retain semantically meaningless roots")
+    func ignoresEmptyFilePiecesRoot() throws {
+        let emptyRoot = Data(repeating: 0xaa, count: SHA256.byteCount)
+        let payloadRoot = Data(repeating: 0xbb, count: SHA256.byteCount)
+        let info = TestBencode.dictionary([
+            Self.key("file tree", .dictionary([
+                Self.key("empty.bin", .dictionary([
+                    (Data(), .dictionary([
+                        Self.key("length", .integer(0)),
+                        Self.key("pieces root", .bytes(emptyRoot)),
+                    ]))
+                ])),
+                Self.key("payload.bin", .dictionary([
+                    (Data(), .dictionary([
+                        Self.key("length", .integer(1)),
+                        Self.key("pieces root", .bytes(payloadRoot)),
+                    ]))
+                ])),
+            ])),
+            Self.key("meta version", .integer(2)),
+            Self.key("name", .string("payload")),
+            Self.key("piece length", .integer(16_384)),
+        ])
+
+        let parsed = try TorrentMetainfoParser().parse(Self.torrent(info: info))
+        #expect(parsed.infoCore.files[0].expectedSize == 0)
+        #expect(parsed.infoCore.files[0].piecesRootRange == nil)
+        let payloadRange = try #require(parsed.infoCore.files[1].piecesRootRange)
+        #expect(Data(parsed.metadata[payloadRange.range]) == payloadRoot)
+    }
+
     @Test("Swift preview uses the validated manifest and source envelope")
     func buildsSwiftPreview() throws {
         let metadata = Self.torrent(
@@ -117,6 +292,12 @@ struct TorrentManifestParserTests {
             _ = try TorrentManifestParser(limits: limits).parse(twoTrackers)
         }
 
+        limits = .standard
+        limits.maximumTrackerTierCount = 1
+        try expectManifestError(.tooManyTrackers) {
+            _ = try TorrentManifestParser(limits: limits).parse(twoTrackers)
+        }
+
         let fallbackTracker = Self.torrent(
             info: info,
             topLevel: [Self.key(
@@ -124,6 +305,7 @@ struct TorrentManifestParserTests {
                 .string("https://fallback.example/announce")
             )]
         )
+        limits = .standard
         limits.maximumTrackerCount = 0
         try expectManifestError(.tooManyTrackers) {
             _ = try TorrentManifestParser(limits: limits).parse(fallbackTracker)
@@ -288,6 +470,15 @@ struct TorrentManifestParserTests {
                 ]
             ))
         }
+        try expectManifestError(.conflictingPath) {
+            _ = try TorrentManifestParser().parse(Self.v1Directory(
+                name: "payload",
+                files: [
+                    .init(path: ["node", "child"], size: 1),
+                    .init(path: ["node"], size: 1),
+                ]
+            ))
+        }
     }
 
     @Test("Noncanonical bencoding and parser budgets fail closed")
@@ -307,12 +498,118 @@ struct TorrentManifestParserTests {
                 Self.v1SingleFile(name: "sample.bin", size: 5)
             )
         }
+
+        limits = .standard
+        limits.maximumPathComponentCount = 1
+        try expectManifestError(.workLimitExceeded) {
+            _ = try TorrentManifestParser(limits: limits).parse(Self.v1Directory(
+                name: "payload",
+                files: [.init(path: ["directory", "file.bin"], size: 1)]
+            ))
+        }
+
+        limits = .standard
+        limits.maximumFileBytes = 4
+        try expectManifestError(.invalidFileLength) {
+            _ = try TorrentManifestParser(limits: limits).parse(
+                Self.v2SingleFile(name: "sample.bin", size: 5)
+            )
+        }
+
+        limits = .standard
+        limits.maximumPayloadBytes = 4
+        try expectManifestError(.invalidFileLength) {
+            _ = try TorrentManifestParser(limits: limits).parse(
+                Self.v2SingleFile(name: "sample.bin", size: 5)
+            )
+        }
+
+        try expectManifestError(.invalidFileLength) {
+            _ = try TorrentManifestParser().parse(Self.v2SingleFile(
+                name: "oversized.bin",
+                size: TorrentMetainfoParser.Limits.nativeMaximumFileBytes + 1
+            ))
+        }
+
+        limits = .standard
+        limits.maximumPieceCount = 0
+        try expectManifestError(.workLimitExceeded) {
+            _ = try TorrentManifestParser(limits: limits).parse(
+                Self.v1SingleFile(name: "sample.bin", size: 5)
+            )
+        }
+
+        let layered = Self.v2PieceLayerFixture()
+        limits = .standard
+        limits.maximumPieceLayerBytes = SHA256.byteCount * 2
+        try expectManifestError(.workLimitExceeded) {
+            _ = try TorrentManifestParser(limits: limits).parse(layered.metadata)
+        }
+
+        let sourced = Self.torrent(
+            info: Self.v1SingleFileInfo(name: "sample.bin", size: 5),
+            topLevel: [Self.key(
+                "announce",
+                .string("https://tracker.example/announce")
+            )]
+        )
+        limits = .standard
+        limits.maximumAggregateSourceBytes = 8
+        try expectManifestError(.workLimitExceeded) {
+            _ = try TorrentManifestParser(limits: limits).parse(sourced)
+        }
+    }
+
+    @Test("Unsupported metainfo features and invalid descriptions are distinct")
+    func rejectsUnsupportedFeatures() throws {
+        try expectManifestError(.unsupportedSSLTorrent) {
+            _ = try TorrentManifestParser().parse(Self.torrent(
+                info: Self.v1SingleFileInfo(
+                    name: "sample.bin",
+                    size: 5,
+                    extra: [Self.key("ssl-cert", .string("certificate"))]
+                )
+            ))
+        }
+        try expectManifestError(.unsupportedMutableTorrent) {
+            _ = try TorrentManifestParser().parse(Self.torrent(
+                info: Self.v1SingleFileInfo(name: "sample.bin", size: 5),
+                topLevel: [Self.key("similar", .list([]))]
+            ))
+        }
+        try expectManifestError(.invalidHumanReadableField) {
+            _ = try TorrentManifestParser().parse(Self.torrent(
+                info: Self.v1SingleFileInfo(name: "sample.bin", size: 5),
+                topLevel: [Self.key("comment", .string("unsafe\u{0001}comment"))]
+            ))
+        }
+    }
+
+    @Test("Metainfo parsing observes cancellation")
+    func observesCancellation() {
+        enum Cancelled: Error, Equatable {
+            case requested
+        }
+
+        #expect(throws: Cancelled.requested) {
+            _ = try TorrentManifestParser().parse(
+                Self.v1SingleFile(name: "sample.bin", size: 5),
+                checkCancellation: { throw Cancelled.requested }
+            )
+        }
     }
 
     private struct V1File {
         let path: [String]
         let size: Int64
         var attributes: String?
+    }
+
+    private struct V2PieceLayerFixture {
+        let info: TestBencode
+        let metadata: Data
+        let root: Data
+        let hashes: Data
     }
 
     private static func v1SingleFile(name: String, size: Int64) -> Data {
@@ -322,7 +619,8 @@ struct TorrentManifestParserTests {
     private static func v1SingleFileInfo(
         name: String,
         size: Int64,
-        isPrivate: Bool = false
+        isPrivate: Bool = false,
+        extra: [(Data, TestBencode)] = []
     ) -> TestBencode {
         var values = [
             key("length", .integer(size)),
@@ -333,6 +631,7 @@ struct TorrentManifestParserTests {
         if isPrivate {
             values.append(key("private", .integer(1)))
         }
+        values.append(contentsOf: extra)
         return .dictionary(values)
     }
 
@@ -366,6 +665,54 @@ struct TorrentManifestParserTests {
 
     private static func hybridSingleFile(name: String, size: Int64) -> Data {
         torrent(info: v2Info(name: name, path: name, size: size, includesV1: true))
+    }
+
+    private static func v2PieceLayerFixture(
+        fileNames: [String] = ["layered.bin"]
+    ) -> V2PieceLayerFixture {
+        let pieceLength: Int64 = 32 * 1_024
+        let pieceHashes = [
+            Data(repeating: 0x11, count: SHA256.byteCount),
+            Data(repeating: 0x22, count: SHA256.byteCount),
+            Data(repeating: 0x33, count: SHA256.byteCount),
+        ]
+        let piecePadding = sha256Pair(
+            Data(repeating: 0, count: SHA256.byteCount),
+            Data(repeating: 0, count: SHA256.byteCount)
+        )
+        let root = sha256Pair(
+            sha256Pair(pieceHashes[0], pieceHashes[1]),
+            sha256Pair(pieceHashes[2], piecePadding)
+        )
+        let hashes = pieceHashes.reduce(into: Data()) { $0.append($1) }
+        let fileTree = fileNames.map { fileName in
+            key(fileName, .dictionary([
+                (Data(), .dictionary([
+                    key("attr", .string("hx")),
+                    key("length", .integer(pieceLength * 3)),
+                    key("pieces root", .bytes(root)),
+                ]))
+            ]))
+        }
+        let info = TestBencode.dictionary([
+            key("file tree", .dictionary(fileTree)),
+            key("meta version", .integer(2)),
+            key("name", .string(fileNames.count == 1 ? fileNames[0] : "payload")),
+            key("piece length", .integer(pieceLength)),
+        ])
+        let metadata = torrent(
+            info: info,
+            topLevel: [(
+                Data("piece layers".utf8),
+                .dictionary([(root, .bytes(hashes))])
+            )]
+        )
+        return V2PieceLayerFixture(
+            info: info,
+            metadata: metadata,
+            root: root,
+            hashes: hashes
+        )
     }
 
     private static func v2Info(
@@ -423,6 +770,13 @@ struct TorrentManifestParserTests {
             output.append(alphabet[Int(byte & 0x0f)])
         }
         return String(decoding: output, as: UTF8.self)
+    }
+
+    private static func sha256Pair(_ left: Data, _ right: Data) -> Data {
+        var hasher = SHA256()
+        hasher.update(data: left)
+        hasher.update(data: right)
+        return Data(hasher.finalize())
     }
 
     private static func base32(_ data: Data) -> String {

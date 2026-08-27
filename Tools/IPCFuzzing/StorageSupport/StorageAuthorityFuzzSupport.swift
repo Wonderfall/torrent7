@@ -565,9 +565,30 @@ private enum StorageManifestFuzzer {
         limits.maximumNestingDepth = Int(cursor.byte() % 33)
         limits.maximumValueCount = 1 + Int(cursor.uint64() % 20_000)
         limits.maximumStringBytes = 1 + Int(cursor.uint64() % 1_048_576)
+        limits.maximumContainerCount = 1 + Int(cursor.uint64() % 20_000)
+        limits.maximumDictionaryKeyBytes = 1 + Int(cursor.uint64() % 1_048_576)
+        limits.maximumIntegerDigits = 1 + Int(cursor.byte() % 19)
+        limits.maximumStringLengthDigits = 1 + Int(cursor.byte() % 19)
         limits.maximumPathComponentBytes = 1 + Int(cursor.byte() % 255)
         limits.maximumPathDepth = 1 + Int(cursor.byte() % 32)
         limits.maximumFileCount = 1 + Int(cursor.uint64() % 20_000)
+        limits.maximumTrackerTierCount = 1 + Int(cursor.uint64() % 256)
+        limits.maximumAggregateSourceBytes = 1 + Int(cursor.uint64() % 1_048_576)
+        limits.maximumPathComponentCount = 1 + Int(cursor.uint64() % 200_000)
+        limits.maximumPathBytes = 1 + Int(cursor.uint64() % 1_048_576)
+        limits.maximumFileBytes = 1 + Int64(
+            cursor.uint64() % UInt64(TorrentMetainfoParser.Limits.nativeMaximumFileBytes)
+        )
+        limits.maximumPayloadBytes = 1 + Int64(
+            cursor.uint64() % UInt64(TorrentMetainfoParser.Limits.nativeMaximumPayloadBytes)
+        )
+        limits.maximumPieceCount = 1 + Int(cursor.uint64() % 100_000)
+        limits.maximumV1PieceHashBytes = 1 + Int(cursor.uint64() % 1_048_576)
+        limits.maximumPieceLayerHashCount = 1 + Int(cursor.uint64() % 100_000)
+        limits.maximumPieceLayerBytes = 1 + Int(cursor.uint64() % 1_048_576)
+        limits.maximumCommentBytes = 1 + Int(cursor.uint64() % 16_384)
+        limits.maximumCreatorBytes = 1 + Int(cursor.uint64() % 4_096)
+        limits.maximumHumanReadableBytes = 1 + Int(cursor.uint64() % 20_480)
         let boundedParser = TorrentManifestParser(limits: limits)
         if let bounded = try? boundedParser.parse(data) {
             guard let standard else {
@@ -584,7 +605,19 @@ private enum StorageManifestFuzzer {
         parser: TorrentManifestParser
     ) {
         let manifest = parsed.manifest
+        let core = parsed.infoCore
+        fuzzAssert(parsed.metadata == metadata)
         fuzzAssert(!parsed.rawInfoDictionary.isEmpty)
+        fuzzAssert(core.infoDictionaryRange.range.upperBound <= metadata.count)
+        fuzzAssert(Data(metadata[core.infoDictionaryRange.range]) == parsed.rawInfoDictionary)
+        fuzzAssert(core.effectiveName == manifest.name)
+        fuzzAssert(core.pieceLength == manifest.pieceLength)
+        fuzzAssert(core.v1InfoHash == manifest.infoHashes.v1)
+        fuzzAssert(core.v2InfoHash == manifest.infoHashes.v2)
+        fuzzAssert(core.files.map(\.index) == manifest.files.map(\.index))
+        fuzzAssert(core.files.map(\.pathComponents) == manifest.files.map(\.pathComponents))
+        fuzzAssert(core.files.map(\.expectedSize) == manifest.files.map(\.expectedSize))
+        fuzzAssert(core.files.map(\.isPadding) == manifest.files.map(\.isPadding))
         fuzzAssert(manifest.files.map(\.index) == manifest.files.indices.map(Int32.init))
         fuzzAssert(manifest.files.allSatisfy {
             $0.expectedSize >= 0
@@ -601,15 +634,52 @@ private enum StorageManifestFuzzer {
         ) == manifest.sourceManifestDigest)
         if let v1 = manifest.infoHashes.v1 {
             fuzzAssert(Data(Insecure.SHA1.hash(data: parsed.rawInfoDictionary)) == v1)
+            guard let pieces = core.v1PieceHashesRange else {
+                Darwin.abort()
+            }
+            fuzzAssert(pieces.range.upperBound <= metadata.count)
+            fuzzAssert(pieces.range.count.isMultiple(of: Insecure.SHA1.byteCount))
+        } else {
+            fuzzAssert(core.v1PieceHashesRange == nil)
         }
         if let v2 = manifest.infoHashes.v2 {
             fuzzAssert(Data(SHA256.hash(data: parsed.rawInfoDictionary)) == v2)
         }
+        for file in core.files {
+            if let root = file.piecesRootRange {
+                fuzzAssert(root.range.upperBound <= metadata.count)
+                fuzzAssert(root.range.count == SHA256.byteCount)
+            }
+        }
+        for layer in parsed.envelope.pieceLayers {
+            fuzzAssert(layer.piecesRootRange.range.upperBound <= metadata.count)
+            fuzzAssert(layer.piecesRootRange.range.count == SHA256.byteCount)
+            fuzzAssert(layer.hashesRange.range.upperBound <= metadata.count)
+            fuzzAssert(layer.hashesRange.range.count.isMultiple(of: SHA256.byteCount))
+            fuzzAssert(layer.fileIndices.allSatisfy {
+                $0 >= 0 && Int($0) < core.files.count && !core.files[Int($0)].isPadding
+            })
+        }
+        fuzzAssert(parsed.envelope.pieceLayers.isEmpty
+            || parsed.envelope.presentFields.contains(.pieceLayers))
+        fuzzAssert(parsed.envelope.hasIgnoredDHTNodesField
+            == parsed.envelope.presentFields.contains(.dhtNodes))
 
         let advertised = try! TorrentAdvertisedInfoHashes(
             v1: manifest.infoHashes.v1,
             v2: manifest.infoHashes.v2
         )
+        let bareInfo = Data(parsed.rawInfoDictionary)
+        let bare = try! TorrentMetainfoParser().parseInfoDictionary(
+            bareInfo,
+            advertisedHashes: advertised
+        )
+        fuzzAssert(equivalentCore(
+            core,
+            bytes: metadata,
+            bare.infoCore,
+            bytes: bareInfo
+        ))
         let reparsed = try! parser.parse(metadata, advertisedHashes: advertised)
         fuzzAssert(equivalent(parsed, reparsed))
 
@@ -637,6 +707,48 @@ private enum StorageManifestFuzzer {
     ) -> Bool {
         left.manifest == right.manifest
             && left.rawInfoDictionary == right.rawInfoDictionary
+            && left.metadata == right.metadata
+            && left.infoCore == right.infoCore
+            && left.envelope == right.envelope
+    }
+
+    private static func equivalentCore(
+        _ left: ValidatedInfoCore,
+        bytes leftBytes: Data,
+        _ right: ValidatedInfoCore,
+        bytes rightBytes: Data
+    ) -> Bool {
+        guard left.kind == right.kind,
+              left.wireName == right.wireName,
+              left.effectiveName == right.effectiveName,
+              left.contentKind == right.contentKind,
+              left.v1InfoHash == right.v1InfoHash,
+              left.v2InfoHash == right.v2InfoHash,
+              left.pieceLength == right.pieceLength,
+              left.totalSize == right.totalSize,
+              left.isPrivate == right.isPrivate,
+              left.files.count == right.files.count,
+              rangedBytes(left.v1PieceHashesRange, in: leftBytes)
+                == rangedBytes(right.v1PieceHashesRange, in: rightBytes) else {
+            return false
+        }
+        return zip(left.files, right.files).allSatisfy { leftFile, rightFile in
+            leftFile.index == rightFile.index
+                && leftFile.pathComponents == rightFile.pathComponents
+                && leftFile.expectedSize == rightFile.expectedSize
+                && leftFile.isPadding == rightFile.isPadding
+                && leftFile.isExecutable == rightFile.isExecutable
+                && leftFile.isHidden == rightFile.isHidden
+                && rangedBytes(leftFile.piecesRootRange, in: leftBytes)
+                    == rangedBytes(rightFile.piecesRootRange, in: rightBytes)
+        }
+    }
+
+    private static func rangedBytes(
+        _ range: ValidatedMetainfoRange?,
+        in bytes: Data
+    ) -> Data? {
+        range.map { Data(bytes[$0.range]) }
     }
 }
 

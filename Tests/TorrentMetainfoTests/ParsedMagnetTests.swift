@@ -94,6 +94,12 @@ struct ParsedMagnetTests {
                 "magnet:?xt=urn:btih:\(hash)&ws=udp%3A%2F%2Fseed.example%3A80"
             )
         }
+        #expect(throws: ParsedMagnetError.invalidSourceURL) {
+            let zone = String(repeating: "a", count: 256)
+            _ = try ParsedMagnet.parse(
+                "magnet:?xt=urn:btih:\(hash)&tr=udp%3A%2F%2F%5Bfe80%3A%3A1%2525\(zone)%5D%3A80%2Fa"
+            )
+        }
 
         let repeatedWideRange = Array(
             repeating: "so=0-19999",

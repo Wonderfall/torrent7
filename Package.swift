@@ -293,7 +293,7 @@ let package = Package(
         ),
         .target(
             name: "TorrentStorageAuthority",
-            dependencies: ["TorrentEngineModel"],
+            dependencies: ["TorrentEngineModel", "TorrentMetainfo"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
                 .treatAllWarnings(as: .error),

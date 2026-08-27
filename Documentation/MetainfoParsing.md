@@ -20,6 +20,9 @@ Validation followed by passing the same bytes to libtorrent is not a cutover.
 - V2 piece layers may be wholly absent. When a piece-layer dictionary is
   supplied, it must completely and correctly describe every applicable file;
   partial, unknown, duplicate, malformed, and root-mismatching layers fail.
+- File and aggregate payload sizes are checked against both product work
+  budgets and the fixed-width limits of the native importer. Empty v2 files do
+  not carry a semantic pieces root in the validated core.
 - Unknown extension fields are skipped structurally under the same byte, token,
   depth, and work budgets. They never grant engine or storage authority.
 - Tracker and web-seed syntax is parsed separately from network admission.
@@ -50,6 +53,11 @@ Validation followed by passing the same bytes to libtorrent is not a cutover.
 Swift parsers emit narrow types such as `ParsedMagnet`, `ValidatedInfoCore`,
 and `ValidatedTorrentEnvelope`. They never emit or control a general
 `add_torrent_params` object.
+
+Local `.torrent` files are decoded as an info core plus a top-level envelope.
+BEP 9 input is decoded through the same core path directly from the exact bare
+`info` dictionary; no synthetic envelope is created and no tracker, web-seed,
+or piece-layer state can enter through swarm metadata.
 
 Variable-sized native imports use a versioned flat capsule containing fixed-
 width records and checked offsets into one byte blob. Capsules contain no
