@@ -132,8 +132,16 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
   C++ revalidates them while libtorrent retains connection, rate, hash, and
   peer-admission policy. The retired native bdecode routes are build-gated, and
   every callback role and context has arm64e PAC replay and codegen coverage.
+- **Typed HTTP tracker-body boundary:** the final decompressed announce or
+  scrape body terminates in a canonical bounded Swift parser. Libtorrent keeps
+  HTTP transport, TLS, redirects, chunking, gzip, scheduling, and peer policy;
+  Swift returns fixed typed fields and caller-owned peer records that C++
+  revalidates and commits atomically. The body is capped at 512 KiB before the
+  callback and output at 3,000 peers. UDP tracker replies remain native as
+  fixed binary, length-checked span parsing.
 - **Input bounds:** caps for torrent files, magnets, file counts, tracker/web-seed
-  counts, peer-extension messages and contacts, tracker host rows, snapshots,
+  counts, peer-extension messages and contacts, HTTP tracker bodies and peers,
+  tracker host rows, snapshots,
   piece-map data, XPC payloads, paged datasets, queued requests, file
   descriptors, and open peers.
 - **Exact-file storage broker:** the GUI alone persists bookmarks, plans

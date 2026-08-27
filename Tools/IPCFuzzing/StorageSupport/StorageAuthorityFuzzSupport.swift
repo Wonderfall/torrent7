@@ -859,6 +859,115 @@ private enum PeerProtocolParserFuzzer {
     }
 }
 
+private enum HTTPTrackerResponseParserFuzzer {
+    static func exercise(_ data: Data) {
+        guard let selector = data.first else {
+            return
+        }
+        let parser = TorrentHTTPTrackerResponseParser()
+        let body: Data
+        let scrapeInfoHash: Data?
+        if selector.isMultiple(of: 2) {
+            body = Data(data.dropFirst())
+            scrapeInfoHash = nil
+        } else {
+            guard data.count >= 21 else {
+                return
+            }
+            scrapeInfoHash = Data(data[1..<21])
+            body = Data(data.dropFirst(21))
+        }
+
+        guard let parsed = try? parser.parse(body, scrapeInfoHash: scrapeInfoHash) else {
+            return
+        }
+        fuzzAssert((try? parser.parse(body, scrapeInfoHash: scrapeInfoHash)) == parsed)
+        fuzzAssert(parsed.body == body)
+        fuzzAssert(parsed.interval >= 0)
+        fuzzAssert(parsed.minimumInterval >= 0)
+        fuzzAssert(parsed.complete >= -1)
+        fuzzAssert(parsed.incomplete >= -1)
+        fuzzAssert(parsed.downloaded >= -1)
+        fuzzAssert(parsed.downloaders >= -1)
+        fuzzAssert(parsed.peers.count <= 3_000)
+        checkRange(parsed.trackerIDRange, maximumCount: 1_024, in: body)
+        checkRange(parsed.failureReasonRange, maximumCount: 1_024, in: body)
+        checkRange(parsed.warningMessageRange, maximumCount: 1_024, in: body)
+
+        if parsed.failureReasonRange != nil {
+            fuzzAssert(parsed.warningMessageRange == nil)
+            fuzzAssert(parsed.externalAddress == nil)
+            fuzzAssert(parsed.peers.isEmpty)
+            fuzzAssert(parsed.complete == -1)
+            fuzzAssert(parsed.incomplete == -1)
+            fuzzAssert(parsed.downloaded == -1)
+            fuzzAssert(parsed.downloaders == -1)
+        }
+        if scrapeInfoHash != nil {
+            fuzzAssert(parsed.externalAddress == nil)
+            fuzzAssert(parsed.peers.isEmpty)
+        } else {
+            fuzzAssert(parsed.downloaders == -1)
+        }
+        if let address = parsed.externalAddress {
+            fuzzAssert(address.family == .ipv4 ? address.high == 0 : true)
+        }
+
+        for peer in parsed.peers {
+            switch peer.kind {
+            case .hostname:
+                fuzzAssert(peer.address == nil)
+                guard let hostname = peer.hostnameRange else {
+                    Darwin.abort()
+                }
+                checkRange(hostname, maximumCount: 255, in: body)
+                fuzzAssert(!hostname.isEmpty)
+                fuzzAssert(body[hostname].allSatisfy(isHostnameByte))
+                if let peerID = peer.peerIDRange {
+                    checkRange(peerID, maximumCount: 20, in: body)
+                    fuzzAssert(peerID.count == 20)
+                }
+            case .ipv4:
+                fuzzAssert(peer.hostnameRange == nil && peer.peerIDRange == nil)
+                fuzzAssert(peer.address?.family == .ipv4)
+                fuzzAssert(peer.address?.high == 0)
+            case .ipv6:
+                fuzzAssert(peer.hostnameRange == nil && peer.peerIDRange == nil)
+                fuzzAssert(peer.address?.family == .ipv6)
+            }
+        }
+    }
+
+    private static func checkRange(
+        _ range: Range<Int>?,
+        maximumCount: Int,
+        in body: Data
+    ) {
+        guard let range else {
+            return
+        }
+        fuzzAssert(range.lowerBound >= 0)
+        fuzzAssert(range.upperBound >= range.lowerBound)
+        fuzzAssert(range.upperBound <= body.count)
+        fuzzAssert(range.count <= maximumCount)
+    }
+
+    private static func isHostnameByte(_ byte: UInt8) -> Bool {
+        switch byte {
+        case UInt8(ascii: "0")...UInt8(ascii: "9"),
+             UInt8(ascii: "A")...UInt8(ascii: "Z"),
+             UInt8(ascii: "a")...UInt8(ascii: "z"),
+             UInt8(ascii: "."),
+             UInt8(ascii: "-"),
+             UInt8(ascii: "_"),
+             UInt8(ascii: ":"):
+            true
+        default:
+            false
+        }
+    }
+}
+
 private func fuzzData(
     _ bytes: UnsafePointer<UInt8>?,
     _ byteCount: UInt
@@ -928,5 +1037,18 @@ public func torrentPeerProtocolParserFuzzOneInput(
     }
     autoreleasepool {
         PeerProtocolParserFuzzer.exercise(data)
+    }
+}
+
+@_cdecl("TorrentHTTPTrackerResponseParserFuzzOneInput")
+public func torrentHTTPTrackerResponseParserFuzzOneInput(
+    _ bytes: UnsafePointer<UInt8>?,
+    _ byteCount: UInt
+) {
+    guard let data = fuzzData(bytes, byteCount) else {
+        return
+    }
+    autoreleasepool {
+        HTTPTrackerResponseParserFuzzer.exercise(data)
     }
 }

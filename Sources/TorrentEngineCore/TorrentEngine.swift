@@ -2159,10 +2159,15 @@ private struct AddedTorrentIdentity: Sendable {
         let retainedPeerProtocolContext = unsafe Unmanaged.passRetained(
             peerProtocolContext
         )
+        let trackerResponseContext = TorrentTrackerResponseBridgeContext()
+        let retainedTrackerResponseContext = unsafe Unmanaged.passRetained(
+            trackerResponseContext
+        )
         defer {
             unsafe retainedContext.release()
             unsafe retainedSwarmMetainfoContext.release()
             unsafe retainedPeerProtocolContext.release()
+            unsafe retainedTrackerResponseContext.release()
         }
 
         var callbacks = unsafe TTorrentPayloadBrokerCallbacks()
@@ -2195,6 +2200,15 @@ private struct AddedTorrentIdentity: Sendable {
         unsafe peerProtocolCallbacks.parse_peer_exchange =
             torrentPeerExchangeParseCallback
 
+        var trackerResponseCallbacks = unsafe TTorrentTrackerResponseParserCallbacks()
+        unsafe trackerResponseCallbacks.context = retainedTrackerResponseContext.toOpaque()
+        unsafe trackerResponseCallbacks.retain_context =
+            torrentTrackerParserContextRetainCallback
+        unsafe trackerResponseCallbacks.release_context =
+            torrentTrackerParserContextReleaseCallback
+        unsafe trackerResponseCallbacks.parse_http_response =
+            torrentHTTPTrackerResponseParseCallback
+
         var errorBuffer = Array<CChar>(repeating: 0, count: 1_024)
         var errorSpan: MutableSpan<CChar>? = errorBuffer.mutableSpan
         let created = unsafe path.withCString { pointer in
@@ -2204,6 +2218,7 @@ private struct AddedTorrentIdentity: Sendable {
                 callbacks,
                 swarmMetainfoCallbacks,
                 peerProtocolCallbacks,
+                trackerResponseCallbacks,
                 &errorSpan
             )
         }

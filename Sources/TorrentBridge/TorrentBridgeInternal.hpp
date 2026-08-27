@@ -14,6 +14,8 @@
 #include <libtorrent/aux_/peer_message_parser.hpp>
 #include <libtorrent/aux_/preparsed_metainfo.hpp>
 #include <libtorrent/aux_/swarm_metadata_parser.hpp>
+#include <libtorrent/aux_/tracker_response_parser.hpp>
+#include <libtorrent/aux_/tracker_manager.hpp>
 #include <libtorrent/bencode.hpp>
 #include <libtorrent/client_data.hpp>
 #include <libtorrent/error_code.hpp>
@@ -309,7 +311,7 @@ static_assert(
 );
 static_assert(kMaxTorrentIdentityTokenCount > static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 62U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 63U);
 static_assert(
     TORRENT_ABI_VERSION > 1,
     "Deprecated libtorrent ABIs can parse add_torrent_params.url as a raw magnet."
@@ -328,9 +330,9 @@ static_assert(TTORRENT_CONTENT_KIND_UNKNOWN == 0U);
 static_assert(TTORRENT_CONTENT_KIND_SINGLE_FILE == 1U);
 static_assert(TTORRENT_CONTENT_KIND_DIRECTORY == 2U);
 #if defined(TORRENT_USE_ASSERTS) && TORRENT_USE_ASSERTS
-static_assert(sizeof(lt::add_torrent_params) == 808U);
+static_assert(sizeof(lt::add_torrent_params) == 824U);
 #else
-static_assert(sizeof(lt::add_torrent_params) == 792U);
+static_assert(sizeof(lt::add_torrent_params) == 808U);
 #endif
 static_assert(TTORRENT_FILE_PRIORITY_SKIP == static_cast<int32_t>(static_cast<std::uint8_t>(lt::dont_download)));
 static_assert(TTORRENT_FILE_PRIORITY_LOW == static_cast<int32_t>(static_cast<std::uint8_t>(lt::low_priority)));
@@ -419,6 +421,11 @@ static_assert(std::is_trivially_copyable_v<TTorrentPeerExchangeRecord>);
 static_assert(std::is_standard_layout_v<TTorrentPeerExchangeResult>);
 static_assert(std::is_trivially_copyable_v<TTorrentPeerExchangeResult>);
 static_assert(std::is_standard_layout_v<TTorrentPeerProtocolParserCallbacks>);
+static_assert(std::is_standard_layout_v<TTorrentTrackerPeerRecord>);
+static_assert(std::is_trivially_copyable_v<TTorrentTrackerPeerRecord>);
+static_assert(std::is_standard_layout_v<TTorrentHTTPTrackerResponseResult>);
+static_assert(std::is_trivially_copyable_v<TTorrentHTTPTrackerResponseResult>);
+static_assert(std::is_standard_layout_v<TTorrentTrackerResponseParserCallbacks>);
 static_assert(std::is_standard_layout_v<TTorrentStorageActivation>);
 static_assert(std::is_trivially_copyable_v<TTorrentStorageActivation>);
 static_assert(sizeof(TTorrentSnapshot) == 2336U);
@@ -502,6 +509,12 @@ static_assert(sizeof(TTorrentPeerExchangeResult) == 16U);
 static_assert(alignof(TTorrentPeerExchangeResult) == 4U);
 static_assert(sizeof(TTorrentPeerProtocolParserCallbacks) == 48U);
 static_assert(alignof(TTorrentPeerProtocolParserCallbacks) == 8U);
+static_assert(sizeof(TTorrentTrackerPeerRecord) == 40U);
+static_assert(alignof(TTorrentTrackerPeerRecord) == 8U);
+static_assert(sizeof(TTorrentHTTPTrackerResponseResult) == 80U);
+static_assert(alignof(TTorrentHTTPTrackerResponseResult) == 8U);
+static_assert(sizeof(TTorrentTrackerResponseParserCallbacks) == 32U);
+static_assert(alignof(TTorrentTrackerResponseParserCallbacks) == 8U);
 static_assert(sizeof(TTorrentStorageActivation) == 96U);
 static_assert(alignof(TTorrentStorageActivation) == 8U);
 static_assert(offsetof(TTorrentStorageActivation, preserved_torrent_id) == 56U);
@@ -726,6 +739,14 @@ inline constexpr ptrauth_extra_data_t kPeerProtocolPEXCallbackDiscriminator =
     ptrauth_string_discriminator("torrent.bridge.peer-protocol.pex");
 inline constexpr ptrauth_extra_data_t kPeerProtocolContextDiscriminator =
     ptrauth_string_discriminator("torrent.bridge.peer-protocol.context");
+inline constexpr ptrauth_extra_data_t kTrackerParserRetainCallbackDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.tracker-parser.retain");
+inline constexpr ptrauth_extra_data_t kTrackerParserReleaseCallbackDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.tracker-parser.release");
+inline constexpr ptrauth_extra_data_t kTrackerParserHTTPCallbackDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.tracker-parser.http");
+inline constexpr ptrauth_extra_data_t kTrackerParserContextDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.tracker-parser.context");
 inline constexpr ptrauth_extra_data_t kWakeCallbackDiscriminator =
     ptrauth_string_discriminator("torrent.bridge.wake");
 inline constexpr ptrauth_extra_data_t kWakeContextDiscriminator =
@@ -829,6 +850,29 @@ using StoredPeerProtocolContext = void * __ptrauth(
     1,
     kPeerProtocolContextDiscriminator
 );
+using StoredTrackerParserRetainCallback =
+    TTorrentTrackerParserContextRetainCallback __ptrauth(
+        ptrauth_key_function_pointer,
+        1,
+        kTrackerParserRetainCallbackDiscriminator
+    );
+using StoredTrackerParserReleaseCallback =
+    TTorrentTrackerParserContextReleaseCallback __ptrauth(
+        ptrauth_key_function_pointer,
+        1,
+        kTrackerParserReleaseCallbackDiscriminator
+    );
+using StoredTrackerParserHTTPCallback =
+    TTorrentHTTPTrackerResponseParseCallback __ptrauth(
+        ptrauth_key_function_pointer,
+        1,
+        kTrackerParserHTTPCallbackDiscriminator
+    );
+using StoredTrackerParserContext = void * __ptrauth(
+    ptrauth_key_process_dependent_data,
+    1,
+    kTrackerParserContextDiscriminator
+);
 #else
 using StoredWakeCallback = TTorrentWakeCallback;
 using StoredWakeContext = void *;
@@ -849,6 +893,10 @@ using StoredPeerProtocolHandshakeCallback = TTorrentExtensionHandshakeParseCallb
 using StoredPeerProtocolMetadataCallback = TTorrentMetadataMessageParseCallback;
 using StoredPeerProtocolPEXCallback = TTorrentPeerExchangeParseCallback;
 using StoredPeerProtocolContext = void *;
+using StoredTrackerParserRetainCallback = TTorrentTrackerParserContextRetainCallback;
+using StoredTrackerParserReleaseCallback = TTorrentTrackerParserContextReleaseCallback;
+using StoredTrackerParserHTTPCallback = TTorrentHTTPTrackerResponseParseCallback;
+using StoredTrackerParserContext = void *;
 #endif
 
 struct PayloadBrokerCallbacks {
@@ -874,6 +922,36 @@ struct PeerProtocolParserCallbacks {
     StoredPeerProtocolHandshakeCallback parse_extension_handshake = nullptr;
     StoredPeerProtocolMetadataCallback parse_metadata_message = nullptr;
     StoredPeerProtocolPEXCallback parse_peer_exchange = nullptr;
+};
+
+struct TrackerResponseParserCallbacks {
+    StoredTrackerParserContext context = nullptr;
+    StoredTrackerParserRetainCallback retain_context = nullptr;
+    StoredTrackerParserReleaseCallback release_context = nullptr;
+    StoredTrackerParserHTTPCallback parse_http_response = nullptr;
+};
+
+class BridgeTrackerResponseParser final : public lt::aux::tracker_response_parser {
+public:
+    explicit BridgeTrackerResponseParser(TTorrentTrackerResponseParserCallbacks callbacks);
+    __attribute__((noinline)) ~BridgeTrackerResponseParser() override;
+
+    BridgeTrackerResponseParser(BridgeTrackerResponseParser const &) = delete;
+    BridgeTrackerResponseParser &operator=(BridgeTrackerResponseParser const &) = delete;
+    BridgeTrackerResponseParser(BridgeTrackerResponseParser &&) = delete;
+    BridgeTrackerResponseParser &operator=(BridgeTrackerResponseParser &&) = delete;
+
+    [[nodiscard]] bool parse_http_response(
+        lt::span<char const> body,
+        bool is_scrape,
+        lt::sha1_hash const &scrape_info_hash,
+        lt::aux::tracker_response &result,
+        lt::error_code &error
+    ) noexcept override;
+
+private:
+    TrackerResponseParserCallbacks callbacks_;
+    bool retained_ = false;
 };
 
 class BridgePeerMessageParser final : public lt::aux::peer_message_parser {
@@ -1612,7 +1690,8 @@ struct TTorrentClient {
         bool enable_peer_exchange_plugin,
         std::shared_ptr<PayloadBrokerContext> payload_broker,
         std::shared_ptr<lt::aux::swarm_metadata_parser> swarm_parser = nullptr,
-        std::shared_ptr<lt::aux::peer_message_parser> peer_parser = nullptr
+        std::shared_ptr<lt::aux::peer_message_parser> peer_parser = nullptr,
+        std::shared_ptr<lt::aux::tracker_response_parser> tracker_parser = nullptr
     );
 
     ~TTorrentClient() noexcept;
@@ -1640,6 +1719,7 @@ struct TTorrentClient {
     std::shared_ptr<PayloadBrokerContext> payload_broker;
     std::shared_ptr<lt::aux::swarm_metadata_parser> swarm_metadata_parser;
     std::shared_ptr<lt::aux::peer_message_parser> peer_message_parser;
+    std::shared_ptr<lt::aux::tracker_response_parser> tracker_response_parser;
     UniqueFileDescriptor state_directory_descriptor;
     UniqueFileDescriptor resume_directory_descriptor;
     UniqueFileDescriptor part_files_directory_descriptor;

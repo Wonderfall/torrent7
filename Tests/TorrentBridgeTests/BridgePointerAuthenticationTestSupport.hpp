@@ -23,6 +23,10 @@ void TorrentBridgeTestReplayPeerProtocolHandshake() noexcept;
 void TorrentBridgeTestReplayPeerProtocolMetadata() noexcept;
 void TorrentBridgeTestReplayPeerProtocolPEX() noexcept;
 void TorrentBridgeTestReplayPeerProtocolContext() noexcept;
+void TorrentBridgeTestReplayTrackerParserRetain() noexcept;
+void TorrentBridgeTestReplayTrackerParserRelease() noexcept;
+void TorrentBridgeTestReplayTrackerParserHTTP() noexcept;
+void TorrentBridgeTestReplayTrackerParserContext() noexcept;
 
 }
 

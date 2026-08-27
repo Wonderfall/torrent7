@@ -1,0 +1,265 @@
+import Darwin
+import Foundation
+import Testing
+import TorrentBridge
+@testable import TorrentEngineCore
+
+@Suite("Swift HTTP tracker response callback")
+struct TorrentTrackerResponseBridgeTests {
+    @Test("Announce callback emits bounded caller-owned typed records")
+    func importsAnnounceResponse() {
+        let hostnamePeer = bencodedDictionary([
+            ("ip", bencodedString(Data("peer.example".utf8))),
+            ("peer id", bencodedString(Data("abcdefghijklmnopqrst".utf8))),
+            ("port", bencodedInteger(6_881)),
+        ])
+        let ipv6 = Data([
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 1,
+            0x1a, 0xe2,
+        ])
+        let body = bencodedDictionary([
+            ("complete", bencodedInteger(9)),
+            ("external ip", bencodedString(Data([203, 0, 113, 8]))),
+            ("incomplete", bencodedInteger(3)),
+            ("interval", bencodedInteger(1_200)),
+            ("peers", bencodedList([hostnamePeer])),
+            ("peers6", bencodedString(ipv6)),
+            ("tracker id", bencodedString(Data("token".utf8))),
+            ("warning message", bencodedString(Data("warning".utf8))),
+        ])
+
+        unsafe withTrackerResponseContext { context in
+            var records = [TTorrentTrackerPeerRecord](
+                repeating: TTorrentTrackerPeerRecord(),
+                count: 4
+            )
+            var result = TTorrentHTTPTrackerResponseResult()
+            let status = unsafe body.withUnsafeBytes { rawBody in
+                unsafe records.withUnsafeMutableBufferPointer { recordBuffer in
+                    unsafe torrentHTTPTrackerResponseParseCallback(
+                        context,
+                        rawBody.bindMemory(to: CChar.self).baseAddress!,
+                        Int32(rawBody.count),
+                        0,
+                        nil,
+                        0,
+                        recordBuffer.baseAddress!,
+                        Int32(recordBuffer.count),
+                        &result
+                    )
+                }
+            }
+
+            #expect(status == 0)
+            #expect(result.interval == 1_200)
+            #expect(result.minimum_interval == 30)
+            #expect(result.complete == 9)
+            #expect(result.incomplete == 3)
+            #expect(result.downloaded == -1)
+            #expect(result.downloaders == -1)
+            #expect(result.peer_count == 2)
+            #expect(result.address_family == UInt8(TTORRENT_PEER_ADDRESS_IPV4))
+            #expect(result.address_low == 0xcb00_7108)
+            #expect(result.present_fields == UInt32(
+                TTORRENT_TRACKER_HAS_ID
+                    | TTORRENT_TRACKER_HAS_WARNING_MESSAGE
+                    | TTORRENT_TRACKER_HAS_EXTERNAL_ADDRESS
+            ))
+            #expect(bodySlice(
+                body,
+                offset: result.tracker_id_offset,
+                size: result.tracker_id_size
+            ) == Data("token".utf8))
+            #expect(bodySlice(
+                body,
+                offset: result.warning_message_offset,
+                size: result.warning_message_size
+            ) == Data("warning".utf8))
+
+            #expect(records[0].kind == UInt8(TTORRENT_TRACKER_PEER_HOSTNAME))
+            #expect(records[0].port == 6_881)
+            #expect(records[0].has_peer_id == 1)
+            #expect(bodySlice(
+                body,
+                offset: records[0].hostname_offset,
+                size: records[0].hostname_size
+            ) == Data("peer.example".utf8))
+            #expect(bodySlice(
+                body,
+                offset: records[0].peer_id_offset,
+                size: 20
+            ) == Data("abcdefghijklmnopqrst".utf8))
+            #expect(records[1].kind == UInt8(TTORRENT_PEER_ADDRESS_IPV6))
+            #expect(records[1].address_high == 0x2001_0db8_0000_0000)
+            #expect(records[1].address_low == 1)
+            #expect(records[1].port == 6_882)
+        }
+    }
+
+    @Test("Scrape callback selects the exact binary info-hash")
+    func importsScrapeResponse() {
+        let infoHash = Data(0..<20)
+        let statistics = bencodedDictionary([
+            ("complete", bencodedInteger(11)),
+            ("downloaded", bencodedInteger(23)),
+            ("downloaders", bencodedInteger(4)),
+            ("incomplete", bencodedInteger(7)),
+        ])
+        let body = bencodedDictionary([
+            ("files", bencodedByteKeyedDictionary([(infoHash, statistics)])),
+        ])
+
+        unsafe withTrackerResponseContext { context in
+            var peerSentinel = TTorrentTrackerPeerRecord()
+            peerSentinel.address_low = 0xfeed_face
+            var result = TTorrentHTTPTrackerResponseResult()
+            let status = unsafe body.withUnsafeBytes { rawBody in
+                unsafe infoHash.withUnsafeBytes { rawHash in
+                    unsafe torrentHTTPTrackerResponseParseCallback(
+                        context,
+                        rawBody.bindMemory(to: CChar.self).baseAddress!,
+                        Int32(rawBody.count),
+                        1,
+                        rawHash.bindMemory(to: UInt8.self).baseAddress!,
+                        Int32(rawHash.count),
+                        &peerSentinel,
+                        1,
+                        &result
+                    )
+                }
+            }
+
+            #expect(status == 0)
+            #expect(result.complete == 11)
+            #expect(result.incomplete == 7)
+            #expect(result.downloaded == 23)
+            #expect(result.downloaders == 4)
+            #expect(result.peer_count == 0)
+            #expect(peerSentinel.address_low == 0xfeed_face)
+        }
+    }
+
+    @Test("Capacity failure leaves caller records untouched and result empty")
+    func rejectsInsufficientCapacityAtomically() {
+        let body = bencodedDictionary([
+            ("peers", bencodedString(Data([203, 0, 113, 8, 0x1a, 0xe1]))),
+        ])
+
+        unsafe withTrackerResponseContext { context in
+            var sentinel = TTorrentTrackerPeerRecord()
+            sentinel.address_low = 0xfeed_face
+            var result = TTorrentHTTPTrackerResponseResult(
+                address_high: 9,
+                address_low: 9,
+                interval: 9,
+                minimum_interval: 9,
+                complete: 9,
+                incomplete: 9,
+                downloaded: 9,
+                downloaders: 9,
+                tracker_id_offset: 9,
+                tracker_id_size: 9,
+                failure_reason_offset: 9,
+                failure_reason_size: 9,
+                warning_message_offset: 9,
+                warning_message_size: 9,
+                peer_count: 9,
+                present_fields: 9,
+                address_family: 9,
+                reserved0: 9,
+                reserved1: 9
+            )
+            let status = unsafe body.withUnsafeBytes { rawBody in
+                unsafe torrentHTTPTrackerResponseParseCallback(
+                    context,
+                    rawBody.bindMemory(to: CChar.self).baseAddress!,
+                    Int32(rawBody.count),
+                    0,
+                    nil,
+                    0,
+                    &sentinel,
+                    0,
+                    &result
+                )
+            }
+
+            #expect(status == EOVERFLOW)
+            #expect(sentinel.address_low == 0xfeed_face)
+            #expect(result.peer_count == 0)
+            #expect(result.present_fields == 0)
+            #expect(result.interval == 0)
+        }
+    }
+
+    @Test("Callback argument validation clears stale scalar output")
+    func rejectsInvalidArguments() {
+        let body = Data("de".utf8)
+        unsafe withTrackerResponseContext { context in
+            var peer = TTorrentTrackerPeerRecord()
+            var result = TTorrentHTTPTrackerResponseResult()
+            result.peer_count = 9
+            let status = unsafe body.withUnsafeBytes { rawBody in
+                unsafe torrentHTTPTrackerResponseParseCallback(
+                    context,
+                    rawBody.bindMemory(to: CChar.self).baseAddress!,
+                    Int32(rawBody.count),
+                    2,
+                    nil,
+                    0,
+                    &peer,
+                    1,
+                    &result
+                )
+            }
+
+            #expect(status == EINVAL)
+            #expect(result.peer_count == 0)
+        }
+    }
+}
+
+private func withTrackerResponseContext(
+    _ body: (UnsafeMutableRawPointer) -> Void
+) {
+    let retained = unsafe Unmanaged.passRetained(TorrentTrackerResponseBridgeContext())
+    defer {
+        unsafe retained.release()
+    }
+    unsafe body(retained.toOpaque())
+}
+
+private func bodySlice(_ body: Data, offset: Int32, size: Int32) -> Data {
+    Data(body[Int(offset)..<(Int(offset) + Int(size))])
+}
+
+private func bencodedInteger(_ value: Int64) -> Data {
+    Data("i\(value)e".utf8)
+}
+
+private func bencodedString(_ value: Data) -> Data {
+    Data("\(value.count):".utf8) + value
+}
+
+private func bencodedList(_ values: [Data]) -> Data {
+    values.reduce(into: Data([UInt8(ascii: "l")])) { result, value in
+        result.append(value)
+    } + Data([UInt8(ascii: "e")])
+}
+
+private func bencodedDictionary(_ fields: [(String, Data)]) -> Data {
+    bencodedByteKeyedDictionary(fields.map { (Data($0.0.utf8), $0.1) })
+}
+
+private func bencodedByteKeyedDictionary(_ fields: [(Data, Data)]) -> Data {
+    let sorted = fields.sorted { left, right in
+        left.0.lexicographicallyPrecedes(right.0)
+    }
+    var result = Data([UInt8(ascii: "d")])
+    for (key, value) in sorted {
+        result.append(bencodedString(key))
+        result.append(value)
+    }
+    result.append(UInt8(ascii: "e"))
+    return result
+}

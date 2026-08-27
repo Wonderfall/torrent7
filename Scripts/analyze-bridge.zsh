@@ -86,6 +86,20 @@ done
     "parse_ut_pex(body.first(length)" "$pex_extension_source" \
     || fail "Patched libtorrent does not require the external ut_pex parser"
 
+typeset -r http_tracker_source="$libtorrent_source/src/http_tracker_connection.cpp"
+typeset -r http_tracker_header="$libtorrent_source/include/libtorrent/aux_/http_tracker_connection.hpp"
+for source in "$http_tracker_source" "$http_tracker_header"; do
+    if "$ripgrep" -n "bdecode|parse_tracker_response" "$source"; then
+        fail "Retired native HTTP tracker bencode parser route is reachable: $source"
+    fi
+done
+[[ $("$ripgrep" --count-matches --fixed-strings \
+    "response_parser->parse_http_response(data" "$http_tracker_source") == 1 ]] \
+    || fail "Patched libtorrent must call the external HTTP tracker parser exactly once"
+"$ripgrep" -q --fixed-strings \
+    "tracker_response_parser::maximum_http_body_size" "$http_tracker_source" \
+    || fail "Patched libtorrent does not cap the final HTTP tracker body before parsing"
+
 if [[ ! -x $clang_tidy ]]; then
     clang_tidy=${commands[clang-tidy]:-}
 fi

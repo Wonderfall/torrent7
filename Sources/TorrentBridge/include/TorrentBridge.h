@@ -150,7 +150,17 @@ inline constexpr uint32_t TTORRENT_HANDSHAKE_HAS_REQUEST_QUEUE = 1U << 3U;
 inline constexpr uint32_t TTORRENT_HANDSHAKE_HAS_CLIENT_VERSION = 1U << 4U;
 inline constexpr uint32_t TTORRENT_HANDSHAKE_HAS_EXTERNAL_ADDRESS = 1U << 5U;
 inline constexpr uint32_t TTORRENT_HANDSHAKE_HAS_UPLOAD_ONLY = 1U << 6U;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 62;
+inline constexpr int32_t TTORRENT_MAX_HTTP_TRACKER_RESPONSE_BYTES = 512 * 1024;
+inline constexpr int32_t TTORRENT_MAX_TRACKER_RESPONSE_PEERS = 3000;
+inline constexpr int32_t TTORRENT_MAX_TRACKER_ID_BYTES = 1024;
+inline constexpr int32_t TTORRENT_MAX_TRACKER_MESSAGE_BYTES = 1024;
+inline constexpr int32_t TTORRENT_MAX_TRACKER_HOSTNAME_BYTES = 255;
+inline constexpr uint8_t TTORRENT_TRACKER_PEER_HOSTNAME = 1;
+inline constexpr uint32_t TTORRENT_TRACKER_HAS_ID = 1U << 0U;
+inline constexpr uint32_t TTORRENT_TRACKER_HAS_FAILURE_REASON = 1U << 1U;
+inline constexpr uint32_t TTORRENT_TRACKER_HAS_WARNING_MESSAGE = 1U << 2U;
+inline constexpr uint32_t TTORRENT_TRACKER_HAS_EXTERNAL_ADDRESS = 1U << 3U;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 63;
 namespace torrent_bridge::internal {
 struct TTorrentClient;
 }
@@ -271,7 +281,17 @@ enum {
     TTORRENT_HANDSHAKE_HAS_CLIENT_VERSION = 1U << 4U,
     TTORRENT_HANDSHAKE_HAS_EXTERNAL_ADDRESS = 1U << 5U,
     TTORRENT_HANDSHAKE_HAS_UPLOAD_ONLY = 1U << 6U,
-    TTORRENT_BRIDGE_ABI_VERSION = 62
+    TTORRENT_MAX_HTTP_TRACKER_RESPONSE_BYTES = 512 * 1024,
+    TTORRENT_MAX_TRACKER_RESPONSE_PEERS = 3000,
+    TTORRENT_MAX_TRACKER_ID_BYTES = 1024,
+    TTORRENT_MAX_TRACKER_MESSAGE_BYTES = 1024,
+    TTORRENT_MAX_TRACKER_HOSTNAME_BYTES = 255,
+    TTORRENT_TRACKER_PEER_HOSTNAME = 1,
+    TTORRENT_TRACKER_HAS_ID = 1U << 0U,
+    TTORRENT_TRACKER_HAS_FAILURE_REASON = 1U << 1U,
+    TTORRENT_TRACKER_HAS_WARNING_MESSAGE = 1U << 2U,
+    TTORRENT_TRACKER_HAS_EXTERNAL_ADDRESS = 1U << 3U,
+    TTORRENT_BRIDGE_ABI_VERSION = 63
 };
 #endif
 
@@ -730,6 +750,71 @@ typedef struct TTorrentPeerProtocolParserCallbacks {
     TTorrentPeerExchangeParseCallback parse_peer_exchange;
 } TTorrentPeerProtocolParserCallbacks;
 
+// Fixed, caller-owned results for a final decompressed HTTP tracker response
+// body. Every offset is relative to the borrowed body and is checked by the
+// bridge before copying. Swift never retains any input or output pointer.
+typedef struct TTorrentTrackerPeerRecord {
+    uint64_t address_high;
+    uint64_t address_low;
+    int32_t hostname_offset;
+    int32_t hostname_size;
+    int32_t peer_id_offset;
+    uint16_t port;
+    uint8_t kind;
+    uint8_t has_peer_id;
+    uint32_t reserved;
+} TTorrentTrackerPeerRecord;
+
+typedef struct TTorrentHTTPTrackerResponseResult {
+    uint64_t address_high;
+    uint64_t address_low;
+    int32_t interval;
+    int32_t minimum_interval;
+    int32_t complete;
+    int32_t incomplete;
+    int32_t downloaded;
+    int32_t downloaders;
+    int32_t tracker_id_offset;
+    int32_t tracker_id_size;
+    int32_t failure_reason_offset;
+    int32_t failure_reason_size;
+    int32_t warning_message_offset;
+    int32_t warning_message_size;
+    int32_t peer_count;
+    uint32_t present_fields;
+    uint8_t address_family;
+    uint8_t reserved0;
+    uint16_t reserved1;
+} TTorrentHTTPTrackerResponseResult;
+
+typedef uint8_t (* TORRENT_BRIDGE_NULLABLE TTorrentTrackerParserContextRetainCallback)(
+    void * TORRENT_BRIDGE_NULLABLE context
+);
+typedef void (* TORRENT_BRIDGE_NULLABLE TTorrentTrackerParserContextReleaseCallback)(
+    void * TORRENT_BRIDGE_NULLABLE context
+);
+typedef int32_t (* TORRENT_BRIDGE_NULLABLE TTorrentHTTPTrackerResponseParseCallback)(
+    void * TORRENT_BRIDGE_NULLABLE context,
+    const char * TORRENT_BRIDGE_NONNULL TORRENT_BRIDGE_COUNTED_BY(body_size)
+        body TORRENT_BRIDGE_NOESCAPE,
+    int32_t body_size,
+    uint8_t is_scrape,
+    const uint8_t * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(scrape_info_hash_size)
+        scrape_info_hash TORRENT_BRIDGE_NOESCAPE,
+    int32_t scrape_info_hash_size,
+    TTorrentTrackerPeerRecord * TORRENT_BRIDGE_NONNULL TORRENT_BRIDGE_COUNTED_BY(peer_capacity)
+        peers_out TORRENT_BRIDGE_NOESCAPE,
+    int32_t peer_capacity,
+    TTorrentHTTPTrackerResponseResult * TORRENT_BRIDGE_NONNULL result_out TORRENT_BRIDGE_NOESCAPE
+);
+
+typedef struct TTorrentTrackerResponseParserCallbacks {
+    void * TORRENT_BRIDGE_NULLABLE context;
+    TTorrentTrackerParserContextRetainCallback retain_context;
+    TTorrentTrackerParserContextReleaseCallback release_context;
+    TTorrentHTTPTrackerResponseParseCallback parse_http_response;
+} TTorrentTrackerResponseParserCallbacks;
+
 // Immutable activation authority for one known torrent. claim_id is the UUID's
 // 16 RFC 4122 bytes. source_manifest_digest is the domain-separated SHA-256
 // digest independently reproduced by Swift and libtorrent before admission.
@@ -756,6 +841,7 @@ TTorrentClient * TORRENT_BRIDGE_NULLABLE TorrentClientCreateWithError(
     TTorrentPayloadBrokerCallbacks payload_broker,
     TTorrentSwarmMetainfoParserCallbacks swarm_metainfo_parser,
     TTorrentPeerProtocolParserCallbacks peer_protocol_parser,
+    TTorrentTrackerResponseParserCallbacks tracker_response_parser,
     char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;

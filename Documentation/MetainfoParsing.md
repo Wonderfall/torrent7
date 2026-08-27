@@ -74,6 +74,33 @@ Validation followed by passing the same bytes to libtorrent is not a cutover.
   token, key-byte, and container budgets. Noncanonical dictionaries are rejected
   rather than normalized and passed onward.
 
+## Accepted HTTP tracker-response dialect
+
+- Only the final decompressed bencoded HTTP response body crosses into Swift.
+  Native code continues to own DNS, TCP, TLS, HTTP status and header parsing,
+  chunk framing, redirects, proxy behavior, and gzip inflation.
+- Announce and scrape dictionaries use the shared canonical iterative scanner.
+  Intervals and swarm statistics are fixed-width and bounded. Scrapes select
+  only the exact binary 20-byte info-hash key requested by libtorrent.
+- IPv4 and IPv6 compact peer strings must be exact multiples of six and
+  eighteen bytes. Dictionary peers retain only bounded hostnames made of ASCII
+  letters, digits, dot, dash, underscore, or colon, an optional exact 20-byte
+  peer ID, and a `UInt16` port. Invalid dictionary entries are skipped only when
+  at least one entry remains valid, matching the pinned compatibility dialect.
+- The decompressed body is capped at 512 KiB before the Swift callback. A
+  response may produce at most 3,000 typed peers; tracker IDs, human-readable
+  failure and warning strings, hostnames, nesting, tokens, containers, keys,
+  and integer syntax have independent bounds. Human-readable strings must be
+  valid UTF-8 without NUL.
+- A failure reason is terminal: scheduling and tracker-ID fields may survive,
+  but peers, warnings, external addresses, and swarm statistics cannot.
+  Endpoint/source admission remains native after typed parsing.
+
+This cutover is deliberately HTTP-body-only. UDP tracker replies remain in
+libtorrent because they are fixed binary records parsed from bounded,
+length-checked spans and do not expose the same generic bencode surface.
+WebTorrent and I2P are disabled in the product build.
+
 ## Native interoperability
 
 Swift parsers emit narrow types such as `ParsedMagnet`, `ValidatedInfoCore`,
@@ -107,11 +134,22 @@ address, port, flag, and payload offset before constructing libtorrent values.
 The callback context and each callback role are separately address-diversified
 with pointer authentication on arm64e.
 
-The incoming BEP 10 handshake, BEP 9 control dictionary, and BEP 11 compact-peer
-dictionary have no native bdecode fallback. Libtorrent still owns connection
-state, additive update semantics, metadata hash verification and assembly,
-message-rate rules, peer filtering, and admission. Its bencoding of outgoing
-self-generated messages is intentionally unchanged.
+HTTP tracker responses use the same ownership pattern. Libtorrent supplies one
+complete borrowed body and, for scrapes, the exact requested hash. Swift writes
+one fixed result plus a caller-owned array of at most 3,000 peer records; all
+retained strings are checked ranges into the borrowed body. C++ revalidates
+every presence bit, enum, count, range, statistic, address family, hostname,
+UTF-8 message, and reserved byte, constructs a temporary native response, and
+commits it only after the full import succeeds. Swift retains no pointer and
+transfers no allocation. The context and all callback roles have separate
+arm64e pointer-authentication discriminators.
+
+The incoming BEP 10 handshake, BEP 9 control dictionary, BEP 11 compact-peer
+dictionary, and final HTTP tracker body have no native bdecode fallback.
+Libtorrent still owns connection state, additive update semantics, metadata
+hash verification and assembly, message-rate rules, peer filtering, tracker
+transport, and admission. Its bencoding of outgoing self-generated messages is
+intentionally unchanged.
 
 ### Metainfo capsule schema v1
 

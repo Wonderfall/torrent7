@@ -1,0 +1,445 @@
+diff --git a/include/libtorrent/add_torrent_params.hpp b/include/libtorrent/add_torrent_params.hpp
+index bc8e557e3..bca463b9a 100644
+--- a/include/libtorrent/add_torrent_params.hpp
++++ b/include/libtorrent/add_torrent_params.hpp
+@@ -171,6 +171,11 @@ TORRENT_VERSION_NAMESPACE_3
+ 		// into narrow typed results before libtorrent mutates connection state.
+ 		std::shared_ptr<aux::peer_message_parser> peer_message_parser;
+ 
++		// Required for torrents accepting HTTP tracker responses. The embedding
++		// application parses the final decompressed bencoded body into a narrow
++		// typed response before tracker state or peer lists are updated.
++		std::shared_ptr<aux::tracker_response_parser> tracker_response_parser;
++
+ 		// This is an optional field. If set, the part-file for this torrent
+ 		// will be stored in the specified subdirectory, still inside its
+ 		// download directory. i.e. ``part_file_dir`` is a relative directory.
+diff --git a/include/libtorrent/aux_/http_tracker_connection.hpp b/include/libtorrent/aux_/http_tracker_connection.hpp
+index 3a271cb8d..3143db3ec 100644
+--- a/include/libtorrent/aux_/http_tracker_connection.hpp
++++ b/include/libtorrent/aux_/http_tracker_connection.hpp
+@@ -21,16 +21,10 @@ see LICENSE file.
+ #include "libtorrent/aux_/ip_helpers.hpp"
+ #include "libtorrent/aux_/tracker_manager.hpp" // for tracker_connection
+ 
+-namespace libtorrent {
+-
+-	struct bdecode_node;
+-}
+-
+ namespace libtorrent::aux {
+ 
+ 	struct http_connection;
+ 	class http_parser;
+-	struct peer_entry;
+ 
+ 	class TORRENT_EXTRA_EXPORT http_tracker_connection
+ 		: public tracker_connection
+@@ -79,12 +73,6 @@ namespace libtorrent::aux {
+ 		bool m_address_policy_pending = false;
+ 	};
+ 
+-	TORRENT_EXTRA_EXPORT tracker_response parse_tracker_response(
+-		span<char const> data, error_code& ec
+-		, tracker_request_flags_t flags, sha1_hash const& scrape_ih);
+-
+-	TORRENT_EXTRA_EXPORT bool extract_peer_info(bdecode_node const& info
+-		, peer_entry& ret, error_code& ec);
+ }
+ 
+ #endif // TORRENT_HTTP_TRACKER_CONNECTION_HPP_INCLUDED
+diff --git a/include/libtorrent/aux_/torrent.hpp b/include/libtorrent/aux_/torrent.hpp
+index 9da204969..f87d84de6 100644
+--- a/include/libtorrent/aux_/torrent.hpp
++++ b/include/libtorrent/aux_/torrent.hpp
+@@ -1683,6 +1683,7 @@ namespace libtorrent::aux {
+ 		std::shared_ptr<swarm_metadata_parser> m_swarm_metadata_parser;
+ 		bool m_swarm_metadata_rejected = false;
+ 		std::shared_ptr<peer_message_parser> m_peer_message_parser;
++		std::shared_ptr<tracker_response_parser> m_tracker_response_parser;
+ 
+ 		// if the torrent is started without metadata, it may
+ 		// still be given a name until the metadata is received
+diff --git a/include/libtorrent/aux_/tracker_manager.hpp b/include/libtorrent/aux_/tracker_manager.hpp
+index b3dffee3e..0490e7d9e 100644
+--- a/include/libtorrent/aux_/tracker_manager.hpp
++++ b/include/libtorrent/aux_/tracker_manager.hpp
+@@ -97,6 +97,7 @@ using tracker_request_flags_t = flags::bitfield_flag<std::uint8_t, struct tracke
+ #endif
+ 
+ 		std::shared_ptr<const ip_filter> filter;
++		std::shared_ptr<tracker_response_parser> response_parser;
+ 
+ 		std::int64_t downloaded = -1;
+ 		std::int64_t uploaded = -1;
+diff --git a/include/libtorrent/fwd.hpp b/include/libtorrent/fwd.hpp
+index fa62fbd2d..6713e9f0c 100644
+--- a/include/libtorrent/fwd.hpp
++++ b/include/libtorrent/fwd.hpp
+@@ -19,6 +19,7 @@ namespace libtorrent {
+ namespace aux {
+ struct extension_handshake;
+ struct peer_message_parser;
++struct tracker_response_parser;
+ struct payload_file_provider;
+ struct swarm_metadata_parser;
+ }
+diff --git a/src/http_tracker_connection.cpp b/src/http_tracker_connection.cpp
+index 49f80652e..2be7aae04 100644
+--- a/src/http_tracker_connection.cpp
++++ b/src/http_tracker_connection.cpp
+@@ -34,6 +34,7 @@ see LICENSE file.
+ #include "libtorrent/socket.hpp"
+ #include "libtorrent/aux_/string_util.hpp" // for is_i2p_url
+ #include "libtorrent/aux_/session_settings.hpp"
++#include "libtorrent/aux_/tracker_response_parser.hpp"
+ #include "libtorrent/aux_/resolver_interface.hpp"
+ #include "libtorrent/ip_filter.hpp"
+ #include "libtorrent/aux_/parse_url.hpp"
+@@ -41,16 +42,6 @@ see LICENSE file.
+ 
+ namespace libtorrent::aux {
+ 
+-	namespace {
+-
+-		bool valid_compact_peer_list(int const len, int const entry_size)
+-		{
+-			TORRENT_ASSERT(entry_size > 0);
+-			return len >= 0 && len % entry_size == 0;
+-		}
+-
+-	}
+-
+ 	http_tracker_connection::http_tracker_connection(
+ 		io_context& ios
+ 		, tracker_manager& man
+@@ -331,7 +322,8 @@ namespace libtorrent::aux {
+ 		m_tracker_connection = std::make_shared<aux::http_connection>(m_ioc, m_man.host_resolver()
+ 			, std::bind(&http_tracker_connection::on_response, shared_from_this()
+ 				, request_generation, _1, _2, _3)
+-			, settings.get_int(settings_pack::max_http_recv_buffer_size)
++			, std::min(settings.get_int(settings_pack::max_http_recv_buffer_size)
++				, tracker_response_parser::maximum_http_body_size)
+ 			, std::bind(&http_tracker_connection::on_connect, shared_from_this()
+ 				, request_generation, _1)
+ 			, std::bind(&http_tracker_connection::on_filter, shared_from_this()
+@@ -589,8 +581,16 @@ namespace libtorrent::aux {
+ 			return;
+ 		}
+ 
+-		tracker_response resp = parse_tracker_response(data, ecode
+-			, tracker_req().kind, tracker_req().info_hash);
++		tracker_response resp;
++		std::shared_ptr<tracker_response_parser> const response_parser
++			= tracker_req().response_parser;
++		if (response_parser == nullptr
++			|| !response_parser->parse_http_response(data
++				, bool(tracker_req().kind & tracker_request::scrape_request)
++				, tracker_req().info_hash, resp, ecode))
++		{
++			if (!ecode) ecode = errors::invalid_tracker_response;
++		}
+ 
+ 		resp.interval = std::max(resp.interval
+ 				, seconds32{m_man.settings().get_int(settings_pack::min_announce_interval)});
+@@ -635,228 +635,4 @@ namespace libtorrent::aux {
+ 		close();
+ 	}
+ 
+-	// TODO: 2 returning a bool here is redundant. Instead this function should
+-	// return the peer_entry
+-	bool extract_peer_info(bdecode_node const& info, peer_entry& ret, error_code& ec)
+-	{
+-		// extract peer id (if any)
+-		if (info.type() != bdecode_node::dict_t)
+-		{
+-			ec = errors::invalid_peer_dict;
+-			return false;
+-		}
+-		bdecode_node i = info.dict_find_string("peer id");
+-		if (i && i.string_length() == 20)
+-		{
+-			std::copy(i.string_ptr(), i.string_ptr() + 20, ret.pid.begin());
+-		}
+-		else
+-		{
+-			// if there's no peer_id, just initialize it to a bunch of zeroes
+-			ret.pid.clear();
+-		}
+-
+-		// extract ip
+-		i = info.dict_find_string("ip");
+-		if (!i)
+-		{
+-			ec = errors::invalid_tracker_response;
+-			return false;
+-		}
+-		ret.hostname = i.string_value();
+-
+-		// extract port
+-		i = info.dict_find_int("port");
+-		if (!i)
+-		{
+-			ec = errors::invalid_tracker_response;
+-			return false;
+-		}
+-
+-		auto const port = i.int_value();
+-		if (port < 0 || port > std::numeric_limits<std::uint16_t>::max())
+-		{
+-			ec = errors::invalid_tracker_response;
+-			return false;
+-		}
+-		ret.port = std::uint16_t(port);
+-
+-		return true;
+-	}
+-
+-	tracker_response parse_tracker_response(span<char const> const data, error_code& ec
+-		, tracker_request_flags_t const flags, sha1_hash const& scrape_ih)
+-	{
+-		tracker_response resp;
+-
+-		bdecode_node e;
+-		int const res = bdecode(data.begin(), data.end(), e, ec);
+-
+-		if (ec) return resp;
+-
+-		if (res != 0 || e.type() != bdecode_node::dict_t)
+-		{
+-			ec = errors::invalid_tracker_response;
+-			return resp;
+-		}
+-
+-		// if no interval is specified, default to 30 minutes
+-		resp.interval = seconds32{e.dict_find_int_value("interval", 1800)};
+-		resp.min_interval = seconds32{e.dict_find_int_value("min interval", 30)};
+-
+-		bdecode_node const tracker_id = e.dict_find_string("tracker id");
+-		if (tracker_id)
+-			resp.trackerid = tracker_id.string_value();
+-
+-		// parse the response
+-		bdecode_node const failure = e.dict_find_string("failure reason");
+-		if (failure)
+-		{
+-			resp.failure_reason = failure.string_value();
+-			ec = errors::tracker_failure;
+-			return resp;
+-		}
+-
+-		bdecode_node const warning = e.dict_find_string("warning message");
+-		if (warning)
+-			resp.warning_message = warning.string_value();
+-
+-		if (flags & tracker_request::scrape_request)
+-		{
+-			bdecode_node const files = e.dict_find_dict("files");
+-			if (!files)
+-			{
+-				ec = errors::invalid_files_entry;
+-				return resp;
+-			}
+-
+-			bdecode_node const scrape_data = files.dict_find_dict(
+-				scrape_ih.to_string());
+-
+-			if (!scrape_data)
+-			{
+-				ec = errors::invalid_hash_entry;
+-				return resp;
+-			}
+-
+-			resp.complete = int(scrape_data.dict_find_int_value("complete", -1));
+-			resp.incomplete = int(scrape_data.dict_find_int_value("incomplete", -1));
+-			resp.downloaded = int(scrape_data.dict_find_int_value("downloaded", -1));
+-			resp.downloaders = int(scrape_data.dict_find_int_value("downloaders", -1));
+-
+-			return resp;
+-		}
+-
+-		// look for optional scrape info
+-		resp.complete = int(e.dict_find_int_value("complete", -1));
+-		resp.incomplete = int(e.dict_find_int_value("incomplete", -1));
+-		resp.downloaded = int(e.dict_find_int_value("downloaded", -1));
+-
+-		bdecode_node peers_ent = e.dict_find("peers");
+-		if (peers_ent && peers_ent.type() == bdecode_node::string_t)
+-		{
+-			char const* peers = peers_ent.string_ptr();
+-			int const len = peers_ent.string_length();
+-#if TORRENT_USE_I2P
+-			if (flags & tracker_request::i2p)
+-			{
+-				if (!valid_compact_peer_list(len, 32))
+-				{
+-					ec = errors::invalid_peers_entry;
+-					return resp;
+-				}
+-				for (int i = 0; i < len; i += 32)
+-				{
+-					i2p_peer_entry p;
+-					std::memcpy(p.destination.data(), peers + i, 32);
+-					resp.i2p_peers.push_back(p);
+-				}
+-			}
+-			else
+-#endif
+-			{
+-				if (!valid_compact_peer_list(len, 6))
+-				{
+-					ec = errors::invalid_peers_entry;
+-					return resp;
+-				}
+-				resp.peers4.reserve(std::size_t(len / 6));
+-				for (int i = 0; i < len; i += 6)
+-				{
+-					ipv4_peer_entry p;
+-					p.ip = aux::read_v4_address(peers).to_bytes();
+-					p.port = aux::read_uint16(peers);
+-					resp.peers4.push_back(p);
+-				}
+-			}
+-		}
+-		else if (peers_ent && peers_ent.type() == bdecode_node::list_t)
+-		{
+-			int const len = peers_ent.list_size();
+-			resp.peers.reserve(std::size_t(len));
+-			error_code parse_error;
+-			for (int i = 0; i < len; ++i)
+-			{
+-				peer_entry p;
+-				if (!extract_peer_info(peers_ent.list_at(i), p, parse_error))
+-					continue;
+-				resp.peers.push_back(p);
+-			}
+-
+-			// only report an error if all peer entries are invalid
+-			if (resp.peers.empty() && parse_error)
+-			{
+-				ec = parse_error;
+-				return resp;
+-			}
+-		}
+-		else
+-		{
+-			peers_ent.clear();
+-		}
+-
+-		bdecode_node ipv6_peers = e.dict_find_string("peers6");
+-		if (ipv6_peers)
+-		{
+-			char const* peers = ipv6_peers.string_ptr();
+-			int const len = ipv6_peers.string_length();
+-			if (!valid_compact_peer_list(len, 18))
+-			{
+-				ec = errors::invalid_peers_entry;
+-				return resp;
+-			}
+-			resp.peers6.reserve(std::size_t(len / 18));
+-			for (int i = 0; i < len; i += 18)
+-			{
+-				ipv6_peer_entry p;
+-				p.ip = aux::read_v6_address(peers).to_bytes();
+-				p.port = aux::read_uint16(peers);
+-				resp.peers6.push_back(p);
+-			}
+-		}
+-		else
+-		{
+-			ipv6_peers.clear();
+-		}
+-/*
+-		// if we didn't receive any peers. We don't care if we're stopping anyway
+-		if (peers_ent == 0 && ipv6_peers == 0
+-			&& tracker_req().event != event_t::stopped)
+-		{
+-			ec = errors::invalid_peers_entry;
+-			return resp;
+-		}
+-*/
+-		bdecode_node const ip_ent = e.dict_find_string("external ip");
+-		if (ip_ent)
+-		{
+-			char const* p = ip_ent.string_ptr();
+-			if (ip_ent.string_length() == std::tuple_size<address_v4::bytes_type>::value)
+-				resp.external_ip = aux::read_v4_address(p);
+-			else if (ip_ent.string_length() == std::tuple_size<address_v6::bytes_type>::value)
+-				resp.external_ip = aux::read_v6_address(p);
+-		}
+-
+-		return resp;
+-	}
+ }
+diff --git a/src/torrent.cpp b/src/torrent.cpp
+index 59edc6108..45e778629 100644
+--- a/src/torrent.cpp
++++ b/src/torrent.cpp
+@@ -468,6 +468,7 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 			m_swarm_metadata_parser = std::move(p.swarm_metadata_parser);
+ 		}
+ 		m_peer_message_parser = std::move(p.peer_message_parser);
++		m_tracker_response_parser = std::move(p.tracker_response_parser);
+ 
+ 		// TODO: 3 we could probably get away with just saving a few fields here
+ 		m_add_torrent_params = std::make_unique<add_torrent_params>(std::move(p));
+@@ -3434,6 +3435,7 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 	tracker_request torrent::build_tracker_request(event_t const e)
+ 	{
+ 		tracker_request req;
++		req.response_parser = m_tracker_response_parser;
+ 		if (settings().get_bool(settings_pack::apply_ip_filter_to_trackers) && m_apply_ip_filter)
+ 		{
+ 			req.filter = m_ip_filter;
+@@ -3748,6 +3750,7 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 	void torrent::scrape_tracker_impl(aux::announce_entry& ae, bool user_triggered)
+ 	{
+ 		tracker_request req;
++		req.response_parser = m_tracker_response_parser;
+ 		if (settings().get_bool(settings_pack::apply_ip_filter_to_trackers)
+ 			&& m_apply_ip_filter)
+ 			req.filter = m_ip_filter;
+diff --git a/include/libtorrent/aux_/tracker_response_parser.hpp b/include/libtorrent/aux_/tracker_response_parser.hpp
+new file mode 100644
+index 000000000..e5dd54d9b
+--- /dev/null
++++ b/include/libtorrent/aux_/tracker_response_parser.hpp
+@@ -0,0 +1,38 @@
++/*
++
++Copyright (c) 2026, Torrent7 contributors
++All rights reserved.
++
++You may use, distribute and modify this code under the terms of the BSD license,
++see LICENSE file.
++*/
++
++#ifndef TORRENT_TRACKER_RESPONSE_PARSER_HPP
++#define TORRENT_TRACKER_RESPONSE_PARSER_HPP
++
++#include "libtorrent/config.hpp"
++#include "libtorrent/error_code.hpp"
++#include "libtorrent/sha1_hash.hpp"
++#include "libtorrent/span.hpp"
++
++namespace libtorrent::aux {
++
++	struct tracker_response;
++
++	// Parses only the final decompressed bencoded body of an HTTP tracker
++	// response. HTTP framing, decompression, redirects, TLS, and endpoint policy
++	// remain in the native tracker connection.
++	struct TORRENT_EXTRA_EXPORT tracker_response_parser
++	{
++		static constexpr int maximum_http_body_size = 512 * 1024;
++
++		virtual ~tracker_response_parser() = default;
++
++		virtual bool parse_http_response(span<char const> body
++			, bool is_scrape, sha1_hash const& scrape_info_hash
++			, tracker_response& result, error_code& ec) noexcept = 0;
++	};
++
++}
++
++#endif // TORRENT_TRACKER_RESPONSE_PARSER_HPP

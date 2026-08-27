@@ -12,6 +12,10 @@ Scripts/verify-xcode.zsh
 
 ## Targets
 
+- `http_tracker_response_parser` selects announce or scrape mode and feeds
+  arbitrary final decompressed bodies to the production Swift parser. It
+  checks determinism, exact body-relative ranges, typed address/peer shapes,
+  failure semantics, and the independent 512 KiB body and 3,000-peer bounds.
 - `ipc_json_preflight` feeds arbitrary bytes and both limit profiles to the
   production bounded JSON allocation preflight.
 - `magnet_parser` feeds arbitrary UTF-8 and replacement-decoded text to the
@@ -32,10 +36,10 @@ Scripts/verify-xcode.zsh
   deterministic parsing, advertised hash enforcement, canonical file indices,
   safe paths, and independently reproduced source digests.
 
-The magnet, peer-protocol, claim, and manifest targets depend on the same `TorrentMetainfo`
-and `TorrentStorageAuthority` modules used by the app. SwiftPM links those
-production modules into a fuzz-only dynamic library; no fuzz hook or
-conditional is linked into the app.
+The HTTP tracker, magnet, peer-protocol, claim, and manifest targets depend on
+the same `TorrentMetainfo` and `TorrentStorageAuthority` modules used by the
+app. SwiftPM links those production modules into a fuzz-only dynamic library;
+no fuzz hook or conditional is linked into the app.
 
 ## Build and run
 

@@ -79,6 +79,9 @@ typeset peer_release="$temporary_directory/peer-release.txt"
 typeset peer_handshake="$temporary_directory/peer-handshake.txt"
 typeset peer_metadata="$temporary_directory/peer-metadata.txt"
 typeset peer_pex="$temporary_directory/peer-pex.txt"
+typeset tracker_retain="$temporary_directory/tracker-retain.txt"
+typeset tracker_release="$temporary_directory/tracker-release.txt"
+typeset tracker_http="$temporary_directory/tracker-http.txt"
 extract_function TorrentBridgeTestInvokeWake "$wake"
 extract_function TorrentBridgeTestInvokePayloadRetain "$retain"
 extract_function TorrentBridgeTestInvokePayloadRelease "$release"
@@ -93,6 +96,9 @@ extract_function TorrentBridgeTestInvokePeerProtocolRelease "$peer_release"
 extract_function TorrentBridgeTestInvokePeerProtocolHandshake "$peer_handshake"
 extract_function TorrentBridgeTestInvokePeerProtocolMetadata "$peer_metadata"
 extract_function TorrentBridgeTestInvokePeerProtocolPEX "$peer_pex"
+extract_function TorrentBridgeTestInvokeTrackerParserRetain "$tracker_retain"
+extract_function TorrentBridgeTestInvokeTrackerParserRelease "$tracker_release"
+extract_function TorrentBridgeTestInvokeTrackerParserHTTP "$tracker_http"
 
 # AppleClang's pinned 16-bit string discriminators for the Bridge-owned slots.
 verify_data_authentication wake.context "$wake" 0x8cdb
@@ -113,5 +119,9 @@ verify_callback_branch peer-protocol.release "$peer_release" 0x27da
 verify_callback_branch peer-protocol.handshake "$peer_handshake" 0x4c7
 verify_callback_branch peer-protocol.metadata "$peer_metadata" 0x719
 verify_callback_branch peer-protocol.pex "$peer_pex" 0x71df
+verify_data_authentication tracker-parser.context "$tracker_retain" 0x2226
+verify_callback_branch tracker-parser.retain "$tracker_retain" 0x5643
+verify_callback_branch tracker-parser.release "$tracker_release" 0x10fd
+verify_callback_branch tracker-parser.http "$tracker_http" 0xa3a7
 
 print -r -- "Bridge callback/context PAC codegen verification passed"

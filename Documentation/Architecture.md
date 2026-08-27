@@ -32,6 +32,7 @@ therefore neither treated as secret nor accepted as filesystem authority.
 | Magnet parsing | Owns the shared bounded Swift parser | Revalidates the typed model and imports flat records |
 | Swarm info-dictionary parsing | None | Hashes in libtorrent, parses synchronously in Swift, imports a typed capsule |
 | Peer extension message parsing | None | Parses BEP 10, BEP 9 control, and BEP 11 synchronously in Swift; applies native state and policy |
+| HTTP tracker body parsing | None | Bounds the decompressed body, parses it synchronously in Swift, imports typed peers and statistics |
 | Destination selection, reservation, and mapping | Owns | None |
 | Durable storage claims and ownership evidence | Owns | None |
 | Exact payload file access | Brokers individual descriptors | Consumes brokered descriptors |
@@ -461,6 +462,17 @@ have no native bdecode fallback. Build-time reachability checks pin that cutover
 while arm64e code-generation and replay tests cover every new callback and its
 long-lived context.
 
+Final decompressed HTTP tracker bodies follow a separate synchronous Swift
+callback. Libtorrent still owns DNS, TLS, HTTP framing, redirects, proxying,
+chunk handling, gzip inflation, tracker scheduling, and endpoint admission. It
+caps both the bottled response and inflated output at 512 KiB before invoking
+Swift. Swift canonical-bdecodes announce or scrape data into one fixed result
+and at most 3,000 caller-owned peer records; C++ revalidates all fields and
+commits an entirely constructed tracker response atomically. The retired HTTP
+tracker bdecode implementation is absent and build-gated. UDP tracker replies
+remain native by design: they are fixed binary, length-checked span parsing,
+not another generic bencode surface. WebTorrent and I2P are disabled.
+
 Libtorrent and BoringSSL are pinned, patched, verified, and linked statically.
 The app bundle contains only the GUI and helper Mach-O executables. TLS uses the
 buffer-only BoringSSL client path with macOS system trust and hostname binding.
@@ -502,7 +514,7 @@ rejection, replacement-safe retained-descriptor soft revocation, claim recovery,
 ambiguous activation containment, imports, removal, and magnet promotion.
 Separate sanitizer-backed fuzz targets cover raw broker XPC dictionaries,
 claim and ownership validation, manifest parsing and digest reproduction,
-peer-extension parsing and typed invariants, the native broker
+peer-extension and HTTP tracker-body parsing and typed invariants, the native broker
 callback/descriptor adapter, and the broader native API input surfaces. Their
 expensive build and execution are intentionally independent of the routine test
 gates, and the harness entry points are absent from shipped products.

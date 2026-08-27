@@ -1077,6 +1077,392 @@ bool BridgePeerMessageParser::parse_ut_pex(
     }
 }
 
+namespace {
+
+struct TrackerAddressBits {
+    std::uint64_t high = 0U;
+    std::uint64_t low = 0U;
+    std::uint8_t family = 0U;
+};
+
+[[nodiscard]] std::optional<lt::address> tracker_address(TrackerAddressBits const bits)
+{
+    if (bits.family == TTORRENT_PEER_ADDRESS_IPV4) {
+        if (bits.high != 0U
+            || bits.low > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())) {
+            return std::nullopt;
+        }
+        lt::address_v4::bytes_type bytes{};
+        auto const value = static_cast<std::uint32_t>(bits.low);
+        for (std::size_t index = 0U; index < bytes.size(); ++index) {
+            auto const shift = static_cast<unsigned int>((bytes.size() - index - 1U) * 8U);
+            bytes.at(index) = static_cast<std::uint8_t>(value >> shift);
+        }
+        return lt::address_v4(bytes);
+    }
+    if (bits.family == TTORRENT_PEER_ADDRESS_IPV6) {
+        lt::address_v6::bytes_type bytes{};
+        for (std::size_t index = 0U; index < 8U; ++index) {
+            auto const shift = static_cast<unsigned int>((7U - index) * 8U);
+            bytes.at(index) = static_cast<std::uint8_t>(bits.high >> shift);
+            bytes.at(index + 8U) = static_cast<std::uint8_t>(bits.low >> shift);
+        }
+        return lt::address_v6(bytes);
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<lt::span<char const>> tracker_body_range(
+    lt::span<char const> const body,
+    int32_t const offset,
+    int32_t const size,
+    int32_t const maximum_size,
+    bool const allow_empty
+)
+{
+    auto const span_offset = static_cast<std::ptrdiff_t>(offset);
+    auto const span_size = static_cast<std::ptrdiff_t>(size);
+    if (offset < 0 || size < 0 || size > maximum_size
+        || (!allow_empty && size == 0)
+        || span_offset > body.size()
+        || span_size > body.size() - span_offset) {
+        return std::nullopt;
+    }
+    return body.subspan(span_offset, span_size);
+}
+
+[[nodiscard]] bool safe_tracker_hostname(lt::span<char const> const hostname)
+{
+    return !hostname.empty() && std::ranges::all_of(hostname, [](char const character) {
+        auto const byte = static_cast<unsigned char>(character);
+        return (byte >= static_cast<unsigned char>('0') && byte <= static_cast<unsigned char>('9'))
+            || (byte >= static_cast<unsigned char>('A') && byte <= static_cast<unsigned char>('Z'))
+            || (byte >= static_cast<unsigned char>('a') && byte <= static_cast<unsigned char>('z'))
+            || byte == static_cast<unsigned char>('.')
+            || byte == static_cast<unsigned char>('-')
+            || byte == static_cast<unsigned char>('_')
+            || byte == static_cast<unsigned char>(':');
+    });
+}
+
+[[nodiscard]] bool valid_tracker_statistic(int32_t const value)
+{
+    return value >= -1;
+}
+
+[[nodiscard]] bool valid_tracker_message(lt::span<char const> const value)
+{
+    std::string const owned(value.begin(), value.end());
+    if (owned.find('\0') != std::string::npos) {
+        return false;
+    }
+    std::size_t offset = 0U;
+    while (offset < owned.size()) {
+        UTF8Sequence const sequence = utf8_sequence(owned, offset);
+        if (!sequence.valid) {
+            return false;
+        }
+        offset += sequence.length;
+    }
+    return true;
+}
+
+} // namespace
+
+BridgeTrackerResponseParser::BridgeTrackerResponseParser(
+    TTorrentTrackerResponseParserCallbacks const callbacks
+)
+    : callbacks_{
+        .context = callbacks.context,
+        .retain_context = callbacks.retain_context,
+        .release_context = callbacks.release_context,
+        .parse_http_response = callbacks.parse_http_response,
+    }
+{
+    if (callbacks_.context == nullptr
+        || callbacks_.retain_context == nullptr
+        || callbacks_.release_context == nullptr
+        || callbacks_.parse_http_response == nullptr) {
+        throw std::invalid_argument("The tracker response parser callback table is incomplete.");
+    }
+    retained_ = callbacks_.retain_context(callbacks_.context) != 0U;
+    if (!retained_) {
+        throw std::invalid_argument("The tracker response parser context is unavailable.");
+    }
+}
+
+BridgeTrackerResponseParser::~BridgeTrackerResponseParser()
+{
+    if (retained_) {
+        callbacks_.release_context(callbacks_.context);
+    }
+}
+
+bool BridgeTrackerResponseParser::parse_http_response(
+    lt::span<char const> const body,
+    bool const is_scrape,
+    lt::sha1_hash const &scrape_info_hash,
+    lt::aux::tracker_response &result,
+    lt::error_code &error
+) noexcept
+{
+    try {
+        if (body.empty()
+            || std::cmp_greater(body.size(), TTORRENT_MAX_HTTP_TRACKER_RESPONSE_BYTES)) {
+            error = lt::errors::invalid_tracker_response;
+            return false;
+        }
+        auto const body_size = static_cast<std::size_t>(body.size());
+        std::size_t const peer_capacity = std::clamp<std::size_t>(
+            (body_size + 5U) / 6U,
+            1U,
+            static_cast<std::size_t>(TTORRENT_MAX_TRACKER_RESPONSE_PEERS)
+        );
+        std::vector<TTorrentTrackerPeerRecord> peers(peer_capacity);
+        TTorrentHTTPTrackerResponseResult parsed{};
+        std::array<std::uint8_t, 20U> scrape_hash_bytes{};
+        if (is_scrape) {
+            std::ranges::copy(scrape_info_hash, scrape_hash_bytes.begin());
+        }
+        auto const *scrape_hash = is_scrape
+            ? scrape_hash_bytes.data()
+            : nullptr;
+        int32_t const status = callbacks_.parse_http_response(
+            callbacks_.context,
+            body.data(),
+            static_cast<int32_t>(body.size()),
+            is_scrape ? 1U : 0U,
+            scrape_hash,
+            is_scrape ? 20 : 0,
+            peers.data(),
+            static_cast<int32_t>(peers.size()),
+            &parsed
+        );
+        constexpr std::uint32_t known_fields =
+            TTORRENT_TRACKER_HAS_ID
+            | TTORRENT_TRACKER_HAS_FAILURE_REASON
+            | TTORRENT_TRACKER_HAS_WARNING_MESSAGE
+            | TTORRENT_TRACKER_HAS_EXTERNAL_ADDRESS;
+        if (status != 0 || parsed.reserved0 != 0U || parsed.reserved1 != 0U
+            || (parsed.present_fields & ~known_fields) != 0U
+            || parsed.interval < 0 || parsed.minimum_interval < 0
+            || !valid_tracker_statistic(parsed.complete)
+            || !valid_tracker_statistic(parsed.incomplete)
+            || !valid_tracker_statistic(parsed.downloaded)
+            || !valid_tracker_statistic(parsed.downloaders)
+            || parsed.peer_count < 0
+            || std::cmp_greater(parsed.peer_count, peers.size())
+            || parsed.peer_count > TTORRENT_MAX_TRACKER_RESPONSE_PEERS) {
+            error = lt::errors::invalid_tracker_response;
+            return false;
+        }
+
+        auto const has = [&](std::uint32_t const field) {
+            return (parsed.present_fields & field) != 0U;
+        };
+        struct OptionalRangeSpecification {
+            std::uint32_t field;
+            int32_t offset;
+            int32_t size;
+            int32_t maximum_size;
+            bool allow_empty;
+        };
+        auto const optional_range = [&](OptionalRangeSpecification const specification)
+            -> std::optional<lt::span<char const>> {
+            if (!has(specification.field)) {
+                if (specification.offset != 0 || specification.size != 0) {
+                    return std::nullopt;
+                }
+                return lt::span<char const>{};
+            }
+            return tracker_body_range(
+                body,
+                specification.offset,
+                specification.size,
+                specification.maximum_size,
+                specification.allow_empty
+            );
+        };
+
+        auto const tracker_id = optional_range(OptionalRangeSpecification{
+            .field = TTORRENT_TRACKER_HAS_ID,
+            .offset = parsed.tracker_id_offset,
+            .size = parsed.tracker_id_size,
+            .maximum_size = TTORRENT_MAX_TRACKER_ID_BYTES,
+            .allow_empty = true,
+        });
+        auto const failure_reason = optional_range(OptionalRangeSpecification{
+            .field = TTORRENT_TRACKER_HAS_FAILURE_REASON,
+            .offset = parsed.failure_reason_offset,
+            .size = parsed.failure_reason_size,
+            .maximum_size = TTORRENT_MAX_TRACKER_MESSAGE_BYTES,
+            .allow_empty = true,
+        });
+        auto const warning_message = optional_range(OptionalRangeSpecification{
+            .field = TTORRENT_TRACKER_HAS_WARNING_MESSAGE,
+            .offset = parsed.warning_message_offset,
+            .size = parsed.warning_message_size,
+            .maximum_size = TTORRENT_MAX_TRACKER_MESSAGE_BYTES,
+            .allow_empty = true,
+        });
+        if (!tracker_id || !failure_reason || !warning_message) {
+            error = lt::errors::invalid_tracker_response;
+            return false;
+        }
+        if ((has(TTORRENT_TRACKER_HAS_FAILURE_REASON)
+                && !valid_tracker_message(*failure_reason))
+            || (has(TTORRENT_TRACKER_HAS_WARNING_MESSAGE)
+                && !valid_tracker_message(*warning_message))) {
+            error = lt::errors::invalid_tracker_response;
+            return false;
+        }
+
+        lt::aux::tracker_response imported;
+        imported.interval = lt::seconds32(parsed.interval);
+        imported.min_interval = lt::seconds32(parsed.minimum_interval);
+        imported.complete = parsed.complete;
+        imported.incomplete = parsed.incomplete;
+        imported.downloaded = parsed.downloaded;
+        imported.downloaders = parsed.downloaders;
+        if (has(TTORRENT_TRACKER_HAS_ID)) {
+            imported.trackerid.assign(tracker_id->begin(), tracker_id->end());
+        }
+        if (has(TTORRENT_TRACKER_HAS_FAILURE_REASON)) {
+            if (parsed.peer_count != 0
+                || has(TTORRENT_TRACKER_HAS_WARNING_MESSAGE)
+                || has(TTORRENT_TRACKER_HAS_EXTERNAL_ADDRESS)
+                || parsed.complete != -1 || parsed.incomplete != -1
+                || parsed.downloaded != -1 || parsed.downloaders != -1) {
+                error = lt::errors::invalid_tracker_response;
+                return false;
+            }
+            imported.failure_reason.assign(failure_reason->begin(), failure_reason->end());
+            result = std::move(imported);
+            error = lt::errors::tracker_failure;
+            return true;
+        }
+        if (has(TTORRENT_TRACKER_HAS_WARNING_MESSAGE)) {
+            imported.warning_message.assign(warning_message->begin(), warning_message->end());
+        }
+
+        if (has(TTORRENT_TRACKER_HAS_EXTERNAL_ADDRESS)) {
+            std::optional<lt::address> const address = tracker_address(TrackerAddressBits{
+                .high = parsed.address_high,
+                .low = parsed.address_low,
+                .family = parsed.address_family,
+            });
+            if (!address) {
+                error = lt::errors::invalid_tracker_response;
+                return false;
+            }
+            imported.external_ip = *address;
+        } else if (parsed.address_family != 0U
+            || parsed.address_high != 0U || parsed.address_low != 0U) {
+            error = lt::errors::invalid_tracker_response;
+            return false;
+        }
+
+        if (is_scrape) {
+            if (parsed.peer_count != 0
+                || has(TTORRENT_TRACKER_HAS_EXTERNAL_ADDRESS)) {
+                error = lt::errors::invalid_tracker_response;
+                return false;
+            }
+        } else if (parsed.downloaders != -1) {
+            error = lt::errors::invalid_tracker_response;
+            return false;
+        }
+
+        imported.peers.reserve(static_cast<std::size_t>(parsed.peer_count));
+        imported.peers4.reserve(static_cast<std::size_t>(parsed.peer_count));
+        imported.peers6.reserve(static_cast<std::size_t>(parsed.peer_count));
+        for (int32_t index = 0; index < parsed.peer_count; ++index) {
+            TTorrentTrackerPeerRecord const &peer = peers.at(static_cast<std::size_t>(index));
+            if (peer.reserved != 0U || peer.has_peer_id > 1U) {
+                error = lt::errors::invalid_tracker_response;
+                return false;
+            }
+            if (peer.kind == TTORRENT_TRACKER_PEER_HOSTNAME) {
+                if (peer.address_high != 0U || peer.address_low != 0U) {
+                    error = lt::errors::invalid_tracker_response;
+                    return false;
+                }
+                auto const hostname = tracker_body_range(
+                    body,
+                    peer.hostname_offset,
+                    peer.hostname_size,
+                    TTORRENT_MAX_TRACKER_HOSTNAME_BYTES,
+                    false
+                );
+                if (!hostname || !safe_tracker_hostname(*hostname)) {
+                    error = lt::errors::invalid_tracker_response;
+                    return false;
+                }
+                lt::aux::peer_entry imported_peer;
+                imported_peer.hostname.assign(hostname->begin(), hostname->end());
+                imported_peer.port = peer.port;
+                if (peer.has_peer_id != 0U) {
+                    auto const peer_id = tracker_body_range(
+                        body,
+                        peer.peer_id_offset,
+                        20,
+                        20,
+                        false
+                    );
+                    if (!peer_id) {
+                        error = lt::errors::invalid_tracker_response;
+                        return false;
+                    }
+                    std::copy(peer_id->begin(), peer_id->end(), imported_peer.pid.begin());
+                } else {
+                    if (peer.peer_id_offset != 0) {
+                        error = lt::errors::invalid_tracker_response;
+                        return false;
+                    }
+                    imported_peer.pid.clear();
+                }
+                imported.peers.push_back(std::move(imported_peer));
+                continue;
+            }
+            if (peer.hostname_offset != 0 || peer.hostname_size != 0
+                || peer.peer_id_offset != 0 || peer.has_peer_id != 0U) {
+                error = lt::errors::invalid_tracker_response;
+                return false;
+            }
+            std::optional<lt::address> const address = tracker_address(TrackerAddressBits{
+                .high = peer.address_high,
+                .low = peer.address_low,
+                .family = peer.kind,
+            });
+            if (!address) {
+                error = lt::errors::invalid_tracker_response;
+                return false;
+            }
+            if (peer.kind == TTORRENT_PEER_ADDRESS_IPV4) {
+                imported.peers4.push_back(lt::aux::ipv4_peer_entry{
+                    .ip = address->to_v4().to_bytes(),
+                    .port = peer.port,
+                });
+            } else if (peer.kind == TTORRENT_PEER_ADDRESS_IPV6) {
+                imported.peers6.push_back(lt::aux::ipv6_peer_entry{
+                    .ip = address->to_v6().to_bytes(),
+                    .port = peer.port,
+                });
+            } else {
+                error = lt::errors::invalid_tracker_response;
+                return false;
+            }
+        }
+
+        result = std::move(imported);
+        error.clear();
+        return true;
+    } catch (...) {
+        error = lt::errors::invalid_tracker_response;
+        return false;
+    }
+}
+
 PayloadBrokerContext::PayloadBrokerContext(TTorrentPayloadBrokerCallbacks const callbacks)
     : callbacks_{
         .context = callbacks.context,
@@ -1982,6 +2368,7 @@ extern "C" TTorrentClient *TorrentClientCreateWithError(
     TTorrentPayloadBrokerCallbacks payload_broker,
     TTorrentSwarmMetainfoParserCallbacks swarm_metainfo_parser,
     TTorrentPeerProtocolParserCallbacks peer_protocol_parser,
+    TTorrentTrackerResponseParserCallbacks tracker_response_parser,
     char *error_out,
     int32_t error_capacity
 ) noexcept
@@ -2005,13 +2392,17 @@ extern "C" TTorrentClient *TorrentClientCreateWithError(
         auto broker = std::make_shared<PayloadBrokerContext>(payload_broker);
         auto parser = std::make_shared<BridgeSwarmMetadataParser>(swarm_metainfo_parser);
         auto peer_parser = std::make_shared<BridgePeerMessageParser>(peer_protocol_parser);
+        auto tracker_parser = std::make_shared<BridgeTrackerResponseParser>(
+            tracker_response_parser
+        );
 
         return std::make_unique<TTorrentClient>(
             normalized_state_path,
             bridge_bool(enable_pex_plugin),
             std::move(broker),
             std::move(parser),
-            std::move(peer_parser)
+            std::move(peer_parser),
+            std::move(tracker_parser)
         ).release();
     } catch (std::exception const &exception) {
         copy_error(error_buffer, exception.what());
