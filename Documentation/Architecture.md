@@ -536,9 +536,10 @@ rejection, replacement-safe retained-descriptor soft revocation, claim recovery,
 ambiguous activation containment, imports, removal, and magnet promotion.
 Separate sanitizer-backed fuzz targets cover raw broker XPC dictionaries,
 claim and ownership validation, manifest parsing and digest reproduction,
-peer-extension, HTTP tracker-body, and DHT KRPC parsing and typed invariants,
-the native broker callback/descriptor adapter, and the broader native API input
-surfaces. Their
+arbitrary bare swarm info dictionaries, peer-extension, HTTP tracker-body, and
+DHT KRPC parsing and typed invariants, the complete production Swift-parser to
+native typed-import callback routes, the native broker callback/descriptor
+adapter, and the broader native API input surfaces. Their
 expensive build and execution are intentionally independent of the routine test
 gates, and the harness entry points are absent from shipped products.
 

@@ -2,3 +2,4 @@
 /deps/
 /libfuzzer-build/
 /libfuzzer-artifacts/
+/swift-build/

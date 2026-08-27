@@ -1,0 +1,4 @@
+module TorrentBridge {
+    umbrella header "../../../../Sources/TorrentBridge/include/TorrentBridge.h"
+    export *
+}

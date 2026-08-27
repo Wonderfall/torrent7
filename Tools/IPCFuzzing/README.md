@@ -39,11 +39,16 @@ Scripts/verify-xcode.zsh
   manifest parser under standard and mutated tighter bounds, then checks
   deterministic parsing, advertised hash enforcement, canonical file indices,
   safe paths, and independently reproduced source digests.
+- `swarm_info_parser` feeds arbitrary bare BEP 9 info dictionaries directly to
+  the production Swift parser. It checks exact retained ranges, independently
+  reproduced v1/v2 hashes, deterministic parsing, and both accepted and
+  rejected advertised-hash enforcement without requiring a valid outer torrent
+  envelope first.
 
-The DHT, HTTP tracker, magnet, peer-protocol, claim, and manifest targets
-depend on the same `TorrentMetainfo` and `TorrentStorageAuthority` modules used
-by the app. SwiftPM links those production modules into a fuzz-only dynamic
-library; no fuzz hook or conditional is linked into the app.
+The DHT, HTTP tracker, magnet, peer-protocol, swarm-info, claim, and manifest
+targets depend on the same `TorrentMetainfo` and `TorrentStorageAuthority`
+modules used by the app. SwiftPM links those production modules into a fuzz-only
+dynamic library; no fuzz hook or conditional is linked into the app.
 
 ## Build and run
 

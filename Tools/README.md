@@ -3,12 +3,15 @@
 Developer-only utilities that are useful for security, diagnostics, or release
 engineering, but are not part of the shipped app product.
 
-`BridgeFuzzing/` contains the TorrentBridge libFuzzer suite. Keeping it here lets
-the fuzz harnesses own their scripts, corpora, fuzz-only dependencies, and
-generated artifacts without changing app targets or production build settings.
+`BridgeFuzzing/` contains the TorrentBridge libFuzzer suite, including the
+end-to-end Swift parser callback and native typed-import boundary. Keeping it
+here lets the fuzz harnesses own their scripts, corpora, fuzz-only dependencies,
+and generated artifacts without changing app targets or production build
+settings.
 
-`IPCFuzzing/` contains the coverage-guided libFuzzer target for the production
-bounded-JSON preflight at the XPC trust boundary.
+`IPCFuzzing/` contains coverage-guided targets for the production bounded-JSON
+preflight, storage authority, and bounded Swift parsers used at untrusted input
+boundaries.
 
 `XPCIntegrationHost/` contains the executable harness packaged by
 `Scripts/test-enhanced-security-extension.zsh` to exercise the Enhanced Security

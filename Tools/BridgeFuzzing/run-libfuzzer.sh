@@ -20,6 +20,7 @@ esac
 all_targets=(
     bridge_magnet
     bridge_metainfo_capsule
+    bridge_parser_callbacks
     bridge_resume_startup
     bridge_session_api
     bridge_payload_broker
@@ -33,7 +34,7 @@ fi
 
 default_max_len() {
     case "$1" in
-        bridge_metainfo_capsule)
+        bridge_metainfo_capsule | bridge_parser_callbacks)
             printf '%s\n' 1048576
             ;;
         *)

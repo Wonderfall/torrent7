@@ -16,6 +16,13 @@ on:
       - "Scripts/verify-xcode.zsh"
       - "Scripts/patches/**"
       - "Sources/TorrentBridge/**"
+      - "Sources/TorrentEngineCore/TorrentDHTMessageBridge.swift"
+      - "Sources/TorrentEngineCore/TorrentMetainfoBridgeCapsule.swift"
+      - "Sources/TorrentEngineCore/TorrentPeerProtocolBridge.swift"
+      - "Sources/TorrentEngineCore/TorrentSwarmMetainfoParser.swift"
+      - "Sources/TorrentEngineCore/TorrentTrackerResponseBridge.swift"
+      - "Sources/TorrentEngineModel/**"
+      - "Sources/TorrentMetainfo/**"
       - "Tools/BridgeFuzzing/**"
   pull_request:
     types:
@@ -35,6 +42,13 @@ on:
       - "Scripts/verify-xcode.zsh"
       - "Scripts/patches/**"
       - "Sources/TorrentBridge/**"
+      - "Sources/TorrentEngineCore/TorrentDHTMessageBridge.swift"
+      - "Sources/TorrentEngineCore/TorrentMetainfoBridgeCapsule.swift"
+      - "Sources/TorrentEngineCore/TorrentPeerProtocolBridge.swift"
+      - "Sources/TorrentEngineCore/TorrentSwarmMetainfoParser.swift"
+      - "Sources/TorrentEngineCore/TorrentTrackerResponseBridge.swift"
+      - "Sources/TorrentEngineModel/**"
+      - "Sources/TorrentMetainfo/**"
       - "Tools/BridgeFuzzing/**"
   schedule:
     - cron: "31 3 * * 1"

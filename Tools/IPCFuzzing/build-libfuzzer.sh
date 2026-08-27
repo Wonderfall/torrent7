@@ -33,6 +33,7 @@ all_targets=(
     storage_broker_ipc
     storage_claim_validation
     storage_manifest
+    swarm_info_parser
 )
 
 if [[ "$#" -gt 0 ]]; then
@@ -67,6 +68,9 @@ harness_for_target() {
         storage_manifest)
             printf '%s\n' "$TOOLS_DIR/harnesses/StorageManifestFuzzer.cpp"
             ;;
+        swarm_info_parser)
+            printf '%s\n' "$TOOLS_DIR/harnesses/SwarmInfoParserFuzzer.cpp"
+            ;;
         *)
             echo "Unknown fuzz target: $1" >&2
             exit 1
@@ -79,7 +83,7 @@ support_for_target() {
         ipc_json_preflight | storage_broker_ipc)
             printf '%s\n' TorrentEngineIPCFuzzSupport
             ;;
-        dht_message_parser | http_tracker_response_parser | magnet_parser | peer_protocol_parser | storage_claim_validation | storage_manifest)
+        dht_message_parser | http_tracker_response_parser | magnet_parser | peer_protocol_parser | storage_claim_validation | storage_manifest | swarm_info_parser)
             printf '%s\n' TorrentStorageFuzzSupport
             ;;
     esac

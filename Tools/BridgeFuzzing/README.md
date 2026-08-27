@@ -2,9 +2,11 @@
 
 Developer-only fuzz harnesses for the C/C++ `TorrentBridge` boundary.
 
-The suite uses `arm64` libFuzzer for coverage-guided discovery. This target is
-intentional: Homebrew LLVM ships an `arm64` libFuzzer runtime, while the app can
-continue to use `arm64e` elsewhere.
+The suite uses Xcode's compiler and sanitizer runtime with Homebrew LLVM's
+standalone `arm64` libFuzzer engine for coverage-guided discovery. This target
+is intentional: Homebrew ships an `arm64` libFuzzer runtime, while the app can
+continue to use `arm64e` elsewhere. Using Xcode's sanitizer runtime also keeps
+mixed Swift/C++ targets on one compatible instrumentation ABI.
 
 This suite intentionally lives under `Tools/BridgeFuzzing`. Fuzzing has its own
 corpora, fuzz-only dependency builds, and generated artifacts, so keeping it
@@ -17,6 +19,12 @@ tooling self-contained.
   session-backed native import path.
 - `bridge_metainfo_capsule`: passes mutated typed-capsule bytes to
   `TorrentClientAddMetainfoCapsule`.
+- `bridge_parser_callbacks`: sends arbitrary bare swarm metadata, peer
+  extension messages, tracker bodies, and DHT datagrams through the exact
+  production Swift callback sources and then through the production C++ typed
+  import adapters. This exercises context retention, caller-owned record
+  arrays, callback-owned capsule release, range validation, and atomic native
+  commit under coverage guidance on both sides of the ABI.
 - `bridge_resume_startup`: creates a temporary state directory with mutated
   `.fastresume` bytes, then exercises blocking and bounded asynchronous client
   destruction.
@@ -91,3 +99,10 @@ directories. Pass `ASAN_OPTIONS=detect_container_overflow=1` to override that.
 These harnesses intentionally compile the bridge `.cpp` files directly from the
 tool scripts. That avoids changing `Package.swift` or exposing test-only hooks
 from production code.
+
+The parser-callback target also compiles the five production Swift callback and
+capsule source files directly into an arm64, ASan-instrumented support library.
+It imports only the C ABI declarations while the C++ half uses the fuzz-only
+arm64 libtorrent build, avoiding any link to the app's arm64e native archives.
+The fuzz-only callback-table factories live under this directory and are absent
+from shipped products.

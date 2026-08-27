@@ -17,6 +17,7 @@ all_targets=(
     storage_broker_ipc
     storage_claim_validation
     storage_manifest
+    swarm_info_parser
 )
 
 if [[ "$#" -gt 0 ]]; then
@@ -48,7 +49,7 @@ default_max_len() {
         storage_claim_validation)
             printf '%s\n' 262144
             ;;
-        storage_manifest)
+        storage_manifest | swarm_info_parser)
             printf '%s\n' 1048576
             ;;
         *)

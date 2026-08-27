@@ -10,6 +10,7 @@ on:
       - "Scripts/verify-xcode.zsh"
       - "Sources/TorrentEngineIPC/**"
       - "Sources/TorrentEngineModel/**"
+      - "Sources/TorrentMetainfo/**"
       - "Sources/TorrentStorageAuthority/**"
       - "Tools/IPCFuzzing/**"
   pull_request:
@@ -24,6 +25,7 @@ on:
       - "Scripts/verify-xcode.zsh"
       - "Sources/TorrentEngineIPC/**"
       - "Sources/TorrentEngineModel/**"
+      - "Sources/TorrentMetainfo/**"
       - "Sources/TorrentStorageAuthority/**"
       - "Tools/IPCFuzzing/**"
   schedule:

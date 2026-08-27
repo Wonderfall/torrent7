@@ -674,7 +674,7 @@ private enum StorageManifestFuzzer {
             bareInfo,
             advertisedHashes: advertised
         )
-        fuzzAssert(equivalentCore(
+        fuzzAssert(equivalentInfoCore(
             core,
             bytes: metadata,
             bare.infoCore,
@@ -712,44 +712,133 @@ private enum StorageManifestFuzzer {
             && left.envelope == right.envelope
     }
 
-    private static func equivalentCore(
-        _ left: ValidatedInfoCore,
-        bytes leftBytes: Data,
-        _ right: ValidatedInfoCore,
-        bytes rightBytes: Data
-    ) -> Bool {
-        guard left.kind == right.kind,
-              left.wireName == right.wireName,
-              left.effectiveName == right.effectiveName,
-              left.contentKind == right.contentKind,
-              left.v1InfoHash == right.v1InfoHash,
-              left.v2InfoHash == right.v2InfoHash,
-              left.pieceLength == right.pieceLength,
-              left.totalSize == right.totalSize,
-              left.isPrivate == right.isPrivate,
-              left.files.count == right.files.count,
-              rangedBytes(left.v1PieceHashesRange, in: leftBytes)
-                == rangedBytes(right.v1PieceHashesRange, in: rightBytes) else {
-            return false
-        }
-        return zip(left.files, right.files).allSatisfy { leftFile, rightFile in
-            leftFile.index == rightFile.index
-                && leftFile.pathComponents == rightFile.pathComponents
-                && leftFile.expectedSize == rightFile.expectedSize
-                && leftFile.isPadding == rightFile.isPadding
-                && leftFile.isExecutable == rightFile.isExecutable
-                && leftFile.isHidden == rightFile.isHidden
-                && rangedBytes(leftFile.piecesRootRange, in: leftBytes)
-                    == rangedBytes(rightFile.piecesRootRange, in: rightBytes)
+}
+
+private enum SwarmInfoParserFuzzer {
+    static func exercise(_ data: Data) {
+        exerciseCandidate(data)
+        if data.last == UInt8(ascii: "\n") {
+            exerciseCandidate(Data(data.dropLast()))
         }
     }
 
-    private static func rangedBytes(
-        _ range: ValidatedMetainfoRange?,
-        in bytes: Data
-    ) -> Data? {
-        range.map { Data(bytes[$0.range]) }
+    private static func exerciseCandidate(_ data: Data) {
+        let parser = TorrentMetainfoParser()
+        guard let parsed = try? parser.parseInfoDictionary(data) else {
+            return
+        }
+        let core = parsed.infoCore
+        fuzzAssert(parsed.bytes == data)
+        fuzzAssert(Data(parsed.infoDictionary) == data)
+        fuzzAssert(core.infoDictionaryRange.range == data.indices)
+        fuzzAssert(core.pieceLength > 0)
+        fuzzAssert(core.totalSize >= 0)
+        fuzzAssert(core.files.map(\.index) == core.files.indices.map(Int32.init))
+        fuzzAssert(core.files.allSatisfy {
+            $0.expectedSize >= 0
+                && !$0.pathComponents.isEmpty
+                && $0.pathComponents.allSatisfy(TorrentStoragePathComponent.isSafe)
+        })
+
+        if let v1 = core.v1InfoHash {
+            fuzzAssert(Data(Insecure.SHA1.hash(data: data)) == v1)
+            guard let pieces = core.v1PieceHashesRange else {
+                Darwin.abort()
+            }
+            fuzzAssert(pieces.range.upperBound <= data.count)
+            fuzzAssert(pieces.range.count.isMultiple(of: Insecure.SHA1.byteCount))
+        } else {
+            fuzzAssert(core.v1PieceHashesRange == nil)
+        }
+        if let v2 = core.v2InfoHash {
+            fuzzAssert(Data(SHA256.hash(data: data)) == v2)
+        }
+        fuzzAssert(core.v1InfoHash != nil || core.v2InfoHash != nil)
+        for file in core.files {
+            if let root = file.piecesRootRange {
+                fuzzAssert(root.range.upperBound <= data.count)
+                fuzzAssert(root.range.count == SHA256.byteCount)
+            }
+        }
+
+        let repeated = try! parser.parseInfoDictionary(data)
+        fuzzAssert(equivalentInfoCore(
+            core,
+            bytes: data,
+            repeated.infoCore,
+            bytes: repeated.bytes
+        ))
+        let advertised = try! TorrentAdvertisedInfoHashes(
+            v1: core.v1InfoHash,
+            v2: core.v2InfoHash
+        )
+        let verified = try! parser.parseInfoDictionary(
+            data,
+            advertisedHashes: advertised
+        )
+        fuzzAssert(equivalentInfoCore(
+            core,
+            bytes: data,
+            verified.infoCore,
+            bytes: verified.bytes
+        ))
+
+        var wrongV1 = core.v1InfoHash
+        var wrongV2 = core.v2InfoHash
+        if wrongV1 != nil {
+            wrongV1![0] ^= 1
+        } else {
+            wrongV2![0] ^= 1
+        }
+        let wrong = try! TorrentAdvertisedInfoHashes(v1: wrongV1, v2: wrongV2)
+        do {
+            _ = try parser.parseInfoDictionary(data, advertisedHashes: wrong)
+            Darwin.abort()
+        } catch let error as TorrentManifestError {
+            fuzzAssert(error == .advertisedInfoHashMismatch)
+        } catch {
+            Darwin.abort()
+        }
     }
+}
+
+private func equivalentInfoCore(
+    _ left: ValidatedInfoCore,
+    bytes leftBytes: Data,
+    _ right: ValidatedInfoCore,
+    bytes rightBytes: Data
+) -> Bool {
+    guard left.kind == right.kind,
+          left.wireName == right.wireName,
+          left.effectiveName == right.effectiveName,
+          left.contentKind == right.contentKind,
+          left.v1InfoHash == right.v1InfoHash,
+          left.v2InfoHash == right.v2InfoHash,
+          left.pieceLength == right.pieceLength,
+          left.totalSize == right.totalSize,
+          left.isPrivate == right.isPrivate,
+          left.files.count == right.files.count,
+          rangedBytes(left.v1PieceHashesRange, in: leftBytes)
+            == rangedBytes(right.v1PieceHashesRange, in: rightBytes) else {
+        return false
+    }
+    return zip(left.files, right.files).allSatisfy { leftFile, rightFile in
+        leftFile.index == rightFile.index
+            && leftFile.pathComponents == rightFile.pathComponents
+            && leftFile.expectedSize == rightFile.expectedSize
+            && leftFile.isPadding == rightFile.isPadding
+            && leftFile.isExecutable == rightFile.isExecutable
+            && leftFile.isHidden == rightFile.isHidden
+            && rangedBytes(leftFile.piecesRootRange, in: leftBytes)
+                == rangedBytes(rightFile.piecesRootRange, in: rightBytes)
+    }
+}
+
+private func rangedBytes(
+    _ range: ValidatedMetainfoRange?,
+    in bytes: Data
+) -> Data? {
+    range.map { Data(bytes[$0.range]) }
 }
 
 private enum MagnetParserFuzzer {
@@ -1111,6 +1200,19 @@ public func torrentMagnetParserFuzzOneInput(
     }
     autoreleasepool {
         MagnetParserFuzzer.exercise(data)
+    }
+}
+
+@_cdecl("TorrentSwarmInfoParserFuzzOneInput")
+public func torrentSwarmInfoParserFuzzOneInput(
+    _ bytes: UnsafePointer<UInt8>?,
+    _ byteCount: UInt
+) {
+    guard let data = fuzzData(bytes, byteCount) else {
+        return
+    }
+    autoreleasepool {
+        SwarmInfoParserFuzzer.exercise(data)
     }
 }
 

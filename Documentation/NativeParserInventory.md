@@ -29,6 +29,12 @@ production:
 | Final decompressed HTTP tracker body | Synchronous Swift announce/scrape callback | 512 KiB input cap and typed response import |
 | Incoming DHT KRPC datagram | Synchronous Swift DHT callback | 1,500-byte cap, typed owning message, no fallback |
 
+The `swarm_info_parser` fuzz target attacks arbitrary bare dictionaries without
+requiring a valid outer torrent. The `bridge_parser_callbacks` target compiles
+the exact production Swift callback and capsule sources, then passes their
+outputs through the real native adapters for every callback route under
+coverage guidance and sanitizers.
+
 `Scripts/analyze-bridge.zsh` fails if the production bridge regains the retired
 magnet or raw-torrent APIs, or if the patched swarm, peer-extension, HTTP
 tracker-body, DHT, or resume-metainfo routes regain a native fallback.
