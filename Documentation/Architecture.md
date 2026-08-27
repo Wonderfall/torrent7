@@ -28,8 +28,9 @@ therefore neither treated as secret nor accepted as filesystem authority.
 | --- | --- | --- |
 | SwiftUI, Finder, notifications, preferences | Owns | None |
 | User consent and persistent security-scoped bookmarks | Owns | None |
-| Torrent manifest safety parsing | Owns an independent Swift parser | Libtorrent parses independently |
+| Torrent manifest safety parsing | Owns Swift preview and claim parsing | Owns production Swift parsing and typed native import |
 | Magnet parsing | Owns the shared bounded Swift parser | Revalidates the typed model and imports flat records |
+| Swarm info-dictionary parsing | None | Hashes in libtorrent, parses synchronously in Swift, imports a typed capsule |
 | Destination selection, reservation, and mapping | Owns | None |
 | Durable storage claims and ownership evidence | Owns | None |
 | Exact payload file access | Brokers individual descriptors | Consumes brokered descriptors |
@@ -439,8 +440,14 @@ the isolated Swift engine, lowered to a versioned metainfo capsule, and passed
 through a capsule-only C ABI. Native code validates the capsule framing and
 reconstructs the narrow libtorrent state without bdecoding the retained exact
 `info` bytes. No production bridge entry point accepts raw magnet or `.torrent`
-bytes. The boundary uses Swift 6.3 safe-interop annotations and does not depend
-on a Swift 6.4 language feature.
+bytes. When peers supply metadata for a hash-only torrent, libtorrent first
+verifies the assembled exact bytes against the torrent identity, then invokes a
+per-torrent synchronous Swift callback. Swift parses the bare info dictionary
+and returns an `INFO_DICTIONARY` capsule; C++ imports it before releasing the
+callback-owned allocation on every path. A rejected hash-valid dictionary is
+latched as invalid, and there is no native bdecode fallback. The boundary uses
+Swift 6.3 safe-interop annotations and does not depend on a Swift 6.4 language
+feature.
 
 Libtorrent and BoringSSL are pinned, patched, verified, and linked statically.
 The app bundle contains only the GUI and helper Mach-O executables. TLS uses the

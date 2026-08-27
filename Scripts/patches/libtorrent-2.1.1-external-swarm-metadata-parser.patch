@@ -1,0 +1,172 @@
+diff --git a/include/libtorrent/add_torrent_params.hpp b/include/libtorrent/add_torrent_params.hpp
+index 7537299e9..af9396a50 100644
+--- a/include/libtorrent/add_torrent_params.hpp
++++ b/include/libtorrent/add_torrent_params.hpp
+@@ -161,6 +161,11 @@ TORRENT_VERSION_NAMESPACE_3
+ 		// provider. save_path remains the private location for the part file.
+ 		std::shared_ptr<aux::payload_file_provider> file_provider;
+ 
++		// Required for torrents added without metadata. Once the exact info
++		// dictionary is received and hash-verified, this parser constructs the
++		// torrent_info without invoking libtorrent's native bdecode path.
++		std::shared_ptr<aux::swarm_metadata_parser> swarm_metadata_parser;
++
+ 		// This is an optional field. If set, the part-file for this torrent
+ 		// will be stored in the specified subdirectory, still inside its
+ 		// download directory. i.e. ``part_file_dir`` is a relative directory.
+diff --git a/include/libtorrent/aux_/swarm_metadata_parser.hpp b/include/libtorrent/aux_/swarm_metadata_parser.hpp
+new file mode 100644
+index 000000000..631184a39
+--- /dev/null
++++ b/include/libtorrent/aux_/swarm_metadata_parser.hpp
+@@ -0,0 +1,35 @@
++/*
++
++Copyright (c) 2026, Torrent7 contributors
++All rights reserved.
++
++You may use, distribute and modify this code under the terms of the BSD license,
++see LICENSE file.
++*/
++
++#ifndef TORRENT_SWARM_METADATA_PARSER_HPP
++#define TORRENT_SWARM_METADATA_PARSER_HPP
++
++#include <memory>
++
++#include "libtorrent/config.hpp"
++#include "libtorrent/error_code.hpp"
++#include "libtorrent/fwd.hpp"
++#include "libtorrent/span.hpp"
++
++namespace libtorrent::aux {
++
++	// Parses a hash-verified info dictionary received from the swarm. The
++	// implementation is supplied by the embedding application so untrusted
++	// metadata does not enter libtorrent's native bdecode path.
++	struct TORRENT_EXTRA_EXPORT swarm_metadata_parser
++	{
++		virtual ~swarm_metadata_parser() = default;
++
++		virtual std::shared_ptr<torrent_info> parse(
++			span<char const> info, error_code& ec) noexcept = 0;
++	};
++
++}
++
++#endif // TORRENT_SWARM_METADATA_PARSER_HPP
+diff --git a/include/libtorrent/aux_/torrent.hpp b/include/libtorrent/aux_/torrent.hpp
+index 548e3fbf4..7ac7e822b 100644
+--- a/include/libtorrent/aux_/torrent.hpp
++++ b/include/libtorrent/aux_/torrent.hpp
+@@ -1676,6 +1676,11 @@ namespace libtorrent::aux {
+ 		// cycle, and not in the constructor. So we need to save it here
+ 		std::unique_ptr<add_torrent_params> m_add_torrent_params;
+ 
++		// Retained independently of m_add_torrent_params because the latter is
++		// discarded after startup, while swarm metadata can arrive at any time.
++		std::shared_ptr<swarm_metadata_parser> m_swarm_metadata_parser;
++		bool m_swarm_metadata_rejected = false;
++
+ 		// if the torrent is started without metadata, it may
+ 		// still be given a name until the metadata is received
+ 		// once the metadata is received this field will no
+diff --git a/include/libtorrent/fwd.hpp b/include/libtorrent/fwd.hpp
+index 480a24057..e9e1c902c 100644
+--- a/include/libtorrent/fwd.hpp
++++ b/include/libtorrent/fwd.hpp
+@@ -18,6 +18,7 @@ namespace libtorrent {
+ 
+ namespace aux {
+ struct payload_file_provider;
++struct swarm_metadata_parser;
+ }
+ 
+ // include/libtorrent/add_torrent_params.hpp
+diff --git a/src/torrent.cpp b/src/torrent.cpp
+index 2bb6380de..18f0d48fe 100644
+--- a/src/torrent.cpp
++++ b/src/torrent.cpp
+@@ -61,7 +61,6 @@ see LICENSE file.
+ #include "libtorrent/announce_entry.hpp"
+ #include "libtorrent/torrent_info.hpp"
+ #include "libtorrent/aux_/parse_url.hpp"
+-#include "libtorrent/bencode.hpp"
+ #include "libtorrent/hasher.hpp"
+ #include "libtorrent/entry.hpp"
+ #include "libtorrent/aux_/peer.hpp"
+@@ -88,7 +87,7 @@ see LICENSE file.
+ #include "libtorrent/aux_/resolver_interface.hpp"
+ #include "libtorrent/aux_/alloca.hpp"
+ #include "libtorrent/aux_/resolve_links.hpp"
+-#include "libtorrent/aux_/resolve_duplicate_filenames.hpp"
++#include "libtorrent/aux_/swarm_metadata_parser.hpp"
+ #include "libtorrent/aux_/file_progress.hpp"
+ #include "libtorrent/aux_/has_block.hpp"
+ #include "libtorrent/aux_/alert_manager.hpp"
+@@ -464,6 +463,10 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 			inc_stats_counter(counters::num_total_pieces_added
+ 				, m_torrent_file->num_pieces());
+ 		}
++		else
++		{
++			m_swarm_metadata_parser = std::move(p.swarm_metadata_parser);
++		}
+ 
+ 		// TODO: 3 we could probably get away with just saving a few fields here
+ 		m_add_torrent_params = std::make_unique<add_torrent_params>(std::move(p));
+@@ -8440,7 +8443,7 @@ namespace {
+ 		TORRENT_ASSERT(is_single_thread());
+ 		INVARIANT_CHECK;
+ 
+-		if (m_torrent_file->is_valid()) return false;
++		if (m_torrent_file->is_valid() || m_swarm_metadata_rejected) return false;
+ 
+ 		if (m_torrent_file->info_hashes().has_v1())
+ 		{
+@@ -8483,38 +8486,18 @@ namespace {
+ 		info_hash_t const old_ih = m_torrent_file->info_hashes();
+ 
+ 		error_code ec;
+-		int pos = 0;
+-		auto const& sett = settings();
+-		bdecode_node const metadata = bdecode(metadata_buf, ec, &pos, 200
+-			, sett.get_int(settings_pack::metadata_token_limit));
+-
+ 		std::shared_ptr<torrent_info> info;
+ 		std::map<file_index_t, std::string> renamed_files;
+-		if (!ec)
+-		{
+-			load_torrent_limits cfg;
+-			cfg.max_pieces = sett.get_int(settings_pack::max_piece_count);
+-			info = std::make_shared<torrent_info>(metadata, ec, cfg, from_info_section);
+-			// ec is an output parameter set by torrent_info's constructor on
+-			// parse failure; cppcheck doesn't see the constructor definition
+-			// (in torrent_info.cpp) from this translation unit
+-			// cppcheck-suppress identicalInnerCondition
+-			if (!ec)
+-			{
+-				renamed_files = aux::resolve_duplicate_filenames(
+-					info->layout(), cfg.max_duplicate_filenames, ec);
+-#if TORRENT_ABI_VERSION < 4
+-				// for backwards compatibility, make sure the file_storage
+-				// returned by the deprecated files() has updated filenames
+-				// as well
+-				for (auto const& entry : renamed_files)
+-					info->rename_file(entry.first, entry.second);
+-#endif
+-			}
+-		}
++		if (m_swarm_metadata_parser)
++			info = m_swarm_metadata_parser->parse(metadata_buf, ec);
++		else
++			ec = errors::invalid_swarm_metadata;
++		if (!ec && !info)
++			ec = errors::invalid_swarm_metadata;
+ 
+ 		if (ec)
+ 		{
++			m_swarm_metadata_rejected = true;
+ 			update_gauge();
+ 			// this means the metadata is correct, since we
+ 			// verified it against the info-hash, but we

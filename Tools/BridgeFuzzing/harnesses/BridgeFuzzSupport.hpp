@@ -28,7 +28,7 @@ namespace bridge_fuzz {
 
 namespace fs = std::filesystem;
 
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 60, "Update the fuzz harnesses for the current TorrentBridge ABI.");
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 61, "Update the fuzz harnesses for the current TorrentBridge ABI.");
 #if !defined(TORRENT_USE_ASSERTS) || !TORRENT_USE_ASSERTS
 #error "Fuzz consumers must match the assertion-enabled Debug libtorrent archive."
 #endif
@@ -365,6 +365,32 @@ private:
     State *state_;
 };
 
+inline TTorrentSwarmMetainfoParserCallbacks rejecting_swarm_metainfo_parser() noexcept
+{
+    static std::uint8_t context = 0U;
+    return TTorrentSwarmMetainfoParserCallbacks{
+        .context = &context,
+        .retain_context = [](void *value) noexcept -> std::uint8_t {
+            return value == nullptr ? 0U : 1U;
+        },
+        .release_context = [](void *) noexcept {},
+        .parse_info = [](
+            void *,
+            char const *,
+            int32_t,
+            TTorrentOwnedMetainfoCapsule *result
+        ) noexcept -> int32_t {
+            if (result != nullptr) {
+                *result = TTorrentOwnedMetainfoCapsule{};
+            }
+            return EINVAL;
+        },
+        .release_capsule = [](void *, TTorrentOwnedMetainfoCapsule capsule) noexcept {
+            std::free(capsule.bytes);
+        },
+    };
+}
+
 class BridgeClientHarness {
 public:
     explicit BridgeClientHarness(std::string_view label)
@@ -378,6 +404,7 @@ public:
             state_path_.c_str(),
             1,
             payload_broker_.callbacks(),
+            rejecting_swarm_metainfo_parser(),
             error.data(),
             error.capacity()
         );

@@ -5,7 +5,11 @@
 #include <libtorrent/create_torrent.hpp>
 
 #include <array>
+#include <atomic>
 #include <bit>
+#include <cerrno>
+#include <cstdlib>
+#include <cstring>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -361,6 +365,100 @@ void write_capsule_range(
     return fixture;
 }
 
+class SwarmMetainfoParserProbe final {
+public:
+    explicit SwarmMetainfoParserProbe(std::vector<std::uint8_t> capsule)
+        : capsule_(std::move(capsule))
+    {
+    }
+
+    [[nodiscard]] TTorrentSwarmMetainfoParserCallbacks callbacks() noexcept
+    {
+        return TTorrentSwarmMetainfoParserCallbacks{
+            .context = this,
+            .retain_context = retain_callback,
+            .release_context = release_callback,
+            .parse_info = parse_callback,
+            .release_capsule = release_capsule_callback,
+        };
+    }
+
+    std::atomic_int retain_count = 0;
+    std::atomic_int context_release_count = 0;
+    std::atomic_int parse_count = 0;
+    std::atomic_int capsule_release_count = 0;
+
+private:
+    static std::uint8_t retain_callback(void *context) noexcept
+    {
+        auto *probe = static_cast<SwarmMetainfoParserProbe *>(context);
+        if (probe == nullptr) {
+            return 0U;
+        }
+        ++probe->retain_count;
+        return 1U;
+    }
+
+    static void release_callback(void *context) noexcept
+    {
+        auto *probe = static_cast<SwarmMetainfoParserProbe *>(context);
+        if (probe != nullptr) {
+            ++probe->context_release_count;
+        }
+    }
+
+    static int32_t parse_callback(
+        void *context,
+        char const *info,
+        int32_t const info_size,
+        TTorrentOwnedMetainfoCapsule *result
+    ) noexcept
+    {
+        auto *probe = static_cast<SwarmMetainfoParserProbe *>(context);
+        if (result == nullptr) {
+            return EINVAL;
+        }
+        *result = TTorrentOwnedMetainfoCapsule{};
+        if (probe == nullptr || info == nullptr || info_size <= 0
+            || probe->capsule_.empty()
+            || probe->capsule_.size() > static_cast<std::size_t>(INT32_MAX)) {
+            return EINVAL;
+        }
+        ++probe->parse_count;
+        auto *copy = static_cast<std::uint8_t *>(std::malloc(probe->capsule_.size()));
+        if (copy == nullptr) {
+            return ENOMEM;
+        }
+        __unsafe_buffer_usage_begin
+        std::memcpy(copy, probe->capsule_.data(), probe->capsule_.size());
+        __unsafe_buffer_usage_end
+        *result = TTorrentOwnedMetainfoCapsule{
+            .bytes = copy,
+            .size = static_cast<int32_t>(probe->capsule_.size()),
+        };
+        return 0;
+    }
+
+    static void release_capsule_callback(
+        void *context,
+        TTorrentOwnedMetainfoCapsule const capsule
+    ) noexcept
+    {
+        auto *probe = static_cast<SwarmMetainfoParserProbe *>(context);
+        if (probe != nullptr) {
+            ++probe->capsule_release_count;
+        }
+        if (capsule.bytes != nullptr && capsule.size > 0) {
+            __unsafe_buffer_usage_begin
+            std::memset(capsule.bytes, 0xa5, static_cast<std::size_t>(capsule.size));
+            __unsafe_buffer_usage_end
+        }
+        std::free(capsule.bytes);
+    }
+
+    std::vector<std::uint8_t> capsule_;
+};
+
 [[nodiscard]] std::string v1_capsule_info(std::uint32_t &piece_hash_offset)
 {
     std::string info = "d6:lengthi4e4:name8:file.bin12:piece lengthi16384e6:pieces20:";
@@ -368,6 +466,29 @@ void write_capsule_range(
     info.append(20U, 'p');
     info += "7:privatei1ee";
     return info;
+}
+
+[[nodiscard]] MetainfoCapsuleFixture make_v1_capsule(
+    std::string const &info,
+    std::uint32_t const piece_hash_offset,
+    std::uint8_t const input_kind
+)
+{
+    return make_metainfo_capsule(
+        info,
+        "file.bin",
+        TTORRENT_METAINFO_KIND_V1,
+        TTORRENT_CONTENT_KIND_SINGLE_FILE,
+        {CapsuleFileFixture{.components = {"file.bin"}, .size = 4}},
+        std::pair{piece_hash_offset, 20U},
+        {},
+        false,
+        {},
+        {},
+        {},
+        -1,
+        input_kind
+    );
 }
 
 [[nodiscard]] TTorrentAddOptions metainfo_capsule_add_options()
@@ -502,6 +623,182 @@ TEST_CASE("preparsed v1 metainfo capsule constructs narrow native state")
     CHECK(imported->dht_nodes.empty());
     CHECK(imported->file_priorities.empty());
     CHECK(imported->piece_priorities.empty());
+}
+
+TEST_CASE("metainfo capsule importers enforce their distinct input kinds")
+{
+    std::uint32_t piece_hash_offset = 0U;
+    std::string const info = v1_capsule_info(piece_hash_offset);
+    MetainfoCapsuleFixture const torrent_file = make_v1_capsule(
+        info,
+        piece_hash_offset,
+        TTORRENT_METAINFO_INPUT_TORRENT_FILE
+    );
+    MetainfoCapsuleFixture const swarm_info = make_v1_capsule(
+        info,
+        piece_hash_offset,
+        TTORRENT_METAINFO_INPUT_INFO_DICTIONARY
+    );
+
+    CHECK(import_preparsed_metainfo_capsule(torrent_file.bytes));
+    CHECK_FALSE(import_preparsed_info_capsule(torrent_file.bytes));
+    CHECK_FALSE(import_preparsed_metainfo_capsule(swarm_info.bytes));
+    CHECK(import_preparsed_info_capsule(swarm_info.bytes));
+}
+
+TEST_CASE("swarm metainfo callback ownership is balanced on accept and reject")
+{
+    std::uint32_t piece_hash_offset = 0U;
+    std::string const info = v1_capsule_info(piece_hash_offset);
+    MetainfoCapsuleFixture const swarm_info = make_v1_capsule(
+        info,
+        piece_hash_offset,
+        TTORRENT_METAINFO_INPUT_INFO_DICTIONARY
+    );
+    SwarmMetainfoParserProbe accepted_probe(swarm_info.bytes);
+    {
+        BridgeSwarmMetadataParser parser(accepted_probe.callbacks());
+        lt::error_code error;
+        std::shared_ptr<lt::torrent_info> parsed = parser.parse(
+            lt::span<char const>(info),
+            error
+        );
+        REQUIRE_FALSE(error);
+        REQUIRE(parsed);
+        CHECK(parsed->name() == "file.bin");
+        CHECK(std::ranges::equal(parsed->info_section(), info));
+        CHECK(accepted_probe.parse_count == 1);
+        CHECK(accepted_probe.capsule_release_count == 1);
+        CHECK(accepted_probe.context_release_count == 0);
+    }
+    CHECK(accepted_probe.retain_count == 1);
+    CHECK(accepted_probe.context_release_count == 1);
+
+    MetainfoCapsuleFixture wrong_kind = swarm_info;
+    wrong_kind.bytes.at(12U) = TTORRENT_METAINFO_INPUT_TORRENT_FILE;
+    SwarmMetainfoParserProbe rejected_probe(std::move(wrong_kind.bytes));
+    {
+        BridgeSwarmMetadataParser parser(rejected_probe.callbacks());
+        lt::error_code error;
+        CHECK_FALSE(parser.parse(lt::span<char const>(info), error));
+        CHECK(error == lt::errors::invalid_swarm_metadata);
+        CHECK(rejected_probe.parse_count == 1);
+        CHECK(rejected_probe.capsule_release_count == 1);
+    }
+    CHECK(rejected_probe.retain_count == 1);
+    CHECK(rejected_probe.context_release_count == 1);
+}
+
+TEST_CASE("hash-verified swarm metadata installs only through the external parser")
+{
+    std::uint32_t piece_hash_offset = 0U;
+    std::string const info = v1_capsule_info(piece_hash_offset);
+    MetainfoCapsuleFixture const swarm_info = make_v1_capsule(
+        info,
+        piece_hash_offset,
+        TTORRENT_METAINFO_INPUT_INFO_DICTIONARY
+    );
+    SwarmMetainfoParserProbe probe(swarm_info.bytes);
+    auto parser = std::make_shared<BridgeSwarmMetadataParser>(probe.callbacks());
+    bridge_tests::TemporaryDirectory temporary_directory;
+
+    {
+        lt::session session(make_session_params(false));
+        lt::add_torrent_params params;
+        params.info_hashes = lt::info_hash_t(lt::hasher(lt::span<char const>(info)).final());
+        params.save_path = temporary_directory.path().string();
+        params.swarm_metadata_parser = parser;
+        params.flags |= lt::torrent_flags::paused;
+        lt::error_code add_error;
+        lt::torrent_handle handle = session.add_torrent(std::move(params), add_error);
+        REQUIRE_FALSE(add_error);
+        REQUIRE(handle.is_valid());
+
+        REQUIRE(handle.set_metadata(lt::span<char const>(info)));
+        std::shared_ptr<lt::torrent_info const> installed = handle.torrent_file();
+        REQUIRE(installed);
+        CHECK(installed->is_valid());
+        CHECK(installed->name() == "file.bin");
+        CHECK(std::ranges::equal(installed->info_section(), info));
+        CHECK(probe.parse_count == 1);
+        CHECK(probe.capsule_release_count == 1);
+    }
+
+    parser.reset();
+    CHECK(probe.context_release_count == 1);
+}
+
+TEST_CASE("bridge identity attachment carries the session swarm parser")
+{
+    std::uint32_t piece_hash_offset = 0U;
+    std::string const info = v1_capsule_info(piece_hash_offset);
+    MetainfoCapsuleFixture const swarm_info = make_v1_capsule(
+        info,
+        piece_hash_offset,
+        TTORRENT_METAINFO_INPUT_INFO_DICTIONARY
+    );
+    SwarmMetainfoParserProbe probe(swarm_info.bytes);
+    auto parser = std::make_shared<BridgeSwarmMetadataParser>(probe.callbacks());
+    bridge_tests::TemporaryDirectory temporary_directory;
+    {
+        TTorrentClient client(
+            (temporary_directory.path() / "State").string(),
+            false,
+            nullptr,
+            parser
+        );
+        client.set_session_shutdown_asynchronous(false);
+        lt::add_torrent_params params;
+        params.info_hashes = lt::info_hash_t(lt::hasher(lt::span<char const>(info)).final());
+        TorrentIdentity *identity = client.attach_identity(
+            params,
+            "t:0123456789abcdef0123456789abcdef"
+        );
+
+        REQUIRE(identity != nullptr);
+        CHECK(params.swarm_metadata_parser == parser);
+    }
+    parser.reset();
+    CHECK(probe.context_release_count == 1);
+}
+
+TEST_CASE("a hash-valid rejected swarm dictionary enters a stable invalid state")
+{
+    std::uint32_t piece_hash_offset = 0U;
+    std::string const info = v1_capsule_info(piece_hash_offset);
+    MetainfoCapsuleFixture invalid_capsule = make_v1_capsule(
+        info,
+        piece_hash_offset,
+        TTORRENT_METAINFO_INPUT_INFO_DICTIONARY
+    );
+    invalid_capsule.bytes.at(0U) ^= 1U;
+    SwarmMetainfoParserProbe probe(std::move(invalid_capsule.bytes));
+    auto parser = std::make_shared<BridgeSwarmMetadataParser>(probe.callbacks());
+    bridge_tests::TemporaryDirectory temporary_directory;
+
+    {
+        lt::session session(make_session_params(false));
+        lt::add_torrent_params params;
+        params.info_hashes = lt::info_hash_t(lt::hasher(lt::span<char const>(info)).final());
+        params.save_path = temporary_directory.path().string();
+        params.swarm_metadata_parser = parser;
+        lt::error_code add_error;
+        lt::torrent_handle handle = session.add_torrent(std::move(params), add_error);
+        REQUIRE_FALSE(add_error);
+        REQUIRE(handle.is_valid());
+
+        CHECK_FALSE(handle.set_metadata(lt::span<char const>(info)));
+        CHECK(handle.status().errc == lt::errors::invalid_swarm_metadata);
+        CHECK(probe.parse_count == 1);
+        CHECK(probe.capsule_release_count == 1);
+
+        CHECK_FALSE(handle.set_metadata(lt::span<char const>(info)));
+        CHECK(probe.parse_count == 1);
+        CHECK(probe.capsule_release_count == 1);
+    }
+
+    parser.reset();
+    CHECK(probe.context_release_count == 1);
 }
 
 TEST_CASE("metainfo capsule C ABI rejects raw bytes and commits typed priorities")

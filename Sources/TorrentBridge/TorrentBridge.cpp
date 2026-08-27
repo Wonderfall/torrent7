@@ -547,6 +547,107 @@ lt::sha256_hash testing_logical_manifest_digest(lt::add_torrent_params const &pa
 }
 #endif
 
+BridgeSwarmMetadataParser::BridgeSwarmMetadataParser(
+    TTorrentSwarmMetainfoParserCallbacks const callbacks
+)
+    : callbacks_{
+        .context = callbacks.context,
+        .retain_context = callbacks.retain_context,
+        .release_context = callbacks.release_context,
+        .parse_info = callbacks.parse_info,
+        .release_capsule = callbacks.release_capsule,
+    }
+{
+    if (callbacks_.context == nullptr
+        || callbacks_.retain_context == nullptr
+        || callbacks_.release_context == nullptr
+        || callbacks_.parse_info == nullptr
+        || callbacks_.release_capsule == nullptr) {
+        throw std::invalid_argument("The swarm metainfo parser callback table is incomplete.");
+    }
+    retained_ = callbacks_.retain_context(callbacks_.context) != 0U;
+    if (!retained_) {
+        throw std::invalid_argument("The swarm metainfo parser context is unavailable.");
+    }
+}
+
+BridgeSwarmMetadataParser::~BridgeSwarmMetadataParser()
+{
+    if (retained_) {
+        callbacks_.release_context(callbacks_.context);
+    }
+}
+
+std::shared_ptr<lt::torrent_info> BridgeSwarmMetadataParser::parse(
+    lt::span<char const> const info,
+    lt::error_code &error
+) noexcept
+{
+    TTorrentOwnedMetainfoCapsule capsule{};
+    struct CapsuleReleaseGuard final {
+        CapsuleReleaseGuard(
+            SwarmMetainfoParserCallbacks const *stored_callbacks,
+            TTorrentOwnedMetainfoCapsule *stored_capsule
+        ) noexcept
+            : callbacks(stored_callbacks), capsule(stored_capsule)
+        {
+        }
+
+        CapsuleReleaseGuard(CapsuleReleaseGuard const &) = delete;
+        CapsuleReleaseGuard &operator=(CapsuleReleaseGuard const &) = delete;
+        CapsuleReleaseGuard(CapsuleReleaseGuard &&) = delete;
+        CapsuleReleaseGuard &operator=(CapsuleReleaseGuard &&) = delete;
+
+        ~CapsuleReleaseGuard() noexcept
+        {
+            if (capsule->bytes != nullptr) {
+                try {
+                    callbacks->release_capsule(callbacks->context, *capsule);
+                } catch (...) {
+                    ignore_shutdown_failure();
+                }
+            }
+        }
+
+        SwarmMetainfoParserCallbacks const *callbacks;
+        TTorrentOwnedMetainfoCapsule *capsule;
+    } release_guard(&callbacks_, &capsule);
+
+    try {
+        if (info.empty()
+            || std::cmp_greater(info.size(), std::numeric_limits<int32_t>::max())) {
+            error = lt::errors::invalid_swarm_metadata;
+            return nullptr;
+        }
+        int32_t const result = callbacks_.parse_info(
+            callbacks_.context,
+            info.data(),
+            static_cast<int32_t>(info.size()),
+            &capsule
+        );
+        if (result != 0
+            || capsule.bytes == nullptr
+            || capsule.size <= 0
+            || capsule.size > TTORRENT_METAINFO_CAPSULE_MAX_BYTES) {
+            error = lt::errors::invalid_swarm_metadata;
+            return nullptr;
+        }
+
+        TorrentInfoLoadResult imported = import_preparsed_info_capsule(
+            input_span_from_c_buffer(capsule.bytes, capsule.size)
+        );
+        if (!imported) {
+            error = lt::errors::invalid_swarm_metadata;
+            return nullptr;
+        }
+        error.clear();
+        return std::move(*imported);
+    } catch (...) {
+        error = lt::errors::invalid_swarm_metadata;
+        return nullptr;
+    }
+}
+
 PayloadBrokerContext::PayloadBrokerContext(TTorrentPayloadBrokerCallbacks const callbacks)
     : callbacks_{
         .context = callbacks.context,
@@ -1450,6 +1551,7 @@ extern "C" TTorrentClient *TorrentClientCreateWithError(
     const char *state_path,
     uint8_t enable_pex_plugin,
     TTorrentPayloadBrokerCallbacks payload_broker,
+    TTorrentSwarmMetainfoParserCallbacks swarm_metainfo_parser,
     char *error_out,
     int32_t error_capacity
 ) noexcept
@@ -1471,11 +1573,13 @@ extern "C" TTorrentClient *TorrentClientCreateWithError(
         }
         std::string normalized_state_path = state_directory_path.lexically_normal().native();
         auto broker = std::make_shared<PayloadBrokerContext>(payload_broker);
+        auto parser = std::make_shared<BridgeSwarmMetadataParser>(swarm_metainfo_parser);
 
         return std::make_unique<TTorrentClient>(
             normalized_state_path,
             bridge_bool(enable_pex_plugin),
-            std::move(broker)
+            std::move(broker),
+            std::move(parser)
         ).release();
     } catch (std::exception const &exception) {
         copy_error(error_buffer, exception.what());

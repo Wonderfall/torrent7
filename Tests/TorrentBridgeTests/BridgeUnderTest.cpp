@@ -26,6 +26,10 @@ struct PointerAuthenticationProbe {
     int release_count = 0;
     int open_count = 0;
     int size_count = 0;
+    int swarm_retain_count = 0;
+    int swarm_release_count = 0;
+    int swarm_parse_count = 0;
+    int swarm_capsule_release_count = 0;
 };
 
 std::uint8_t pointer_authentication_retain(void *context)
@@ -64,6 +68,37 @@ int32_t pointer_authentication_size(
     return ENOENT;
 }
 
+std::uint8_t pointer_authentication_swarm_retain(void *context)
+{
+    ++static_cast<PointerAuthenticationProbe *>(context)->swarm_retain_count;
+    return 1U;
+}
+
+void pointer_authentication_swarm_release(void *context)
+{
+    ++static_cast<PointerAuthenticationProbe *>(context)->swarm_release_count;
+}
+
+int32_t pointer_authentication_swarm_parse(
+    void *context,
+    char const *,
+    int32_t,
+    TTorrentOwnedMetainfoCapsule *result
+)
+{
+    ++static_cast<PointerAuthenticationProbe *>(context)->swarm_parse_count;
+    *result = TTorrentOwnedMetainfoCapsule{};
+    return EINVAL;
+}
+
+void pointer_authentication_swarm_capsule_release(
+    void *context,
+    TTorrentOwnedMetainfoCapsule
+)
+{
+    ++static_cast<PointerAuthenticationProbe *>(context)->swarm_capsule_release_count;
+}
+
 void pointer_authentication_wake(void *context)
 {
     ++static_cast<PointerAuthenticationProbe *>(context)->wake_count;
@@ -92,6 +127,19 @@ __attribute__((noinline)) void replay_object_bytes(
         .release_context = pointer_authentication_release,
         .open_payload = pointer_authentication_open,
         .payload_size = pointer_authentication_size,
+    };
+}
+
+[[nodiscard]] SwarmMetainfoParserCallbacks make_swarm_pointer_authentication_callbacks(
+    PointerAuthenticationProbe *context
+)
+{
+    return SwarmMetainfoParserCallbacks{
+        .context = context,
+        .retain_context = pointer_authentication_swarm_retain,
+        .release_context = pointer_authentication_swarm_release,
+        .parse_info = pointer_authentication_swarm_parse,
+        .release_capsule = pointer_authentication_swarm_capsule_release,
     };
 }
 
@@ -149,6 +197,41 @@ extern "C" __attribute__((noinline, used)) void TorrentBridgeTestInvokePayloadSi
     ));
 }
 
+extern "C" __attribute__((noinline, used)) void TorrentBridgeTestInvokeSwarmMetainfoRetain(
+    SwarmMetainfoParserCallbacks const *callbacks
+) noexcept
+{
+    static_cast<void>(callbacks->retain_context(callbacks->context));
+}
+
+extern "C" __attribute__((noinline, used)) void TorrentBridgeTestInvokeSwarmMetainfoRelease(
+    SwarmMetainfoParserCallbacks const *callbacks
+) noexcept
+{
+    callbacks->release_context(callbacks->context);
+}
+
+extern "C" __attribute__((noinline, used)) void TorrentBridgeTestInvokeSwarmMetainfoParse(
+    SwarmMetainfoParserCallbacks const *callbacks
+) noexcept
+{
+    std::array<char, 1U> info{{'d'}};
+    TTorrentOwnedMetainfoCapsule result{};
+    static_cast<void>(callbacks->parse_info(
+        callbacks->context,
+        info.data(),
+        static_cast<int32_t>(info.size()),
+        &result
+    ));
+}
+
+extern "C" __attribute__((noinline, used)) void TorrentBridgeTestInvokeSwarmMetainfoCapsuleRelease(
+    SwarmMetainfoParserCallbacks const *callbacks
+) noexcept
+{
+    callbacks->release_capsule(callbacks->context, TTorrentOwnedMetainfoCapsule{});
+}
+
 extern "C" bool TorrentBridgeTestPACSlotsInvokeNormally() noexcept
 {
     PointerAuthenticationProbe probe;
@@ -157,17 +240,27 @@ extern "C" bool TorrentBridgeTestPACSlotsInvokeNormally() noexcept
         .context = &probe,
     };
     PayloadBrokerCallbacks const callbacks = make_pointer_authentication_callbacks(&probe);
+    SwarmMetainfoParserCallbacks const swarm_callbacks =
+        make_swarm_pointer_authentication_callbacks(&probe);
 
     TorrentBridgeTestInvokeWake(&wake);
     TorrentBridgeTestInvokePayloadRetain(&callbacks);
     TorrentBridgeTestInvokePayloadRelease(&callbacks);
     TorrentBridgeTestInvokePayloadOpen(&callbacks);
     TorrentBridgeTestInvokePayloadSize(&callbacks);
+    TorrentBridgeTestInvokeSwarmMetainfoRetain(&swarm_callbacks);
+    TorrentBridgeTestInvokeSwarmMetainfoRelease(&swarm_callbacks);
+    TorrentBridgeTestInvokeSwarmMetainfoParse(&swarm_callbacks);
+    TorrentBridgeTestInvokeSwarmMetainfoCapsuleRelease(&swarm_callbacks);
     return probe.wake_count == 1
         && probe.retain_count == 1
         && probe.release_count == 1
         && probe.open_count == 1
-        && probe.size_count == 1;
+        && probe.size_count == 1
+        && probe.swarm_retain_count == 1
+        && probe.swarm_release_count == 1
+        && probe.swarm_parse_count == 1
+        && probe.swarm_capsule_release_count == 1;
 }
 
 extern "C" void TorrentBridgeTestReplayWakeCallback() noexcept
@@ -272,6 +365,86 @@ extern "C" void TorrentBridgeTestReplayPayloadContext() noexcept
     destination.open_payload = pointer_authentication_open;
     destination.payload_size = pointer_authentication_size;
     TorrentBridgeTestInvokePayloadRetain(&destination);
+}
+
+extern "C" void TorrentBridgeTestReplaySwarmMetainfoRetain() noexcept
+{
+    PointerAuthenticationProbe source_context;
+    PointerAuthenticationProbe destination_context;
+    SwarmMetainfoParserCallbacks source =
+        make_swarm_pointer_authentication_callbacks(&source_context);
+    SwarmMetainfoParserCallbacks destination =
+        make_swarm_pointer_authentication_callbacks(&destination_context);
+    replay_object_bytes(&destination, &source, sizeof(destination));
+    destination.context = &destination_context;
+    destination.release_context = pointer_authentication_swarm_release;
+    destination.parse_info = pointer_authentication_swarm_parse;
+    destination.release_capsule = pointer_authentication_swarm_capsule_release;
+    TorrentBridgeTestInvokeSwarmMetainfoRetain(&destination);
+}
+
+extern "C" void TorrentBridgeTestReplaySwarmMetainfoRelease() noexcept
+{
+    PointerAuthenticationProbe source_context;
+    PointerAuthenticationProbe destination_context;
+    SwarmMetainfoParserCallbacks source =
+        make_swarm_pointer_authentication_callbacks(&source_context);
+    SwarmMetainfoParserCallbacks destination =
+        make_swarm_pointer_authentication_callbacks(&destination_context);
+    replay_object_bytes(&destination, &source, sizeof(destination));
+    destination.context = &destination_context;
+    destination.retain_context = pointer_authentication_swarm_retain;
+    destination.parse_info = pointer_authentication_swarm_parse;
+    destination.release_capsule = pointer_authentication_swarm_capsule_release;
+    TorrentBridgeTestInvokeSwarmMetainfoRelease(&destination);
+}
+
+extern "C" void TorrentBridgeTestReplaySwarmMetainfoParse() noexcept
+{
+    PointerAuthenticationProbe source_context;
+    PointerAuthenticationProbe destination_context;
+    SwarmMetainfoParserCallbacks source =
+        make_swarm_pointer_authentication_callbacks(&source_context);
+    SwarmMetainfoParserCallbacks destination =
+        make_swarm_pointer_authentication_callbacks(&destination_context);
+    replay_object_bytes(&destination, &source, sizeof(destination));
+    destination.context = &destination_context;
+    destination.retain_context = pointer_authentication_swarm_retain;
+    destination.release_context = pointer_authentication_swarm_release;
+    destination.release_capsule = pointer_authentication_swarm_capsule_release;
+    TorrentBridgeTestInvokeSwarmMetainfoParse(&destination);
+}
+
+extern "C" void TorrentBridgeTestReplaySwarmMetainfoCapsuleRelease() noexcept
+{
+    PointerAuthenticationProbe source_context;
+    PointerAuthenticationProbe destination_context;
+    SwarmMetainfoParserCallbacks source =
+        make_swarm_pointer_authentication_callbacks(&source_context);
+    SwarmMetainfoParserCallbacks destination =
+        make_swarm_pointer_authentication_callbacks(&destination_context);
+    replay_object_bytes(&destination, &source, sizeof(destination));
+    destination.context = &destination_context;
+    destination.retain_context = pointer_authentication_swarm_retain;
+    destination.release_context = pointer_authentication_swarm_release;
+    destination.parse_info = pointer_authentication_swarm_parse;
+    TorrentBridgeTestInvokeSwarmMetainfoCapsuleRelease(&destination);
+}
+
+extern "C" void TorrentBridgeTestReplaySwarmMetainfoContext() noexcept
+{
+    PointerAuthenticationProbe source_context;
+    PointerAuthenticationProbe destination_context;
+    SwarmMetainfoParserCallbacks source =
+        make_swarm_pointer_authentication_callbacks(&source_context);
+    SwarmMetainfoParserCallbacks destination =
+        make_swarm_pointer_authentication_callbacks(&destination_context);
+    replay_object_bytes(&destination, &source, sizeof(destination));
+    destination.retain_context = pointer_authentication_swarm_retain;
+    destination.release_context = pointer_authentication_swarm_release;
+    destination.parse_info = pointer_authentication_swarm_parse;
+    destination.release_capsule = pointer_authentication_swarm_capsule_release;
+    TorrentBridgeTestInvokeSwarmMetainfoRetain(&destination);
 }
 
 } // namespace torrent_bridge::internal

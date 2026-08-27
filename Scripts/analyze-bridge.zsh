@@ -13,6 +13,8 @@ typeset -r deps_prefix=${DEPS_PREFIX:-$root_dir/.build/deps/arm64e/prefix}
 typeset -r boost_prefix=${BOOST_PREFIX:-$deps_prefix}
 typeset -r boringssl_prefix=${BORINGSSL_PREFIX:-$deps_prefix}
 typeset -r native_deps_build_id=$("$root_dir/Scripts/native-deps-build-id.zsh")
+typeset -r libtorrent_source=${LIBTORRENT_SOURCE_DIR:-${deps_prefix:h}/src/libtorrent}
+typeset -r libtorrent_patch_helper="$root_dir/Scripts/libtorrent-patch-series.sh"
 typeset clang_tidy=${CLANG_TIDY:-$homebrew_prefix/opt/llvm/bin/clang-tidy}
 typeset -r ripgrep=${commands[rg]:-}
 
@@ -36,6 +38,23 @@ for symbol in "${retired_parser_symbols[@]}"; do
         fail "Retired native parser route is reachable from production sources: $symbol"
     fi
 done
+
+[[ -d "$libtorrent_source/.git" ]] \
+    || fail "Missing patched libtorrent source: $libtorrent_source"
+"$libtorrent_patch_helper" verify "$libtorrent_source"
+typeset -a retired_swarm_metadata_patterns=(
+    "bdecode(metadata_buf"
+    "make_shared<torrent_info>(metadata"
+)
+for pattern in "${retired_swarm_metadata_patterns[@]}"; do
+    if "$ripgrep" -n --fixed-strings "$pattern" "$libtorrent_source/src/torrent.cpp"; then
+        fail "Retired native swarm metadata parser route is reachable: $pattern"
+    fi
+done
+"$ripgrep" -q --fixed-strings \
+    "m_swarm_metadata_parser->parse(metadata_buf, ec)" \
+    "$libtorrent_source/src/torrent.cpp" \
+    || fail "Patched libtorrent does not require the external swarm metadata parser"
 
 if [[ ! -x $clang_tidy ]]; then
     clang_tidy=${commands[clang-tidy]:-}

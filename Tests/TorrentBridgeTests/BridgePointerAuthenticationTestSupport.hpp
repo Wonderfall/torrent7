@@ -12,6 +12,11 @@ void TorrentBridgeTestReplayPayloadRelease() noexcept;
 void TorrentBridgeTestReplayPayloadOpen() noexcept;
 void TorrentBridgeTestReplayPayloadSize() noexcept;
 void TorrentBridgeTestReplayPayloadContext() noexcept;
+void TorrentBridgeTestReplaySwarmMetainfoRetain() noexcept;
+void TorrentBridgeTestReplaySwarmMetainfoRelease() noexcept;
+void TorrentBridgeTestReplaySwarmMetainfoParse() noexcept;
+void TorrentBridgeTestReplaySwarmMetainfoCapsuleRelease() noexcept;
+void TorrentBridgeTestReplaySwarmMetainfoContext() noexcept;
 
 }
 

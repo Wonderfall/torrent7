@@ -748,12 +748,15 @@ decode_files(
 }
 
 [[nodiscard]] TorrentLoadResult import_capsule_impl(
-    std::span<std::uint8_t const> const capsule
+    std::span<std::uint8_t const> const capsule,
+    std::uint8_t const expected_input_kind,
+    std::shared_ptr<lt::torrent_info> *const imported_info_out
 )
 {
     CapsuleReader const reader(capsule);
     CapsuleHeader header{};
     if (!parse_header(reader, header)
+        || header.input_kind != expected_input_kind
         || !validate_envelope_shape(reader, header)
         || !reader.is_payload_range(header.info, header.payload_offset)
         || header.info.size > kMaxTorrentFileBytes
@@ -812,7 +815,7 @@ decode_files(
     }
 
     lt::add_torrent_params params;
-    params.ti = std::move(info);
+    params.ti = info;
     params.info_hashes = params.ti->info_hashes();
     std::size_t aggregate_source_bytes = 0U;
     for (std::uint32_t index = 0U; index < header.tracker_count; ++index) {
@@ -892,6 +895,9 @@ decode_files(
     if (!valid_info) {
         return std::unexpected(valid_info.error());
     }
+    if (imported_info_out != nullptr) {
+        *imported_info_out = std::move(info);
+    }
     return params;
 }
 
@@ -902,7 +908,33 @@ TorrentLoadResult import_preparsed_metainfo_capsule(
 )
 {
     try {
-        return import_capsule_impl(capsule);
+        return import_capsule_impl(
+            capsule,
+            TTORRENT_METAINFO_INPUT_TORRENT_FILE,
+            nullptr
+        );
+    } catch (...) {
+        return std::unexpected(invalid_capsule());
+    }
+}
+
+TorrentInfoLoadResult import_preparsed_info_capsule(
+    std::span<std::uint8_t const> const capsule
+)
+{
+    try {
+        std::shared_ptr<lt::torrent_info> info;
+        TorrentLoadResult const imported = import_capsule_impl(
+            capsule,
+            TTORRENT_METAINFO_INPUT_INFO_DICTIONARY,
+            &info
+        );
+        if (!imported || !info) {
+            return std::unexpected(imported
+                ? invalid_capsule()
+                : imported.error());
+        }
+        return info;
     } catch (...) {
         return std::unexpected(invalid_capsule());
     }

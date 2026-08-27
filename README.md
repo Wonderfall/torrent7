@@ -120,6 +120,12 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
   cancellation-aware Swift parser. The helper receives fixed hashes and bounded
   source/selection records; C++ validates checked ranges into one borrowed byte
   blob, copies retained data, and never calls libtorrent's magnet parser.
+- **Typed metainfo boundary:** local `.torrent` bytes and hash-verified info
+  dictionaries assembled from peers are parsed by the same bounded Swift
+  parser. Swift emits input-kinded, pointer-free capsules; C++ validates and
+  imports them through the preparsed libtorrent constructor. Swarm parsing is a
+  synchronous per-torrent callback with balanced retained context and capsule
+  ownership, and libtorrent has no native bdecode fallback for this route.
 - **Input bounds:** caps for torrent files, magnets, file counts, tracker/web-seed
   counts, tracker host rows, snapshots, piece-map data, XPC payloads, paged
   datasets, queued requests, file descriptors, and open peers.

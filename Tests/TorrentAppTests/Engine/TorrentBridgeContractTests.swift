@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 import TorrentBridge
@@ -39,6 +40,42 @@ private func contractPayloadBrokerCallbacks() -> TTorrentPayloadBrokerCallbacks 
     return unsafe callbacks
 }
 
+private func contractSwarmMetainfoContextRetain(
+    _ context: UnsafeMutableRawPointer?
+) -> UInt8 {
+    unsafe context == nil ? 0 : 1
+}
+
+private func contractSwarmMetainfoContextRelease(_ context: UnsafeMutableRawPointer?) {}
+
+private func contractSwarmMetainfoParse(
+    _ context: UnsafeMutableRawPointer?,
+    _ info: UnsafePointer<CChar>,
+    _ infoSize: Int32,
+    _ resultOut: UnsafeMutablePointer<TTorrentOwnedMetainfoCapsule>
+) -> Int32 {
+    unsafe resultOut.pointee = TTorrentOwnedMetainfoCapsule(bytes: nil, size: 0)
+    return EINVAL
+}
+
+private func contractSwarmMetainfoCapsuleRelease(
+    _ context: UnsafeMutableRawPointer?,
+    _ capsule: TTorrentOwnedMetainfoCapsule
+) {
+    unsafe free(capsule.bytes)
+}
+
+private func contractSwarmMetainfoParserCallbacks()
+    -> TTorrentSwarmMetainfoParserCallbacks {
+    var callbacks = unsafe TTorrentSwarmMetainfoParserCallbacks()
+    unsafe callbacks.context = UnsafeMutableRawPointer(bitPattern: 1)
+    unsafe callbacks.retain_context = contractSwarmMetainfoContextRetain
+    unsafe callbacks.release_context = contractSwarmMetainfoContextRelease
+    unsafe callbacks.parse_info = contractSwarmMetainfoParse
+    unsafe callbacks.release_capsule = contractSwarmMetainfoCapsuleRelease
+    return unsafe callbacks
+}
+
 private func bridgeString(_ buffer: [CChar]) -> String {
     String(decoding: buffer.prefix { $0 != 0 }.map(UInt8.init(bitPattern:)), as: UTF8.self)
 }
@@ -47,7 +84,7 @@ private func bridgeString(_ buffer: [CChar]) -> String {
 struct TorrentBridgeContractTests {
     @Test("Pins bridge ABI version, limits, states, and native event kinds")
     func pinsBridgeConstants() {
-        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 60)
+        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 61)
         #expect(UInt32(TTORRENT_MAGNET_IMPORT_SCHEMA_VERSION) == 1)
         #expect(UInt32(TTORRENT_METAINFO_CAPSULE_MAGIC) == 0x494d_3754)
         #expect(UInt16(TTORRENT_METAINFO_CAPSULE_SCHEMA_VERSION) == 1)
@@ -175,8 +212,16 @@ struct TorrentBridgeContractTests {
         #expect(MemoryLayout<TTorrentFilePriorityEntry>.alignment == 4)
         let payloadBrokerCallbacksSize = unsafe MemoryLayout<TTorrentPayloadBrokerCallbacks>.size
         let payloadBrokerCallbacksAlignment = unsafe MemoryLayout<TTorrentPayloadBrokerCallbacks>.alignment
+        let ownedMetainfoCapsuleSize = unsafe MemoryLayout<TTorrentOwnedMetainfoCapsule>.size
+        let ownedMetainfoCapsuleAlignment = unsafe MemoryLayout<TTorrentOwnedMetainfoCapsule>.alignment
+        let swarmParserCallbacksSize = unsafe MemoryLayout<TTorrentSwarmMetainfoParserCallbacks>.size
+        let swarmParserCallbacksAlignment = unsafe MemoryLayout<TTorrentSwarmMetainfoParserCallbacks>.alignment
         #expect(payloadBrokerCallbacksSize == 40)
         #expect(payloadBrokerCallbacksAlignment == 8)
+        #expect(ownedMetainfoCapsuleSize == 16)
+        #expect(ownedMetainfoCapsuleAlignment == 8)
+        #expect(swarmParserCallbacksSize == 40)
+        #expect(swarmParserCallbacksAlignment == 8)
         #expect(MemoryLayout<TTorrentStorageActivation>.size == 96)
         #expect(MemoryLayout<TTorrentStorageActivation>.alignment == 8)
         #expect(MemoryLayout<TTorrentStorageActivation>.offset(of: \.claim_generation) == 16)
@@ -270,6 +315,36 @@ struct TorrentBridgeContractTests {
         let relativePathResult = invalidCreateResult(path: "relative/state")
         #expect(!relativePathResult.didCreate)
         #expect(relativePathResult.error == "The state path must be absolute.")
+    }
+
+    @Test("Create rejects an incomplete swarm metainfo parser table")
+    func createRejectsIncompleteSwarmMetainfoParser() throws {
+        try withTemporaryDirectory { stateDirectory in
+            var errorBuffer = BridgeErrorBuffer()
+            let maybeClient = unsafe errorBuffer.withMutableBuffer { buffer in
+                var error: MutableSpan<CChar>? = buffer.mutableSpan
+                defer { error = nil }
+                return unsafe stateDirectory.torrentFilePath.withCString { path in
+                    unsafe TorrentClientCreateWithError(
+                        path,
+                        1,
+                        contractPayloadBrokerCallbacks(),
+                        TTorrentSwarmMetainfoParserCallbacks(),
+                        &error
+                    )
+                }
+            }
+            if let client = unsafe maybeClient {
+                unsafe TorrentClientDestroyBlocking(client)
+            }
+            let didCreate = unsafe maybeClient != nil
+
+            #expect(!didCreate)
+            #expect(
+                errorBuffer.string
+                    == "The swarm metainfo parser callback table is incomplete."
+            )
+        }
     }
 
     @Test("Null client query APIs zero outputs")
@@ -552,6 +627,7 @@ private func invalidCreateResult(path: String?) -> (didCreate: Bool, error: Stri
                     statePath,
                     1,
                     contractPayloadBrokerCallbacks(),
+                    contractSwarmMetainfoParserCallbacks(),
                     &error
                 )
             }
@@ -565,6 +641,7 @@ private func invalidCreateResult(path: String?) -> (didCreate: Bool, error: Stri
             nil,
             1,
             contractPayloadBrokerCallbacks(),
+            contractSwarmMetainfoParserCallbacks(),
             &error
         )
         if let client = unsafe client {
@@ -631,6 +708,7 @@ private func emptyClientSmokeResult(statePath: String) -> EmptyClientSmokeResult
                 statePathPointer,
                 1,
                 contractPayloadBrokerCallbacks(),
+                contractSwarmMetainfoParserCallbacks(),
                 &error
             )
         }

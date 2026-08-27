@@ -70,11 +70,19 @@ typeset retain="$temporary_directory/retain.txt"
 typeset release="$temporary_directory/release.txt"
 typeset open_payload="$temporary_directory/open-payload.txt"
 typeset payload_size="$temporary_directory/payload-size.txt"
+typeset swarm_retain="$temporary_directory/swarm-retain.txt"
+typeset swarm_release="$temporary_directory/swarm-release.txt"
+typeset swarm_parse="$temporary_directory/swarm-parse.txt"
+typeset swarm_capsule_release="$temporary_directory/swarm-capsule-release.txt"
 extract_function TorrentBridgeTestInvokeWake "$wake"
 extract_function TorrentBridgeTestInvokePayloadRetain "$retain"
 extract_function TorrentBridgeTestInvokePayloadRelease "$release"
 extract_function TorrentBridgeTestInvokePayloadOpen "$open_payload"
 extract_function TorrentBridgeTestInvokePayloadSize "$payload_size"
+extract_function TorrentBridgeTestInvokeSwarmMetainfoRetain "$swarm_retain"
+extract_function TorrentBridgeTestInvokeSwarmMetainfoRelease "$swarm_release"
+extract_function TorrentBridgeTestInvokeSwarmMetainfoParse "$swarm_parse"
+extract_function TorrentBridgeTestInvokeSwarmMetainfoCapsuleRelease "$swarm_capsule_release"
 
 # AppleClang's pinned 16-bit string discriminators for the Bridge-owned slots.
 verify_data_authentication wake.context "$wake" 0x8cdb
@@ -84,5 +92,10 @@ verify_callback_branch payload.retain "$retain" 0x5c7
 verify_callback_branch payload.release "$release" 0x26d6
 verify_callback_branch payload.open "$open_payload" 0x2285
 verify_callback_branch payload.size "$payload_size" 0x664f
+verify_data_authentication swarm-metainfo.context "$swarm_retain" 0x4e83
+verify_callback_branch swarm-metainfo.retain "$swarm_retain" 0xb73c
+verify_callback_branch swarm-metainfo.release "$swarm_release" 0x1f63
+verify_callback_branch swarm-metainfo.parse "$swarm_parse" 0xaa1c
+verify_callback_branch swarm-metainfo.capsule-release "$swarm_capsule_release" 0xcfc7
 
 print -r -- "Bridge callback/context PAC codegen verification passed"

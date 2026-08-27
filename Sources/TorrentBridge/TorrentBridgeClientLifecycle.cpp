@@ -71,18 +71,20 @@ bool wait_for_alert_worker_backoff(
 }
 
 TTorrentClient::TTorrentClient(std::string_view state_path, bool enable_peer_exchange_plugin)
-    : TTorrentClient(state_path, enable_peer_exchange_plugin, nullptr)
+    : TTorrentClient(state_path, enable_peer_exchange_plugin, nullptr, nullptr)
 {
 }
 
 TTorrentClient::TTorrentClient(
     std::string_view state_path,
     bool enable_peer_exchange_plugin,
-    std::shared_ptr<PayloadBrokerContext> broker
+    std::shared_ptr<PayloadBrokerContext> broker,
+    std::shared_ptr<lt::aux::swarm_metadata_parser> swarm_parser
 )
     : part_files_directory(fs::path{std::string(state_path)} / "PartFiles"),
       staging_directory(fs::path{std::string(state_path)} / "Staging"),
       payload_broker(std::move(broker)),
+      swarm_metadata_parser(std::move(swarm_parser)),
       session(make_session_params(enable_peer_exchange_plugin)),
       peer_exchange_plugin_enabled(enable_peer_exchange_plugin)
 {
@@ -764,6 +766,7 @@ TorrentIdentity *TTorrentClient::attach_identity(
     );
     stage_presentation_metadata(*identity, params);
     params.userdata = identity->token;
+    params.swarm_metadata_parser = swarm_metadata_parser;
     return identity;
 }
 

@@ -130,7 +130,7 @@ inline constexpr uint16_t TTORRENT_METAINFO_FIELD_COMMENT = 1U << 4U;
 inline constexpr uint16_t TTORRENT_METAINFO_FIELD_CREATED_BY = 1U << 5U;
 inline constexpr uint16_t TTORRENT_METAINFO_FIELD_CREATION_DATE = 1U << 6U;
 inline constexpr uint16_t TTORRENT_METAINFO_FIELD_DHT_NODES = 1U << 7U;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 60;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 61;
 namespace torrent_bridge::internal {
 struct TTorrentClient;
 }
@@ -231,7 +231,7 @@ enum {
     TTORRENT_METAINFO_FIELD_CREATED_BY = 1U << 5U,
     TTORRENT_METAINFO_FIELD_CREATION_DATE = 1U << 6U,
     TTORRENT_METAINFO_FIELD_DHT_NODES = 1U << 7U,
-    TTORRENT_BRIDGE_ABI_VERSION = 60
+    TTORRENT_BRIDGE_ABI_VERSION = 61
 };
 #endif
 
@@ -557,6 +557,43 @@ typedef struct TTorrentPayloadBrokerCallbacks {
     TTorrentPayloadSizeCallback payload_size;
 } TTorrentPayloadBrokerCallbacks;
 
+// Swarm metadata arrives as one exact, hash-verified bencoded info dictionary
+// on libtorrent's network thread. parse_info must synchronously return a newly
+// allocated INFO_DICTIONARY capsule and must not retain either input pointer.
+// The bridge copies/imports the capsule before calling release_capsule exactly
+// once. All callbacks must return promptly, must not throw, and must not
+// reenter TorrentBridge.
+typedef struct TTorrentOwnedMetainfoCapsule {
+    uint8_t * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(size) bytes;
+    int32_t size;
+} TTorrentOwnedMetainfoCapsule;
+
+typedef uint8_t (* TORRENT_BRIDGE_NULLABLE TTorrentSwarmMetainfoContextRetainCallback)(
+    void * TORRENT_BRIDGE_NULLABLE context
+);
+typedef void (* TORRENT_BRIDGE_NULLABLE TTorrentSwarmMetainfoContextReleaseCallback)(
+    void * TORRENT_BRIDGE_NULLABLE context
+);
+typedef int32_t (* TORRENT_BRIDGE_NULLABLE TTorrentSwarmMetainfoParseCallback)(
+    void * TORRENT_BRIDGE_NULLABLE context,
+    const char * TORRENT_BRIDGE_NONNULL TORRENT_BRIDGE_COUNTED_BY(info_size)
+        info TORRENT_BRIDGE_NOESCAPE,
+    int32_t info_size,
+    TTorrentOwnedMetainfoCapsule * TORRENT_BRIDGE_NONNULL result_out TORRENT_BRIDGE_NOESCAPE
+);
+typedef void (* TORRENT_BRIDGE_NULLABLE TTorrentSwarmMetainfoCapsuleReleaseCallback)(
+    void * TORRENT_BRIDGE_NULLABLE context,
+    TTorrentOwnedMetainfoCapsule capsule
+);
+
+typedef struct TTorrentSwarmMetainfoParserCallbacks {
+    void * TORRENT_BRIDGE_NULLABLE context;
+    TTorrentSwarmMetainfoContextRetainCallback retain_context;
+    TTorrentSwarmMetainfoContextReleaseCallback release_context;
+    TTorrentSwarmMetainfoParseCallback parse_info;
+    TTorrentSwarmMetainfoCapsuleReleaseCallback release_capsule;
+} TTorrentSwarmMetainfoParserCallbacks;
+
 // Immutable activation authority for one known torrent. claim_id is the UUID's
 // 16 RFC 4122 bytes. source_manifest_digest is the domain-separated SHA-256
 // digest independently reproduced by Swift and libtorrent before admission.
@@ -573,12 +610,15 @@ const char * TORRENT_BRIDGE_NONNULL TORRENT_BRIDGE_NULL_TERMINATED TorrentBridge
     TORRENT_BRIDGE_NOEXCEPT;
 
 // Returns an owned client handle. Release it exactly once with
-// TorrentClientDestroy. The broker context is retained synchronously before
-// construction and released after every provider and disk worker is quiescent.
+// TorrentClientDestroy. Both callback contexts are retained synchronously
+// before construction. The broker context is released after every provider and
+// disk worker is quiescent; the metainfo context is released after the session
+// and its torrents are destroyed.
 TTorrentClient * TORRENT_BRIDGE_NULLABLE TorrentClientCreateWithError(
     const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED state_path TORRENT_BRIDGE_NOESCAPE,
     uint8_t enable_pex_plugin,
     TTorrentPayloadBrokerCallbacks payload_broker,
+    TTorrentSwarmMetainfoParserCallbacks swarm_metainfo_parser,
     char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;

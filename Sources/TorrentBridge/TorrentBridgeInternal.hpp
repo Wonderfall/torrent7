@@ -12,6 +12,7 @@
 #include <libtorrent/aux_/path.hpp>
 #include <libtorrent/aux_/payload_file_provider.hpp>
 #include <libtorrent/aux_/preparsed_metainfo.hpp>
+#include <libtorrent/aux_/swarm_metadata_parser.hpp>
 #include <libtorrent/bencode.hpp>
 #include <libtorrent/client_data.hpp>
 #include <libtorrent/error_code.hpp>
@@ -33,6 +34,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
@@ -306,7 +308,7 @@ static_assert(
 );
 static_assert(kMaxTorrentIdentityTokenCount > static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 60U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 61U);
 static_assert(
     TORRENT_ABI_VERSION > 1,
     "Deprecated libtorrent ABIs can parse add_torrent_params.url as a raw magnet."
@@ -325,9 +327,9 @@ static_assert(TTORRENT_CONTENT_KIND_UNKNOWN == 0U);
 static_assert(TTORRENT_CONTENT_KIND_SINGLE_FILE == 1U);
 static_assert(TTORRENT_CONTENT_KIND_DIRECTORY == 2U);
 #if defined(TORRENT_USE_ASSERTS) && TORRENT_USE_ASSERTS
-static_assert(sizeof(lt::add_torrent_params) == 776U);
+static_assert(sizeof(lt::add_torrent_params) == 792U);
 #else
-static_assert(sizeof(lt::add_torrent_params) == 760U);
+static_assert(sizeof(lt::add_torrent_params) == 776U);
 #endif
 static_assert(TTORRENT_FILE_PRIORITY_SKIP == static_cast<int32_t>(static_cast<std::uint8_t>(lt::dont_download)));
 static_assert(TTORRENT_FILE_PRIORITY_LOW == static_cast<int32_t>(static_cast<std::uint8_t>(lt::low_priority)));
@@ -404,6 +406,9 @@ static_assert(std::is_trivially_copyable_v<TTorrentNetworkStatusResult>);
 static_assert(std::is_standard_layout_v<TTorrentBridgeHealthResult>);
 static_assert(std::is_trivially_copyable_v<TTorrentBridgeHealthResult>);
 static_assert(std::is_standard_layout_v<TTorrentPayloadBrokerCallbacks>);
+static_assert(std::is_standard_layout_v<TTorrentOwnedMetainfoCapsule>);
+static_assert(std::is_trivially_copyable_v<TTorrentOwnedMetainfoCapsule>);
+static_assert(std::is_standard_layout_v<TTorrentSwarmMetainfoParserCallbacks>);
 static_assert(std::is_standard_layout_v<TTorrentStorageActivation>);
 static_assert(std::is_trivially_copyable_v<TTorrentStorageActivation>);
 static_assert(sizeof(TTorrentSnapshot) == 2336U);
@@ -473,6 +478,10 @@ static_assert(alignof(TTorrentBridgeHealthResult) == 8U);
 static_assert(offsetof(TTorrentBridgeHealthResult, health) == 8U);
 static_assert(sizeof(TTorrentPayloadBrokerCallbacks) == 40U);
 static_assert(alignof(TTorrentPayloadBrokerCallbacks) == 8U);
+static_assert(sizeof(TTorrentOwnedMetainfoCapsule) == 16U);
+static_assert(alignof(TTorrentOwnedMetainfoCapsule) == 8U);
+static_assert(sizeof(TTorrentSwarmMetainfoParserCallbacks) == 40U);
+static_assert(alignof(TTorrentSwarmMetainfoParserCallbacks) == 8U);
 static_assert(sizeof(TTorrentStorageActivation) == 96U);
 static_assert(alignof(TTorrentStorageActivation) == 8U);
 static_assert(offsetof(TTorrentStorageActivation, preserved_torrent_id) == 56U);
@@ -506,6 +515,7 @@ using ResumeRemoveResult = std::expected<bool, std::string>;
 using ResumeSaveResult = std::expected<void, std::string>;
 using ResumeIDListResult = std::expected<std::vector<std::string>, std::string>;
 using TorrentLoadResult = std::expected<lt::add_torrent_params, BridgeError>;
+using TorrentInfoLoadResult = std::expected<std::shared_ptr<lt::torrent_info>, BridgeError>;
 
 [[nodiscard]] constexpr bool torrent_count_allows_admission(std::size_t count) noexcept
 {
@@ -674,6 +684,16 @@ inline constexpr ptrauth_extra_data_t kPayloadSizeCallbackDiscriminator =
     ptrauth_string_discriminator("torrent.bridge.payload.size");
 inline constexpr ptrauth_extra_data_t kPayloadContextDiscriminator =
     ptrauth_string_discriminator("torrent.bridge.payload.context");
+inline constexpr ptrauth_extra_data_t kSwarmMetainfoRetainCallbackDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.swarm-metainfo.retain");
+inline constexpr ptrauth_extra_data_t kSwarmMetainfoReleaseCallbackDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.swarm-metainfo.release");
+inline constexpr ptrauth_extra_data_t kSwarmMetainfoParseCallbackDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.swarm-metainfo.parse");
+inline constexpr ptrauth_extra_data_t kSwarmMetainfoCapsuleReleaseCallbackDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.swarm-metainfo.capsule-release");
+inline constexpr ptrauth_extra_data_t kSwarmMetainfoContextDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.swarm-metainfo.context");
 inline constexpr ptrauth_extra_data_t kWakeCallbackDiscriminator =
     ptrauth_string_discriminator("torrent.bridge.wake");
 inline constexpr ptrauth_extra_data_t kWakeContextDiscriminator =
@@ -713,6 +733,35 @@ using StoredPayloadContext = void * __ptrauth(
     1,
     kPayloadContextDiscriminator
 );
+using StoredSwarmMetainfoRetainCallback =
+    TTorrentSwarmMetainfoContextRetainCallback __ptrauth(
+        ptrauth_key_function_pointer,
+        1,
+        kSwarmMetainfoRetainCallbackDiscriminator
+    );
+using StoredSwarmMetainfoReleaseCallback =
+    TTorrentSwarmMetainfoContextReleaseCallback __ptrauth(
+        ptrauth_key_function_pointer,
+        1,
+        kSwarmMetainfoReleaseCallbackDiscriminator
+    );
+using StoredSwarmMetainfoParseCallback =
+    TTorrentSwarmMetainfoParseCallback __ptrauth(
+        ptrauth_key_function_pointer,
+        1,
+        kSwarmMetainfoParseCallbackDiscriminator
+    );
+using StoredSwarmMetainfoCapsuleReleaseCallback =
+    TTorrentSwarmMetainfoCapsuleReleaseCallback __ptrauth(
+        ptrauth_key_function_pointer,
+        1,
+        kSwarmMetainfoCapsuleReleaseCallbackDiscriminator
+    );
+using StoredSwarmMetainfoContext = void * __ptrauth(
+    ptrauth_key_process_dependent_data,
+    1,
+    kSwarmMetainfoContextDiscriminator
+);
 #else
 using StoredWakeCallback = TTorrentWakeCallback;
 using StoredWakeContext = void *;
@@ -721,6 +770,12 @@ using StoredPayloadReleaseCallback = TTorrentPayloadContextReleaseCallback;
 using StoredPayloadOpenCallback = TTorrentPayloadOpenCallback;
 using StoredPayloadSizeCallback = TTorrentPayloadSizeCallback;
 using StoredPayloadContext = void *;
+using StoredSwarmMetainfoRetainCallback = TTorrentSwarmMetainfoContextRetainCallback;
+using StoredSwarmMetainfoReleaseCallback = TTorrentSwarmMetainfoContextReleaseCallback;
+using StoredSwarmMetainfoParseCallback = TTorrentSwarmMetainfoParseCallback;
+using StoredSwarmMetainfoCapsuleReleaseCallback =
+    TTorrentSwarmMetainfoCapsuleReleaseCallback;
+using StoredSwarmMetainfoContext = void *;
 #endif
 
 struct PayloadBrokerCallbacks {
@@ -729,6 +784,34 @@ struct PayloadBrokerCallbacks {
     StoredPayloadReleaseCallback release_context = nullptr;
     StoredPayloadOpenCallback open_payload = nullptr;
     StoredPayloadSizeCallback payload_size = nullptr;
+};
+
+struct SwarmMetainfoParserCallbacks {
+    StoredSwarmMetainfoContext context = nullptr;
+    StoredSwarmMetainfoRetainCallback retain_context = nullptr;
+    StoredSwarmMetainfoReleaseCallback release_context = nullptr;
+    StoredSwarmMetainfoParseCallback parse_info = nullptr;
+    StoredSwarmMetainfoCapsuleReleaseCallback release_capsule = nullptr;
+};
+
+class BridgeSwarmMetadataParser final : public lt::aux::swarm_metadata_parser {
+public:
+    explicit BridgeSwarmMetadataParser(TTorrentSwarmMetainfoParserCallbacks callbacks);
+    __attribute__((noinline)) ~BridgeSwarmMetadataParser() override;
+
+    BridgeSwarmMetadataParser(BridgeSwarmMetadataParser const &) = delete;
+    BridgeSwarmMetadataParser &operator=(BridgeSwarmMetadataParser const &) = delete;
+    BridgeSwarmMetadataParser(BridgeSwarmMetadataParser &&) = delete;
+    BridgeSwarmMetadataParser &operator=(BridgeSwarmMetadataParser &&) = delete;
+
+    [[nodiscard]] std::shared_ptr<lt::torrent_info> parse(
+        lt::span<char const> info,
+        lt::error_code &error
+    ) noexcept override;
+
+private:
+    SwarmMetainfoParserCallbacks callbacks_;
+    bool retained_ = false;
 };
 
 class PayloadBrokerContext final {
@@ -1149,6 +1232,10 @@ TorrentLoadResult import_preparsed_metainfo_capsule(
     std::span<std::uint8_t const> capsule
 );
 
+TorrentInfoLoadResult import_preparsed_info_capsule(
+    std::span<std::uint8_t const> capsule
+);
+
 #ifdef TORRENT_BRIDGE_TESTING
 int32_t add_torrent_params_for_testing(
     TTorrentClient *client,
@@ -1408,7 +1495,8 @@ struct TTorrentClient {
     TTorrentClient(
         std::string_view state_path,
         bool enable_peer_exchange_plugin,
-        std::shared_ptr<PayloadBrokerContext> payload_broker
+        std::shared_ptr<PayloadBrokerContext> payload_broker,
+        std::shared_ptr<lt::aux::swarm_metadata_parser> swarm_parser = nullptr
     );
 
     ~TTorrentClient() noexcept;
@@ -1434,6 +1522,7 @@ struct TTorrentClient {
     fs::path part_files_directory;
     fs::path staging_directory;
     std::shared_ptr<PayloadBrokerContext> payload_broker;
+    std::shared_ptr<lt::aux::swarm_metadata_parser> swarm_metadata_parser;
     UniqueFileDescriptor state_directory_descriptor;
     UniqueFileDescriptor resume_directory_descriptor;
     UniqueFileDescriptor part_files_directory_descriptor;
