@@ -120,6 +120,7 @@ package struct TorrentMetainfoParser: Sendable {
         package var maximumAggregateSourceBytes = 1 * 1_024 * 1_024
         package var maximumPathComponentCount = 200_000
         package var maximumPathBytes = 8 * 1_024 * 1_024
+        package var maximumStoragePathBytes = TorrentEngineLimits.maximumFilePathBytes
         package var maximumFileBytes = nativeMaximumFileBytes
         package var maximumPayloadBytes = nativeMaximumPayloadBytes
         package var maximumPieceCount = 1_000_000
@@ -408,6 +409,12 @@ package struct TorrentMetainfoParser: Sendable {
             throw TorrentManifestError.missingName
         }
         try validateComponent(name, isTopLevel: true)
+        try validateStoragePathLengths(
+            selected.files,
+            name: name,
+            contentKind: selected.contentKind,
+            cancellation: cancellation
+        )
 
         guard let validatedInfoRange = ValidatedMetainfoRange(infoRange) else {
             throw TorrentManifestError.malformedBencoding
@@ -1554,6 +1561,36 @@ package struct TorrentMetainfoParser: Sendable {
         }
     }
 
+    private func validateStoragePathLengths(
+        _ files: [UnindexedFile],
+        name: String,
+        contentKind: ValidatedMetainfoContentKind,
+        cancellation: CancellationPoller
+    ) throws {
+        for file in files {
+            try cancellation.recordWork()
+            var byteCount = 0
+            if contentKind == .directory {
+                try addStoragePathBytes(name.utf8.count, to: &byteCount)
+                try addStoragePathBytes(1, to: &byteCount)
+            }
+            for (index, component) in file.pathComponents.enumerated() {
+                if index != 0 {
+                    try addStoragePathBytes(1, to: &byteCount)
+                }
+                try addStoragePathBytes(component.utf8.count, to: &byteCount)
+            }
+        }
+    }
+
+    private func addStoragePathBytes(_ count: Int, to total: inout Int) throws {
+        guard total <= limits.maximumStoragePathBytes,
+              count <= limits.maximumStoragePathBytes - total else {
+            throw TorrentManifestError.invalidFilePath
+        }
+        total += count
+    }
+
     private func parsePathList(
         _ node: Int,
         document: BencodeRangeDocument
@@ -1691,6 +1728,8 @@ package struct TorrentMetainfoParser: Sendable {
             && limits.maximumAggregateSourceBytes >= 0
             && limits.maximumPathComponentCount > 0
             && limits.maximumPathBytes > 0
+            && limits.maximumStoragePathBytes > 0
+            && limits.maximumStoragePathBytes <= TorrentEngineLimits.maximumFilePathBytes
             && limits.maximumFileBytes >= 0
             && limits.maximumFileBytes <= Limits.nativeMaximumFileBytes
             && limits.maximumPayloadBytes >= 0

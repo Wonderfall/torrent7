@@ -5,6 +5,7 @@
 #include <libtorrent/create_torrent.hpp>
 
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -65,6 +66,357 @@ void append_bencoded_string(std::string &buffer, std::string_view value)
     buffer.append(value);
 }
 
+struct CapsuleFileFixture {
+    std::vector<std::string> components;
+    std::int64_t size;
+    std::uint32_t flags = 0U;
+    std::optional<std::uint32_t> info_root_offset;
+};
+
+struct CapsuleLayerFixture {
+    std::array<std::uint8_t, 32U> root;
+    std::vector<std::uint8_t> hashes;
+    std::vector<std::int32_t> file_indices;
+};
+
+struct MetainfoCapsuleFixture {
+    std::vector<std::uint8_t> bytes;
+    std::uint32_t info_offset = 0U;
+    std::uint32_t component_table_offset = 0U;
+    std::uint32_t file_table_offset = 0U;
+    std::uint32_t piece_layer_table_offset = 0U;
+};
+
+void write_u16(std::vector<std::uint8_t> &bytes, std::size_t const offset, std::uint16_t const value)
+{
+    bytes.at(offset) = static_cast<std::uint8_t>(value);
+    bytes.at(offset + 1U) = static_cast<std::uint8_t>(value >> 8U);
+}
+
+void write_u32(std::vector<std::uint8_t> &bytes, std::size_t const offset, std::uint32_t const value)
+{
+    for (std::size_t byte = 0U; byte < sizeof(value); ++byte) {
+        bytes.at(offset + byte) = static_cast<std::uint8_t>(value >> (byte * 8U));
+    }
+}
+
+void write_i32(std::vector<std::uint8_t> &bytes, std::size_t const offset, std::int32_t const value)
+{
+    write_u32(bytes, offset, std::bit_cast<std::uint32_t>(value));
+}
+
+void write_i64(std::vector<std::uint8_t> &bytes, std::size_t const offset, std::int64_t const value)
+{
+    std::uint64_t const bits = std::bit_cast<std::uint64_t>(value);
+    for (std::size_t byte = 0U; byte < sizeof(bits); ++byte) {
+        bytes.at(offset + byte) = static_cast<std::uint8_t>(bits >> (byte * 8U));
+    }
+}
+
+[[nodiscard]] std::size_t align_up(std::size_t const value, std::size_t const alignment)
+{
+    std::size_t const remainder = value % alignment;
+    return remainder == 0U ? value : value + alignment - remainder;
+}
+
+[[nodiscard]] std::pair<std::uint32_t, std::uint32_t> append_capsule_bytes(
+    std::vector<std::uint8_t> &bytes,
+    std::span<std::uint8_t const> const value
+)
+{
+    auto const offset = static_cast<std::uint32_t>(bytes.size());
+    auto const size = static_cast<std::uint32_t>(value.size());
+    bytes.insert(bytes.end(), value.begin(), value.end());
+    return {offset, size};
+}
+
+[[nodiscard]] std::pair<std::uint32_t, std::uint32_t> append_capsule_string(
+    std::vector<std::uint8_t> &bytes,
+    std::string_view const value
+)
+{
+    std::vector<std::uint8_t> encoded;
+    encoded.reserve(value.size());
+    std::ranges::transform(value, std::back_inserter(encoded), [](char const character) {
+        return static_cast<std::uint8_t>(character);
+    });
+    return append_capsule_bytes(bytes, encoded);
+}
+
+void write_capsule_range(
+    std::vector<std::uint8_t> &bytes,
+    std::size_t const destination,
+    std::pair<std::uint32_t, std::uint32_t> const range
+)
+{
+    write_u32(bytes, destination, range.first);
+    write_u32(bytes, destination + 4U, range.second);
+}
+
+[[nodiscard]] MetainfoCapsuleFixture make_metainfo_capsule(
+    std::string const &info,
+    std::string const &name,
+    std::uint8_t const kind,
+    std::uint8_t const content_kind,
+    std::vector<CapsuleFileFixture> const &files,
+    std::optional<std::pair<std::uint32_t, std::uint32_t>> const v1_piece_hashes = std::nullopt,
+    std::vector<CapsuleLayerFixture> const &layers = {},
+    bool const private_torrent = false,
+    std::vector<std::pair<std::string, std::uint8_t>> const &trackers = {},
+    std::vector<std::string> const &web_seeds = {},
+    std::string const &comment = {},
+    std::int64_t const creation_date = -1,
+    std::uint8_t const input_kind = TTORRENT_METAINFO_INPUT_TORRENT_FILE
+)
+{
+    std::size_t component_count = 0U;
+    for (CapsuleFileFixture const &file : files) {
+        component_count += file.components.size();
+    }
+    std::size_t layer_file_index_count = 0U;
+    for (CapsuleLayerFixture const &layer : layers) {
+        layer_file_index_count += layer.file_indices.size();
+    }
+
+    std::size_t cursor = TTORRENT_METAINFO_CAPSULE_HEADER_SIZE;
+    cursor = align_up(cursor, 8U);
+    std::size_t const file_table = cursor;
+    cursor += files.size() * TTORRENT_METAINFO_CAPSULE_FILE_RECORD_SIZE;
+    cursor = align_up(cursor, 4U);
+    std::size_t const component_table = cursor;
+    cursor += component_count * TTORRENT_METAINFO_CAPSULE_RANGE_RECORD_SIZE;
+    cursor = align_up(cursor, 4U);
+    std::size_t const tracker_table = cursor;
+    cursor += trackers.size() * TTORRENT_METAINFO_CAPSULE_TRACKER_RECORD_SIZE;
+    cursor = align_up(cursor, 4U);
+    std::size_t const web_seed_table = cursor;
+    cursor += web_seeds.size() * TTORRENT_METAINFO_CAPSULE_RANGE_RECORD_SIZE;
+    cursor = align_up(cursor, 4U);
+    std::size_t const piece_layer_table = cursor;
+    cursor += layers.size() * TTORRENT_METAINFO_CAPSULE_PIECE_LAYER_RECORD_SIZE;
+    cursor = align_up(cursor, 4U);
+    std::size_t const piece_layer_file_index_table = cursor;
+    cursor += layer_file_index_count * TTORRENT_METAINFO_CAPSULE_FILE_INDEX_RECORD_SIZE;
+    std::size_t const payload = align_up(cursor, 8U);
+
+    MetainfoCapsuleFixture fixture{
+        .bytes = std::vector<std::uint8_t>(payload, 0U),
+        .info_offset = 0U,
+        .component_table_offset = static_cast<std::uint32_t>(component_table),
+        .file_table_offset = static_cast<std::uint32_t>(file_table),
+        .piece_layer_table_offset = static_cast<std::uint32_t>(piece_layer_table),
+    };
+    auto &bytes = fixture.bytes;
+    write_u32(bytes, 0U, TTORRENT_METAINFO_CAPSULE_MAGIC);
+    write_u16(bytes, 4U, TTORRENT_METAINFO_CAPSULE_SCHEMA_VERSION);
+    write_u16(bytes, 6U, TTORRENT_METAINFO_CAPSULE_HEADER_SIZE);
+    bytes.at(12U) = input_kind;
+    bytes.at(13U) = kind;
+    bytes.at(14U) = content_kind;
+    bytes.at(15U) = private_torrent ? TTORRENT_METAINFO_PRIVATE : 0U;
+    write_u32(bytes, 20U, 16U * 1024U);
+    write_u32(bytes, 64U, static_cast<std::uint32_t>(file_table));
+    write_u32(bytes, 68U, static_cast<std::uint32_t>(files.size()));
+    write_u32(bytes, 72U, static_cast<std::uint32_t>(component_table));
+    write_u32(bytes, 76U, static_cast<std::uint32_t>(component_count));
+    write_u32(bytes, 80U, static_cast<std::uint32_t>(tracker_table));
+    write_u32(bytes, 84U, static_cast<std::uint32_t>(trackers.size()));
+    write_u32(bytes, 88U, static_cast<std::uint32_t>(web_seed_table));
+    write_u32(bytes, 92U, static_cast<std::uint32_t>(web_seeds.size()));
+    write_u32(bytes, 96U, static_cast<std::uint32_t>(piece_layer_table));
+    write_u32(bytes, 100U, static_cast<std::uint32_t>(layers.size()));
+    write_u32(bytes, 104U, static_cast<std::uint32_t>(piece_layer_file_index_table));
+    write_u32(bytes, 108U, static_cast<std::uint32_t>(layer_file_index_count));
+    write_i64(bytes, 128U, creation_date);
+    write_u32(bytes, 136U, static_cast<std::uint32_t>(payload));
+    write_u16(bytes, 144U, TTORRENT_METAINFO_CAPSULE_FILE_RECORD_SIZE);
+    write_u16(bytes, 146U, TTORRENT_METAINFO_CAPSULE_RANGE_RECORD_SIZE);
+    write_u16(bytes, 148U, TTORRENT_METAINFO_CAPSULE_TRACKER_RECORD_SIZE);
+    write_u16(bytes, 150U, TTORRENT_METAINFO_CAPSULE_PIECE_LAYER_RECORD_SIZE);
+    write_u16(bytes, 152U, TTORRENT_METAINFO_CAPSULE_FILE_INDEX_RECORD_SIZE);
+
+    std::uint16_t present_fields = 0U;
+    if (!trackers.empty()) {
+        present_fields = static_cast<std::uint16_t>(present_fields
+            + TTORRENT_METAINFO_FIELD_ANNOUNCE_LIST);
+    }
+    if (!web_seeds.empty()) {
+        present_fields = static_cast<std::uint16_t>(present_fields
+            + TTORRENT_METAINFO_FIELD_URL_LIST);
+    }
+    if (!layers.empty()) {
+        present_fields = static_cast<std::uint16_t>(present_fields
+            + TTORRENT_METAINFO_FIELD_PIECE_LAYERS);
+    }
+    if (!comment.empty()) {
+        present_fields = static_cast<std::uint16_t>(present_fields
+            + TTORRENT_METAINFO_FIELD_COMMENT);
+    }
+    if (creation_date >= 0) {
+        present_fields = static_cast<std::uint16_t>(present_fields
+            + TTORRENT_METAINFO_FIELD_CREATION_DATE);
+    }
+    write_u16(bytes, 16U, present_fields);
+
+    std::vector<std::uint8_t> info_bytes;
+    info_bytes.reserve(info.size());
+    std::ranges::transform(info, std::back_inserter(info_bytes), [](char const character) {
+        return static_cast<std::uint8_t>(character);
+    });
+    auto const info_range = append_capsule_bytes(bytes, info_bytes);
+    fixture.info_offset = info_range.first;
+    write_capsule_range(bytes, 24U, info_range);
+    write_capsule_range(bytes, 32U, append_capsule_string(bytes, name));
+
+    bool const has_v1 = kind == TTORRENT_METAINFO_KIND_V1
+        || kind == TTORRENT_METAINFO_KIND_HYBRID;
+    bool const has_v2 = kind == TTORRENT_METAINFO_KIND_V2
+        || kind == TTORRENT_METAINFO_KIND_HYBRID;
+    if (has_v1) {
+        lt::sha1_hash const hash = lt::hasher(lt::span<char const>(info)).final();
+        std::array<std::uint8_t, 20U> encoded{};
+        std::ranges::transform(hash, encoded.begin(), [](char const byte) {
+            return static_cast<std::uint8_t>(byte);
+        });
+        write_capsule_range(bytes, 40U, append_capsule_bytes(bytes, encoded));
+    }
+    if (has_v2) {
+        lt::sha256_hash const hash = lt::hasher256(lt::span<char const>(info)).final();
+        std::array<std::uint8_t, 32U> encoded{};
+        std::ranges::transform(hash, encoded.begin(), [](char const byte) {
+            return static_cast<std::uint8_t>(byte);
+        });
+        write_capsule_range(bytes, 48U, append_capsule_bytes(bytes, encoded));
+    }
+    if (v1_piece_hashes) {
+        write_capsule_range(bytes, 56U, {
+            info_range.first + v1_piece_hashes->first,
+            v1_piece_hashes->second,
+        });
+    }
+
+    std::size_t next_component = 0U;
+    for (std::size_t file_index = 0U; file_index < files.size(); ++file_index) {
+        CapsuleFileFixture const &file = files.at(file_index);
+        std::size_t const record = file_table
+            + file_index * TTORRENT_METAINFO_CAPSULE_FILE_RECORD_SIZE;
+        write_i32(bytes, record, static_cast<std::int32_t>(file_index));
+        write_u32(bytes, record + 4U, static_cast<std::uint32_t>(next_component));
+        write_u32(bytes, record + 8U, static_cast<std::uint32_t>(file.components.size()));
+        write_u32(bytes, record + 12U, file.flags);
+        write_i64(bytes, record + 16U, file.size);
+        if (file.info_root_offset) {
+            write_capsule_range(bytes, record + 24U, {
+                info_range.first + *file.info_root_offset,
+                32U,
+            });
+        }
+        for (std::string const &component : file.components) {
+            write_capsule_range(
+                bytes,
+                component_table + next_component * TTORRENT_METAINFO_CAPSULE_RANGE_RECORD_SIZE,
+                append_capsule_string(bytes, component)
+            );
+            ++next_component;
+        }
+    }
+
+    for (std::size_t index = 0U; index < trackers.size(); ++index) {
+        std::size_t const record = tracker_table
+            + index * TTORRENT_METAINFO_CAPSULE_TRACKER_RECORD_SIZE;
+        write_capsule_range(bytes, record, append_capsule_string(bytes, trackers.at(index).first));
+        bytes.at(record + 8U) = trackers.at(index).second;
+    }
+    for (std::size_t index = 0U; index < web_seeds.size(); ++index) {
+        write_capsule_range(
+            bytes,
+            web_seed_table + index * TTORRENT_METAINFO_CAPSULE_RANGE_RECORD_SIZE,
+            append_capsule_string(bytes, web_seeds.at(index))
+        );
+    }
+
+    std::size_t next_layer_file_index = 0U;
+    for (std::size_t index = 0U; index < layers.size(); ++index) {
+        CapsuleLayerFixture const &layer = layers.at(index);
+        std::size_t const record = piece_layer_table
+            + index * TTORRENT_METAINFO_CAPSULE_PIECE_LAYER_RECORD_SIZE;
+        write_capsule_range(bytes, record, append_capsule_bytes(bytes, layer.root));
+        write_capsule_range(bytes, record + 8U, append_capsule_bytes(bytes, layer.hashes));
+        write_u32(bytes, record + 16U, static_cast<std::uint32_t>(next_layer_file_index));
+        write_u32(bytes, record + 20U, static_cast<std::uint32_t>(layer.file_indices.size()));
+        for (std::int32_t const file_index : layer.file_indices) {
+            write_i32(
+                bytes,
+                piece_layer_file_index_table
+                    + next_layer_file_index * TTORRENT_METAINFO_CAPSULE_FILE_INDEX_RECORD_SIZE,
+                file_index
+            );
+            ++next_layer_file_index;
+        }
+    }
+    if (!comment.empty()) {
+        write_capsule_range(bytes, 112U, append_capsule_string(bytes, comment));
+    }
+    write_u32(bytes, 8U, static_cast<std::uint32_t>(bytes.size()));
+    return fixture;
+}
+
+[[nodiscard]] std::string v1_capsule_info(std::uint32_t &piece_hash_offset)
+{
+    std::string info = "d6:lengthi4e4:name8:file.bin12:piece lengthi16384e6:pieces20:";
+    piece_hash_offset = static_cast<std::uint32_t>(info.size());
+    info.append(20U, 'p');
+    info += "7:privatei1ee";
+    return info;
+}
+
+[[nodiscard]] std::array<std::uint8_t, 32U> v2_root(
+    std::span<std::uint8_t const> const piece_hashes
+)
+{
+    std::vector<char> input;
+    input.reserve(piece_hashes.size());
+    std::ranges::transform(piece_hashes, std::back_inserter(input), [](std::uint8_t const byte) {
+        return static_cast<char>(byte);
+    });
+    lt::sha256_hash const root = lt::hasher256(lt::span<char const>(input)).final();
+    std::array<std::uint8_t, 32U> encoded{};
+    std::ranges::transform(root, encoded.begin(), [](char const byte) {
+        return static_cast<std::uint8_t>(byte);
+    });
+    return encoded;
+}
+
+[[nodiscard]] std::string v2_capsule_info(
+    std::string_view const name,
+    std::int64_t const size,
+    std::array<std::uint8_t, 32U> const &root,
+    std::uint32_t &root_offset,
+    bool const include_v1,
+    std::uint32_t &piece_hash_offset
+)
+{
+    std::string info = "d9:file treed" + std::to_string(name.size()) + ":" + std::string(name)
+        + "d0:d6:lengthi" + std::to_string(size) + "e11:pieces root32:";
+    root_offset = static_cast<std::uint32_t>(info.size());
+    for (std::uint8_t const byte : root) {
+        info.push_back(static_cast<char>(byte));
+    }
+    info += "eee";
+    if (include_v1) {
+        info += "6:lengthi" + std::to_string(size) + "e";
+    }
+    info += "12:meta versioni2e4:name" + std::to_string(name.size()) + ":" + std::string(name)
+        + "12:piece lengthi16384e";
+    if (include_v1) {
+        info += "6:pieces20:";
+        piece_hash_offset = static_cast<std::uint32_t>(info.size());
+        info.append(20U, 'h');
+    }
+    info.push_back('e');
+    return info;
+}
+
 [[nodiscard]] std::shared_ptr<lt::torrent_info const> make_raw_v1_torrent_info(std::string_view files_payload)
 {
     std::vector<char> buffer;
@@ -84,6 +436,282 @@ void append_bencoded_string(std::string &buffer, std::string_view value)
 }
 
 } // namespace
+
+TEST_CASE("preparsed v1 metainfo capsule constructs narrow native state")
+{
+    std::uint32_t piece_hash_offset = 0U;
+    std::string const info = v1_capsule_info(piece_hash_offset);
+    MetainfoCapsuleFixture fixture = make_metainfo_capsule(
+        info,
+        "file.bin",
+        TTORRENT_METAINFO_KIND_V1,
+        TTORRENT_CONTENT_KIND_SINGLE_FILE,
+        {CapsuleFileFixture{.components = {"file.bin"}, .size = 4}},
+        std::pair{piece_hash_offset, 20U},
+        {},
+        true,
+        {{"HTTPS://tracker.example/announce", 3U}},
+        {"HTTPS://seed.example/file"},
+        "capsule comment",
+        1'234
+    );
+
+    TorrentLoadResult imported = import_preparsed_metainfo_capsule(fixture.bytes);
+
+    REQUIRE(imported);
+    REQUIRE(imported->ti);
+    CHECK(imported->ti->is_loaded());
+    CHECK(imported->ti->priv());
+    CHECK(imported->ti->info_hashes().has_v1());
+    CHECK_FALSE(imported->ti->info_hashes().has_v2());
+    CHECK(imported->info_hashes == imported->ti->info_hashes());
+    CHECK(imported->ti->name() == "file.bin");
+    CHECK(imported->ti->piece_length() == 16 * 1024);
+    CHECK(imported->ti->num_pieces() == 1);
+    CHECK(imported->ti->layout().num_files() == 1);
+    CHECK(imported->ti->layout().file_path(lt::file_index_t(0)) == "file.bin");
+    CHECK(imported->ti->layout().file_size(lt::file_index_t(0)) == 4);
+    CHECK(imported->ti->hash_for_piece(lt::piece_index_t(0)) == lt::sha1_hash(std::string(20U, 'p')));
+    CHECK(std::ranges::equal(imported->ti->info_section(), info));
+    CHECK(imported->trackers == std::vector<std::string>{"HTTPS://tracker.example/announce"});
+    CHECK(imported->tracker_tiers == std::vector<int>{3});
+    CHECK(imported->url_seeds == std::vector<std::string>{"HTTPS://seed.example/file"});
+    CHECK(imported->comment == "capsule comment");
+    CHECK(imported->creation_date == 1'234);
+    CHECK(imported->peers.empty());
+    CHECK(imported->banned_peers.empty());
+    CHECK(imported->dht_nodes.empty());
+    CHECK(imported->file_priorities.empty());
+    CHECK(imported->piece_priorities.empty());
+}
+
+TEST_CASE("preparsed v2 capsule imports verified piece layers with owned roots")
+{
+    std::vector<std::uint8_t> piece_hashes(64U);
+    for (std::size_t index = 0U; index < piece_hashes.size(); ++index) {
+        piece_hashes.at(index) = static_cast<std::uint8_t>(index + 1U);
+    }
+    std::array<std::uint8_t, 32U> const root = v2_root(piece_hashes);
+    std::uint32_t root_offset = 0U;
+    std::uint32_t ignored_piece_hash_offset = 0U;
+    std::string const info = v2_capsule_info(
+        "file.bin",
+        32'768,
+        root,
+        root_offset,
+        false,
+        ignored_piece_hash_offset
+    );
+    MetainfoCapsuleFixture fixture = make_metainfo_capsule(
+        info,
+        "file.bin",
+        TTORRENT_METAINFO_KIND_V2,
+        TTORRENT_CONTENT_KIND_SINGLE_FILE,
+        {CapsuleFileFixture{
+            .components = {"file.bin"},
+            .size = 32'768,
+            .info_root_offset = root_offset,
+        }},
+        std::nullopt,
+        {CapsuleLayerFixture{.root = root, .hashes = piece_hashes, .file_indices = {0}}}
+    );
+
+    TorrentLoadResult imported = import_preparsed_metainfo_capsule(fixture.bytes);
+    REQUIRE(imported);
+    REQUIRE(imported->ti);
+    CHECK_FALSE(imported->ti->info_hashes().has_v1());
+    CHECK(imported->ti->info_hashes().has_v2());
+    CHECK(imported->ti->layout().root(lt::file_index_t(0)) == lt::sha256_hash(
+        reinterpret_cast<char const *>(root.data())
+    ));
+    REQUIRE(imported->merkle_trees.size() == 1);
+    CHECK_FALSE(imported->merkle_trees[lt::file_index_t(0)].empty());
+
+    std::shared_ptr<lt::torrent_info> copy = std::make_shared<lt::torrent_info>(*imported->ti);
+    imported->ti.reset();
+    CHECK(copy->layout().root(lt::file_index_t(0)) == lt::sha256_hash(
+        reinterpret_cast<char const *>(root.data())
+    ));
+    lt::torrent_info moved(copy->info_hashes());
+    moved = std::move(*copy);
+    copy.reset();
+    CHECK(moved.layout().root(lt::file_index_t(0)) == lt::sha256_hash(
+        reinterpret_cast<char const *>(root.data())
+    ));
+    std::span<char const> const owned_info = moved.info_section();
+    char const * const owned_root = moved.layout().root_ptr(lt::file_index_t(0));
+    REQUIRE(root_offset <= owned_info.size());
+    REQUIRE(lt::sha256_hash::size() <= owned_info.size() - root_offset);
+    CHECK(owned_root == owned_info.subspan(root_offset, lt::sha256_hash::size()).data());
+}
+
+TEST_CASE("preparsed hybrid capsule accepts the compatible omitted tail pad")
+{
+    std::array<std::uint8_t, 32U> root{};
+    root.fill(0x5aU);
+    std::uint32_t root_offset = 0U;
+    std::uint32_t piece_hash_offset = 0U;
+    std::string const info = v2_capsule_info(
+        "tiny.bin",
+        3,
+        root,
+        root_offset,
+        true,
+        piece_hash_offset
+    );
+    MetainfoCapsuleFixture fixture = make_metainfo_capsule(
+        info,
+        "tiny.bin",
+        TTORRENT_METAINFO_KIND_HYBRID,
+        TTORRENT_CONTENT_KIND_SINGLE_FILE,
+        {CapsuleFileFixture{
+            .components = {"tiny.bin"},
+            .size = 3,
+            .info_root_offset = root_offset,
+        }},
+        std::pair{piece_hash_offset, 20U}
+    );
+
+    TorrentLoadResult imported = import_preparsed_metainfo_capsule(fixture.bytes);
+
+    REQUIRE(imported);
+    REQUIRE(imported->ti);
+    CHECK(imported->ti->info_hashes().has_v1());
+    CHECK(imported->ti->info_hashes().has_v2());
+    CHECK(imported->ti->layout().num_files() == 1);
+    CHECK(imported->ti->total_size() == 3);
+}
+
+TEST_CASE("preparsed capsule supports a synthetic root for rootless v2 metadata")
+{
+    std::array<std::uint8_t, 32U> root{};
+    root.fill(0x6bU);
+    std::string info = "d9:file treed8:leaf.bind0:d6:lengthi16384e11:pieces root32:";
+    std::uint32_t const root_offset = static_cast<std::uint32_t>(info.size());
+    for (std::uint8_t const byte : root) {
+        info.push_back(static_cast<char>(byte));
+    }
+    info += "eee12:meta versioni2e12:piece lengthi16384ee";
+    MetainfoCapsuleFixture fixture = make_metainfo_capsule(
+        info,
+        "Torrent-0123456789ab",
+        TTORRENT_METAINFO_KIND_V2,
+        TTORRENT_CONTENT_KIND_DIRECTORY,
+        {CapsuleFileFixture{
+            .components = {"leaf.bin"},
+            .size = 16'384,
+            .info_root_offset = root_offset,
+        }}
+    );
+
+    TorrentLoadResult imported = import_preparsed_metainfo_capsule(fixture.bytes);
+
+    REQUIRE(imported);
+    REQUIRE(imported->ti);
+    CHECK(imported->ti->name() == "Torrent-0123456789ab");
+    CHECK(imported->ti->layout().file_path(lt::file_index_t(0))
+        == "Torrent-0123456789ab/leaf.bin");
+}
+
+TEST_CASE("preparsed metainfo capsule rejects corrupted framing and semantic ranges")
+{
+    std::uint32_t piece_hash_offset = 0U;
+    std::string const info = v1_capsule_info(piece_hash_offset);
+    MetainfoCapsuleFixture const valid = make_metainfo_capsule(
+        info,
+        "file.bin",
+        TTORRENT_METAINFO_KIND_V1,
+        TTORRENT_CONTENT_KIND_SINGLE_FILE,
+        {CapsuleFileFixture{.components = {"file.bin"}, .size = 4}},
+        std::pair{piece_hash_offset, 20U}
+    );
+    REQUIRE(import_preparsed_metainfo_capsule(valid.bytes));
+
+    auto rejects = [](MetainfoCapsuleFixture fixture) {
+        CHECK_FALSE(import_preparsed_metainfo_capsule(fixture.bytes));
+    };
+
+    MetainfoCapsuleFixture mutation = valid;
+    mutation.bytes.at(0U) ^= 1U;
+    rejects(mutation);
+
+    mutation = valid;
+    write_u32(mutation.bytes, 8U, static_cast<std::uint32_t>(mutation.bytes.size() - 1U));
+    rejects(mutation);
+
+    mutation = valid;
+    write_u16(mutation.bytes, 144U, TTORRENT_METAINFO_CAPSULE_FILE_RECORD_SIZE + 1U);
+    rejects(mutation);
+
+    mutation = valid;
+    mutation.bytes.at(154U) = 1U;
+    rejects(mutation);
+
+    mutation = valid;
+    write_u32(mutation.bytes, 72U, mutation.component_table_offset + 4U);
+    rejects(mutation);
+
+    mutation = valid;
+    write_i32(mutation.bytes, mutation.file_table_offset, 1);
+    rejects(mutation);
+
+    mutation = valid;
+    write_u32(mutation.bytes, mutation.component_table_offset, 1U);
+    rejects(mutation);
+
+    mutation = valid;
+    mutation.bytes.at(mutation.info_offset) = 'l';
+    rejects(mutation);
+
+    mutation = valid;
+    mutation.bytes.back() ^= 1U;
+    rejects(mutation);
+
+    mutation = valid;
+    write_u32(mutation.bytes, 56U, mutation.info_offset);
+    rejects(mutation);
+
+    mutation = valid;
+    mutation.bytes.at(15U) = 0x80U;
+    rejects(mutation);
+
+    mutation = valid;
+    write_u16(mutation.bytes, 16U, TTORRENT_METAINFO_FIELD_PIECE_LAYERS);
+    rejects(mutation);
+
+    MetainfoCapsuleFixture const unsupported_tracker = make_metainfo_capsule(
+        info,
+        "file.bin",
+        TTORRENT_METAINFO_KIND_V1,
+        TTORRENT_CONTENT_KIND_SINGLE_FILE,
+        {CapsuleFileFixture{.components = {"file.bin"}, .size = 4}},
+        std::pair{piece_hash_offset, 20U},
+        {},
+        false,
+        {{"ftp://tracker.example/announce", 0U}}
+    );
+    rejects(unsupported_tracker);
+
+    MetainfoCapsuleFixture const unsupported_web_seed = make_metainfo_capsule(
+        info,
+        "file.bin",
+        TTORRENT_METAINFO_KIND_V1,
+        TTORRENT_CONTENT_KIND_SINGLE_FILE,
+        {CapsuleFileFixture{.components = {"file.bin"}, .size = 4}},
+        std::pair{piece_hash_offset, 20U},
+        {},
+        false,
+        {},
+        {"udp://seed.example/file"}
+    );
+    rejects(unsupported_web_seed);
+
+    std::vector<std::uint8_t> truncated(
+        valid.bytes.begin(),
+        std::next(valid.bytes.begin(), TTORRENT_METAINFO_CAPSULE_HEADER_SIZE - 1)
+    );
+    CHECK_FALSE(import_preparsed_metainfo_capsule(truncated));
+}
 
 TEST_CASE("torrent metadata rejects symbolic links and paths that cannot fit the bridge ABI")
 {

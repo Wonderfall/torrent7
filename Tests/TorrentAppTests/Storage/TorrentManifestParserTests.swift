@@ -509,6 +509,15 @@ struct TorrentManifestParserTests {
         }
 
         limits = .standard
+        limits.maximumStoragePathBytes = 20
+        try expectManifestError(.invalidFilePath) {
+            _ = try TorrentManifestParser(limits: limits).parse(Self.v1Directory(
+                name: "payload",
+                files: [.init(path: ["directory", "file.bin"], size: 1)]
+            ))
+        }
+
+        limits = .standard
         limits.maximumFileBytes = 4
         try expectManifestError(.invalidFileLength) {
             _ = try TorrentManifestParser(limits: limits).parse(

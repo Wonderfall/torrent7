@@ -66,6 +66,48 @@ ABI-sized integers. Native code validates every range, derives redundant
 values, copies all retained data, and commits fully constructed state
 atomically.
 
+### Metainfo capsule schema v1
+
+Schema v1 is at most 96 MiB. Every multibyte integer is little-endian, every
+offset is relative to the start of the capsule, and an absent range is encoded
+as `(offset: 0, size: 0)`. Tables must appear once in the canonical order below;
+the native reader rejects gaps other than required alignment padding.
+
+| Bytes | Type | Meaning |
+| --- | --- | --- |
+| 0–3 | `u32` | Magic `0x494d3754` (`T7MI` in byte order) |
+| 4–7 | `u16`, `u16` | Schema version `1`, header size `160` |
+| 8–11 | `u32` | Total capsule size |
+| 12–15 | four `u8` | Input kind, metainfo kind, content kind, private flag |
+| 16–19 | `u16`, reserved | Envelope-presence bits, then zero |
+| 20–23 | `u32` | Piece length |
+| 24–63 | five ranges | Exact info, effective name, v1 hash, v2 hash, v1 piece hashes |
+| 64–111 | six table descriptors | Files, path components, trackers, web seeds, piece layers, layer file indices |
+| 112–127 | two ranges | Comment and creator |
+| 128–135 | `i64` | Creation date, or `-1` when absent |
+| 136–143 | `u32`, reserved | Payload offset, then zero |
+| 144–153 | five `u16` | Record sizes: `32`, `8`, `16`, `24`, `4` |
+| 154–159 | reserved | All zero |
+
+Each table descriptor is `(u32 offset, u32 count)`. Tables are aligned and
+encoded in this order: files to 8 bytes, then all remaining tables to 4 bytes;
+the payload begins at the next 8-byte boundary.
+
+| Record | Bytes | Fields |
+| --- | ---: | --- |
+| File | 32 | `i32 index`; component start/count; flags; `i64 size`; pieces-root range |
+| Range | 8 | `u32 offset`; `u32 size` |
+| Tracker | 16 | URL range; `u8 tier`; seven zero bytes |
+| Piece layer | 24 | Root range; hash range; file-index start/count |
+| File index | 4 | `i32` validated file index |
+
+File roots and v1 piece hashes must point inside the copied exact-info range.
+Layer bytes, paths, sources, and descriptions live in the payload. Bare BEP 9
+info input must have zero envelope presence, tables, and descriptive ranges,
+with a `-1` creation date. The native importer recomputes both advertised
+identities, reconstructs file and Merkle state from typed records, owns every
+retained byte, and never bdecodes the exact-info payload.
+
 Exact original `info` bytes may be retained for info-hash calculation and BEP 9
 metadata serving. They must never be decoded later, including through lazy or
 compatibility accessors. Production has no fallback to `load_torrent_buffer`,

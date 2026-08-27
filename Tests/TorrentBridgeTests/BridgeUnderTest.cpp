@@ -5,6 +5,7 @@
 #include "../../Sources/TorrentBridge/TorrentBridgeClientLifecycle.cpp"
 #include "../../Sources/TorrentBridge/TorrentBridgeClientPersistence.cpp"
 #include "../../Sources/TorrentBridge/TorrentBridgeClientResume.cpp"
+#include "../../Sources/TorrentBridge/TorrentBridgeMetainfo.cpp"
 #include "../../Sources/TorrentBridge/TorrentBridgeSupport.cpp"
 
 #include "BridgePointerAuthenticationTestSupport.hpp"

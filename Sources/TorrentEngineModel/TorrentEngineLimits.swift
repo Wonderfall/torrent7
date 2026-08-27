@@ -21,6 +21,7 @@ package enum TorrentEngineLimits {
     package static let maximumTorrentSnapshotCount = 20_000
     package static let maximumTrackerHostRowCount = 20_000
     package static let maximumEnginePrivatePathBytes = 1_023
+    package static let maximumFilePathBytes = 1_023
     package static let maximumRemovalWarningBytes = 511
     package static let maximumPieceMapCount = 0x20_0000
     package static let torrentIDCapacity = 68

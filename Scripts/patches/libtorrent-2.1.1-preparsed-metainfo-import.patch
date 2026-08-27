@@ -1,0 +1,290 @@
+diff --git a/include/libtorrent/aux_/preparsed_metainfo.hpp b/include/libtorrent/aux_/preparsed_metainfo.hpp
+new file mode 100644
+index 000000000..fdc54730d
+--- /dev/null
++++ b/include/libtorrent/aux_/preparsed_metainfo.hpp
+@@ -0,0 +1,57 @@
++/*
++
++Copyright (c) 2026, Torrent7 contributors
++
++You may use, distribute and modify this code under the terms of the BSD license,
++see LICENSE file.
++*/
++
++#ifndef TORRENT_AUX_PREPARSED_METAINFO_HPP_INCLUDED
++#define TORRENT_AUX_PREPARSED_METAINFO_HPP_INCLUDED
++
++#include "libtorrent/config.hpp"
++#include "libtorrent/error_code.hpp"
++#include "libtorrent/file_storage.hpp"
++#include "libtorrent/fwd.hpp"
++#include "libtorrent/info_hash.hpp"
++#include "libtorrent/span.hpp"
++
++#include <cstdint>
++#include <memory>
++#include <string>
++
++namespace libtorrent::aux {
++
++	// Narrow input for constructing torrent_info after an external parser has
++	// validated the info dictionary. Paths are already joined storage paths.
++	// A non-negative pieces_root_offset addresses 32 bytes in info_section.
++	struct preparsed_metainfo_file
++	{
++		std::string path;
++		std::int64_t size = 0;
++		file_flags_t flags{};
++		std::int32_t pieces_root_offset = -1;
++	};
++
++	struct preparsed_metainfo
++	{
++		span<char const> info_section;
++		span<preparsed_metainfo_file const> files;
++		info_hash_t expected_info_hashes;
++		std::string name;
++		int piece_length = 0;
++		std::int32_t piece_hashes_offset = -1;
++		std::int32_t piece_hashes_size = 0;
++		bool multifile = false;
++		bool private_torrent = false;
++	};
++
++	// This importer does not decode info_section. It copies the exact bytes,
++	// recomputes identity, derives file offsets and piece counts, and commits a
++	// fully populated torrent_info only after all supplied semantics agree.
++	TORRENT_EXTRA_EXPORT std::shared_ptr<torrent_info> import_preparsed_metainfo(
++		preparsed_metainfo const& input, error_code& ec);
++
++}
++
++#endif // TORRENT_AUX_PREPARSED_METAINFO_HPP_INCLUDED
+diff --git a/include/libtorrent/torrent_info.hpp b/include/libtorrent/torrent_info.hpp
+index 8843179a2..61a18f966 100644
+--- a/include/libtorrent/torrent_info.hpp
++++ b/include/libtorrent/torrent_info.hpp
+@@ -47,6 +47,9 @@ namespace libtorrent {
+ 	struct invariant_access;
+ 
+ namespace aux {
++	struct preparsed_metainfo;
++	TORRENT_EXTRA_EXPORT std::shared_ptr<torrent_info> import_preparsed_metainfo(
++		preparsed_metainfo const&, error_code&);
+ 
+ 	// internal, exposed for the unit test
+ 	TORRENT_EXTRA_EXPORT void sanitize_append_path_element(std::string& path
+@@ -747,6 +750,9 @@ TORRENT_VERSION_NAMESPACE_4
+ #endif
+ 
+ 	private:
++		friend std::shared_ptr<torrent_info> aux::import_preparsed_metainfo(
++			aux::preparsed_metainfo const&, error_code&);
++
+ 		void parse_info_section_impl(
+ 			bdecode_node const& info, error_code& ec, load_torrent_limits const& cfg
+ 		);
+diff --git a/src/torrent_info.cpp b/src/torrent_info.cpp
+index 8f2874a81..740f4948f 100644
+--- a/src/torrent_info.cpp
++++ b/src/torrent_info.cpp
+@@ -33,6 +33,7 @@ see LICENSE file.
+ #include "libtorrent/disk_interface.hpp" // for default_block_size
+ #include "libtorrent/span.hpp"
+ #include "libtorrent/aux_/parse_url.hpp" // for is_valid_tracker_url
++#include "libtorrent/aux_/preparsed_metainfo.hpp"
+ 
+ #include "libtorrent/load_torrent.hpp" // for aux::parse_torrent_file()
+ #if TORRENT_ABI_VERSION < 4
+@@ -1032,6 +1033,190 @@ TORRENT_VERSION_NAMESPACE_4
+ 
+ 	torrent_info::~torrent_info() = default;
+ 
++	TORRENT_VERSION_NAMESPACE_4_END
++
++	namespace aux {
++
++	std::shared_ptr<torrent_info> import_preparsed_metainfo(
++		preparsed_metainfo const& input, error_code& ec)
++	{
++		ec.clear();
++		bool const has_v1 = input.expected_info_hashes.has_v1();
++		bool const has_v2 = input.expected_info_hashes.has_v2();
++		if ((!has_v1 && !has_v2)
++			|| input.info_section.empty()
++			|| input.info_section.size() >= std::numeric_limits<int>::max()
++			|| input.info_section.front() != 'd'
++			|| input.info_section.back() != 'e')
++		{
++			ec = errors::invalid_bencoding;
++			return {};
++		}
++
++		sha1_hash const v1_hash = hasher(input.info_section).final();
++		sha256_hash const v2_hash = hasher256(input.info_section).final();
++		if ((has_v1 && v1_hash != input.expected_info_hashes.v1)
++			|| (has_v2 && v2_hash != input.expected_info_hashes.v2))
++		{
++			ec = errors::mismatching_info_hash;
++			return {};
++		}
++
++		if (input.name.empty()
++			|| input.files.empty()
++			|| input.files.size() > std::numeric_limits<int>::max()
++			|| input.piece_length <= 0
++			|| input.piece_length > file_storage::max_piece_size
++			|| (has_v2 && (input.piece_length < default_block_size
++				|| (input.piece_length & (input.piece_length - 1)) != 0)))
++		{
++			ec = errors::torrent_invalid_length;
++			return {};
++		}
++
++		info_hash_t hashes;
++		if (has_v1) hashes.v1 = v1_hash;
++		if (has_v2) hashes.v2 = v2_hash;
++		auto result = std::make_shared<torrent_info>(hashes);
++		result->m_info_section_size = static_cast<std::int32_t>(input.info_section.size());
++		char* info_copy = new char[static_cast<std::size_t>(result->m_info_section_size)];
++		std::memcpy(info_copy, input.info_section.data()
++			, static_cast<std::size_t>(result->m_info_section_size));
++		result->m_info_section.reset(info_copy);
++
++		file_storage files;
++		files.set_piece_length(input.piece_length);
++		file_flags_t constexpr accepted_flags = file_storage::flag_pad_file
++			| file_storage::flag_hidden | file_storage::flag_executable;
++		for (preparsed_metainfo_file const& file : input.files)
++		{
++			bool const padding = bool(file.flags & file_storage::flag_pad_file);
++			if (file.path.empty()
++				|| file.size < 0
++				|| file.size > file_storage::max_file_size
++				|| bool(file.flags & ~accepted_flags)
++				|| (!padding && has_parent_path(file.path) != input.multifile)
++				|| (padding && file.pieces_root_offset != -1))
++			{
++				ec = errors::torrent_invalid_length;
++				return {};
++			}
++
++			char const* root = nullptr;
++			if (!padding && file.size > 0 && has_v2)
++			{
++				if (file.pieces_root_offset < 0
++					|| file.pieces_root_offset > result->m_info_section_size - sha256_hash::size())
++				{
++					ec = errors::torrent_missing_pieces_root;
++					return {};
++				}
++				root = result->m_info_section.get() + file.pieces_root_offset;
++				if (sha256_hash(root).is_all_zeros())
++				{
++					ec = errors::torrent_missing_pieces_root;
++					return {};
++				}
++			}
++			else if (file.pieces_root_offset != -1)
++			{
++				ec = errors::torrent_inconsistent_files;
++				return {};
++			}
++
++			// v2 padding is derived by file_storage. The typed list below is
++			// compared against that derivation before it is committed.
++			if (has_v2 && padding) continue;
++			files.add_file(ec, file.path, file.size, file.flags, 0, {}, root);
++			if (ec) return {};
++		}
++
++		if (has_v2 && has_v1
++			&& input.files.size() < std::numeric_limits<int>::max()
++			&& files.num_files() == static_cast<int>(input.files.size() + 1)
++			&& files.pad_file_at(file_index_t(files.num_files() - 1)))
++		{
++			files.remove_tail_padding();
++		}
++
++		if (files.num_files() != static_cast<int>(input.files.size()))
++		{
++			ec = errors::torrent_inconsistent_files;
++			return {};
++		}
++		for (file_index_t const index : files.file_range())
++		{
++			preparsed_metainfo_file const& expected = input.files[static_cast<int>(index)];
++			bool const padding = files.pad_file_at(index);
++			if (padding != bool(expected.flags & file_storage::flag_pad_file)
++				|| files.file_size(index) != expected.size
++				|| bool(files.file_flags(index) & file_storage::flag_hidden)
++					!= bool(expected.flags & file_storage::flag_hidden)
++				|| bool(files.file_flags(index) & file_storage::flag_executable)
++					!= bool(expected.flags & file_storage::flag_executable)
++				|| (!padding && files.file_path(index) != expected.path))
++			{
++				ec = errors::torrent_inconsistent_files;
++				return {};
++			}
++			if (!padding && has_v2 && expected.size > 0)
++			{
++				char const* const root = result->m_info_section.get()
++					+ expected.pieces_root_offset;
++				if (files.root(index) != sha256_hash(root))
++				{
++					ec = errors::torrent_inconsistent_files;
++					return {};
++				}
++			}
++		}
++
++		if (files.name() != input.name
++			|| files.total_size() <= 0
++			|| files.total_size() / files.piece_length() > file_storage::max_num_pieces)
++		{
++			ec = errors::torrent_invalid_length;
++			return {};
++		}
++		files.set_num_pieces(static_cast<int>((files.total_size()
++			+ files.piece_length() - 1) / files.piece_length()));
++		if (files.num_pieces() >= std::numeric_limits<int>::max() / sha1_hash::size())
++		{
++			ec = errors::too_many_pieces_in_torrent;
++			return {};
++		}
++
++		if (has_v1)
++		{
++			std::int64_t const hash_bytes = std::int64_t(files.num_pieces()) * sha1_hash::size();
++			if (hash_bytes != input.piece_hashes_size
++				|| input.piece_hashes_offset <= 0
++				|| input.piece_hashes_offset > result->m_info_section_size
++				|| hash_bytes > result->m_info_section_size - input.piece_hashes_offset)
++			{
++				ec = errors::torrent_invalid_hashes;
++				return {};
++			}
++			result->m_piece_hashes = input.piece_hashes_offset;
++		}
++		else if (input.piece_hashes_offset != -1 || input.piece_hashes_size != 0)
++		{
++			ec = errors::torrent_invalid_hashes;
++			return {};
++		}
++
++		result->m_flags = input.multifile ? torrent_info::multifile
++			: torrent_info_flags_t{};
++		if (input.private_torrent) result->m_flags |= torrent_info::private_torrent;
++		result->m_files.swap(files);
++		TORRENT_ASSERT(result->m_info_hash.has_v2() == result->m_files.v2());
++		return result;
++	}
++
++	} // namespace aux
++
++	TORRENT_VERSION_NAMESPACE_4
++
+ #if TORRENT_ABI_VERSION < 4
+ 	file_storage const& torrent_info::files() const
+ 	{

@@ -15,7 +15,6 @@ enum TorrentEngineClientResponseValidator {
     private static let maximumTorrentCommentBytes = 1_023
     private static let maximumSourceURLBytes = 1_023
     private static let maximumTrackerMessageBytes = 511
-    private static let maximumFilePathBytes = 1_023
     private static let maximumNetworkEndpointBytes = 255
     private static let maximumDiagnosticBytes = 511
 
@@ -413,7 +412,7 @@ enum TorrentEngineClientResponseValidator {
     private static func isConfinedRelativePath(_ path: String) -> Bool {
         guard isBoundedText(
             path,
-            maximumBytes: maximumFilePathBytes,
+            maximumBytes: TorrentEngineLimits.maximumFilePathBytes,
             allowsEmpty: false
         ),
         !(path as NSString).isAbsolutePath else {

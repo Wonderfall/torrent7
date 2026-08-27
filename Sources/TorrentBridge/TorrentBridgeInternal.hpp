@@ -11,6 +11,7 @@
 #include <libtorrent/alert_types.hpp>
 #include <libtorrent/aux_/path.hpp>
 #include <libtorrent/aux_/payload_file_provider.hpp>
+#include <libtorrent/aux_/preparsed_metainfo.hpp>
 #include <libtorrent/bencode.hpp>
 #include <libtorrent/client_data.hpp>
 #include <libtorrent/error_code.hpp>
@@ -306,7 +307,7 @@ static_assert(
 );
 static_assert(kMaxTorrentIdentityTokenCount > static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 58U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 59U);
 static_assert(
     TORRENT_ABI_VERSION > 1,
     "Deprecated libtorrent ABIs can parse add_torrent_params.url as a raw magnet."
@@ -1143,6 +1144,10 @@ TorrentLoadResult import_parsed_magnet(
     std::span<TTorrentMagnetTracker const> trackers,
     std::span<TTorrentByteRange const> web_seeds,
     std::span<TTorrentFileSelectionRange const> file_selections
+);
+
+TorrentLoadResult import_preparsed_metainfo_capsule(
+    std::span<std::uint8_t const> capsule
 );
 
 void sanitize_resume_endpoint_hints(lt::add_torrent_params &params) noexcept;
