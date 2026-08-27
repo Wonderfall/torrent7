@@ -471,7 +471,7 @@ struct TorrentStoreIntegrationTests {
                 TorrentTrackerHostItem(torrentID: "alpha", host: "mirror.example.org")
             ]
         ))
-        await harness.engine.setDirtyMask(UInt32(TTORRENT_DIRTY_TRACKER_HOSTS))
+        await harness.engine.setDirtyMask(TorrentEngineDirtySet.trackerHosts.rawValue)
 
         await harness.store.refreshNow()
 
@@ -497,7 +497,7 @@ struct TorrentStoreIntegrationTests {
             revision: 2,
             hosts: [TorrentTrackerHostItem(torrentID: "alpha", host: "new.example.org")]
         ))
-        await harness.engine.setDirtyMask(UInt32(TTORRENT_DIRTY_TRACKER_HOSTS))
+        await harness.engine.setDirtyMask(TorrentEngineDirtySet.trackerHosts.rawValue)
         await harness.engine.suspendNextTrackerHostBatchCall()
 
         let activeRefresh = Task { @MainActor in
@@ -509,7 +509,7 @@ struct TorrentStoreIntegrationTests {
             revision: 3,
             hosts: [TorrentTrackerHostItem(torrentID: "alpha", host: "latest.example.org")]
         ))
-        await harness.engine.setDirtyMask(UInt32(TTORRENT_DIRTY_TRACKER_HOSTS))
+        await harness.engine.setDirtyMask(TorrentEngineDirtySet.trackerHosts.rawValue)
         harness.store.refresh()
 
         await harness.engine.resumeSuspendedTrackerHostBatchCalls()
@@ -2668,7 +2668,10 @@ struct TorrentStoreIntegrationTests {
         let queuedOperation = Task { @MainActor in
             operationStarted.withLock { $0 = true }
             do {
-                try await harness.store.requestSources(for: "alpha")
+                try await harness.store.setSourcePolicy(
+                    for: "alpha",
+                    mutation: .boolean(field: .dht, enabled: false)
+                )
                 operationOutcome.withLock { $0 = "succeeded" }
             } catch {
                 operationOutcome.withLock { $0 = error.localizedDescription }
@@ -2696,7 +2699,7 @@ struct TorrentStoreIntegrationTests {
         #expect(replacementCount.withLock { $0 } == 1)
         #expect(resolvedOutcome != nil)
         #expect(resolvedOutcome != "succeeded")
-        #expect(await harness.engine.requestedSourceIDs.isEmpty)
+        #expect(await harness.engine.sourcePolicyUpdates.isEmpty)
         #expect(!harness.store.engineAvailable)
     }
 

@@ -84,9 +84,6 @@ struct FooterBarContainer: View {
         if store.networkStatus.networkBlocked {
             return "Network traffic is blocked until the selected interface is available."
         }
-        if store.networkStatus.isApplying {
-            return "Network settings are being applied."
-        }
         if !store.networkStatus.lastError.isEmpty {
             return store.networkStatus.lastError
         }

@@ -374,8 +374,7 @@ enum TorrentEngineClientResponseValidator {
                 (0...Int(Int32.max)).contains($0)
             } ?? true
         }
-        guard status.submittedRevision <= status.requestedRevision,
-              (0...65_535).contains(status.listenPort),
+        guard (0...65_535).contains(status.listenPort),
               dhtDiagnosticsAreValid,
               isBoundedText(
                   status.endpoint,

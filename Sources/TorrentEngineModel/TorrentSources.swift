@@ -658,8 +658,6 @@ package enum TorrentDHTStatus: UInt8, Codable, Equatable, Sendable {
 }
 
 package struct TorrentNetworkStatus: Codable, Equatable, Sendable {
-    package let requestedRevision: UInt64
-    package let submittedRevision: UInt64
     package let listenPort: Int32
     package let networkBlocked: Bool
     package let hasListener: Bool
@@ -669,8 +667,6 @@ package struct TorrentNetworkStatus: Codable, Equatable, Sendable {
     package let dhtRoutingNodeCount: Int?
 
     package static let empty = TorrentNetworkStatus(
-        requestedRevision: 0,
-        submittedRevision: 0,
         listenPort: 0,
         networkBlocked: true,
         hasListener: false,
@@ -681,8 +677,6 @@ package struct TorrentNetworkStatus: Codable, Equatable, Sendable {
     )
 
     package init(
-        requestedRevision: UInt64,
-        submittedRevision: UInt64,
         listenPort: Int32,
         networkBlocked: Bool,
         hasListener: Bool,
@@ -691,8 +685,6 @@ package struct TorrentNetworkStatus: Codable, Equatable, Sendable {
         dhtStatus: TorrentDHTStatus,
         dhtRoutingNodeCount: Int?
     ) {
-        self.requestedRevision = requestedRevision
-        self.submittedRevision = submittedRevision
         self.listenPort = listenPort
         self.networkBlocked = networkBlocked
         self.hasListener = hasListener
@@ -700,10 +692,6 @@ package struct TorrentNetworkStatus: Codable, Equatable, Sendable {
         self.lastError = lastError
         self.dhtStatus = dhtStatus
         self.dhtRoutingNodeCount = dhtRoutingNodeCount
-    }
-
-    package var isApplying: Bool {
-        requestedRevision > submittedRevision
     }
 
     package var dhtStatusSummary: String {

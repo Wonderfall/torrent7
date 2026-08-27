@@ -2,31 +2,6 @@
 
 namespace torrent_bridge::internal {
 
-void TTorrentClient::invalidate_queue_order_index_locked() noexcept
-{
-    queue_order_index.reset();
-}
-
-void TTorrentClient::untrack_queue_identity_locked(TorrentIdentity *identity) noexcept
-{
-    if (identity == nullptr || !identity->queue_order_tracked) {
-        return;
-    }
-
-    identity->queue_order_tracked = false;
-    auto *const priority = queue_order_index.state(identity->queue_priority);
-    if (!queue_order_index.valid || priority == nullptr) {
-        invalidate_queue_order_index_locked();
-        return;
-    }
-
-    if (priority->count == 0U) {
-        invalidate_queue_order_index_locked();
-        return;
-    }
-    --priority->count;
-}
-
 bool TTorrentClient::identity_is_referenced_locked(TorrentIdentity const *identity) const
 {
     if (identity == nullptr) {
@@ -61,9 +36,9 @@ void TTorrentClient::retire_identity_if_unreferenced_locked(TorrentIdentity *ide
     lsd_disabled_by_app.erase(identity);
     peer_exchange_disabled_by_app.erase(identity);
     metadata_validation_pending.erase(identity);
-    untrack_queue_identity_locked(identity);
     canonical_ids_in_use.erase(identity->canonical_id);
     if (identity->token != nullptr) {
+        handle_by_native_token.erase(identity->token->value);
         identity->token->active_identity.store(nullptr, std::memory_order_release);
     }
     torrent_identities.erase(existing);
@@ -169,20 +144,23 @@ void TTorrentClient::mark_active(lt::info_hash_t const &hashes, lt::torrent_hand
     std::scoped_lock io_guard(resume_io_lock);
     for (std::string const &id : ids) {
         active_identity_by_id[id] = identity;
-        handle_by_id[id] = handle;
         removing_identity_by_id.erase(id);
     }
-    handle_by_id[identity->canonical_id] = handle;
+    if (identity->token != nullptr) {
+        handle_by_native_token[identity->token->value] = handle;
+    }
 }
 
-void TTorrentClient::remember_canonical_handle(lt::torrent_handle const &handle, TorrentIdentity *identity)
+void TTorrentClient::remember_native_handle(lt::torrent_handle const &handle, TorrentIdentity *identity)
 {
     if (!handle.is_valid() || identity == nullptr) {
         return;
     }
 
     std::scoped_lock io_guard(resume_io_lock);
-    handle_by_id[identity->canonical_id] = handle;
+    if (identity->token != nullptr) {
+        handle_by_native_token[identity->token->value] = handle;
+    }
 }
 
 void TTorrentClient::mark_unidentified_remove_requested(TorrentIdentity *identity)
@@ -192,9 +170,9 @@ void TTorrentClient::mark_unidentified_remove_requested(TorrentIdentity *identit
     }
 
     std::scoped_lock io_guard(resume_io_lock);
-    untrack_queue_identity_locked(identity);
-    discard_pending_resume_saves_locked(identity);
-    handle_by_id.erase(identity->canonical_id);
+    if (identity->token != nullptr) {
+        handle_by_native_token.erase(identity->token->value);
+    }
     removing_identity_by_id.erase(identity->canonical_id);
     unidentified_removing_identities.insert(identity);
 }
@@ -210,11 +188,10 @@ void TTorrentClient::mark_unidentified_remove_requested(TorrentIdentity *identit
         return true;
     }
 
-    invalidate_queue_order_index_locked();
     try {
         session.remove_torrent(handle);
     } catch (...) {
-        remember_canonical_handle(handle, identity);
+        remember_native_handle(handle, identity);
         request_snapshot_update_locked();
         BridgeResult const rollback_fault = fault_persistence(3, "Added torrent rollback could not be "
                                                                  "completed; resume persistence is uncertain.");
@@ -245,7 +222,7 @@ void TTorrentClient::mark_unidentified_remove_requested(TorrentIdentity *identit
         BridgeResult tombstoned = persist_removal_tombstones(resume_ids);
         if (!tombstoned) {
             mark_active(hashes, handle, identity);
-            changes |= cache_snapshot(handle);
+            changes |= observe_torrent_handle(handle);
             request_snapshot_update_locked();
             changes |= queue_alert_error("Added torrent rollback could not be made durable: " + tombstoned.error().message +
                                          ".");
@@ -254,7 +231,6 @@ void TTorrentClient::mark_unidentified_remove_requested(TorrentIdentity *identit
         tombstone_published = true;
     }
 
-    invalidate_queue_order_index_locked();
     try {
         session.remove_torrent(handle);
     } catch (...) {
@@ -269,17 +245,16 @@ void TTorrentClient::mark_unidentified_remove_requested(TorrentIdentity *identit
             }
         }
         mark_active(hashes, handle, identity);
-        changes |= cache_snapshot(handle);
+        changes |= observe_torrent_handle(handle);
         request_snapshot_update_locked();
         ignore_shutdown_failure();
         return false;
     }
 
-    mark_remove_requested(hashes, "", identity);
-    changes |= remove_snapshot(hashes, "");
+    mark_remove_requested(hashes, identity);
+    changes |= mark_torrent_removed(hashes, "");
     ResumeSaveResult removed_resume = remove_resume_files_for_ids_checked(resume_ids);
     if (!removed_resume) {
-        remember_pending_resume_cleanup(resume_ids);
         changes |= queue_alert_error("Added torrent rollback left resume cleanup pending: " + removed_resume.error() + ".");
     } else if (tombstone_published) {
         ResumeSaveResult cleared = clear_removal_tombstones(resume_ids);
@@ -291,14 +266,13 @@ void TTorrentClient::mark_unidentified_remove_requested(TorrentIdentity *identit
     return true;
 }
 
-void TTorrentClient::mark_remove_requested(lt::info_hash_t const &hashes, std::string_view requested_id, TorrentIdentity *identity)
+void TTorrentClient::mark_remove_requested(
+    lt::info_hash_t const &hashes,
+    TorrentIdentity *identity
+)
 {
     std::vector<std::string> const ids = hash_keys(hashes);
     std::scoped_lock io_guard(resume_io_lock);
-    if (identity != nullptr) {
-        untrack_queue_identity_locked(identity);
-        discard_pending_resume_saves_locked(identity);
-    }
 
     for (std::string const &id : ids) {
         if (id.empty()) {
@@ -309,17 +283,15 @@ void TTorrentClient::mark_remove_requested(lt::info_hash_t const &hashes, std::s
         if (active != active_identity_by_id.end() && (identity == nullptr || active->second == identity)) {
             active_identity_by_id.erase(active);
         }
-        handle_by_id.erase(id);
 
         if (identity != nullptr) {
             removing_identity_by_id[id] = identity;
         }
     }
-    if (!requested_id.empty()) {
-        handle_by_id.erase(std::string(requested_id));
-    }
     if (identity != nullptr) {
-        handle_by_id.erase(identity->canonical_id);
+        if (identity->token != nullptr) {
+            handle_by_native_token.erase(identity->token->value);
+        }
         removing_identity_by_id.erase(identity->canonical_id);
     }
 }
@@ -331,8 +303,6 @@ void TTorrentClient::mark_conflict_remove_requested(lt::info_hash_t const &hashe
     }
 
     std::scoped_lock io_guard(resume_io_lock);
-    untrack_queue_identity_locked(identity);
-    discard_pending_resume_saves_locked(identity);
     for (std::string const &id : hash_keys(hashes)) {
         auto const active = active_identity_by_id.find(id);
         if (active != active_identity_by_id.end() && active->second == identity) {
@@ -343,13 +313,10 @@ void TTorrentClient::mark_conflict_remove_requested(lt::info_hash_t const &hashe
         if (removing != removing_identity_by_id.end() && removing->second == identity) {
             removing_identity_by_id.erase(removing);
         }
-
-        auto const mapped = handle_by_id.find(id);
-        if (mapped != handle_by_id.end() && identity_from_handle(mapped->second) == identity) {
-            handle_by_id.erase(mapped);
-        }
     }
-    handle_by_id.erase(identity->canonical_id);
+    if (identity->token != nullptr) {
+        handle_by_native_token.erase(identity->token->value);
+    }
     removing_identity_by_id.erase(identity->canonical_id);
     unidentified_removing_identities.insert(identity);
 }
@@ -394,7 +361,6 @@ void TTorrentClient::finalize_removed(lt::info_hash_t const &hashes, TorrentIden
     }
 
     std::scoped_lock io_guard(resume_io_lock);
-    discard_pending_resume_saves_locked(identity);
     unidentified_removing_identities.erase(identity);
     for (std::string const &id : hash_keys(hashes)) {
         auto const active = active_identity_by_id.find(id);
@@ -402,17 +368,14 @@ void TTorrentClient::finalize_removed(lt::info_hash_t const &hashes, TorrentIden
             active_identity_by_id.erase(active);
         }
 
-        auto const mapped = handle_by_id.find(id);
-        if (mapped != handle_by_id.end() && identity_from_handle(mapped->second) == identity) {
-            handle_by_id.erase(mapped);
-        }
-
         auto const removing = removing_identity_by_id.find(id);
         if (removing != removing_identity_by_id.end() && removing->second == identity) {
             removing_identity_by_id.erase(removing);
         }
     }
-    handle_by_id.erase(identity->canonical_id);
+    if (identity->token != nullptr) {
+        handle_by_native_token.erase(identity->token->value);
+    }
     removing_identity_by_id.erase(identity->canonical_id);
     retire_identity_if_unreferenced_locked(identity);
     torrent_removal_quiesced.notify_all();

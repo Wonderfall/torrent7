@@ -1330,7 +1330,7 @@ struct TorrentXPCClientSecurityTests {
             #expect(operation.requestTimeout <= .seconds(120))
         }
         #expect(!TorrentEngineIPCOperation.poll.timeoutCanLeaveOutcomeUnknown)
-        #expect(!TorrentEngineIPCOperation.requestSources.timeoutCanLeaveOutcomeUnknown)
+        #expect(!TorrentEngineIPCOperation.sourcePolicy.timeoutCanLeaveOutcomeUnknown)
         #expect(TorrentEngineIPCOperation.addMagnet.timeoutCanLeaveOutcomeUnknown)
         #expect(TorrentEngineIPCOperation.applySettings.timeoutCanLeaveOutcomeUnknown)
         #expect(TorrentEngineIPCOperation.remove.timeoutCanLeaveOutcomeUnknown)
@@ -1624,10 +1624,10 @@ struct TorrentXPCClientSecurityTests {
                     for: request,
                     epoch: epoch
                 )
-            case .requestSources:
+            case .reannounce:
                 await blocker.block()
                 return try successReply(TorrentEngineIPCEmpty(), for: request, epoch: epoch)
-            case .reannounce:
+            case .forceRecheck:
                 return try successReply(TorrentEngineIPCEmpty(), for: request, epoch: epoch)
             default:
                 throw TorrentEngineClientError.serviceRejected("Unexpected operation")
@@ -1635,23 +1635,23 @@ struct TorrentXPCClientSecurityTests {
         }
         let client = try await makeClient(transport: transport)
         let observingTask = Task {
-            try await client.requestSources(id: torrentID)
+            try await client.reannounce(id: torrentID)
         }
         await blocker.waitUntilBlocked()
 
         observingTask.cancel()
         try await Task.sleep(for: .milliseconds(25))
-        #expect(transport.operations == [.handshake, .requestSources])
+        #expect(transport.operations == [.handshake, .reannounce])
         #expect(client.isAvailable)
         #expect(!transport.isCancelled)
 
         await blocker.release()
         try await observingTask.value
-        try await client.reannounce(id: torrentID)
+        try await client.forceRecheck(id: torrentID)
 
         #expect(client.isAvailable)
         #expect(!transport.isCancelled)
-        #expect(transport.operations == [.handshake, .requestSources, .reannounce])
+        #expect(transport.operations == [.handshake, .reannounce, .forceRecheck])
         #expect(transport.sequences == [1, 2, 3])
     }
 
@@ -1669,10 +1669,10 @@ struct TorrentXPCClientSecurityTests {
                     for: request,
                     epoch: epoch
                 )
-            case .requestSources:
+            case .reannounce:
                 await blocker.block()
                 throw TorrentEngineClientError.serviceRejected("Known rejection")
-            case .reannounce:
+            case .forceRecheck:
                 return try successReply(TorrentEngineIPCEmpty(), for: request, epoch: epoch)
             default:
                 throw TorrentEngineClientError.serviceRejected("Unexpected operation")
@@ -1680,7 +1680,7 @@ struct TorrentXPCClientSecurityTests {
         }
         let client = try await makeClient(transport: transport)
         let observingTask = Task {
-            try await client.requestSources(id: torrentID)
+            try await client.reannounce(id: torrentID)
         }
         await blocker.waitUntilBlocked()
 
@@ -1699,10 +1699,10 @@ struct TorrentXPCClientSecurityTests {
             Issue.record("Expected a known service rejection, got \(error)")
         }
 
-        try await client.reannounce(id: torrentID)
+        try await client.forceRecheck(id: torrentID)
         #expect(client.isAvailable)
         #expect(!transport.isCancelled)
-        #expect(transport.operations == [.handshake, .requestSources, .reannounce])
+        #expect(transport.operations == [.handshake, .reannounce, .forceRecheck])
         #expect(transport.sequences == [1, 2, 3])
     }
 

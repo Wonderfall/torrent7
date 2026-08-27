@@ -3,7 +3,7 @@ import TorrentEngineModel
 import XPC
 
 package enum TorrentEngineIPCProtocol {
-    package static let version: UInt64 = 10
+    package static let version: UInt64 = 11
 }
 
 package enum TorrentEngineIPCLimits {
@@ -132,15 +132,12 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
     case blockNetwork = 21
     case saveAll = 22
 
-    case requestSources = 30
     case sourcePolicy = 31
     case setSourcePolicy = 32
     case torrentOptions = 33
     case setTorrentOptions = 34
     case moveTorrentInQueue = 35
-    case requestFiles = 36
     case setFilePriority = 37
-    case requestPieceMap = 38
     case torrentMetadata = 39
 
     case trackerBatch = 40

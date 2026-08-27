@@ -1,0 +1,21 @@
+diff --git a/src/torrent.cpp b/src/torrent.cpp
+--- a/src/torrent.cpp
++++ b/src/torrent.cpp
+@@ -10323,6 +10323,16 @@ namespace libtorrent {
+ 		// don't add duplicates
+ 		auto const it = std::find(m_web_seeds.begin(), m_web_seeds.end(), ent);
+ 		if (it != m_web_seeds.end())
+ 		{
++			// remove_web_seed() defers erasure while name resolution is in
++			// progress. Re-adding the seed cancels that pending removal.
++			if (it->removed)
++			{
++				it->removed = false;
++				if (!it->ephemeral)
++					set_need_save_resume(torrent_handle::if_metadata_changed);
++				update_want_tick();
++			}
++
+ 			// if we're adding a web seed (as non-ephemeral) and we have an
+ 			// ephemeral web seed already, promote it to non-ephemeral
+ 			if (it->ephemeral && !ent.ephemeral)

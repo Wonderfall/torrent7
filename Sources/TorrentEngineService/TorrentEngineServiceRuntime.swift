@@ -630,10 +630,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             try await requireEngine().saveAllChecked()
             return try encode(TorrentEngineIPCEmpty(), for: operation)
 
-        case .requestSources:
-            let value = try decodeTorrentIDRequest(request)
-            try await requireEngine().requestSources(id: value.id)
-            return try encode(TorrentEngineIPCEmpty(), for: operation)
         case .sourcePolicy:
             let value = try decodeTorrentIDRequest(request)
             return try await encode(requireEngine().sourcePolicy(id: value.id), for: operation)
@@ -658,10 +654,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             try Self.validateTorrentID(value.id)
             try await requireEngine().moveTorrentInQueue(id: value.id, move: value.move)
             return try encode(TorrentEngineIPCEmpty(), for: operation)
-        case .requestFiles:
-            let value = try decodeTorrentIDRequest(request)
-            try await requireEngine().requestFiles(id: value.id)
-            return try encode(TorrentEngineIPCEmpty(), for: operation)
         case .setFilePriority:
             let value = try decode(TorrentEngineIPCSetFilePriorityRequest.self, from: request)
             try Self.validateTorrentID(value.id)
@@ -673,10 +665,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
                 fileIndex: value.fileIndex,
                 priority: value.priority
             )
-            return try encode(TorrentEngineIPCEmpty(), for: operation)
-        case .requestPieceMap:
-            let value = try decodeTorrentIDRequest(request)
-            try await requireEngine().requestPieceMap(id: value.id)
             return try encode(TorrentEngineIPCEmpty(), for: operation)
         case .torrentMetadata:
             let value = try decodeTorrentIDRequest(request)

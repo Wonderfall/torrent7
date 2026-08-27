@@ -2,74 +2,13 @@
 
 namespace torrent_bridge::internal {
 
-std::optional<PendingResumeRequest> TTorrentClient::release_async_resume_state_for_alert(lt::alert const *alert)
-{
-    if (auto const *resume = lt::alert_cast<lt::save_resume_data_alert>(alert)) {
-        TorrentIdentity *identity = identity_from_resume_alert(*resume);
-        std::optional<std::uint64_t> const generation = async_resume_generation(identity);
-        if (generation) {
-            if (std::optional<lt::resume_data_flags_t> flags = complete_async_resume_save(identity, *generation)) {
-                return PendingResumeRequest{.handle = resume->handle, .flags = *flags};
-            }
-        }
-        return std::nullopt;
-    }
-
-    if (auto const *resume_failed = lt::alert_cast<lt::save_resume_data_failed_alert>(alert)) {
-        TorrentIdentity *identity = identity_from_handle(resume_failed->handle);
-        std::optional<std::uint64_t> const generation = async_resume_generation(identity);
-        if (generation) {
-            if (std::optional<lt::resume_data_flags_t> flags = complete_async_resume_save(identity, *generation)) {
-                return PendingResumeRequest{.handle = resume_failed->handle, .flags = *flags};
-            }
-        }
-    }
-    return std::nullopt;
-}
-
-void TTorrentClient::enqueue_repeat_resume_save(
-    std::vector<PendingResumeRequest> &repeat_resume_requests,
-    PendingResumeRequest const &request
-)
-{
-    try {
-        repeat_resume_requests.push_back(request);
-    } catch (...) {
-        request_save(request.handle, request.flags);
-        ignore_shutdown_failure();
-    }
-}
-
-void TTorrentClient::complete_async_resume_write(
-    PendingResumeWrite const &write,
-    std::vector<PendingResumeRequest> &repeat_resume_requests
-)
-{
-    if (!write.async) {
-        return;
-    }
-
-    try {
-        if (std::optional<lt::resume_data_flags_t> flags = complete_async_resume_save(write.identity, write.generation)) {
-            enqueue_repeat_resume_save(
-                repeat_resume_requests,
-                PendingResumeRequest{.handle = write.handle, .flags = *flags}
-            );
-        }
-    } catch (...) {
-        ignore_shutdown_failure();
-    }
-}
-
 void TTorrentClient::pump_alerts()
 {
     // Alert batches carry direct identity pointers beyond the client lock.
     [[maybe_unused]] IdentityReclamationBlock identity_reclamation_block(*this);
-    std::vector<PendingResumeWrite> resume_data;
     std::vector<PendingResumeHandle> forced_resume_handles;
-    std::vector<PendingResumeRequest> repeat_resume_requests;
     std::vector<lt::alert *> alerts;
-    bool rebuild_cache = false;
+    bool refresh_statuses = false;
     bool force_resume_save = false;
     WakeCallbackInvocation wake;
     {
@@ -81,9 +20,13 @@ void TTorrentClient::pump_alerts()
         for (lt::alert const *alert : alerts) {
             try {
                 if (lt::alert_cast<lt::alerts_dropped_alert>(alert) != nullptr) {
-                    rebuild_cache = true;
+                    refresh_statuses = true;
                     force_resume_save = true;
                     changes |= invalidate_dht_diagnostics();
+                    changes |= mark_trackers_changed();
+                    changes |= mark_web_seeds_changed();
+                    changes |= mark_files_changed();
+                    changes |= mark_piece_map_changed();
                     changes |= queue_alert_error(
                         "Internal libtorrent alerts were dropped. Torrent details may be temporarily stale.");
                     continue;
@@ -96,12 +39,12 @@ void TTorrentClient::pump_alerts()
                     }
 
                     finalize_removed(removed->info_hashes, identity);
-                    changes |= remove_snapshot(removed->info_hashes, "");
+                    changes |= mark_torrent_removed(removed->info_hashes, "");
                     continue;
                 }
 
                 if (auto const *state_update = lt::alert_cast<lt::state_update_alert>(alert)) {
-                    changes |= update_snapshot_cache(state_update->status);
+                    changes |= observe_torrent_statuses(state_update->status);
                     continue;
                 }
 
@@ -111,18 +54,7 @@ void TTorrentClient::pump_alerts()
                 }
 
                 if (auto const *trackers = lt::alert_cast<lt::tracker_list_alert>(alert)) {
-                    changes |= cache_trackers(trackers->handle, trackers->trackers);
-                    continue;
-                }
-
-                if (auto const *peers = lt::alert_cast<lt::peer_info_alert>(alert)) {
-                    cache_peer_sources(peers->handle, peers->peer_info);
-                    changes |= cache_web_seed_activity(peers->handle, peers->peer_info);
-                    continue;
-                }
-
-                if (auto const *file_progress = lt::alert_cast<lt::file_progress_alert>(alert)) {
-                    changes |= cache_file_progress(file_progress->handle, file_progress->files);
+                    changes |= observe_trackers(trackers->handle);
                     continue;
                 }
 
@@ -134,49 +66,12 @@ void TTorrentClient::pump_alerts()
                         continue;
                     }
 
-                    BridgeResult const cached_files = cache_file_metadata(file_priority->handle, changes);
-                    if (!cached_files) {
-                        changes |= queue_alert_error("File priorities could not be refreshed" +
-                                                     torrent_context(*file_priority) + ": " +
-                                                     cached_files.error().message + ".");
-                        continue;
-                    }
-
-                    request_save(file_priority->handle, kPolicyResumeSaveFlags);
-                    file_priority->handle.post_file_progress(lt::torrent_handle::piece_granularity);
-                    continue;
-                }
-
-                if (auto const *resume = lt::alert_cast<lt::save_resume_data_alert>(alert)) {
-                    TorrentIdentity *identity = identity_from_resume_alert(*resume);
-                    std::optional<std::uint64_t> const generation = async_resume_generation(identity);
-                    if (!generation) {
-                        continue;
-                    }
-
-                    changes |= cache_resume_metadata(identity, resume->params);
-                    resume_data.push_back(
-                        PendingResumeWrite{.params = resume->params,
-                                           .handle = resume->handle,
-                                           .identity = identity,
-                                           .policy = resume_policy_snapshot_locked(identity),
-                                           .generation = *generation,
-                                           .async = true,
-                                           .cleanups = cleanups_for_write(identity, *generation)});
+                    changes |= mark_files_changed();
+                    request_save_locked(file_priority->handle, kPolicyResumeSaveFlags);
                     continue;
                 }
 
                 if (auto const *resume_failed = lt::alert_cast<lt::save_resume_data_failed_alert>(alert)) {
-                    TorrentIdentity *identity = identity_from_handle(resume_failed->handle);
-                    std::optional<std::uint64_t> const generation = async_resume_generation(identity);
-                    if (generation) {
-                        if (std::optional<lt::resume_data_flags_t> flags = complete_async_resume_save(identity, *generation)) {
-                            enqueue_repeat_resume_save(
-                                repeat_resume_requests,
-                                PendingResumeRequest{.handle = resume_failed->handle, .flags = *flags}
-                            );
-                        }
-                    }
                     if (resume_failed->error != lt::errors::resume_data_not_modified) {
                         changes |= queue_alert_error("Resume data could not be generated" + torrent_context(*resume_failed) +
                                                      ": " + resume_failed->error.message() + ".");
@@ -247,30 +142,24 @@ void TTorrentClient::pump_alerts()
                     if (!valid_metadata) {
                         continue;
                     }
-                    request_save(metadata->handle);
+                    request_save_locked(metadata->handle);
                     continue;
                 }
 
                 if (auto const *finished = lt::alert_cast<lt::torrent_finished_alert>(alert)) {
-                    request_save(finished->handle);
+                    request_save_locked(finished->handle);
                     continue;
                 }
 
                 if (auto const *paused = lt::alert_cast<lt::torrent_paused_alert>(alert)) {
-                    request_save(paused->handle);
+                    request_save_locked(paused->handle);
                     continue;
                 }
             } catch (std::exception const &exception) {
-                if (std::optional<PendingResumeRequest> repeat = release_async_resume_state_for_alert(alert)) {
-                    enqueue_repeat_resume_save(repeat_resume_requests, *repeat);
-                }
                 changes |= queue_alert_error("Libtorrent alert could not be processed (" + alert_label(alert) +
                                              "): " + exception.what() + ".");
                 continue;
             } catch (...) {
-                if (std::optional<PendingResumeRequest> repeat = release_async_resume_state_for_alert(alert)) {
-                    enqueue_repeat_resume_save(repeat_resume_requests, *repeat);
-                }
                 changes |= queue_alert_error("Libtorrent alert could not be processed (" + alert_label(alert) + ").");
                 continue;
             }
@@ -286,9 +175,8 @@ void TTorrentClient::pump_alerts()
             changes |= queue_alert_error("Pending torrent metadata could not be validated.");
         }
 
-        if (rebuild_cache) {
-            changes |= invalidate_detail_caches_locked();
-            changes |= rebuild_snapshot_cache();
+        if (refresh_statuses) {
+            changes |= refresh_torrent_statuses();
             request_snapshot_update_locked();
         }
 
@@ -299,55 +187,31 @@ void TTorrentClient::pump_alerts()
     }
     invoke_wake_callback(wake);
 
-    if (!persistence_is_faulted() && !forced_resume_handles.empty()) {
-        try {
-            std::vector<PendingResumeWrite> forced_resume_data =
-                collect_resume_data(forced_resume_handles, kFullResumeSaveFlags);
-            resume_data.insert(resume_data.end(), std::make_move_iterator(forced_resume_data.begin()),
-                               std::make_move_iterator(forced_resume_data.end()));
-        } catch (std::exception const &exception) {
-            queue_alert_error_threadsafe(std::string("Forced resume data could not be collected: ") +
-                                         exception.what() + ".");
-        } catch (...) {
-            queue_alert_error_threadsafe("Forced resume data could not be collected.");
+    for (PendingResumeHandle const &pending : forced_resume_handles) {
+        if (pending.cleanups.empty()) {
+            request_save(pending.handle, kFullResumeSaveFlags);
+            continue;
         }
-    }
 
-    for (PendingResumeWrite const &write : resume_data) {
-        try {
-            if (persistence_is_faulted()) {
-                complete_async_resume_write(write, repeat_resume_requests);
-                continue;
-            }
-            ResumeSaveResult saved = write_resume_data(write);
-            if (!saved) {
-                ignore_shutdown_failure();
-            }
-            complete_async_resume_write(write, repeat_resume_requests);
-        } catch (std::exception const &exception) {
-            complete_async_resume_write(write, repeat_resume_requests);
-            queue_alert_error_threadsafe(
-                std::string("Resume data could not be saved: ")
-                + exception.what()
-                + "."
-            );
-        } catch (...) {
-            complete_async_resume_write(write, repeat_resume_requests);
-            queue_alert_error_threadsafe("Resume data could not be saved.");
+        std::array<PendingResumeHandle, 1> const handles{pending};
+        std::vector<PendingResumeWrite> writes = collect_resume_data(handles, kFullResumeSaveFlags);
+        if (writes.size() != 1U || !write_resume_data(writes.front())) {
+            // The durable tombstone remains authoritative. Swift owns the
+            // subsequent full-save retry and tombstone recovery schedule.
+            request_save(pending.handle, kFullResumeSaveFlags);
         }
-    }
-
-    for (PendingResumeRequest const &request : repeat_resume_requests) {
-        request_save(request.handle, request.flags);
     }
 }
 
-std::optional<lt::torrent_handle> TTorrentClient::find(std::string const &id)
+std::optional<lt::torrent_handle> TTorrentClient::find(std::uint64_t const native_token)
 {
+    if (native_token == 0U) {
+        return std::nullopt;
+    }
     {
         std::scoped_lock io_guard(resume_io_lock);
-        auto const mapped = handle_by_id.find(id);
-        if (mapped != handle_by_id.end() && mapped->second.is_valid()) {
+        auto const mapped = handle_by_native_token.find(native_token);
+        if (mapped != handle_by_native_token.end() && mapped->second.is_valid()) {
             return mapped->second;
         }
     }
@@ -357,15 +221,11 @@ std::optional<lt::torrent_handle> TTorrentClient::find(std::string const &id)
             continue;
         }
 
-        if (TorrentIdentity *identity = identity_from_handle(handle)) {
-            if (identity->canonical_id == id) {
-                mark_active(handle, identity);
-                return handle;
-            }
-        }
-
-        if (hash_matches(handle.info_hashes(), id)) {
-            mark_active(handle, identity_from_handle(handle));
+        TorrentIdentity *identity = identity_from_handle(handle);
+        if (identity != nullptr
+            && identity->token != nullptr
+            && identity->token->value == native_token) {
+            mark_active(handle, identity);
             return handle;
         }
     }
@@ -442,12 +302,32 @@ ResumeSaveResult TTorrentClient::clear_removal_tombstones(std::vector<std::strin
     }
 
     ResumeSaveResult cleared = clear_removal_tombstones_locked(ids);
-    if (!cleared) {
-        remember_pending_tombstone_clear_locked(ids);
-        return cleared;
+    return cleared;
+}
+
+ResumeSaveResult TTorrentClient::clear_removal_tombstone_file(std::string_view const filename)
+{
+    if (filename.empty()
+        || filename.contains('/')
+        || filename.contains('\0')
+        || !is_removal_tombstone_path(fs::path(filename))) {
+        return std::unexpected("Removal tombstone filename is invalid.");
     }
-    forget_pending_resume_cleanup_locked(ids);
-    forget_pending_tombstone_clear_locked(ids);
+
+    std::scoped_lock io_guard(resume_io_lock);
+    if (persistence_is_faulted_locked()) {
+        return std::unexpected("Resume persistence is in an uncertain state.");
+    }
+    ResumeRemoveResult const removed = remove_resume_file_checked_locked(filename);
+    if (!removed) {
+        return std::unexpected("Removal tombstone could not be cleared: " + removed.error());
+    }
+    if (*removed) {
+        ResumeSaveResult const synced = sync_directory(resume_directory_descriptor.get());
+        if (!synced) {
+            return std::unexpected("Removal tombstone cleanup could not be synced: " + synced.error());
+        }
+    }
     return {};
 }
 

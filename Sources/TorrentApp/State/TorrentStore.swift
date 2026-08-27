@@ -667,12 +667,6 @@ final class TorrentStore {
         setLastError(message, source: .userAction)
     }
 
-    func requestSources(for id: TorrentItem.ID) async throws {
-        try await performQueuedUserOperation { engine in
-            try await engine.requestSources(id: id)
-        }
-    }
-
     func sourcePolicy(for id: TorrentItem.ID) async throws -> TorrentSourcePolicy {
         let requestedEngine = engine
         let lifecycleGeneration = engineLifecycleGeneration
@@ -741,12 +735,6 @@ final class TorrentStore {
             for id in idsToMove {
                 try await engine.moveTorrentInQueue(id: id, move: move)
             }
-        }
-    }
-
-    func requestFiles(for id: TorrentItem.ID) async throws {
-        try await performQueuedUserOperation { engine in
-            try await engine.requestFiles(id: id)
         }
     }
 
@@ -858,12 +846,6 @@ final class TorrentStore {
         )
         try storageBrokerRegistry.replace(claim: updated)
         return updated
-    }
-
-    func requestPieceMap(for id: TorrentItem.ID) async throws {
-        try await performQueuedUserOperation { engine in
-            try await engine.requestPieceMap(id: id)
-        }
     }
 
     func trackerBatch(for id: TorrentItem.ID, since revision: UInt64?) async -> TorrentTrackerBatch? {
@@ -2681,7 +2663,6 @@ final class TorrentStore {
 
         let options = try await engine.torrentOptions(id: item.id)
         let sourcePolicy = try await engine.sourcePolicy(id: item.id)
-        try await engine.requestFiles(id: item.id)
         guard let fileBatch = await engine.fileBatch(id: item.id, since: nil) else {
             throw TorrentMagnetPromotionError.metadataNotReady
         }

@@ -34,7 +34,6 @@ struct TorrentBridgeMappingTests {
         writeCString("Ubuntu ISO", to: &snapshot.name)
         writeCString("/Downloads", to: &snapshot.save_path)
         writeCString("disk full", to: &snapshot.error)
-        writeCString("release image", to: &snapshot.comment)
         snapshot.progress = 1.5
         snapshot.total_done = 10
         snapshot.total_wanted = 20
@@ -44,7 +43,6 @@ struct TorrentBridgeMappingTests {
         snapshot.all_time_upload = 25
         snapshot.all_time_download = 35
         snapshot.added_time = 123
-        snapshot.created_time = 456
         snapshot.completed_time = 789
         snapshot.download_payload_rate = 1_000
         snapshot.upload_payload_rate = 500
@@ -67,10 +65,10 @@ struct TorrentBridgeMappingTests {
         #expect(item.infoHash == "info-hash")
         #expect(item.name == "Ubuntu ISO")
         #expect(item.error == "disk full")
-        #expect(item.comment == "release image")
+        #expect(item.comment.isEmpty)
         #expect(item.progress == 1)
         #expect(item.totalSize == 30)
-        #expect(item.createdTime == 456)
+        #expect(item.createdTime == 0)
         #expect(item.completedTime == 789)
         #expect(item.state == .downloading)
         #expect(item.queued == false)
@@ -137,8 +135,6 @@ struct TorrentBridgeMappingTests {
     @Test("Maps network status")
     func mapsNetworkStatus() {
         var status = TTorrentNetworkStatus()
-        status.requested_revision = 2
-        status.submitted_revision = 1
         status.listen_port = 51_413
         status.network_blocked = true.bridgeFlag
         status.has_listener = false.bridgeFlag
@@ -149,14 +145,11 @@ struct TorrentBridgeMappingTests {
 
         let mapped = TorrentNetworkStatus(status: status)
 
-        #expect(mapped.requestedRevision == 2)
-        #expect(mapped.submittedRevision == 1)
         #expect(mapped.listenPort == 51_413)
         #expect(mapped.networkBlocked)
         #expect(!mapped.hasListener)
         #expect(mapped.endpoint == "0.0.0.0:51413")
         #expect(mapped.lastError == "blocked")
-        #expect(mapped.isApplying)
         #expect(mapped.dhtStatus == .running)
         #expect(mapped.dhtRoutingNodeCount == 37)
         #expect(mapped.dhtStatusSummary == "Running · 37 routing nodes")
@@ -206,69 +199,6 @@ struct TorrentBridgeMappingTests {
         #expect(health.isAlertWorkerDegraded)
         #expect(health.lastAlertWorkerError == "retrying")
         #expect(health != .unavailable)
-    }
-
-    @Test("Maps source policy")
-    func mapsSourcePolicy() {
-        let policy = TorrentSourcePolicy(
-            snapshot: TTorrentSourcePolicy(
-                enable_dht: true.bridgeFlag,
-                enable_peer_exchange: false.bridgeFlag,
-                enable_lsd: true.bridgeFlag,
-                https_tracker_policy: UInt8(TTORRENT_HTTPS_POLICY_PREFER),
-                https_web_seed_policy: UInt8(TTORRENT_HTTPS_POLICY_INHERIT),
-                effective_https_tracker_policy: UInt8(TTORRENT_HTTPS_POLICY_PREFER),
-                effective_https_web_seed_policy: UInt8(TTORRENT_HTTPS_POLICY_REQUIRE),
-                dht_locked: true.bridgeFlag,
-                peer_exchange_locked: true.bridgeFlag,
-                lsd_locked: false.bridgeFlag,
-                metadata_validation_pending: true.bridgeFlag,
-                allow_pre_metadata_dht: true.bridgeFlag
-            )
-        )
-
-        #expect(policy.isDHTEnabled)
-        #expect(!policy.isPeerExchangeEnabled)
-        #expect(policy.isLocalServiceDiscoveryEnabled)
-        #expect(policy.httpsTrackerPolicy == .prefer)
-        #expect(policy.httpsWebSeedPolicy == .inherit)
-        #expect(policy.effectiveHTTPSTrackerPolicy == .prefer)
-        #expect(policy.effectiveHTTPSWebSeedPolicy == .require)
-        #expect(policy.isDHTLocked)
-        #expect(policy.isPeerExchangeLocked)
-        #expect(!policy.isLocalServiceDiscoveryLocked)
-        #expect(policy.isMetadataValidationPending)
-        #expect(policy.allowsPreMetadataDHT)
-
-        #expect(TorrentSourcePolicyField.dht.bridgeValue == Int32(TTORRENT_SOURCE_POLICY_ENABLE_DHT))
-        #expect(
-            TorrentSourcePolicyField.peerExchange.bridgeValue
-                == Int32(TTORRENT_SOURCE_POLICY_ENABLE_PEER_EXCHANGE)
-        )
-        #expect(
-            TorrentSourcePolicyField.localServiceDiscovery.bridgeValue
-                == Int32(TTORRENT_SOURCE_POLICY_ENABLE_LSD)
-        )
-        #expect(
-            TorrentSourcePolicyMutation.httpsTracker(.prefer).bridgeFieldAndValue.field
-                == Int32(TTORRENT_SOURCE_POLICY_HTTPS_TRACKER_POLICY)
-        )
-        #expect(
-            TorrentSourcePolicyMutation.httpsTracker(.prefer).bridgeFieldAndValue.value
-                == Int32(TTORRENT_HTTPS_POLICY_PREFER)
-        )
-        #expect(
-            TorrentSourcePolicyMutation.httpsWebSeed(.require).bridgeFieldAndValue.field
-                == Int32(TTORRENT_SOURCE_POLICY_HTTPS_WEB_SEED_POLICY)
-        )
-        #expect(
-            TorrentSourcePolicyMutation.httpsWebSeed(.require).bridgeFieldAndValue.value
-                == Int32(TTORRENT_HTTPS_POLICY_REQUIRE)
-        )
-        #expect(
-            TorrentSourcePolicyField.preMetadataDHT.bridgeValue
-                == Int32(TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT)
-        )
     }
 
     @Test("Maps torrent options")

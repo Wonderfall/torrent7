@@ -112,18 +112,15 @@ package protocol TorrentEngineServicing: Sendable {
         direction: TorrentSortDirection,
         includeTrackerHosts: Bool
     ) async throws -> TorrentEnginePollResult
-    func requestSources(id: String) async throws
     func sourcePolicy(id: String) async throws -> TorrentSourcePolicy
     func setSourcePolicy(id: String, mutation: TorrentSourcePolicyMutation) async throws
     func torrentOptions(id: String) async throws -> TorrentOptions
     func setTorrentOptions(id: String, options: TorrentOptions) async throws
     func moveTorrentInQueue(id: String, move: TorrentQueueMove) async throws
-    func requestFiles(id: String) async throws
     /// Returns libtorrent's exact immutable bencoded info dictionary once
     /// magnet metadata is resident. The bytes are never re-encoded.
     func torrentMetadata(id: String) async throws -> Data?
     func setFilePriority(id: String, fileIndex: Int32, priority: TorrentFilePriority) async throws
-    func requestPieceMap(id: String) async throws
     func trackerBatch(id: String, since revision: UInt64?) async -> TorrentTrackerBatch?
     func webSeedBatch(id: String, since revision: UInt64?) async -> TorrentWebSeedBatch?
     func webSeedActivity(id: String) async -> TorrentWebSeedActivity?

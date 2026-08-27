@@ -82,83 +82,6 @@ RegularFileResult is_regular_file_at(
 
 } // namespace
 
-[[nodiscard]] bool TTorrentClient::resume_write_is_installable_locked(PendingEncodedResumeWrite const &write) const
-{
-    if (write.identity == nullptr) {
-        return true;
-    }
-
-    return write.generation >= write.identity->resume_save.installed_generation;
-}
-
-std::vector<PendingEncodedResumeWrite> TTorrentClient::claim_resume_retries()
-{
-    std::vector<PendingEncodedResumeWrite> retries;
-    std::scoped_lock io_guard(resume_io_lock);
-    for (auto const &identity : torrent_identities) {
-        if (!identity->resume_save.retry) {
-            continue;
-        }
-
-        PendingEncodedResumeWrite retry = std::move(*identity->resume_save.retry);
-        identity->resume_save.retry.reset();
-        retries.push_back(std::move(retry));
-    }
-    return retries;
-}
-
-std::vector<std::string> TTorrentClient::retry_resume_cleanups(bool reports_errors)
-{
-    std::vector<std::string> errors;
-    if (persistence_is_faulted()) {
-        return errors;
-    }
-
-    {
-        std::scoped_lock io_guard(resume_io_lock);
-        for (auto const &identity : torrent_identities) {
-            std::vector<PendingResumeCleanup> const cleanups = identity->resume_save.cleanup_retry;
-            if (cleanups.empty()) {
-                continue;
-            }
-            PendingEncodedResumeWrite cleanup_write{.hashes = {},
-                                                    .identity = identity.get(),
-                                                    .generation = identity->resume_save.committed_generation,
-                                                    .encoded = {},
-                                                    .cleanups = cleanups};
-            if (!resume_cleanups_are_eligible_locked(cleanup_write)) {
-                continue;
-            }
-
-            ResumeSaveResult cleaned = complete_resume_cleanups_locked(cleanup_write);
-            if (!cleaned) {
-                errors.push_back(cleaned.error());
-                continue;
-            }
-        }
-    }
-
-    if (reports_errors) {
-        for (std::string const &error : errors) {
-            queue_alert_error_threadsafe("Resume cleanup retry failed: " + error + ".");
-        }
-    }
-    return errors;
-}
-
-void TTorrentClient::discard_pending_resume_saves_locked(TorrentIdentity *identity) noexcept
-{
-    if (identity == nullptr) {
-        return;
-    }
-
-    identity->resume_save.async_in_flight.reset();
-    identity->resume_save.save_again = false;
-    identity->resume_save.retry.reset();
-    identity->resume_save.pending_cleanups.clear();
-    identity->resume_save.cleanup_retry.clear();
-}
-
 void TTorrentClient::discard_unpublished_identity(TorrentIdentity *identity) noexcept
 {
     std::scoped_lock io_guard(resume_io_lock);
@@ -166,7 +89,6 @@ void TTorrentClient::discard_unpublished_identity(TorrentIdentity *identity) noe
     lsd_disabled_by_app.erase(identity);
     peer_exchange_disabled_by_app.erase(identity);
     metadata_validation_pending.erase(identity);
-    untrack_queue_identity_locked(identity);
     auto const owned_identity = std::ranges::find_if(torrent_identities, [identity](auto const &owned) {
         return owned.get() == identity;
     });
@@ -189,105 +111,6 @@ void TTorrentClient::discard_unpublished_identity(TorrentIdentity *identity) noe
     }
 }
 
-void TTorrentClient::append_cleanup_ids_locked(std::vector<PendingResumeCleanup> &destination, PendingResumeCleanup cleanup)
-{
-    if (cleanup.resume_ids.empty()) {
-        return;
-    }
-
-    auto const existing = std::ranges::find_if(destination, [&cleanup](PendingResumeCleanup const &entry) {
-        return entry.after_generation == cleanup.after_generation;
-    });
-    if (existing == destination.end()) {
-        destination.push_back(std::move(cleanup));
-        return;
-    }
-
-    for (std::string const &id : cleanup.resume_ids) {
-        append_unique(existing->resume_ids, id);
-    }
-}
-
-void TTorrentClient::remember_pending_cleanups_locked(TorrentIdentity *identity, std::vector<PendingResumeCleanup> cleanups)
-{
-    if (identity == nullptr) {
-        return;
-    }
-
-    for (PendingResumeCleanup &cleanup : cleanups) {
-        cleanup.after_generation = 0;
-        append_cleanup_ids_locked(identity->resume_save.pending_cleanups, std::move(cleanup));
-    }
-}
-
-void TTorrentClient::remember_pending_cleanups(TorrentIdentity *identity, std::vector<PendingResumeCleanup> cleanups)
-{
-    std::scoped_lock io_guard(resume_io_lock);
-    remember_pending_cleanups_locked(identity, std::move(cleanups));
-}
-
-std::vector<PendingResumeCleanup>
-TTorrentClient::cleanups_for_write(TorrentIdentity *identity, std::uint64_t generation,
-                   std::vector<PendingResumeCleanup> const &explicit_cleanups)
-{
-    std::vector<PendingResumeCleanup> cleanups;
-    if (identity != nullptr) {
-        std::scoped_lock io_guard(resume_io_lock);
-        for (PendingResumeCleanup cleanup : identity->resume_save.pending_cleanups) {
-            cleanup.after_generation = generation;
-            append_cleanup_ids_locked(cleanups, std::move(cleanup));
-        }
-    }
-    for (PendingResumeCleanup cleanup : explicit_cleanups) {
-        cleanup.after_generation = generation;
-        append_cleanup_ids_locked(cleanups, std::move(cleanup));
-    }
-    return cleanups;
-}
-
-void TTorrentClient::remove_cleanup_ids_locked(std::vector<PendingResumeCleanup> &target,
-                               std::vector<PendingResumeCleanup> const &completed)
-{
-    std::vector<std::string> completed_ids;
-    for (PendingResumeCleanup const &cleanup : completed) {
-        for (std::string const &id : cleanup.resume_ids) {
-            append_unique(completed_ids, id);
-        }
-    }
-    if (completed_ids.empty()) {
-        return;
-    }
-
-    for (PendingResumeCleanup &cleanup : target) {
-        std::erase_if(cleanup.resume_ids, [&completed_ids](std::string const &id) {
-            return std::ranges::find(completed_ids, id) != completed_ids.end();
-        });
-    }
-    std::erase_if(target, [](PendingResumeCleanup const &cleanup) { return cleanup.resume_ids.empty(); });
-}
-
-void TTorrentClient::mark_resume_cleanups_completed_locked(TorrentIdentity *identity,
-                                           std::vector<PendingResumeCleanup> const &cleanups)
-{
-    if (identity == nullptr) {
-        return;
-    }
-
-    remove_cleanup_ids_locked(identity->resume_save.pending_cleanups, cleanups);
-    remove_cleanup_ids_locked(identity->resume_save.cleanup_retry, cleanups);
-}
-
-void TTorrentClient::remember_resume_cleanup_failure_locked(TorrentIdentity *identity, std::vector<PendingResumeCleanup> cleanups)
-{
-    if (identity == nullptr) {
-        return;
-    }
-
-    for (PendingResumeCleanup &cleanup : cleanups) {
-        append_cleanup_ids_locked(identity->resume_save.cleanup_retry, std::move(cleanup));
-    }
-}
-
 std::vector<std::string> TTorrentClient::removal_ids_for_identity(lt::info_hash_t const &hashes, std::string_view requested_id,
                                                   TorrentIdentity *identity)
 {
@@ -298,171 +121,7 @@ std::vector<std::string> TTorrentClient::removal_ids_for_identity(lt::info_hash_
     }
 
     append_unique(ids, identity->canonical_id);
-    auto append_cleanup_ids = [&ids](std::vector<PendingResumeCleanup> const &cleanups) {
-        for (PendingResumeCleanup const &cleanup : cleanups) {
-            for (std::string const &id : cleanup.resume_ids) {
-                append_unique(ids, id);
-            }
-        }
-    };
-    append_cleanup_ids(identity->resume_save.pending_cleanups);
-    append_cleanup_ids(identity->resume_save.cleanup_retry);
     return ids;
-}
-
-bool TTorrentClient::resume_cleanup_pending_for_hashes(lt::info_hash_t const &hashes)
-{
-    std::scoped_lock io_guard(resume_io_lock);
-    std::vector<std::string> const ids = hash_keys(hashes);
-    for (std::string const &id : ids) {
-        if (pending_resume_cleanup_ids_by_id.contains(id)) {
-            return true;
-        }
-        if (pending_tombstone_clear_ids_by_id.contains(id)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-void TTorrentClient::remember_pending_resume_cleanup_locked(std::vector<std::string> const &ids)
-{
-    ResumeIDListResult normalized = normalized_resume_ids(ids);
-    if (!normalized || normalized->empty()) {
-        return;
-    }
-
-    for (std::string const &id : *normalized) {
-        pending_resume_cleanup_ids_by_id[id] = *normalized;
-    }
-}
-
-void TTorrentClient::remember_pending_resume_cleanup(std::vector<std::string> const &ids)
-{
-    std::scoped_lock io_guard(resume_io_lock);
-    remember_pending_resume_cleanup_locked(ids);
-}
-
-void TTorrentClient::forget_pending_resume_cleanup_locked(std::vector<std::string> const &ids)
-{
-    ResumeIDListResult normalized = normalized_resume_ids(ids);
-    if (!normalized) {
-        return;
-    }
-
-    for (std::string const &id : *normalized) {
-        pending_resume_cleanup_ids_by_id.erase(id);
-    }
-}
-
-std::vector<std::vector<std::string>> TTorrentClient::pending_resume_cleanup_id_groups()
-{
-    std::vector<std::vector<std::string>> groups;
-    std::scoped_lock io_guard(resume_io_lock);
-    for (auto const &entry : pending_resume_cleanup_ids_by_id) {
-        if (std::ranges::find(groups, entry.second) == groups.end()) {
-            groups.push_back(entry.second);
-        }
-    }
-    return groups;
-}
-
-ResumeSaveResult TTorrentClient::complete_pending_resume_cleanup(std::vector<std::string> const &resume_ids)
-{
-    if (persistence_is_faulted()) {
-        return std::unexpected("Resume persistence is in an uncertain state.");
-    }
-
-    ResumeSaveResult removed_resume = remove_resume_files_for_ids_checked(resume_ids);
-    if (!removed_resume) {
-        return std::unexpected("resume cleanup is pending: " + removed_resume.error());
-    }
-
-    ResumeSaveResult cleared = clear_removal_tombstones(resume_ids);
-    if (!cleared) {
-        return std::unexpected("removal marker cleanup is pending: " + cleared.error());
-    }
-    return {};
-}
-
-std::vector<std::string> TTorrentClient::retry_pending_resume_cleanups(bool reports_errors)
-{
-    std::vector<std::string> errors;
-    if (persistence_is_faulted()) {
-        return errors;
-    }
-
-    for (std::vector<std::string> const &resume_ids : pending_resume_cleanup_id_groups()) {
-        ResumeSaveResult completed = complete_pending_resume_cleanup(resume_ids);
-        if (!completed) {
-            errors.push_back(completed.error());
-        }
-    }
-
-    if (reports_errors) {
-        for (std::string const &error : errors) {
-            queue_alert_error_threadsafe("Pending resume cleanup retry failed: " + error + ".");
-        }
-    }
-    return errors;
-}
-
-void TTorrentClient::remember_pending_tombstone_clear_locked(std::vector<std::string> const &ids)
-{
-    ResumeIDListResult normalized = normalized_resume_ids(ids);
-    if (!normalized || normalized->empty()) {
-        return;
-    }
-
-    for (std::string const &id : *normalized) {
-        pending_tombstone_clear_ids_by_id[id] = *normalized;
-    }
-}
-
-void TTorrentClient::forget_pending_tombstone_clear_locked(std::vector<std::string> const &ids)
-{
-    ResumeIDListResult normalized = normalized_resume_ids(ids);
-    if (!normalized) {
-        return;
-    }
-
-    for (std::string const &id : *normalized) {
-        pending_tombstone_clear_ids_by_id.erase(id);
-    }
-}
-
-std::vector<std::vector<std::string>> TTorrentClient::pending_tombstone_clear_id_groups()
-{
-    std::vector<std::vector<std::string>> groups;
-    std::scoped_lock io_guard(resume_io_lock);
-    for (auto const &entry : pending_tombstone_clear_ids_by_id) {
-        if (std::ranges::find(groups, entry.second) == groups.end()) {
-            groups.push_back(entry.second);
-        }
-    }
-    return groups;
-}
-
-std::vector<std::string> TTorrentClient::retry_pending_tombstone_clears(bool reports_errors)
-{
-    std::vector<std::string> errors;
-    if (persistence_is_faulted()) {
-        return errors;
-    }
-
-    for (std::vector<std::string> const &ids : pending_tombstone_clear_id_groups()) {
-        ResumeSaveResult cleared = clear_removal_tombstones(ids);
-        if (!cleared) {
-            errors.push_back(cleared.error());
-        }
-    }
-
-    if (reports_errors) {
-        for (std::string const &error : errors) {
-            queue_alert_error_threadsafe("Removal marker cleanup retry failed: " + error + ".");
-        }
-    }
-    return errors;
 }
 
 bool TTorrentClient::remove_resume_file_locked(std::string_view const filename)
@@ -626,97 +285,12 @@ TombstoneEntriesResult TTorrentClient::scan_removal_tombstone_entries_locked(
     return entries;
 }
 
-ResumeSaveResult TTorrentClient::load_removal_tombstone_index_locked(
-    RemovalTombstoneIndexLimits const limits
-)
-{
-    TombstoneEntriesResult entries = scan_removal_tombstone_entries_locked(limits);
-    if (!entries) {
-        return std::unexpected(entries.error());
-    }
-    if (entries->size() > limits.entry_count) {
-        return std::unexpected("Removal tombstone index contains too many entries.");
-    }
-
-    RemovalTombstoneEntryMap indexed_entries;
-    RemovalTombstoneIDIndex indexed_ids;
-    std::size_t membership_count = 0;
-    for (RemovalTombstoneEntry &entry : *entries) {
-        if (membership_count > limits.id_membership_count
-            || entry.ids.size() > limits.id_membership_count - membership_count) {
-            return std::unexpected("Removal tombstone index contains too many identifier references.");
-        }
-
-        auto owned_entry = std::make_unique<RemovalTombstoneEntry>(std::move(entry));
-        RemovalTombstoneEntry *const raw_entry = owned_entry.get();
-        auto const [position, inserted] = indexed_entries.emplace(
-            raw_entry->filename,
-            std::move(owned_entry)
-        );
-        static_cast<void>(position);
-        if (!inserted) {
-            return std::unexpected("Removal tombstone index contains a duplicate filename.");
-        }
-        for (std::string const &id : raw_entry->ids) {
-            indexed_ids[id].insert(raw_entry);
-        }
-        membership_count += raw_entry->ids.size();
-    }
-
-    removal_tombstones_by_filename.swap(indexed_entries);
-    removal_tombstones_by_id.swap(indexed_ids);
-    removal_tombstone_id_membership_count = membership_count;
-    return {};
-}
-
-void TTorrentClient::unindex_removal_tombstone_locked(RemovalTombstoneEntry const *const entry) noexcept
-{
-    if (entry == nullptr) {
-        return;
-    }
-
-    auto const indexed_entry = removal_tombstones_by_filename.find(entry->filename);
-    if (indexed_entry == removal_tombstones_by_filename.end()
-        || indexed_entry->second.get() != entry) {
-        return;
-    }
-    for (std::string const &id : entry->ids) {
-        auto indexed = removal_tombstones_by_id.find(id);
-        if (indexed == removal_tombstones_by_id.end()) {
-            continue;
-        }
-        if (indexed->second.erase(entry) > 0U && removal_tombstone_id_membership_count > 0U) {
-            --removal_tombstone_id_membership_count;
-        }
-        if (indexed->second.empty()) {
-            removal_tombstones_by_id.erase(indexed);
-        }
-    }
-    removal_tombstones_by_filename.erase(indexed_entry);
-}
-
 TombstoneEntriesResult TTorrentClient::removal_tombstone_entries_locked()
 {
-    std::vector<RemovalTombstoneEntry> entries;
-    entries.reserve(removal_tombstones_by_filename.size());
-    for (auto const &[filename, entry] : removal_tombstones_by_filename) {
-        static_cast<void>(filename);
-        if (entry != nullptr) {
-            entries.push_back(*entry);
-        }
-    }
-    return entries;
-}
-
-TombstoneIDResult TTorrentClient::removal_tombstone_ids_locked()
-{
-    std::set<std::string> ids;
-    for (auto const &[id, entries] : removal_tombstones_by_id) {
-        if (!entries.empty()) {
-            ids.insert(id);
-        }
-    }
-    return ids;
+    return scan_removal_tombstone_entries_locked(RemovalTombstoneIndexLimits{
+        .entry_count = kMaxRemovalTombstoneEntryCount,
+        .id_membership_count = kMaxRemovalTombstoneIDMembershipCount,
+    });
 }
 
 ResumeIDListResult TTorrentClient::tombstone_ids_overlapping_locked(std::vector<std::string> const &ids)
@@ -729,20 +303,19 @@ ResumeIDListResult TTorrentClient::tombstone_ids_overlapping_locked(std::vector<
         return std::vector<std::string>{};
     }
 
-    std::set<RemovalTombstoneEntry const *> matched_entries;
-    for (std::string const &id : *normalized) {
-        auto const indexed = removal_tombstones_by_id.find(id);
-        if (indexed != removal_tombstones_by_id.end()) {
-            matched_entries.insert(indexed->second.begin(), indexed->second.end());
-        }
+    TombstoneEntriesResult const entries = removal_tombstone_entries_locked();
+    if (!entries) {
+        return std::unexpected(entries.error());
     }
-
     std::vector<std::string> matched_ids;
-    for (RemovalTombstoneEntry const *entry : matched_entries) {
-        if (entry == nullptr) {
+    for (RemovalTombstoneEntry const &entry : *entries) {
+        bool const overlaps = std::ranges::any_of(entry.ids, [&normalized](std::string const &id) {
+            return std::ranges::find(*normalized, id) != normalized->end();
+        });
+        if (!overlaps) {
             continue;
         }
-        for (std::string const &id : entry->ids) {
+        for (std::string const &id : entry.ids) {
             append_unique(matched_ids, id);
         }
     }
@@ -764,55 +337,39 @@ TombstoneCommitResult TTorrentClient::persist_removal_tombstones_locked(std::vec
         return std::unexpected("Removal tombstone payload is too large.");
     }
 
-    if (removal_tombstones_by_filename.size() >= kMaxRemovalTombstoneEntryCount) {
+    TombstoneEntriesResult const entries = removal_tombstone_entries_locked();
+    if (!entries) {
+        return std::unexpected(entries.error());
+    }
+    if (entries->size() >= kMaxRemovalTombstoneEntryCount) {
         return std::unexpected("Removal tombstone index contains too many entries.");
     }
-    if (removal_tombstone_id_membership_count > kMaxRemovalTombstoneIDMembershipCount
+    std::size_t membership_count = 0;
+    for (RemovalTombstoneEntry const &entry : *entries) {
+        membership_count += entry.ids.size();
+    }
+    if (membership_count > kMaxRemovalTombstoneIDMembershipCount
         || normalized->size()
-            > kMaxRemovalTombstoneIDMembershipCount - removal_tombstone_id_membership_count) {
+            > kMaxRemovalTombstoneIDMembershipCount - membership_count) {
         return std::unexpected("Removal tombstone index contains too many identifier references.");
+    }
+
+    std::set<std::string> existing_filenames;
+    for (RemovalTombstoneEntry const &entry : *entries) {
+        existing_filenames.insert(entry.filename);
     }
 
     std::string tombstone_filename;
     constexpr std::size_t kMaxFilenameAttempts = 16U;
     for (std::size_t attempt = 0; attempt < kMaxFilenameAttempts; ++attempt) {
         tombstone_filename = make_removal_tombstone_filename();
-        if (!removal_tombstones_by_filename.contains(tombstone_filename)) {
+        if (!existing_filenames.contains(tombstone_filename)) {
             break;
         }
         tombstone_filename.clear();
     }
     if (tombstone_filename.empty()) {
         return std::unexpected("A unique removal tombstone filename could not be created.");
-    }
-
-    RemovalTombstoneEntryMap staged_entries;
-    auto staged_entry = std::make_unique<RemovalTombstoneEntry>(RemovalTombstoneEntry{
-        .filename = tombstone_filename,
-        .ids = *normalized
-    });
-    RemovalTombstoneEntry *const raw_staged_entry = staged_entry.get();
-    staged_entries.emplace(tombstone_filename, std::move(staged_entry));
-
-    struct ExistingIDMembership {
-        std::set<RemovalTombstoneEntry const *> *destination = nullptr;
-        std::set<RemovalTombstoneEntry const *>::node_type node;
-    };
-    RemovalTombstoneIDIndex staged_new_ids;
-    std::vector<ExistingIDMembership> staged_existing_ids;
-    staged_existing_ids.reserve(normalized->size());
-    for (std::string const &id : *normalized) {
-        auto const existing = removal_tombstones_by_id.find(id);
-        if (existing == removal_tombstones_by_id.end()) {
-            staged_new_ids[id].insert(raw_staged_entry);
-            continue;
-        }
-
-        std::set<RemovalTombstoneEntry const *> staged_membership{raw_staged_entry};
-        staged_existing_ids.push_back(ExistingIDMembership{
-            .destination = &existing->second,
-            .node = staged_membership.extract(raw_staged_entry)
-        });
     }
 
     ResumeSaveResult written = write_owner_only_file_at_checked(
@@ -827,33 +384,15 @@ TombstoneCommitResult TTorrentClient::persist_removal_tombstones_locked(std::vec
     ResumeSaveResult synced = sync_directory(resume_directory_descriptor.get());
     if (!synced) {
         return TombstoneCommitStatus{
-            .directory_synced = false
+            .directory_synced = false,
+            .filename = tombstone_filename,
         };
     }
 
-    auto entry_node = staged_entries.extract(tombstone_filename);
-    auto const inserted_entry = removal_tombstones_by_filename.insert(std::move(entry_node));
-    if (!inserted_entry.inserted) {
-        std::terminate();
-    }
-    while (!staged_new_ids.empty()) {
-        auto id_node = staged_new_ids.extract(staged_new_ids.begin());
-        auto const inserted_id = removal_tombstones_by_id.insert(std::move(id_node));
-        if (!inserted_id.inserted) {
-            std::terminate();
-        }
-    }
-    for (ExistingIDMembership &membership : staged_existing_ids) {
-        if (membership.destination == nullptr) {
-            std::terminate();
-        }
-        auto const inserted_membership = membership.destination->insert(std::move(membership.node));
-        if (!inserted_membership.inserted) {
-            std::terminate();
-        }
-    }
-    removal_tombstone_id_membership_count += normalized->size();
-    return TombstoneCommitStatus{};
+    return TombstoneCommitStatus{
+        .directory_synced = true,
+        .filename = tombstone_filename,
+    };
 }
 
 ResumeSaveResult TTorrentClient::clear_removal_tombstones_locked(std::vector<std::string> const &ids)
@@ -866,40 +405,28 @@ ResumeSaveResult TTorrentClient::clear_removal_tombstones_locked(std::vector<std
         return {};
     }
 
-    std::set<RemovalTombstoneEntry const *> candidates;
-    for (std::string const &id : *normalized) {
-        auto const indexed = removal_tombstones_by_id.find(id);
-        if (indexed != removal_tombstones_by_id.end()) {
-            candidates.insert(indexed->second.begin(), indexed->second.end());
-        }
+    TombstoneEntriesResult const entries = removal_tombstone_entries_locked();
+    if (!entries) {
+        return std::unexpected(entries.error());
     }
-
-    std::vector<RemovalTombstoneEntry const *> cleared_entries;
-    cleared_entries.reserve(candidates.size());
-    for (RemovalTombstoneEntry const *entry : candidates) {
-        if (entry == nullptr) {
-            continue;
-        }
-        bool const covers_entry = std::ranges::all_of(entry->ids, [&normalized](std::string const &id) {
+    bool removed_any = false;
+    for (RemovalTombstoneEntry const &entry : *entries) {
+        bool const covers_entry = std::ranges::all_of(entry.ids, [&normalized](std::string const &id) {
             return std::ranges::find(*normalized, id) != normalized->end();
         });
         if (!covers_entry) {
             continue;
         }
 
-        ResumeRemoveResult removed_tombstone = remove_resume_file_checked_locked(entry->filename);
+        ResumeRemoveResult removed_tombstone = remove_resume_file_checked_locked(entry.filename);
         if (!removed_tombstone) {
             return std::unexpected("Removal tombstone could not be cleared: " + removed_tombstone.error());
         }
-        cleared_entries.push_back(entry);
+        removed_any = *removed_tombstone || removed_any;
     }
 
-    ResumeSaveResult synced = sync_directory(resume_directory_descriptor.get());
-    if (!synced) {
-        return synced;
-    }
-    for (RemovalTombstoneEntry const *entry : cleared_entries) {
-        unindex_removal_tombstone_locked(entry);
+    if (removed_any) {
+        return sync_directory(resume_directory_descriptor.get());
     }
     return {};
 }
@@ -941,10 +468,6 @@ ResumeSaveResult TTorrentClient::complete_pending_removals()
         if (!synced_tombstone_removal) {
             return std::unexpected("Removal tombstone cleanup could not be synced: " +
                                    synced_tombstone_removal.error());
-        }
-        auto const indexed_entry = removal_tombstones_by_filename.find(entry.filename);
-        if (indexed_entry != removal_tombstones_by_filename.end()) {
-            unindex_removal_tombstone_locked(indexed_entry->second.get());
         }
     }
     return {};
@@ -989,16 +512,6 @@ void TTorrentClient::remove_orphan_resume_temp_files()
 
 void TTorrentClient::load_resume_data()
 {
-    std::set<std::string> tombstoned_ids;
-    {
-        std::scoped_lock io_guard(resume_io_lock);
-        TombstoneIDResult tombstones = removal_tombstone_ids_locked();
-        if (!tombstones) {
-            throw std::runtime_error(tombstones.error());
-        }
-        tombstoned_ids = std::move(*tombstones);
-    }
-
     DirectoryNamesResult const names = directory_entry_names(
         resume_directory_descriptor.get(),
         "Resume data directory could not be scanned"
@@ -1008,6 +521,7 @@ void TTorrentClient::load_resume_data()
     }
 
     std::uint64_t unclaimed_resume_count = 0U;
+    std::uint64_t duplicate_identity_resume_count = 0U;
     std::size_t restore_add_attempt_count = 0U;
     auto const record_unclaimed_resume = [&unclaimed_resume_count] {
         if (unclaimed_resume_count != std::numeric_limits<std::uint64_t>::max()) {
@@ -1032,11 +546,6 @@ void TTorrentClient::load_resume_data()
         }
         std::optional<std::string> const resume_id = resume_id_from_resume_path(fs::path(name));
         if (!resume_id) {
-            continue;
-        }
-        if (tombstoned_ids.contains(*resume_id)) {
-            remove_resume_file_locked(name);
-            sync_resume_directory_quietly();
             continue;
         }
         BridgeResult const admission = ensure_torrent_admission_available(3);
@@ -1082,6 +591,15 @@ void TTorrentClient::load_resume_data()
             remove_resume_file_locked(name);
             sync_resume_directory_quietly();
             continue;
+        }
+        {
+            std::scoped_lock io_guard(resume_io_lock);
+            if (canonical_ids_in_use.contains(canonical_id)) {
+                if (duplicate_identity_resume_count != std::numeric_limits<std::uint64_t>::max()) {
+                    ++duplicate_identity_resume_count;
+                }
+                continue;
+            }
         }
         if (params.ti) {
             BridgeResult const valid_info = validate_torrent_info(params);
@@ -1186,10 +704,10 @@ void TTorrentClient::load_resume_data()
             params,
             HTTPSSourcePolicy{
                 .trackers = persisted_https_tracker_policy == HTTPSPolicy::inherit
-                    ? https_tracker_policy
+                    ? HTTPSPolicy::prefer
                     : persisted_https_tracker_policy,
                 .web_seeds = persisted_https_web_seed_policy == HTTPSPolicy::inherit
-                    ? https_web_seed_policy
+                    ? HTTPSPolicy::require
                     : persisted_https_web_seed_policy,
             }
         ));
@@ -1282,8 +800,8 @@ void TTorrentClient::load_resume_data()
         drain_restore_alerts_if_needed();
     }
 
-    // Process the final partial batch before rebuilding the externally visible
-    // cache. This also surfaces restore-time storage and fast-resume errors.
+    // Process the final partial batch before refreshing externally visible
+    // status. This also surfaces restore-time storage and fast-resume errors.
     pump_alerts();
 
     if (unclaimed_resume_count != 0U) {
@@ -1293,7 +811,14 @@ void TTorrentClient::load_resume_data()
             + " because brokered storage authority was missing or invalid. Resume data was preserved."
         )));
     }
-    static_cast<void>(apply_queue_priority_order_locked());
+    if (duplicate_identity_resume_count != 0U) {
+        std::string const noun = duplicate_identity_resume_count == 1U ? "record" : "records";
+        static_cast<void>(publish_changes_locked(queue_alert_error(
+            "Skipped restoring " + std::to_string(duplicate_identity_resume_count)
+            + " saved resume " + noun
+            + " because its canonical Swift identity was duplicated. Resume data was preserved."
+        )));
+    }
 }
 
 } // namespace torrent_bridge::internal

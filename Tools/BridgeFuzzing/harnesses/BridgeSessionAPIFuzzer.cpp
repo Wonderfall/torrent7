@@ -8,14 +8,14 @@
 
 namespace {
 
-std::string selected_id(bridge_fuzz::ByteReader &reader, TTorrentClient *client)
+std::uint64_t selected_token(bridge_fuzz::ByteReader &reader, TTorrentClient *client)
 {
-    std::vector<std::string> ids = bridge_fuzz::snapshot_ids(client);
-    if (!ids.empty() && reader.read_bool()) {
-        return ids[reader.read_u8() % ids.size()];
+    std::vector<std::uint64_t> tokens = bridge_fuzz::snapshot_tokens(client);
+    if (!tokens.empty() && reader.read_bool()) {
+        return tokens[reader.read_u8() % tokens.size()];
     }
 
-    return reader.read_string(96);
+    return reader.read_u64();
 }
 
 char const *maybe_null(bridge_fuzz::ByteReader &reader, std::string const &value)
@@ -42,6 +42,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             std::string magnet = reader.read_string(2048);
             TTorrentAddOptions options = bridge_fuzz::add_options_from_reader(reader);
             bridge_fuzz::AddedIdBuffer added_id;
+            std::uint64_t native_token = 0;
             int32_t add_outcome = TTORRENT_ADD_REJECTED;
             static_cast<void>(TorrentClientAddMagnet(
                 harness.client(),
@@ -49,6 +50,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
                 options,
                 reader.read_bool() ? nullptr : added_id.data(),
                 reader.read_bool() ? -1 : added_id.capacity(),
+                reader.read_bool() ? nullptr : &native_token,
                 reader.read_bool() ? nullptr : &add_outcome,
                 error.data(),
                 error.capacity()
@@ -61,6 +63,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
                 bridge_fuzz::storage_activation_from_reader(reader);
             TTorrentAddOptions options = bridge_fuzz::add_options_from_reader(reader);
             bridge_fuzz::AddedIdBuffer added_id;
+            std::uint64_t native_token = 0;
             int32_t add_outcome = TTORRENT_ADD_REJECTED;
             static_cast<void>(TorrentClientAddTorrentFileData(
                 harness.client(),
@@ -70,6 +73,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
                 options,
                 reader.read_bool() ? nullptr : added_id.data(),
                 reader.read_bool() ? -1 : added_id.capacity(),
+                reader.read_bool() ? nullptr : &native_token,
                 reader.read_bool() ? nullptr : &add_outcome,
                 error.data(),
                 error.capacity()
@@ -83,6 +87,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
                 bridge_fuzz::storage_activation_from_reader(reader);
             TTorrentAddOptions options = bridge_fuzz::add_options_from_reader(reader);
             bridge_fuzz::AddedIdBuffer added_id;
+            std::uint64_t native_token = 0;
             int32_t add_outcome = TTORRENT_ADD_REJECTED;
             int32_t const priority_count = reader.read_bool()
                 ? -1
@@ -97,6 +102,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
                 priority_count,
                 reader.read_bool() ? nullptr : added_id.data(),
                 reader.read_bool() ? -1 : added_id.capacity(),
+                reader.read_bool() ? nullptr : &native_token,
                 reader.read_bool() ? nullptr : &add_outcome,
                 error.data(),
                 error.capacity()
@@ -136,38 +142,38 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             break;
         }
         case 5: {
-            std::string id = selected_id(reader, harness.client());
+            std::uint64_t const token = selected_token(reader, harness.client());
             static_cast<void>(TorrentClientPause(
                 harness.client(),
-                maybe_null(reader, id),
+                token,
                 error.data(),
                 error.capacity()
             ));
             break;
         }
         case 6: {
-            std::string id = selected_id(reader, harness.client());
+            std::uint64_t const token = selected_token(reader, harness.client());
             static_cast<void>(TorrentClientResume(
                 harness.client(),
-                maybe_null(reader, id),
+                token,
                 error.data(),
                 error.capacity()
             ));
             break;
         }
         case 7: {
-            std::string id = selected_id(reader, harness.client());
+            std::uint64_t const token = selected_token(reader, harness.client());
             if (reader.read_bool()) {
                 static_cast<void>(TorrentClientReannounce(
                     harness.client(),
-                    maybe_null(reader, id),
+                    token,
                     error.data(),
                     error.capacity()
                 ));
             } else {
                 static_cast<void>(TorrentClientForceRecheck(
                     harness.client(),
-                    maybe_null(reader, id),
+                    token,
                     error.data(),
                     error.capacity()
                 ));
@@ -175,11 +181,11 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             break;
         }
         case 8: {
-            std::string id = selected_id(reader, harness.client());
+            std::uint64_t const token = selected_token(reader, harness.client());
             std::uint8_t removal_committed = 0;
             static_cast<void>(TorrentClientRemove(
                 harness.client(),
-                maybe_null(reader, id),
+                token,
                 reader.read_bool() ? nullptr : &removal_committed,
                 error.data(),
                 error.capacity()
@@ -187,35 +193,50 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             break;
         }
         case 9: {
-            std::string id = selected_id(reader, harness.client());
-            static_cast<void>(TorrentClientCopySourcePolicy(
+            std::uint64_t const token = selected_token(reader, harness.client());
+            int32_t required_count = 0;
+            std::uint8_t available = 0;
+            static_cast<void>(TorrentClientCopySourcePolicyStateBatch(
                 harness.client(),
-                maybe_null(reader, id),
-                error.data(),
-                error.capacity()
-            ));
-            static_cast<void>(TorrentClientSetSourcePolicyField(
-                harness.client(),
-                maybe_null(reader, id),
+                nullptr,
                 reader.read_i32(),
-                reader.read_u8(),
+                reader.read_bool() ? nullptr : &required_count,
+                reader.read_bool() ? nullptr : &available
+            ));
+            TTorrentSourcePolicyApplication application{};
+            application.native_token = token;
+            application.dht_policy = reader.read_u8();
+            application.peer_exchange_policy = reader.read_u8();
+            application.lsd_policy = reader.read_u8();
+            application.https_tracker_policy = reader.read_u8();
+            application.https_web_seed_policy = reader.read_u8();
+            application.effective_https_tracker_policy = reader.read_u8();
+            application.effective_https_web_seed_policy = reader.read_u8();
+            application.enable_dht = reader.read_u8();
+            application.enable_peer_exchange = reader.read_u8();
+            application.enable_lsd = reader.read_u8();
+            application.allow_pre_metadata_dht = reader.read_u8();
+            static_cast<void>(TorrentClientApplySourcePolicyState(
+                harness.client(),
+                reader.read_bool() ? nullptr : &application,
+                reader.read_i32(),
                 error.data(),
                 error.capacity()
             ));
             break;
         }
         case 10: {
-            std::string id = selected_id(reader, harness.client());
+            std::uint64_t const token = selected_token(reader, harness.client());
             TTorrentOptions options = bridge_fuzz::torrent_options_from_reader(reader);
             static_cast<void>(TorrentClientCopyTorrentOptions(
                 harness.client(),
-                maybe_null(reader, id),
+                token,
                 error.data(),
                 error.capacity()
             ));
             static_cast<void>(TorrentClientSetTorrentOptions(
                 harness.client(),
-                maybe_null(reader, id),
+                token,
                 options,
                 error.data(),
                 error.capacity()
@@ -223,10 +244,13 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             break;
         }
         case 11: {
-            std::string id = selected_id(reader, harness.client());
-            static_cast<void>(TorrentClientMoveTorrentInQueue(
+            std::uint64_t const token = selected_token(reader, harness.client());
+            TTorrentQueuePlacement placement{};
+            placement.native_token = token;
+            placement.priority = reader.read_i32();
+            static_cast<void>(TorrentClientApplyQueueState(
                 harness.client(),
-                maybe_null(reader, id),
+                reader.read_bool() ? nullptr : &placement,
                 reader.read_i32(),
                 error.data(),
                 error.capacity()
@@ -234,10 +258,10 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             break;
         }
         case 12: {
-            std::string id = selected_id(reader, harness.client());
+            std::uint64_t const token = selected_token(reader, harness.client());
             static_cast<void>(TorrentClientSetFilePriority(
                 harness.client(),
-                maybe_null(reader, id),
+                token,
                 reader.read_i32(),
                 reader.read_i32(),
                 error.data(),
@@ -246,27 +270,19 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             break;
         }
         case 13: {
-            std::string id = selected_id(reader, harness.client());
+            std::uint64_t const token = selected_token(reader, harness.client());
             TTorrentPieceMapSnapshot piece_map{};
             std::array<std::uint8_t, 256> pieces{};
-            std::uint64_t revision = 0;
             int32_t required_count = 0;
-            std::uint8_t resident = 0;
-            static_cast<void>(TorrentClientRequestPieceMap(
-                harness.client(),
-                maybe_null(reader, id),
-                error.data(),
-                error.capacity()
-            ));
+            std::uint8_t available = 0;
             static_cast<void>(TorrentClientCopyPieceMap(
                 harness.client(),
-                maybe_null(reader, id),
+                token,
                 reader.read_bool() ? nullptr : &piece_map,
                 reader.read_bool() ? nullptr : pieces.data(),
                 reader.read_bool() ? -1 : static_cast<int32_t>(pieces.size()),
-                reader.read_bool() ? nullptr : &revision,
                 reader.read_bool() ? nullptr : &required_count,
-                reader.read_bool() ? nullptr : &resident
+                reader.read_bool() ? nullptr : &available
             ));
             break;
         }
@@ -276,40 +292,52 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
             break;
         case 15:
             if (reader.read_bool()) {
-                static_cast<void>(TorrentClientSaveAllChecked(harness.client(), error.data(), error.capacity()));
+                static_cast<void>(TorrentClientRecoverPendingRemovalsChecked(
+                    harness.client(),
+                    error.data(),
+                    error.capacity()
+                ));
             } else {
                 static_cast<void>(TorrentClientBlockNetwork(harness.client(), error.data(), error.capacity()));
             }
             bridge_fuzz::drain_alert_error(harness.client());
             break;
         case 16: {
-            std::string id = selected_id(reader, harness.client());
+            std::uint64_t const token = selected_token(reader, harness.client());
             if (reader.read_bool()) {
-                static_cast<void>(TorrentClientRequestSources(
+                static_cast<void>(TorrentClientCopyWebSeedActivity(
                     harness.client(),
-                    maybe_null(reader, id),
-                    error.data(),
-                    error.capacity()
+                    token
                 ));
             } else {
-                static_cast<void>(TorrentClientRequestFiles(
+                static_cast<void>(TorrentClientCopyPeerSources(
                     harness.client(),
-                    maybe_null(reader, id),
-                    error.data(),
-                    error.capacity()
+                    token
                 ));
             }
             break;
         }
-        case 17:
-            TorrentClientSaveAll(harness.client());
+        case 17: {
+            static_cast<void>(TorrentClientSaveResumeDataChecked(
+                harness.client(),
+                selected_token(reader, harness.client()),
+                reader.read_u8(),
+                error.data(),
+                error.capacity()
+            ));
             static_cast<void>(TorrentBridgeLibtorrentVersion());
             break;
+        }
         case 18: {
-            std::uint32_t dirty_mask = 0;
-            static_cast<void>(TorrentClientTakeChanges(
+            std::array<TTorrentEvent, 8> events{};
+            int32_t required_count = 0;
+            std::uint8_t available = 0;
+            static_cast<void>(TorrentClientDrainEvents(
                 harness.client(),
-                reader.read_bool() ? nullptr : &dirty_mask
+                reader.read_bool() ? nullptr : events.data(),
+                reader.read_bool() ? 0 : static_cast<int32_t>(events.size()),
+                reader.read_bool() ? nullptr : &required_count,
+                reader.read_bool() ? nullptr : &available
             ));
             break;
         }

@@ -140,7 +140,8 @@ TEST_CASE("resume identifiers are normalized and validated")
 TEST_CASE("removal tombstone filenames have the expected strict shape")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
-    fs::path const tombstone_path = removal_tombstone_path(temporary_directory.path());
+    fs::path const tombstone_path = temporary_directory.path()
+        / make_removal_tombstone_filename();
 
     CHECK(is_removal_tombstone_path(tombstone_path));
     CHECK(is_removal_tombstone_path(fs::path("removal-" + std::string(32U, 'a') + ".fastresume.remove")));
@@ -192,17 +193,4 @@ TEST_CASE("tombstone payload parsing rejects malformed data")
     ));
     REQUIRE_FALSE(legacy_deletion_marker);
     CHECK(legacy_deletion_marker.error() == "Removal tombstone version is invalid.");
-}
-
-TEST_CASE("joined_error_messages preserves the first failures and truncates long batches")
-{
-    CHECK(joined_error_messages({}).empty());
-    CHECK(joined_error_messages({"one"}) == "one");
-
-    std::vector<std::string> errors;
-    for (int index = 0; index < 10; ++index) {
-        errors.push_back("error " + std::to_string(index));
-    }
-
-    CHECK(joined_error_messages(errors) == "Multiple resume operations failed: error 0; error 1; error 2; error 3; error 4; error 5; error 6; error 7; 2 more.");
 }

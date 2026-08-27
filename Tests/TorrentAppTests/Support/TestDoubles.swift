@@ -358,8 +358,6 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private var nextPollError: Error?
     var dirtyMask: UInt32 = 0
     var networkStatusValue = TorrentNetworkStatus(
-        requestedRevision: 0,
-        submittedRevision: 0,
         listenPort: 0,
         networkBlocked: false,
         hasListener: false,
@@ -440,8 +438,6 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private(set) var torrentOptionsUpdates = [(id: String, options: TorrentOptions)]()
     private(set) var filePriorityUpdates = [(id: String, fileIndex: Int32, priority: TorrentFilePriority)]()
     private(set) var queueMoves = [(id: String, move: TorrentQueueMove)]()
-    private(set) var requestedPieceMapIDs = [String]()
-    private(set) var requestedSourceIDs = [String]()
     var sourcePolicyValue = TorrentSourcePolicy(
         isDHTEnabled: true,
         isPeerExchangeEnabled: true,
@@ -1071,10 +1067,6 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         return response
     }
 
-    func requestSources(id: String) async throws {
-        requestedSourceIDs.append(id)
-    }
-
     func sourcePolicy(id: String) async throws -> TorrentSourcePolicy {
         sourcePolicyValue
     }
@@ -1104,14 +1096,8 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         queueMoves.append((id, move))
     }
 
-    func requestFiles(id: String) async throws {}
-
     func setFilePriority(id: String, fileIndex: Int32, priority: TorrentFilePriority) async throws {
         filePriorityUpdates.append((id, fileIndex, priority))
-    }
-
-    func requestPieceMap(id: String) async throws {
-        requestedPieceMapIDs.append(id)
     }
 
     func trackerBatch(id: String, since revision: UInt64?) async -> TorrentTrackerBatch? {
@@ -1167,8 +1153,6 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 private extension TorrentNetworkStatus {
     func withNetworkBlocked(_ networkBlocked: Bool) -> TorrentNetworkStatus {
         TorrentNetworkStatus(
-            requestedRevision: requestedRevision,
-            submittedRevision: submittedRevision,
             listenPort: listenPort,
             networkBlocked: networkBlocked,
             hasListener: networkBlocked ? false : hasListener,

@@ -110,7 +110,6 @@ package actor TorrentUnavailableEngine: TorrentEngineServicing {
         throw unavailableError
     }
 
-    package func requestSources(id: String) throws { _ = id; throw unavailableError }
     package func sourcePolicy(id: String) throws -> TorrentSourcePolicy { _ = id; throw unavailableError }
 
     package func setSourcePolicy(
@@ -136,7 +135,6 @@ package actor TorrentUnavailableEngine: TorrentEngineServicing {
         throw unavailableError
     }
 
-    package func requestFiles(id: String) throws { _ = id; throw unavailableError }
 
     package func torrentMetadata(id: String) throws -> Data? {
         _ = id
@@ -154,7 +152,6 @@ package actor TorrentUnavailableEngine: TorrentEngineServicing {
         throw unavailableError
     }
 
-    package func requestPieceMap(id: String) throws { _ = id; throw unavailableError }
     package func trackerBatch(id: String, since revision: UInt64?) -> TorrentTrackerBatch? { nil }
     package func webSeedBatch(id: String, since revision: UInt64?) -> TorrentWebSeedBatch? { nil }
     package func webSeedActivity(id: String) -> TorrentWebSeedActivity? { nil }

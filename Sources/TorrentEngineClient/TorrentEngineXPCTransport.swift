@@ -451,9 +451,8 @@ extension TorrentEngineIPCOperation {
 
     package var timeoutCanLeaveOutcomeUnknown: Bool {
         switch self {
-        case .poll, .previewTorrentFile, .requestSources,
-             .sourcePolicy, .torrentOptions, .requestFiles,
-             .requestPieceMap, .torrentMetadata, .trackerBatch, .webSeedBatch,
+        case .poll, .previewTorrentFile, .sourcePolicy, .torrentOptions,
+             .torrentMetadata, .trackerBatch, .webSeedBatch,
              .webSeedActivity, .peerSources, .fileBatch,
              .pieceMapBatch, .readDataset, .closeDataset, .changeHint:
             false

@@ -28,7 +28,7 @@ namespace bridge_fuzz {
 
 namespace fs = std::filesystem;
 
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 46, "Update the fuzz harnesses for the current TorrentBridge ABI.");
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 57, "Update the fuzz harnesses for the current TorrentBridge ABI.");
 #if !defined(TORRENT_USE_ASSERTS) || !TORRENT_USE_ASSERTS
 #error "Fuzz consumers must match the assertion-enabled Debug libtorrent archive."
 #endif
@@ -89,6 +89,15 @@ public:
         value |= static_cast<std::uint32_t>(read_u8()) << 16U;
         value |= static_cast<std::uint32_t>(read_u8()) << 24U;
         return static_cast<std::int32_t>(value);
+    }
+
+    std::uint64_t read_u64() noexcept
+    {
+        std::uint64_t value = 0;
+        for (unsigned shift = 0; shift < 64U; shift += 8U) {
+            value |= static_cast<std::uint64_t>(read_u8()) << shift;
+        }
+        return value;
     }
 
     std::string read_string(std::size_t max_length)
@@ -372,9 +381,9 @@ inline int32_t snapshot_required_count(TTorrentClient *client)
         return 0;
     }
 
-    std::uint64_t revision = 0;
     int32_t required_count = 0;
-    static_cast<void>(TorrentClientCopySnapshotBatch(client, nullptr, 0, &revision, &required_count));
+    uint8_t available = 0;
+    static_cast<void>(TorrentClientCopySnapshotBatch(client, nullptr, 0, &required_count, &available));
     return std::max<int32_t>(required_count, 0);
 }
 
@@ -384,9 +393,23 @@ inline void exercise_change_copy(TTorrentClient *client)
         return;
     }
 
-    uint32_t dirty_mask = 0;
-    static_cast<void>(TorrentClientTakeChanges(client, nullptr));
-    static_cast<void>(TorrentClientTakeChanges(client, &dirty_mask));
+    int32_t required_count = 0;
+    uint8_t available = 0;
+    std::array<TTorrentEvent, 16> events{};
+    static_cast<void>(TorrentClientDrainEvents(
+        client,
+        nullptr,
+        0,
+        &required_count,
+        &available
+    ));
+    static_cast<void>(TorrentClientDrainEvents(
+        client,
+        events.data(),
+        static_cast<int32_t>(events.size()),
+        &required_count,
+        &available
+    ));
 
     static_cast<void>(TorrentClientCopyNetworkStatus(client));
     static_cast<void>(TorrentClientCopyHealth(client));
@@ -399,25 +422,31 @@ inline void exercise_snapshot_copy(TTorrentClient *client)
     }
 
     std::array<TTorrentSnapshot, 8> snapshots{};
-    std::uint64_t revision = 0;
     int32_t required_count = 0;
-    static_cast<void>(TorrentClientCopySnapshotBatch(client, nullptr, 0, &revision, &required_count));
+    uint8_t available = 0;
+    static_cast<void>(TorrentClientCopySnapshotBatch(client, nullptr, 0, &required_count, &available));
     static_cast<void>(TorrentClientCopySnapshotBatch(
         client,
         snapshots.data(),
         static_cast<int32_t>(snapshots.size()),
-        &revision,
-        &required_count
+        &required_count,
+        &available
     ));
 
     std::array<TTorrentTrackerHostSnapshot, 8> tracker_hosts{};
-    static_cast<void>(TorrentClientCopyTrackerHostBatch(client, nullptr, 0, &revision, &required_count));
+    static_cast<void>(TorrentClientCopyTrackerHostBatch(
+        client,
+        nullptr,
+        0,
+        &required_count,
+        &available
+    ));
     static_cast<void>(TorrentClientCopyTrackerHostBatch(
         client,
         tracker_hosts.data(),
         static_cast<int32_t>(tracker_hosts.size()),
-        &revision,
-        &required_count
+        &required_count,
+        &available
     ));
 
     exercise_change_copy(client);
@@ -433,30 +462,31 @@ inline void drain_alert_error(TTorrentClient *client)
     static_cast<void>(TorrentClientTakeAlertError(client, error.data(), error.capacity()));
 }
 
-inline std::vector<std::string> snapshot_ids(TTorrentClient *client)
+inline std::vector<std::uint64_t> snapshot_tokens(TTorrentClient *client)
 {
     if (client == nullptr) {
         return {};
     }
 
     std::array<TTorrentSnapshot, 64> snapshots{};
-    std::uint64_t revision = 0;
     int32_t required_count = 0;
+    uint8_t available = 0;
     int32_t const copied = TorrentClientCopySnapshotBatch(
         client,
         snapshots.data(),
         static_cast<int32_t>(snapshots.size()),
-        &revision,
-        &required_count
+        &required_count,
+        &available
     );
 
-    std::vector<std::string> ids;
+    std::vector<std::uint64_t> tokens;
     for (int32_t index = 0; index < copied; ++index) {
-        if (snapshots[static_cast<std::size_t>(index)].id[0] != '\0') {
-            ids.emplace_back(snapshots[static_cast<std::size_t>(index)].id);
+        std::uint64_t const token = snapshots[static_cast<std::size_t>(index)].native_token;
+        if (token != 0U) {
+            tokens.push_back(token);
         }
     }
-    return ids;
+    return tokens;
 }
 
 inline void exercise_detail_copies(TTorrentClient *client)
@@ -465,10 +495,8 @@ inline void exercise_detail_copies(TTorrentClient *client)
         return;
     }
 
-    for (std::string const &id : snapshot_ids(client)) {
+    for (std::uint64_t const token : snapshot_tokens(client)) {
         ErrorBuffer error;
-        static_cast<void>(TorrentClientRequestSources(client, id.c_str(), error.data(), error.capacity()));
-        static_cast<void>(TorrentClientRequestFiles(client, id.c_str(), error.data(), error.capacity()));
 
         std::array<TTorrentTrackerSnapshot, 8> trackers{};
         std::array<TTorrentWebSeedSnapshot, 8> web_seeds{};
@@ -476,101 +504,90 @@ inline void exercise_detail_copies(TTorrentClient *client)
         TTorrentOptions options{};
         TTorrentPieceMapSnapshot piece_map{};
         std::array<std::uint8_t, 256> pieces{};
-        std::uint64_t revision = 0;
         int32_t required_count = 0;
-        std::uint8_t resident = 0;
+        std::uint8_t available = 0;
 
-        static_cast<void>(TorrentClientCopySourcePolicy(client, id.c_str(), error.data(), error.capacity()));
-        static_cast<void>(TorrentClientSetSourcePolicyField(
+        std::array<TTorrentSourcePolicyState, 8> source_policy_states{};
+        static_cast<void>(TorrentClientCopySourcePolicyStateBatch(
             client,
-            id.c_str(),
-            TTORRENT_SOURCE_POLICY_ENABLE_DHT,
-            std::uint8_t{0},
-            error.data(),
-            error.capacity()
+            source_policy_states.data(),
+            static_cast<int32_t>(source_policy_states.size()),
+            &required_count,
+            &available
         ));
-        static_cast<void>(TorrentClientCopyTorrentOptions(client, id.c_str(), error.data(), error.capacity()));
-        static_cast<void>(TorrentClientSetTorrentOptions(client, id.c_str(), options, error.data(), error.capacity()));
+        static_cast<void>(TorrentClientCopyTorrentOptions(client, token, error.data(), error.capacity()));
+        static_cast<void>(TorrentClientSetTorrentOptions(client, token, options, error.data(), error.capacity()));
         static_cast<void>(TorrentClientCopyTrackerBatch(
             client,
-            id.c_str(),
+            token,
             nullptr,
             0,
-            &revision,
             &required_count,
-            &resident
+            &available
         ));
         static_cast<void>(TorrentClientCopyTrackerBatch(
             client,
-            id.c_str(),
+            token,
             trackers.data(),
             static_cast<int32_t>(trackers.size()),
-            &revision,
             &required_count,
-            &resident
+            &available
         ));
         static_cast<void>(TorrentClientCopyWebSeedBatch(
             client,
-            id.c_str(),
+            token,
             nullptr,
             0,
-            &revision,
             &required_count,
-            &resident
+            &available
         ));
         static_cast<void>(TorrentClientCopyWebSeedBatch(
             client,
-            id.c_str(),
+            token,
             web_seeds.data(),
             static_cast<int32_t>(web_seeds.size()),
-            &revision,
             &required_count,
-            &resident
+            &available
         ));
-        static_cast<void>(TorrentClientCopyWebSeedActivity(client, id.c_str()));
-        static_cast<void>(TorrentClientCopyPeerSources(client, id.c_str()));
-        static_cast<void>(TorrentClientRequestPieceMap(client, id.c_str(), error.data(), error.capacity()));
+        static_cast<void>(TorrentClientCopyWebSeedActivity(client, token));
+        static_cast<void>(TorrentClientCopyPeerSources(client, token));
         static_cast<void>(TorrentClientCopyPieceMap(
             client,
-            id.c_str(),
+            token,
             nullptr,
             nullptr,
             0,
-            &revision,
             &required_count,
-            &resident
+            &available
         ));
         static_cast<void>(TorrentClientCopyPieceMap(
             client,
-            id.c_str(),
+            token,
             &piece_map,
             pieces.data(),
             static_cast<int32_t>(pieces.size()),
-            &revision,
             &required_count,
-            &resident
+            &available
         ));
         static_cast<void>(TorrentClientCopyFileBatch(
             client,
-            id.c_str(),
+            token,
             nullptr,
             0,
-            &revision,
             &required_count,
-            &resident
+            &available
         ));
         static_cast<void>(TorrentClientCopyFileBatch(
             client,
-            id.c_str(),
+            token,
             files.data(),
             static_cast<int32_t>(files.size()),
-            &revision,
             &required_count,
-            &resident
+            &available
         ));
         static_cast<void>(TorrentClientSetFilePriority(
             client,
-            id.c_str(),
+            token,
             0,
             TTORRENT_FILE_PRIORITY_NORMAL,
             error.data(),
@@ -586,17 +603,17 @@ inline void remove_all_torrents(TTorrentClient *client)
     }
 
     for (int round = 0; round < 8; ++round) {
-        std::vector<std::string> ids = snapshot_ids(client);
-        if (ids.empty()) {
+        std::vector<std::uint64_t> tokens = snapshot_tokens(client);
+        if (tokens.empty()) {
             return;
         }
 
-        for (std::string const &id : ids) {
+        for (std::uint64_t const token : tokens) {
             ErrorBuffer error;
             std::uint8_t removal_committed = 0;
             static_cast<void>(TorrentClientRemove(
                 client,
-                id.c_str(),
+                token,
                 &removal_committed,
                 error.data(),
                 error.capacity()
@@ -619,18 +636,32 @@ inline TTorrentSessionSettings settings_from_reader(ByteReader &reader, std::str
     settings.accept_incoming_connections = reader.read_u8();
     settings.enable_port_forwarding = reader.read_u8();
     settings.enable_dht = reader.read_u8();
-    settings.use_dht_by_default = reader.read_u8();
+    settings.dht_read_only = reader.read_u8();
     settings.enable_lsd = reader.read_u8();
-    settings.use_lsd_by_default = reader.read_u8();
-    settings.use_pex_by_default = reader.read_u8();
-    settings.https_tracker_policy = reader.read_u8();
-    settings.https_web_seed_policy = reader.read_u8();
     settings.encryption_policy = reader.read_i32();
     settings.anonymous_mode = reader.read_u8();
     settings.network_blocked = reader.read_u8();
+    settings.dht_discovery_policy = reader.read_u8();
 
     network_interface = reader.read_string(128);
     return settings;
+}
+
+[[nodiscard]] inline TTorrentAddOptions valid_add_options(std::string_view canonical_id)
+{
+    TTorrentAddOptions options{};
+    options.starts_paused = 1;
+    options.queue_priority = TTORRENT_QUEUE_PRIORITY_NORMAL;
+    options.enable_dht = 0;
+    options.enable_peer_exchange = 0;
+    options.enable_lsd = 0;
+    options.https_tracker_policy = TTORRENT_HTTPS_POLICY_INHERIT;
+    options.https_web_seed_policy = TTORRENT_HTTPS_POLICY_INHERIT;
+    options.effective_https_tracker_policy = TTORRENT_HTTPS_POLICY_PREFER;
+    options.effective_https_web_seed_policy = TTORRENT_HTTPS_POLICY_REQUIRE;
+    options.allow_pre_metadata_dht = 0;
+    std::ranges::copy(canonical_id, options.canonical_id);
+    return options;
 }
 
 inline TTorrentAddOptions add_options_from_reader(ByteReader &reader)
@@ -638,10 +669,22 @@ inline TTorrentAddOptions add_options_from_reader(ByteReader &reader)
     TTorrentAddOptions options{};
     options.starts_paused = reader.read_u8();
     options.queue_priority = reader.read_u8();
+    options.enable_dht = reader.read_u8();
     options.enable_peer_exchange = reader.read_u8();
+    options.enable_lsd = reader.read_u8();
     options.https_tracker_policy = reader.read_u8();
     options.https_web_seed_policy = reader.read_u8();
+    options.effective_https_tracker_policy = reader.read_u8();
+    options.effective_https_web_seed_policy = reader.read_u8();
     options.allow_pre_metadata_dht = reader.read_u8();
+    constexpr std::string_view hex = "0123456789abcdef";
+    options.canonical_id[0] = 't';
+    options.canonical_id[1] = ':';
+    for (std::size_t index = 0; index < 16U; ++index) {
+        std::uint8_t const byte = reader.read_u8();
+        options.canonical_id[2U + (index * 2U)] = hex[byte >> 4U];
+        options.canonical_id[3U + (index * 2U)] = hex[byte & 0x0fU];
+    }
     return options;
 }
 

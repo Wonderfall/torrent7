@@ -1639,10 +1639,6 @@ private struct TorrentInfoView: View {
                 return
             }
             sourcePolicy = confirmedPolicy
-            try? await store.requestSources(for: torrentID)
-            guard isCurrentSourcePolicyMutation(mutationGeneration) else {
-                return
-            }
             let trackerBatch = await store.trackerBatch(for: torrentID, since: nil)
             guard isCurrentSourcePolicyMutation(mutationGeneration) else {
                 return
@@ -1722,13 +1718,6 @@ private struct TorrentInfoView: View {
                 guard mutationGeneration == sourcePolicyMutationGeneration else {
                     continue
                 }
-                try await store.requestSources(for: torrentID)
-                guard isCurrentSourcesRefresh(token) else {
-                    return
-                }
-                guard mutationGeneration == sourcePolicyMutationGeneration else {
-                    continue
-                }
             } catch {
                 guard isCurrentSourcesRefresh(token) else {
                     return
@@ -1741,10 +1730,6 @@ private struct TorrentInfoView: View {
                 return
             }
 
-            try? await Task.sleep(for: .milliseconds(350))
-            guard isCurrentSourcesRefresh(token) else {
-                return
-            }
             guard mutationGeneration == sourcePolicyMutationGeneration else {
                 continue
             }
@@ -1838,24 +1823,6 @@ private struct TorrentInfoView: View {
                 continue
             }
 
-            do {
-                try await store.requestFiles(for: torrentID)
-                guard isCurrentFilesRefresh(token) else {
-                    return
-                }
-            } catch {
-                guard isCurrentFilesRefresh(token) else {
-                    return
-                }
-                fileError = error.localizedDescription
-                filesLoaded = true
-                return
-            }
-
-            try? await Task.sleep(for: .milliseconds(350))
-            guard isCurrentFilesRefresh(token) else {
-                return
-            }
             let fileBatch = await store.fileBatch(
                 for: torrentID,
                 since: fileRevision
@@ -1937,20 +1904,6 @@ private struct TorrentInfoView: View {
                     return
                 }
                 continue
-            }
-
-            do {
-                try await store.requestPieceMap(for: torrentID)
-                guard isCurrentPieceMapRefresh(token) else {
-                    return
-                }
-            } catch {
-                guard isCurrentPieceMapRefresh(token) else {
-                    return
-                }
-                pieceMapError = error.localizedDescription
-                pieceMapLoaded = true
-                return
             }
 
             let pieceMapBatch = await store.pieceMapBatch(

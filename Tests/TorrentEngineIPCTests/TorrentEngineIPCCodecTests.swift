@@ -380,9 +380,12 @@ struct TorrentEngineIPCEnvelopeTests {
 
     @Test("Stable dataset and hint operation numbers")
     func stableOperationNumbers() {
-        #expect(TorrentEngineIPCProtocol.version == 10)
+        #expect(TorrentEngineIPCProtocol.version == 11)
         #expect(TorrentEngineIPCOperation(rawValue: 7) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 10) == nil)
+        #expect(TorrentEngineIPCOperation(rawValue: 30) == nil)
+        #expect(TorrentEngineIPCOperation(rawValue: 36) == nil)
+        #expect(TorrentEngineIPCOperation(rawValue: 38) == nil)
         #expect(TorrentEngineIPCOperation.torrentMetadata.rawValue == 39)
         #expect(TorrentEngineIPCOperation(rawValue: 41) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 50) == nil)
@@ -907,8 +910,6 @@ struct TorrentEngineIPCJSONTests {
                 count: TorrentEngineIPCLimits.maximumAlertErrorsPerPoll
             ),
             networkStatus: TorrentNetworkStatus(
-                requestedRevision: .max,
-                submittedRevision: .max,
                 listenPort: 65_535,
                 networkBlocked: false,
                 hasListener: true,

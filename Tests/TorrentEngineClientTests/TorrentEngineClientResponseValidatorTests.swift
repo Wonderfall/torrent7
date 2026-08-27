@@ -374,8 +374,6 @@ struct TorrentEngineClientResponseValidatorTests {
         routingNodes: Int?
     ) -> TorrentNetworkStatus {
         TorrentNetworkStatus(
-            requestedRevision: 1,
-            submittedRevision: 1,
             listenPort: 0,
             networkBlocked: false,
             hasListener: false,

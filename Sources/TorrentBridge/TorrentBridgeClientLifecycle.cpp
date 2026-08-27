@@ -9,6 +9,33 @@ namespace {
     return value == std::numeric_limits<std::uint64_t>::max() ? value : value + 1U;
 }
 
+struct ChangeEventMapping {
+    DirtyMask change;
+    std::uint8_t event_kind;
+};
+
+constexpr std::array kChangeEventMappings{
+    ChangeEventMapping{.change = kChangeTorrents, .event_kind = TTORRENT_EVENT_TORRENTS_CHANGED},
+    ChangeEventMapping{.change = kChangeTrackers, .event_kind = TTORRENT_EVENT_TRACKERS_CHANGED},
+    ChangeEventMapping{.change = kChangeWebSeeds, .event_kind = TTORRENT_EVENT_WEB_SEEDS_CHANGED},
+    ChangeEventMapping{.change = kChangeFiles, .event_kind = TTORRENT_EVENT_FILES_CHANGED},
+    ChangeEventMapping{.change = kChangeNetwork, .event_kind = TTORRENT_EVENT_NETWORK_CHANGED},
+    ChangeEventMapping{.change = kChangeErrors, .event_kind = TTORRENT_EVENT_ERRORS_AVAILABLE},
+    ChangeEventMapping{.change = kChangePieces, .event_kind = TTORRENT_EVENT_PIECES_CHANGED},
+    ChangeEventMapping{.change = kChangeTrackerHosts, .event_kind = TTORRENT_EVENT_TRACKER_HOSTS_CHANGED},
+    ChangeEventMapping{.change = kChangeHealth, .event_kind = TTORRENT_EVENT_HEALTH_CHANGED},
+};
+
+constexpr DirtyMask kKnownChanges = kChangeTorrents
+    | kChangeTrackers
+    | kChangeWebSeeds
+    | kChangeFiles
+    | kChangeNetwork
+    | kChangeErrors
+    | kChangePieces
+    | kChangeTrackerHosts
+    | kChangeHealth;
+
 } // namespace
 
 std::chrono::milliseconds alert_worker_failure_backoff(std::uint64_t const consecutive_failures) noexcept
@@ -53,15 +80,15 @@ TTorrentClient::TTorrentClient(
     bool enable_peer_exchange_plugin,
     std::shared_ptr<PayloadBrokerContext> broker
 )
-    : state_directory(std::string(state_path)),
-      resume_directory(state_directory / "ResumeData"),
-      part_files_directory(state_directory / "PartFiles"),
-      staging_directory(state_directory / "Staging"),
+    : part_files_directory(fs::path{std::string(state_path)} / "PartFiles"),
+      staging_directory(fs::path{std::string(state_path)} / "Staging"),
       payload_broker(std::move(broker)),
       session(make_session_params(enable_peer_exchange_plugin)),
       peer_exchange_plugin_enabled(enable_peer_exchange_plugin)
 {
+    fs::path const state_directory{std::string(state_path)};
     session.pause();
+    pending_events.reserve(static_cast<std::size_t>(TTORRENT_MAX_EVENT_COUNT));
 
     std::error_code create_error;
     fs::create_directories(state_directory, create_error);
@@ -105,24 +132,17 @@ TTorrentClient::TTorrentClient(
     part_files_directory_descriptor = create_private_directory("PartFiles", "part files directory");
     staging_directory_descriptor = create_private_directory("Staging", "magnet staging directory");
     remove_orphan_resume_temp_files();
-    {
-        std::scoped_lock io_guard(resume_io_lock);
-        ResumeSaveResult indexed_tombstones = load_removal_tombstone_index_locked(
-            RemovalTombstoneIndexLimits{
-                .entry_count = kMaxRemovalTombstoneEntryCount,
-                .id_membership_count = kMaxRemovalTombstoneIDMembershipCount,
-            }
-        );
-        if (!indexed_tombstones) {
-            throw std::runtime_error(indexed_tombstones.error());
-        }
-    }
     ResumeSaveResult completed_removals = complete_pending_removals();
     if (!completed_removals) {
         throw std::runtime_error(completed_removals.error());
     }
     load_resume_data();
-    static_cast<void>(rebuild_snapshot_cache());
+    {
+        std::scoped_lock guard(lock);
+        std::scoped_lock io_guard(resume_io_lock);
+        source_policy_reconciled = handle_by_native_token.empty();
+    }
+    static_cast<void>(refresh_torrent_statuses());
     request_snapshot_update();
     start_alert_worker();
 }
@@ -196,7 +216,7 @@ void TTorrentClient::set_wake_callback(TTorrentWakeCallback callback, void *cont
         }
         wake_callback = callback;
         wake_callback_context = context;
-        if (has_dirty_changes(pending_changes) && !wake_pending) {
+        if ((!pending_events.empty() || pending_critical_faults != 0U) && !wake_pending) {
             wake_pending = true;
             ++wake_callbacks_in_flight;
             wake = WakeCallbackInvocation{.callback = callback, .context = context};
@@ -220,54 +240,225 @@ void TTorrentClient::clear_wake_callback() noexcept
     }
 }
 
-std::uint64_t TTorrentClient::take_changes(DirtyMask *changes_out) noexcept
+int32_t TTorrentClient::drain_events(
+    std::span<TTorrentEvent> output,
+    int32_t *required_count_out,
+    std::uint8_t *available_out
+) noexcept
 {
+    if (required_count_out != nullptr) {
+        *required_count_out = 0;
+    }
+    if (available_out != nullptr) {
+        *available_out = bridge_bool(false);
+    }
     try {
         std::scoped_lock guard(lock);
-        DirtyMask const changes = pending_changes;
-        pending_changes = 0;
+        std::size_t const critical_event_count = pending_critical_faults == 0U ? 0U : 1U;
+        std::size_t const event_count = pending_events.size() + critical_event_count;
+        if (required_count_out != nullptr) {
+            *required_count_out = static_cast<int32_t>(event_count);
+        }
+        if (available_out != nullptr) {
+            *available_out = bridge_bool(true);
+        }
+        if (output.size() < event_count) {
+            return 0;
+        }
+
+        auto destination = output.begin();
+        if (pending_critical_faults != 0U) {
+            *destination = TTorrentEvent{
+                .native_token = 0U,
+                .kind = TTORRENT_EVENT_CRITICAL_FAULT,
+                .resume_save_mode = TTORRENT_RESUME_SAVE_ROUTINE,
+                .critical_faults = pending_critical_faults,
+            };
+            ++destination;
+        }
+        if (!pending_events.empty()) {
+            std::ranges::copy(pending_events, destination);
+        }
+        pending_critical_faults = 0U;
+        pending_events.clear();
         wake_pending = false;
-        if (changes_out != nullptr) {
-            *changes_out = changes;
-        }
-        return publication_epoch;
+        return static_cast<int32_t>(event_count);
     } catch (...) {
-        if (changes_out != nullptr) {
-            *changes_out = 0;
-        }
         return 0;
     }
 }
 
+int32_t TTorrentClient::drain_presentation_metadata(
+    std::span<TTorrentPresentationMetadata> output,
+    int32_t *required_count_out,
+    std::uint8_t *available_out
+) noexcept
+{
+    if (required_count_out != nullptr) {
+        *required_count_out = 0;
+    }
+    if (available_out != nullptr) {
+        *available_out = bridge_bool(false);
+    }
+    try {
+        std::scoped_lock guard(lock);
+        std::scoped_lock io_guard(resume_io_lock);
+        std::size_t pending_count = 0;
+        for (std::unique_ptr<TorrentIdentity> const &owned : torrent_identities) {
+            TorrentIdentity *const identity = owned.get();
+            if (identity == nullptr || !identity->pending_presentation_metadata) {
+                continue;
+            }
+            if (identity->token == nullptr
+                || identity->token->active_identity.load(std::memory_order_acquire) != identity
+                || !handle_by_native_token.contains(identity->token->value)) {
+                identity->pending_presentation_metadata.reset();
+                continue;
+            }
+            ++pending_count;
+        }
+
+        if (required_count_out != nullptr) {
+            *required_count_out = static_cast<int32_t>(pending_count);
+        }
+        if (available_out != nullptr) {
+            *available_out = bridge_bool(true);
+        }
+        if (output.size() < pending_count) {
+            return 0;
+        }
+
+        auto destination = output.begin();
+        for (std::unique_ptr<TorrentIdentity> const &owned : torrent_identities) {
+            TorrentIdentity *const identity = owned.get();
+            if (identity == nullptr || !identity->pending_presentation_metadata) {
+                continue;
+            }
+            *destination = *identity->pending_presentation_metadata;
+            identity->pending_presentation_metadata.reset();
+            ++destination;
+        }
+        return static_cast<int32_t>(pending_count);
+    } catch (...) {
+        return 0;
+    }
+}
+
+DirtyMask TTorrentClient::record_critical_fault_locked(std::uint32_t faults) noexcept
+{
+    constexpr std::uint32_t kKnownCriticalFaults =
+        TTORRENT_CRITICAL_FAULT_SESSION_IDENTITY_AUTHORITY
+        | TTORRENT_CRITICAL_FAULT_NETWORK_CONTAINMENT_UNCONFIRMED;
+    faults &= kKnownCriticalFaults;
+    if (faults == 0U) {
+        return 0U;
+    }
+
+    DirtyMask changes = 0U;
+    try {
+        BridgeResult const contained = contain_network_for_critical_fault_locked(changes);
+        if (!contained) {
+            faults |= TTORRENT_CRITICAL_FAULT_NETWORK_CONTAINMENT_UNCONFIRMED;
+        }
+    } catch (...) {
+        faults |= TTORRENT_CRITICAL_FAULT_NETWORK_CONTAINMENT_UNCONFIRMED;
+    }
+
+    pending_critical_faults |= faults;
+    try {
+        if (pending_events.size() >= static_cast<std::size_t>(TTORRENT_MAX_EVENT_COUNT)) {
+            pending_events.clear();
+            pending_events.push_back(TTorrentEvent{
+                .native_token = 0U,
+                .kind = TTORRENT_EVENT_RESYNC_REQUIRED,
+                .resume_save_mode = TTORRENT_RESUME_SAVE_ROUTINE,
+                .critical_faults = 0U,
+            });
+        }
+    } catch (...) {
+        pending_events.clear();
+    }
+    return changes;
+}
+
 WakeCallbackInvocation TTorrentClient::publish_changes_locked(DirtyMask changes) noexcept
 {
-    if (!has_dirty_changes(changes)) {
+    if (!has_dirty_changes(changes)
+        && pending_events.empty()
+        && pending_critical_faults == 0U) {
         return {};
     }
 
-    if ((changes & TTORRENT_DIRTY_TORRENTS) != 0U) {
-        ++snapshot_revision;
-    }
-    if ((changes & TTORRENT_DIRTY_TRACKERS) != 0U) {
-        ++tracker_revision;
-    }
-    if ((changes & TTORRENT_DIRTY_TRACKER_HOSTS) != 0U) {
-        ++tracker_host_revision;
-    }
-    if ((changes & TTORRENT_DIRTY_WEB_SEEDS) != 0U) {
-        ++web_seed_revision;
-    }
-    if ((changes & TTORRENT_DIRTY_FILES) != 0U) {
-        ++file_revision;
-    }
-    if ((changes & TTORRENT_DIRTY_PIECES) != 0U) {
-        ++piece_map_revision;
+    try {
+        std::size_t const event_capacity = static_cast<std::size_t>(TTORRENT_MAX_EVENT_COUNT)
+            - (pending_critical_faults == 0U ? 0U : 1U);
+        if (pending_events.size() >= event_capacity) {
+            pending_events.clear();
+            pending_events.push_back(TTorrentEvent{
+                .native_token = 0U,
+                .kind = TTORRENT_EVENT_RESYNC_REQUIRED,
+                .resume_save_mode = TTORRENT_RESUME_SAVE_ROUTINE,
+                .critical_faults = 0U,
+            });
+        }
+        bool const resync_already_pending = std::ranges::any_of(
+            pending_events,
+            [](TTorrentEvent const &event) {
+                return event.kind == TTORRENT_EVENT_RESYNC_REQUIRED;
+            }
+        );
+        if (!resync_already_pending) {
+            if ((changes & ~kKnownChanges) != 0U) {
+                pending_events.clear();
+                pending_events.push_back(TTorrentEvent{
+                    .native_token = 0U,
+                    .kind = TTORRENT_EVENT_RESYNC_REQUIRED,
+                    .resume_save_mode = TTORRENT_RESUME_SAVE_ROUTINE,
+                    .critical_faults = 0U,
+                });
+            } else {
+                for (ChangeEventMapping const &mapping : kChangeEventMappings) {
+                    if ((changes & mapping.change) == 0U) {
+                        continue;
+                    }
+                    if (pending_events.size() >= event_capacity) {
+                        pending_events.clear();
+                        pending_events.push_back(
+                            TTorrentEvent{
+                                .native_token = 0U,
+                                .kind = TTORRENT_EVENT_RESYNC_REQUIRED,
+                                .resume_save_mode = TTORRENT_RESUME_SAVE_ROUTINE,
+                                .critical_faults = 0U,
+                            }
+                        );
+                        break;
+                    }
+                    pending_events.push_back(TTorrentEvent{
+                        .native_token = 0U,
+                        .kind = mapping.event_kind,
+                        .resume_save_mode = TTORRENT_RESUME_SAVE_ROUTINE,
+                        .critical_faults = 0U,
+                    });
+                }
+            }
+        }
+    } catch (...) {
+        pending_events.clear();
+        try {
+            pending_events.push_back(TTorrentEvent{
+                .native_token = 0U,
+                .kind = TTORRENT_EVENT_RESYNC_REQUIRED,
+                .resume_save_mode = TTORRENT_RESUME_SAVE_ROUTINE,
+                .critical_faults = 0U,
+            });
+        } catch (...) {
+            return {};
+        }
     }
 
-    ++publication_epoch;
-    pending_changes |= changes;
-
-    if (wake_callback == nullptr || wake_pending) {
+    if ((pending_events.empty() && pending_critical_faults == 0U)
+        || wake_callback == nullptr
+        || wake_pending) {
         return {};
     }
 
@@ -380,7 +571,7 @@ void TTorrentClient::alert_loop(std::stop_token const &stop_token)
             auto const after_alerts = clock::now();
             bool const persistence_faulted_now = persistence_is_faulted();
             if (!persistence_faulted_now && after_alerts >= next_resume_retry) {
-                retry_resume_writes(false);
+                request_resume_retry();
                 next_resume_retry = advance_deadline(next_resume_retry, kResumeRetryInterval, after_alerts);
             } else if (persistence_faulted_now && after_alerts >= next_resume_retry) {
                 next_resume_retry = advance_deadline(next_resume_retry, kResumeRetryInterval, after_alerts);
@@ -430,7 +621,7 @@ std::uint64_t TTorrentClient::record_alert_worker_failure(std::string_view error
         bridge_health.alert_worker_degraded = bridge_bool(true);
         copy_string(std::span{bridge_health.last_alert_worker_error}, detail);
 
-        DirtyMask changes = TTORRENT_DIRTY_HEALTH;
+        DirtyMask changes = kChangeHealth;
         try {
             std::string queued_error(kUserErrorPrefix);
             std::size_t const remaining = kMaximumQueuedErrorBytes - queued_error.size();
@@ -460,7 +651,7 @@ void TTorrentClient::record_alert_worker_recovery() noexcept
         }
         bridge_health.consecutive_alert_worker_failures = 0;
         bridge_health.alert_worker_degraded = bridge_bool(false);
-        wake = publish_changes_locked(TTORRENT_DIRTY_HEALTH);
+        wake = publish_changes_locked(kChangeHealth);
     } catch (...) {
         return;
     }
@@ -469,66 +660,54 @@ void TTorrentClient::record_alert_worker_recovery() noexcept
 
 [[nodiscard]] std::string TTorrentClient::reserve_canonical_torrent_id_locked(
     std::string canonical_id,
-    bool const requires_requested_id,
+    bool const allow_reuse_from_removing,
     int32_t *const preserved_queue_rank_out
 )
 {
     if (preserved_queue_rank_out != nullptr) {
         *preserved_queue_rank_out = kUnsetQueueRank;
     }
-    if (!canonical_id.empty()) {
-        if (!is_canonical_torrent_id(canonical_id)) {
-            if (requires_requested_id) {
-                throw std::invalid_argument("The requested torrent identifier is invalid.");
-            }
-        } else if (canonical_ids_in_use.insert(canonical_id).second) {
-            return canonical_id;
-        }
+    if (!is_canonical_torrent_id(canonical_id)) {
+        throw std::invalid_argument("The requested torrent identifier is invalid.");
+    }
+    if (canonical_ids_in_use.insert(canonical_id).second) {
+        return canonical_id;
+    }
 
-        if (requires_requested_id) {
-            auto const previous = std::ranges::find_if(
-                torrent_identities,
-                [&canonical_id](auto const &owned) {
-                    return owned != nullptr && owned->canonical_id == canonical_id;
-                }
+    if (allow_reuse_from_removing) {
+        auto const previous = std::ranges::find_if(
+            torrent_identities,
+            [&canonical_id](auto const &owned) {
+                return owned != nullptr && owned->canonical_id == canonical_id;
+            }
+        );
+        if (previous != torrent_identities.end()) {
+            TorrentIdentity *const identity = previous->get();
+            auto const references_identity = [identity](auto const &entry) {
+                return entry.second == identity;
+            };
+            bool const is_active = std::ranges::any_of(
+                active_identity_by_id,
+                references_identity
             );
-            if (previous != torrent_identities.end()) {
-                TorrentIdentity *const identity = previous->get();
-                auto const references_identity = [identity](auto const &entry) {
-                    return entry.second == identity;
-                };
-                bool const is_active = std::ranges::any_of(
-                    active_identity_by_id,
-                    references_identity
-                );
-                bool const is_removing = unidentified_removing_identities.contains(identity)
-                    || std::ranges::any_of(removing_identity_by_id, references_identity);
-                if (!is_active && is_removing) {
-                    if (preserved_queue_rank_out != nullptr) {
-                        *preserved_queue_rank_out = identity->queue_rank;
-                    }
-                    identity->canonical_id.clear();
-                    return canonical_id;
+            bool const is_removing = unidentified_removing_identities.contains(identity)
+                || std::ranges::any_of(removing_identity_by_id, references_identity);
+            if (!is_active && is_removing) {
+                if (preserved_queue_rank_out != nullptr) {
+                    *preserved_queue_rank_out = identity->queue_rank;
                 }
+                identity->canonical_id.clear();
+                return canonical_id;
             }
-            throw std::runtime_error("The requested torrent identifier is still active.");
         }
     }
 
-    constexpr int kMaxCanonicalIDGenerationAttempts = 256;
-    for (int attempt = 0; attempt < kMaxCanonicalIDGenerationAttempts; ++attempt) {
-        std::string generated = make_canonical_torrent_id();
-        if (canonical_ids_in_use.insert(generated).second) {
-            return generated;
-        }
-    }
-
-    throw std::runtime_error("A unique torrent identifier could not be generated.");
+    throw std::runtime_error("The requested torrent identifier is already in use.");
 }
 
 TorrentIdentity *TTorrentClient::make_identity(
     std::string canonical_id,
-    bool const requires_requested_id
+    bool const allow_reuse_from_removing
 )
 {
     std::scoped_lock io_guard(resume_io_lock);
@@ -544,11 +723,13 @@ TorrentIdentity *TTorrentClient::make_identity(
     auto token = std::make_unique<TorrentIdentityToken>();
     auto identity = std::make_unique<TorrentIdentity>();
     int32_t preserved_queue_rank = kUnsetQueueRank;
-    identity->generation = next_identity_generation++;
-    token->generation = identity->generation;
+    if (next_native_token == 0U) {
+        throw std::length_error("The native torrent token space has been exhausted.");
+    }
+    token->value = next_native_token++;
     identity->canonical_id = reserve_canonical_torrent_id_locked(
         std::move(canonical_id),
-        requires_requested_id,
+        allow_reuse_from_removing,
         &preserved_queue_rank
     );
     identity->queue_rank = preserved_queue_rank;
@@ -574,30 +755,20 @@ TorrentIdentity *TTorrentClient::make_identity(
 TorrentIdentity *TTorrentClient::attach_identity(
     lt::add_torrent_params &params,
     std::string canonical_id,
-    bool const requires_requested_id
+    bool const allow_reuse_from_removing
 )
 {
     TorrentIdentity *identity = make_identity(
         std::move(canonical_id),
-        requires_requested_id
+        allow_reuse_from_removing
     );
-    std::array<char, sizeof(TTorrentSnapshot::comment)> comment{};
-    copy_string(std::span{comment}, params.comment);
-    identity->comment = comment.data();
-    identity->creation_date = std::max<std::time_t>(params.creation_date, 0);
+    stage_presentation_metadata(*identity, params);
     params.userdata = identity->token;
     return identity;
 }
 
 BridgeResult TTorrentClient::ensure_torrent_admission_available(int32_t code) const
 {
-    if (session_identity_authority_faulted) {
-        return bridge_error(
-            code,
-            "Torrent admission is blocked because the session identity authority is uncertain. Restart the app to recover."
-        );
-    }
-
     std::size_t tracked_count = 0;
     std::size_t identity_token_count = 0;
     {
@@ -619,108 +790,6 @@ BridgeResult TTorrentClient::ensure_torrent_admission_available(int32_t code) co
         );
     }
     return {};
-}
-
-std::uint64_t TTorrentClient::allocate_resume_generation_locked(TorrentIdentity *identity)
-{
-    if (identity == nullptr) {
-        return 0;
-    }
-    return identity->resume_save.next_generation++;
-}
-
-std::uint64_t TTorrentClient::allocate_resume_generation(TorrentIdentity *identity)
-{
-    std::scoped_lock io_guard(resume_io_lock);
-    return allocate_resume_generation_locked(identity);
-}
-
-namespace {
-
-lt::resume_data_flags_t merged_resume_save_flags(lt::resume_data_flags_t existing,
-                                                 lt::resume_data_flags_t requested) noexcept
-{
-    lt::resume_data_flags_t merged = existing | requested;
-    bool const existing_only_if_modified =
-        static_cast<bool>(existing & lt::torrent_handle::only_if_modified);
-    bool const requested_only_if_modified =
-        static_cast<bool>(requested & lt::torrent_handle::only_if_modified);
-    if (!existing_only_if_modified || !requested_only_if_modified) {
-        merged &= ~lt::torrent_handle::only_if_modified;
-    }
-    return merged;
-}
-
-} // namespace
-
-std::optional<std::uint64_t> TTorrentClient::begin_async_resume_save(TorrentIdentity *identity,
-                                                                    lt::resume_data_flags_t flags)
-{
-    if (identity == nullptr) {
-        return std::nullopt;
-    }
-
-    std::scoped_lock io_guard(resume_io_lock);
-    ResumeSaveState &state = identity->resume_save;
-    if (state.async_in_flight) {
-        state.save_again_flags = state.save_again
-            ? merged_resume_save_flags(state.save_again_flags, flags)
-            : flags;
-        state.save_again = true;
-        return std::nullopt;
-    }
-
-    std::uint64_t const generation = allocate_resume_generation_locked(identity);
-    state.async_in_flight = generation;
-    state.save_again = false;
-    state.save_again_flags = kRoutineResumeSaveFlags;
-    return generation;
-}
-
-void TTorrentClient::cancel_async_resume_save(TorrentIdentity *identity, std::uint64_t generation)
-{
-    if (identity == nullptr) {
-        return;
-    }
-
-    std::scoped_lock io_guard(resume_io_lock);
-    ResumeSaveState &state = identity->resume_save;
-    if (state.async_in_flight == generation) {
-        state.async_in_flight.reset();
-    }
-}
-
-std::optional<std::uint64_t> TTorrentClient::async_resume_generation(TorrentIdentity *identity)
-{
-    if (identity == nullptr) {
-        return std::nullopt;
-    }
-
-    std::scoped_lock io_guard(resume_io_lock);
-    return identity->resume_save.async_in_flight;
-}
-
-std::optional<lt::resume_data_flags_t> TTorrentClient::complete_async_resume_save(TorrentIdentity *identity,
-                                                                                  std::uint64_t generation)
-{
-    if (identity == nullptr) {
-        return std::nullopt;
-    }
-
-    std::scoped_lock io_guard(resume_io_lock);
-    ResumeSaveState &state = identity->resume_save;
-    if (state.async_in_flight != generation) {
-        return std::nullopt;
-    }
-
-    state.async_in_flight.reset();
-    if (!state.save_again) {
-        return std::nullopt;
-    }
-    lt::resume_data_flags_t const flags = state.save_again_flags;
-    state.save_again = false;
-    state.save_again_flags = kRoutineResumeSaveFlags;
-    return flags;
 }
 
 void TTorrentClient::queue_alert_error_threadsafe(std::string message)

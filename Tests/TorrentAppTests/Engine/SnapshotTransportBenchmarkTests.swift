@@ -14,35 +14,44 @@ struct SnapshotTransportBenchmarkTests {
         let snapshotStride = MemoryLayout<TTorrentSnapshot>.stride
         let rawBatchBytes = maximumCount * snapshotStride
         let twoRawBatchBytes = 2 * rawBatchBytes
+        let presentationStride = MemoryLayout<TTorrentPresentationMetadata>.stride
+        let presentationBatchBytes = maximumCount * presentationStride
 
         let snapshot = TTorrentSnapshot()
-        let fixedCStringFieldCount = 6
+        let fixedCStringFieldCount = 5
         let fixedCStringBytesPerSnapshot = MemoryLayout.size(ofValue: snapshot.id)
             + MemoryLayout.size(ofValue: snapshot.info_hash)
             + MemoryLayout.size(ofValue: snapshot.name)
             + MemoryLayout.size(ofValue: snapshot.save_path)
             + MemoryLayout.size(ofValue: snapshot.error)
-            + MemoryLayout.size(ofValue: snapshot.comment)
         let fixedCStringScanBytes = maximumCount * fixedCStringBytesPerSnapshot
         let maximumDecodedStringBytes = maximumCount
             * (fixedCStringBytesPerSnapshot - fixedCStringFieldCount)
+        let maximumDecodedCommentBytes = maximumCount * (1_024 - 1)
         let torrentItemArrayBytes = maximumCount * MemoryLayout<TorrentItem>.stride
-        let modeledSwiftTransientBytes = rawBatchBytes
+        let modeledHotSwiftTransientBytes = rawBatchBytes
             + (2 * torrentItemArrayBytes)
             + maximumDecodedStringBytes
+        let modeledInitialSwiftTransientBytes = modeledHotSwiftTransientBytes
+            + presentationBatchBytes
+            + maximumDecodedCommentBytes
 
         #expect(maximumCount == 20_000)
-        #expect(snapshotStride == 3_360)
-        #expect(rawBatchBytes == 67_200_000)
-        #expect(rawBatchBytes <= 65 * 1_024 * 1_024)
-        #expect(twoRawBatchBytes == 134_400_000)
-        #expect(twoRawBatchBytes <= 130 * 1_024 * 1_024)
-        #expect(fixedCStringBytesPerSnapshot == 3_208)
-        #expect(fixedCStringScanBytes == 64_160_000)
-        #expect(fixedCStringScanBytes <= 62 * 1_024 * 1_024)
-        #expect(maximumCount * fixedCStringFieldCount == 120_000)
+        #expect(snapshotStride == 2_336)
+        #expect(rawBatchBytes == 46_720_000)
+        #expect(rawBatchBytes <= 45 * 1_024 * 1_024)
+        #expect(twoRawBatchBytes == 93_440_000)
+        #expect(twoRawBatchBytes <= 90 * 1_024 * 1_024)
+        #expect(presentationStride == 1_040)
+        #expect(presentationBatchBytes == 20_800_000)
+        #expect(presentationBatchBytes <= 20 * 1_024 * 1_024)
+        #expect(fixedCStringBytesPerSnapshot == 2_184)
+        #expect(fixedCStringScanBytes == 43_680_000)
+        #expect(fixedCStringScanBytes <= 42 * 1_024 * 1_024)
+        #expect(maximumCount * fixedCStringFieldCount == 100_000)
         #expect(torrentItemArrayBytes <= 5 * 1_024 * 1_024)
-        #expect(modeledSwiftTransientBytes <= 160 * 1_024 * 1_024)
+        #expect(modeledHotSwiftTransientBytes <= 100 * 1_024 * 1_024)
+        #expect(modeledInitialSwiftTransientBytes <= 140 * 1_024 * 1_024)
     }
 
     @Test("Opt-in maximum snapshot mapping and sorting benchmark")
@@ -166,7 +175,6 @@ private func makeBenchmarkSnapshots(count: Int) -> [TTorrentSnapshot] {
     let infoHash = maximumLengthASCII(label: "hash", capacity: 68)
     let savePath = maximumLengthASCII(label: "/save", capacity: 1_024)
     let error = maximumLengthASCII(label: "error", capacity: 512)
-    let comment = maximumLengthASCII(label: "comment", capacity: 1_024)
     var snapshots: [TTorrentSnapshot] = []
     snapshots.reserveCapacity(count)
 
@@ -177,7 +185,6 @@ private func makeBenchmarkSnapshots(count: Int) -> [TTorrentSnapshot] {
         writeBenchmarkCString(indexedMaximumLengthASCII(label: "name", index: index, capacity: 512), to: &snapshot.name)
         writeBenchmarkCString(savePath, to: &snapshot.save_path)
         writeBenchmarkCString(error, to: &snapshot.error)
-        writeBenchmarkCString(comment, to: &snapshot.comment)
         snapshot.total_done = Int64(index)
         snapshot.total_wanted = Int64(count)
         snapshot.added_time = Int64((index * 7_919) % count)

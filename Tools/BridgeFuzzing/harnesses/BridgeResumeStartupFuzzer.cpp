@@ -71,7 +71,11 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
         static_cast<void>(TorrentClientBlockNetwork(client, error.data(), error.capacity()));
         bridge_fuzz::exercise_snapshot_copy(client);
         bridge_fuzz::exercise_detail_copies(client);
-        static_cast<void>(TorrentClientSaveAllChecked(client, error.data(), error.capacity()));
+        static_cast<void>(TorrentClientRecoverPendingRemovalsChecked(
+            client,
+            error.data(),
+            error.capacity()
+        ));
         TorrentClientDestroyBlocking(client);
     }
 

@@ -358,20 +358,6 @@ bool is_resume_data_id(std::string_view id) noexcept
         || is_prefixed_hex_id(id, "v2:", 64U);
 }
 
-std::string make_canonical_torrent_id()
-{
-    std::array<unsigned char, 16> bytes{};
-    arc4random_buf(bytes.data(), bytes.size());
-
-    std::string id(kCanonicalIDPrefix);
-    id.reserve(kCanonicalIDPrefix.size() + 32U);
-    for (unsigned char const byte : bytes) {
-        id.push_back(hex_digit(byte >> 4U));
-        id.push_back(hex_digit(byte));
-    }
-    return id;
-}
-
 std::string resume_temp_extension(std::uint32_t attempt)
 {
     auto const now = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -658,16 +644,6 @@ ResumeSaveResult write_owner_only_file_at_checked(
     return {};
 }
 
-void clear_count_outputs(std::uint64_t *revision_out, int32_t *required_count_out) noexcept
-{
-    if (revision_out != nullptr) {
-        *revision_out = 0;
-    }
-    if (required_count_out != nullptr) {
-        *required_count_out = 0;
-    }
-}
-
 std::string safe_c_string(char const *value)
 {
     return value == nullptr ? std::string() : std::string(value);
@@ -766,11 +742,6 @@ std::string make_removal_tombstone_filename()
     }
     name += removal_tombstone_suffix();
     return name;
-}
-
-fs::path removal_tombstone_path(fs::path const &resume_directory)
-{
-    return resume_directory / make_removal_tombstone_filename();
 }
 
 bool is_removal_tombstone_path(fs::path const &path)
@@ -893,35 +864,6 @@ std::string tombstone_payload(std::vector<std::string> const &ids)
         payload.push_back('\n');
     }
     return payload;
-}
-
-std::string joined_error_messages(std::vector<std::string> const &errors)
-{
-    if (errors.empty()) {
-        return {};
-    }
-    if (errors.size() == 1U) {
-        return errors.front();
-    }
-
-    std::string message = "Multiple resume operations failed";
-    std::size_t appended = 0;
-    for (std::string const &error : errors) {
-        if (error.empty()) {
-            continue;
-        }
-        message += appended == 0U ? ": " : "; ";
-        message += error;
-        ++appended;
-        if (appended >= 8U && errors.size() > appended) {
-            message += "; ";
-            message += std::to_string(errors.size() - appended);
-            message += " more";
-            break;
-        }
-    }
-    message.push_back('.');
-    return message;
 }
 
 std::string primary_hash_key(lt::info_hash_t const &hashes)
@@ -1372,21 +1314,26 @@ TorrentIdentity *identity_from_handle(lt::torrent_handle const &handle) noexcept
     }
 }
 
-TorrentIdentity *identity_from_resume_alert(lt::save_resume_data_alert const &alert) noexcept
-{
-    if (TorrentIdentity *identity = identity_from_client_data(alert.params.userdata)) {
-        return identity;
-    }
-
-    return identity_from_handle(alert.handle);
-}
-
-std::string identity_snapshot_id(TorrentIdentity const *identity, lt::info_hash_t const &hashes)
+std::string identity_snapshot_id(TorrentIdentity const *identity)
 {
     if (identity != nullptr && is_canonical_torrent_id(identity->canonical_id)) {
         return identity->canonical_id;
     }
-    return primary_hash_key(hashes);
+    return {};
+}
+
+void stage_presentation_metadata(
+    TorrentIdentity &identity,
+    lt::add_torrent_params const &params
+)
+{
+    auto metadata = std::make_unique<TTorrentPresentationMetadata>();
+    metadata->native_token = identity.token == nullptr ? 0U : identity.token->value;
+    metadata->created_time = static_cast<std::int64_t>(
+        std::max<std::time_t>(params.creation_date, 0)
+    );
+    copy_string(std::span{metadata->comment}, params.comment);
+    identity.pending_presentation_metadata = std::move(metadata);
 }
 
 bool hash_matches(lt::info_hash_t const &hashes, std::string_view id)
@@ -1456,6 +1403,9 @@ TTorrentSnapshot snapshot_from_status(
 )
 {
     TTorrentSnapshot snapshot{};
+    snapshot.native_token = identity == nullptr || identity->token == nullptr
+        ? 0U
+        : identity->token->value;
     copy_string(std::span{snapshot.id}, primary_hash_key(status.info_hashes));
     copy_string(std::span{snapshot.info_hash}, primary_hash_key(status.info_hashes));
     copy_string(std::span{snapshot.name}, status.name.empty() ? std::string_view("Metadata pending") : std::string_view(status.name));
@@ -1468,10 +1418,6 @@ TTorrentSnapshot snapshot_from_status(
         snapshot.private_torrent = bridge_bool(torrent_file->priv());
     } else {
         snapshot.total_size = status.total;
-    }
-    if (identity != nullptr) {
-        copy_string(std::span{snapshot.comment}, identity->comment);
-        snapshot.created_time = static_cast<int64_t>(identity->creation_date);
     }
     snapshot.progress = download_progress(status);
     snapshot.total_done = status.total_wanted_done;
@@ -1796,39 +1742,44 @@ TTorrentPeerSourceSnapshot peer_source_snapshot(std::vector<lt::peer_info> const
         peers.size(),
         static_cast<std::size_t>(std::numeric_limits<int32_t>::max())
     ));
+    auto increment = [](int32_t &value) noexcept {
+        if (value < std::numeric_limits<int32_t>::max()) {
+            ++value;
+        }
+    };
 
     for (lt::peer_info const &peer : peers) {
         bool has_source = false;
         if (static_cast<bool>(peer.source & lt::peer_info::tracker)) {
-            ++snapshot.tracker;
+            increment(snapshot.tracker);
             has_source = true;
         }
         if (static_cast<bool>(peer.source & lt::peer_info::dht)) {
-            ++snapshot.dht;
+            increment(snapshot.dht);
             has_source = true;
         }
         if (static_cast<bool>(peer.source & lt::peer_info::pex)) {
-            ++snapshot.peer_exchange;
+            increment(snapshot.peer_exchange);
             has_source = true;
         }
         if (static_cast<bool>(peer.source & lt::peer_info::lsd)) {
-            ++snapshot.local_service_discovery;
+            increment(snapshot.local_service_discovery);
             has_source = true;
         }
         if (static_cast<bool>(peer.source & lt::peer_info::resume_data)) {
-            ++snapshot.resume_data;
+            increment(snapshot.resume_data);
             has_source = true;
         }
         if (static_cast<bool>(peer.source & lt::peer_info::incoming)) {
-            ++snapshot.incoming;
+            increment(snapshot.incoming);
             has_source = true;
         }
         if (is_web_seed_peer(peer)) {
-            ++snapshot.web_seed;
+            increment(snapshot.web_seed);
             has_source = true;
         }
         if (!has_source) {
-            ++snapshot.other;
+            increment(snapshot.other);
         }
     }
 

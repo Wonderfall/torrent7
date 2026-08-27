@@ -35,12 +35,6 @@ extension TorrentQueuePriority {
     }
 }
 
-extension TorrentQueueMove {
-    var bridgeValue: Int32 {
-        rawValue
-    }
-}
-
 extension TorrentOptions {
     init(snapshot: TTorrentOptions) {
         self.init(
@@ -93,7 +87,7 @@ extension TorrentItem {
             name: String(cStringTuple: snapshot.name),
             savePath: String(cStringTuple: snapshot.save_path),
             error: String(cStringTuple: snapshot.error),
-            comment: String(cStringTuple: snapshot.comment),
+            comment: "",
             progress: min(max(snapshot.progress, 0), 1),
             totalDone: snapshot.total_done,
             totalWanted: snapshot.total_wanted,
@@ -105,7 +99,7 @@ extension TorrentItem {
             allTimeUpload: snapshot.all_time_upload,
             allTimeDownload: snapshot.all_time_download,
             addedTime: snapshot.added_time,
-            createdTime: snapshot.created_time,
+            createdTime: 0,
             completedTime: snapshot.completed_time,
             downloadRate: snapshot.download_rate,
             uploadRate: snapshot.upload_rate,
@@ -136,8 +130,6 @@ extension TorrentNetworkStatus {
         default: .disabled
         }
         self.init(
-            requestedRevision: status.requested_revision,
-            submittedRevision: status.submitted_revision,
             listenPort: status.listen_port,
             networkBlocked: status.network_blocked != 0,
             hasListener: status.has_listener != 0,
@@ -181,15 +173,6 @@ extension TorrentTrackerItem {
     }
 }
 
-extension TorrentTrackerHostItem {
-    init(snapshot: TTorrentTrackerHostSnapshot) {
-        self.init(
-            torrentID: String(cStringTuple: snapshot.torrent_id),
-            host: String(cStringTuple: snapshot.host)
-        )
-    }
-}
-
 extension TorrentWebSeedItem {
     init(snapshot: TTorrentWebSeedSnapshot) {
         self.init(
@@ -221,62 +204,6 @@ extension TorrentPeerSources {
             webSeed: snapshot.web_seed,
             other: snapshot.other
         )
-    }
-}
-
-extension TorrentSourcePolicy {
-    init(snapshot: TTorrentSourcePolicy) {
-        self.init(
-            isDHTEnabled: snapshot.enable_dht.bridgeBool,
-            isPeerExchangeEnabled: snapshot.enable_peer_exchange.bridgeBool,
-            isLocalServiceDiscoveryEnabled: snapshot.enable_lsd.bridgeBool,
-            httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride(
-                rawValue: Int(snapshot.https_tracker_policy)
-            ) ?? .inherit,
-            httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride(
-                rawValue: Int(snapshot.https_web_seed_policy)
-            ) ?? .inherit,
-            effectiveHTTPSTrackerPolicy: TorrentHTTPSTrackerPolicy(
-                rawValue: Int(snapshot.effective_https_tracker_policy)
-            ) ?? .original,
-            effectiveHTTPSWebSeedPolicy: TorrentHTTPSWebSeedPolicy(
-                rawValue: Int(snapshot.effective_https_web_seed_policy)
-            ) ?? .original,
-            isDHTLocked: snapshot.dht_locked.bridgeBool,
-            isPeerExchangeLocked: snapshot.peer_exchange_locked.bridgeBool,
-            isLocalServiceDiscoveryLocked: snapshot.lsd_locked.bridgeBool,
-            isMetadataValidationPending: snapshot.metadata_validation_pending.bridgeBool,
-            allowsPreMetadataDHT: snapshot.allow_pre_metadata_dht.bridgeBool
-        )
-    }
-
-}
-
-extension TorrentSourcePolicyField {
-    var bridgeValue: Int32 {
-        switch self {
-        case .dht:
-            Int32(TTORRENT_SOURCE_POLICY_ENABLE_DHT)
-        case .peerExchange:
-            Int32(TTORRENT_SOURCE_POLICY_ENABLE_PEER_EXCHANGE)
-        case .localServiceDiscovery:
-            Int32(TTORRENT_SOURCE_POLICY_ENABLE_LSD)
-        case .preMetadataDHT:
-            Int32(TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT)
-        }
-    }
-}
-
-extension TorrentSourcePolicyMutation {
-    var bridgeFieldAndValue: (field: Int32, value: Int32) {
-        switch self {
-        case .boolean(let field, let enabled):
-            (field.bridgeValue, enabled ? 1 : 0)
-        case .httpsTracker(let policy):
-            (Int32(TTORRENT_SOURCE_POLICY_HTTPS_TRACKER_POLICY), Int32(policy.rawValue))
-        case .httpsWebSeed(let policy):
-            (Int32(TTORRENT_SOURCE_POLICY_HTTPS_WEB_SEED_POLICY), Int32(policy.rawValue))
-        }
     }
 }
 

@@ -642,10 +642,6 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         return failure
     }
 
-    package func requestSources(id: String) async throws {
-        try await invokeUnit(.requestSources, TorrentEngineIPCTorrentIDRequest(id: id))
-    }
-
     package func sourcePolicy(id: String) async throws -> TorrentSourcePolicy {
         try await invoke(.sourcePolicy, TorrentEngineIPCTorrentIDRequest(id: id))
     }
@@ -675,10 +671,6 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         try await invokeUnit(.moveTorrentInQueue, TorrentEngineIPCMoveQueueRequest(id: id, move: move))
     }
 
-    package func requestFiles(id: String) async throws {
-        try await invokeUnit(.requestFiles, TorrentEngineIPCTorrentIDRequest(id: id))
-    }
-
     package func setFilePriority(
         id: String,
         fileIndex: Int32,
@@ -692,10 +684,6 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                 priority: priority
             )
         )
-    }
-
-    package func requestPieceMap(id: String) async throws {
-        try await invokeUnit(.requestPieceMap, TorrentEngineIPCTorrentIDRequest(id: id))
     }
 
     package func trackerBatch(id: String, since revision: UInt64?) async -> TorrentTrackerBatch? {

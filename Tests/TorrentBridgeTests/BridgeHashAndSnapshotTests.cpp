@@ -6,10 +6,6 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
-#include <cstdlib>
-#include <iomanip>
-#include <iostream>
 #include <memory>
 #include <span>
 #include <string>
@@ -40,11 +36,6 @@ TEST_CASE("hex and bridge ID helpers use lowercase canonical forms")
     CHECK(is_resume_data_id(bridge_tests::v1_id('1')));
     CHECK(is_resume_data_id(bridge_tests::v2_id('2')));
     CHECK_FALSE(is_resume_data_id("v2:" + std::string(63U, '2')));
-}
-
-TEST_CASE("make_canonical_torrent_id returns syntactically valid durable IDs")
-{
-    CHECK(is_canonical_torrent_id(make_canonical_torrent_id()));
 }
 
 TEST_CASE("hash keys include available protocols in stable order")
@@ -82,8 +73,8 @@ TEST_CASE("hash matching and snapshot identity prefer canonical IDs when availab
     CHECK(hash_matches(hashes, v1));
     CHECK_FALSE(hash_matches(hashes, canonical));
     CHECK(primary_hash_key(hashes) == v1);
-    CHECK(identity_snapshot_id(&identity, hashes) == canonical);
-    CHECK(identity_snapshot_id(nullptr, hashes) == v1);
+    CHECK(identity_snapshot_id(&identity) == canonical);
+    CHECK(identity_snapshot_id(nullptr).empty());
 }
 
 TEST_CASE("encoded resume data carries only valid canonical bridge IDs")
@@ -222,25 +213,19 @@ TEST_CASE("snapshot_from_status copies sanitized ABI fields")
     CHECK(snapshot.content_kind == TTORRENT_CONTENT_KIND_UNKNOWN);
 }
 
-TEST_CASE("snapshot_from_status maps torrent metadata facts when available")
+TEST_CASE("snapshot_from_status maps torrent facts when metadata is available")
 {
     std::vector<lt::create_file_entry> files;
     files.emplace_back("metadata.bin", 1024);
 
     lt::create_torrent creator(std::move(files), 16 * 1024, lt::create_torrent::v1_only);
     creator.set_priv(true);
-    creator.set_comment("Created for tests");
-    creator.set_creation_date(12'345);
     creator.set_hash(lt::piece_index_t(0), bridge_tests::sha1_hash_from_seed(17U));
 
     std::vector<char> const buffer = creator.generate_buf();
     lt::add_torrent_params const params =
         bridge_tests::load_torrent_params(buffer, "snapshot metadata torrent info");
     std::shared_ptr<lt::torrent_info const> const info = params.ti;
-
-    TorrentIdentity identity;
-    identity.comment = params.comment;
-    identity.creation_date = params.creation_date;
 
     lt::torrent_status status;
     status.info_hashes = info->info_hashes();
@@ -250,11 +235,9 @@ TEST_CASE("snapshot_from_status maps torrent metadata facts when available")
     status.completed_time = 67'890;
     status.has_metadata = true;
 
-    TTorrentSnapshot const snapshot = snapshot_from_status(status, &identity);
+    TTorrentSnapshot const snapshot = snapshot_from_status(status);
 
-    CHECK(std::string(snapshot.comment) == "Created for tests");
     CHECK(snapshot.total_size == 1024);
-    CHECK(snapshot.created_time == 12'345);
     CHECK(snapshot.completed_time == 67'890);
     CHECK(bridge_bool(snapshot.private_torrent));
     CHECK(snapshot.content_kind == TTORRENT_CONTENT_KIND_SINGLE_FILE);
@@ -285,67 +268,4 @@ TEST_CASE("snapshot_from_status recognizes a one-file multi-file torrent as a di
     TTorrentSnapshot const snapshot = snapshot_from_status(status);
 
     CHECK(snapshot.content_kind == TTORRENT_CONTENT_KIND_DIRECTORY);
-}
-
-TEST_CASE("maximum snapshot batch copy benchmark is opt-in")
-{
-    char const *const enabled = std::getenv("RUN_SNAPSHOT_TRANSPORT_BENCHMARK");
-    if (enabled == nullptr || std::string_view{enabled} != "1") {
-        return;
-    }
-
-    constexpr std::size_t sample_count = 25U;
-    constexpr std::size_t warmup_count = 3U;
-    constexpr std::size_t maximum_snapshot_count =
-        static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT);
-    constexpr std::size_t snapshot_bytes = maximum_snapshot_count * sizeof(TTorrentSnapshot);
-
-    bridge_tests::TemporaryDirectory directory;
-    TTorrentClient client(directory.path().string());
-    client.stop_alert_worker();
-
-    TTorrentSnapshot seed{};
-    seed.total_done = 42;
-    BRIDGE_WITH_CLIENT_LOCK(client, client.snapshot_cache.assign(maximum_snapshot_count, seed));
-    std::vector<TTorrentSnapshot> output(maximum_snapshot_count);
-
-    std::uint64_t revision = 0U;
-    int32_t required_count = 0;
-    for (std::size_t index = 0; index < warmup_count; ++index) {
-        int32_t const copied = client.copy_snapshots(output, &revision, &required_count);
-        REQUIRE(copied == TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT);
-        REQUIRE(required_count == TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT);
-    }
-
-    std::vector<double> durations;
-    durations.reserve(sample_count);
-    for (std::size_t index = 0; index < sample_count; ++index) {
-        auto const started_at = std::chrono::steady_clock::now();
-        int32_t const copied = client.copy_snapshots(output, &revision, &required_count);
-        auto const finished_at = std::chrono::steady_clock::now();
-
-        REQUIRE(copied == TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT);
-        REQUIRE(required_count == TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT);
-        durations.push_back(std::chrono::duration<double, std::milli>{finished_at - started_at}.count());
-    }
-
-    REQUIRE(output.front().total_done == 42);
-    REQUIRE(output.back().total_done == 42);
-
-    std::ranges::sort(durations);
-    double const median_ms = durations.at(durations.size() / 2U);
-    std::size_t const p95_index = ((95U * durations.size() + 99U) / 100U) - 1U;
-    double const p95_ms = durations.at(p95_index);
-    double const median_gib_per_second =
-        (static_cast<double>(snapshot_bytes) / (1024.0 * 1024.0 * 1024.0)) / (median_ms / 1000.0);
-
-    std::cout << std::fixed << std::setprecision(3)
-              << "SNAPSHOT_TRANSPORT_NATIVE {\"count\":" << maximum_snapshot_count
-              << ",\"snapshot_stride\":" << sizeof(TTorrentSnapshot)
-              << ",\"bytes\":" << snapshot_bytes
-              << ",\"samples\":" << sample_count
-              << ",\"median_ms\":" << median_ms
-              << ",\"p95_ms\":" << p95_ms
-              << ",\"median_gib_per_second\":" << median_gib_per_second
-              << "}\n";
 }

@@ -5,6 +5,8 @@ package enum TorrentInputLimits {
 
 package enum TorrentEngineLimits {
     package static let maximumAlertErrorsPerPoll = 16
+    package static let maximumResumeIDCount = 8
+    package static let removalTombstoneFilenameCapacity = 96
     // A poll response is capped at 4 MiB. Keep the interface collection small
     // enough that every semantically valid worst-case snapshot fits that cap.
     package static let maximumNetworkInterfaceCount = 64
@@ -41,4 +43,15 @@ package struct TorrentEngineDirtySet: OptionSet, Sendable {
     package static let pieces = Self(rawValue: 1 << 6)
     package static let trackerHosts = Self(rawValue: 1 << 7)
     package static let health = Self(rawValue: 1 << 8)
+    package static let allKnown: Self = [
+        .torrents,
+        .trackers,
+        .webSeeds,
+        .files,
+        .network,
+        .errors,
+        .pieces,
+        .trackerHosts,
+        .health,
+    ]
 }

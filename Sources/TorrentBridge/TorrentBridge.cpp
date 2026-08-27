@@ -41,30 +41,46 @@ bool is_valid_torrent_count_limit(int limit)
     return limit == -1 || limit >= 2;
 }
 
-struct QueueOrderingEntry {
-    lt::torrent_handle handle;
-    TorrentIdentity *identity = nullptr;
-    int position = -1;
-    int rank = kUnsetQueueRank;
-};
-
 struct ActiveTorrentEntry {
     lt::torrent_handle handle;
     TorrentIdentity *identity = nullptr;
 };
 
+ResumeIDListResult resume_ids_from_bridge(std::span<TTorrentResumeID const> const rows)
+{
+    if (rows.empty() || rows.size() > static_cast<std::size_t>(TTORRENT_MAX_RESUME_ID_COUNT)) {
+        return std::unexpected("Invalid resume identifier count.");
+    }
+
+    std::vector<std::string> ids;
+    ids.reserve(rows.size());
+    for (TTorrentResumeID const &row : rows) {
+        auto const terminator = std::ranges::find(row.value, '\0');
+        if (terminator == std::ranges::end(row.value)) {
+            return std::unexpected("Resume identifier is not terminated.");
+        }
+        std::string id(row.value, terminator);
+        if (!is_resume_data_id(id)
+            || std::ranges::find(ids, id) != ids.end()) {
+            return std::unexpected("Resume identifier is invalid or duplicated.");
+        }
+        ids.push_back(std::move(id));
+    }
+    return ids;
+}
+
 std::vector<ActiveTorrentEntry> active_torrent_entries(TTorrentClient const &client)
 {
     std::vector<ActiveTorrentEntry> entries;
-    std::set<TorrentIdentity *> seen;
     std::scoped_lock io_guard(client.resume_io_lock);
-    entries.reserve(client.active_identity_by_id.size());
-    for (auto const &[id, identity] : client.active_identity_by_id) {
-        if (identity == nullptr || !seen.insert(identity).second) {
+    entries.reserve(client.handle_by_native_token.size());
+    for (auto const &owned_identity : client.torrent_identities) {
+        TorrentIdentity *const identity = owned_identity.get();
+        if (identity == nullptr || identity->token == nullptr) {
             continue;
         }
-        auto const handle = client.handle_by_id.find(id);
-        if (handle != client.handle_by_id.end()) {
+        auto const handle = client.handle_by_native_token.find(identity->token->value);
+        if (handle != client.handle_by_native_token.end() && handle->second.is_valid()) {
             entries.push_back(ActiveTorrentEntry{
                 .handle = handle->second,
                 .identity = identity,
@@ -72,20 +88,6 @@ std::vector<ActiveTorrentEntry> active_torrent_entries(TTorrentClient const &cli
         }
     }
     return entries;
-}
-
-int queue_priority_sort_rank(int32_t priority)
-{
-    switch (priority) {
-    case TTORRENT_QUEUE_PRIORITY_HIGH:
-        return 0;
-    case TTORRENT_QUEUE_PRIORITY_NORMAL:
-        return 1;
-    case TTORRENT_QUEUE_PRIORITY_LOW:
-        return 2;
-    default:
-        return 1;
-    }
 }
 
 std::optional<int> queue_position_value(lt::torrent_handle const &handle) noexcept
@@ -101,284 +103,133 @@ std::optional<int> queue_position_value(lt::torrent_handle const &handle) noexce
     }
 }
 
-std::vector<QueueOrderingEntry> queue_ordering_entries(TTorrentClient const &client)
-    TORRENT_BRIDGE_REQUIRES(client.lock, client.resume_io_lock)
-{
-    std::vector<lt::torrent_handle> handles;
-    handles.reserve(client.handle_by_id.size());
-    for (auto const &[id, handle] : client.handle_by_id) {
-        static_cast<void>(id);
-        handles.push_back(handle);
-    }
-
-    std::vector<QueueOrderingEntry> entries;
-    std::set<TorrentIdentity *> seen;
-    for (lt::torrent_handle const &handle : handles) {
-        TorrentIdentity *identity = identity_from_handle(handle);
-        if (identity == nullptr || !seen.insert(identity).second) {
-            continue;
-        }
-        std::optional<int> const position = queue_position_value(handle);
-        if (!position) {
-            continue;
-        }
-        int const rank = is_valid_queue_rank(identity->queue_rank) ? identity->queue_rank : *position;
-        entries.push_back(QueueOrderingEntry{
-            .handle = handle,
-            .identity = identity,
-            .position = *position,
-            .rank = rank
-        });
-    }
-
-    std::ranges::sort(entries, [](QueueOrderingEntry const &left, QueueOrderingEntry const &right) {
-        int const left_priority_rank = queue_priority_sort_rank(left.identity->queue_priority);
-        int const right_priority_rank = queue_priority_sort_rank(right.identity->queue_priority);
-        if (left_priority_rank != right_priority_rank) {
-            return left_priority_rank < right_priority_rank;
-        }
-        if (left.rank != right.rank) {
-            return left.rank < right.rank;
-        }
-        if (left.position != right.position) {
-            return left.position < right.position;
-        }
-        return left.identity->canonical_id < right.identity->canonical_id;
-    });
-    return entries;
-}
-
-void append_unique_handle_by_identity(std::vector<lt::torrent_handle> &handles, lt::torrent_handle const &handle)
-{
-    TorrentIdentity const *identity = identity_from_handle(handle);
-    if (identity != nullptr && std::ranges::any_of(handles, [identity](lt::torrent_handle const &existing) {
-        return identity_from_handle(existing) == identity;
-    })) {
-        return;
-    }
-    handles.push_back(handle);
-}
-
-bool contains_handle_identity(std::span<lt::torrent_handle const> handles, lt::torrent_handle const &handle)
-{
-    TorrentIdentity const *identity = identity_from_handle(handle);
-    return identity != nullptr && std::ranges::any_of(handles, [identity](lt::torrent_handle const &existing) {
-        return identity_from_handle(existing) == identity;
-    });
-}
-
 void save_and_publish_policy_handles(TTorrentClient &client, std::span<lt::torrent_handle const> handles,
                                      LockedChangePublisher &publisher) TORRENT_BRIDGE_REQUIRES(client.lock)
 {
     for (lt::torrent_handle const &handle : handles) {
-        client.request_save(handle, kPolicyResumeSaveFlags);
-        publisher.add(client.cache_snapshot(handle));
+        client.request_save_locked(handle, kPolicyResumeSaveFlags);
+        publisher.add(client.observe_torrent_handle(handle));
     }
 }
 
-std::vector<lt::torrent_handle> apply_queue_order(
-    std::span<QueueOrderingEntry> entries,
-    bool *positions_applied_out = nullptr
-)
+struct ResolvedQueuePlacement {
+    lt::torrent_handle handle;
+    TorrentIdentity *identity = nullptr;
+    int32_t priority = TTORRENT_QUEUE_PRIORITY_NORMAL;
+    int32_t rank = 0;
+    std::optional<int> previous_position;
+    int32_t previous_priority = TTORRENT_QUEUE_PRIORITY_NORMAL;
+    int32_t previous_rank = kUnsetQueueRank;
+};
+
+BridgeResult apply_queue_state_locked(
+    TTorrentClient &client,
+    std::span<TTorrentQueuePlacement const> placements,
+    LockedChangePublisher &publisher
+) TORRENT_BRIDGE_REQUIRES(client.lock)
 {
-    bool positions_applied = true;
-    std::vector<lt::torrent_handle> changed_handles;
-    changed_handles.reserve(entries.size());
-
-    int position = 0;
-    int rank = 0;
-    std::optional<int> priority_group;
-    for (QueueOrderingEntry &entry : entries) {
-        int const entry_priority_group = queue_priority_sort_rank(entry.identity->queue_priority);
-        if (!priority_group || *priority_group != entry_priority_group) {
-            priority_group = entry_priority_group;
-            rank = 0;
-        }
-
-        bool changed = entry.position != position;
-        if (entry.identity->queue_rank != rank) {
-            entry.identity->queue_rank = rank;
-            changed = true;
-        }
-
-        try {
-            entry.handle.queue_position_set(lt::queue_position_t(position));
-        } catch (...) {
-            positions_applied = false;
-            ignore_shutdown_failure();
-        }
-
-        if (changed) {
-            // queue_ordering_entries already guarantees one entry per identity.
-            changed_handles.push_back(entry.handle);
-        }
-        ++position;
-        ++rank;
-    }
-    if (positions_applied_out != nullptr) {
-        *positions_applied_out = positions_applied;
-    }
-    return changed_handles;
-}
-
-bool move_queue_entry(std::vector<QueueOrderingEntry> &entries, TorrentIdentity const *identity, int32_t move) noexcept
-{
-    auto const selected = std::ranges::find_if(entries, [identity](QueueOrderingEntry const &entry) {
-        return entry.identity == identity;
-    });
-    if (selected == entries.end()) {
-        return false;
+    std::vector<ActiveTorrentEntry> const active_entries = active_torrent_entries(client);
+    if (placements.size() != active_entries.size()) {
+        return bridge_error(2, "The Swift queue state did not cover every active torrent.");
     }
 
-    int32_t const priority = selected->identity->queue_priority;
-    auto const first = std::ranges::find_if(entries, [priority](QueueOrderingEntry const &entry) {
-        return entry.identity->queue_priority == priority;
-    });
-    auto const last = std::find_if_not(first, entries.end(), [priority](QueueOrderingEntry const &entry) {
-        return entry.identity->queue_priority == priority;
-    });
-
-    auto target = selected;
-    switch (move) {
-    case TTORRENT_QUEUE_MOVE_TOP:
-        target = first;
-        break;
-    case TTORRENT_QUEUE_MOVE_UP:
-        if (selected != first) {
-            target = std::prev(selected);
+    std::unordered_map<std::uint64_t, ActiveTorrentEntry const *> active_by_token;
+    active_by_token.reserve(active_entries.size());
+    for (ActiveTorrentEntry const &entry : active_entries) {
+        if (entry.identity == nullptr
+            || entry.identity->token == nullptr
+            || entry.identity->token->value == 0U
+            || !active_by_token.emplace(entry.identity->token->value, &entry).second) {
+            return bridge_error(2, "The native queue identities were inconsistent.");
         }
-        break;
-    case TTORRENT_QUEUE_MOVE_DOWN:
-        if (std::next(selected) != last) {
-            target = std::next(selected);
-        }
-        break;
-    case TTORRENT_QUEUE_MOVE_BOTTOM:
-        target = std::prev(last);
-        break;
-    default:
-        return false;
-    }
-    if (target == selected) {
-        return false;
     }
 
-    if (target < selected) {
-        std::rotate(target, selected, std::next(selected));
-    } else {
-        std::rotate(selected, std::next(selected), std::next(target));
+    std::array<int32_t, 3> next_rank{};
+    std::set<TorrentIdentity *> seen;
+    std::vector<ResolvedQueuePlacement> resolved;
+    resolved.reserve(placements.size());
+    for (TTorrentQueuePlacement const &placement : placements) {
+        if (placement.native_token == 0U || !is_valid_queue_priority(placement.priority)) {
+            return bridge_error(1, "The Swift queue state was invalid.");
+        }
+        auto const active = active_by_token.find(placement.native_token);
+        if (active == active_by_token.end() || !seen.insert(active->second->identity).second) {
+            return bridge_error(2, "The Swift queue state contained an unknown or duplicate torrent.");
+        }
+
+        int32_t const rank = next_rank.at(static_cast<std::size_t>(placement.priority))++;
+        resolved.push_back(ResolvedQueuePlacement{
+            .handle = active->second->handle,
+            .identity = active->second->identity,
+            .priority = placement.priority,
+            .rank = rank,
+            .previous_position = queue_position_value(active->second->handle),
+            .previous_priority = active->second->identity->queue_priority,
+            .previous_rank = active->second->identity->queue_rank,
+        });
     }
-    return true;
+
+    std::vector<std::pair<int, lt::torrent_handle>> previous_native_order;
+    previous_native_order.reserve(resolved.size());
+    for (ResolvedQueuePlacement const &entry : resolved) {
+        if (entry.previous_position) {
+            previous_native_order.emplace_back(*entry.previous_position, entry.handle);
+        }
+    }
+    std::ranges::sort(previous_native_order, {}, &std::pair<int, lt::torrent_handle>::first);
+
+    try {
+        int next_position = 0;
+        for (ResolvedQueuePlacement &entry : resolved) {
+            entry.identity->queue_priority = entry.priority;
+            entry.identity->queue_rank = entry.rank;
+            if (entry.previous_position) {
+                entry.handle.queue_position_set(lt::queue_position_t(next_position++));
+            }
+        }
+    } catch (std::exception const &exception) {
+        for (ResolvedQueuePlacement const &entry : resolved) {
+            entry.identity->queue_priority = entry.previous_priority;
+            entry.identity->queue_rank = entry.previous_rank;
+        }
+        int position = 0;
+        for (auto const &[previous_position, handle] : previous_native_order) {
+            static_cast<void>(previous_position);
+            try {
+                handle.queue_position_set(lt::queue_position_t(position++));
+            } catch (...) {
+                ignore_shutdown_failure();
+            }
+        }
+        return bridge_error(2, std::string("The native queue state could not be applied: ") + exception.what());
+    } catch (...) {
+        for (ResolvedQueuePlacement const &entry : resolved) {
+            entry.identity->queue_priority = entry.previous_priority;
+            entry.identity->queue_rank = entry.previous_rank;
+        }
+        int position = 0;
+        for (auto const &[previous_position, handle] : previous_native_order) {
+            static_cast<void>(previous_position);
+            try {
+                handle.queue_position_set(lt::queue_position_t(position++));
+            } catch (...) {
+                ignore_shutdown_failure();
+            }
+        }
+        return bridge_error(2, "The native queue state could not be applied.");
+    }
+
+    std::vector<lt::torrent_handle> handles;
+    handles.reserve(resolved.size());
+    for (ResolvedQueuePlacement const &entry : resolved) {
+        handles.push_back(entry.handle);
+    }
+    save_and_publish_policy_handles(client, handles, publisher);
+    client.request_snapshot_update_locked();
+    return {};
 }
 
 } // namespace
-
-std::vector<lt::torrent_handle> TTorrentClient::apply_queue_priority_order_locked()
-{
-    std::scoped_lock io_guard(resume_io_lock);
-#if defined(TORRENT_BRIDGE_TESTING)
-    ++queue_order_rebuild_count;
-    if (fail_next_queue_order_rebuild_before_collection) {
-        fail_next_queue_order_rebuild_before_collection = false;
-        throw std::runtime_error("Injected queue-order rebuild failure.");
-    }
-#endif
-    std::vector<QueueOrderingEntry> entries = queue_ordering_entries(*this);
-    bool positions_applied = false;
-    std::vector<lt::torrent_handle> changed_handles = apply_queue_order(entries, &positions_applied);
-
-    queue_order_index.reset();
-    for (auto const &owned_identity : torrent_identities) {
-        if (owned_identity != nullptr) {
-            owned_identity->queue_order_tracked = false;
-        }
-    }
-    queue_order_index.valid = positions_applied;
-    if (!positions_applied) {
-        return changed_handles;
-    }
-
-    for (auto const &entry : entries) {
-        auto *const priority = queue_order_index.state(entry.identity->queue_priority);
-        if (priority == nullptr) {
-            invalidate_queue_order_index_locked();
-            break;
-        }
-        if (priority->count >= static_cast<std::size_t>(std::numeric_limits<int32_t>::max())) {
-            invalidate_queue_order_index_locked();
-            break;
-        }
-        ++priority->count;
-        priority->next_rank = static_cast<int32_t>(priority->count);
-        entry.identity->queue_order_tracked = true;
-    }
-    return changed_handles;
-}
-
-void TTorrentClient::insert_added_queue_priority_order_locked(
-    lt::torrent_handle const &handle,
-    TorrentIdentity *identity
-)
-{
-    if (identity == nullptr || !is_valid_queue_priority(identity->queue_priority)) {
-        invalidate_queue_order_index_locked();
-        return;
-    }
-
-    std::optional<int> const position = queue_position_value(handle);
-    if (!position) {
-        identity->queue_rank = kUnsetQueueRank;
-        identity->queue_order_tracked = false;
-        return;
-    }
-
-    auto const queued_count = queue_order_index.total_count();
-    if (!queue_order_index.valid) {
-        return;
-    }
-    if (std::cmp_not_equal(*position, queued_count)) {
-        invalidate_queue_order_index_locked();
-        return;
-    }
-
-    auto *const priority = queue_order_index.state(identity->queue_priority);
-    auto const group_end = queue_order_index.insertion_position(identity->queue_priority);
-    if (priority == nullptr || !group_end) {
-        invalidate_queue_order_index_locked();
-        return;
-    }
-    if (priority->next_rank == std::numeric_limits<int32_t>::max()) {
-        invalidate_queue_order_index_locked();
-        return;
-    }
-    std::size_t insertion_position = *group_end;
-    bool const restores_rank = is_valid_queue_rank(identity->queue_rank)
-        && std::cmp_less_equal(identity->queue_rank, priority->count);
-    if (restores_rank) {
-        insertion_position = *group_end - priority->count
-            + static_cast<std::size_t>(identity->queue_rank);
-    }
-    if (insertion_position > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-        invalidate_queue_order_index_locked();
-        return;
-    }
-
-    try {
-        if (std::cmp_not_equal(insertion_position, *position)) {
-            handle.queue_position_set(lt::queue_position_t(static_cast<int>(insertion_position)));
-        }
-    } catch (...) {
-        invalidate_queue_order_index_locked();
-        ignore_shutdown_failure();
-        return;
-    }
-
-    if (!restores_rank) {
-        identity->queue_rank = priority->next_rank++;
-    }
-    identity->queue_order_tracked = true;
-    ++priority->count;
-}
 
 namespace {
 
@@ -682,6 +533,13 @@ void append_optional_hash(
 
 } // namespace
 
+BridgeResult TTorrentClient::contain_network_for_critical_fault_locked(
+    DirtyMask &changes
+)
+{
+    return block_network_locked(*this, changes);
+}
+
 #if defined(TORRENT_BRIDGE_TESTING)
 lt::sha256_hash testing_logical_manifest_digest(lt::add_torrent_params const &params)
 {
@@ -863,6 +721,22 @@ static std::string storage_preserved_torrent_id(
     return result;
 }
 
+static std::optional<std::string> requested_torrent_id(
+    TTorrentAddOptions const &options
+)
+{
+    std::span<char const> const bytes{options.canonical_id};
+    auto const terminator = std::ranges::find(bytes, '\0');
+    if (terminator == bytes.end()) {
+        return std::nullopt;
+    }
+    std::string id(bytes.begin(), terminator);
+    if (!is_canonical_torrent_id(id)) {
+        return std::nullopt;
+    }
+    return id;
+}
+
 BridgeResult validate_storage_activation(
     lt::add_torrent_params const &params,
     TTorrentStorageActivation const &activation
@@ -911,28 +785,6 @@ std::string storage_claim_key(TTorrentStorageActivation const &activation)
 
 namespace {
 
-struct SourcePolicyApplicationResult {
-    DirtyMask changes = 0;
-    std::vector<lt::torrent_handle> handles_to_save;
-};
-
-void add_policy_save(SourcePolicyApplicationResult &result, lt::torrent_handle const &handle)
-{
-    if (handle.is_valid()) {
-        result.handles_to_save.push_back(handle);
-    }
-}
-
-void add_policy_result(SourcePolicyApplicationResult &result, SourcePolicyApplicationResult next)
-{
-    result.changes |= next.changes;
-    result.handles_to_save.insert(
-        result.handles_to_save.end(),
-        std::make_move_iterator(next.handles_to_save.begin()),
-        std::make_move_iterator(next.handles_to_save.end())
-    );
-}
-
 bool set_torrent_flag_if_needed(lt::torrent_handle const &handle, lt::torrent_flags_t flag)
 {
     if (static_cast<bool>(handle.flags() & flag)) {
@@ -949,260 +801,6 @@ bool unset_torrent_flag_if_needed(lt::torrent_handle const &handle, lt::torrent_
     }
     handle.unset_flags(flag);
     return true;
-}
-
-void request_policy_saves(TTorrentClient &client, std::vector<lt::torrent_handle> const &handles)
-{
-    for (lt::torrent_handle const &handle : handles) {
-        client.request_save(handle);
-    }
-}
-
-SourcePolicyApplicationResult apply_dht_policy_locked(TTorrentClient &client, bool use_dht_by_default)
-    TORRENT_BRIDGE_REQUIRES(client.lock)
-{
-    client.dht_enabled_by_default = use_dht_by_default;
-    SourcePolicyApplicationResult result;
-    for (ActiveTorrentEntry const &entry : active_torrent_entries(client)) {
-        TorrentIdentity *identity = entry.identity;
-        lt::torrent_handle const &handle = entry.handle;
-        bool changed = false;
-        if (identity->dht_locked_by_source) {
-            changed = identity->dht_enabled_by_user || identity->dht_disabled_by_user;
-            identity->dht_enabled_by_user = false;
-            identity->dht_disabled_by_user = false;
-            changed = client.dht_disabled_by_app.erase(identity) > 0U || changed;
-            changed = set_torrent_flag_if_needed(handle, lt::torrent_flags::disable_dht) || changed;
-            result.changes |= client.clear_peer_cache_if_restricted(handle, identity);
-            if (changed) {
-                add_policy_save(result, handle);
-            }
-            continue;
-        }
-
-        if (client.metadata_validation_pending.contains(identity)) {
-            if (use_dht_by_default) {
-                changed = client.dht_disabled_by_app.erase(identity) > 0U;
-            } else {
-                changed = client.dht_disabled_by_app.insert(identity).second;
-            }
-            if (identity->allow_pre_metadata_dht) {
-                changed = unset_torrent_flag_if_needed(handle, lt::torrent_flags::disable_dht) || changed;
-            } else {
-                changed = set_torrent_flag_if_needed(handle, lt::torrent_flags::disable_dht) || changed;
-                result.changes |= client.clear_peer_cache_if_restricted(handle, identity);
-            }
-            if (changed) {
-                add_policy_save(result, handle);
-            }
-            continue;
-        }
-
-        if (identity->dht_enabled_by_user) {
-            changed = client.dht_disabled_by_app.erase(identity) > 0U;
-            changed = unset_torrent_flag_if_needed(handle, lt::torrent_flags::disable_dht) || changed;
-            if (changed) {
-                add_policy_save(result, handle);
-            }
-            continue;
-        }
-
-        if (identity->dht_disabled_by_user) {
-            changed = client.dht_disabled_by_app.erase(identity) > 0U;
-            changed = set_torrent_flag_if_needed(handle, lt::torrent_flags::disable_dht) || changed;
-            result.changes |= client.clear_peer_cache_if_restricted(handle, identity);
-            if (changed) {
-                add_policy_save(result, handle);
-            }
-            continue;
-        }
-
-        if (use_dht_by_default) {
-            if (client.dht_disabled_by_app.erase(identity) > 0U) {
-                changed = true;
-                changed = unset_torrent_flag_if_needed(handle, lt::torrent_flags::disable_dht) || changed;
-            }
-            if (changed) {
-                add_policy_save(result, handle);
-            }
-            continue;
-        }
-
-        changed = client.dht_disabled_by_app.insert(identity).second;
-        changed = set_torrent_flag_if_needed(handle, lt::torrent_flags::disable_dht) || changed;
-        result.changes |= client.clear_peer_cache_if_restricted(handle, identity);
-        if (changed) {
-            add_policy_save(result, handle);
-        }
-    }
-    return result;
-}
-
-SourcePolicyApplicationResult apply_lsd_policy_locked(TTorrentClient &client, bool use_lsd_by_default)
-    TORRENT_BRIDGE_REQUIRES(client.lock)
-{
-    client.lsd_enabled_by_default = use_lsd_by_default;
-    SourcePolicyApplicationResult result;
-    for (ActiveTorrentEntry const &entry : active_torrent_entries(client)) {
-        TorrentIdentity *identity = entry.identity;
-        lt::torrent_handle const &handle = entry.handle;
-        bool changed = false;
-        if (identity->lsd_locked_by_source) {
-            changed = identity->lsd_enabled_by_user || identity->lsd_disabled_by_user;
-            identity->lsd_enabled_by_user = false;
-            identity->lsd_disabled_by_user = false;
-            changed = client.lsd_disabled_by_app.erase(identity) > 0U || changed;
-            changed = set_torrent_flag_if_needed(handle, lt::torrent_flags::disable_lsd) || changed;
-            if (changed) {
-                add_policy_save(result, handle);
-            }
-            continue;
-        }
-
-        if (client.metadata_validation_pending.contains(identity)) {
-            if (use_lsd_by_default) {
-                changed = client.lsd_disabled_by_app.erase(identity) > 0U;
-            } else {
-                changed = client.lsd_disabled_by_app.insert(identity).second;
-            }
-            changed = set_torrent_flag_if_needed(handle, lt::torrent_flags::disable_lsd) || changed;
-            if (changed) {
-                add_policy_save(result, handle);
-            }
-            continue;
-        }
-
-        if (identity->lsd_enabled_by_user) {
-            changed = client.lsd_disabled_by_app.erase(identity) > 0U;
-            changed = unset_torrent_flag_if_needed(handle, lt::torrent_flags::disable_lsd) || changed;
-            if (changed) {
-                add_policy_save(result, handle);
-            }
-            continue;
-        }
-
-        if (identity->lsd_disabled_by_user) {
-            changed = client.lsd_disabled_by_app.erase(identity) > 0U;
-            changed = set_torrent_flag_if_needed(handle, lt::torrent_flags::disable_lsd) || changed;
-            if (changed) {
-                add_policy_save(result, handle);
-            }
-            continue;
-        }
-
-        if (use_lsd_by_default) {
-            if (client.lsd_disabled_by_app.erase(identity) > 0U) {
-                changed = true;
-                changed = unset_torrent_flag_if_needed(handle, lt::torrent_flags::disable_lsd) || changed;
-            }
-            if (changed) {
-                add_policy_save(result, handle);
-            }
-            continue;
-        }
-
-        changed = client.lsd_disabled_by_app.insert(identity).second;
-        changed = set_torrent_flag_if_needed(handle, lt::torrent_flags::disable_lsd) || changed;
-        if (changed) {
-            add_policy_save(result, handle);
-        }
-    }
-    return result;
-}
-
-SourcePolicyApplicationResult apply_peer_exchange_policy_locked(TTorrentClient &client, bool use_peer_exchange_by_default)
-    TORRENT_BRIDGE_REQUIRES(client.lock)
-{
-    client.peer_exchange_enabled_by_default = use_peer_exchange_by_default;
-    SourcePolicyApplicationResult result;
-    for (ActiveTorrentEntry const &entry : active_torrent_entries(client)) {
-        TorrentIdentity *identity = entry.identity;
-        lt::torrent_handle const &handle = entry.handle;
-        bool changed = false;
-        if (identity->peer_exchange_locked_by_source) {
-            changed = identity->peer_exchange_enabled_by_user || identity->peer_exchange_disabled_by_user;
-            identity->peer_exchange_enabled_by_user = false;
-            identity->peer_exchange_disabled_by_user = false;
-            changed = client.peer_exchange_disabled_by_app.erase(identity) > 0U || changed;
-            changed = set_torrent_flag_if_needed(handle, lt::torrent_flags::disable_pex) || changed;
-            if (changed) {
-                add_policy_save(result, handle);
-            }
-            continue;
-        }
-
-        if (!client.peer_exchange_plugin_enabled) {
-            changed = client.peer_exchange_disabled_by_app.insert(identity).second;
-            changed = set_torrent_flag_if_needed(handle, lt::torrent_flags::disable_pex) || changed;
-            if (changed) {
-                add_policy_save(result, handle);
-            }
-            continue;
-        }
-
-        if (client.metadata_validation_pending.contains(identity)) {
-            bool const intended_enabled = identity->peer_exchange_enabled_by_user
-                || (!identity->peer_exchange_disabled_by_user && use_peer_exchange_by_default);
-            if (intended_enabled) {
-                changed = client.peer_exchange_disabled_by_app.erase(identity) > 0U;
-            } else {
-                changed = client.peer_exchange_disabled_by_app.insert(identity).second;
-            }
-            changed = set_torrent_flag_if_needed(handle, lt::torrent_flags::disable_pex) || changed;
-            if (changed) {
-                add_policy_save(result, handle);
-            }
-            continue;
-        }
-
-        if (identity->peer_exchange_enabled_by_user) {
-            changed = client.peer_exchange_disabled_by_app.erase(identity) > 0U;
-            if (!client.metadata_validation_pending.contains(identity)) {
-                changed = unset_torrent_flag_if_needed(handle, lt::torrent_flags::disable_pex) || changed;
-            }
-            if (changed) {
-                add_policy_save(result, handle);
-            }
-            continue;
-        }
-
-        if (identity->peer_exchange_disabled_by_user) {
-            changed = client.peer_exchange_disabled_by_app.erase(identity) > 0U;
-            changed = set_torrent_flag_if_needed(handle, lt::torrent_flags::disable_pex) || changed;
-            if (changed) {
-                add_policy_save(result, handle);
-            }
-            continue;
-        }
-
-        if (use_peer_exchange_by_default) {
-            bool const was_disabled_by_app = client.peer_exchange_disabled_by_app.erase(identity) > 0U;
-            changed = was_disabled_by_app;
-            if (was_disabled_by_app && !client.metadata_validation_pending.contains(identity)) {
-                changed = unset_torrent_flag_if_needed(handle, lt::torrent_flags::disable_pex) || changed;
-            }
-            if (changed) {
-                add_policy_save(result, handle);
-            }
-            continue;
-        }
-
-        if (client.peer_exchange_disabled_by_app.contains(identity)) {
-            if (set_torrent_flag_if_needed(handle, lt::torrent_flags::disable_pex)) {
-                add_policy_save(result, handle);
-            }
-            continue;
-        }
-
-        if (static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex)) {
-            continue;
-        }
-
-        handle.set_flags(lt::torrent_flags::disable_pex);
-        client.peer_exchange_disabled_by_app.insert(identity);
-        add_policy_save(result, handle);
-    }
-    return result;
 }
 
 using TrackerTopologyEntry = std::pair<std::string_view, std::uint8_t>;
@@ -1252,7 +850,8 @@ void preserve_runtime_tracker_state(
 DirtyMask TTorrentClient::enforce_https_source_policy(
     lt::torrent_handle const &handle,
     TorrentIdentity *identity,
-    HTTPSSourcePolicyScope const scope
+    HTTPSSourcePolicyScope const scope,
+    HTTPSSourcePolicy const policy
 )
 {
     if (!handle.is_valid()) {
@@ -1268,18 +867,18 @@ DirtyMask TTorrentClient::enforce_https_source_policy(
         std::vector<lt::announce_entry> const trackers = handle.trackers();
         std::vector<lt::announce_entry> const effective_trackers = trackers_for_https_policy(
             trackers,
-            effective_https_tracker_policy(identity)
+            policy.trackers
         );
         trackers_changed = !same_tracker_topology(trackers, effective_trackers);
         if (trackers_changed) {
             handle.replace_trackers(effective_trackers);
             handle.force_reannounce();
-            changes |= cache_trackers(handle, effective_trackers);
+            changes |= observe_trackers(handle);
             changed = true;
         }
     }
 
-    bool const require_web_seeds = effective_https_web_seed_policy(identity) == HTTPSPolicy::require;
+    bool const require_web_seeds = policy.web_seeds == HTTPSPolicy::require;
     if (updates_https_web_seeds(scope) && require_web_seeds) {
         for (std::string const &url : handle.url_seeds()) {
             if (!is_https_url(url)) {
@@ -1291,24 +890,13 @@ DirtyMask TTorrentClient::enforce_https_source_policy(
     }
 
     if (web_seeds_changed) {
-        if (std::optional<std::string> const cache_id = cache_id_for_handle(handle)) {
-            if (auto cached = web_seed_cache.find(*cache_id); cached != web_seed_cache.end()) {
-                auto const original_size = cached->second.web_seeds.size();
-                std::erase_if(cached->second.web_seeds, [](TTorrentWebSeedSnapshot const &snapshot) {
-                    return !is_https_url(snapshot.url);
-                });
-                if (cached->second.web_seeds.size() != original_size) {
-                    cached->second.revision = web_seed_revision + 1U;
-                    changes |= mark_web_seed_cache_changed();
-                }
-            }
-        }
+        changes |= mark_web_seeds_changed();
     }
     if (trackers_changed) {
         changes |= clear_peer_cache_if_restricted(handle, identity);
     }
     if (changed) {
-        request_save(handle);
+        request_save_locked(handle);
     }
 
     return changes;
@@ -1317,7 +905,8 @@ DirtyMask TTorrentClient::enforce_https_source_policy(
 DirtyMask TTorrentClient::restore_metadata_source_policy(
     lt::torrent_handle const &handle,
     TorrentIdentity *identity,
-    HTTPSSourcePolicyScope const scope
+    HTTPSSourcePolicyScope const scope,
+    HTTPSSourcePolicy const policy
 )
 {
     if (!handle.is_valid()) {
@@ -1352,7 +941,7 @@ DirtyMask TTorrentClient::restore_metadata_source_policy(
         }
         restored_trackers = trackers_for_https_policy(
             std::move(restored_trackers),
-            effective_https_tracker_policy(identity)
+            policy.trackers
         );
         preserve_runtime_tracker_state(restored_trackers, current_trackers);
         trackers_changed = !same_tracker_topology(restored_trackers, current_trackers);
@@ -1362,7 +951,7 @@ DirtyMask TTorrentClient::restore_metadata_source_policy(
     std::set<std::string> restored_url_seeds = existing_url_seeds;
     bool web_seeds_changed = false;
     if (updates_https_web_seeds(scope)) {
-        bool const require_web_seeds = effective_https_web_seed_policy(identity) == HTTPSPolicy::require;
+        bool const require_web_seeds = policy.web_seeds == HTTPSPolicy::require;
         auto web_seed_allowed = [require_web_seeds](std::string const &web_seed) noexcept {
             return !require_web_seeds || is_https_url(web_seed);
         };
@@ -1392,7 +981,7 @@ DirtyMask TTorrentClient::restore_metadata_source_policy(
     if (trackers_changed) {
         handle.replace_trackers(restored_trackers);
         handle.force_reannounce();
-        changes |= cache_trackers(handle, restored_trackers);
+        changes |= observe_trackers(handle);
         changes |= clear_peer_cache_if_restricted(handle, identity);
         changed = true;
     }
@@ -1409,15 +998,11 @@ DirtyMask TTorrentClient::restore_metadata_source_policy(
                 handle.add_url_seed(url);
             }
         }
-        if (std::optional<std::string> const cache_id = cache_id_for_handle(handle)) {
-            changes |= cache_web_seeds(*cache_id, restored_url_seeds);
-        } else {
-            changes |= queue_alert_error("Torrent not found.");
-        }
+        changes |= mark_web_seeds_changed();
     }
 
     if (changed) {
-        request_save(handle);
+        request_save_locked(handle);
     }
 
     return changes;
@@ -1446,292 +1031,415 @@ DirtyMask TTorrentClient::clear_peer_cache_if_restricted(
     }
 
     handle.clear_peers();
-    request_save(handle);
+    request_save_locked(handle);
     request_snapshot_update_locked();
-    return TTORRENT_DIRTY_TORRENTS;
+    return kChangeTorrents;
 }
 
-HTTPSPolicy TTorrentClient::effective_https_tracker_policy(TorrentIdentity const *identity) const noexcept
+namespace {
+
+bool is_valid_boolean_policy(std::uint8_t const value) noexcept
 {
-    return identity != nullptr && identity->https_tracker_policy != HTTPSPolicy::inherit
-        ? identity->https_tracker_policy
-        : https_tracker_policy;
+    return value == TTORRENT_BOOLEAN_POLICY_INHERIT
+        || value == TTORRENT_BOOLEAN_POLICY_DISABLED
+        || value == TTORRENT_BOOLEAN_POLICY_ENABLED;
 }
 
-HTTPSPolicy TTorrentClient::effective_https_web_seed_policy(TorrentIdentity const *identity) const noexcept
+std::uint8_t boolean_policy(bool const enabled, bool const disabled) noexcept
 {
-    return identity != nullptr && identity->https_web_seed_policy != HTTPSPolicy::inherit
-        ? identity->https_web_seed_policy
-        : https_web_seed_policy;
+    if (enabled != disabled) {
+        return enabled ? TTORRENT_BOOLEAN_POLICY_ENABLED : TTORRENT_BOOLEAN_POLICY_DISABLED;
+    }
+    return TTORRENT_BOOLEAN_POLICY_INHERIT;
 }
 
-TTorrentSourcePolicy TTorrentClient::source_policy(lt::torrent_handle const &handle, TorrentIdentity const *identity) const
+TTorrentSourcePolicyState source_policy_state(
+    TTorrentClient const &client,
+    ActiveTorrentEntry const &entry
+) TORRENT_BRIDGE_REQUIRES(client.lock)
 {
-    TTorrentSourcePolicy policy{};
-    lt::torrent_flags_t const flags = handle.flags();
-    std::shared_ptr<lt::torrent_info const> const torrent_file = handle.torrent_file();
+    TTorrentSourcePolicyState state{};
+    TorrentIdentity const *identity = entry.identity;
+    state.native_token = identity->token == nullptr ? 0U : identity->token->value;
+    state.dht_policy = boolean_policy(identity->dht_enabled_by_user, identity->dht_disabled_by_user);
+    state.peer_exchange_policy = boolean_policy(
+        identity->peer_exchange_enabled_by_user,
+        identity->peer_exchange_disabled_by_user
+    );
+    state.lsd_policy = boolean_policy(identity->lsd_enabled_by_user, identity->lsd_disabled_by_user);
+    state.https_tracker_policy = static_cast<std::uint8_t>(identity->https_tracker_policy);
+    state.https_web_seed_policy = static_cast<std::uint8_t>(identity->https_web_seed_policy);
+
+    std::shared_ptr<lt::torrent_info const> const torrent_file = entry.handle.torrent_file();
     bool const private_torrent = torrent_file && torrent_file->is_valid() && torrent_file->priv();
-    bool const dht_locked =
-        private_torrent || (identity != nullptr && identity->dht_locked_by_source);
-    bool const peer_exchange_locked =
-        private_torrent || (identity != nullptr && identity->peer_exchange_locked_by_source);
-    bool const lsd_locked =
-        private_torrent || (identity != nullptr && identity->lsd_locked_by_source);
-    bool const metadata_pending =
-        identity != nullptr && metadata_validation_pending.contains(identity);
-
-    bool dht_enabled = !dht_locked && !static_cast<bool>(flags & lt::torrent_flags::disable_dht);
-    if (identity != nullptr && !dht_locked) {
-        bool const disabled_by_app = std::ranges::any_of(dht_disabled_by_app, [identity](TorrentIdentity const *entry) {
-            return entry == identity;
-        });
-        if (identity->dht_enabled_by_user) {
-            dht_enabled = true;
-        } else if (identity->dht_disabled_by_user || disabled_by_app) {
-            dht_enabled = false;
-        }
-        if (metadata_validation_pending.contains(identity)) {
-            dht_enabled = identity->allow_pre_metadata_dht;
-        }
-    }
-
-    bool peer_exchange_enabled =
-        peer_exchange_plugin_enabled && !peer_exchange_locked && !static_cast<bool>(flags & lt::torrent_flags::disable_pex);
-    if (identity != nullptr && !peer_exchange_locked) {
-        bool const disabled_by_app = std::ranges::any_of(
-            peer_exchange_disabled_by_app,
-            [identity](TorrentIdentity const *entry) {
-                return entry == identity;
-            }
-        );
-        if (peer_exchange_plugin_enabled && identity->peer_exchange_enabled_by_user) {
-            peer_exchange_enabled = true;
-        } else if (identity->peer_exchange_disabled_by_user || disabled_by_app) {
-            peer_exchange_enabled = false;
-        }
-    }
-
-    bool lsd_enabled = !lsd_locked && !static_cast<bool>(flags & lt::torrent_flags::disable_lsd);
-    if (identity != nullptr && !lsd_locked) {
-        bool const disabled_by_app = std::ranges::any_of(lsd_disabled_by_app, [identity](TorrentIdentity const *entry) {
-            return entry == identity;
-        });
-        if (identity->lsd_enabled_by_user) {
-            lsd_enabled = true;
-        } else if (identity->lsd_disabled_by_user || disabled_by_app) {
-            lsd_enabled = false;
-        }
-    }
-
-    policy.enable_dht = bridge_bool(dht_enabled);
-    policy.enable_peer_exchange = bridge_bool(peer_exchange_enabled);
-    policy.enable_lsd = bridge_bool(lsd_enabled);
-    policy.https_tracker_policy = static_cast<std::uint8_t>(
-        identity != nullptr ? identity->https_tracker_policy : HTTPSPolicy::inherit
+    bool const metadata_pending = client.metadata_validation_pending.contains(identity);
+    state.dht_locked = bridge_bool(private_torrent || identity->dht_locked_by_source);
+    state.peer_exchange_locked = bridge_bool(private_torrent || identity->peer_exchange_locked_by_source);
+    state.lsd_locked = bridge_bool(private_torrent || identity->lsd_locked_by_source);
+    state.metadata_validation_pending = bridge_bool(metadata_pending);
+    state.allow_pre_metadata_dht = bridge_bool(
+        metadata_pending && !bridge_bool(state.dht_locked) && identity->allow_pre_metadata_dht
     );
-    policy.https_web_seed_policy = static_cast<std::uint8_t>(
-        identity != nullptr ? identity->https_web_seed_policy : HTTPSPolicy::inherit
-    );
-    policy.effective_https_tracker_policy = static_cast<std::uint8_t>(
-        effective_https_tracker_policy(identity)
-    );
-    policy.effective_https_web_seed_policy = static_cast<std::uint8_t>(
-        effective_https_web_seed_policy(identity)
-    );
-    policy.dht_locked = bridge_bool(dht_locked);
-    policy.peer_exchange_locked = bridge_bool(peer_exchange_locked);
-    policy.lsd_locked = bridge_bool(lsd_locked);
-    policy.metadata_validation_pending = bridge_bool(metadata_pending);
-    policy.allow_pre_metadata_dht = bridge_bool(
-        metadata_pending && identity != nullptr && identity->allow_pre_metadata_dht
-    );
-    return policy;
+    return state;
 }
 
-DirtyMask TTorrentClient::set_source_policy_field(
-    lt::torrent_handle const &handle,
-    TorrentIdentity *identity,
-    int32_t field,
-    int32_t const value
-)
-{
-    if (identity == nullptr || !handle.is_valid()) {
-        return {};
-    }
+struct ResolvedSourcePolicyApplication {
+    TTorrentSourcePolicyApplication application{};
+    lt::torrent_handle handle;
+    TorrentIdentity *identity = nullptr;
+    lt::torrent_flags_t previous_flags;
+    HTTPSPolicy previous_tracker_policy = HTTPSPolicy::inherit;
+    HTTPSPolicy previous_web_seed_policy = HTTPSPolicy::inherit;
+    bool previous_dht_enabled_by_user = false;
+    bool previous_dht_disabled_by_user = false;
+    bool previous_peer_exchange_enabled_by_user = false;
+    bool previous_peer_exchange_disabled_by_user = false;
+    bool previous_lsd_enabled_by_user = false;
+    bool previous_lsd_disabled_by_user = false;
+    bool previous_allow_pre_metadata_dht = false;
+    bool previous_app_disabled_dht = false;
+    bool previous_app_disabled_peer_exchange = false;
+    bool previous_app_disabled_lsd = false;
+    std::vector<lt::announce_entry> previous_trackers;
+    std::set<std::string> previous_web_seeds;
+};
 
-    bool const enabled = value != 0;
-    std::shared_ptr<lt::torrent_info const> const torrent_file = handle.torrent_file();
-    bool const private_torrent = torrent_file && torrent_file->is_valid() && torrent_file->priv();
-    bool const dht_locked = private_torrent || identity->dht_locked_by_source;
-    bool const peer_exchange_locked = private_torrent || identity->peer_exchange_locked_by_source;
-    bool const lsd_locked = private_torrent || identity->lsd_locked_by_source;
-    bool const metadata_pending = metadata_validation_pending.contains(identity);
-    TTorrentSourcePolicy const current_policy = source_policy(handle, identity);
-    HTTPSSourcePolicy const previous_https_policy{
-        .trackers = effective_https_tracker_policy(identity),
-        .web_seeds = effective_https_web_seed_policy(identity),
+struct BooleanPolicyMirror {
+    bool enabled = false;
+    bool disabled = false;
+};
+
+BooleanPolicyMirror policy_mirror(std::uint8_t const policy) noexcept
+{
+    return BooleanPolicyMirror{
+        .enabled = policy == TTORRENT_BOOLEAN_POLICY_ENABLED,
+        .disabled = policy == TTORRENT_BOOLEAN_POLICY_DISABLED,
     };
-    lt::torrent_flags_t const original_flags = handle.flags();
-    bool const updates_dht = field == TTORRENT_SOURCE_POLICY_ENABLE_DHT
-        || field == TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT;
-    bool const should_force_lsd_announce =
-        field == TTORRENT_SOURCE_POLICY_ENABLE_LSD
-        && !lsd_locked
-        && !metadata_pending
-        && enabled
-        && !bridge_bool(current_policy.enable_lsd)
-        && lsd_service_enabled
-        && !requested_network_blocked
-        && !static_cast<bool>(original_flags & lt::torrent_flags::paused);
-
-    if (updates_dht && metadata_pending) {
-        bool const allow_pre_metadata_dht = !dht_locked && enabled;
-        identity->allow_pre_metadata_dht = allow_pre_metadata_dht;
-        if (allow_pre_metadata_dht) {
-            if (static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht)) {
-                handle.unset_flags(lt::torrent_flags::disable_dht);
-            }
-        } else if (!static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht)) {
-            handle.set_flags(lt::torrent_flags::disable_dht);
-        }
-    } else if (updates_dht && dht_locked) {
-        identity->dht_enabled_by_user = false;
-        identity->dht_disabled_by_user = false;
-        dht_disabled_by_app.erase(identity);
-        if (!static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht)) {
-            handle.set_flags(lt::torrent_flags::disable_dht);
-        }
-    } else if (updates_dht && enabled) {
-        identity->dht_enabled_by_user = true;
-        identity->dht_disabled_by_user = false;
-        dht_disabled_by_app.erase(identity);
-        if (static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht)) {
-            handle.unset_flags(lt::torrent_flags::disable_dht);
-        }
-    } else if (updates_dht) {
-        identity->dht_enabled_by_user = false;
-        identity->dht_disabled_by_user = true;
-        dht_disabled_by_app.erase(identity);
-        if (!static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht)) {
-            handle.set_flags(lt::torrent_flags::disable_dht);
-        }
-    }
-
-    if (field == TTORRENT_SOURCE_POLICY_ENABLE_PEER_EXCHANGE && peer_exchange_locked) {
-        identity->peer_exchange_enabled_by_user = false;
-        identity->peer_exchange_disabled_by_user = false;
-        peer_exchange_disabled_by_app.erase(identity);
-        if (!static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex)) {
-            handle.set_flags(lt::torrent_flags::disable_pex);
-        }
-    } else if (field == TTORRENT_SOURCE_POLICY_ENABLE_PEER_EXCHANGE && !peer_exchange_plugin_enabled) {
-        if (!static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex)) {
-            handle.set_flags(lt::torrent_flags::disable_pex);
-        }
-    } else if (field == TTORRENT_SOURCE_POLICY_ENABLE_PEER_EXCHANGE && enabled) {
-        identity->peer_exchange_enabled_by_user = true;
-        identity->peer_exchange_disabled_by_user = false;
-        peer_exchange_disabled_by_app.erase(identity);
-        if (static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex)) {
-            handle.unset_flags(lt::torrent_flags::disable_pex);
-        }
-    } else if (field == TTORRENT_SOURCE_POLICY_ENABLE_PEER_EXCHANGE) {
-        identity->peer_exchange_enabled_by_user = false;
-        identity->peer_exchange_disabled_by_user = true;
-        peer_exchange_disabled_by_app.erase(identity);
-        if (!static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex)) {
-            handle.set_flags(lt::torrent_flags::disable_pex);
-        }
-    }
-
-    if (field == TTORRENT_SOURCE_POLICY_ENABLE_LSD && lsd_locked) {
-        identity->lsd_enabled_by_user = false;
-        identity->lsd_disabled_by_user = false;
-        lsd_disabled_by_app.erase(identity);
-        if (!static_cast<bool>(handle.flags() & lt::torrent_flags::disable_lsd)) {
-            handle.set_flags(lt::torrent_flags::disable_lsd);
-        }
-    } else if (field == TTORRENT_SOURCE_POLICY_ENABLE_LSD && enabled) {
-        identity->lsd_enabled_by_user = true;
-        identity->lsd_disabled_by_user = false;
-        lsd_disabled_by_app.erase(identity);
-        if (static_cast<bool>(handle.flags() & lt::torrent_flags::disable_lsd)) {
-            handle.unset_flags(lt::torrent_flags::disable_lsd);
-        }
-    } else if (field == TTORRENT_SOURCE_POLICY_ENABLE_LSD) {
-        identity->lsd_enabled_by_user = false;
-        identity->lsd_disabled_by_user = true;
-        lsd_disabled_by_app.erase(identity);
-        if (!static_cast<bool>(handle.flags() & lt::torrent_flags::disable_lsd)) {
-            handle.set_flags(lt::torrent_flags::disable_lsd);
-        }
-    }
-
-    if (field == TTORRENT_SOURCE_POLICY_HTTPS_TRACKER_POLICY) {
-        identity->https_tracker_policy = https_policy_from_value(value);
-    }
-
-    if (field == TTORRENT_SOURCE_POLICY_HTTPS_WEB_SEED_POLICY) {
-        identity->https_web_seed_policy = https_policy_from_value(value);
-    }
-
-    DirtyMask changes = 0;
-    if (field == TTORRENT_SOURCE_POLICY_HTTPS_TRACKER_POLICY
-        || field == TTORRENT_SOURCE_POLICY_HTTPS_WEB_SEED_POLICY) {
-        HTTPSSourcePolicy const current_https_policy{
-            .trackers = effective_https_tracker_policy(identity),
-            .web_seeds = effective_https_web_seed_policy(identity),
-        };
-        HTTPSSourcePolicyScope const scope = changed_https_policy_scope(
-            previous_https_policy,
-            current_https_policy
-        );
-        if (scope != HTTPSSourcePolicyScope::none) {
-            changes |= restore_metadata_source_policy(handle, identity, scope);
-            changes |= enforce_https_source_policy(handle, identity, scope);
-        }
-    }
-    if (updates_dht || field == TTORRENT_SOURCE_POLICY_ENABLE_PEER_EXCHANGE) {
-        changes |= clear_peer_cache_if_restricted(handle, identity);
-    }
-    if (should_force_lsd_announce) {
-        handle.force_lsd_announce();
-    }
-    return changes;
 }
 
-DirtyMask TTorrentClient::apply_https_source_policy_locked(
-    HTTPSSourcePolicy const previous_global_policy
-)
+void set_membership(std::set<TorrentIdentity *> &set, TorrentIdentity *identity, bool const contained)
 {
-    DirtyMask changes = 0;
-    for (ActiveTorrentEntry const &entry : active_torrent_entries(*this)) {
-        HTTPSSourcePolicy const previous_effective_policy{
-            .trackers = entry.identity != nullptr
-                    && entry.identity->https_tracker_policy != HTTPSPolicy::inherit
-                ? entry.identity->https_tracker_policy
-                : previous_global_policy.trackers,
-            .web_seeds = entry.identity != nullptr
-                    && entry.identity->https_web_seed_policy != HTTPSPolicy::inherit
-                ? entry.identity->https_web_seed_policy
-                : previous_global_policy.web_seeds,
-        };
-        HTTPSSourcePolicy const current_effective_policy{
-            .trackers = effective_https_tracker_policy(entry.identity),
-            .web_seeds = effective_https_web_seed_policy(entry.identity),
-        };
-        HTTPSSourcePolicyScope const scope = changed_https_policy_scope(
-            previous_effective_policy,
-            current_effective_policy
-        );
-        if (scope == HTTPSSourcePolicyScope::none) {
-            continue;
-        }
-        changes |= restore_metadata_source_policy(entry.handle, entry.identity, scope);
-        changes |= enforce_https_source_policy(entry.handle, entry.identity, scope);
+    if (contained) {
+        set.insert(identity);
+    } else {
+        set.erase(identity);
     }
-    return changes;
 }
+
+bool restore_membership(
+    std::set<TorrentIdentity *> &set,
+    TorrentIdentity *identity,
+    bool const contained
+) noexcept
+{
+    try {
+        set_membership(set, identity, contained);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool restore_source_application(TTorrentClient &client, ResolvedSourcePolicyApplication const &entry) noexcept
+    TORRENT_BRIDGE_REQUIRES(client.lock)
+{
+#if defined(TORRENT_BRIDGE_TESTING)
+    if (client.fail_next_source_policy_rollback) {
+        client.fail_next_source_policy_rollback = false;
+        return false;
+    }
+#endif
+    TorrentIdentity *identity = entry.identity;
+    identity->https_tracker_policy = entry.previous_tracker_policy;
+    identity->https_web_seed_policy = entry.previous_web_seed_policy;
+    identity->dht_enabled_by_user = entry.previous_dht_enabled_by_user;
+    identity->dht_disabled_by_user = entry.previous_dht_disabled_by_user;
+    identity->peer_exchange_enabled_by_user = entry.previous_peer_exchange_enabled_by_user;
+    identity->peer_exchange_disabled_by_user = entry.previous_peer_exchange_disabled_by_user;
+    identity->lsd_enabled_by_user = entry.previous_lsd_enabled_by_user;
+    identity->lsd_disabled_by_user = entry.previous_lsd_disabled_by_user;
+    identity->allow_pre_metadata_dht = entry.previous_allow_pre_metadata_dht;
+    bool mirrors_restored = restore_membership(
+        client.dht_disabled_by_app,
+        identity,
+        entry.previous_app_disabled_dht
+    );
+    mirrors_restored = restore_membership(
+        client.peer_exchange_disabled_by_app,
+        identity,
+        entry.previous_app_disabled_peer_exchange
+    ) && mirrors_restored;
+    mirrors_restored = restore_membership(
+        client.lsd_disabled_by_app,
+        identity,
+        entry.previous_app_disabled_lsd
+    ) && mirrors_restored;
+    try {
+        auto restore_flag = [&](lt::torrent_flags_t const flag) {
+            if (static_cast<bool>(entry.previous_flags & flag)) {
+                entry.handle.set_flags(flag);
+            } else {
+                entry.handle.unset_flags(flag);
+            }
+        };
+        restore_flag(lt::torrent_flags::disable_dht);
+        restore_flag(lt::torrent_flags::disable_pex);
+        restore_flag(lt::torrent_flags::disable_lsd);
+        entry.handle.replace_trackers(entry.previous_trackers);
+        std::set<std::string> const current_web_seeds = entry.handle.url_seeds();
+        for (std::string const &url : current_web_seeds) {
+            if (!entry.previous_web_seeds.contains(url)) {
+                entry.handle.remove_url_seed(url);
+            }
+        }
+        for (std::string const &url : entry.previous_web_seeds) {
+            if (!current_web_seeds.contains(url)) {
+                entry.handle.add_url_seed(url);
+            }
+        }
+    } catch (...) {
+        return false;
+    }
+    return mirrors_restored;
+}
+
+BridgeResult rollback_source_applications_or_contain(
+    TTorrentClient &client,
+    std::span<ResolvedSourcePolicyApplication const> applications,
+    LockedChangePublisher &publisher,
+    std::string message
+) TORRENT_BRIDGE_REQUIRES(client.lock)
+{
+    bool rollback_complete = true;
+    for (ResolvedSourcePolicyApplication const &entry : applications) {
+        bool const entry_restored = restore_source_application(client, entry);
+        rollback_complete = entry_restored && rollback_complete;
+    }
+    if (rollback_complete) {
+        return bridge_error(2, std::move(message));
+    }
+
+    client.source_policy_reconciled = false;
+    DirtyMask containment_changes = 0U;
+    BridgeResult const containment = block_network_locked(client, containment_changes);
+    publisher.add(containment_changes);
+    if (!containment) {
+        message += " Source-policy rollback was incomplete, and network containment could not be confirmed: ";
+        message += containment.error().message;
+        return bridge_error(2, std::move(message));
+    }
+    message += " Source-policy rollback was incomplete; networking was blocked.";
+    return bridge_error(2, std::move(message));
+}
+
+BridgeResult apply_source_policy_state_locked(
+    TTorrentClient &client,
+    std::span<TTorrentSourcePolicyApplication const> applications,
+    LockedChangePublisher &publisher
+) TORRENT_BRIDGE_REQUIRES(client.lock)
+{
+    std::vector<ActiveTorrentEntry> const active_entries = active_torrent_entries(client);
+    if (applications.size() != active_entries.size()) {
+        return bridge_error(2, "The Swift source policy did not cover every active torrent.");
+    }
+
+    std::unordered_map<std::uint64_t, ActiveTorrentEntry const *> active_by_token;
+    active_by_token.reserve(active_entries.size());
+    for (ActiveTorrentEntry const &entry : active_entries) {
+        if (entry.identity == nullptr
+            || entry.identity->token == nullptr
+            || entry.identity->token->value == 0U
+            || !active_by_token.emplace(entry.identity->token->value, &entry).second) {
+            return bridge_error(2, "The native source-policy identities were inconsistent.");
+        }
+    }
+
+    std::set<TorrentIdentity *> seen;
+    std::vector<ResolvedSourcePolicyApplication> resolved;
+    resolved.reserve(applications.size());
+    for (TTorrentSourcePolicyApplication const &application : applications) {
+        auto const active = active_by_token.find(application.native_token);
+        if (application.native_token == 0U
+            || active == active_by_token.end()
+            || !seen.insert(active->second->identity).second) {
+            return bridge_error(2, "The Swift source policy contained an unknown or duplicate torrent.");
+        }
+        if (!is_valid_boolean_policy(application.dht_policy)
+            || !is_valid_boolean_policy(application.peer_exchange_policy)
+            || !is_valid_boolean_policy(application.lsd_policy)
+            || !is_valid_https_tracker_policy(application.https_tracker_policy, true)
+            || !is_valid_https_web_seed_policy(application.https_web_seed_policy, true)
+            || !is_valid_https_tracker_policy(application.effective_https_tracker_policy, false)
+            || !is_valid_https_web_seed_policy(application.effective_https_web_seed_policy, false)
+            || application.enable_dht > 1U
+            || application.enable_peer_exchange > 1U
+            || application.enable_lsd > 1U
+            || application.allow_pre_metadata_dht > 1U) {
+            return bridge_error(1, "The Swift source policy contained an invalid value.");
+        }
+
+        ActiveTorrentEntry const &entry = *active->second;
+        TorrentIdentity *identity = entry.identity;
+        std::shared_ptr<lt::torrent_info const> const torrent_file = entry.handle.torrent_file();
+        bool const private_torrent = torrent_file && torrent_file->is_valid() && torrent_file->priv();
+        bool const dht_locked = private_torrent || identity->dht_locked_by_source;
+        bool const pex_locked = private_torrent || identity->peer_exchange_locked_by_source;
+        bool const lsd_locked = private_torrent || identity->lsd_locked_by_source;
+        bool const metadata_pending = client.metadata_validation_pending.contains(identity);
+        bool const enable_dht = bridge_bool(application.enable_dht);
+        bool const enable_pex = bridge_bool(application.enable_peer_exchange);
+        bool const enable_lsd = bridge_bool(application.enable_lsd);
+        bool const allow_pre_metadata_dht = bridge_bool(application.allow_pre_metadata_dht);
+        if ((dht_locked && (enable_dht || application.dht_policy != TTORRENT_BOOLEAN_POLICY_INHERIT))
+            || (pex_locked && (enable_pex || application.peer_exchange_policy != TTORRENT_BOOLEAN_POLICY_INHERIT))
+            || (lsd_locked && (enable_lsd || application.lsd_policy != TTORRENT_BOOLEAN_POLICY_INHERIT))
+            || (metadata_pending && (enable_pex || enable_lsd))
+            || (!metadata_pending && allow_pre_metadata_dht)
+            || (metadata_pending && enable_dht != allow_pre_metadata_dht)
+            || (allow_pre_metadata_dht && dht_locked)
+            || (enable_pex && !client.peer_exchange_plugin_enabled)) {
+            return bridge_error(2, "The Swift source policy violated a native source constraint.");
+        }
+
+        resolved.push_back(ResolvedSourcePolicyApplication{
+            .application = application,
+            .handle = entry.handle,
+            .identity = identity,
+            .previous_flags = entry.handle.flags(),
+            .previous_tracker_policy = identity->https_tracker_policy,
+            .previous_web_seed_policy = identity->https_web_seed_policy,
+            .previous_dht_enabled_by_user = identity->dht_enabled_by_user,
+            .previous_dht_disabled_by_user = identity->dht_disabled_by_user,
+            .previous_peer_exchange_enabled_by_user = identity->peer_exchange_enabled_by_user,
+            .previous_peer_exchange_disabled_by_user = identity->peer_exchange_disabled_by_user,
+            .previous_lsd_enabled_by_user = identity->lsd_enabled_by_user,
+            .previous_lsd_disabled_by_user = identity->lsd_disabled_by_user,
+            .previous_allow_pre_metadata_dht = identity->allow_pre_metadata_dht,
+            .previous_app_disabled_dht = client.dht_disabled_by_app.contains(identity),
+            .previous_app_disabled_peer_exchange = client.peer_exchange_disabled_by_app.contains(identity),
+            .previous_app_disabled_lsd = client.lsd_disabled_by_app.contains(identity),
+            .previous_trackers = entry.handle.trackers(),
+            .previous_web_seeds = entry.handle.url_seeds(),
+        });
+    }
+
+    DirtyMask changes = 0;
+    try {
+        for (ResolvedSourcePolicyApplication &entry : resolved) {
+            TTorrentSourcePolicyApplication const &application = entry.application;
+            TorrentIdentity *identity = entry.identity;
+            bool const enable_dht = bridge_bool(application.enable_dht);
+            bool const enable_pex = bridge_bool(application.enable_peer_exchange);
+            bool const enable_lsd = bridge_bool(application.enable_lsd);
+            bool const dht_was_disabled = static_cast<bool>(entry.previous_flags & lt::torrent_flags::disable_dht);
+            bool const pex_was_disabled = static_cast<bool>(entry.previous_flags & lt::torrent_flags::disable_pex);
+            bool const lsd_was_disabled = static_cast<bool>(entry.previous_flags & lt::torrent_flags::disable_lsd);
+
+            identity->https_tracker_policy = https_policy_from_value(application.https_tracker_policy);
+            identity->https_web_seed_policy = https_policy_from_value(application.https_web_seed_policy);
+            BooleanPolicyMirror const dht_mirror = policy_mirror(application.dht_policy);
+            identity->dht_enabled_by_user = dht_mirror.enabled;
+            identity->dht_disabled_by_user = dht_mirror.disabled;
+            BooleanPolicyMirror const peer_exchange_mirror = policy_mirror(
+                application.peer_exchange_policy
+            );
+            identity->peer_exchange_enabled_by_user = peer_exchange_mirror.enabled;
+            identity->peer_exchange_disabled_by_user = peer_exchange_mirror.disabled;
+            BooleanPolicyMirror const lsd_mirror = policy_mirror(application.lsd_policy);
+            identity->lsd_enabled_by_user = lsd_mirror.enabled;
+            identity->lsd_disabled_by_user = lsd_mirror.disabled;
+            identity->allow_pre_metadata_dht = bridge_bool(application.allow_pre_metadata_dht);
+            set_membership(
+                client.dht_disabled_by_app,
+                identity,
+                application.dht_policy == TTORRENT_BOOLEAN_POLICY_INHERIT && !enable_dht
+            );
+            set_membership(
+                client.peer_exchange_disabled_by_app,
+                identity,
+                application.peer_exchange_policy == TTORRENT_BOOLEAN_POLICY_INHERIT && !enable_pex
+            );
+            set_membership(
+                client.lsd_disabled_by_app,
+                identity,
+                application.lsd_policy == TTORRENT_BOOLEAN_POLICY_INHERIT && !enable_lsd
+            );
+
+            bool changed = enable_dht
+                ? unset_torrent_flag_if_needed(entry.handle, lt::torrent_flags::disable_dht)
+                : set_torrent_flag_if_needed(entry.handle, lt::torrent_flags::disable_dht);
+            changed = (enable_pex
+                ? unset_torrent_flag_if_needed(entry.handle, lt::torrent_flags::disable_pex)
+                : set_torrent_flag_if_needed(entry.handle, lt::torrent_flags::disable_pex)) || changed;
+            changed = (enable_lsd
+                ? unset_torrent_flag_if_needed(entry.handle, lt::torrent_flags::disable_lsd)
+                : set_torrent_flag_if_needed(entry.handle, lt::torrent_flags::disable_lsd)) || changed;
+
+            HTTPSSourcePolicy const https_policy{
+                .trackers = https_policy_from_value(application.effective_https_tracker_policy),
+                .web_seeds = https_policy_from_value(application.effective_https_web_seed_policy),
+            };
+            changes |= client.restore_metadata_source_policy(
+                entry.handle,
+                identity,
+                HTTPSSourcePolicyScope::all,
+                https_policy
+            );
+            changes |= client.enforce_https_source_policy(
+                entry.handle,
+                identity,
+                HTTPSSourcePolicyScope::all,
+                https_policy
+            );
+            if (!enable_dht || !enable_pex || https_policy.trackers == HTTPSPolicy::require) {
+                changes |= client.clear_peer_cache_if_restricted(entry.handle, identity);
+            }
+            if (enable_lsd
+                && lsd_was_disabled
+                && client.lsd_service_enabled
+                && !client.requested_network_blocked
+                && !static_cast<bool>(entry.previous_flags & lt::torrent_flags::paused)) {
+                entry.handle.force_lsd_announce();
+            }
+            if (changed || dht_was_disabled != !enable_dht || pex_was_disabled != !enable_pex) {
+                changes |= kChangeTorrents;
+            }
+#if defined(TORRENT_BRIDGE_TESTING)
+            if (client.fail_next_source_policy_application) {
+                client.fail_next_source_policy_application = false;
+                throw std::runtime_error("Synthetic source-policy application failure.");
+            }
+#endif
+        }
+    } catch (std::exception const &exception) {
+        return rollback_source_applications_or_contain(
+            client,
+            resolved,
+            publisher,
+            exception.what()
+        );
+    } catch (...) {
+        return rollback_source_applications_or_contain(
+            client,
+            resolved,
+            publisher,
+            "The native source policy could not be applied."
+        );
+    }
+
+    std::vector<lt::torrent_handle> handles;
+    handles.reserve(resolved.size());
+    for (ResolvedSourcePolicyApplication const &entry : resolved) {
+        handles.push_back(entry.handle);
+    }
+    save_and_publish_policy_handles(client, handles, publisher);
+    client.source_policy_reconciled = true;
+    publisher.add(changes);
+    client.request_snapshot_update_locked();
+    return {};
+}
+
+} // namespace
 
 extern "C" const char *TorrentBridgeLibtorrentVersion(void) noexcept
 {
@@ -1842,33 +1550,84 @@ extern "C" void TorrentClientSetWakeCallback(
     }
 }
 
-extern "C" uint64_t TorrentClientTakeChanges(TTorrentClient *client, uint32_t *dirty_mask_out) noexcept
+extern "C" int32_t TorrentClientDrainEvents(
+    TTorrentClient *client,
+    TTorrentEvent *events,
+    int32_t capacity,
+    int32_t *required_count_out,
+    uint8_t *available_out
+) noexcept
 {
-    if (dirty_mask_out != nullptr) {
-        *dirty_mask_out = 0;
+    if (required_count_out != nullptr) {
+        *required_count_out = 0;
+    }
+    if (available_out != nullptr) {
+        *available_out = bridge_bool(false);
     }
     if (client == nullptr) {
         return 0;
     }
 
-    return client->take_changes(dirty_mask_out);
+    try {
+        std::span<TTorrentEvent> output = output_span_from_c_buffer(events, capacity);
+        return client->drain_events(output, required_count_out, available_out);
+    } catch (...) {
+        return 0;
+    }
+}
+
+extern "C" int32_t TorrentClientDrainPresentationMetadata(
+    TTorrentClient *client,
+    TTorrentPresentationMetadata *metadata,
+    int32_t capacity,
+    int32_t *required_count_out,
+    uint8_t *available_out
+) noexcept
+{
+    if (required_count_out != nullptr) {
+        *required_count_out = 0;
+    }
+    if (available_out != nullptr) {
+        *available_out = bridge_bool(false);
+    }
+    if (client == nullptr) {
+        return 0;
+    }
+
+    try {
+        std::span<TTorrentPresentationMetadata> output = output_span_from_c_buffer(
+            metadata,
+            capacity
+        );
+        return client->drain_presentation_metadata(
+            output,
+            required_count_out,
+            available_out
+        );
+    } catch (...) {
+        return 0;
+    }
 }
 
 extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *magnet_uri,
                                           TTorrentAddOptions options,
                                           char *added_id_out, int32_t added_id_capacity,
+                                          std::uint64_t *native_token_out,
                                           int32_t *add_outcome_out,
                                           char *error_out, int32_t error_capacity) noexcept
 {
     if (add_outcome_out != nullptr) {
         *add_outcome_out = TTORRENT_ADD_REJECTED;
     }
+    if (native_token_out != nullptr) {
+        *native_token_out = 0U;
+    }
     WakeCallbackInvocation wake;
     std::span<char> const added_id_buffer = output_buffer(added_id_out, added_id_capacity);
     copy_string_dynamic(added_id_buffer, "");
     int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 4, [&]() -> BridgeResult {
-        if (client == nullptr || magnet_uri == nullptr || add_outcome_out == nullptr) {
-            return bridge_error(1, "Missing torrent client, magnet URI, or add outcome output.");
+        if (client == nullptr || magnet_uri == nullptr || native_token_out == nullptr || add_outcome_out == nullptr) {
+            return bridge_error(1, "Missing torrent client, magnet URI, native token, or add outcome output.");
         }
         TTorrentAddOptions const &add_options = options;
         std::string_view const magnet = c_string_view(magnet_uri);
@@ -1877,6 +1636,10 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         }
         if (!is_valid_queue_priority(add_options.queue_priority)) {
             return bridge_error(1, "Invalid queue priority.");
+        }
+        std::optional<std::string> const canonical_id = requested_torrent_id(add_options);
+        if (!canonical_id) {
+            return bridge_error(1, "Invalid Swift torrent identifier.");
         }
 
         std::scoped_lock guard(client->lock);
@@ -1900,18 +1663,24 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
             return valid_original_sources;
         }
 
-        if (!is_valid_https_tracker_policy(add_options.https_tracker_policy, true)
-            || !is_valid_https_web_seed_policy(add_options.https_web_seed_policy, true)) {
+        if (add_options.enable_dht > 1U
+            || add_options.enable_peer_exchange > 1U
+            || add_options.enable_lsd > 1U
+            || add_options.allow_pre_metadata_dht > 1U
+            || !is_valid_https_tracker_policy(add_options.https_tracker_policy, true)
+            || !is_valid_https_web_seed_policy(add_options.https_web_seed_policy, true)
+            || !is_valid_https_tracker_policy(add_options.effective_https_tracker_policy, false)
+            || !is_valid_https_web_seed_policy(add_options.effective_https_web_seed_policy, false)) {
             return bridge_error(1, "Invalid HTTPS source policy.");
         }
         HTTPSPolicy const requested_tracker_policy = https_policy_from_value(add_options.https_tracker_policy);
         HTTPSPolicy const requested_web_seed_policy = https_policy_from_value(add_options.https_web_seed_policy);
-        HTTPSPolicy const effective_tracker_policy = requested_tracker_policy == HTTPSPolicy::inherit
-            ? client->https_tracker_policy
-            : requested_tracker_policy;
-        HTTPSPolicy const effective_web_seed_policy = requested_web_seed_policy == HTTPSPolicy::inherit
-            ? client->https_web_seed_policy
-            : requested_web_seed_policy;
+        HTTPSPolicy const effective_tracker_policy = https_policy_from_value(
+            add_options.effective_https_tracker_policy
+        );
+        HTTPSPolicy const effective_web_seed_policy = https_policy_from_value(
+            add_options.effective_https_web_seed_policy
+        );
         static_cast<void>(apply_https_source_policy(
             params,
             HTTPSSourcePolicy{.trackers = effective_tracker_policy, .web_seeds = effective_web_seed_policy}
@@ -1920,7 +1689,10 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         if (!valid_effective_sources) {
             return valid_effective_sources;
         }
-        bool const enable_peer_exchange_value = bridge_bool(add_options.enable_peer_exchange);
+        bool const enable_dht_value = bridge_bool(add_options.enable_dht);
+        bool const enable_peer_exchange_value = bridge_bool(add_options.enable_peer_exchange)
+            && client->peer_exchange_plugin_enabled;
+        bool const enable_lsd_value = bridge_bool(add_options.enable_lsd);
         bool const metadata_pending = !params.ti;
         bool const allow_pre_metadata_dht =
             metadata_pending && bridge_bool(add_options.allow_pre_metadata_dht);
@@ -1930,10 +1702,10 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         bool const private_torrent = params.ti && params.ti->priv();
         bool const dht_locked_by_source =
             private_torrent || static_cast<bool>(params.flags & lt::torrent_flags::disable_dht);
-        bool const dht_disabled_by_app = !client->dht_enabled_by_default && !dht_locked_by_source;
+        bool const dht_disabled_by_app = !enable_dht_value && !dht_locked_by_source;
         bool const lsd_locked_by_source =
             private_torrent || static_cast<bool>(params.flags & lt::torrent_flags::disable_lsd);
-        bool const lsd_disabled_by_app = !client->lsd_enabled_by_default && !lsd_locked_by_source;
+        bool const lsd_disabled_by_app = !enable_lsd_value && !lsd_locked_by_source;
         bool const peer_exchange_was_disabled =
             static_cast<bool>(params.flags & lt::torrent_flags::disable_pex);
         bool const peer_exchange_locked_by_source = private_torrent || peer_exchange_was_disabled;
@@ -1964,10 +1736,7 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         );
         bool const peer_exchange_disabled_by_app =
             !enable_peer_exchange_value && !peer_exchange_was_disabled && !peer_exchange_locked_by_source;
-        if (client->resume_cleanup_pending_for_hashes(params.info_hashes)) {
-            return bridge_error(3, "Torrent data deletion is still pending.");
-        }
-        TorrentIdentity *identity = client->attach_identity(params);
+        TorrentIdentity *identity = client->attach_identity(params, *canonical_id, true);
         UnpublishedIdentityGuard identity_guard(*client, identity);
         identity->https_tracker_policy = requested_tracker_policy;
         identity->https_web_seed_policy = requested_web_seed_policy;
@@ -1975,6 +1744,10 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         identity->dht_locked_by_source = dht_locked_by_source;
         identity->lsd_locked_by_source = lsd_locked_by_source;
         identity->peer_exchange_locked_by_source = peer_exchange_locked_by_source;
+        identity->peer_exchange_enabled_by_user = enable_peer_exchange_value
+            && !peer_exchange_locked_by_source;
+        identity->peer_exchange_disabled_by_user = !enable_peer_exchange_value
+            && !peer_exchange_locked_by_source;
         identity->allow_pre_metadata_dht = allow_pre_metadata_dht;
         identity->intended_default_dont_download = intended_default_dont_download;
         identity->intended_file_priorities = std::move(intended_file_priorities);
@@ -1993,8 +1766,6 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
             client->discard_unpublished_identity(identity);
             return bridge_error(3, add_error.message());
         }
-        client->insert_added_queue_priority_order_locked(handle, identity);
-
         lt::info_hash_t hashes;
         try {
             hashes = handle.info_hashes();
@@ -2006,9 +1777,6 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         }
         std::vector<std::string> const resume_ids = hash_keys_with_requested(hashes, identity->canonical_id);
         client->mark_active(hashes, handle, identity);
-        if (!client->queue_order_index.valid) {
-            static_cast<void>(client->apply_queue_priority_order_locked());
-        }
         if (dht_disabled_by_app) {
             client->dht_disabled_by_app.insert(identity);
         }
@@ -2116,9 +1884,10 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
                 return bridge_error(3, "Removal marker could not be cleared: " + cleared_tombstones.error());
             }
         }
-        publisher.add(client->cache_snapshot(handle));
+        publisher.add(client->observe_torrent_handle(handle));
         client->request_snapshot_update_locked();
         copy_string_dynamic(added_id_buffer, identity->canonical_id);
+        *native_token_out = identity->token->value;
         *add_outcome_out = TTORRENT_ADD_COMMITTED;
         return {};
     });
@@ -2156,6 +1925,7 @@ int32_t add_torrent_file_data_with_priorities(
     int32_t file_priority_count,
     char *added_id_out,
     int32_t added_id_capacity,
+    std::uint64_t *native_token_out,
     int32_t *add_outcome_out,
     char *error_out,
     int32_t error_capacity,
@@ -2165,12 +1935,15 @@ int32_t add_torrent_file_data_with_priorities(
     if (add_outcome_out != nullptr) {
         *add_outcome_out = TTORRENT_ADD_REJECTED;
     }
+    if (native_token_out != nullptr) {
+        *native_token_out = 0U;
+    }
     WakeCallbackInvocation wake;
     std::span<char> const added_id_buffer = output_buffer(added_id_out, added_id_capacity);
     copy_string_dynamic(added_id_buffer, "");
     int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 3, [&]() -> BridgeResult {
-        if (client == nullptr || add_outcome_out == nullptr) {
-            return bridge_error(1, "Missing torrent client or add outcome output.");
+        if (client == nullptr || native_token_out == nullptr || add_outcome_out == nullptr) {
+            return bridge_error(1, "Missing torrent client, native token, or add outcome output.");
         }
         TTorrentAddOptions const &add_options = options;
         if (file_priority_count < 0) {
@@ -2184,6 +1957,10 @@ int32_t add_torrent_file_data_with_priorities(
         }
         if (!is_valid_queue_priority(add_options.queue_priority)) {
             return bridge_error(1, "Invalid queue priority.");
+        }
+        std::optional<std::string> const canonical_id = requested_torrent_id(add_options);
+        if (!canonical_id) {
+            return bridge_error(1, "Invalid Swift torrent identifier.");
         }
         TorrentLoadResult loaded_torrent = load_torrent();
         if (!loaded_torrent) {
@@ -2230,18 +2007,24 @@ int32_t add_torrent_file_data_with_priorities(
         if (!admission) {
             return admission;
         }
-        if (!is_valid_https_tracker_policy(add_options.https_tracker_policy, true)
-            || !is_valid_https_web_seed_policy(add_options.https_web_seed_policy, true)) {
+        if (add_options.enable_dht > 1U
+            || add_options.enable_peer_exchange > 1U
+            || add_options.enable_lsd > 1U
+            || add_options.allow_pre_metadata_dht > 1U
+            || !is_valid_https_tracker_policy(add_options.https_tracker_policy, true)
+            || !is_valid_https_web_seed_policy(add_options.https_web_seed_policy, true)
+            || !is_valid_https_tracker_policy(add_options.effective_https_tracker_policy, false)
+            || !is_valid_https_web_seed_policy(add_options.effective_https_web_seed_policy, false)) {
             return bridge_error(1, "Invalid HTTPS source policy.");
         }
         HTTPSPolicy const requested_tracker_policy = https_policy_from_value(add_options.https_tracker_policy);
         HTTPSPolicy const requested_web_seed_policy = https_policy_from_value(add_options.https_web_seed_policy);
-        HTTPSPolicy const effective_tracker_policy = requested_tracker_policy == HTTPSPolicy::inherit
-            ? client->https_tracker_policy
-            : requested_tracker_policy;
-        HTTPSPolicy const effective_web_seed_policy = requested_web_seed_policy == HTTPSPolicy::inherit
-            ? client->https_web_seed_policy
-            : requested_web_seed_policy;
+        HTTPSPolicy const effective_tracker_policy = https_policy_from_value(
+            add_options.effective_https_tracker_policy
+        );
+        HTTPSPolicy const effective_web_seed_policy = https_policy_from_value(
+            add_options.effective_https_web_seed_policy
+        );
         static_cast<void>(apply_https_source_policy(
             params,
             HTTPSSourcePolicy{.trackers = effective_tracker_policy, .web_seeds = effective_web_seed_policy}
@@ -2250,14 +2033,17 @@ int32_t add_torrent_file_data_with_priorities(
         if (!valid_effective_sources) {
             return valid_effective_sources;
         }
-        bool const enable_peer_exchange_value = bridge_bool(add_options.enable_peer_exchange);
+        bool const enable_dht_value = bridge_bool(add_options.enable_dht);
+        bool const enable_peer_exchange_value = bridge_bool(add_options.enable_peer_exchange)
+            && client->peer_exchange_plugin_enabled;
+        bool const enable_lsd_value = bridge_bool(add_options.enable_lsd);
         bool const private_torrent = params.ti && params.ti->priv();
         bool const dht_locked_by_source =
             private_torrent || static_cast<bool>(params.flags & lt::torrent_flags::disable_dht);
-        bool const dht_disabled_by_app = !client->dht_enabled_by_default && !dht_locked_by_source;
+        bool const dht_disabled_by_app = !enable_dht_value && !dht_locked_by_source;
         bool const lsd_locked_by_source =
             private_torrent || static_cast<bool>(params.flags & lt::torrent_flags::disable_lsd);
-        bool const lsd_disabled_by_app = !client->lsd_enabled_by_default && !lsd_locked_by_source;
+        bool const lsd_disabled_by_app = !enable_lsd_value && !lsd_locked_by_source;
         bool const peer_exchange_was_disabled =
             static_cast<bool>(params.flags & lt::torrent_flags::disable_pex);
         bool const peer_exchange_locked_by_source = private_torrent || peer_exchange_was_disabled;
@@ -2282,15 +2068,14 @@ int32_t add_torrent_file_data_with_priorities(
         params.file_provider = client->make_payload_provider(activation);
         bool const peer_exchange_disabled_by_app =
             !enable_peer_exchange_value && !peer_exchange_was_disabled && !peer_exchange_locked_by_source;
-        if (client->resume_cleanup_pending_for_hashes(params.info_hashes)) {
-            return bridge_error(2, "Torrent data deletion is still pending.");
-        }
-
         std::string const preserved_id = storage_preserved_torrent_id(activation);
+        if (!preserved_id.empty() && preserved_id != *canonical_id) {
+            return bridge_error(2, "The Swift torrent identifier does not match the preserved storage identity.");
+        }
         TorrentIdentity *identity = client->attach_identity(
             params,
-            preserved_id,
-            !preserved_id.empty()
+            *canonical_id,
+            true
         );
         UnpublishedIdentityGuard identity_guard(*client, identity);
         identity->storage_activation = activation;
@@ -2300,6 +2085,10 @@ int32_t add_torrent_file_data_with_priorities(
         identity->dht_locked_by_source = dht_locked_by_source;
         identity->lsd_locked_by_source = lsd_locked_by_source;
         identity->peer_exchange_locked_by_source = peer_exchange_locked_by_source;
+        identity->peer_exchange_enabled_by_user = enable_peer_exchange_value
+            && !peer_exchange_locked_by_source;
+        identity->peer_exchange_disabled_by_user = !enable_peer_exchange_value
+            && !peer_exchange_locked_by_source;
         BridgeResult const remembered_sources = remember_source_policy_sources(*identity, source_params);
         if (!remembered_sources) {
             return remembered_sources;
@@ -2315,8 +2104,6 @@ int32_t add_torrent_file_data_with_priorities(
             client->discard_unpublished_identity(identity);
             return bridge_error(2, add_error.message());
         }
-        client->insert_added_queue_priority_order_locked(handle, identity);
-
         lt::info_hash_t hashes;
         try {
             hashes = handle.info_hashes();
@@ -2328,9 +2115,6 @@ int32_t add_torrent_file_data_with_priorities(
         }
         std::vector<std::string> const resume_ids = hash_keys_with_requested(hashes, identity->canonical_id);
         client->mark_active(hashes, handle, identity);
-        if (!client->queue_order_index.valid) {
-            static_cast<void>(client->apply_queue_priority_order_locked());
-        }
         if (dht_disabled_by_app) {
             client->dht_disabled_by_app.insert(identity);
         }
@@ -2416,9 +2200,10 @@ int32_t add_torrent_file_data_with_priorities(
                 return bridge_error(2, "Removal marker could not be cleared: " + cleared_tombstones.error());
             }
         }
-        publisher.add(client->cache_snapshot(handle));
+        publisher.add(client->observe_torrent_handle(handle));
         client->request_snapshot_update_locked();
         copy_string_dynamic(added_id_buffer, identity->canonical_id);
+        *native_token_out = identity->token->value;
         *add_outcome_out = TTORRENT_ADD_COMMITTED;
         return {};
     });
@@ -2439,6 +2224,7 @@ extern "C" int32_t TorrentClientAddTorrentFileData(
     TTorrentAddOptions options,
     char *added_id_out,
     int32_t added_id_capacity,
+    std::uint64_t *native_token_out,
     int32_t *add_outcome_out,
     char *error_out,
     int32_t error_capacity
@@ -2453,6 +2239,7 @@ extern "C" int32_t TorrentClientAddTorrentFileData(
         0,
         added_id_out,
         added_id_capacity,
+        native_token_out,
         add_outcome_out,
         error_out,
         error_capacity,
@@ -2472,6 +2259,7 @@ extern "C" int32_t TorrentClientAddTorrentFileDataWithPriorities(
     int32_t file_priority_count,
     char *added_id_out,
     int32_t added_id_capacity,
+    std::uint64_t *native_token_out,
     int32_t *add_outcome_out,
     char *error_out,
     int32_t error_capacity
@@ -2486,6 +2274,7 @@ extern "C" int32_t TorrentClientAddTorrentFileDataWithPriorities(
         file_priority_count,
         added_id_out,
         added_id_capacity,
+        native_token_out,
         add_outcome_out,
         error_out,
         error_capacity,
@@ -2578,146 +2367,116 @@ extern "C" int32_t TorrentClientCopySnapshotBatch(
     TTorrentClient *client,
     TTorrentSnapshot *snapshots,
     int32_t capacity,
-    uint64_t *revision_out,
-    int32_t *required_count_out
+    int32_t *required_count_out,
+    uint8_t *available_out
 ) noexcept
 {
-    clear_count_outputs(revision_out, required_count_out);
+    if (required_count_out != nullptr) {
+        *required_count_out = 0;
+    }
+    if (available_out != nullptr) {
+        *available_out = 0;
+    }
     if (client == nullptr) {
         return 0;
     }
 
     try {
         std::span<TTorrentSnapshot> output = output_span_from_c_buffer(snapshots, capacity);
-        return client->copy_snapshots(output, revision_out, required_count_out);
+        int32_t const copied = client->copy_snapshots(output, required_count_out);
+        if (available_out != nullptr) {
+            *available_out = 1;
+        }
+        return copied;
     } catch (...) {
         return 0;
     }
 }
 
-extern "C" int32_t TorrentClientRequestSources(
+extern "C" int32_t TorrentClientCopySourcePolicyStateBatch(
     TTorrentClient *client,
-    const char *torrent_id,
-    char *error_out,
-    int32_t error_capacity
+    TTorrentSourcePolicyState *states,
+    int32_t capacity,
+    int32_t *required_count_out,
+    uint8_t *available_out
 ) noexcept
 {
-    WakeCallbackInvocation wake;
-    int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 2, [&]() -> BridgeResult {
-        if (client == nullptr || torrent_id == nullptr) {
-            return bridge_error(1, "Missing torrent client or torrent id.");
-        }
-
-        std::scoped_lock guard(client->lock);
-        LockedChangePublisher publisher(*client, wake);
-        return client->request_sources(std::string(c_string_view(torrent_id)), publisher.changes);
-    });
-    if (client != nullptr) {
-        client->invoke_wake_callback(wake);
+    if (required_count_out != nullptr) {
+        *required_count_out = 0;
     }
-    return result;
-}
+    if (available_out != nullptr) {
+        *available_out = bridge_bool(false);
+    }
+    if (client == nullptr) {
+        return 0;
+    }
 
-extern "C" TTorrentSourcePolicyResult TorrentClientCopySourcePolicy(
-    TTorrentClient *client,
-    const char *torrent_id,
-    char *error_out,
-    int32_t error_capacity
-) noexcept
-{
-    TTorrentSourcePolicyResult output{};
-    output.status = run_bridge_operation(output_buffer(error_out, error_capacity), 2, [&]() -> BridgeResult {
-        if (client == nullptr || torrent_id == nullptr) {
-            return bridge_error(1, "Missing torrent client or torrent id.");
-        }
-
+    try {
+        std::span<TTorrentSourcePolicyState> output = output_span_from_c_buffer(states, capacity);
         std::scoped_lock guard(client->lock);
-        auto handle = client->find(std::string(c_string_view(torrent_id)));
-        if (!handle) {
-            return bridge_error(2, "Torrent not found.");
+        std::vector<ActiveTorrentEntry> const active_entries = active_torrent_entries(*client);
+        if (active_entries.size() > static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT)) {
+            return 0;
         }
-
-        output.policy = client->source_policy(*handle, identity_from_handle(*handle));
-        return {};
-    });
-    return output;
+        auto const required = static_cast<int32_t>(active_entries.size());
+        if (required_count_out != nullptr) {
+            *required_count_out = required;
+        }
+        if (output.size() < active_entries.size()) {
+            if (available_out != nullptr) {
+                *available_out = bridge_bool(true);
+            }
+            return 0;
+        }
+        auto destination = output.begin();
+        for (ActiveTorrentEntry const &entry : active_entries) {
+            *destination = source_policy_state(*client, entry);
+            ++destination;
+        }
+        if (available_out != nullptr) {
+            *available_out = bridge_bool(true);
+        }
+        return required;
+    } catch (...) {
+        if (required_count_out != nullptr) {
+            *required_count_out = 0;
+        }
+        if (available_out != nullptr) {
+            *available_out = bridge_bool(false);
+        }
+        return 0;
+    }
 }
 
-extern "C" int32_t TorrentClientSetSourcePolicyField(
+extern "C" int32_t TorrentClientApplySourcePolicyState(
     TTorrentClient *client,
-    const char *torrent_id,
-    int32_t field,
-    int32_t value,
+    TTorrentSourcePolicyApplication const *applications,
+    int32_t application_count,
     char *error_out,
     int32_t error_capacity
 ) noexcept
 {
     WakeCallbackInvocation wake;
     int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 2, [&]() -> BridgeResult {
-        if (client == nullptr || torrent_id == nullptr) {
-            return bridge_error(1, "Missing torrent client or torrent id.");
+        if (client == nullptr) {
+            return bridge_error(1, "Missing torrent client.");
         }
-        if (field < TTORRENT_SOURCE_POLICY_ENABLE_DHT
-            || field > TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT) {
-            return bridge_error(1, "Invalid source policy field.");
+        if (application_count < 0 || application_count > TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT) {
+            return bridge_error(1, "Invalid Swift source-policy count.");
         }
-        bool const tracker_policy_field = field == TTORRENT_SOURCE_POLICY_HTTPS_TRACKER_POLICY;
-        bool const web_seed_policy_field = field == TTORRENT_SOURCE_POLICY_HTTPS_WEB_SEED_POLICY;
-        if ((tracker_policy_field && !is_valid_https_tracker_policy(value, true))
-            || (web_seed_policy_field && !is_valid_https_web_seed_policy(value, true))
-            || (!tracker_policy_field && !web_seed_policy_field && value != 0 && value != 1)) {
-            return bridge_error(1, "Invalid source policy value.");
+        if (application_count > 0 && applications == nullptr) {
+            return bridge_error(1, "Missing Swift source policy.");
         }
-
+        std::span<TTorrentSourcePolicyApplication const> const source_policy = input_span_from_c_buffer(
+            applications,
+            application_count
+        );
         std::scoped_lock guard(client->lock);
         LockedChangePublisher publisher(*client, wake);
-        auto handle = client->find(std::string(c_string_view(torrent_id)));
-        if (!handle) {
-            return bridge_error(2, "Torrent not found.");
-        }
-
-        TorrentIdentity *identity = identity_from_handle(*handle);
-        if (identity == nullptr) {
-            return bridge_error(2, "Torrent identity not found.");
-        }
-
-        bool const metadata_pending = client->metadata_validation_pending.contains(identity);
-        if ((metadata_pending && field != TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT
-                && field <= TTORRENT_SOURCE_POLICY_ENABLE_LSD)
-            || (!metadata_pending && field == TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT)) {
-            return bridge_error(2, "This source policy field is unavailable for the current metadata state.");
-        }
-
         BridgeResult const persistence = client->ensure_persistence_available(2);
-        if (!persistence) {
-            return persistence;
-        }
-
-        DirtyMask const source_policy_changes = client->set_source_policy_field(
-            *handle,
-            identity,
-            field,
-            value
-        );
-        publisher.add(source_policy_changes);
-        ResumeSaveResult const saved_policy = client->save_source_policy_resume_data(*handle, identity);
-        if (!saved_policy) {
-            return client->fault_persistence(
-                2,
-                "Source policy could not be saved: " + saved_policy.error()
-            );
-        }
-        if ((source_policy_changes & TTORRENT_DIRTY_TRACKERS) == 0U) {
-            publisher.add(client->cache_trackers(*handle, handle->trackers()));
-        }
-        if ((source_policy_changes & TTORRENT_DIRTY_WEB_SEEDS) == 0U) {
-            BridgeResult const cached_web_seeds = client->cache_web_seeds(*handle, publisher.changes);
-            if (!cached_web_seeds) {
-                return cached_web_seeds;
-            }
-        }
-        client->request_snapshot_update_locked();
-        return {};
+        return persistence
+            ? apply_source_policy_state_locked(*client, source_policy, publisher)
+            : persistence;
     });
     if (client != nullptr) {
         client->invoke_wake_callback(wake);
@@ -2727,19 +2486,19 @@ extern "C" int32_t TorrentClientSetSourcePolicyField(
 
 extern "C" TTorrentOptionsResult TorrentClientCopyTorrentOptions(
     TTorrentClient *client,
-    const char *torrent_id,
+    std::uint64_t const native_token,
     char *error_out,
     int32_t error_capacity
 ) noexcept
 {
     TTorrentOptionsResult output{};
     output.status = run_bridge_operation(output_buffer(error_out, error_capacity), 2, [&]() -> BridgeResult {
-        if (client == nullptr || torrent_id == nullptr) {
-            return bridge_error(1, "Missing torrent client or torrent id.");
+        if (client == nullptr || native_token == 0U) {
+            return bridge_error(1, "Missing torrent client or native token.");
         }
 
         std::scoped_lock guard(client->lock);
-        auto handle = client->find(std::string(c_string_view(torrent_id)));
+        auto handle = client->find(native_token);
         if (!handle) {
             return bridge_error(2, "Torrent not found.");
         }
@@ -2757,7 +2516,7 @@ extern "C" TTorrentOptionsResult TorrentClientCopyTorrentOptions(
 
 extern "C" int32_t TorrentClientSetTorrentOptions(
     TTorrentClient *client,
-    const char *torrent_id,
+    std::uint64_t const native_token,
     TTorrentOptions options,
     char *error_out,
     int32_t error_capacity
@@ -2765,8 +2524,8 @@ extern "C" int32_t TorrentClientSetTorrentOptions(
 {
     WakeCallbackInvocation wake;
     int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 2, [&]() -> BridgeResult {
-        if (client == nullptr || torrent_id == nullptr) {
-            return bridge_error(1, "Missing torrent client or torrent id.");
+        if (client == nullptr || native_token == 0U) {
+            return bridge_error(1, "Missing torrent client or native token.");
         }
         if (options.download_rate_limit < -1 || options.upload_rate_limit < -1) {
             return bridge_error(1, "Torrent rate limits must be unlimited or nonnegative.");
@@ -2785,7 +2544,7 @@ extern "C" int32_t TorrentClientSetTorrentOptions(
         if (!persistence) {
             return persistence;
         }
-        auto handle = client->find(std::string(c_string_view(torrent_id)));
+        auto handle = client->find(native_token);
         if (!handle) {
             return bridge_error(2, "Torrent not found.");
         }
@@ -2807,26 +2566,8 @@ extern "C" int32_t TorrentClientSetTorrentOptions(
         if (normalized_torrent_count_limit(handle->max_connections()) != options.max_connections) {
             handle->set_max_connections(options.max_connections);
         }
-        std::vector<lt::torrent_handle> queue_handles_to_save;
-        bool queue_priority_changed = false;
-        if (identity->queue_priority != options.queue_priority) {
-            client->invalidate_queue_order_index_locked();
-            identity->queue_priority = options.queue_priority;
-            identity->queue_rank = kUnsetQueueRank;
-            queue_handles_to_save = client->apply_queue_priority_order_locked();
-            queue_priority_changed = true;
-        }
-        if (!queue_priority_changed) {
-            client->request_save(*handle);
-            publisher.add(client->cache_snapshot(*handle));
-        } else {
-            append_unique_handle_by_identity(queue_handles_to_save, *handle);
-            save_and_publish_policy_handles(
-                *client,
-                std::span<lt::torrent_handle const>(queue_handles_to_save),
-                publisher
-            );
-        }
+        client->request_save_locked(*handle);
+        publisher.add(client->observe_torrent_handle(*handle));
         client->request_snapshot_update_locked();
         return {};
     });
@@ -2836,22 +2577,29 @@ extern "C" int32_t TorrentClientSetTorrentOptions(
     return result;
 }
 
-extern "C" int32_t TorrentClientMoveTorrentInQueue(
+extern "C" int32_t TorrentClientApplyQueueState(
     TTorrentClient *client,
-    const char *torrent_id,
-    int32_t move,
+    TTorrentQueuePlacement const *placements,
+    int32_t placement_count,
     char *error_out,
     int32_t error_capacity
 ) noexcept
 {
     WakeCallbackInvocation wake;
     int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 2, [&]() -> BridgeResult {
-        if (client == nullptr || torrent_id == nullptr) {
-            return bridge_error(1, "Missing torrent client or torrent id.");
+        if (client == nullptr) {
+            return bridge_error(1, "Missing torrent client.");
         }
-        if (move < TTORRENT_QUEUE_MOVE_TOP || move > TTORRENT_QUEUE_MOVE_BOTTOM) {
-            return bridge_error(1, "Invalid queue move.");
+        if (placement_count < 0 || placement_count > TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT) {
+            return bridge_error(1, "Invalid Swift queue state count.");
         }
+        if (placement_count > 0 && placements == nullptr) {
+            return bridge_error(1, "Missing Swift queue state.");
+        }
+        std::span<TTorrentQueuePlacement const> const queue_state = input_span_from_c_buffer(
+            placements,
+            placement_count
+        );
 
         std::scoped_lock guard(client->lock);
         LockedChangePublisher publisher(*client, wake);
@@ -2859,39 +2607,7 @@ extern "C" int32_t TorrentClientMoveTorrentInQueue(
         if (!persistence) {
             return persistence;
         }
-        auto handle = client->find(std::string(c_string_view(torrent_id)));
-        if (!handle) {
-            return bridge_error(2, "Torrent not found.");
-        }
-
-        TorrentIdentity *identity = identity_from_handle(*handle);
-        if (identity == nullptr) {
-            return bridge_error(2, "Torrent identity not found.");
-        }
-
-        std::vector<QueueOrderingEntry> entries;
-        {
-            std::scoped_lock io_guard(client->resume_io_lock);
-            entries = queue_ordering_entries(*client);
-        }
-        if (move_queue_entry(entries, identity, move)) {
-            bool positions_applied = false;
-            std::vector<lt::torrent_handle> queue_handles_to_save = apply_queue_order(
-                entries,
-                &positions_applied
-            );
-            if (!positions_applied) {
-                client->invalidate_queue_order_index_locked();
-            }
-            append_unique_handle_by_identity(queue_handles_to_save, *handle);
-            save_and_publish_policy_handles(
-                *client,
-                std::span<lt::torrent_handle const>(queue_handles_to_save),
-                publisher
-            );
-            client->request_snapshot_update_locked();
-        }
-        return {};
+        return apply_queue_state_locked(*client, queue_state, publisher);
     });
     if (client != nullptr) {
         client->invoke_wake_callback(wake);
@@ -2901,32 +2617,38 @@ extern "C" int32_t TorrentClientMoveTorrentInQueue(
 
 extern "C" int32_t TorrentClientCopyTrackerBatch(
     TTorrentClient *client,
-    const char *torrent_id,
+    std::uint64_t const native_token,
     TTorrentTrackerSnapshot *trackers,
     int32_t capacity,
-    uint64_t *revision_out,
     int32_t *required_count_out,
-    uint8_t *resident_out
+    uint8_t *available_out
 ) noexcept
 {
-    clear_count_outputs(revision_out, required_count_out);
-    if (resident_out != nullptr) {
-        *resident_out = bridge_bool(false);
+    if (required_count_out != nullptr) {
+        *required_count_out = 0;
     }
-    if (client == nullptr || torrent_id == nullptr) {
+    if (available_out != nullptr) {
+        *available_out = bridge_bool(false);
+    }
+    if (client == nullptr || native_token == 0U) {
         return 0;
     }
 
     try {
         std::span<TTorrentTrackerSnapshot> output = output_span_from_c_buffer(trackers, capacity);
         return client->copy_trackers(
-            std::string(c_string_view(torrent_id)),
+            native_token,
             output,
-            revision_out,
             required_count_out,
-            resident_out
+            available_out
         );
     } catch (...) {
+        if (required_count_out != nullptr) {
+            *required_count_out = 0;
+        }
+        if (available_out != nullptr) {
+            *available_out = bridge_bool(false);
+        }
         return 0;
     }
 }
@@ -2935,65 +2657,82 @@ extern "C" int32_t TorrentClientCopyTrackerHostBatch(
     TTorrentClient *client,
     TTorrentTrackerHostSnapshot *hosts,
     int32_t capacity,
-    uint64_t *revision_out,
-    int32_t *required_count_out
+    int32_t *required_count_out,
+    uint8_t *available_out
 ) noexcept
 {
-    clear_count_outputs(revision_out, required_count_out);
+    if (required_count_out != nullptr) {
+        *required_count_out = 0;
+    }
+    if (available_out != nullptr) {
+        *available_out = bridge_bool(false);
+    }
     if (client == nullptr) {
         return 0;
     }
 
     try {
         std::span<TTorrentTrackerHostSnapshot> output = output_span_from_c_buffer(hosts, capacity);
-        return client->copy_tracker_hosts(output, revision_out, required_count_out);
+        return client->copy_tracker_hosts(output, required_count_out, available_out);
     } catch (...) {
+        if (required_count_out != nullptr) {
+            *required_count_out = 0;
+        }
+        if (available_out != nullptr) {
+            *available_out = bridge_bool(false);
+        }
         return 0;
     }
 }
 
-extern "C" int32_t TorrentClientCopyWebSeedBatch(TTorrentClient *client, const char *torrent_id,
+extern "C" int32_t TorrentClientCopyWebSeedBatch(TTorrentClient *client, std::uint64_t const native_token,
                                                  TTorrentWebSeedSnapshot *web_seeds, int32_t capacity,
-                                                 uint64_t *revision_out, int32_t *required_count_out,
-                                                 uint8_t *resident_out) noexcept
+                                                 int32_t *required_count_out,
+                                                 uint8_t *available_out) noexcept
 {
-    clear_count_outputs(revision_out, required_count_out);
-    if (resident_out != nullptr) {
-        *resident_out = bridge_bool(false);
+    if (required_count_out != nullptr) {
+        *required_count_out = 0;
     }
-    if (client == nullptr || torrent_id == nullptr) {
+    if (available_out != nullptr) {
+        *available_out = bridge_bool(false);
+    }
+    if (client == nullptr || native_token == 0U) {
         return 0;
     }
 
     try {
         std::span<TTorrentWebSeedSnapshot> output = output_span_from_c_buffer(web_seeds, capacity);
         return client->copy_web_seeds(
-            std::string(c_string_view(torrent_id)),
+            native_token,
             output,
-            revision_out,
             required_count_out,
-            resident_out
+            available_out
         );
     } catch (...) {
+        if (required_count_out != nullptr) {
+            *required_count_out = 0;
+        }
+        if (available_out != nullptr) {
+            *available_out = bridge_bool(false);
+        }
         return 0;
     }
 }
 
 extern "C" TTorrentWebSeedActivityResult TorrentClientCopyWebSeedActivity(
     TTorrentClient *client,
-    const char *torrent_id
+    std::uint64_t const native_token
 ) noexcept
 {
     TTorrentWebSeedActivityResult output{};
-    if (client == nullptr || torrent_id == nullptr) {
+    if (client == nullptr || native_token == 0U) {
         return output;
     }
 
     try {
         output.status = client->copy_web_seed_activity(
-            std::string(c_string_view(torrent_id)),
-            &output.activity,
-            &output.revision
+            native_token,
+            &output.activity
         ) ? 1 : 0;
     } catch (...) {
         output = {};
@@ -3003,19 +2742,18 @@ extern "C" TTorrentWebSeedActivityResult TorrentClientCopyWebSeedActivity(
 
 extern "C" TTorrentPeerSourcesResult TorrentClientCopyPeerSources(
     TTorrentClient *client,
-    const char *torrent_id
+    std::uint64_t const native_token
 ) noexcept
 {
     TTorrentPeerSourcesResult output{};
-    if (client == nullptr || torrent_id == nullptr) {
+    if (client == nullptr || native_token == 0U) {
         return output;
     }
 
     try {
         output.status = client->copy_peer_sources(
-            std::string(c_string_view(torrent_id)),
-            &output.sources,
-            &output.revision
+            native_token,
+            &output.sources
         ) ? 1 : 0;
     } catch (...) {
         output = {};
@@ -3023,110 +2761,88 @@ extern "C" TTorrentPeerSourcesResult TorrentClientCopyPeerSources(
     return output;
 }
 
-extern "C" int32_t TorrentClientRequestFiles(TTorrentClient *client, const char *torrent_id, char *error_out,
-                                             int32_t error_capacity) noexcept
+extern "C" int32_t TorrentClientCopyFileBatch(TTorrentClient *client, std::uint64_t const native_token,
+                                              TTorrentFileSnapshot *files, int32_t capacity,
+                                              int32_t *required_count_out, uint8_t *available_out) noexcept
 {
-    WakeCallbackInvocation wake;
-    int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 2, [&]() -> BridgeResult {
-        if (client == nullptr || torrent_id == nullptr) {
-            return bridge_error(1, "Missing torrent client or torrent id.");
-        }
-
-        std::scoped_lock guard(client->lock);
-        LockedChangePublisher publisher(*client, wake);
-        return client->request_files(std::string(c_string_view(torrent_id)), publisher.changes);
-    });
-    if (client != nullptr) {
-        client->invoke_wake_callback(wake);
+    if (required_count_out != nullptr) {
+        *required_count_out = 0;
     }
-    return result;
-}
-
-extern "C" int32_t TorrentClientCopyFileBatch(TTorrentClient *client, const char *torrent_id,
-                                              TTorrentFileSnapshot *files, int32_t capacity, uint64_t *revision_out,
-                                              int32_t *required_count_out, uint8_t *resident_out) noexcept
-{
-    clear_count_outputs(revision_out, required_count_out);
-    if (resident_out != nullptr) {
-        *resident_out = bridge_bool(false);
+    if (available_out != nullptr) {
+        *available_out = bridge_bool(false);
     }
-    if (client == nullptr || torrent_id == nullptr) {
+    if (client == nullptr || native_token == 0U) {
         return 0;
     }
 
     try {
         std::span<TTorrentFileSnapshot> output = output_span_from_c_buffer(files, capacity);
         return client->copy_files(
-            std::string(c_string_view(torrent_id)),
+            native_token,
             output,
-            revision_out,
             required_count_out,
-            resident_out
+            available_out
         );
     } catch (...) {
+        if (required_count_out != nullptr) {
+            *required_count_out = 0;
+        }
+        if (available_out != nullptr) {
+            *available_out = bridge_bool(false);
+        }
         return 0;
     }
 }
 
-extern "C" int32_t TorrentClientRequestPieceMap(TTorrentClient *client, const char *torrent_id, char *error_out,
-                                                int32_t error_capacity) noexcept
-{
-    WakeCallbackInvocation wake;
-    int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 2, [&]() -> BridgeResult {
-        if (client == nullptr || torrent_id == nullptr) {
-            return bridge_error(1, "Missing torrent client or torrent id.");
-        }
-
-        std::scoped_lock guard(client->lock);
-        LockedChangePublisher publisher(*client, wake);
-        return client->request_piece_map(std::string(c_string_view(torrent_id)), publisher.changes);
-    });
-    if (client != nullptr) {
-        client->invoke_wake_callback(wake);
-    }
-    return result;
-}
-
 extern "C" int32_t TorrentClientCopyPieceMap(
     TTorrentClient *client,
-    const char *torrent_id,
+    std::uint64_t const native_token,
     TTorrentPieceMapSnapshot *snapshot,
     uint8_t *pieces,
     int32_t capacity,
-    uint64_t *revision_out,
     int32_t *required_count_out,
-    uint8_t *resident_out
+    uint8_t *available_out
 ) noexcept
 {
-    clear_count_outputs(revision_out, required_count_out);
-    if (resident_out != nullptr) {
-        *resident_out = bridge_bool(false);
+    if (required_count_out != nullptr) {
+        *required_count_out = 0;
+    }
+    if (available_out != nullptr) {
+        *available_out = bridge_bool(false);
     }
     if (snapshot != nullptr) {
         *snapshot = TTorrentPieceMapSnapshot{};
     }
-    if (client == nullptr || torrent_id == nullptr) {
+    if (client == nullptr || native_token == 0U) {
         return 0;
     }
 
     try {
         std::span<std::uint8_t> output = output_span_from_c_buffer(pieces, capacity);
         return client->copy_piece_map(
-            std::string(c_string_view(torrent_id)),
+            native_token,
             snapshot,
             output,
-            revision_out,
             required_count_out,
-            resident_out
+            available_out
         );
     } catch (...) {
+        if (required_count_out != nullptr) {
+            *required_count_out = 0;
+        }
+        if (available_out != nullptr) {
+            *available_out = bridge_bool(false);
+        }
+        if (snapshot != nullptr) {
+            *snapshot = TTorrentPieceMapSnapshot{};
+        }
         return 0;
     }
 }
 
 extern "C" int32_t TorrentClientCopyTorrentMetadata(
     TTorrentClient *client,
-    const char *torrent_id,
+    std::uint64_t const native_token,
     std::uint8_t *metadata,
     int32_t capacity,
     int32_t *required_count_out,
@@ -3139,7 +2855,7 @@ extern "C" int32_t TorrentClientCopyTorrentMetadata(
     if (available_out != nullptr) {
         *available_out = bridge_bool(false);
     }
-    if (client == nullptr || torrent_id == nullptr
+    if (client == nullptr || native_token == 0U
         || required_count_out == nullptr || available_out == nullptr) {
         return 0;
     }
@@ -3147,7 +2863,7 @@ extern "C" int32_t TorrentClientCopyTorrentMetadata(
     try {
         std::span<std::uint8_t> output = output_span_from_c_buffer(metadata, capacity);
         std::scoped_lock guard(client->lock);
-        auto const handle = client->find(std::string(c_string_view(torrent_id)));
+        auto const handle = client->find(native_token);
         if (!handle) {
             return 0;
         }
@@ -3179,7 +2895,7 @@ extern "C" int32_t TorrentClientCopyTorrentMetadata(
 
 extern "C" int32_t TorrentClientSetFilePriority(
     TTorrentClient *client,
-    const char *torrent_id,
+    std::uint64_t const native_token,
     int32_t file_index,
     int32_t priority,
     char *error_out,
@@ -3188,8 +2904,8 @@ extern "C" int32_t TorrentClientSetFilePriority(
 {
     WakeCallbackInvocation wake;
     int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 2, [&]() -> BridgeResult {
-        if (client == nullptr || torrent_id == nullptr) {
-            return bridge_error(1, "Missing torrent client or torrent id.");
+        if (client == nullptr || native_token == 0U) {
+            return bridge_error(1, "Missing torrent client or native token.");
         }
         if (file_index < 0 || !is_valid_file_priority(priority)) {
             return bridge_error(1, "Invalid file priority.");
@@ -3202,7 +2918,7 @@ extern "C" int32_t TorrentClientSetFilePriority(
             return persistence;
         }
 
-        auto handle = client->find(std::string(c_string_view(torrent_id)));
+        auto handle = client->find(native_token);
         if (!handle) {
             return bridge_error(2, "Torrent not found.");
         }
@@ -3245,13 +2961,9 @@ extern "C" int32_t TorrentClientSetFilePriority(
                 file_priority_from_bridge(priority)
             );
         }
-        client->request_save(*handle);
-        BridgeResult const cached_files = client->cache_file_metadata(*handle, publisher.changes);
-        if (!cached_files) {
-            return cached_files;
-        }
-        publisher.add(client->cache_snapshot(*handle));
-        handle->post_file_progress(lt::torrent_handle::piece_granularity);
+        client->request_save_locked(*handle);
+        publisher.add(client->mark_files_changed());
+        publisher.add(client->observe_torrent_handle(*handle));
         client->request_snapshot_update_locked();
         return {};
     });
@@ -3261,13 +2973,13 @@ extern "C" int32_t TorrentClientSetFilePriority(
     return result;
 }
 
-extern "C" int32_t TorrentClientPause(TTorrentClient *client, const char *torrent_id, char *error_out,
+extern "C" int32_t TorrentClientPause(TTorrentClient *client, std::uint64_t const native_token, char *error_out,
                                       int32_t error_capacity) noexcept
 {
     WakeCallbackInvocation wake;
     int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 3, [&]() -> BridgeResult {
-        if (client == nullptr || torrent_id == nullptr) {
-            return bridge_error(1, "Missing torrent client or torrent id.");
+        if (client == nullptr || native_token == 0U) {
+            return bridge_error(1, "Missing torrent client or native token.");
         }
 
         std::scoped_lock guard(client->lock);
@@ -3276,15 +2988,14 @@ extern "C" int32_t TorrentClientPause(TTorrentClient *client, const char *torren
         if (!persistence) {
             return persistence;
         }
-        auto handle = client->find(std::string(c_string_view(torrent_id)));
+        auto handle = client->find(native_token);
         if (!handle) {
             return bridge_error(2, "Torrent not found.");
         }
 
-        client->invalidate_queue_order_index_locked();
         handle->set_flags(lt::torrent_flags::paused, lt::torrent_flags::paused | lt::torrent_flags::auto_managed);
-        client->request_save(*handle);
-        publisher.add(client->cache_snapshot(*handle));
+        client->request_save_locked(*handle);
+        publisher.add(client->observe_torrent_handle(*handle));
         client->request_snapshot_update_locked();
         return {};
     });
@@ -3294,13 +3005,13 @@ extern "C" int32_t TorrentClientPause(TTorrentClient *client, const char *torren
     return result;
 }
 
-extern "C" int32_t TorrentClientResume(TTorrentClient *client, const char *torrent_id, char *error_out,
+extern "C" int32_t TorrentClientResume(TTorrentClient *client, std::uint64_t const native_token, char *error_out,
                                        int32_t error_capacity) noexcept
 {
     WakeCallbackInvocation wake;
     int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 3, [&]() -> BridgeResult {
-        if (client == nullptr || torrent_id == nullptr) {
-            return bridge_error(1, "Missing torrent client or torrent id.");
+        if (client == nullptr || native_token == 0U) {
+            return bridge_error(1, "Missing torrent client or native token.");
         }
 
         std::scoped_lock guard(client->lock);
@@ -3309,22 +3020,14 @@ extern "C" int32_t TorrentClientResume(TTorrentClient *client, const char *torre
         if (!persistence) {
             return persistence;
         }
-        auto handle = client->find(std::string(c_string_view(torrent_id)));
+        auto handle = client->find(native_token);
         if (!handle) {
             return bridge_error(2, "Torrent not found.");
         }
 
-        client->invalidate_queue_order_index_locked();
         handle->set_flags(lt::torrent_flags::auto_managed, lt::torrent_flags::paused | lt::torrent_flags::auto_managed);
-        std::vector<lt::torrent_handle> queue_handles_to_save = client->apply_queue_priority_order_locked();
-        std::span<lt::torrent_handle const> queue_handles_span(queue_handles_to_save);
-        if (!queue_handles_to_save.empty()) {
-            save_and_publish_policy_handles(*client, queue_handles_span, publisher);
-        }
-        if (!contains_handle_identity(queue_handles_span, *handle)) {
-            client->request_save(*handle);
-            publisher.add(client->cache_snapshot(*handle));
-        }
+        client->request_save_locked(*handle);
+        publisher.add(client->observe_torrent_handle(*handle));
         client->request_snapshot_update_locked();
         return {};
     });
@@ -3334,16 +3037,16 @@ extern "C" int32_t TorrentClientResume(TTorrentClient *client, const char *torre
     return result;
 }
 
-extern "C" int32_t TorrentClientReannounce(TTorrentClient *client, const char *torrent_id, char *error_out,
+extern "C" int32_t TorrentClientReannounce(TTorrentClient *client, std::uint64_t const native_token, char *error_out,
                                            int32_t error_capacity) noexcept
 {
     return run_bridge_operation(output_buffer(error_out, error_capacity), 3, [&]() -> BridgeResult {
-        if (client == nullptr || torrent_id == nullptr) {
-            return bridge_error(1, "Missing torrent client or torrent id.");
+        if (client == nullptr || native_token == 0U) {
+            return bridge_error(1, "Missing torrent client or native token.");
         }
 
         std::scoped_lock guard(client->lock);
-        auto handle = client->find(std::string(c_string_view(torrent_id)));
+        auto handle = client->find(native_token);
         if (!handle) {
             return bridge_error(2, "Torrent not found.");
         }
@@ -3353,24 +3056,24 @@ extern "C" int32_t TorrentClientReannounce(TTorrentClient *client, const char *t
     });
 }
 
-extern "C" int32_t TorrentClientForceRecheck(TTorrentClient *client, const char *torrent_id, char *error_out,
+extern "C" int32_t TorrentClientForceRecheck(TTorrentClient *client, std::uint64_t const native_token, char *error_out,
                                              int32_t error_capacity) noexcept
 {
     WakeCallbackInvocation wake;
     int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 3, [&]() -> BridgeResult {
-        if (client == nullptr || torrent_id == nullptr) {
-            return bridge_error(1, "Missing torrent client or torrent id.");
+        if (client == nullptr || native_token == 0U) {
+            return bridge_error(1, "Missing torrent client or native token.");
         }
 
         std::scoped_lock guard(client->lock);
         LockedChangePublisher publisher(*client, wake);
-        auto handle = client->find(std::string(c_string_view(torrent_id)));
+        auto handle = client->find(native_token);
         if (!handle) {
             return bridge_error(2, "Torrent not found.");
         }
 
         handle->force_recheck();
-        publisher.add(client->cache_snapshot(*handle));
+        publisher.add(client->observe_torrent_handle(*handle));
         client->request_snapshot_update_locked();
         return {};
     });
@@ -3380,7 +3083,7 @@ extern "C" int32_t TorrentClientForceRecheck(TTorrentClient *client, const char 
     return result;
 }
 
-extern "C" int32_t TorrentClientRemove(TTorrentClient *client, const char *torrent_id,
+extern "C" int32_t TorrentClientRemove(TTorrentClient *client, std::uint64_t const native_token,
                                        uint8_t *removal_committed_out, char *error_out, int32_t error_capacity) noexcept
 {
     if (removal_committed_out != nullptr) {
@@ -3388,20 +3091,15 @@ extern "C" int32_t TorrentClientRemove(TTorrentClient *client, const char *torre
     }
     WakeCallbackInvocation wake;
     int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 3, [&]() -> BridgeResult {
-        if (client == nullptr || torrent_id == nullptr || removal_committed_out == nullptr) {
-            return bridge_error(1, "Missing torrent client, torrent id, or removal operation output.");
+        if (client == nullptr || native_token == 0U || removal_committed_out == nullptr) {
+            return bridge_error(1, "Missing torrent client, native token, or removal operation output.");
         }
 
-        std::string const id(c_string_view(torrent_id));
         TorrentIdentityToken *removal_token = nullptr;
         {
             std::scoped_lock guard(client->lock);
             LockedChangePublisher publisher(*client, wake);
-            BridgeResult const persistence = client->ensure_persistence_available(3);
-            if (!persistence) {
-                return persistence;
-            }
-            auto handle = client->find(id);
+            auto handle = client->find(native_token);
             if (!handle) {
                 return bridge_error(2, "Torrent not found.");
             }
@@ -3411,43 +3109,19 @@ extern "C" int32_t TorrentClientRemove(TTorrentClient *client, const char *torre
             if (identity == nullptr || identity->token == nullptr) {
                 return bridge_error(3, "Torrent removal identity is unavailable.");
             }
+            std::string const &id = identity->canonical_id;
             removal_token = identity->token;
-            std::vector<std::string> const removal_ids = client->removal_ids_for_identity(hashes, id, identity);
-            BridgeResult tombstoned;
-            try {
-                tombstoned = client->persist_removal_tombstones(removal_ids);
-            } catch (...) {
-                throw;
-            }
-            if (!tombstoned) {
-                return tombstoned;
-            }
 
-            client->invalidate_queue_order_index_locked();
             try {
                 client->session.remove_torrent(*handle);
             } catch (std::exception const &exception) {
-                return client->cancel_tombstoned_operation_or_fault(removal_ids, 3, exception.what());
+                return bridge_error(3, exception.what());
             } catch (...) {
-                return client->cancel_tombstoned_operation_or_fault(removal_ids, 3, "Torrent could not be removed.");
+                return bridge_error(3, "Torrent could not be removed.");
             }
             *removal_committed_out = bridge_bool(true);
-            client->mark_remove_requested(hashes, id, identity);
-            ResumeSaveResult removed_resume = client->remove_resume_files_for_ids_checked(removal_ids);
-            if (!removed_resume) {
-                client->remember_pending_resume_cleanup(removal_ids);
-                publisher.add(client->queue_alert_error("Torrent was removed, but resume cleanup is pending: " + removed_resume.error() + "."));
-            } else {
-                ResumeSaveResult cleared_tombstones = client->clear_removal_tombstones(removal_ids);
-                if (!cleared_tombstones) {
-                    publisher.add(client->queue_alert_error(
-                        "Torrent was removed, but removal marker cleanup is pending: "
-                        + cleared_tombstones.error()
-                        + "."
-                    ));
-                }
-            }
-            publisher.add(client->remove_snapshot(hashes, id));
+            client->mark_remove_requested(hashes, identity);
+            publisher.add(client->mark_torrent_removed(hashes, id));
             client->request_snapshot_update_locked();
         }
 
@@ -3466,6 +3140,164 @@ extern "C" int32_t TorrentClientRemove(TTorrentClient *client, const char *torre
         client->invoke_wake_callback(wake);
     }
     return result;
+}
+
+extern "C" int32_t TorrentClientCopyResumeIDs(
+    TTorrentClient *client,
+    std::uint64_t const native_token,
+    TTorrentResumeID *ids,
+    int32_t const capacity,
+    int32_t *required_count_out,
+    std::uint8_t *available_out
+) noexcept
+{
+    if (required_count_out != nullptr) {
+        *required_count_out = 0;
+    }
+    if (available_out != nullptr) {
+        *available_out = bridge_bool(false);
+    }
+    if (client == nullptr || native_token == 0U) {
+        return 0;
+    }
+
+    try {
+        std::span<TTorrentResumeID> const output = output_span_from_c_buffer(ids, capacity);
+        std::scoped_lock guard(client->lock);
+        std::optional<lt::torrent_handle> const handle = client->find(native_token);
+        if (!handle) {
+            return 0;
+        }
+        TorrentIdentity *const identity = identity_from_handle(*handle);
+        if (identity == nullptr) {
+            return 0;
+        }
+        std::vector<std::string> const resume_ids = client->removal_ids_for_identity(
+            handle->info_hashes(),
+            identity->canonical_id,
+            identity
+        );
+        if (resume_ids.empty()
+            || resume_ids.size() > static_cast<std::size_t>(TTORRENT_MAX_RESUME_ID_COUNT)) {
+            return 0;
+        }
+        auto const required = static_cast<int32_t>(resume_ids.size());
+        if (required_count_out != nullptr) {
+            *required_count_out = required;
+        }
+        if (available_out != nullptr) {
+            *available_out = bridge_bool(true);
+        }
+        if (output.size() < resume_ids.size()) {
+            return 0;
+        }
+        auto destination = output.begin();
+        for (std::string const &resume_id : resume_ids) {
+            *destination = {};
+            copy_string(std::span{destination->value}, resume_id);
+            ++destination;
+        }
+        return required;
+    } catch (...) {
+        if (required_count_out != nullptr) {
+            *required_count_out = 0;
+        }
+        if (available_out != nullptr) {
+            *available_out = bridge_bool(false);
+        }
+        return 0;
+    }
+}
+
+extern "C" int32_t TorrentClientPersistRemovalTombstone(
+    TTorrentClient *client,
+    TTorrentResumeID const *ids,
+    int32_t const id_count,
+    char *filename_out,
+    int32_t const filename_capacity,
+    char *error_out,
+    int32_t const error_capacity
+) noexcept
+{
+    std::span<char> const filename_buffer = output_buffer(filename_out, filename_capacity);
+    copy_error(filename_buffer, "");
+    return run_bridge_operation(output_buffer(error_out, error_capacity), 3, [&]() -> BridgeResult {
+        if (client == nullptr || id_count <= 0 || ids == nullptr || filename_buffer.empty()) {
+            return bridge_error(1, "Missing removal tombstone input or output.");
+        }
+        ResumeIDListResult const resume_ids = resume_ids_from_bridge(
+            input_span_from_c_buffer(ids, id_count)
+        );
+        if (!resume_ids) {
+            return bridge_error(1, resume_ids.error());
+        }
+
+        std::scoped_lock io_guard(client->resume_io_lock);
+        BridgeResult const persistence = client->ensure_persistence_available_locked(3);
+        if (!persistence) {
+            return persistence;
+        }
+        TombstoneCommitResult const saved = client->persist_removal_tombstones_locked(*resume_ids);
+        if (!saved) {
+            return bridge_error(3, saved.error());
+        }
+        if (!saved->directory_synced) {
+            return client->fault_persistence_and_pause_locked(
+                3,
+                "Removal tombstone commit outcome is uncertain."
+            );
+        }
+        if (saved->filename.empty()
+            || saved->filename.size() + 1U > filename_buffer.size()) {
+            return client->fault_persistence_and_pause_locked(
+                3,
+                "Removal tombstone filename could not be returned."
+            );
+        }
+        copy_string_dynamic(filename_buffer, saved->filename);
+        return {};
+    });
+}
+
+extern "C" int32_t TorrentClientRemoveResumeData(
+    TTorrentClient *client,
+    TTorrentResumeID const *ids,
+    int32_t const id_count,
+    char *error_out,
+    int32_t const error_capacity
+) noexcept
+{
+    return run_bridge_operation(output_buffer(error_out, error_capacity), 3, [&]() -> BridgeResult {
+        if (client == nullptr || id_count <= 0 || ids == nullptr) {
+            return bridge_error(1, "Missing resume cleanup input.");
+        }
+        ResumeIDListResult const resume_ids = resume_ids_from_bridge(
+            input_span_from_c_buffer(ids, id_count)
+        );
+        if (!resume_ids) {
+            return bridge_error(1, resume_ids.error());
+        }
+        ResumeSaveResult const removed = client->remove_resume_files_for_ids_checked(*resume_ids);
+        return removed ? BridgeResult{} : bridge_error(3, removed.error());
+    });
+}
+
+extern "C" int32_t TorrentClientClearRemovalTombstone(
+    TTorrentClient *client,
+    char const *filename,
+    char *error_out,
+    int32_t const error_capacity
+) noexcept
+{
+    return run_bridge_operation(output_buffer(error_out, error_capacity), 3, [&]() -> BridgeResult {
+        if (client == nullptr || filename == nullptr) {
+            return bridge_error(1, "Missing removal tombstone filename.");
+        }
+        ResumeSaveResult const cleared = client->clear_removal_tombstone_file(
+            c_string_view(filename)
+        );
+        return cleared ? BridgeResult{} : bridge_error(3, cleared.error());
+    });
 }
 
 extern "C" int32_t TorrentClientApplySettings(
@@ -3501,7 +3333,6 @@ extern "C" int32_t TorrentClientApplySettings(
         bool const accept_incoming_connections = bridge_bool(requested.accept_incoming_connections);
         bool const enable_port_forwarding = bridge_bool(requested.enable_port_forwarding);
         bool const enable_dht = bridge_bool(requested.enable_dht);
-        bool const use_dht_by_default = bridge_bool(requested.use_dht_by_default);
         bool const dht_read_only = bridge_bool(requested.dht_read_only);
         if (!is_valid_dht_discovery_policy(requested.dht_discovery_policy)) {
             return bridge_error(1, "Invalid DHT discovery policy.");
@@ -3509,14 +3340,6 @@ extern "C" int32_t TorrentClientApplySettings(
         bool const use_dht_as_fallback = requested.dht_discovery_policy
             == TTORRENT_DHT_DISCOVERY_AFTER_ALL_TRACKERS_FAIL;
         bool const enable_lsd = bridge_bool(requested.enable_lsd);
-        bool const use_lsd_by_default = bridge_bool(requested.use_lsd_by_default);
-        bool const use_pex_by_default = bridge_bool(requested.use_pex_by_default);
-        if (!is_valid_https_tracker_policy(requested.https_tracker_policy, false)
-            || !is_valid_https_web_seed_policy(requested.https_web_seed_policy, false)) {
-            return bridge_error(1, "Invalid HTTPS source policy.");
-        }
-        HTTPSPolicy const https_tracker_policy = https_policy_from_value(requested.https_tracker_policy);
-        HTTPSPolicy const https_web_seed_policy = https_policy_from_value(requested.https_web_seed_policy);
         bool const anonymous_mode = bridge_bool(requested.anonymous_mode);
         bool const network_blocked = bridge_bool(requested.network_blocked);
         if (!is_valid_encryption_policy(requested.encryption_policy)) {
@@ -3532,6 +3355,12 @@ extern "C" int32_t TorrentClientApplySettings(
 
         std::scoped_lock guard(client->lock);
         LockedChangePublisher publisher(*client, wake);
+        if (!network_blocked && !client->source_policy_reconciled) {
+            return bridge_error(
+                2,
+                "Networking cannot resume until source policy has been fully reconciled."
+            );
+        }
         if (network_blocked) {
             DirtyMask containment_changes = 0U;
             BridgeResult const containment = block_network_locked(
@@ -3552,14 +3381,7 @@ extern "C" int32_t TorrentClientApplySettings(
         bool const should_resume_session = client->requested_network_blocked && !network_blocked;
         bool const expected_session_paused = network_blocked
             || (!should_resume_session && client->session.is_paused());
-        HTTPSSourcePolicy const previous_https_source_policy{
-            .trackers = client->https_tracker_policy,
-            .web_seeds = client->https_web_seed_policy,
-        };
-        SourcePolicyApplicationResult source_policy_application;
-        add_policy_result(source_policy_application, apply_dht_policy_locked(*client, use_dht_by_default));
         client->lsd_service_enabled = enable_lsd;
-        add_policy_result(source_policy_application, apply_lsd_policy_locked(*client, use_lsd_by_default));
 
         lt::settings_pack settings;
         settings.set_str(lt::settings_pack::listen_interfaces, listen_interface_settings);
@@ -3595,12 +3417,6 @@ extern "C" int32_t TorrentClientApplySettings(
         settings.set_int(lt::settings_pack::allowed_enc_level, static_cast<int>(lt::settings_pack::pe_both));
         settings.set_bool(lt::settings_pack::prefer_rc4, false);
         client->session.apply_settings(std::move(settings));
-        add_policy_result(source_policy_application, apply_peer_exchange_policy_locked(*client, use_pex_by_default));
-        client->https_tracker_policy = https_tracker_policy;
-        client->https_web_seed_policy = https_web_seed_policy;
-        publisher.add(source_policy_application.changes);
-        request_policy_saves(*client, source_policy_application.handles_to_save);
-        publisher.add(client->apply_https_source_policy_locked(previous_https_source_policy));
 
         if (network_blocked) {
             client->session.pause();
@@ -3710,10 +3526,29 @@ extern "C" TTorrentBridgeHealthResult TorrentClientCopyHealth(TTorrentClient *cl
     return output;
 }
 
-extern "C" int32_t TorrentClientSaveAllChecked(
+extern "C" int32_t TorrentClientSaveResumeDataChecked(
+    TTorrentClient *client,
+    std::uint64_t const native_token,
+    std::uint8_t const save_mode,
+    char *error_out,
+    int32_t const error_capacity
+) noexcept
+{
+    return run_bridge_operation(output_buffer(error_out, error_capacity), 3, [&]() -> BridgeResult {
+        if (client == nullptr) {
+            return bridge_error(1, "Missing torrent client.");
+        }
+        return client->save_resume_data_checked(
+            native_token,
+            static_cast<ResumeSaveMode>(save_mode)
+        );
+    });
+}
+
+extern "C" int32_t TorrentClientRecoverPendingRemovalsChecked(
     TTorrentClient *client,
     char *error_out,
-    int32_t error_capacity
+    int32_t const error_capacity
 ) noexcept
 {
     return run_bridge_operation(output_buffer(error_out, error_capacity), 2, [&]() -> BridgeResult {
@@ -3721,21 +3556,13 @@ extern "C" int32_t TorrentClientSaveAllChecked(
             return bridge_error(1, "Missing torrent client.");
         }
 
-        return client->save_all_checked();
+        std::scoped_lock guard(client->lock);
+        ResumeSaveResult const recovered = client->complete_pending_removals();
+        if (!recovered) {
+            return bridge_error(3, recovered.error());
+        }
+        return {};
     });
-}
-
-extern "C" void TorrentClientSaveAll(TTorrentClient *client) noexcept
-{
-    if (client == nullptr) {
-        return;
-    }
-
-    try {
-        client->save_all();
-    } catch (...) {
-        ignore_shutdown_failure();
-    }
 }
 
 extern "C" int32_t TorrentClientTakeAlertError(

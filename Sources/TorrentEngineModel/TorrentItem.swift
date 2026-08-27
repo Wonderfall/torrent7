@@ -120,6 +120,50 @@ package struct TorrentItem: Codable, Identifiable, Hashable, Sendable {
         self.privateTorrent = privateTorrent
     }
 
+    package func replacingPresentation(
+        comment: String,
+        createdTime: Int64
+    ) -> Self {
+        Self(
+            id: id,
+            infoHash: infoHash,
+            name: name,
+            savePath: savePath,
+            error: error,
+            comment: comment,
+            progress: progress,
+            totalDone: totalDone,
+            totalWanted: totalWanted,
+            totalSize: totalSize,
+            totalUpload: totalUpload,
+            totalDownload: totalDownload,
+            totalPayloadUpload: totalPayloadUpload,
+            totalPayloadDownload: totalPayloadDownload,
+            allTimeUpload: allTimeUpload,
+            allTimeDownload: allTimeDownload,
+            addedTime: addedTime,
+            createdTime: createdTime,
+            completedTime: completedTime,
+            downloadRate: downloadRate,
+            uploadRate: uploadRate,
+            downloadPayloadRate: downloadPayloadRate,
+            uploadPayloadRate: uploadPayloadRate,
+            peers: peers,
+            knownPeers: knownPeers,
+            seeds: seeds,
+            state: state,
+            queuePosition: queuePosition,
+            queuePriority: queuePriority,
+            paused: paused,
+            autoManaged: autoManaged,
+            seeding: seeding,
+            finished: finished,
+            contentKind: contentKind,
+            hasMetadata: hasMetadata,
+            privateTorrent: privateTorrent
+        )
+    }
+
     package var manuallyPaused: Bool {
         paused && !autoManaged
     }

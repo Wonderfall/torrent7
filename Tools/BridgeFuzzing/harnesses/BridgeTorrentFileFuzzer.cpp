@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
     std::uint8_t const *data,
@@ -10,17 +11,12 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
 {
     auto &harness = bridge_fuzz::shared_harness("bridge-torrent-file");
 
-    TTorrentAddOptions options{
-        .starts_paused = 1,
-        .queue_priority = TTORRENT_QUEUE_PRIORITY_NORMAL,
-        .enable_peer_exchange = 0,
-        .https_tracker_policy = TTORRENT_HTTPS_POLICY_INHERIT,
-        .https_web_seed_policy = TTORRENT_HTTPS_POLICY_INHERIT,
-        .allow_pre_metadata_dht = 0,
-    };
+    constexpr std::string_view canonical_id = "t:00000000000000000000000000000002";
+    TTorrentAddOptions options = bridge_fuzz::valid_add_options(canonical_id);
     bridge_fuzz::AddedIdBuffer added_id;
     bridge_fuzz::ErrorBuffer error;
     int32_t add_outcome = TTORRENT_ADD_REJECTED;
+    std::uint64_t native_token = 0;
     TTorrentStorageActivation activation{};
     int32_t const result = TorrentClientAddTorrentFileData(
         harness.client(),
@@ -30,6 +26,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
         options,
         added_id.data(),
         added_id.capacity(),
+        &native_token,
         &add_outcome,
         error.data(),
         error.capacity()

@@ -2,58 +2,51 @@
 
 namespace torrent_bridge::internal {
 
-ResumeSaveResult TTorrentClient::remember_resume_write_failure_locked(PendingEncodedResumeWrite write, std::string message)
+namespace {
+
+[[nodiscard]] std::uint8_t resume_save_mode(lt::resume_data_flags_t const flags) noexcept
 {
-    if (write.identity != nullptr && resume_write_is_installable_locked(write)) {
-        ResumeSaveState &state = write.identity->resume_save;
-        if (!state.retry || write.generation >= state.retry->generation) {
-            state.retry = std::move(write);
-        }
+    if (static_cast<bool>(flags & lt::torrent_handle::flush_disk_cache)) {
+        return TTORRENT_RESUME_SAVE_FULL;
     }
-    return std::unexpected(std::move(message));
+    if (static_cast<bool>(flags & lt::torrent_handle::only_if_modified)) {
+        return TTORRENT_RESUME_SAVE_ROUTINE;
+    }
+    return TTORRENT_RESUME_SAVE_POLICY;
 }
 
-void TTorrentClient::mark_resume_write_installed_locked(PendingEncodedResumeWrite const &write)
+[[nodiscard]] std::optional<lt::resume_data_flags_t> resume_save_flags(ResumeSaveMode const mode) noexcept
 {
-    if (write.identity == nullptr) {
+    switch (mode) {
+    case ResumeSaveMode::routine:
+        return kRoutineResumeSaveFlags;
+    case ResumeSaveMode::policy:
+        return kPolicyResumeSaveFlags;
+    case ResumeSaveMode::full:
+        return kFullResumeSaveFlags;
+    default:
+        return std::nullopt;
+    }
+}
+
+void append_resume_cleanup(
+    std::vector<PendingResumeCleanup> &destination,
+    PendingResumeCleanup cleanup
+)
+{
+    if (cleanup.resume_ids.empty()) {
         return;
     }
-
-    ResumeSaveState &state = write.identity->resume_save;
-    state.installed_generation = std::max(state.installed_generation, write.generation);
-    if (state.retry && state.retry->generation < state.installed_generation) {
-        state.retry.reset();
-    }
-}
-
-void TTorrentClient::mark_resume_write_committed_locked(PendingEncodedResumeWrite const &write)
-{
-    if (write.identity == nullptr) {
+    if (destination.empty()) {
+        destination.push_back(std::move(cleanup));
         return;
     }
-
-    ResumeSaveState &state = write.identity->resume_save;
-    state.installed_generation = std::max(state.installed_generation, write.generation);
-    state.committed_generation = std::max(state.committed_generation, write.generation);
-    if (state.retry && state.retry->generation <= state.committed_generation) {
-        state.retry.reset();
+    for (std::string const &id : cleanup.resume_ids) {
+        append_unique(destination.front().resume_ids, id);
     }
 }
 
-[[nodiscard]] bool TTorrentClient::resume_cleanups_are_eligible_locked(PendingEncodedResumeWrite const &write) const
-{
-    if (write.cleanups.empty()) {
-        return false;
-    }
-    if (write.identity == nullptr) {
-        return true;
-    }
-
-    std::uint64_t const committed_generation = write.identity->resume_save.committed_generation;
-    return std::ranges::all_of(write.cleanups, [committed_generation](PendingResumeCleanup const &cleanup) {
-        return cleanup.after_generation == 0 || cleanup.after_generation <= committed_generation;
-    });
-}
+} // namespace
 
 ResumeSaveResult TTorrentClient::perform_resume_cleanups_locked(std::vector<PendingResumeCleanup> const &cleanups)
 {
@@ -83,13 +76,12 @@ ResumeSaveResult TTorrentClient::complete_resume_cleanups_locked(PendingEncodedR
     if (persistence_is_faulted_locked()) {
         return std::unexpected("Resume persistence is in an uncertain state.");
     }
-    if (!resume_cleanups_are_eligible_locked(write)) {
+    if (write.cleanups.empty()) {
         return {};
     }
 
     ResumeSaveResult cleaned = perform_resume_cleanups_locked(write.cleanups);
     if (!cleaned) {
-        remember_resume_cleanup_failure_locked(write.identity, write.cleanups);
         return std::unexpected("Obsolete resume data could not be removed: " + cleaned.error());
     }
 
@@ -101,13 +93,8 @@ ResumeSaveResult TTorrentClient::complete_resume_cleanups_locked(PendingEncodedR
     }
     ResumeSaveResult cleared_tombstones = clear_removal_tombstones_locked(cleanup_ids);
     if (!cleared_tombstones) {
-        remember_pending_tombstone_clear_locked(cleanup_ids);
-        remember_resume_cleanup_failure_locked(write.identity, write.cleanups);
         return std::unexpected("Removal tombstone could not be cleared: " + cleared_tombstones.error());
     }
-    forget_pending_tombstone_clear_locked(cleanup_ids);
-
-    mark_resume_cleanups_completed_locked(write.identity, write.cleanups);
     return {};
 }
 
@@ -135,21 +122,13 @@ ResumeSaveResult TTorrentClient::commit_encoded_resume_data_checked(PendingEncod
     if (!reconcile_current_for_write_locked(write.hashes, write.identity)) {
         return {};
     }
-    if (write.identity != nullptr && !resume_write_is_installable_locked(write)) {
-        ResumeSaveResult cleaned = complete_resume_cleanups_locked(write);
-        if (!cleaned) {
-            return cleaned;
-        }
-        return {};
-    }
-
     std::string const final_filename = id + std::string(kResumeExtension);
     ResumeTempFileResult opened_temp_file = open_resume_temp_file_at(
         resume_directory_descriptor.get(),
         final_filename
     );
     if (!opened_temp_file) {
-        return remember_resume_write_failure_locked(std::move(write), opened_temp_file.error());
+        return std::unexpected(opened_temp_file.error());
     }
 
     ResumeTempFile temp_file = std::move(*opened_temp_file);
@@ -162,7 +141,7 @@ ResumeSaveResult TTorrentClient::commit_encoded_resume_data_checked(PendingEncod
             ignore_shutdown_failure();
         }
         remove_file_at_quietly(resume_directory_descriptor.get(), temp_filename);
-        return remember_resume_write_failure_locked(std::move(write), written.error());
+        return std::unexpected(written.error());
     }
 
     ResumeSaveResult synced = sync_file(temp_file.descriptor.get());
@@ -172,13 +151,13 @@ ResumeSaveResult TTorrentClient::commit_encoded_resume_data_checked(PendingEncod
             ignore_shutdown_failure();
         }
         remove_file_at_quietly(resume_directory_descriptor.get(), temp_filename);
-        return remember_resume_write_failure_locked(std::move(write), synced.error());
+        return std::unexpected(synced.error());
     }
 
     ResumeSaveResult closed = close_resume_temp_file(temp_file.descriptor);
     if (!closed) {
         remove_file_at_quietly(resume_directory_descriptor.get(), temp_filename);
-        return remember_resume_write_failure_locked(std::move(write), closed.error());
+        return std::unexpected(closed.error());
     }
 
     if (::renameat(
@@ -189,27 +168,26 @@ ResumeSaveResult TTorrentClient::commit_encoded_resume_data_checked(PendingEncod
         ) != 0) {
         int const error_number = errno;
         remove_file_at_quietly(resume_directory_descriptor.get(), temp_filename);
-        return remember_resume_write_failure_locked(
-            std::move(write), system_error_message("Resume data could not be committed", error_number));
+        return std::unexpected(system_error_message(
+            "Resume data could not be committed",
+            error_number
+        ));
     }
-    mark_resume_write_installed_locked(write);
-
-    PendingResumeCleanup alias_cleanup{.after_generation = write.generation, .resume_ids = {}};
+    PendingResumeCleanup alias_cleanup{.resume_ids = {}};
     for (std::string const &alias : hash_keys(write.hashes)) {
         if (alias != id) {
             append_unique(alias_cleanup.resume_ids, alias);
         }
     }
     if (!alias_cleanup.resume_ids.empty()) {
-        append_cleanup_ids_locked(write.cleanups, std::move(alias_cleanup));
+        append_resume_cleanup(write.cleanups, std::move(alias_cleanup));
     }
 
     ResumeSaveResult directory_synced = sync_directory(resume_directory_descriptor.get());
     if (!directory_synced) {
-        return remember_resume_write_failure_locked(std::move(write), directory_synced.error());
+        return std::unexpected(directory_synced.error());
     }
 
-    mark_resume_write_committed_locked(write);
     ResumeSaveResult cleaned = complete_resume_cleanups_locked(write);
     if (!cleaned) {
         return cleaned;
@@ -221,7 +199,6 @@ ResumeSaveResult TTorrentClient::write_resume_data_checked(
     lt::add_torrent_params const &params,
     TorrentIdentity *identity,
     ResumePolicySnapshot const &policy,
-    std::uint64_t generation,
     std::vector<PendingResumeCleanup> cleanups
 )
 {
@@ -313,7 +290,6 @@ ResumeSaveResult TTorrentClient::write_resume_data_checked(
 
     return commit_encoded_resume_data_checked(PendingEncodedResumeWrite{.hashes = params.info_hashes,
                                                                         .identity = identity,
-                                                                        .generation = generation,
                                                                         .encoded = std::move(encoded),
                                                                         .cleanups = std::move(cleanups)});
 }
@@ -321,7 +297,7 @@ ResumeSaveResult TTorrentClient::write_resume_data_checked(
 ResumeSaveResult TTorrentClient::write_resume_data(PendingResumeWrite const &write)
 {
     ResumeSaveResult result =
-        write_resume_data_checked(write.params, write.identity, write.policy, write.generation, write.cleanups);
+        write_resume_data_checked(write.params, write.identity, write.policy, write.cleanups);
     if (!result) {
         queue_alert_error_threadsafe("Resume data could not be saved: " + result.error() + ".");
         return result;
@@ -334,35 +310,7 @@ ResumeSaveResult TTorrentClient::save_added_torrent_resume_data(lt::add_torrent_
 {
     params.info_hashes = hashes;
 
-    std::uint64_t const generation = allocate_resume_generation(identity);
-    return write_resume_data_checked(params, identity, resume_policy_snapshot_locked(identity), generation, {});
-}
-
-ResumeSaveResult TTorrentClient::save_source_policy_resume_data(
-    lt::torrent_handle const &handle,
-    TorrentIdentity *identity
-)
-{
-    if (!handle.is_valid() || identity == nullptr) {
-        return std::unexpected("Source policy resume data is missing a torrent.");
-    }
-
-    try {
-        lt::add_torrent_params params;
-        ResumePolicySnapshot policy;
-        std::uint64_t generation = 0;
-        {
-            std::scoped_lock capture_guard(resume_capture_lock);
-            params = handle.get_resume_data(kPolicyResumeSaveFlags);
-            policy = resume_policy_snapshot_locked(identity);
-            generation = allocate_resume_generation(identity);
-        }
-        return write_resume_data_checked(params, identity, policy, generation, {});
-    } catch (std::exception const &exception) {
-        return std::unexpected(std::string("Source policy resume data could not be collected: ") + exception.what());
-    } catch (...) {
-        return std::unexpected("Source policy resume data could not be collected.");
-    }
+    return write_resume_data_checked(params, identity, resume_policy_snapshot_locked(identity), {});
 }
 
 ResumeSaveResult TTorrentClient::remove_obsolete_tombstoned_resume_data_for_readd(std::vector<std::string> const &resume_ids)
@@ -388,77 +336,186 @@ ResumeSaveResult TTorrentClient::remove_obsolete_tombstoned_resume_data_for_read
     return remove_resume_files_for_ids_checked(*matched_ids);
 }
 
-std::vector<std::string> TTorrentClient::retry_terminal_cleanups(bool reports_errors)
+void TTorrentClient::request_save_locked(lt::torrent_handle const &handle, lt::resume_data_flags_t const flags)
 {
-    std::vector<std::string> errors;
-    std::vector<std::string> cleanup_errors = retry_resume_cleanups(reports_errors);
-    errors.insert(
-        errors.end(),
-        std::make_move_iterator(cleanup_errors.begin()),
-        std::make_move_iterator(cleanup_errors.end())
-    );
-    std::vector<std::string> resume_cleanup_errors = retry_pending_resume_cleanups(reports_errors);
-    errors.insert(
-        errors.end(),
-        std::make_move_iterator(resume_cleanup_errors.begin()),
-        std::make_move_iterator(resume_cleanup_errors.end())
-    );
-    std::vector<std::string> tombstone_clear_errors = retry_pending_tombstone_clears(reports_errors);
-    errors.insert(
-        errors.end(),
-        std::make_move_iterator(tombstone_clear_errors.begin()),
-        std::make_move_iterator(tombstone_clear_errors.end())
-    );
-    return errors;
-}
-
-std::vector<std::string> TTorrentClient::retry_resume_writes(bool reports_errors)
-{
-    std::vector<std::string> errors;
-    if (persistence_is_faulted()) {
-        return errors;
-    }
-
-    std::vector<PendingEncodedResumeWrite> retries = claim_resume_retries();
-    for (PendingEncodedResumeWrite &retry : retries) {
-        ResumeSaveResult result = commit_encoded_resume_data_checked(std::move(retry));
-        if (!result) {
-            errors.push_back(result.error());
-            if (reports_errors) {
-                queue_alert_error_threadsafe("Resume data retry failed: " + result.error() + ".");
-            }
-        }
-    }
-    std::vector<std::string> cleanup_errors = retry_terminal_cleanups(reports_errors);
-    errors.insert(
-        errors.end(),
-        std::make_move_iterator(cleanup_errors.begin()),
-        std::make_move_iterator(cleanup_errors.end())
-    );
-    return errors;
-}
-
-void TTorrentClient::request_save(lt::torrent_handle const &handle, lt::resume_data_flags_t flags)
-{
-    if (persistence_is_faulted()) {
-        return;
-    }
     if (!handle.is_valid()) {
         return;
     }
 
     TorrentIdentity *identity = identity_from_handle(handle);
-    std::scoped_lock capture_guard(resume_capture_lock);
-    std::optional<std::uint64_t> const generation = begin_async_resume_save(identity, flags);
-    if (!generation) {
+    if (identity == nullptr || identity->token == nullptr || identity->token->value == 0U) {
         return;
     }
+
     try {
-        handle.save_resume_data(flags);
+        bool const resync_already_pending = std::ranges::any_of(
+            pending_events,
+            [](TTorrentEvent const &event) {
+                return event.kind == TTORRENT_EVENT_RESYNC_REQUIRED;
+            }
+        );
+        if (resync_already_pending) {
+            return;
+        }
+
+        std::uint8_t const requested_mode = resume_save_mode(flags);
+        auto const existing = std::ranges::find_if(
+            pending_events,
+            [native_token = identity->token->value](TTorrentEvent const &event) {
+                return event.kind == TTORRENT_EVENT_RESUME_SAVE_REQUESTED
+                    && event.native_token == native_token;
+            }
+        );
+        if (existing != pending_events.end()) {
+            existing->resume_save_mode = std::max(existing->resume_save_mode, requested_mode);
+            return;
+        }
+
+        if (pending_events.size() >= static_cast<std::size_t>(TTORRENT_MAX_EVENT_COUNT)) {
+            pending_events.clear();
+            pending_events.push_back(TTorrentEvent{
+                .native_token = 0U,
+                .kind = TTORRENT_EVENT_RESYNC_REQUIRED,
+                .resume_save_mode = TTORRENT_RESUME_SAVE_FULL,
+                .critical_faults = 0U,
+            });
+            return;
+        }
+        pending_events.push_back(TTorrentEvent{
+            .native_token = identity->token->value,
+            .kind = TTORRENT_EVENT_RESUME_SAVE_REQUESTED,
+            .resume_save_mode = requested_mode,
+            .critical_faults = 0U,
+        });
     } catch (...) {
-        cancel_async_resume_save(identity, *generation);
-        return;
+        pending_events.clear();
+        try {
+            pending_events.push_back(TTorrentEvent{
+                .native_token = 0U,
+                .kind = TTORRENT_EVENT_RESYNC_REQUIRED,
+                .resume_save_mode = TTORRENT_RESUME_SAVE_FULL,
+                .critical_faults = 0U,
+            });
+        } catch (...) {
+            ignore_shutdown_failure();
+        }
     }
+}
+
+void TTorrentClient::request_save(lt::torrent_handle const &handle, lt::resume_data_flags_t const flags)
+{
+    WakeCallbackInvocation wake;
+    {
+        std::scoped_lock guard(lock);
+        request_save_locked(handle, flags);
+        wake = publish_changes_locked(0U);
+    }
+    invoke_wake_callback(wake);
+}
+
+void TTorrentClient::request_resume_retry()
+{
+    WakeCallbackInvocation wake;
+    {
+        std::scoped_lock guard(lock);
+        bool const retry_already_pending = std::ranges::any_of(
+            pending_events,
+            [](TTorrentEvent const &event) {
+                return event.kind == TTORRENT_EVENT_RESUME_RETRY_REQUESTED
+                    || event.kind == TTORRENT_EVENT_RESYNC_REQUIRED;
+            }
+        );
+        if (!retry_already_pending) {
+            if (pending_events.size() >= static_cast<std::size_t>(TTORRENT_MAX_EVENT_COUNT)) {
+                pending_events.clear();
+                pending_events.push_back(TTorrentEvent{
+                    .native_token = 0U,
+                    .kind = TTORRENT_EVENT_RESYNC_REQUIRED,
+                    .resume_save_mode = TTORRENT_RESUME_SAVE_FULL,
+                    .critical_faults = 0U,
+                });
+            } else {
+                pending_events.push_back(TTorrentEvent{
+                    .native_token = 0U,
+                    .kind = TTORRENT_EVENT_RESUME_RETRY_REQUESTED,
+                    .resume_save_mode = TTORRENT_RESUME_SAVE_ROUTINE,
+                    .critical_faults = 0U,
+                });
+            }
+        }
+        wake = publish_changes_locked(0U);
+    }
+    invoke_wake_callback(wake);
+}
+
+BridgeResult TTorrentClient::save_resume_data_checked(
+    std::uint64_t const native_token,
+    ResumeSaveMode const save_mode
+)
+{
+    std::optional<lt::resume_data_flags_t> const flags = resume_save_flags(save_mode);
+    if (native_token == 0U || !flags) {
+        return bridge_error(1, "Invalid Swift resume-save request.");
+    }
+
+    [[maybe_unused]] IdentityReclamationBlock identity_reclamation_block(*this);
+    PendingResumeHandle pending;
+    {
+        std::scoped_lock guard(lock);
+        BridgeResult const persistence = ensure_persistence_available(3);
+        if (!persistence) {
+            return persistence;
+        }
+        std::optional<lt::torrent_handle> const handle = find(native_token);
+        if (!handle) {
+            return bridge_error(2, "Torrent not found.");
+        }
+        TorrentIdentity *identity = identity_from_handle(*handle);
+        if (identity == nullptr) {
+            return bridge_error(2, "Resume data is missing torrent identity.");
+        }
+        pending = PendingResumeHandle{
+            .handle = *handle,
+            .identity = identity,
+            .policy = resume_policy_snapshot_locked(identity),
+            .cleanups = {},
+        };
+    }
+
+    lt::add_torrent_params params;
+    try {
+        std::scoped_lock capture_guard(resume_capture_lock);
+        if (!pending.handle.is_valid()) {
+            return bridge_error(2, "Torrent handle became invalid while saving resume data.");
+        }
+        params = pending.handle.get_resume_data(*flags);
+    } catch (std::exception const &exception) {
+        return bridge_error(3, std::string("Resume data could not be collected: ") + exception.what());
+    } catch (...) {
+        return bridge_error(3, "Resume data could not be collected.");
+    }
+
+    WakeCallbackInvocation wake;
+    {
+        std::scoped_lock guard(lock);
+        DirtyMask const changes = capture_requested_presentation_metadata(pending.identity, params);
+        if (has_dirty_changes(changes)) {
+            request_snapshot_update_locked();
+        }
+        wake = publish_changes_locked(changes);
+    }
+    invoke_wake_callback(wake);
+
+    ResumeSaveResult const saved = write_resume_data_checked(
+        params,
+        pending.identity,
+        pending.policy,
+        pending.cleanups
+    );
+    if (!saved) {
+        return bridge_error(3, saved.error());
+    }
+    return {};
 }
 
 std::vector<lt::torrent_handle> TTorrentClient::collect_torrent_handles()
@@ -484,7 +541,6 @@ void TTorrentClient::request_periodic_resume_saves()
         handles = collect_torrent_handles();
     }
 
-    retry_resume_writes(false);
     for (lt::torrent_handle const &handle : handles) {
         request_save(handle);
     }
@@ -513,31 +569,6 @@ std::vector<PendingResumeHandle> TTorrentClient::collect_resume_handles()
     return handles;
 }
 
-ResumeHandleReport TTorrentClient::collect_resume_handles_report()
-{
-    ResumeHandleReport report;
-    for (auto const &handle : session.get_torrents()) {
-        if (!handle.is_valid()) {
-            report.errors.emplace_back("A torrent handle became invalid while saving resume data.");
-            continue;
-        }
-
-        TorrentIdentity *identity = identity_from_handle(handle);
-        if (identity == nullptr) {
-            report.errors.emplace_back("Resume data is missing torrent identity.");
-            continue;
-        }
-
-        report.handles.push_back(PendingResumeHandle{
-            .handle = handle,
-            .identity = identity,
-            .policy = resume_policy_snapshot_locked(identity),
-            .cleanups = {}
-        });
-    }
-    return report;
-}
-
 std::vector<PendingResumeWrite> TTorrentClient::collect_resume_data(
     std::span<PendingResumeHandle const> handles,
     lt::resume_data_flags_t flags
@@ -554,62 +585,19 @@ std::vector<PendingResumeWrite> TTorrentClient::collect_resume_data(
             continue;
         }
 
-        std::uint64_t const generation = allocate_resume_generation(pending.identity);
         try {
             lt::add_torrent_params params = pending.handle.get_resume_data(flags);
             resume_data.push_back(PendingResumeWrite{
                 .params = std::move(params),
-                .handle = pending.handle,
                 .identity = pending.identity,
                 .policy = pending.policy,
-                .generation = generation,
-                .async = false,
-                .cleanups = cleanups_for_write(pending.identity, generation, pending.cleanups)
+                .cleanups = pending.cleanups
             });
         } catch (...) {
             continue;
         }
     }
     return resume_data;
-}
-
-ResumeDataReport TTorrentClient::collect_resume_data_report(
-    std::span<PendingResumeHandle const> handles,
-    lt::resume_data_flags_t flags
-)
-{
-    ResumeDataReport report;
-    std::scoped_lock capture_guard(resume_capture_lock);
-    for (PendingResumeHandle const &pending : handles) {
-        if (!pending.handle.is_valid()) {
-            report.errors.emplace_back("A torrent handle became invalid while saving resume data.");
-            continue;
-        }
-
-        if (pending.identity == nullptr) {
-            report.errors.emplace_back("Resume data is missing torrent identity.");
-            continue;
-        }
-
-        std::uint64_t const generation = allocate_resume_generation(pending.identity);
-        try {
-            lt::add_torrent_params params = pending.handle.get_resume_data(flags);
-            report.writes.push_back(PendingResumeWrite{
-                .params = std::move(params),
-                .handle = pending.handle,
-                .identity = pending.identity,
-                .policy = pending.policy,
-                .generation = generation,
-                .async = false,
-                .cleanups = cleanups_for_write(pending.identity, generation, pending.cleanups)
-            });
-        } catch (std::exception const &exception) {
-            report.errors.emplace_back(std::string("Resume data could not be collected: ") + exception.what());
-        } catch (...) {
-            report.errors.emplace_back("Resume data could not be collected.");
-        }
-    }
-    return report;
 }
 
 void TTorrentClient::save_all()
@@ -619,7 +607,6 @@ void TTorrentClient::save_all()
         return;
     }
 
-    retry_resume_writes(false);
     std::vector<PendingResumeHandle> handles;
     {
         std::scoped_lock guard(lock);
@@ -633,62 +620,6 @@ void TTorrentClient::save_all()
             ignore_shutdown_failure();
         }
     }
-}
-
-BridgeResult TTorrentClient::save_all_checked()
-{
-    // The checked save intentionally releases the client lock around native and
-    // filesystem work. Pin any identity pointers captured during that window.
-    [[maybe_unused]] IdentityReclamationBlock identity_reclamation_block(*this);
-    {
-        std::scoped_lock guard(lock);
-        BridgeResult const persistence = ensure_persistence_available(3);
-        if (!persistence) {
-            return persistence;
-        }
-    }
-    static_cast<void>(retry_resume_writes(false));
-    std::vector<std::string> errors;
-    ResumeHandleReport handle_report;
-    {
-        std::scoped_lock guard(lock);
-        handle_report = collect_resume_handles_report();
-    }
-    errors.insert(
-        errors.end(),
-        std::make_move_iterator(handle_report.errors.begin()),
-        std::make_move_iterator(handle_report.errors.end())
-    );
-
-    ResumeDataReport collected = collect_resume_data_report(handle_report.handles, kFullResumeSaveFlags);
-    errors.insert(
-        errors.end(),
-        std::make_move_iterator(collected.errors.begin()),
-        std::make_move_iterator(collected.errors.end())
-    );
-
-    for (PendingResumeWrite const &write : collected.writes) {
-        ResumeSaveResult saved = write_resume_data_checked(
-            write.params,
-            write.identity,
-            write.policy,
-            write.generation,
-            write.cleanups
-        );
-        if (!saved) {
-            errors.push_back(saved.error());
-        }
-    }
-    std::vector<std::string> cleanup_errors = retry_terminal_cleanups(false);
-    errors.insert(
-        errors.end(),
-        std::make_move_iterator(cleanup_errors.begin()),
-        std::make_move_iterator(cleanup_errors.end())
-    );
-    if (!errors.empty()) {
-        return bridge_error(3, joined_error_messages(errors));
-    }
-    return {};
 }
 
 } // namespace torrent_bridge::internal

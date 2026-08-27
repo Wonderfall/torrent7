@@ -50,7 +50,7 @@ session. Identified builds require the expected application and helper signing
 identifiers from the same Team ID. Local ad-hoc integration fixtures use an
 explicit reduced-assurance mode.
 
-Command IPC version 10 uses typed, operation-specific envelopes with bounded
+Command IPC version 11 uses typed, operation-specific envelopes with bounded
 JSON and raw attachments. Requests carry an engine epoch, monotonic sequence,
 and replay identifier. The implementation bounds queue depth, nesting, value
 count, strings, raw torrent bytes, piece-map data, paged datasets, and response
@@ -384,6 +384,54 @@ exception crossing the Swift boundary. The C ABI documents lifetime-scoped
 borrows and validates every count, pointer, enum, identifier, activation, and
 callback table. Stored callbacks and long-lived opaque contexts use diversified
 pointer authentication in arm64e production builds.
+
+Inside the helper, the `TorrentEngine` Swift actor owns application state. Its
+bounded stores hold snapshot and detail caches, semantic revisions, dirty-state
+reconciliation, the global detail LRU, canonical-ID/token lookup, logical
+removal generations, queue ordering, source-policy decisions, resume-save
+generations and coalescing, retry state, and removal-cleanup stages. New
+canonical IDs are generated in Swift and passed to native add commands as
+bounded intent. Native code has no fallback identity generator: it only
+validates and reserves Swift- or resume-provided canonical IDs. It does not
+retain application snapshot or tombstone indexes. It synchronously extracts
+owned DTOs from libtorrent behind the exception firewall, and Swift reconciles
+those values under actor isolation. Comments and creation dates travel through
+a coalesced owned handoff only when add/resume metadata supplies them; Swift
+then retains the presentation values, so the hot native snapshot batch carries
+neither a duplicate presentation cache nor a 1 KiB comment field per torrent.
+
+The native state that remains is kernel-coupled rather than a second
+application model. A compact token must outlive the Swift state that created it
+because libtorrent retains `client_data_t` and returns it from later alerts.
+C++ also keeps the token-indexed live handle map and narrow policy/queue/source mirrors
+needed to apply libtorrent flags and encode an immediately consistent resume
+record. Native add/rollback, invalid-metadata removal, and hybrid-conflict
+resolution remain synchronous transactions because libtorrent acceptance,
+userdata lifetime, and the initial durable resume commit cannot safely be split
+across an actor hop. A bounded obsolete-ID list may live only for the duration
+of the conflict survivor's commit-before-cleanup sequence.
+
+Critical kernel detections do not become native lifecycle policy. If native
+identity authority becomes uncertain, C++ synchronously blocks the complete
+session and waits for libtorrent to acknowledge containment. It then emits a
+fixed-width critical-fault bitmask through the bounded event handoff. Native
+retains only undrained typed bits; the `TorrentEngine` actor owns durable
+latching, diagnostics, operation rejection, client destruction when
+containment was not confirmed, and explicit restart recovery.
+
+Swift schedules all ordinary and policy resume saves and owns their modes,
+generations, coalescing, failures, and retries. C++ exposes one-shot
+capture/encode/write commands plus stateless removal-marker recovery. The
+low-level implementation preserves descriptor-relative access, `O_NOFOLLOW`,
+restricted permissions, file sync, rename, and directory sync; it never
+retains retryable encoded data or a long-lived removal-marker index. Startup
+recovery is likewise a bounded native directory scan before libtorrent restore.
+
+Pure size, shape, and policy rules are enforced in Swift where they drive app
+behavior. Magnet and torrent acceptance still pass through libtorrent's native
+parsers, so there is no divergent Swift parser. The boundary is a small C ABI
+with Swift 6.3 safe-interop annotations and bounded owned DTOs. It does not
+depend on a Swift 6.4 language feature.
 
 Libtorrent and BoringSSL are pinned, patched, verified, and linked statically.
 The app bundle contains only the GUI and helper Mach-O executables. TLS uses the
