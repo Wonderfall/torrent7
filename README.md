@@ -65,6 +65,9 @@ and tracker-host snapshots cross XPC as bounded, short-lived paged datasets;
 detail data remains demand-driven and revisioned. The rationale, trust
 boundaries, state ownership, and non-negotiable security invariants are
 documented in [Architecture and Security Decisions](Documentation/Architecture.md).
+The post-cutover native protocol surface and the evidence required before
+another rewrite are tracked in the
+[Native Parser Inventory](Documentation/NativeParserInventory.md).
 
 ## Features
 
