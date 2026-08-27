@@ -571,6 +571,10 @@ reject_match "[[:space:]]_(TLS_method|TLS_client_method|SSL_CTX_set_verify|SSL_s
 reject_match "[[:space:]]_(X509|d2i_X509|i2d_X509|ASN1_|PEM_)[^[:space:]]*([[:space:]]|$)" \
     "$engine_symbol_output" \
     "Engine extension retains BoringSSL X.509/ASN.1/PEM code"
+reject_match "parse_magnet_uri" "$engine_symbol_output" \
+    "Engine extension retains libtorrent's retired raw magnet parser"
+reject_match "TorrentClientAddMagnet" "$engine_symbol_output" \
+    "Engine extension retains the retired raw magnet bridge entry point"
 /usr/bin/strings -a "$engine_extension_executable" >"$engine_strings_output"
 
 # The GUI is now pure Swift. Swift arm64e emits PAC but has no BTI codegen

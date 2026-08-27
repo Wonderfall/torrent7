@@ -31,10 +31,19 @@ Validation followed by passing the same bytes to libtorrent is not a cutover.
   equal topics are accepted and conflicting topics are rejected.
 - Percent decoding is strict. A literal `+` decodes as a space to preserve the
   current Torrent7 and pinned-libtorrent behavior.
+- `tr`, `ws`, and numeric-suffixed forms such as `tr.7` are recognized.
+  Trackers are limited to HTTP, HTTPS, and UDP URLs; web seeds are limited to
+  HTTP and HTTPS URLs. Authorities, ports, escapes, and aggregate retained bytes
+  are bounded before the typed value is created.
 - Display names are never storage names. Tracker tiers and select-only hints are
-  data for a later engine-policy stage, not direct `add_torrent_params` fields.
+  canonical bounded data for a later engine-policy stage, not authority-bearing
+  `add_torrent_params` input.
 - Peer and DHT bootstrap hints remain ignored unless a later product policy
   explicitly authorizes them.
+- Raw magnet text terminates in Swift. XPC carries `ParsedMagnet`, and the C ABI
+  accepts only fixed hashes plus checked flat ranges. Test code may use
+  libtorrent as a differential oracle; production contains no raw-magnet bridge
+  entry point or embedded-`.torrent` fallback to `parse_magnet_uri`.
 
 ## Native interoperability
 

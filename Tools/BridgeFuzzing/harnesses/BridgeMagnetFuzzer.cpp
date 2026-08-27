@@ -2,17 +2,14 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <string>
-
 extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
     std::uint8_t const *data,
     std::size_t size
 )
 {
     auto &harness = bridge_fuzz::shared_harness("bridge-magnet");
-    std::string magnet = bridge_fuzz::input_to_string(data, size, 64U * 1024U + 16U);
-
-    static_cast<void>(TorrentBridgeInspectMagnetSources(magnet.c_str()));
+    bridge_fuzz::ByteReader reader(data, size);
+    bridge_fuzz::MagnetImportInput const magnet = bridge_fuzz::magnet_import_from_reader(reader);
 
     constexpr std::string_view canonical_id = "t:00000000000000000000000000000001";
     TTorrentAddOptions options = bridge_fuzz::valid_add_options(canonical_id);
@@ -20,9 +17,17 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
     bridge_fuzz::ErrorBuffer error;
     int32_t add_outcome = TTORRENT_ADD_REJECTED;
     std::uint64_t native_token = 0;
-    int32_t const result = TorrentClientAddMagnet(
+    int32_t const result = TorrentClientAddParsedMagnet(
         harness.client(),
-        magnet.c_str(),
+        magnet.header,
+        magnet.blob.data(),
+        static_cast<int32_t>(magnet.blob.size()),
+        magnet.trackers.data(),
+        static_cast<int32_t>(magnet.trackers.size()),
+        magnet.web_seeds.data(),
+        static_cast<int32_t>(magnet.web_seeds.size()),
+        magnet.file_selections.data(),
+        static_cast<int32_t>(magnet.file_selections.size()),
         options,
         added_id.data(),
         added_id.capacity(),

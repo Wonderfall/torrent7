@@ -204,10 +204,19 @@ int32_t TorrentClientAddMagnet(
     int32_t error_capacity
 )
 {
+    bridge_tests::ParsedMagnetFixture const parsed = bridge_tests::parsed_magnet_fixture(magnet);
     std::uint64_t token = 0;
-    return ::TorrentClientAddMagnet(
+    return ::TorrentClientAddParsedMagnet(
         client,
-        magnet,
+        parsed.header,
+        parsed.blob.data(),
+        static_cast<int32_t>(parsed.blob.size()),
+        parsed.trackers.data(),
+        static_cast<int32_t>(parsed.trackers.size()),
+        parsed.web_seeds.data(),
+        static_cast<int32_t>(parsed.web_seeds.size()),
+        parsed.file_selections.data(),
+        static_cast<int32_t>(parsed.file_selections.size()),
         options,
         added_id,
         added_id_capacity,

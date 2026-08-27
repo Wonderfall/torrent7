@@ -2151,19 +2151,212 @@ void sanitize_magnet_endpoint_hints(lt::add_torrent_params &params)
     params.peers.clear();
 }
 
-TorrentLoadResult parse_sanitized_magnet(std::string_view const magnet)
+namespace {
+
+constexpr std::uint32_t kKnownMagnetImportFlags =
+    TTORRENT_MAGNET_HAS_V1
+    | TTORRENT_MAGNET_HAS_V2
+    | TTORRENT_MAGNET_HAS_FILE_SELECTION;
+constexpr std::size_t kMaxMagnetDisplayNameBytes = 511U;
+constexpr std::size_t kMaxMagnetSourceURLBytes = std::size_t{16} * 1024U;
+
+bool bytes_are_zero(std::span<std::uint8_t const> const bytes) noexcept
 {
-    if (magnet.size() > kMaxMagnetURIBytes) {
-        return std::unexpected(BridgeError{.code = 2, .message = "The magnet link is too large."});
+    return std::ranges::all_of(bytes, [](std::uint8_t const byte) { return byte == 0U; });
+}
+
+std::expected<std::string, BridgeError> import_magnet_string(
+    std::span<std::uint8_t const> const blob,
+    TTorrentByteRange const range,
+    std::size_t const maximum_size,
+    std::size_t &expected_offset,
+    std::string_view const field
+)
+{
+    std::size_t const checked_offset = range.offset;
+    std::size_t const checked_size = range.size;
+    if (checked_size == 0U
+        || checked_size > maximum_size
+        || checked_offset != expected_offset
+        || checked_offset > blob.size()
+        || checked_size > blob.size() - checked_offset) {
+        return std::unexpected(BridgeError{
+            .code = 1,
+            .message = "Invalid parsed magnet " + std::string(field) + " range."
+        });
+    }
+    std::span<std::uint8_t const> const bytes = blob.subspan(checked_offset, checked_size);
+    if (std::ranges::any_of(bytes, [](std::uint8_t const byte) {
+            return byte < 0x20U || byte == 0x7fU;
+        })) {
+        return std::unexpected(BridgeError{
+            .code = 1,
+            .message = "Invalid parsed magnet " + std::string(field) + "."
+        });
+    }
+    expected_offset += checked_size;
+    std::string value;
+    value.reserve(bytes.size());
+    std::ranges::transform(bytes, std::back_inserter(value), [](std::uint8_t const byte) {
+        return static_cast<char>(byte);
+    });
+    return value;
+}
+
+} // namespace
+
+TorrentLoadResult import_parsed_magnet(
+    TTorrentMagnetImport const &magnet,
+    std::span<std::uint8_t const> const blob,
+    std::span<TTorrentMagnetTracker const> const trackers,
+    std::span<TTorrentByteRange const> const web_seeds,
+    std::span<TTorrentFileSelectionRange const> const file_selections
+)
+{
+    if (trackers.size() > static_cast<std::size_t>(TTORRENT_MAX_TRACKER_COUNT)) {
+        return std::unexpected(BridgeError{
+            .code = 2,
+            .message = "The torrent contains too many trackers. The maximum is "
+                + std::to_string(TTORRENT_MAX_TRACKER_COUNT)
+                + "."
+        });
+    }
+    if (web_seeds.size() > static_cast<std::size_t>(TTORRENT_MAX_WEB_SEED_COUNT)) {
+        return std::unexpected(BridgeError{
+            .code = 2,
+            .message = "The torrent contains too many web seeds. The maximum is "
+                + std::to_string(TTORRENT_MAX_WEB_SEED_COUNT)
+                + "."
+        });
+    }
+    if (magnet.schema_version != TTORRENT_MAGNET_IMPORT_SCHEMA_VERSION
+        || (magnet.flags & ~kKnownMagnetImportFlags) != 0U
+        || blob.size() > kMaxMagnetURIBytes
+        || file_selections.size() > static_cast<std::size_t>(TTORRENT_MAX_FILE_COUNT)) {
+        return std::unexpected(BridgeError{.code = 1, .message = "Invalid parsed magnet import."});
     }
 
-    lt::error_code parse_error;
-    lt::add_torrent_params params = lt::parse_magnet_uri(std::string(magnet), parse_error);
-    if (parse_error) {
-        return std::unexpected(BridgeError{.code = 2, .message = parse_error.message()});
+    bool const has_v1 = (magnet.flags & TTORRENT_MAGNET_HAS_V1) != 0U;
+    bool const has_v2 = (magnet.flags & TTORRENT_MAGNET_HAS_V2) != 0U;
+    bool const has_file_selection =
+        (magnet.flags & TTORRENT_MAGNET_HAS_FILE_SELECTION) != 0U;
+    if ((!has_v1 && !has_v2)
+        || (!has_v1 && !bytes_are_zero(std::span{magnet.v1_info_hash}))
+        || (!has_v2 && !bytes_are_zero(std::span{magnet.v2_info_hash}))
+        || (!has_file_selection && !file_selections.empty())) {
+        return std::unexpected(BridgeError{.code = 1, .message = "Invalid parsed magnet flags."});
     }
 
-    sanitize_magnet_endpoint_hints(params);
+    lt::add_torrent_params params;
+    if (has_v1) {
+        lt::sha1_hash hash;
+        std::ranges::copy(magnet.v1_info_hash, hash.begin());
+        params.info_hashes.v1 = hash;
+    }
+    if (has_v2) {
+        lt::sha256_hash hash;
+        std::ranges::copy(magnet.v2_info_hash, hash.begin());
+        params.info_hashes.v2 = hash;
+    }
+
+    std::size_t expected_offset = 0U;
+    if (magnet.display_name_size == 0U) {
+        if (magnet.display_name_offset != 0U) {
+            return std::unexpected(BridgeError{
+                .code = 1,
+                .message = "Invalid parsed magnet display name range."
+            });
+        }
+    } else {
+        auto imported = import_magnet_string(
+            blob,
+            TTorrentByteRange{
+                .offset = magnet.display_name_offset,
+                .size = magnet.display_name_size,
+            },
+            kMaxMagnetDisplayNameBytes,
+            expected_offset,
+            "display name"
+        );
+        if (!imported) {
+            return std::unexpected(imported.error());
+        }
+        params.name = std::move(*imported);
+    }
+
+    params.trackers.reserve(trackers.size());
+    params.tracker_tiers.reserve(trackers.size());
+    std::size_t tracker_index = 0U;
+    for (TTorrentMagnetTracker const &tracker : trackers) {
+        std::uint8_t const expected_tier = static_cast<std::uint8_t>(
+            std::min(
+                tracker_index,
+                static_cast<std::size_t>(std::numeric_limits<std::uint8_t>::max())
+            )
+        );
+        if (tracker.tier != expected_tier || !bytes_are_zero(std::span{tracker.reserved})) {
+            return std::unexpected(BridgeError{.code = 1, .message = "Invalid parsed magnet tracker."});
+        }
+        auto imported = import_magnet_string(
+            blob,
+            TTorrentByteRange{
+                .offset = tracker.url_offset,
+                .size = tracker.url_size,
+            },
+            kMaxMagnetSourceURLBytes,
+            expected_offset,
+            "tracker"
+        );
+        if (!imported) {
+            return std::unexpected(imported.error());
+        }
+        params.trackers.push_back(std::move(*imported));
+        params.tracker_tiers.push_back(tracker.tier);
+        ++tracker_index;
+    }
+
+    params.url_seeds.reserve(web_seeds.size());
+    for (TTorrentByteRange const &web_seed : web_seeds) {
+        auto imported = import_magnet_string(
+            blob,
+            web_seed,
+            kMaxMagnetSourceURLBytes,
+            expected_offset,
+            "web seed"
+        );
+        if (!imported) {
+            return std::unexpected(imported.error());
+        }
+        params.url_seeds.push_back(std::move(*imported));
+    }
+    if (expected_offset != blob.size()) {
+        return std::unexpected(BridgeError{.code = 1, .message = "Invalid parsed magnet byte blob."});
+    }
+
+    if (has_file_selection) {
+        params.flags |= lt::torrent_flags::default_dont_download;
+        int32_t previous_last = -2;
+        for (TTorrentFileSelectionRange const &selection : file_selections) {
+            if (selection.first_index < 0
+                || selection.first_index <= previous_last + 1
+                || selection.first_index > selection.last_index
+                || selection.last_index >= TTORRENT_MAX_FILE_COUNT) {
+                return std::unexpected(BridgeError{
+                    .code = 1,
+                    .message = "Invalid parsed magnet file selection."
+                });
+            }
+            auto const last = static_cast<std::size_t>(selection.last_index);
+            if (params.file_priorities.size() <= last) {
+                params.file_priorities.resize(last + 1U, lt::dont_download);
+            }
+            for (int32_t index = selection.first_index; index <= selection.last_index; ++index) {
+                params.file_priorities.at(static_cast<std::size_t>(index)) = lt::default_priority;
+            }
+            previous_last = selection.last_index;
+        }
+    }
+
     return params;
 }
 

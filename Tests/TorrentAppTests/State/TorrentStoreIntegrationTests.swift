@@ -5,6 +5,7 @@ import Testing
 import TorrentBridge
 import TorrentEngineClient
 import TorrentEngineModel
+import TorrentMetainfo
 import TorrentStorageAuthority
 @testable import TorrentApp
 
@@ -1835,8 +1836,8 @@ struct TorrentStoreIntegrationTests {
                 id: UUID(),
                 torrentID: fixture.torrentID,
                 originalMagnet: fixture.magnet,
-                advertisedInfoHashes: try TorrentMagnetDescriptor
-                    .parse(fixture.magnet).infoHashes,
+                advertisedInfoHashes: try ParsedMagnet
+                    .parse(fixture.magnet).storageInfoHashes,
                 destinationPath: root.torrentFilePath,
                 operationNonce: operationNonce,
                 state: .awaitingMetadata,

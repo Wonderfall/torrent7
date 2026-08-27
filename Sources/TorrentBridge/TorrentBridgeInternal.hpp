@@ -17,7 +17,6 @@
 #include <libtorrent/file_storage.hpp>
 #include <libtorrent/hasher.hpp>
 #include <libtorrent/load_torrent.hpp>
-#include <libtorrent/magnet_uri.hpp>
 #include <libtorrent/read_resume_data.hpp>
 #include <libtorrent/session.hpp>
 #include <libtorrent/session_handle.hpp>
@@ -307,7 +306,11 @@ static_assert(
 );
 static_assert(kMaxTorrentIdentityTokenCount > static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 57U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 58U);
+static_assert(
+    TORRENT_ABI_VERSION > 1,
+    "Deprecated libtorrent ABIs can parse add_torrent_params.url as a raw magnet."
+);
 static_assert(sizeof(TTorrentEvent) == 16U);
 static_assert(offsetof(TTorrentEvent, critical_faults) == 12U);
 static_assert(TTORRENT_DHT_DISCOVERY_ALONGSIDE_TRACKERS == 0U);
@@ -368,8 +371,14 @@ static_assert(std::is_standard_layout_v<TTorrentFilePriorityEntry>);
 static_assert(std::is_trivially_copyable_v<TTorrentFilePriorityEntry>);
 static_assert(std::is_standard_layout_v<TTorrentPieceMapSnapshot>);
 static_assert(std::is_trivially_copyable_v<TTorrentPieceMapSnapshot>);
-static_assert(std::is_standard_layout_v<TTorrentSourceSecurityInspection>);
-static_assert(std::is_trivially_copyable_v<TTorrentSourceSecurityInspection>);
+static_assert(std::is_standard_layout_v<TTorrentMagnetImport>);
+static_assert(std::is_trivially_copyable_v<TTorrentMagnetImport>);
+static_assert(std::is_standard_layout_v<TTorrentMagnetTracker>);
+static_assert(std::is_trivially_copyable_v<TTorrentMagnetTracker>);
+static_assert(std::is_standard_layout_v<TTorrentByteRange>);
+static_assert(std::is_trivially_copyable_v<TTorrentByteRange>);
+static_assert(std::is_standard_layout_v<TTorrentFileSelectionRange>);
+static_assert(std::is_trivially_copyable_v<TTorrentFileSelectionRange>);
 static_assert(std::is_standard_layout_v<TTorrentSessionSettings>);
 static_assert(std::is_trivially_copyable_v<TTorrentSessionSettings>);
 static_assert(std::is_standard_layout_v<TTorrentNetworkStatus>);
@@ -384,8 +393,6 @@ static_assert(std::is_standard_layout_v<TTorrentAddOptions>);
 static_assert(std::is_trivially_copyable_v<TTorrentAddOptions>);
 static_assert(std::is_standard_layout_v<TTorrentOptions>);
 static_assert(std::is_trivially_copyable_v<TTorrentOptions>);
-static_assert(std::is_standard_layout_v<TTorrentSourceSecurityInspectionResult>);
-static_assert(std::is_trivially_copyable_v<TTorrentSourceSecurityInspectionResult>);
 static_assert(std::is_standard_layout_v<TTorrentOptionsResult>);
 static_assert(std::is_trivially_copyable_v<TTorrentOptionsResult>);
 static_assert(std::is_standard_layout_v<TTorrentWebSeedActivityResult>);
@@ -424,8 +431,14 @@ static_assert(sizeof(TTorrentFilePriorityEntry) == 8U);
 static_assert(alignof(TTorrentFilePriorityEntry) == 4U);
 static_assert(sizeof(TTorrentPieceMapSnapshot) == 16U);
 static_assert(alignof(TTorrentPieceMapSnapshot) == 4U);
-static_assert(sizeof(TTorrentSourceSecurityInspection) == 16U);
-static_assert(alignof(TTorrentSourceSecurityInspection) == 4U);
+static_assert(sizeof(TTorrentMagnetImport) == 68U);
+static_assert(alignof(TTorrentMagnetImport) == 4U);
+static_assert(sizeof(TTorrentMagnetTracker) == 12U);
+static_assert(alignof(TTorrentMagnetTracker) == 4U);
+static_assert(sizeof(TTorrentByteRange) == 8U);
+static_assert(alignof(TTorrentByteRange) == 4U);
+static_assert(sizeof(TTorrentFileSelectionRange) == 8U);
+static_assert(alignof(TTorrentFileSelectionRange) == 4U);
 static_assert(sizeof(TTorrentSessionSettings) == 48U);
 static_assert(offsetof(TTorrentSessionSettings, dht_discovery_policy) == 46U);
 static_assert(alignof(TTorrentSessionSettings) == 4U);
@@ -443,9 +456,6 @@ static_assert(sizeof(TTorrentAddOptions) == 78U);
 static_assert(alignof(TTorrentAddOptions) == 1U);
 static_assert(sizeof(TTorrentOptions) == 20U);
 static_assert(alignof(TTorrentOptions) == 4U);
-static_assert(sizeof(TTorrentSourceSecurityInspectionResult) == 20U);
-static_assert(alignof(TTorrentSourceSecurityInspectionResult) == 4U);
-static_assert(offsetof(TTorrentSourceSecurityInspectionResult, inspection) == 4U);
 static_assert(sizeof(TTorrentOptionsResult) == 24U);
 static_assert(alignof(TTorrentOptionsResult) == 4U);
 static_assert(offsetof(TTorrentOptionsResult, options) == 4U);
@@ -629,7 +639,12 @@ struct RemovalTombstonePayload {
     std::vector<std::string> ids;
 };
 
-using TorrentSourceCounts = TTorrentSourceSecurityInspection;
+struct TorrentSourceCounts {
+    int32_t tracker_count = 0;
+    int32_t https_tracker_count = 0;
+    int32_t web_seed_count = 0;
+    int32_t https_web_seed_count = 0;
+};
 
 using TombstoneEntriesResult = std::expected<std::vector<RemovalTombstoneEntry>, std::string>;
 using TombstoneCommitResult = std::expected<TombstoneCommitStatus, std::string>;
@@ -1122,7 +1137,13 @@ bool allow_pre_metadata_dht_from_resume_data(std::vector<char> const &buffer);
 
 void sanitize_magnet_endpoint_hints(lt::add_torrent_params &params);
 
-TorrentLoadResult parse_sanitized_magnet(std::string_view magnet);
+TorrentLoadResult import_parsed_magnet(
+    TTorrentMagnetImport const &magnet,
+    std::span<std::uint8_t const> blob,
+    std::span<TTorrentMagnetTracker const> trackers,
+    std::span<TTorrentByteRange const> web_seeds,
+    std::span<TTorrentFileSelectionRange const> file_selections
+);
 
 void sanitize_resume_endpoint_hints(lt::add_torrent_params &params) noexcept;
 

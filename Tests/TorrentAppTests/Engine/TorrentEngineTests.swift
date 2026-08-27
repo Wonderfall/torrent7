@@ -3,6 +3,7 @@ import Foundation
 import Synchronization
 import Testing
 import TorrentEngineModel
+import TorrentMetainfo
 @testable import TorrentEngineCore
 
 @Suite("Torrent engine", .serialized)
@@ -602,7 +603,9 @@ struct TorrentEngineTests {
             payloadBroker: TestPayloadBroker()
         )
         let id = try await engine.addMagnet(
-            "magnet:?xt=urn:btih:\(String(repeating: "6", count: 40))"
+            ParsedMagnet.parse(
+                "magnet:?xt=urn:btih:\(String(repeating: "6", count: 40))"
+            )
         )
 
         let batch = await engine.webSeedBatch(id: id, since: nil)
@@ -612,11 +615,14 @@ struct TorrentEngineTests {
     }
 
     @Test("Startup failure engine throws startup error for mutations")
-    func startupFailureEngineThrowsStartupErrorForMutations() async {
+    func startupFailureEngineThrowsStartupErrorForMutations() async throws {
         let engine = TorrentEngine(startupFailureMessage: "boom")
+        let magnet = try ParsedMagnet.parse(
+            "magnet:?xt=urn:btih:\(String(repeating: "6", count: 40))"
+        )
 
         await expectStartupError {
-            _ = try await engine.addMagnet("magnet:?xt=urn:btih:abc")
+            _ = try await engine.addMagnet(magnet)
         }
         await expectStartupError {
             try await engine.saveAllChecked()
@@ -708,7 +714,9 @@ struct TorrentEngineTests {
             payloadBroker: TestPayloadBroker()
         )
         let id = try await engine.addMagnet(
-            "magnet:?xt=urn:btih:\(String(repeating: "7", count: 40))"
+            ParsedMagnet.parse(
+                "magnet:?xt=urn:btih:\(String(repeating: "7", count: 40))"
+            )
         )
 
         #expect(try await engine.remove(id: id) == .removed)

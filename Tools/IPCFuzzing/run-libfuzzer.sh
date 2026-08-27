@@ -10,6 +10,7 @@ RUNS="${RUNS:-100000}"
 
 all_targets=(
     ipc_json_preflight
+    magnet_parser
     storage_broker_ipc
     storage_claim_validation
     storage_manifest
@@ -25,6 +26,9 @@ default_max_len() {
     case "$1" in
         ipc_json_preflight)
             printf '%s\n' 2097152
+            ;;
+        magnet_parser)
+            printf '%s\n' 65536
             ;;
         storage_broker_ipc)
             printf '%s\n' 65536

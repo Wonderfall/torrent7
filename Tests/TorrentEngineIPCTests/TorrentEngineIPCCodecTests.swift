@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import TorrentEngineModel
+import TorrentMetainfo
 import XPC
 @testable import TorrentEngineIPC
 
@@ -380,7 +381,7 @@ struct TorrentEngineIPCEnvelopeTests {
 
     @Test("Stable dataset and hint operation numbers")
     func stableOperationNumbers() {
-        #expect(TorrentEngineIPCProtocol.version == 11)
+        #expect(TorrentEngineIPCProtocol.version == 12)
         #expect(TorrentEngineIPCOperation(rawValue: 7) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 10) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 11) == nil)
@@ -453,6 +454,42 @@ struct TorrentEngineIPCEnvelopeTests {
             maximumBytes:
                 TorrentEngineIPCOperation.addTorrentFile.maximumRequestPayloadBytes,
             limits: TorrentEngineIPCOperation.addTorrentFile.requestJSONLimits
+        )
+    }
+
+    @Test("Maximum canonical magnet selections fit their JSON allocation profile")
+    func maximumMagnetSelectionsFit() throws {
+        let magnet = try ParsedMagnet(
+            v1InfoHash: Data(repeating: 0xA5, count: 20),
+            v2InfoHash: nil,
+            displayName: nil,
+            trackers: [],
+            webSeeds: [],
+            fileSelections: stride(
+                from: 0,
+                to: TorrentEngineLimits.maximumFileCount,
+                by: 2
+            ).map {
+                ParsedMagnet.FileSelection(
+                    firstIndex: Int32($0),
+                    lastIndex: Int32($0)
+                )
+            }
+        )
+        let request = TorrentEngineIPCAddMagnetRequest(
+            magnet: magnet,
+            startsPaused: false,
+            queuePriority: .normal,
+            enablePeerExchange: false,
+            httpsTrackerPolicy: .inherit,
+            httpsWebSeedPolicy: .inherit,
+            allowPreMetadataDHT: false
+        )
+
+        _ = try TorrentEngineIPCJSONCodec.encode(
+            request,
+            maximumBytes: TorrentEngineIPCOperation.addMagnet.maximumRequestPayloadBytes,
+            limits: TorrentEngineIPCOperation.addMagnet.requestJSONLimits
         )
     }
 

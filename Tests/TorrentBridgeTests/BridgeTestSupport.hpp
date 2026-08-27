@@ -3,6 +3,8 @@
 
 #include "TorrentBridgeInternal.hpp"
 
+#include <libtorrent/magnet_uri.hpp>
+
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -43,6 +45,91 @@ using namespace torrent_bridge::internal;
 }())
 
 namespace bridge_tests {
+
+struct ParsedMagnetFixture {
+    TTorrentMagnetImport header{};
+    std::vector<std::uint8_t> blob;
+    std::vector<TTorrentMagnetTracker> trackers;
+    std::vector<TTorrentByteRange> web_seeds;
+    std::vector<TTorrentFileSelectionRange> file_selections;
+};
+
+[[nodiscard]] inline ParsedMagnetFixture parsed_magnet_fixture(std::string_view const uri)
+{
+    lt::error_code error;
+    lt::add_torrent_params const params = lt::parse_magnet_uri(uri, error);
+    if (error) {
+        throw std::invalid_argument("Invalid test magnet: " + error.message());
+    }
+
+    ParsedMagnetFixture fixture;
+    fixture.header.schema_version = TTORRENT_MAGNET_IMPORT_SCHEMA_VERSION;
+    if (params.info_hashes.has_v1()) {
+        fixture.header.flags |= TTORRENT_MAGNET_HAS_V1;
+        std::ranges::copy(params.info_hashes.v1, fixture.header.v1_info_hash);
+    }
+    if (params.info_hashes.has_v2()) {
+        fixture.header.flags |= TTORRENT_MAGNET_HAS_V2;
+        std::ranges::copy(params.info_hashes.v2, fixture.header.v2_info_hash);
+    }
+
+    auto append = [&fixture](std::string_view const value) {
+        if (fixture.blob.size() > std::numeric_limits<std::uint32_t>::max()
+            || value.size() > std::numeric_limits<std::uint32_t>::max()
+            || value.size() > std::numeric_limits<std::uint32_t>::max() - fixture.blob.size()) {
+            throw std::length_error("Test magnet fixture is too large.");
+        }
+        TTorrentByteRange const range{
+            .offset = static_cast<std::uint32_t>(fixture.blob.size()),
+            .size = static_cast<std::uint32_t>(value.size()),
+        };
+        fixture.blob.insert(fixture.blob.end(), value.begin(), value.end());
+        return range;
+    };
+
+    if (!params.name.empty()) {
+        TTorrentByteRange const name = append(params.name);
+        fixture.header.display_name_offset = name.offset;
+        fixture.header.display_name_size = name.size;
+    }
+    fixture.trackers.reserve(params.trackers.size());
+    for (std::size_t index = 0; index < params.trackers.size(); ++index) {
+        TTorrentByteRange const range = append(params.trackers[index]);
+        fixture.trackers.push_back(TTorrentMagnetTracker{
+            .url_offset = range.offset,
+            .url_size = range.size,
+            .tier = static_cast<std::uint8_t>(
+                std::min(index, static_cast<std::size_t>(std::numeric_limits<std::uint8_t>::max()))
+            ),
+            .reserved = {},
+        });
+    }
+    fixture.web_seeds.reserve(params.url_seeds.size());
+    for (std::string const &web_seed : params.url_seeds) {
+        fixture.web_seeds.push_back(append(web_seed));
+    }
+
+    if (static_cast<bool>(params.flags & lt::torrent_flags::default_dont_download)) {
+        fixture.header.flags |= TTORRENT_MAGNET_HAS_FILE_SELECTION;
+        std::size_t index = 0U;
+        while (index < params.file_priorities.size()) {
+            if (params.file_priorities[index] == lt::dont_download) {
+                ++index;
+                continue;
+            }
+            std::size_t const first = index;
+            do {
+                ++index;
+            } while (index < params.file_priorities.size()
+                && params.file_priorities[index] != lt::dont_download);
+            fixture.file_selections.push_back(TTorrentFileSelectionRange{
+                .first_index = static_cast<int32_t>(first),
+                .last_index = static_cast<int32_t>(index - 1U),
+            });
+        }
+    }
+    return fixture;
+}
 
 class TemporaryDirectory {
 public:

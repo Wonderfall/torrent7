@@ -47,7 +47,8 @@ private func bridgeString(_ buffer: [CChar]) -> String {
 struct TorrentBridgeContractTests {
     @Test("Pins bridge ABI version, limits, states, and native event kinds")
     func pinsBridgeConstants() {
-        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 57)
+        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 58)
+        #expect(UInt32(TTORRENT_MAGNET_IMPORT_SCHEMA_VERSION) == 1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_UNKNOWN) == -1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_CHECKING_FILES) == 1)
         #expect(Int32(TTORRENT_BRIDGE_STATE_DOWNLOADING_METADATA) == 2)
@@ -157,8 +158,14 @@ struct TorrentBridgeContractTests {
         #expect(MemoryLayout<TTorrentStorageActivation>.offset(of: \.preserved_torrent_id) == 56)
         #expect(MemoryLayout<TTorrentPieceMapSnapshot>.size == 16)
         #expect(MemoryLayout<TTorrentPieceMapSnapshot>.alignment == 4)
-        #expect(MemoryLayout<TTorrentSourceSecurityInspection>.size == 16)
-        #expect(MemoryLayout<TTorrentSourceSecurityInspection>.alignment == 4)
+        #expect(MemoryLayout<TTorrentMagnetImport>.size == 68)
+        #expect(MemoryLayout<TTorrentMagnetImport>.alignment == 4)
+        #expect(MemoryLayout<TTorrentMagnetTracker>.size == 12)
+        #expect(MemoryLayout<TTorrentMagnetTracker>.alignment == 4)
+        #expect(MemoryLayout<TTorrentByteRange>.size == 8)
+        #expect(MemoryLayout<TTorrentByteRange>.alignment == 4)
+        #expect(MemoryLayout<TTorrentFileSelectionRange>.size == 8)
+        #expect(MemoryLayout<TTorrentFileSelectionRange>.alignment == 4)
         #expect(MemoryLayout<TTorrentSessionSettings>.size == 48)
         #expect(MemoryLayout<TTorrentSessionSettings>.alignment == 4)
         #expect(MemoryLayout<TTorrentSessionSettings>.offset(of: \.dht_discovery_policy) == 46)
@@ -176,9 +183,6 @@ struct TorrentBridgeContractTests {
         #expect(MemoryLayout<TTorrentAddOptions>.alignment == 1)
         #expect(MemoryLayout<TTorrentOptions>.size == 20)
         #expect(MemoryLayout<TTorrentOptions>.alignment == 4)
-        #expect(MemoryLayout<TTorrentSourceSecurityInspectionResult>.size == 20)
-        #expect(MemoryLayout<TTorrentSourceSecurityInspectionResult>.alignment == 4)
-        #expect(MemoryLayout<TTorrentSourceSecurityInspectionResult>.offset(of: \.inspection) == 4)
         #expect(MemoryLayout<TTorrentOptionsResult>.size == 24)
         #expect(MemoryLayout<TTorrentOptionsResult>.alignment == 4)
         #expect(MemoryLayout<TTorrentOptionsResult>.offset(of: \.options) == 4)
@@ -418,7 +422,11 @@ struct TorrentBridgeContractTests {
         var errorStorage = Array<CChar>(repeating: 0, count: 1_024)
         var addedID: MutableSpan<CChar>? = addedIDStorage.mutableSpan
         var error: MutableSpan<CChar>? = errorStorage.mutableSpan
-        let addResult = unsafe TorrentClientAddMagnet(
+        let addResult = unsafe TorrentClientAddParsedMagnet(
+            nil,
+            TTorrentMagnetImport(),
+            nil,
+            nil,
             nil,
             nil,
             TTorrentAddOptions(),
@@ -431,7 +439,7 @@ struct TorrentBridgeContractTests {
         error = nil
 
         #expect(addResult == 1)
-        #expect(bridgeString(errorStorage) == "Missing torrent client, magnet URI, native token, or add outcome output.")
+        #expect(bridgeString(errorStorage) == "Missing torrent client, native token, or add outcome output.")
         #expect(addOutcome == Int32(TTORRENT_ADD_REJECTED))
         #expect(nativeToken == 0)
 

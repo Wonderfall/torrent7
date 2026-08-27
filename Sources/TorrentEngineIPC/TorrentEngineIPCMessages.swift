@@ -1,5 +1,6 @@
 import Foundation
 import TorrentEngineModel
+import TorrentMetainfo
 
 package struct TorrentEngineIPCEmpty: Codable, Equatable, Sendable {
     package init() {}
@@ -48,7 +49,7 @@ package struct TorrentEngineIPCRestartRequest: Codable, Equatable, Sendable {
 }
 
 package struct TorrentEngineIPCAddMagnetRequest: Codable, Equatable, Sendable {
-    package let magnet: String
+    package let magnet: ParsedMagnet
     package let startsPaused: Bool
     package let queuePriority: TorrentQueuePriority
     package let enablePeerExchange: Bool
@@ -57,7 +58,7 @@ package struct TorrentEngineIPCAddMagnetRequest: Codable, Equatable, Sendable {
     package let allowPreMetadataDHT: Bool
 
     package init(
-        magnet: String,
+        magnet: ParsedMagnet,
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
         enablePeerExchange: Bool,

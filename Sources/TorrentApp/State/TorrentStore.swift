@@ -7,6 +7,7 @@ import System
 import TorrentEngineClient
 import TorrentEngineIPC
 import TorrentEngineModel
+import TorrentMetainfo
 import TorrentStorageAuthority
 
 private typealias AppliedNetworkBinding = TorrentNetworkBinding
@@ -1242,7 +1243,7 @@ final class TorrentStore {
                         ?? .unavailable
                 }
                 let descriptor = try preparedFolder.map { _ in
-                    try TorrentMagnetDescriptor.parse(magnet)
+                    try ParsedMagnet.parse(magnet)
                 }
                 let addedTorrentID = try await store.engine.addMagnet(
                     magnet,
@@ -1263,7 +1264,7 @@ final class TorrentStore {
                             id: UUID(),
                             torrentID: addedTorrentID,
                             originalMagnet: magnet,
-                            advertisedInfoHashes: descriptor.infoHashes,
+                            advertisedInfoHashes: try descriptor.storageInfoHashes,
                             destinationPath: preparedFolder.path,
                             operationNonce: UUID(),
                             state: .awaitingMetadata,
@@ -2616,10 +2617,10 @@ final class TorrentStore {
         guard let storageClaimJournal else {
             throw storageClaimJournalInitializationError ?? .unavailable
         }
-        let descriptor = try TorrentMagnetDescriptor.parse(
+        let descriptor = try ParsedMagnet.parse(
             initialPromotion.originalMagnet
         )
-        guard descriptor.infoHashes == initialPromotion.advertisedInfoHashes else {
+        guard try descriptor.storageInfoHashes == initialPromotion.advertisedInfoHashes else {
             throw TorrentStorageJournalError.corrupt
         }
 
@@ -2720,10 +2721,10 @@ final class TorrentStore {
               let activation = initialPromotion.activation else {
             throw TorrentStorageJournalError.invalidTransition
         }
-        let descriptor = try TorrentMagnetDescriptor.parse(
+        let descriptor = try ParsedMagnet.parse(
             initialPromotion.originalMagnet
         )
-        guard descriptor.infoHashes == initialPromotion.advertisedInfoHashes else {
+        guard try descriptor.storageInfoHashes == initialPromotion.advertisedInfoHashes else {
             throw TorrentStorageJournalError.corrupt
         }
         let torrentData = try descriptor.torrentFile(

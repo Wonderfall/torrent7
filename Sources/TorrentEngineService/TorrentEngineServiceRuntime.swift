@@ -2,6 +2,7 @@ import Foundation
 import TorrentEngineCore
 import TorrentEngineIPC
 import TorrentEngineModel
+import TorrentMetainfo
 import TorrentNetworkSecurity
 import XPC
 
@@ -824,13 +825,6 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         _ request: TorrentEngineIPCAddMagnetRequest,
         controllerLease: TorrentEngineControllerLease
     ) async throws -> String {
-        guard !request.magnet.isEmpty,
-              request.magnet.hasPrefix("magnet:?"),
-              request.magnet.utf8.count <= TorrentInputLimits.maxMagnetURIBytes,
-              !request.magnet.utf8.contains(0) else {
-            throw TorrentEngineServiceRuntimeError.invalidMagnet
-        }
-
         var nativeAddCommitted = false
         do {
             let addingEngine = try requireEngine()

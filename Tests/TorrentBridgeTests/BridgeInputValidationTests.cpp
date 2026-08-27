@@ -50,37 +50,6 @@ namespace {
     return bridge_tests::load_torrent_params(buffer, "file priority test torrent info").ti;
 }
 
-[[nodiscard]] std::string source_inspection_magnet(std::string_view query = {})
-{
-    std::string magnet = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
-    magnet.append(query);
-    return magnet;
-}
-
-[[nodiscard]] TTorrentSourceSecurityInspection inspect_magnet_sources(std::string const &magnet)
-{
-    TTorrentSourceSecurityInspectionResult const result = TorrentBridgeInspectMagnetSources(magnet.c_str());
-    REQUIRE(result.status == 0);
-    return result.inspection;
-}
-
-void check_inspection_matches_native_parse(std::string const &magnet)
-{
-    TTorrentSourceSecurityInspection const inspection = inspect_magnet_sources(magnet);
-
-    lt::error_code parse_error;
-    lt::add_torrent_params params = lt::parse_magnet_uri(magnet, parse_error);
-    REQUIRE_FALSE(parse_error);
-    sanitize_magnet_endpoint_hints(params);
-    REQUIRE(validate_torrent_sources(params).has_value());
-    TorrentSourceCounts const counts = torrent_source_counts(params);
-
-    CHECK(inspection.tracker_count == counts.tracker_count);
-    CHECK(inspection.https_tracker_count == counts.https_tracker_count);
-    CHECK(inspection.web_seed_count == counts.web_seed_count);
-    CHECK(inspection.https_web_seed_count == counts.https_web_seed_count);
-}
-
 void append_bencoded_string(std::vector<char> &buffer, std::string_view value)
 {
     std::string const size = std::to_string(value.size());
@@ -178,6 +147,22 @@ TEST_CASE("torrent metadata rejects unsafe renamed file layouts")
     std::string overlong_path = "files/";
     overlong_path.append(sizeof(TTorrentFileSnapshot::path), 'x');
     expect_rejected(RenameMap{{lt::file_index_t(0), std::move(overlong_path)}});
+}
+
+TEST_CASE("torrent loading never interprets an embedded magnet URI")
+{
+    std::string const magnet =
+        "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
+    std::vector<char> input{'d'};
+    append_bencoded_string(input, "magnet-uri");
+    append_bencoded_string(input, magnet);
+    input.push_back('e');
+
+    TorrentLoadResult const loaded = load_torrent_data(input);
+
+    REQUIRE_FALSE(loaded);
+    CHECK(loaded.error().code == 2);
+    CHECK(loaded.error().message == "The torrent file is invalid.");
 }
 
 TEST_CASE("peer source snapshots count overlapping libtorrent source flags")
@@ -364,101 +349,92 @@ TEST_CASE("source counts include trackers and web seeds")
     CHECK(counts.https_web_seed_count == 1);
 }
 
-TEST_CASE("magnet source inspection matches native parsing for case and numbered parameters")
+TEST_CASE("parsed magnet import constructs only narrow add fields")
 {
-    std::string const magnet = source_inspection_magnet(
-        "&TR.1=HTTP%3A%2F%2Ftracker.example%2Fannounce"
-        "&tr.=HTTPS%3A%2F%2Fsecure.example%2Fannounce"
-        "&tr.label=https%3A%2F%2Fignored.example%2Fannounce"
-        "&WS.2=HTTPS%3A%2F%2Fseed.example%2Ffile"
-        "&ws.label=http%3A%2F%2Fignored-seed.example%2Ffile"
+    bridge_tests::ParsedMagnetFixture const fixture = bridge_tests::parsed_magnet_fixture(
+        "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
+        "&dn=typed"
+        "&tr=https%3A%2F%2Ftracker.example%2Fannounce"
+        "&ws=https%3A%2F%2Fseed.example%2Ffile"
+        "&so=1-2"
     );
 
-    check_inspection_matches_native_parse(magnet);
-    TTorrentSourceSecurityInspection const inspection = inspect_magnet_sources(magnet);
-    CHECK(inspection.tracker_count == 2);
-    CHECK(inspection.https_tracker_count == 1);
-    CHECK(inspection.web_seed_count == 1);
-    CHECK(inspection.https_web_seed_count == 1);
-}
-
-TEST_CASE("magnet source inspection matches native authority validation and decode-once behavior")
-{
-    std::string const malformed_authorities = source_inspection_magnet(
-        "&tr=https%3A%2F%2F"
-        "&tr=https%3A%2F%2Funder_score.example%2Fannounce"
-        "&tr=https%3A%2F%2Fu%3Ap%40evil%40host.example%2Fannounce"
-        "&tr=https%3A%2F%2Fsecure.example%2Fannounce%0A"
+    TorrentLoadResult const imported = import_parsed_magnet(
+        fixture.header,
+        fixture.blob,
+        fixture.trackers,
+        fixture.web_seeds,
+        fixture.file_selections
     );
-    check_inspection_matches_native_parse(malformed_authorities);
-    CHECK(inspect_magnet_sources(malformed_authorities).tracker_count == 0);
 
-    std::string const decoded_once = source_inspection_magnet(
-        "&tr=https%3A%2F%2Ftracker.example%2Fann+ounce"
-        "&tr=https%3A%2F%2F%2565xample.com%2Fannounce"
-        "&t%72=https%3A%2F%2Fignored.example%2Fannounce"
+    REQUIRE(imported.has_value());
+    CHECK(imported->info_hashes.has_v1());
+    CHECK_FALSE(imported->info_hashes.has_v2());
+    CHECK(imported->name == "typed");
+    CHECK(imported->trackers == std::vector<std::string>{
+        "https://tracker.example/announce"
+    });
+    CHECK(imported->tracker_tiers == std::vector<int>{0});
+    CHECK(imported->url_seeds == std::vector<std::string>{
+        "https://seed.example/file"
+    });
+    REQUIRE(imported->file_priorities.size() == 3U);
+    CHECK(imported->file_priorities[0] == lt::dont_download);
+    CHECK(imported->file_priorities[1] == lt::default_priority);
+    CHECK(imported->file_priorities[2] == lt::default_priority);
+    CHECK(imported->peers.empty());
+    CHECK(imported->dht_nodes.empty());
+}
+
+TEST_CASE("parsed magnet import rejects noncanonical ranges and records")
+{
+    bridge_tests::ParsedMagnetFixture fixture = bridge_tests::parsed_magnet_fixture(
+        "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
+        "&tr=https%3A%2F%2Ftracker.example%2Fannounce"
+        "&so=1-2"
     );
-    check_inspection_matches_native_parse(decoded_once);
-    CHECK(inspect_magnet_sources(decoded_once).tracker_count == 0);
-}
 
-TEST_CASE("magnet source inspection enforces source count caps")
-{
-    std::string maximum = source_inspection_magnet();
-    for (int32_t index = 0; index < TTORRENT_MAX_TRACKER_COUNT; ++index) {
-        maximum += "&tr=http://t/a";
-    }
-    for (int32_t index = 0; index < TTORRENT_MAX_WEB_SEED_COUNT; ++index) {
-        maximum += "&ws=http://s/f";
-    }
-    REQUIRE(maximum.size() <= kMaxMagnetURIBytes);
+    fixture.header.schema_version += 1U;
+    CHECK_FALSE(import_parsed_magnet(
+        fixture.header,
+        fixture.blob,
+        fixture.trackers,
+        fixture.web_seeds,
+        fixture.file_selections
+    ));
+    fixture.header.schema_version = TTORRENT_MAGNET_IMPORT_SCHEMA_VERSION;
 
-    TTorrentSourceSecurityInspection const maximum_inspection = inspect_magnet_sources(maximum);
-    CHECK(maximum_inspection.tracker_count == TTORRENT_MAX_TRACKER_COUNT);
-    CHECK(maximum_inspection.web_seed_count == TTORRENT_MAX_WEB_SEED_COUNT);
+    fixture.blob.push_back(static_cast<std::uint8_t>('x'));
+    CHECK_FALSE(import_parsed_magnet(
+        fixture.header,
+        fixture.blob,
+        fixture.trackers,
+        fixture.web_seeds,
+        fixture.file_selections
+    ));
+    fixture.blob.pop_back();
 
-    std::string too_many_trackers = source_inspection_magnet();
-    for (int32_t index = 0; index <= TTORRENT_MAX_TRACKER_COUNT; ++index) {
-        too_many_trackers += "&tr=http://t/a";
-    }
-    REQUIRE(too_many_trackers.size() <= kMaxMagnetURIBytes);
-    TTorrentSourceSecurityInspectionResult const tracker_result =
-        TorrentBridgeInspectMagnetSources(too_many_trackers.c_str());
-    CHECK(tracker_result.status == 2);
-    CHECK(tracker_result.inspection.tracker_count == 0);
-    CHECK(tracker_result.inspection.https_tracker_count == 0);
-    CHECK(tracker_result.inspection.web_seed_count == 0);
-    CHECK(tracker_result.inspection.https_web_seed_count == 0);
+    fixture.trackers[0].url_offset += 1U;
+    CHECK_FALSE(import_parsed_magnet(
+        fixture.header,
+        fixture.blob,
+        fixture.trackers,
+        fixture.web_seeds,
+        fixture.file_selections
+    ));
+    fixture.trackers[0].url_offset -= 1U;
 
-    std::string too_many_web_seeds = source_inspection_magnet();
-    for (int32_t index = 0; index <= TTORRENT_MAX_WEB_SEED_COUNT; ++index) {
-        too_many_web_seeds += "&ws=http://s/f";
-    }
-    REQUIRE(too_many_web_seeds.size() <= kMaxMagnetURIBytes);
-    TTorrentSourceSecurityInspectionResult const web_seed_result =
-        TorrentBridgeInspectMagnetSources(too_many_web_seeds.c_str());
-    CHECK(web_seed_result.status == 2);
-    CHECK(web_seed_result.inspection.web_seed_count == 0);
-}
-
-TEST_CASE("magnet source inspection fails closed for invalid or oversized input")
-{
-    TTorrentSourceSecurityInspectionResult result = TorrentBridgeInspectMagnetSources("not-a-magnet");
-    CHECK(result.status == 2);
-    CHECK(result.inspection.tracker_count == 0);
-    CHECK(result.inspection.https_tracker_count == 0);
-    CHECK(result.inspection.web_seed_count == 0);
-    CHECK(result.inspection.https_web_seed_count == 0);
-
-    std::string oversized = source_inspection_magnet();
-    oversized.append(kMaxMagnetURIBytes, 'x');
-    result = TorrentBridgeInspectMagnetSources(oversized.c_str());
-    CHECK(result.status == 2);
-    CHECK(result.inspection.tracker_count == 0);
-
-    result = TorrentBridgeInspectMagnetSources(nullptr);
-    CHECK(result.status == 1);
-    CHECK(result.inspection.tracker_count == 0);
+    fixture.file_selections.push_back(TTorrentFileSelectionRange{
+        .first_index = 3,
+        .last_index = 4,
+    });
+    CHECK_FALSE(import_parsed_magnet(
+        fixture.header,
+        fixture.blob,
+        fixture.trackers,
+        fixture.web_seeds,
+        fixture.file_selections
+    ));
 }
 
 TEST_CASE("source validation rejects source lists above bridge limits")

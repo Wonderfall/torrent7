@@ -29,6 +29,7 @@ therefore neither treated as secret nor accepted as filesystem authority.
 | SwiftUI, Finder, notifications, preferences | Owns | None |
 | User consent and persistent security-scoped bookmarks | Owns | None |
 | Torrent manifest safety parsing | Owns an independent Swift parser | Libtorrent parses independently |
+| Magnet parsing | Owns the shared bounded Swift parser | Revalidates the typed model and imports flat records |
 | Destination selection, reservation, and mapping | Owns | None |
 | Durable storage claims and ownership evidence | Owns | None |
 | Exact payload file access | Brokers individual descriptors | Consumes brokered descriptors |
@@ -50,7 +51,7 @@ session. Identified builds require the expected application and helper signing
 identifiers from the same Team ID. Local ad-hoc integration fixtures use an
 explicit reduced-assurance mode.
 
-Command IPC version 11 uses typed, operation-specific envelopes with bounded
+Command IPC version 12 uses typed, operation-specific envelopes with bounded
 JSON and raw attachments. Requests carry an engine epoch, monotonic sequence,
 and replay identifier. The implementation bounds queue depth, nesting, value
 count, strings, raw torrent bytes, piece-map data, paged datasets, and response
@@ -428,10 +429,15 @@ retains retryable encoded data or a long-lived removal-marker index. Startup
 recovery is likewise a bounded native directory scan before libtorrent restore.
 
 Pure size, shape, and policy rules are enforced in Swift where they drive app
-behavior. Magnet and torrent acceptance still pass through libtorrent's native
-parsers, so there is no divergent Swift parser. The boundary is a small C ABI
-with Swift 6.3 safe-interop annotations and bounded owned DTOs. It does not
-depend on a Swift 6.4 language feature.
+behavior. Raw magnet text is parsed once by the shared `TorrentMetainfo` Swift
+module before XPC. The typed result is revalidated during decoding, then lowered
+to a versioned flat C ABI containing fixed hashes, fixed-width records, and
+checked ranges into one byte blob. Native code copies only those narrow fields;
+the production engine contains neither the former raw-magnet C entry point nor
+a reachable `parse_magnet_uri`. Local torrent-file acceptance still passes raw
+metainfo through libtorrent until its later typed-import cutover. The boundary
+uses Swift 6.3 safe-interop annotations and does not depend on a Swift 6.4
+language feature.
 
 Libtorrent and BoringSSL are pinned, patched, verified, and linked statically.
 The app bundle contains only the GUI and helper Mach-O executables. TLS uses the

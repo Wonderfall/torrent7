@@ -52,7 +52,9 @@ Torrent 7 has two separately sandboxed executables. The pure-Swift GUI owns
 SwiftUI state, user consent, persistent security-scoped bookmarks, storage
 claims, destination creation, and payload deletion. It talks over a versioned,
 bounded XPC protocol to a system-managed engine extension, which owns network
-access, resume state, native protocol parsing, and libtorrent. Payload I/O is
+access, resume state, remaining native protocol execution, and libtorrent.
+Magnet links are consumed by a shared bounded Swift parser and cross XPC as a
+validated typed model rather than raw text. Payload I/O is
 pathless across this boundary: the helper asks a mutually authenticated GUI
 broker for one exact file descriptor at a time. Inside the helper, a narrow C
 ABI remains the language boundary around the C++23 bridge; it is no longer part
@@ -81,8 +83,8 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
 
 - **Pure native UI:** SwiftUI for the interface, with tiny AppKit helpers only where
   macOS still requires them, such as Dock and notification integration.
-- **Process isolation:** all libtorrent, C++, torrent parsing, native persistence,
-  and torrent networking run in an App Sandbox Enhanced Security helper
+- **Process isolation:** all libtorrent, C++, remaining native torrent parsing,
+  native persistence, and torrent networking run in an App Sandbox Enhanced Security helper
   extension. The GUI executable contains no torrent-engine symbols and has no
   network entitlement. ExtensionFoundation performs application-scoped
   discovery and process launch; the client retains one process coordinator and
@@ -97,9 +99,10 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
   failures, and semantic response validation constrain both sides of the XPC
   boundary. JSON cannot alias values, so repeated decoded leaf content must
   consume repeated bounded wire bytes. Typed JSON messages are container-rooted;
-  bounded raw torrent bytes travel separately for preview and add operations,
-  while dense piece maps use a validated bit-packed `Data` field. Neither raw
-  attachment is echoed in a response. Commit-ambiguous response
+  bounded raw torrent bytes travel separately only for add operations, while
+  magnet adds carry a revalidated typed model and dense piece maps use a
+  validated bit-packed `Data` field. Raw attachments are never echoed in a
+  response. Commit-ambiguous response
   serialization failures close the controller instead of being reported as
   definite rejections. Errors
   after native add begins receive the same treatment because libtorrent may have
@@ -113,6 +116,10 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
   only untracks a torrent and retires its resume record; the GUI performs any
   authenticated payload deletion through its storage journal. The bridge is
   linked only into the engine helper extension.
+- **Typed magnet boundary:** raw magnet text terminates in a strict,
+  cancellation-aware Swift parser. The helper receives fixed hashes and bounded
+  source/selection records; C++ validates checked ranges into one borrowed byte
+  blob, copies retained data, and never calls libtorrent's magnet parser.
 - **Input bounds:** caps for torrent files, magnets, file counts, tracker/web-seed
   counts, tracker host rows, snapshots, piece-map data, XPC payloads, paged
   datasets, queued requests, file descriptors, and open peers.

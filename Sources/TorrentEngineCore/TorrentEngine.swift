@@ -2,6 +2,7 @@ import Foundation
 import Synchronization
 import TorrentBridge
 import TorrentEngineModel
+import TorrentMetainfo
 
 private func stringFromBridgeBuffer(_ buffer: [CChar]) -> String {
     let bytes = buffer.prefix { $0 != 0 }.map(UInt8.init(bitPattern:))
@@ -275,7 +276,7 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func addMagnet(
-        _ magnet: String,
+        _ magnet: ParsedMagnet,
         startsPaused: Bool = false,
         queuePriority: TorrentQueuePriority = .normal,
         enablePeerExchange: Bool = true,
@@ -284,6 +285,7 @@ private struct AddedTorrentIdentity: Sendable {
         allowPreMetadataDHT: Bool = false
     ) throws -> String {
         let client = try unsafe requireClient()
+        let bridgePayload = try TorrentMagnetBridgePayload(magnet)
         guard let requestedID = identityStore.makeCanonicalID() else {
             throw TorrentEngineError.bridgeError(
                 "A unique Swift torrent identifier could not be generated."
@@ -305,17 +307,32 @@ private struct AddedTorrentIdentity: Sendable {
             allowPreMetadataDHT: allowPreMetadataDHT
         )
         let added = try unsafe throwingBridgeAdd(capacity: Int(TTORRENT_ID_CAPACITY)) { outputBuffer, nativeToken, addOutcome, errorBuffer in
-            unsafe magnet.withCString { magnetPointer in
-                unsafe TorrentClientAddMagnet(
-                    client,
-                    magnetPointer,
-                    options,
-                    &outputBuffer,
-                    nativeToken,
-                    addOutcome,
-                    &errorBuffer
-                )
-            }
+            let blob: Span<UInt8>? = bridgePayload.blob.isEmpty
+                ? nil
+                : bridgePayload.blob.span
+            let trackers: Span<TTorrentMagnetTracker>? = bridgePayload.trackers.isEmpty
+                ? nil
+                : bridgePayload.trackers.span
+            let webSeeds: Span<TTorrentByteRange>? = bridgePayload.webSeeds.isEmpty
+                ? nil
+                : bridgePayload.webSeeds.span
+            let fileSelections: Span<TTorrentFileSelectionRange>? =
+                bridgePayload.fileSelections.isEmpty
+                    ? nil
+                    : bridgePayload.fileSelections.span
+            return unsafe TorrentClientAddParsedMagnet(
+                client,
+                bridgePayload.header,
+                blob,
+                trackers,
+                webSeeds,
+                fileSelections,
+                options,
+                &outputBuffer,
+                nativeToken,
+                addOutcome,
+                &errorBuffer
+            )
         }
         guard added.id == requestedID,
               identityStore.registerAddedTorrent(id: added.id, nativeToken: added.nativeToken) else {

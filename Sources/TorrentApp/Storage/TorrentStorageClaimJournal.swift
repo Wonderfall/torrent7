@@ -3,6 +3,7 @@ import CryptoKit
 import Foundation
 import System
 import TorrentEngineModel
+import TorrentMetainfo
 import TorrentStorageAuthority
 
 enum TorrentStorageJournalError: LocalizedError, Equatable, Sendable {
@@ -953,8 +954,8 @@ actor TorrentStorageClaimJournal {
               promotion.destinationPath.hasPrefix("/"),
               promotion.destinationPath.utf8.count <= 16 * 1_024,
               !promotion.destinationPath.utf8.contains(0),
-              (try? TorrentMagnetDescriptor.parse(promotion.originalMagnet))?
-                .infoHashes == promotion.advertisedInfoHashes else {
+              (try? ParsedMagnet.parse(promotion.originalMagnet))
+                .flatMap({ try? $0.storageInfoHashes }) == promotion.advertisedInfoHashes else {
             return false
         }
 

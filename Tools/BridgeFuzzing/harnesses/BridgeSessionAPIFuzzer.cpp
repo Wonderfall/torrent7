@@ -18,11 +18,6 @@ std::uint64_t selected_token(bridge_fuzz::ByteReader &reader, TTorrentClient *cl
     return reader.read_u64();
 }
 
-char const *maybe_null(bridge_fuzz::ByteReader &reader, std::string const &value)
-{
-    return reader.read_bool() ? nullptr : value.c_str();
-}
-
 } // namespace
 
 extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
@@ -39,14 +34,23 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
 
         switch (reader.read_u8() % 18U) {
         case 0: {
-            std::string magnet = reader.read_string(2048);
+            bridge_fuzz::MagnetImportInput const magnet =
+                bridge_fuzz::magnet_import_from_reader(reader);
             TTorrentAddOptions options = bridge_fuzz::add_options_from_reader(reader);
             bridge_fuzz::AddedIdBuffer added_id;
             std::uint64_t native_token = 0;
             int32_t add_outcome = TTORRENT_ADD_REJECTED;
-            static_cast<void>(TorrentClientAddMagnet(
+            static_cast<void>(TorrentClientAddParsedMagnet(
                 harness.client(),
-                maybe_null(reader, magnet),
+                magnet.header,
+                reader.read_bool() ? nullptr : magnet.blob.data(),
+                reader.read_bool() ? -1 : static_cast<int32_t>(magnet.blob.size()),
+                reader.read_bool() ? nullptr : magnet.trackers.data(),
+                reader.read_bool() ? -1 : static_cast<int32_t>(magnet.trackers.size()),
+                reader.read_bool() ? nullptr : magnet.web_seeds.data(),
+                reader.read_bool() ? -1 : static_cast<int32_t>(magnet.web_seeds.size()),
+                reader.read_bool() ? nullptr : magnet.file_selections.data(),
+                reader.read_bool() ? -1 : static_cast<int32_t>(magnet.file_selections.size()),
                 options,
                 reader.read_bool() ? nullptr : added_id.data(),
                 reader.read_bool() ? -1 : added_id.capacity(),

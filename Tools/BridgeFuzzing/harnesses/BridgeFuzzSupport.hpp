@@ -28,7 +28,7 @@ namespace bridge_fuzz {
 
 namespace fs = std::filesystem;
 
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 57, "Update the fuzz harnesses for the current TorrentBridge ABI.");
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 58, "Update the fuzz harnesses for the current TorrentBridge ABI.");
 #if !defined(TORRENT_USE_ASSERTS) || !TORRENT_USE_ASSERTS
 #error "Fuzz consumers must match the assertion-enabled Debug libtorrent archive."
 #endif
@@ -135,6 +135,54 @@ private:
     std::span<std::uint8_t const> bytes_;
     std::size_t offset_ = 0;
 };
+
+struct MagnetImportInput {
+    TTorrentMagnetImport header{};
+    std::vector<std::uint8_t> blob;
+    std::vector<TTorrentMagnetTracker> trackers;
+    std::vector<TTorrentByteRange> web_seeds;
+    std::vector<TTorrentFileSelectionRange> file_selections;
+};
+
+inline MagnetImportInput magnet_import_from_reader(ByteReader &reader)
+{
+    MagnetImportInput input;
+    input.header.schema_version = static_cast<std::uint32_t>(reader.read_i32());
+    input.header.flags = static_cast<std::uint32_t>(reader.read_i32());
+    for (std::uint8_t &byte : input.header.v1_info_hash) {
+        byte = reader.read_u8();
+    }
+    for (std::uint8_t &byte : input.header.v2_info_hash) {
+        byte = reader.read_u8();
+    }
+    input.header.display_name_offset = static_cast<std::uint32_t>(reader.read_i32());
+    input.header.display_name_size = static_cast<std::uint32_t>(reader.read_i32());
+
+    std::size_t const tracker_count = reader.read_u8() % 33U;
+    std::size_t const web_seed_count = reader.read_u8() % 33U;
+    std::size_t const selection_count = reader.read_u8() % 33U;
+    input.trackers.resize(tracker_count);
+    for (TTorrentMagnetTracker &tracker : input.trackers) {
+        tracker.url_offset = static_cast<std::uint32_t>(reader.read_i32());
+        tracker.url_size = static_cast<std::uint32_t>(reader.read_i32());
+        tracker.tier = reader.read_u8();
+        for (std::uint8_t &byte : tracker.reserved) {
+            byte = reader.read_u8();
+        }
+    }
+    input.web_seeds.resize(web_seed_count);
+    for (TTorrentByteRange &web_seed : input.web_seeds) {
+        web_seed.offset = static_cast<std::uint32_t>(reader.read_i32());
+        web_seed.size = static_cast<std::uint32_t>(reader.read_i32());
+    }
+    input.file_selections.resize(selection_count);
+    for (TTorrentFileSelectionRange &selection : input.file_selections) {
+        selection.first_index = reader.read_i32();
+        selection.last_index = reader.read_i32();
+    }
+    input.blob = reader.read_bytes(8U * 1024U);
+    return input;
+}
 
 inline std::string input_to_string(std::uint8_t const *data, std::size_t size, std::size_t max_size)
 {

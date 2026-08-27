@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import TorrentMetainfo
 import TorrentStorageAuthority
 
 private struct StorageAuthorityByteCursor {
@@ -639,6 +640,43 @@ private enum StorageManifestFuzzer {
     }
 }
 
+private enum MagnetParserFuzzer {
+    static func exercise(_ data: Data) {
+        if let strict = String(data: data, encoding: .utf8) {
+            exerciseCandidate(strict)
+        }
+        exerciseCandidate(String(decoding: data, as: UTF8.self))
+    }
+
+    private static func exerciseCandidate(_ candidate: String) {
+        guard let parsed = try? ParsedMagnet.parse(candidate) else {
+            return
+        }
+        fuzzAssert(parsed.v1InfoHash?.count == nil || parsed.v1InfoHash?.count == 20)
+        fuzzAssert(parsed.v2InfoHash?.count == nil || parsed.v2InfoHash?.count == 32)
+        fuzzAssert(parsed.v1InfoHash != nil || parsed.v2InfoHash != nil)
+        fuzzAssert(parsed.trackers.count <= 2_000)
+        fuzzAssert(parsed.webSeeds.count <= 2_000)
+        if let selections = parsed.fileSelections {
+            var previousLast: Int32?
+            for selection in selections {
+                fuzzAssert(selection.firstIndex >= 0)
+                fuzzAssert(selection.firstIndex <= selection.lastIndex)
+                fuzzAssert(selection.lastIndex < 20_000)
+                fuzzAssert(previousLast.map { selection.firstIndex > $0 + 1 } ?? true)
+                previousLast = selection.lastIndex
+            }
+        }
+
+        guard let encoded = try? JSONEncoder().encode(parsed),
+              let decoded = try? JSONDecoder().decode(ParsedMagnet.self, from: encoded) else {
+            Darwin.abort()
+        }
+        fuzzAssert(decoded == parsed)
+        fuzzAssert((try? ParsedMagnet.parse(candidate)) == parsed)
+    }
+}
+
 private func fuzzData(
     _ bytes: UnsafePointer<UInt8>?,
     _ byteCount: UInt
@@ -682,5 +720,18 @@ public func torrentStorageManifestFuzzOneInput(
     }
     autoreleasepool {
         StorageManifestFuzzer.exercise(data)
+    }
+}
+
+@_cdecl("TorrentMagnetParserFuzzOneInput")
+public func torrentMagnetParserFuzzOneInput(
+    _ bytes: UnsafePointer<UInt8>?,
+    _ byteCount: UInt
+) {
+    guard let data = fuzzData(bytes, byteCount) else {
+        return
+    }
+    autoreleasepool {
+        MagnetParserFuzzer.exercise(data)
     }
 }

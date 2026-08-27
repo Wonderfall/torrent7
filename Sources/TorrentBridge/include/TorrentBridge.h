@@ -100,7 +100,11 @@ inline constexpr uint8_t TTORRENT_DHT_STATUS_RUNNING = 2;
 inline constexpr uint8_t TTORRENT_CONTENT_KIND_UNKNOWN = 0;
 inline constexpr uint8_t TTORRENT_CONTENT_KIND_SINGLE_FILE = 1;
 inline constexpr uint8_t TTORRENT_CONTENT_KIND_DIRECTORY = 2;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 57;
+inline constexpr uint32_t TTORRENT_MAGNET_IMPORT_SCHEMA_VERSION = 1;
+inline constexpr uint32_t TTORRENT_MAGNET_HAS_V1 = 1U << 0U;
+inline constexpr uint32_t TTORRENT_MAGNET_HAS_V2 = 1U << 1U;
+inline constexpr uint32_t TTORRENT_MAGNET_HAS_FILE_SELECTION = 1U << 2U;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 58;
 namespace torrent_bridge::internal {
 struct TTorrentClient;
 }
@@ -171,7 +175,11 @@ enum {
     TTORRENT_CONTENT_KIND_UNKNOWN = 0,
     TTORRENT_CONTENT_KIND_SINGLE_FILE = 1,
     TTORRENT_CONTENT_KIND_DIRECTORY = 2,
-    TTORRENT_BRIDGE_ABI_VERSION = 57
+    TTORRENT_MAGNET_IMPORT_SCHEMA_VERSION = 1,
+    TTORRENT_MAGNET_HAS_V1 = 1U << 0U,
+    TTORRENT_MAGNET_HAS_V2 = 1U << 1U,
+    TTORRENT_MAGNET_HAS_FILE_SELECTION = 1U << 2U,
+    TTORRENT_BRIDGE_ABI_VERSION = 58
 };
 #endif
 
@@ -311,12 +319,33 @@ typedef struct TTorrentPieceMapSnapshot {
     uint8_t map_truncated;
 } TTorrentPieceMapSnapshot;
 
-typedef struct TTorrentSourceSecurityInspection {
-    int32_t tracker_count;
-    int32_t https_tracker_count;
-    int32_t web_seed_count;
-    int32_t https_web_seed_count;
-} TTorrentSourceSecurityInspection;
+// Parsed magnets cross the native boundary as fixed hashes and checked ranges
+// into one borrowed byte blob. No record contains a nested pointer.
+typedef struct TTorrentMagnetImport {
+    uint32_t schema_version;
+    uint32_t flags;
+    uint8_t v1_info_hash[20];
+    uint8_t v2_info_hash[32];
+    uint32_t display_name_offset;
+    uint32_t display_name_size;
+} TTorrentMagnetImport;
+
+typedef struct TTorrentMagnetTracker {
+    uint32_t url_offset;
+    uint32_t url_size;
+    uint8_t tier;
+    uint8_t reserved[3];
+} TTorrentMagnetTracker;
+
+typedef struct TTorrentByteRange {
+    uint32_t offset;
+    uint32_t size;
+} TTorrentByteRange;
+
+typedef struct TTorrentFileSelectionRange {
+    int32_t first_index;
+    int32_t last_index;
+} TTorrentFileSelectionRange;
 
 typedef struct TTorrentSessionSettings {
     int32_t download_rate_limit;
@@ -413,11 +442,6 @@ typedef struct TTorrentOptions {
     int32_t queue_priority;
 } TTorrentOptions;
 
-typedef struct TTorrentSourceSecurityInspectionResult {
-    int32_t status;
-    TTorrentSourceSecurityInspection inspection;
-} TTorrentSourceSecurityInspectionResult;
-
 typedef struct TTorrentOptionsResult {
     int32_t status;
     TTorrentOptions options;
@@ -496,13 +520,6 @@ typedef struct TTorrentStorageActivation {
 const char * TORRENT_BRIDGE_NONNULL TORRENT_BRIDGE_NULL_TERMINATED TorrentBridgeLibtorrentVersion(void)
     TORRENT_BRIDGE_NOEXCEPT;
 
-// Parses and sanitizes the magnet with the same native path used by add.
-// result.status is 0 only when all sources are valid and within the bridge
-// limits; the inspection is zeroed on failure.
-TTorrentSourceSecurityInspectionResult TorrentBridgeInspectMagnetSources(
-    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED magnet_uri TORRENT_BRIDGE_NOESCAPE
-) TORRENT_BRIDGE_NOEXCEPT;
-
 // Returns an owned client handle. Release it exactly once with
 // TorrentClientDestroy. The broker context is retained synchronously before
 // construction and released after every provider and disk worker is quiescent.
@@ -556,9 +573,21 @@ int32_t TorrentClientDrainPresentationMetadata(
 // not yet proven, and COMMITTED only after every bridge invariant and durable
 // bookkeeping step succeeds. A failed call may therefore be distinguished as
 // a definite rejection or a commit-ambiguous failure without replaying it.
-int32_t TorrentClientAddMagnet(
+int32_t TorrentClientAddParsedMagnet(
     TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
-    const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED magnet_uri TORRENT_BRIDGE_NOESCAPE,
+    TTorrentMagnetImport magnet,
+    const uint8_t * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(blob_size)
+        blob TORRENT_BRIDGE_NOESCAPE,
+    int32_t blob_size,
+    const TTorrentMagnetTracker * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(tracker_count)
+        trackers TORRENT_BRIDGE_NOESCAPE,
+    int32_t tracker_count,
+    const TTorrentByteRange * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(web_seed_count)
+        web_seeds TORRENT_BRIDGE_NOESCAPE,
+    int32_t web_seed_count,
+    const TTorrentFileSelectionRange * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(file_selection_count)
+        file_selections TORRENT_BRIDGE_NOESCAPE,
+    int32_t file_selection_count,
     TTorrentAddOptions options,
     char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(added_id_capacity) added_id_out TORRENT_BRIDGE_NOESCAPE,
     int32_t added_id_capacity,

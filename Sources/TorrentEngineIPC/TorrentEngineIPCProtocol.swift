@@ -3,7 +3,7 @@ import TorrentEngineModel
 import XPC
 
 package enum TorrentEngineIPCProtocol {
-    package static let version: UInt64 = 11
+    package static let version: UInt64 = 12
 }
 
 package enum TorrentEngineIPCLimits {
@@ -28,8 +28,10 @@ package enum TorrentEngineIPCLimits {
         maximumPrimitiveByteCount: maximumJSONPrimitiveByteCountLimit
     )
     package static let magnetRequestJSONLimits = TorrentEngineIPCJSONLimits(
-        maximumNestingDepth: 8,
-        maximumValueNodeCount: 256,
+        maximumNestingDepth: 10,
+        // A canonical select-only list can contain 10,000 disjoint ranges.
+        // Each range expands to an object, two keys, and two integer values.
+        maximumValueNodeCount: 64 * 1_024,
         maximumStringByteCount: TorrentInputLimits.maxMagnetURIBytes * 6,
         maximumPrimitiveByteCount: maximumJSONPrimitiveByteCountLimit
     )

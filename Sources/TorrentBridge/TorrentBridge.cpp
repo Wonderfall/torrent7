@@ -1446,32 +1446,6 @@ extern "C" const char *TorrentBridgeLibtorrentVersion(void) noexcept
     return LIBTORRENT_VERSION;
 }
 
-extern "C" TTorrentSourceSecurityInspectionResult TorrentBridgeInspectMagnetSources(
-    const char *magnet_uri
-) noexcept
-{
-    TTorrentSourceSecurityInspectionResult output{};
-    output.status = run_bridge_operation({}, 3, [&]() -> BridgeResult {
-        if (magnet_uri == nullptr) {
-            return bridge_error(1, "Missing magnet URI.");
-        }
-
-        TorrentLoadResult parsed = parse_sanitized_magnet(c_string_view(magnet_uri));
-        if (!parsed) {
-            return std::unexpected(parsed.error());
-        }
-
-        BridgeResult const valid_sources = validate_torrent_sources(*parsed);
-        if (!valid_sources) {
-            return valid_sources;
-        }
-
-        output.inspection = torrent_source_counts(*parsed);
-        return {};
-    });
-    return output;
-}
-
 extern "C" TTorrentClient *TorrentClientCreateWithError(
     const char *state_path,
     uint8_t enable_pex_plugin,
@@ -1609,12 +1583,25 @@ extern "C" int32_t TorrentClientDrainPresentationMetadata(
     }
 }
 
-extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *magnet_uri,
-                                          TTorrentAddOptions options,
-                                          char *added_id_out, int32_t added_id_capacity,
-                                          std::uint64_t *native_token_out,
-                                          int32_t *add_outcome_out,
-                                          char *error_out, int32_t error_capacity) noexcept
+extern "C" int32_t TorrentClientAddParsedMagnet(
+    TTorrentClient *client,
+    TTorrentMagnetImport magnet,
+    std::uint8_t const *blob,
+    int32_t blob_size,
+    TTorrentMagnetTracker const *trackers,
+    int32_t tracker_count,
+    TTorrentByteRange const *web_seeds,
+    int32_t web_seed_count,
+    TTorrentFileSelectionRange const *file_selections,
+    int32_t file_selection_count,
+    TTorrentAddOptions options,
+    char *added_id_out,
+    int32_t added_id_capacity,
+    std::uint64_t *native_token_out,
+    int32_t *add_outcome_out,
+    char *error_out,
+    int32_t error_capacity
+) noexcept
 {
     if (add_outcome_out != nullptr) {
         *add_outcome_out = TTORRENT_ADD_REJECTED;
@@ -1626,13 +1613,19 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
     std::span<char> const added_id_buffer = output_buffer(added_id_out, added_id_capacity);
     copy_string_dynamic(added_id_buffer, "");
     int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 4, [&]() -> BridgeResult {
-        if (client == nullptr || magnet_uri == nullptr || native_token_out == nullptr || add_outcome_out == nullptr) {
-            return bridge_error(1, "Missing torrent client, magnet URI, native token, or add outcome output.");
+        if (client == nullptr || native_token_out == nullptr || add_outcome_out == nullptr) {
+            return bridge_error(1, "Missing torrent client, native token, or add outcome output.");
         }
         TTorrentAddOptions const &add_options = options;
-        std::string_view const magnet = c_string_view(magnet_uri);
-        if (magnet.size() > kMaxMagnetURIBytes) {
-            return bridge_error(2, "The magnet link is too large.");
+        if (blob_size < 0
+            || tracker_count < 0
+            || web_seed_count < 0
+            || file_selection_count < 0
+            || (blob_size > 0 && blob == nullptr)
+            || (tracker_count > 0 && trackers == nullptr)
+            || (web_seed_count > 0 && web_seeds == nullptr)
+            || (file_selection_count > 0 && file_selections == nullptr)) {
+            return bridge_error(1, "Invalid parsed magnet buffers.");
         }
         if (!is_valid_queue_priority(add_options.queue_priority)) {
             return bridge_error(1, "Invalid queue priority.");
@@ -1652,7 +1645,13 @@ extern "C" int32_t TorrentClientAddMagnet(TTorrentClient *client, const char *ma
         if (!admission) {
             return admission;
         }
-        TorrentLoadResult parsed = parse_sanitized_magnet(magnet);
+        TorrentLoadResult parsed = import_parsed_magnet(
+            magnet,
+            input_span_from_c_buffer(blob, blob_size),
+            input_span_from_c_buffer(trackers, tracker_count),
+            input_span_from_c_buffer(web_seeds, web_seed_count),
+            input_span_from_c_buffer(file_selections, file_selection_count)
+        );
         if (!parsed) {
             return std::unexpected(parsed.error());
         }

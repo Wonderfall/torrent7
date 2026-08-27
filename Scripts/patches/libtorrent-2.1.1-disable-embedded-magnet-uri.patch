@@ -1,0 +1,39 @@
+diff --git a/src/load_torrent.cpp b/src/load_torrent.cpp
+--- a/src/load_torrent.cpp
++++ b/src/load_torrent.cpp
+@@ -7,6 +7,8 @@ You may use, distribute and modify this code under the terms of the BSD license,
+ see LICENSE file.
+ */
+ 
++#include <set>
++
+ #include "libtorrent/load_torrent.hpp"
+ #include "libtorrent/torrent_info.hpp"
+ #include "libtorrent/file_storage.hpp"
+@@ -16,7 +18,6 @@ see LICENSE file.
+ #include "libtorrent/aux_/file_pointer.hpp"
+ #include "libtorrent/aux_/path.hpp"
+ #include "libtorrent/aux_/escape_string.hpp" // maybe_url_encode
+-#include "libtorrent/magnet_uri.hpp"
+ #include "libtorrent/aux_/string_util.hpp" // for is_i2p_url, ltrim, ensure_trailing_slash
+ #include "libtorrent/aux_/resolve_duplicate_filenames.hpp"
+ #include "libtorrent/aux_/parse_url.hpp" // for is_valid_tracker_url
+@@ -159,13 +160,6 @@ namespace aux {
+ 		bdecode_node const info = torrent_file.dict_find_dict("info");
+ 		if (!info)
+ 		{
+-			bdecode_node const uri = torrent_file.dict_find_string("magnet-uri");
+-			if (uri)
+-			{
+-				parse_magnet_uri(uri.string_value(), out, ec);
+-				return {};
+-			}
+-
+ 			ec = errors::torrent_missing_info;
+ 			return {};
+ 		}
+@@ -407,4 +401,3 @@ namespace aux {
+ 	}
+ 
+ }
+-

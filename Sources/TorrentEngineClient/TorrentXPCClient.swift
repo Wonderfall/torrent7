@@ -2,6 +2,7 @@ import Foundation
 import Synchronization
 import TorrentEngineIPC
 import TorrentEngineModel
+import TorrentMetainfo
 import XPC
 
 package enum TorrentEngineConnectionRetryMode: Equatable, Sendable {
@@ -412,10 +413,16 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride,
         allowPreMetadataDHT: Bool
     ) async throws -> String {
+        let parsedMagnet = try ParsedMagnet.parse(
+            magnet,
+            checkCancellation: {
+                try Task.checkCancellation()
+            }
+        )
         let response: TorrentEngineIPCAddedTorrentResponse = try await invoke(
             .addMagnet,
             TorrentEngineIPCAddMagnetRequest(
-                magnet: magnet,
+                magnet: parsedMagnet,
                 startsPaused: startsPaused,
                 queuePriority: queuePriority,
                 enablePeerExchange: enablePeerExchange,

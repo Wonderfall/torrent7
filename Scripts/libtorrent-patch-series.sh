@@ -30,6 +30,7 @@ readonly -a LIBTORRENT_PATCHES=(
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-current-dht-fallback.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-dht-disable-late-response.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-revive-removed-web-seeds.patch"
+    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-disable-embedded-magnet-uri.patch"
 )
 
 fail() {

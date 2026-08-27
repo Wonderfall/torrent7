@@ -14,6 +14,9 @@ Scripts/verify-xcode.zsh
 
 - `ipc_json_preflight` feeds arbitrary bytes and both limit profiles to the
   production bounded JSON allocation preflight.
+- `magnet_parser` feeds arbitrary UTF-8 and replacement-decoded text to the
+  shared Swift magnet parser and checks typed Codable round trips and canonical
+  file selections.
 - `storage_broker_ipc` generates typed, malformed raw XPC dictionaries and
   exercises strict request/reply decoding, exact-key rejection, bounded binary
   fields, descriptor ownership, and canonical round trips.
@@ -25,9 +28,10 @@ Scripts/verify-xcode.zsh
   deterministic parsing, advertised hash enforcement, canonical file indices,
   safe paths, and independently reproduced source digests.
 
-The claim and manifest targets depend on the same `TorrentStorageAuthority`
-module used by the app. SwiftPM links that production module into a fuzz-only
-dynamic library; no fuzz hook or conditional is linked into the app.
+The magnet, claim, and manifest targets depend on the same `TorrentMetainfo`
+and `TorrentStorageAuthority` modules used by the app. SwiftPM links those
+production modules into a fuzz-only dynamic library; no fuzz hook or
+conditional is linked into the app.
 
 ## Build and run
 

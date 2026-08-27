@@ -2,6 +2,7 @@ import CryptoKit
 import Foundation
 import Testing
 import TorrentEngineModel
+import TorrentMetainfo
 import TorrentStorageAuthority
 @testable import TorrentApp
 
@@ -194,9 +195,9 @@ struct TorrentManifestParserTests {
             "ws=https%3A%2F%2Fseed.example%2Fhybrid.bin",
         ].joined(separator: "&")
 
-        let descriptor = try TorrentMagnetDescriptor.parse(magnet)
-        #expect(descriptor.infoHashes == original.manifest.infoHashes)
-        #expect(descriptor.trackers == [
+        let descriptor = try ParsedMagnet.parse(magnet)
+        #expect(try descriptor.storageInfoHashes == original.manifest.infoHashes)
+        #expect(descriptor.trackers.map(\.url) == [
             "https://tracker.example/announce",
             "udp://tracker.example:80",
         ])
@@ -221,12 +222,12 @@ struct TorrentManifestParserTests {
             Self.v1SingleFile(name: "sample.bin", size: 5)
         )
         let v1 = try #require(parsed.manifest.infoHashes.v1)
-        let descriptor = try TorrentMagnetDescriptor.parse(
+        let descriptor = try ParsedMagnet.parse(
             "magnet:?xt=urn:btih:\(Self.base32(v1).lowercased())"
         )
 
-        #expect(descriptor.infoHashes.v1 == v1)
-        #expect(descriptor.infoHashes.v2 == nil)
+        #expect(descriptor.v1InfoHash == v1)
+        #expect(descriptor.v2InfoHash == nil)
     }
 
     @Test("Magnet descriptors reject conflicting exact topics")
@@ -234,8 +235,8 @@ struct TorrentManifestParserTests {
         let first = String(repeating: "0", count: 40)
         let second = String(repeating: "1", count: 40)
 
-        #expect(throws: TorrentMagnetDescriptorError.conflictingInfoHashes) {
-            _ = try TorrentMagnetDescriptor.parse(
+        #expect(throws: ParsedMagnetError.conflictingInfoHashes) {
+            _ = try ParsedMagnet.parse(
                 "magnet:?xt=urn:btih:\(first)&xt=urn:btih:\(second)"
             )
         }
