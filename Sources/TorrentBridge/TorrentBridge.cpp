@@ -648,6 +648,435 @@ std::shared_ptr<lt::torrent_info> BridgeSwarmMetadataParser::parse(
     }
 }
 
+namespace {
+
+[[nodiscard]] bool valid_extension_id(int32_t const value) noexcept
+{
+    return value >= -1 && value <= 255;
+}
+
+[[nodiscard]] bool valid_extension_ids(
+    std::array<int32_t, 5U> const &identifiers
+)
+{
+    for (std::size_t index = 0U; index < identifiers.size(); ++index) {
+        int32_t const identifier = identifiers.at(index);
+        if (!valid_extension_id(identifier)) {
+            return false;
+        }
+        if (identifier <= 0) {
+            continue;
+        }
+        for (std::size_t previous = 0U; previous < index; ++previous) {
+            if (identifiers.at(previous) == identifier) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+struct PeerAddressBits {
+    std::uint64_t high = 0U;
+    std::uint64_t low = 0U;
+    std::uint8_t family = 0U;
+};
+
+[[nodiscard]] std::optional<lt::address> peer_address(PeerAddressBits const bits)
+{
+    if (bits.family == TTORRENT_PEER_ADDRESS_IPV4) {
+        if (bits.high != 0U || bits.low == 0U
+            || bits.low > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())) {
+            return std::nullopt;
+        }
+        lt::address_v4::bytes_type bytes{};
+        auto const value = static_cast<std::uint32_t>(bits.low);
+        for (std::size_t index = 0U; index < bytes.size(); ++index) {
+            auto const shift = static_cast<unsigned int>((bytes.size() - index - 1U) * 8U);
+            bytes.at(index) = static_cast<std::uint8_t>(value >> shift);
+        }
+        if (bytes.front() >= 224U || value == std::numeric_limits<std::uint32_t>::max()) {
+            return std::nullopt;
+        }
+        return lt::address_v4(bytes);
+    }
+    if (bits.family == TTORRENT_PEER_ADDRESS_IPV6) {
+        if ((bits.high == 0U && bits.low == 0U)
+            || static_cast<std::uint8_t>(bits.high >> 56U) == 0xffU
+            || (bits.high == 0U && (bits.low >> 32U) == 0xffffU)) {
+            return std::nullopt;
+        }
+        lt::address_v6::bytes_type bytes{};
+        for (std::size_t index = 0U; index < 8U; ++index) {
+            auto const shift = static_cast<unsigned int>((7U - index) * 8U);
+            bytes.at(index) = static_cast<std::uint8_t>(bits.high >> shift);
+            bytes.at(index + 8U) = static_cast<std::uint8_t>(bits.low >> shift);
+        }
+        return lt::address_v6(bytes);
+    }
+    return std::nullopt;
+}
+
+} // namespace
+
+BridgePeerMessageParser::BridgePeerMessageParser(
+    TTorrentPeerProtocolParserCallbacks const callbacks
+)
+    : callbacks_{
+        .context = callbacks.context,
+        .retain_context = callbacks.retain_context,
+        .release_context = callbacks.release_context,
+        .parse_extension_handshake = callbacks.parse_extension_handshake,
+        .parse_metadata_message = callbacks.parse_metadata_message,
+        .parse_peer_exchange = callbacks.parse_peer_exchange,
+    }
+{
+    if (callbacks_.context == nullptr
+        || callbacks_.retain_context == nullptr
+        || callbacks_.release_context == nullptr
+        || callbacks_.parse_extension_handshake == nullptr
+        || callbacks_.parse_metadata_message == nullptr
+        || callbacks_.parse_peer_exchange == nullptr) {
+        throw std::invalid_argument("The peer protocol parser callback table is incomplete.");
+    }
+    retained_ = callbacks_.retain_context(callbacks_.context) != 0U;
+    if (!retained_) {
+        throw std::invalid_argument("The peer protocol parser context is unavailable.");
+    }
+}
+
+BridgePeerMessageParser::~BridgePeerMessageParser()
+{
+    if (retained_) {
+        callbacks_.release_context(callbacks_.context);
+    }
+}
+
+bool BridgePeerMessageParser::parse_extension_handshake(
+    lt::span<char const> const message,
+    lt::aux::extension_handshake &result,
+    lt::error_code &error
+) noexcept
+{
+    try {
+        if (message.empty()
+            || std::cmp_greater(message.size(), TTORRENT_MAX_EXTENSION_HANDSHAKE_BYTES)) {
+            error = lt::errors::invalid_extended;
+            return false;
+        }
+        std::array<std::uint8_t, TTORRENT_MAX_PEER_CLIENT_VERSION_BYTES> client_version{};
+        TTorrentExtensionHandshakeResult parsed{};
+        parsed.ut_metadata_id = -1;
+        parsed.ut_pex_id = -1;
+        parsed.upload_only_id = -1;
+        parsed.holepunch_id = -1;
+        parsed.dont_have_id = -1;
+        int32_t const status = callbacks_.parse_extension_handshake(
+            callbacks_.context,
+            message.data(),
+            static_cast<int32_t>(message.size()),
+            client_version.data(),
+            static_cast<int32_t>(client_version.size()),
+            &parsed
+        );
+        constexpr std::uint32_t known_fields =
+            TTORRENT_HANDSHAKE_HAS_METADATA_SIZE
+            | TTORRENT_HANDSHAKE_HAS_LISTEN_PORT
+            | TTORRENT_HANDSHAKE_HAS_LAST_SEEN_COMPLETE
+            | TTORRENT_HANDSHAKE_HAS_REQUEST_QUEUE
+            | TTORRENT_HANDSHAKE_HAS_CLIENT_VERSION
+            | TTORRENT_HANDSHAKE_HAS_EXTERNAL_ADDRESS
+            | TTORRENT_HANDSHAKE_HAS_UPLOAD_ONLY;
+        if (status != 0
+            || parsed.reserved != 0U
+            || (parsed.present_fields & ~known_fields) != 0U
+            || !valid_extension_ids({
+                parsed.ut_metadata_id,
+                parsed.ut_pex_id,
+                parsed.upload_only_id,
+                parsed.holepunch_id,
+                parsed.dont_have_id,
+            })) {
+            error = lt::errors::invalid_extended;
+            return false;
+        }
+
+        lt::aux::extension_handshake imported;
+        imported.ut_metadata_id = parsed.ut_metadata_id;
+        imported.ut_pex_id = parsed.ut_pex_id;
+        imported.upload_only_id = parsed.upload_only_id;
+        imported.holepunch_id = parsed.holepunch_id;
+        imported.dont_have_id = parsed.dont_have_id;
+
+        auto const has = [&](std::uint32_t const field) {
+            return (parsed.present_fields & field) != 0U;
+        };
+        if (has(TTORRENT_HANDSHAKE_HAS_METADATA_SIZE)) {
+            if (parsed.metadata_size < 0 || parsed.metadata_size > 4 * 1024 * 1024) {
+                error = lt::errors::invalid_extended;
+                return false;
+            }
+            imported.metadata_size = parsed.metadata_size;
+        } else if (parsed.metadata_size != 0) {
+            error = lt::errors::invalid_extended;
+            return false;
+        }
+        if (has(TTORRENT_HANDSHAKE_HAS_LISTEN_PORT)) {
+            if (parsed.listen_port <= 0
+                || parsed.listen_port > 65'535) {
+                error = lt::errors::invalid_extended;
+                return false;
+            }
+            imported.listen_port = parsed.listen_port;
+        } else if (parsed.listen_port != 0) {
+            error = lt::errors::invalid_extended;
+            return false;
+        }
+        if (has(TTORRENT_HANDSHAKE_HAS_LAST_SEEN_COMPLETE)) {
+            if (parsed.last_seen_complete < 0) {
+                error = lt::errors::invalid_extended;
+                return false;
+            }
+            imported.last_seen_complete = parsed.last_seen_complete;
+        } else if (parsed.last_seen_complete != 0) {
+            error = lt::errors::invalid_extended;
+            return false;
+        }
+        if (has(TTORRENT_HANDSHAKE_HAS_REQUEST_QUEUE)) {
+            if (parsed.request_queue_limit < 0
+                || parsed.request_queue_limit > 65'535) {
+                error = lt::errors::invalid_extended;
+                return false;
+            }
+            imported.request_queue_limit = parsed.request_queue_limit;
+        } else if (parsed.request_queue_limit != 0) {
+            error = lt::errors::invalid_extended;
+            return false;
+        }
+        if (has(TTORRENT_HANDSHAKE_HAS_CLIENT_VERSION)) {
+            if (parsed.client_version_size <= 0
+                || std::cmp_greater(parsed.client_version_size, client_version.size())) {
+                error = lt::errors::invalid_extended;
+                return false;
+            }
+            std::string version;
+            version.reserve(static_cast<std::size_t>(parsed.client_version_size));
+            for (std::uint8_t const byte : std::span(client_version).first(
+                static_cast<std::size_t>(parsed.client_version_size)
+            )) {
+                version.push_back(static_cast<char>(byte));
+            }
+            imported.client_version = std::move(version);
+        } else if (parsed.client_version_size != 0) {
+            error = lt::errors::invalid_extended;
+            return false;
+        }
+        if (has(TTORRENT_HANDSHAKE_HAS_EXTERNAL_ADDRESS)) {
+            imported.external_address = peer_address(PeerAddressBits{
+                .high = parsed.address_high,
+                .low = parsed.address_low,
+                .family = parsed.address_family,
+            });
+            if (!imported.external_address) {
+                error = lt::errors::invalid_extended;
+                return false;
+            }
+        } else if (parsed.address_family != 0U
+            || parsed.address_high != 0U || parsed.address_low != 0U) {
+            error = lt::errors::invalid_extended;
+            return false;
+        }
+        if (has(TTORRENT_HANDSHAKE_HAS_UPLOAD_ONLY)) {
+            if (parsed.upload_only > 1U) {
+                error = lt::errors::invalid_extended;
+                return false;
+            }
+            imported.upload_only = parsed.upload_only != 0U;
+        } else if (parsed.upload_only != 0U) {
+            error = lt::errors::invalid_extended;
+            return false;
+        }
+
+        result = std::move(imported);
+        error.clear();
+        return true;
+    } catch (...) {
+        error = lt::errors::invalid_extended;
+        return false;
+    }
+}
+
+bool BridgePeerMessageParser::parse_ut_metadata(
+    lt::span<char const> const message,
+    lt::aux::ut_metadata_message &result,
+    lt::error_code &error
+) noexcept
+{
+    try {
+        if (message.empty()
+            || std::cmp_greater(message.size(), TTORRENT_MAX_METADATA_MESSAGE_BYTES)) {
+            error = lt::errors::invalid_metadata_message;
+            return false;
+        }
+        TTorrentMetadataMessageResult parsed{};
+        int32_t const status = callbacks_.parse_metadata_message(
+            callbacks_.context,
+            message.data(),
+            static_cast<int32_t>(message.size()),
+            &parsed
+        );
+        if (status != 0 || parsed.reserved0 != 0U || parsed.reserved1 != 0U
+            || parsed.piece < 0 || parsed.has_total_size > 1U
+            || parsed.payload_offset <= 0 || parsed.payload_size < 0
+            || parsed.payload_offset > static_cast<int32_t>(message.size())
+            || parsed.payload_size
+                != static_cast<int32_t>(message.size()) - parsed.payload_offset
+            || (parsed.has_total_size == 0U && parsed.total_size != 0)
+            || (parsed.has_total_size != 0U
+                && (parsed.total_size < 0 || parsed.total_size > 4 * 1024 * 1024))) {
+            error = lt::errors::invalid_metadata_message;
+            return false;
+        }
+
+        lt::aux::ut_metadata_message imported;
+        imported.raw_type = parsed.raw_message_type;
+        imported.piece = parsed.piece;
+        imported.total_size = parsed.has_total_size != 0U ? parsed.total_size : 0;
+        imported.payload_offset = parsed.payload_offset;
+        imported.payload_size = parsed.payload_size;
+        switch (parsed.kind) {
+        case TTORRENT_METADATA_MESSAGE_REQUEST:
+            if (parsed.raw_message_type != 0 || parsed.payload_size != 0) {
+                error = lt::errors::invalid_metadata_message;
+                return false;
+            }
+            imported.type = lt::aux::ut_metadata_message_type::request;
+            break;
+        case TTORRENT_METADATA_MESSAGE_DATA:
+            if (parsed.raw_message_type != 1 || parsed.has_total_size == 0U
+                || parsed.total_size <= 0 || parsed.payload_size <= 0
+                || parsed.payload_size > 16 * 1024) {
+                error = lt::errors::invalid_metadata_message;
+                return false;
+            }
+            imported.type = lt::aux::ut_metadata_message_type::piece;
+            break;
+        case TTORRENT_METADATA_MESSAGE_REJECT:
+            if (parsed.raw_message_type != 2 || parsed.payload_size != 0) {
+                error = lt::errors::invalid_metadata_message;
+                return false;
+            }
+            imported.type = lt::aux::ut_metadata_message_type::dont_have;
+            break;
+        case TTORRENT_METADATA_MESSAGE_UNKNOWN:
+            if (parsed.raw_message_type >= 0 && parsed.raw_message_type <= 2) {
+                error = lt::errors::invalid_metadata_message;
+                return false;
+            }
+            imported.type = lt::aux::ut_metadata_message_type::unknown;
+            break;
+        default:
+            error = lt::errors::invalid_metadata_message;
+            return false;
+        }
+        result = imported;
+        error.clear();
+        return true;
+    } catch (...) {
+        error = lt::errors::invalid_metadata_message;
+        return false;
+    }
+}
+
+bool BridgePeerMessageParser::parse_ut_pex(
+    lt::span<char const> const message,
+    lt::aux::peer_exchange_message &result,
+    lt::error_code &error
+) noexcept
+{
+    try {
+        if (message.empty()
+            || std::cmp_greater(message.size(), TTORRENT_MAX_PEX_MESSAGE_BYTES)) {
+            error = lt::errors::invalid_pex_message;
+            return false;
+        }
+        std::array<TTorrentPeerExchangeRecord, TTORRENT_MAX_PEX_MESSAGE_CONTACTS> records{};
+        TTorrentPeerExchangeResult parsed{};
+        int32_t const status = callbacks_.parse_peer_exchange(
+            callbacks_.context,
+            message.data(),
+            static_cast<int32_t>(message.size()),
+            records.data(),
+            static_cast<int32_t>(records.size()),
+            &parsed
+        );
+        if (status != 0 || parsed.reserved != 0U
+            || parsed.record_count <= 0
+            || std::cmp_greater(parsed.record_count, records.size())
+            || parsed.added_count < 0 || parsed.dropped_count < 0
+            || parsed.added_count > 100 || parsed.dropped_count > 100
+            || parsed.record_count != parsed.added_count + parsed.dropped_count) {
+            error = lt::errors::invalid_pex_message;
+            return false;
+        }
+
+        lt::aux::peer_exchange_message imported;
+        imported.contacts.reserve(static_cast<std::size_t>(parsed.record_count));
+        std::set<std::tuple<std::uint8_t, std::uint64_t, std::uint64_t>> seen_addresses;
+        int32_t added_count = 0;
+        int32_t dropped_count = 0;
+        for (int32_t index = 0; index < parsed.record_count; ++index) {
+            TTorrentPeerExchangeRecord const &record = records.at(
+                static_cast<std::size_t>(index)
+            );
+            if (record.reserved0 != 0U || record.reserved1 != 0U
+                || record.port == 0U || (record.flags & 0xe0U) != 0U
+                || (record.action != TTORRENT_PEX_CONTACT_ADD
+                    && record.action != TTORRENT_PEX_CONTACT_DROP)
+                || !seen_addresses.emplace(
+                    record.address_family, record.address_high, record.address_low
+                ).second) {
+                error = lt::errors::invalid_pex_message;
+                return false;
+            }
+            std::optional<lt::address> address = peer_address(PeerAddressBits{
+                .high = record.address_high,
+                .low = record.address_low,
+                .family = record.address_family,
+            });
+            if (!address) {
+                error = lt::errors::invalid_pex_message;
+                return false;
+            }
+            lt::aux::peer_exchange_action action = lt::aux::peer_exchange_action::add;
+            if (record.action == TTORRENT_PEX_CONTACT_ADD) {
+                action = lt::aux::peer_exchange_action::add;
+                ++added_count;
+            } else {
+                action = lt::aux::peer_exchange_action::drop;
+                ++dropped_count;
+            }
+            imported.contacts.push_back(lt::aux::peer_exchange_contact{
+                .endpoint = lt::tcp::endpoint(*address, record.port),
+                .action = action,
+                .flags = lt::pex_flags_t(record.flags),
+            });
+        }
+        if (added_count != parsed.added_count || dropped_count != parsed.dropped_count) {
+            error = lt::errors::invalid_pex_message;
+            return false;
+        }
+        imported.added_count = added_count;
+        imported.dropped_count = dropped_count;
+        result = std::move(imported);
+        error.clear();
+        return true;
+    } catch (...) {
+        error = lt::errors::invalid_pex_message;
+        return false;
+    }
+}
+
 PayloadBrokerContext::PayloadBrokerContext(TTorrentPayloadBrokerCallbacks const callbacks)
     : callbacks_{
         .context = callbacks.context,
@@ -1552,6 +1981,7 @@ extern "C" TTorrentClient *TorrentClientCreateWithError(
     uint8_t enable_pex_plugin,
     TTorrentPayloadBrokerCallbacks payload_broker,
     TTorrentSwarmMetainfoParserCallbacks swarm_metainfo_parser,
+    TTorrentPeerProtocolParserCallbacks peer_protocol_parser,
     char *error_out,
     int32_t error_capacity
 ) noexcept
@@ -1574,12 +2004,14 @@ extern "C" TTorrentClient *TorrentClientCreateWithError(
         std::string normalized_state_path = state_directory_path.lexically_normal().native();
         auto broker = std::make_shared<PayloadBrokerContext>(payload_broker);
         auto parser = std::make_shared<BridgeSwarmMetadataParser>(swarm_metainfo_parser);
+        auto peer_parser = std::make_shared<BridgePeerMessageParser>(peer_protocol_parser);
 
         return std::make_unique<TTorrentClient>(
             normalized_state_path,
             bridge_bool(enable_pex_plugin),
             std::move(broker),
-            std::move(parser)
+            std::move(parser),
+            std::move(peer_parser)
         ).release();
     } catch (std::exception const &exception) {
         copy_error(error_buffer, exception.what());

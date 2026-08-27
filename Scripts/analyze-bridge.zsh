@@ -56,6 +56,36 @@ done
     "$libtorrent_source/src/torrent.cpp" \
     || fail "Patched libtorrent does not require the external swarm metadata parser"
 
+typeset -r peer_handshake_source="$libtorrent_source/src/bt_peer_connection.cpp"
+typeset -r metadata_extension_source="$libtorrent_source/src/ut_metadata.cpp"
+typeset -r pex_extension_source="$libtorrent_source/src/ut_pex.cpp"
+if "$ripgrep" -n --fixed-strings \
+    "bdecode(recv_buffer.subspan(2)" "$peer_handshake_source"; then
+    fail "Retired native extension-handshake parser route is reachable"
+fi
+if "$ripgrep" -n --fixed-strings "bdecode(body" "$metadata_extension_source"; then
+    fail "Retired native ut_metadata parser route is reachable"
+fi
+if "$ripgrep" -n --fixed-strings \
+    "bdecode(body.begin(), body.end(), pex_msg" "$pex_extension_source"; then
+    fail "Retired native ut_pex parser route is reachable"
+fi
+for source in "$metadata_extension_source" "$pex_extension_source"; do
+    if "$ripgrep" -n --fixed-strings \
+        "on_extension_handshake(bdecode_node const&" "$source"; then
+        fail "Retired plugin extension-handshake parser route is reachable: $source"
+    fi
+done
+"$ripgrep" -q --fixed-strings \
+    "parse_extension_handshake(recv_buffer.subspan(2)" "$peer_handshake_source" \
+    || fail "Patched libtorrent does not require the external extension-handshake parser"
+"$ripgrep" -q --fixed-strings \
+    "parse_ut_metadata(body" "$metadata_extension_source" \
+    || fail "Patched libtorrent does not require the external ut_metadata parser"
+"$ripgrep" -q --fixed-strings \
+    "parse_ut_pex(body.first(length)" "$pex_extension_source" \
+    || fail "Patched libtorrent does not require the external ut_pex parser"
+
 if [[ ! -x $clang_tidy ]]; then
     clang_tidy=${commands[clang-tidy]:-}
 fi

@@ -11,6 +11,7 @@ RUNS="${RUNS:-100000}"
 all_targets=(
     ipc_json_preflight
     magnet_parser
+    peer_protocol_parser
     storage_broker_ipc
     storage_claim_validation
     storage_manifest
@@ -29,6 +30,9 @@ default_max_len() {
             ;;
         magnet_parser)
             printf '%s\n' 65536
+            ;;
+        peer_protocol_parser)
+            printf '%s\n' 512001
             ;;
         storage_broker_ipc)
             printf '%s\n' 65536

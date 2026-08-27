@@ -26,6 +26,7 @@ void exercise_asynchronous_destroy_once(std::filesystem::path const &root)
         1,
         payload_broker.callbacks(),
         bridge_fuzz::rejecting_swarm_metainfo_parser(),
+        bridge_fuzz::rejecting_peer_protocol_parser(),
         create_error.data(),
         create_error.capacity()
     );
@@ -64,6 +65,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
         1,
         payload_broker.callbacks(),
         bridge_fuzz::rejecting_swarm_metainfo_parser(),
+        bridge_fuzz::rejecting_peer_protocol_parser(),
         create_error.data(),
         create_error.capacity()
     );

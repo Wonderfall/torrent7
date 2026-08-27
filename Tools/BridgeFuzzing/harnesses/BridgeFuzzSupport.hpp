@@ -28,7 +28,7 @@ namespace bridge_fuzz {
 
 namespace fs = std::filesystem;
 
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 61, "Update the fuzz harnesses for the current TorrentBridge ABI.");
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 62, "Update the fuzz harnesses for the current TorrentBridge ABI.");
 #if !defined(TORRENT_USE_ASSERTS) || !TORRENT_USE_ASSERTS
 #error "Fuzz consumers must match the assertion-enabled Debug libtorrent archive."
 #endif
@@ -391,6 +391,44 @@ inline TTorrentSwarmMetainfoParserCallbacks rejecting_swarm_metainfo_parser() no
     };
 }
 
+inline TTorrentPeerProtocolParserCallbacks rejecting_peer_protocol_parser() noexcept
+{
+    static std::uint8_t context = 0U;
+    return TTorrentPeerProtocolParserCallbacks{
+        .context = &context,
+        .retain_context = [](void *value) noexcept -> std::uint8_t {
+            return value == nullptr ? 0U : 1U;
+        },
+        .release_context = [](void *) noexcept {},
+        .parse_extension_handshake = [](
+            void *, char const *, int32_t, std::uint8_t *, int32_t,
+            TTorrentExtensionHandshakeResult *result
+        ) noexcept -> int32_t {
+            if (result != nullptr) {
+                *result = TTorrentExtensionHandshakeResult{};
+            }
+            return EINVAL;
+        },
+        .parse_metadata_message = [](
+            void *, char const *, int32_t, TTorrentMetadataMessageResult *result
+        ) noexcept -> int32_t {
+            if (result != nullptr) {
+                *result = TTorrentMetadataMessageResult{};
+            }
+            return EINVAL;
+        },
+        .parse_peer_exchange = [](
+            void *, char const *, int32_t, TTorrentPeerExchangeRecord *, int32_t,
+            TTorrentPeerExchangeResult *result
+        ) noexcept -> int32_t {
+            if (result != nullptr) {
+                *result = TTorrentPeerExchangeResult{};
+            }
+            return EINVAL;
+        },
+    };
+}
+
 class BridgeClientHarness {
 public:
     explicit BridgeClientHarness(std::string_view label)
@@ -405,6 +443,7 @@ public:
             1,
             payload_broker_.callbacks(),
             rejecting_swarm_metainfo_parser(),
+            rejecting_peer_protocol_parser(),
             error.data(),
             error.capacity()
         );

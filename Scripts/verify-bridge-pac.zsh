@@ -74,6 +74,11 @@ typeset swarm_retain="$temporary_directory/swarm-retain.txt"
 typeset swarm_release="$temporary_directory/swarm-release.txt"
 typeset swarm_parse="$temporary_directory/swarm-parse.txt"
 typeset swarm_capsule_release="$temporary_directory/swarm-capsule-release.txt"
+typeset peer_retain="$temporary_directory/peer-retain.txt"
+typeset peer_release="$temporary_directory/peer-release.txt"
+typeset peer_handshake="$temporary_directory/peer-handshake.txt"
+typeset peer_metadata="$temporary_directory/peer-metadata.txt"
+typeset peer_pex="$temporary_directory/peer-pex.txt"
 extract_function TorrentBridgeTestInvokeWake "$wake"
 extract_function TorrentBridgeTestInvokePayloadRetain "$retain"
 extract_function TorrentBridgeTestInvokePayloadRelease "$release"
@@ -83,6 +88,11 @@ extract_function TorrentBridgeTestInvokeSwarmMetainfoRetain "$swarm_retain"
 extract_function TorrentBridgeTestInvokeSwarmMetainfoRelease "$swarm_release"
 extract_function TorrentBridgeTestInvokeSwarmMetainfoParse "$swarm_parse"
 extract_function TorrentBridgeTestInvokeSwarmMetainfoCapsuleRelease "$swarm_capsule_release"
+extract_function TorrentBridgeTestInvokePeerProtocolRetain "$peer_retain"
+extract_function TorrentBridgeTestInvokePeerProtocolRelease "$peer_release"
+extract_function TorrentBridgeTestInvokePeerProtocolHandshake "$peer_handshake"
+extract_function TorrentBridgeTestInvokePeerProtocolMetadata "$peer_metadata"
+extract_function TorrentBridgeTestInvokePeerProtocolPEX "$peer_pex"
 
 # AppleClang's pinned 16-bit string discriminators for the Bridge-owned slots.
 verify_data_authentication wake.context "$wake" 0x8cdb
@@ -97,5 +107,11 @@ verify_callback_branch swarm-metainfo.retain "$swarm_retain" 0xb73c
 verify_callback_branch swarm-metainfo.release "$swarm_release" 0x1f63
 verify_callback_branch swarm-metainfo.parse "$swarm_parse" 0xaa1c
 verify_callback_branch swarm-metainfo.capsule-release "$swarm_capsule_release" 0xcfc7
+verify_data_authentication peer-protocol.context "$peer_retain" 0x5d9e
+verify_callback_branch peer-protocol.retain "$peer_retain" 0x55eb
+verify_callback_branch peer-protocol.release "$peer_release" 0x27da
+verify_callback_branch peer-protocol.handshake "$peer_handshake" 0x4c7
+verify_callback_branch peer-protocol.metadata "$peer_metadata" 0x719
+verify_callback_branch peer-protocol.pex "$peer_pex" 0x71df
 
 print -r -- "Bridge callback/context PAC codegen verification passed"

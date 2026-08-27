@@ -130,7 +130,27 @@ inline constexpr uint16_t TTORRENT_METAINFO_FIELD_COMMENT = 1U << 4U;
 inline constexpr uint16_t TTORRENT_METAINFO_FIELD_CREATED_BY = 1U << 5U;
 inline constexpr uint16_t TTORRENT_METAINFO_FIELD_CREATION_DATE = 1U << 6U;
 inline constexpr uint16_t TTORRENT_METAINFO_FIELD_DHT_NODES = 1U << 7U;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 61;
+inline constexpr int32_t TTORRENT_MAX_EXTENSION_HANDSHAKE_BYTES = 64 * 1024;
+inline constexpr int32_t TTORRENT_MAX_METADATA_MESSAGE_BYTES = 17 * 1024;
+inline constexpr int32_t TTORRENT_MAX_PEX_MESSAGE_BYTES = 500 * 1024;
+inline constexpr int32_t TTORRENT_MAX_PEX_MESSAGE_CONTACTS = 200;
+inline constexpr int32_t TTORRENT_MAX_PEER_CLIENT_VERSION_BYTES = 256;
+inline constexpr uint8_t TTORRENT_PEER_ADDRESS_IPV4 = 4;
+inline constexpr uint8_t TTORRENT_PEER_ADDRESS_IPV6 = 6;
+inline constexpr uint8_t TTORRENT_METADATA_MESSAGE_REQUEST = 0;
+inline constexpr uint8_t TTORRENT_METADATA_MESSAGE_DATA = 1;
+inline constexpr uint8_t TTORRENT_METADATA_MESSAGE_REJECT = 2;
+inline constexpr uint8_t TTORRENT_METADATA_MESSAGE_UNKNOWN = 255;
+inline constexpr uint8_t TTORRENT_PEX_CONTACT_ADD = 1;
+inline constexpr uint8_t TTORRENT_PEX_CONTACT_DROP = 2;
+inline constexpr uint32_t TTORRENT_HANDSHAKE_HAS_METADATA_SIZE = 1U << 0U;
+inline constexpr uint32_t TTORRENT_HANDSHAKE_HAS_LISTEN_PORT = 1U << 1U;
+inline constexpr uint32_t TTORRENT_HANDSHAKE_HAS_LAST_SEEN_COMPLETE = 1U << 2U;
+inline constexpr uint32_t TTORRENT_HANDSHAKE_HAS_REQUEST_QUEUE = 1U << 3U;
+inline constexpr uint32_t TTORRENT_HANDSHAKE_HAS_CLIENT_VERSION = 1U << 4U;
+inline constexpr uint32_t TTORRENT_HANDSHAKE_HAS_EXTERNAL_ADDRESS = 1U << 5U;
+inline constexpr uint32_t TTORRENT_HANDSHAKE_HAS_UPLOAD_ONLY = 1U << 6U;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 62;
 namespace torrent_bridge::internal {
 struct TTorrentClient;
 }
@@ -231,7 +251,27 @@ enum {
     TTORRENT_METAINFO_FIELD_CREATED_BY = 1U << 5U,
     TTORRENT_METAINFO_FIELD_CREATION_DATE = 1U << 6U,
     TTORRENT_METAINFO_FIELD_DHT_NODES = 1U << 7U,
-    TTORRENT_BRIDGE_ABI_VERSION = 61
+    TTORRENT_MAX_EXTENSION_HANDSHAKE_BYTES = 64 * 1024,
+    TTORRENT_MAX_METADATA_MESSAGE_BYTES = 17 * 1024,
+    TTORRENT_MAX_PEX_MESSAGE_BYTES = 500 * 1024,
+    TTORRENT_MAX_PEX_MESSAGE_CONTACTS = 200,
+    TTORRENT_MAX_PEER_CLIENT_VERSION_BYTES = 256,
+    TTORRENT_PEER_ADDRESS_IPV4 = 4,
+    TTORRENT_PEER_ADDRESS_IPV6 = 6,
+    TTORRENT_METADATA_MESSAGE_REQUEST = 0,
+    TTORRENT_METADATA_MESSAGE_DATA = 1,
+    TTORRENT_METADATA_MESSAGE_REJECT = 2,
+    TTORRENT_METADATA_MESSAGE_UNKNOWN = 255,
+    TTORRENT_PEX_CONTACT_ADD = 1,
+    TTORRENT_PEX_CONTACT_DROP = 2,
+    TTORRENT_HANDSHAKE_HAS_METADATA_SIZE = 1U << 0U,
+    TTORRENT_HANDSHAKE_HAS_LISTEN_PORT = 1U << 1U,
+    TTORRENT_HANDSHAKE_HAS_LAST_SEEN_COMPLETE = 1U << 2U,
+    TTORRENT_HANDSHAKE_HAS_REQUEST_QUEUE = 1U << 3U,
+    TTORRENT_HANDSHAKE_HAS_CLIENT_VERSION = 1U << 4U,
+    TTORRENT_HANDSHAKE_HAS_EXTERNAL_ADDRESS = 1U << 5U,
+    TTORRENT_HANDSHAKE_HAS_UPLOAD_ONLY = 1U << 6U,
+    TTORRENT_BRIDGE_ABI_VERSION = 62
 };
 #endif
 
@@ -594,6 +634,102 @@ typedef struct TTorrentSwarmMetainfoParserCallbacks {
     TTorrentSwarmMetainfoCapsuleReleaseCallback release_capsule;
 } TTorrentSwarmMetainfoParserCallbacks;
 
+// Fixed, caller-owned results for peer extension messages. Swift parses each
+// complete borrowed message synchronously and never retains any pointer. The
+// bridge validates these flat records before constructing libtorrent-native
+// values; connection and peer-admission policy remain native.
+typedef struct TTorrentExtensionHandshakeResult {
+    uint64_t address_high;
+    uint64_t address_low;
+    int32_t ut_metadata_id;
+    int32_t ut_pex_id;
+    int32_t upload_only_id;
+    int32_t holepunch_id;
+    int32_t dont_have_id;
+    int32_t metadata_size;
+    int32_t listen_port;
+    int32_t last_seen_complete;
+    int32_t request_queue_limit;
+    uint32_t present_fields;
+    int32_t client_version_size;
+    uint8_t address_family;
+    uint8_t upload_only;
+    uint16_t reserved;
+} TTorrentExtensionHandshakeResult;
+
+typedef struct TTorrentMetadataMessageResult {
+    int64_t raw_message_type;
+    int32_t piece;
+    int32_t total_size;
+    int32_t payload_offset;
+    int32_t payload_size;
+    uint8_t kind;
+    uint8_t has_total_size;
+    uint16_t reserved0;
+    uint32_t reserved1;
+} TTorrentMetadataMessageResult;
+
+typedef struct TTorrentPeerExchangeRecord {
+    uint64_t address_high;
+    uint64_t address_low;
+    uint16_t port;
+    uint8_t address_family;
+    uint8_t action;
+    uint8_t flags;
+    uint8_t reserved0;
+    uint16_t reserved1;
+} TTorrentPeerExchangeRecord;
+
+typedef struct TTorrentPeerExchangeResult {
+    int32_t record_count;
+    int32_t added_count;
+    int32_t dropped_count;
+    uint32_t reserved;
+} TTorrentPeerExchangeResult;
+
+typedef uint8_t (* TORRENT_BRIDGE_NULLABLE TTorrentPeerProtocolContextRetainCallback)(
+    void * TORRENT_BRIDGE_NULLABLE context
+);
+typedef void (* TORRENT_BRIDGE_NULLABLE TTorrentPeerProtocolContextReleaseCallback)(
+    void * TORRENT_BRIDGE_NULLABLE context
+);
+typedef int32_t (* TORRENT_BRIDGE_NULLABLE TTorrentExtensionHandshakeParseCallback)(
+    void * TORRENT_BRIDGE_NULLABLE context,
+    const char * TORRENT_BRIDGE_NONNULL TORRENT_BRIDGE_COUNTED_BY(message_size)
+        message TORRENT_BRIDGE_NOESCAPE,
+    int32_t message_size,
+    uint8_t * TORRENT_BRIDGE_NONNULL TORRENT_BRIDGE_COUNTED_BY(client_version_capacity)
+        client_version_out TORRENT_BRIDGE_NOESCAPE,
+    int32_t client_version_capacity,
+    TTorrentExtensionHandshakeResult * TORRENT_BRIDGE_NONNULL result_out TORRENT_BRIDGE_NOESCAPE
+);
+typedef int32_t (* TORRENT_BRIDGE_NULLABLE TTorrentMetadataMessageParseCallback)(
+    void * TORRENT_BRIDGE_NULLABLE context,
+    const char * TORRENT_BRIDGE_NONNULL TORRENT_BRIDGE_COUNTED_BY(message_size)
+        message TORRENT_BRIDGE_NOESCAPE,
+    int32_t message_size,
+    TTorrentMetadataMessageResult * TORRENT_BRIDGE_NONNULL result_out TORRENT_BRIDGE_NOESCAPE
+);
+typedef int32_t (* TORRENT_BRIDGE_NULLABLE TTorrentPeerExchangeParseCallback)(
+    void * TORRENT_BRIDGE_NULLABLE context,
+    const char * TORRENT_BRIDGE_NONNULL TORRENT_BRIDGE_COUNTED_BY(message_size)
+        message TORRENT_BRIDGE_NOESCAPE,
+    int32_t message_size,
+    TTorrentPeerExchangeRecord * TORRENT_BRIDGE_NONNULL TORRENT_BRIDGE_COUNTED_BY(record_capacity)
+        records_out TORRENT_BRIDGE_NOESCAPE,
+    int32_t record_capacity,
+    TTorrentPeerExchangeResult * TORRENT_BRIDGE_NONNULL result_out TORRENT_BRIDGE_NOESCAPE
+);
+
+typedef struct TTorrentPeerProtocolParserCallbacks {
+    void * TORRENT_BRIDGE_NULLABLE context;
+    TTorrentPeerProtocolContextRetainCallback retain_context;
+    TTorrentPeerProtocolContextReleaseCallback release_context;
+    TTorrentExtensionHandshakeParseCallback parse_extension_handshake;
+    TTorrentMetadataMessageParseCallback parse_metadata_message;
+    TTorrentPeerExchangeParseCallback parse_peer_exchange;
+} TTorrentPeerProtocolParserCallbacks;
+
 // Immutable activation authority for one known torrent. claim_id is the UUID's
 // 16 RFC 4122 bytes. source_manifest_digest is the domain-separated SHA-256
 // digest independently reproduced by Swift and libtorrent before admission.
@@ -610,15 +746,16 @@ const char * TORRENT_BRIDGE_NONNULL TORRENT_BRIDGE_NULL_TERMINATED TorrentBridge
     TORRENT_BRIDGE_NOEXCEPT;
 
 // Returns an owned client handle. Release it exactly once with
-// TorrentClientDestroy. Both callback contexts are retained synchronously
+// TorrentClientDestroy. All callback contexts are retained synchronously
 // before construction. The broker context is released after every provider and
-// disk worker is quiescent; the metainfo context is released after the session
-// and its torrents are destroyed.
+// disk worker is quiescent; parser contexts are released after the session and
+// its torrents are destroyed.
 TTorrentClient * TORRENT_BRIDGE_NULLABLE TorrentClientCreateWithError(
     const char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_NULL_TERMINATED state_path TORRENT_BRIDGE_NOESCAPE,
     uint8_t enable_pex_plugin,
     TTorrentPayloadBrokerCallbacks payload_broker,
     TTorrentSwarmMetainfoParserCallbacks swarm_metainfo_parser,
+    TTorrentPeerProtocolParserCallbacks peer_protocol_parser,
     char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;

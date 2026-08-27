@@ -11,6 +11,7 @@
 #include <libtorrent/alert_types.hpp>
 #include <libtorrent/aux_/path.hpp>
 #include <libtorrent/aux_/payload_file_provider.hpp>
+#include <libtorrent/aux_/peer_message_parser.hpp>
 #include <libtorrent/aux_/preparsed_metainfo.hpp>
 #include <libtorrent/aux_/swarm_metadata_parser.hpp>
 #include <libtorrent/bencode.hpp>
@@ -308,7 +309,7 @@ static_assert(
 );
 static_assert(kMaxTorrentIdentityTokenCount > static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 61U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 62U);
 static_assert(
     TORRENT_ABI_VERSION > 1,
     "Deprecated libtorrent ABIs can parse add_torrent_params.url as a raw magnet."
@@ -327,9 +328,9 @@ static_assert(TTORRENT_CONTENT_KIND_UNKNOWN == 0U);
 static_assert(TTORRENT_CONTENT_KIND_SINGLE_FILE == 1U);
 static_assert(TTORRENT_CONTENT_KIND_DIRECTORY == 2U);
 #if defined(TORRENT_USE_ASSERTS) && TORRENT_USE_ASSERTS
-static_assert(sizeof(lt::add_torrent_params) == 792U);
+static_assert(sizeof(lt::add_torrent_params) == 808U);
 #else
-static_assert(sizeof(lt::add_torrent_params) == 776U);
+static_assert(sizeof(lt::add_torrent_params) == 792U);
 #endif
 static_assert(TTORRENT_FILE_PRIORITY_SKIP == static_cast<int32_t>(static_cast<std::uint8_t>(lt::dont_download)));
 static_assert(TTORRENT_FILE_PRIORITY_LOW == static_cast<int32_t>(static_cast<std::uint8_t>(lt::low_priority)));
@@ -409,6 +410,15 @@ static_assert(std::is_standard_layout_v<TTorrentPayloadBrokerCallbacks>);
 static_assert(std::is_standard_layout_v<TTorrentOwnedMetainfoCapsule>);
 static_assert(std::is_trivially_copyable_v<TTorrentOwnedMetainfoCapsule>);
 static_assert(std::is_standard_layout_v<TTorrentSwarmMetainfoParserCallbacks>);
+static_assert(std::is_standard_layout_v<TTorrentExtensionHandshakeResult>);
+static_assert(std::is_trivially_copyable_v<TTorrentExtensionHandshakeResult>);
+static_assert(std::is_standard_layout_v<TTorrentMetadataMessageResult>);
+static_assert(std::is_trivially_copyable_v<TTorrentMetadataMessageResult>);
+static_assert(std::is_standard_layout_v<TTorrentPeerExchangeRecord>);
+static_assert(std::is_trivially_copyable_v<TTorrentPeerExchangeRecord>);
+static_assert(std::is_standard_layout_v<TTorrentPeerExchangeResult>);
+static_assert(std::is_trivially_copyable_v<TTorrentPeerExchangeResult>);
+static_assert(std::is_standard_layout_v<TTorrentPeerProtocolParserCallbacks>);
 static_assert(std::is_standard_layout_v<TTorrentStorageActivation>);
 static_assert(std::is_trivially_copyable_v<TTorrentStorageActivation>);
 static_assert(sizeof(TTorrentSnapshot) == 2336U);
@@ -482,6 +492,16 @@ static_assert(sizeof(TTorrentOwnedMetainfoCapsule) == 16U);
 static_assert(alignof(TTorrentOwnedMetainfoCapsule) == 8U);
 static_assert(sizeof(TTorrentSwarmMetainfoParserCallbacks) == 40U);
 static_assert(alignof(TTorrentSwarmMetainfoParserCallbacks) == 8U);
+static_assert(sizeof(TTorrentExtensionHandshakeResult) == 64U);
+static_assert(alignof(TTorrentExtensionHandshakeResult) == 8U);
+static_assert(sizeof(TTorrentMetadataMessageResult) == 32U);
+static_assert(alignof(TTorrentMetadataMessageResult) == 8U);
+static_assert(sizeof(TTorrentPeerExchangeRecord) == 24U);
+static_assert(alignof(TTorrentPeerExchangeRecord) == 8U);
+static_assert(sizeof(TTorrentPeerExchangeResult) == 16U);
+static_assert(alignof(TTorrentPeerExchangeResult) == 4U);
+static_assert(sizeof(TTorrentPeerProtocolParserCallbacks) == 48U);
+static_assert(alignof(TTorrentPeerProtocolParserCallbacks) == 8U);
 static_assert(sizeof(TTorrentStorageActivation) == 96U);
 static_assert(alignof(TTorrentStorageActivation) == 8U);
 static_assert(offsetof(TTorrentStorageActivation, preserved_torrent_id) == 56U);
@@ -694,6 +714,18 @@ inline constexpr ptrauth_extra_data_t kSwarmMetainfoCapsuleReleaseCallbackDiscri
     ptrauth_string_discriminator("torrent.bridge.swarm-metainfo.capsule-release");
 inline constexpr ptrauth_extra_data_t kSwarmMetainfoContextDiscriminator =
     ptrauth_string_discriminator("torrent.bridge.swarm-metainfo.context");
+inline constexpr ptrauth_extra_data_t kPeerProtocolRetainCallbackDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.peer-protocol.retain");
+inline constexpr ptrauth_extra_data_t kPeerProtocolReleaseCallbackDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.peer-protocol.release");
+inline constexpr ptrauth_extra_data_t kPeerProtocolHandshakeCallbackDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.peer-protocol.handshake");
+inline constexpr ptrauth_extra_data_t kPeerProtocolMetadataCallbackDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.peer-protocol.metadata");
+inline constexpr ptrauth_extra_data_t kPeerProtocolPEXCallbackDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.peer-protocol.pex");
+inline constexpr ptrauth_extra_data_t kPeerProtocolContextDiscriminator =
+    ptrauth_string_discriminator("torrent.bridge.peer-protocol.context");
 inline constexpr ptrauth_extra_data_t kWakeCallbackDiscriminator =
     ptrauth_string_discriminator("torrent.bridge.wake");
 inline constexpr ptrauth_extra_data_t kWakeContextDiscriminator =
@@ -762,6 +794,41 @@ using StoredSwarmMetainfoContext = void * __ptrauth(
     1,
     kSwarmMetainfoContextDiscriminator
 );
+using StoredPeerProtocolRetainCallback =
+    TTorrentPeerProtocolContextRetainCallback __ptrauth(
+        ptrauth_key_function_pointer,
+        1,
+        kPeerProtocolRetainCallbackDiscriminator
+    );
+using StoredPeerProtocolReleaseCallback =
+    TTorrentPeerProtocolContextReleaseCallback __ptrauth(
+        ptrauth_key_function_pointer,
+        1,
+        kPeerProtocolReleaseCallbackDiscriminator
+    );
+using StoredPeerProtocolHandshakeCallback =
+    TTorrentExtensionHandshakeParseCallback __ptrauth(
+        ptrauth_key_function_pointer,
+        1,
+        kPeerProtocolHandshakeCallbackDiscriminator
+    );
+using StoredPeerProtocolMetadataCallback =
+    TTorrentMetadataMessageParseCallback __ptrauth(
+        ptrauth_key_function_pointer,
+        1,
+        kPeerProtocolMetadataCallbackDiscriminator
+    );
+using StoredPeerProtocolPEXCallback =
+    TTorrentPeerExchangeParseCallback __ptrauth(
+        ptrauth_key_function_pointer,
+        1,
+        kPeerProtocolPEXCallbackDiscriminator
+    );
+using StoredPeerProtocolContext = void * __ptrauth(
+    ptrauth_key_process_dependent_data,
+    1,
+    kPeerProtocolContextDiscriminator
+);
 #else
 using StoredWakeCallback = TTorrentWakeCallback;
 using StoredWakeContext = void *;
@@ -776,6 +843,12 @@ using StoredSwarmMetainfoParseCallback = TTorrentSwarmMetainfoParseCallback;
 using StoredSwarmMetainfoCapsuleReleaseCallback =
     TTorrentSwarmMetainfoCapsuleReleaseCallback;
 using StoredSwarmMetainfoContext = void *;
+using StoredPeerProtocolRetainCallback = TTorrentPeerProtocolContextRetainCallback;
+using StoredPeerProtocolReleaseCallback = TTorrentPeerProtocolContextReleaseCallback;
+using StoredPeerProtocolHandshakeCallback = TTorrentExtensionHandshakeParseCallback;
+using StoredPeerProtocolMetadataCallback = TTorrentMetadataMessageParseCallback;
+using StoredPeerProtocolPEXCallback = TTorrentPeerExchangeParseCallback;
+using StoredPeerProtocolContext = void *;
 #endif
 
 struct PayloadBrokerCallbacks {
@@ -792,6 +865,48 @@ struct SwarmMetainfoParserCallbacks {
     StoredSwarmMetainfoReleaseCallback release_context = nullptr;
     StoredSwarmMetainfoParseCallback parse_info = nullptr;
     StoredSwarmMetainfoCapsuleReleaseCallback release_capsule = nullptr;
+};
+
+struct PeerProtocolParserCallbacks {
+    StoredPeerProtocolContext context = nullptr;
+    StoredPeerProtocolRetainCallback retain_context = nullptr;
+    StoredPeerProtocolReleaseCallback release_context = nullptr;
+    StoredPeerProtocolHandshakeCallback parse_extension_handshake = nullptr;
+    StoredPeerProtocolMetadataCallback parse_metadata_message = nullptr;
+    StoredPeerProtocolPEXCallback parse_peer_exchange = nullptr;
+};
+
+class BridgePeerMessageParser final : public lt::aux::peer_message_parser {
+public:
+    explicit BridgePeerMessageParser(TTorrentPeerProtocolParserCallbacks callbacks);
+    __attribute__((noinline)) ~BridgePeerMessageParser() override;
+
+    BridgePeerMessageParser(BridgePeerMessageParser const &) = delete;
+    BridgePeerMessageParser &operator=(BridgePeerMessageParser const &) = delete;
+    BridgePeerMessageParser(BridgePeerMessageParser &&) = delete;
+    BridgePeerMessageParser &operator=(BridgePeerMessageParser &&) = delete;
+
+    [[nodiscard]] bool parse_extension_handshake(
+        lt::span<char const> message,
+        lt::aux::extension_handshake &result,
+        lt::error_code &error
+    ) noexcept override;
+
+    [[nodiscard]] bool parse_ut_metadata(
+        lt::span<char const> message,
+        lt::aux::ut_metadata_message &result,
+        lt::error_code &error
+    ) noexcept override;
+
+    [[nodiscard]] bool parse_ut_pex(
+        lt::span<char const> message,
+        lt::aux::peer_exchange_message &result,
+        lt::error_code &error
+    ) noexcept override;
+
+private:
+    PeerProtocolParserCallbacks callbacks_;
+    bool retained_ = false;
 };
 
 class BridgeSwarmMetadataParser final : public lt::aux::swarm_metadata_parser {
@@ -1496,7 +1611,8 @@ struct TTorrentClient {
         std::string_view state_path,
         bool enable_peer_exchange_plugin,
         std::shared_ptr<PayloadBrokerContext> payload_broker,
-        std::shared_ptr<lt::aux::swarm_metadata_parser> swarm_parser = nullptr
+        std::shared_ptr<lt::aux::swarm_metadata_parser> swarm_parser = nullptr,
+        std::shared_ptr<lt::aux::peer_message_parser> peer_parser = nullptr
     );
 
     ~TTorrentClient() noexcept;
@@ -1523,6 +1639,7 @@ struct TTorrentClient {
     fs::path staging_directory;
     std::shared_ptr<PayloadBrokerContext> payload_broker;
     std::shared_ptr<lt::aux::swarm_metadata_parser> swarm_metadata_parser;
+    std::shared_ptr<lt::aux::peer_message_parser> peer_message_parser;
     UniqueFileDescriptor state_directory_descriptor;
     UniqueFileDescriptor resume_directory_descriptor;
     UniqueFileDescriptor part_files_directory_descriptor;

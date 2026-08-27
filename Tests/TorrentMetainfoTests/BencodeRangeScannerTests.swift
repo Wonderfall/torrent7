@@ -50,6 +50,21 @@ struct BencodeRangeScannerTests {
         #expect(document.integer(at: integer) == 1)
     }
 
+    @Test("Prefix scanning retains but does not decode appended binary data")
+    func scansOneLeadingValue() throws {
+        let data = Data("d1:ai1ee\u{0}\u{1}payload".utf8)
+        let document = try BencodeRangeDocument.scanPrefix(
+            data,
+            limits: Self.limits()
+        )
+
+        #expect(document.encodedRange(at: document.rootIndex) == 0..<8)
+        #expect(document.data == data)
+        #expect(throws: BencodeScanError.malformed) {
+            _ = try BencodeRangeDocument.scan(data, limits: Self.limits())
+        }
+    }
+
     @Test("Deep values are scanned iteratively")
     func scansDeepValuesIteratively() throws {
         let depth = 5_000

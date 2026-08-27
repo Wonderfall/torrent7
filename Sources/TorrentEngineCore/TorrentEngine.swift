@@ -2155,9 +2155,14 @@ private struct AddedTorrentIdentity: Sendable {
         let retainedSwarmMetainfoContext = unsafe Unmanaged.passRetained(
             swarmMetainfoContext
         )
+        let peerProtocolContext = TorrentPeerProtocolBridgeContext()
+        let retainedPeerProtocolContext = unsafe Unmanaged.passRetained(
+            peerProtocolContext
+        )
         defer {
             unsafe retainedContext.release()
             unsafe retainedSwarmMetainfoContext.release()
+            unsafe retainedPeerProtocolContext.release()
         }
 
         var callbacks = unsafe TTorrentPayloadBrokerCallbacks()
@@ -2177,6 +2182,19 @@ private struct AddedTorrentIdentity: Sendable {
         unsafe swarmMetainfoCallbacks.release_capsule =
             torrentSwarmMetainfoCapsuleReleaseCallback
 
+        var peerProtocolCallbacks = unsafe TTorrentPeerProtocolParserCallbacks()
+        unsafe peerProtocolCallbacks.context = retainedPeerProtocolContext.toOpaque()
+        unsafe peerProtocolCallbacks.retain_context =
+            torrentPeerProtocolContextRetainCallback
+        unsafe peerProtocolCallbacks.release_context =
+            torrentPeerProtocolContextReleaseCallback
+        unsafe peerProtocolCallbacks.parse_extension_handshake =
+            torrentExtensionHandshakeParseCallback
+        unsafe peerProtocolCallbacks.parse_metadata_message =
+            torrentMetadataMessageParseCallback
+        unsafe peerProtocolCallbacks.parse_peer_exchange =
+            torrentPeerExchangeParseCallback
+
         var errorBuffer = Array<CChar>(repeating: 0, count: 1_024)
         var errorSpan: MutableSpan<CChar>? = errorBuffer.mutableSpan
         let created = unsafe path.withCString { pointer in
@@ -2185,6 +2203,7 @@ private struct AddedTorrentIdentity: Sendable {
                 enablePeerExchangePlugin.bridgeFlag,
                 callbacks,
                 swarmMetainfoCallbacks,
+                peerProtocolCallbacks,
                 &errorSpan
             )
         }

@@ -167,12 +167,45 @@ struct BencodeRangeDocument: Sendable {
         limits: BencodeScanLimits,
         checkCancellation: () throws -> Void = {}
     ) throws -> Self {
+        try scan(
+            data,
+            limits: limits,
+            requiresCompleteInput: true,
+            checkCancellation: checkCancellation
+        )
+    }
+
+    /// Scans exactly one leading bencoded value while retaining any trailing
+    /// bytes in `data`. This is required by BEP 9, whose data messages append
+    /// one raw metadata block immediately after the control dictionary.
+    static func scanPrefix(
+        _ data: Data,
+        limits: BencodeScanLimits,
+        checkCancellation: () throws -> Void = {}
+    ) throws -> Self {
+        try scan(
+            data,
+            limits: limits,
+            requiresCompleteInput: false,
+            checkCancellation: checkCancellation
+        )
+    }
+
+    private static func scan(
+        _ data: Data,
+        limits: BencodeScanLimits,
+        requiresCompleteInput: Bool,
+        checkCancellation: () throws -> Void
+    ) throws -> Self {
         let ownedData = data.startIndex == 0 ? data : Data(data)
         guard ownedData.count < Int(missingOffset) else {
             throw BencodeScanError.stringLimitExceeded
         }
         var scanner = Scanner(data: ownedData, limits: limits)
-        return try scanner.scan(checkCancellation: checkCancellation)
+        return try scanner.scan(
+            requiresCompleteInput: requiresCompleteInput,
+            checkCancellation: checkCancellation
+        )
     }
 
     private static func range(offset: UInt32, size: UInt32) -> Range<Int> {
@@ -213,6 +246,7 @@ struct BencodeRangeDocument: Sendable {
         }
 
         mutating func scan(
+            requiresCompleteInput: Bool,
             checkCancellation: () throws -> Void
         ) throws -> BencodeRangeDocument {
             guard limits.maximumNestingDepth >= 0,
@@ -254,7 +288,8 @@ struct BencodeRangeDocument: Sendable {
                 try parseValue(checkCancellation: checkCancellation)
             }
 
-            guard let rootIndex, offset == data.count else {
+            guard let rootIndex,
+                  !requiresCompleteInput || offset == data.count else {
                 throw BencodeScanError.malformed
             }
             try checkCancellation()

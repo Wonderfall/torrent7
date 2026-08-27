@@ -126,9 +126,16 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
   imports them through the preparsed libtorrent constructor. Swarm parsing is a
   synchronous per-torrent callback with balanced retained context and capsule
   ownership, and libtorrent has no native bdecode fallback for this route.
+- **Typed peer-extension boundary:** incoming BEP 10 handshakes, BEP 9 metadata
+  controls, and BEP 11 peer exchanges terminate in bounded canonical Swift
+  parsers. Fixed POD records and one caller-owned PEX array cross the C ABI;
+  C++ revalidates them while libtorrent retains connection, rate, hash, and
+  peer-admission policy. The retired native bdecode routes are build-gated, and
+  every callback role and context has arm64e PAC replay and codegen coverage.
 - **Input bounds:** caps for torrent files, magnets, file counts, tracker/web-seed
-  counts, tracker host rows, snapshots, piece-map data, XPC payloads, paged
-  datasets, queued requests, file descriptors, and open peers.
+  counts, peer-extension messages and contacts, tracker host rows, snapshots,
+  piece-map data, XPC payloads, paged datasets, queued requests, file
+  descriptors, and open peers.
 - **Exact-file storage broker:** the GUI alone persists bookmarks, plans
   destinations, owns durable storage claims, and deletes payloads. The helper
   receives an authenticated anonymous broker endpoint, then requests pathless

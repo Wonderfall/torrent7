@@ -459,6 +459,142 @@ private:
     std::vector<std::uint8_t> capsule_;
 };
 
+class PeerProtocolParserProbe final {
+public:
+    PeerProtocolParserProbe()
+    {
+        handshake_result.ut_metadata_id = -1;
+        handshake_result.ut_pex_id = -1;
+        handshake_result.upload_only_id = -1;
+        handshake_result.holepunch_id = -1;
+        handshake_result.dont_have_id = -1;
+    }
+
+    [[nodiscard]] TTorrentPeerProtocolParserCallbacks callbacks() noexcept
+    {
+        return TTorrentPeerProtocolParserCallbacks{
+            .context = this,
+            .retain_context = retain_callback,
+            .release_context = release_callback,
+            .parse_extension_handshake = handshake_callback,
+            .parse_metadata_message = metadata_callback,
+            .parse_peer_exchange = pex_callback,
+        };
+    }
+
+    TTorrentExtensionHandshakeResult handshake_result{};
+    TTorrentMetadataMessageResult metadata_result{};
+    TTorrentPeerExchangeResult pex_result{};
+    std::vector<std::uint8_t> client_version;
+    std::vector<TTorrentPeerExchangeRecord> pex_records;
+    int32_t handshake_status = 0;
+    int32_t metadata_status = 0;
+    int32_t pex_status = 0;
+    std::atomic_int retain_count = 0;
+    std::atomic_int release_count = 0;
+    std::atomic_int handshake_count = 0;
+    std::atomic_int metadata_count = 0;
+    std::atomic_int pex_count = 0;
+    std::atomic_int last_version_capacity = 0;
+    std::atomic_int last_record_capacity = 0;
+
+private:
+    static std::uint8_t retain_callback(void *context) noexcept
+    {
+        auto *probe = static_cast<PeerProtocolParserProbe *>(context);
+        if (probe == nullptr) {
+            return 0U;
+        }
+        ++probe->retain_count;
+        return 1U;
+    }
+
+    static void release_callback(void *context) noexcept
+    {
+        auto *probe = static_cast<PeerProtocolParserProbe *>(context);
+        if (probe != nullptr) {
+            ++probe->release_count;
+        }
+    }
+
+    static int32_t handshake_callback(
+        void *context,
+        char const *message,
+        int32_t const message_size,
+        std::uint8_t *client_version_out,
+        int32_t const client_version_capacity,
+        TTorrentExtensionHandshakeResult *result
+    ) noexcept
+    {
+        auto *probe = static_cast<PeerProtocolParserProbe *>(context);
+        if (probe == nullptr || message == nullptr || message_size <= 0
+            || client_version_out == nullptr || client_version_capacity < 0
+            || result == nullptr) {
+            return EINVAL;
+        }
+        ++probe->handshake_count;
+        probe->last_version_capacity = client_version_capacity;
+        *result = probe->handshake_result;
+        if (std::cmp_greater(probe->client_version.size(), client_version_capacity)) {
+            return EOVERFLOW;
+        }
+        __unsafe_buffer_usage_begin
+        std::span<std::uint8_t> const output(
+            client_version_out,
+            static_cast<std::size_t>(client_version_capacity)
+        );
+        __unsafe_buffer_usage_end
+        std::ranges::copy(probe->client_version, output.begin());
+        return probe->handshake_status;
+    }
+
+    static int32_t metadata_callback(
+        void *context,
+        char const *message,
+        int32_t const message_size,
+        TTorrentMetadataMessageResult *result
+    ) noexcept
+    {
+        auto *probe = static_cast<PeerProtocolParserProbe *>(context);
+        if (probe == nullptr || message == nullptr || message_size <= 0 || result == nullptr) {
+            return EINVAL;
+        }
+        ++probe->metadata_count;
+        *result = probe->metadata_result;
+        return probe->metadata_status;
+    }
+
+    static int32_t pex_callback(
+        void *context,
+        char const *message,
+        int32_t const message_size,
+        TTorrentPeerExchangeRecord *records,
+        int32_t const record_capacity,
+        TTorrentPeerExchangeResult *result
+    ) noexcept
+    {
+        auto *probe = static_cast<PeerProtocolParserProbe *>(context);
+        if (probe == nullptr || message == nullptr || message_size <= 0
+            || records == nullptr || record_capacity < 0 || result == nullptr) {
+            return EINVAL;
+        }
+        ++probe->pex_count;
+        probe->last_record_capacity = record_capacity;
+        *result = probe->pex_result;
+        if (std::cmp_greater(probe->pex_records.size(), record_capacity)) {
+            return EOVERFLOW;
+        }
+        __unsafe_buffer_usage_begin
+        std::span<TTorrentPeerExchangeRecord> const output(
+            records,
+            static_cast<std::size_t>(record_capacity)
+        );
+        __unsafe_buffer_usage_end
+        std::ranges::copy(probe->pex_records, output.begin());
+        return probe->pex_status;
+    }
+};
+
 [[nodiscard]] std::string v1_capsule_info(std::uint32_t &piece_hash_offset)
 {
     std::string info = "d6:lengthi4e4:name8:file.bin12:piece lengthi16384e6:pieces20:";
@@ -689,6 +825,205 @@ TEST_CASE("swarm metainfo callback ownership is balanced on accept and reject")
     CHECK(rejected_probe.context_release_count == 1);
 }
 
+TEST_CASE("peer protocol callback ownership and typed imports are exact")
+{
+    PeerProtocolParserProbe probe;
+    probe.client_version = {'T', 'o', 'r', 'r', 'e', 'n', 't', ' ', '7'};
+    probe.handshake_result = TTorrentExtensionHandshakeResult{
+        .address_high = 0U,
+        .address_low = 0xcb00'7108U,
+        .ut_metadata_id = 2,
+        .ut_pex_id = 1,
+        .upload_only_id = 3,
+        .holepunch_id = 4,
+        .dont_have_id = 7,
+        .metadata_size = 1'234,
+        .listen_port = 6'881,
+        .last_seen_complete = 9,
+        .request_queue_limit = 250,
+        .present_fields = TTORRENT_HANDSHAKE_HAS_METADATA_SIZE
+            | TTORRENT_HANDSHAKE_HAS_LISTEN_PORT
+            | TTORRENT_HANDSHAKE_HAS_LAST_SEEN_COMPLETE
+            | TTORRENT_HANDSHAKE_HAS_REQUEST_QUEUE
+            | TTORRENT_HANDSHAKE_HAS_CLIENT_VERSION
+            | TTORRENT_HANDSHAKE_HAS_EXTERNAL_ADDRESS
+            | TTORRENT_HANDSHAKE_HAS_UPLOAD_ONLY,
+        .client_version_size = static_cast<int32_t>(probe.client_version.size()),
+        .address_family = TTORRENT_PEER_ADDRESS_IPV4,
+        .upload_only = 1U,
+        .reserved = 0U,
+    };
+    probe.metadata_result = TTorrentMetadataMessageResult{
+        .raw_message_type = 1,
+        .piece = 2,
+        .total_size = 40'000,
+        .payload_offset = 4,
+        .payload_size = 5,
+        .kind = TTORRENT_METADATA_MESSAGE_DATA,
+        .has_total_size = 1U,
+        .reserved0 = 0U,
+        .reserved1 = 0U,
+    };
+    probe.pex_records = {
+        TTorrentPeerExchangeRecord{
+            .address_high = 0U,
+            .address_low = 0xcb00'7109U,
+            .port = 6'881U,
+            .address_family = TTORRENT_PEER_ADDRESS_IPV4,
+            .action = TTORRENT_PEX_CONTACT_ADD,
+            .flags = 0x1fU,
+            .reserved0 = 0U,
+            .reserved1 = 0U,
+        },
+        TTorrentPeerExchangeRecord{
+            .address_high = 0x2001'0db8'0000'0000U,
+            .address_low = 1U,
+            .port = 6'882U,
+            .address_family = TTORRENT_PEER_ADDRESS_IPV6,
+            .action = TTORRENT_PEX_CONTACT_DROP,
+            .flags = 0U,
+            .reserved0 = 0U,
+            .reserved1 = 0U,
+        },
+    };
+    probe.pex_result = TTorrentPeerExchangeResult{
+        .record_count = 2,
+        .added_count = 1,
+        .dropped_count = 1,
+        .reserved = 0U,
+    };
+
+    {
+        BridgePeerMessageParser parser(probe.callbacks());
+        CHECK(probe.retain_count == 1);
+        CHECK(probe.release_count == 0);
+
+        std::string const handshake_message = "de";
+        lt::aux::extension_handshake handshake;
+        lt::error_code error;
+        REQUIRE(parser.parse_extension_handshake(handshake_message, handshake, error));
+        CHECK_FALSE(error);
+        CHECK(handshake.ut_metadata_id == 2);
+        CHECK(handshake.ut_pex_id == 1);
+        CHECK(handshake.upload_only_id == 3);
+        CHECK(handshake.holepunch_id == 4);
+        CHECK(handshake.dont_have_id == 7);
+        CHECK(handshake.metadata_size == 1'234);
+        CHECK(handshake.listen_port == 6'881);
+        CHECK(handshake.last_seen_complete == 9);
+        CHECK(handshake.request_queue_limit == 250);
+        CHECK(handshake.client_version == "Torrent 7");
+        REQUIRE(handshake.external_address);
+        CHECK(handshake.external_address->to_string() == "203.0.113.8");
+        CHECK(handshake.upload_only == true);
+        CHECK(probe.last_version_capacity == TTORRENT_MAX_PEER_CLIENT_VERSION_BYTES);
+
+        std::string const metadata_message = "dictBLOCK";
+        lt::aux::ut_metadata_message metadata;
+        REQUIRE(parser.parse_ut_metadata(metadata_message, metadata, error));
+        CHECK_FALSE(error);
+        CHECK(metadata.type == lt::aux::ut_metadata_message_type::piece);
+        CHECK(metadata.raw_type == 1);
+        CHECK(metadata.piece == 2);
+        CHECK(metadata.total_size == 40'000);
+        CHECK(metadata.payload_offset == 4);
+        CHECK(metadata.payload_size == 5);
+
+        std::string const pex_message = "de";
+        lt::aux::peer_exchange_message pex;
+        REQUIRE(parser.parse_ut_pex(pex_message, pex, error));
+        CHECK_FALSE(error);
+        REQUIRE(pex.contacts.size() == 2U);
+        CHECK(pex.added_count == 1);
+        CHECK(pex.dropped_count == 1);
+        CHECK(pex.contacts.at(0).endpoint.address().to_string() == "203.0.113.9");
+        CHECK(pex.contacts.at(0).endpoint.port() == 6'881U);
+        CHECK(pex.contacts.at(0).action == lt::aux::peer_exchange_action::add);
+        CHECK(static_cast<std::uint8_t>(pex.contacts.at(0).flags) == 0x1fU);
+        CHECK(pex.contacts.at(1).endpoint.address().to_string() == "2001:db8::1");
+        CHECK(pex.contacts.at(1).endpoint.port() == 6'882U);
+        CHECK(pex.contacts.at(1).action == lt::aux::peer_exchange_action::drop);
+        CHECK(probe.last_record_capacity == TTORRENT_MAX_PEX_MESSAGE_CONTACTS);
+    }
+
+    CHECK(probe.release_count == 1);
+    CHECK(probe.handshake_count == 1);
+    CHECK(probe.metadata_count == 1);
+    CHECK(probe.pex_count == 1);
+}
+
+TEST_CASE("peer protocol typed boundary rejects malformed callback records atomically")
+{
+    PeerProtocolParserProbe probe;
+    BridgePeerMessageParser parser(probe.callbacks());
+    lt::error_code error;
+
+    probe.handshake_result.reserved = 1U;
+    lt::aux::extension_handshake handshake;
+    handshake.ut_metadata_id = 91;
+    CHECK_FALSE(parser.parse_extension_handshake("de", handshake, error));
+    CHECK(error == lt::errors::invalid_extended);
+    CHECK(handshake.ut_metadata_id == 91);
+
+    probe.handshake_result.reserved = 0U;
+    probe.handshake_result.ut_metadata_id = 3;
+    probe.handshake_result.ut_pex_id = 3;
+    CHECK_FALSE(parser.parse_extension_handshake("de", handshake, error));
+    CHECK(error == lt::errors::invalid_extended);
+    CHECK(handshake.ut_metadata_id == 91);
+
+    probe.metadata_result = TTorrentMetadataMessageResult{
+        .raw_message_type = 0,
+        .piece = 1,
+        .total_size = 4,
+        .payload_offset = 2,
+        .payload_size = 0,
+        .kind = TTORRENT_METADATA_MESSAGE_DATA,
+        .has_total_size = 1U,
+        .reserved0 = 0U,
+        .reserved1 = 0U,
+    };
+    lt::aux::ut_metadata_message metadata;
+    metadata.piece = 92;
+    CHECK_FALSE(parser.parse_ut_metadata("de", metadata, error));
+    CHECK(error == lt::errors::invalid_metadata_message);
+    CHECK(metadata.piece == 92);
+
+    TTorrentPeerExchangeRecord const duplicate{
+        .address_high = 0U,
+        .address_low = 0xcb00'7109U,
+        .port = 6'881U,
+        .address_family = TTORRENT_PEER_ADDRESS_IPV4,
+        .action = TTORRENT_PEX_CONTACT_ADD,
+        .flags = 0U,
+        .reserved0 = 0U,
+        .reserved1 = 0U,
+    };
+    probe.pex_records = {duplicate, duplicate};
+    probe.pex_result = TTorrentPeerExchangeResult{
+        .record_count = 2,
+        .added_count = 2,
+        .dropped_count = 0,
+        .reserved = 0U,
+    };
+    lt::aux::peer_exchange_message pex;
+    pex.added_count = 93;
+    CHECK_FALSE(parser.parse_ut_pex("de", pex, error));
+    CHECK(error == lt::errors::invalid_pex_message);
+    CHECK(pex.added_count == 93);
+
+    probe.pex_records = {duplicate};
+    probe.pex_result = TTorrentPeerExchangeResult{
+        .record_count = 1,
+        .added_count = 0,
+        .dropped_count = 0,
+        .reserved = 1U,
+    };
+    CHECK_FALSE(parser.parse_ut_pex("de", pex, error));
+    CHECK(error == lt::errors::invalid_pex_message);
+    CHECK(pex.added_count == 93);
+}
+
 TEST_CASE("hash-verified swarm metadata installs only through the external parser")
 {
     std::uint32_t piece_hash_offset = 0U;
@@ -728,7 +1063,7 @@ TEST_CASE("hash-verified swarm metadata installs only through the external parse
     CHECK(probe.context_release_count == 1);
 }
 
-TEST_CASE("bridge identity attachment carries the session swarm parser")
+TEST_CASE("bridge identity attachment carries both session parsers")
 {
     std::uint32_t piece_hash_offset = 0U;
     std::string const info = v1_capsule_info(piece_hash_offset);
@@ -739,13 +1074,16 @@ TEST_CASE("bridge identity attachment carries the session swarm parser")
     );
     SwarmMetainfoParserProbe probe(swarm_info.bytes);
     auto parser = std::make_shared<BridgeSwarmMetadataParser>(probe.callbacks());
+    PeerProtocolParserProbe peer_probe;
+    auto peer_parser = std::make_shared<BridgePeerMessageParser>(peer_probe.callbacks());
     bridge_tests::TemporaryDirectory temporary_directory;
     {
         TTorrentClient client(
             (temporary_directory.path() / "State").string(),
             false,
             nullptr,
-            parser
+            parser,
+            peer_parser
         );
         client.set_session_shutdown_asynchronous(false);
         lt::add_torrent_params params;
@@ -757,9 +1095,12 @@ TEST_CASE("bridge identity attachment carries the session swarm parser")
 
         REQUIRE(identity != nullptr);
         CHECK(params.swarm_metadata_parser == parser);
+        CHECK(params.peer_message_parser == peer_parser);
     }
     parser.reset();
+    peer_parser.reset();
     CHECK(probe.context_release_count == 1);
+    CHECK(peer_probe.release_count == 1);
 }
 
 TEST_CASE("a hash-valid rejected swarm dictionary enters a stable invalid state")

@@ -17,6 +17,10 @@ Scripts/verify-xcode.zsh
 - `magnet_parser` feeds arbitrary UTF-8 and replacement-decoded text to the
   shared Swift magnet parser and checks typed Codable round trips and canonical
   file selections.
+- `peer_protocol_parser` selects the extension handshake, BEP 9 metadata
+  control, or BEP 11 peer-exchange parser and feeds it arbitrary bytes. It
+  checks deterministic parsing plus typed ID, payload-range, address, flag,
+  uniqueness, and count invariants.
 - `storage_broker_ipc` generates typed, malformed raw XPC dictionaries and
   exercises strict request/reply decoding, exact-key rejection, bounded binary
   fields, descriptor ownership, and canonical round trips.
@@ -28,7 +32,7 @@ Scripts/verify-xcode.zsh
   deterministic parsing, advertised hash enforcement, canonical file indices,
   safe paths, and independently reproduced source digests.
 
-The magnet, claim, and manifest targets depend on the same `TorrentMetainfo`
+The magnet, peer-protocol, claim, and manifest targets depend on the same `TorrentMetainfo`
 and `TorrentStorageAuthority` modules used by the app. SwiftPM links those
 production modules into a fuzz-only dynamic library; no fuzz hook or
 conditional is linked into the app.

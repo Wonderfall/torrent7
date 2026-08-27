@@ -27,6 +27,7 @@ fi
 all_targets=(
     ipc_json_preflight
     magnet_parser
+    peer_protocol_parser
     storage_broker_ipc
     storage_claim_validation
     storage_manifest
@@ -45,6 +46,9 @@ harness_for_target() {
             ;;
         magnet_parser)
             printf '%s\n' "$TOOLS_DIR/harnesses/MagnetParserFuzzer.cpp"
+            ;;
+        peer_protocol_parser)
+            printf '%s\n' "$TOOLS_DIR/harnesses/PeerProtocolParserFuzzer.cpp"
             ;;
         storage_broker_ipc)
             printf '%s\n' "$TOOLS_DIR/harnesses/StorageBrokerIPCFuzzer.cpp"
@@ -67,7 +71,7 @@ support_for_target() {
         ipc_json_preflight | storage_broker_ipc)
             printf '%s\n' TorrentEngineIPCFuzzSupport
             ;;
-        magnet_parser | storage_claim_validation | storage_manifest)
+        magnet_parser | peer_protocol_parser | storage_claim_validation | storage_manifest)
             printf '%s\n' TorrentStorageFuzzSupport
             ;;
     esac

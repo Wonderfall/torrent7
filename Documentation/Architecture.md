@@ -31,6 +31,7 @@ therefore neither treated as secret nor accepted as filesystem authority.
 | Torrent manifest safety parsing | Owns Swift preview and claim parsing | Owns production Swift parsing and typed native import |
 | Magnet parsing | Owns the shared bounded Swift parser | Revalidates the typed model and imports flat records |
 | Swarm info-dictionary parsing | None | Hashes in libtorrent, parses synchronously in Swift, imports a typed capsule |
+| Peer extension message parsing | None | Parses BEP 10, BEP 9 control, and BEP 11 synchronously in Swift; applies native state and policy |
 | Destination selection, reservation, and mapping | Owns | None |
 | Durable storage claims and ownership evidence | Owns | None |
 | Exact payload file access | Brokers individual descriptors | Consumes brokered descriptors |
@@ -449,6 +450,17 @@ latched as invalid, and there is no native bdecode fallback. The boundary uses
 Swift 6.3 safe-interop annotations and does not depend on a Swift 6.4 language
 feature.
 
+Incoming extension handshakes, metadata-control messages, and peer-exchange
+dictionaries likewise terminate in a bounded synchronous Swift parser. Fixed
+POD results and one caller-owned PEX record array cross the C ABI; Swift retains
+no borrowed bytes and transfers no output allocation. C++ revalidates the flat
+records before constructing libtorrent types. Libtorrent continues to own
+connection state, additive extension updates, metadata hash assembly, message
+rate limits, and peer admission, but these three peer-controlled dictionaries
+have no native bdecode fallback. Build-time reachability checks pin that cutover,
+while arm64e code-generation and replay tests cover every new callback and its
+long-lived context.
+
 Libtorrent and BoringSSL are pinned, patched, verified, and linked statically.
 The app bundle contains only the GUI and helper Mach-O executables. TLS uses the
 buffer-only BoringSSL client path with macOS system trust and hostname binding.
@@ -489,11 +501,11 @@ rejection, per-object ownership authentication, descriptor-relative namespace
 rejection, replacement-safe retained-descriptor soft revocation, claim recovery,
 ambiguous activation containment, imports, removal, and magnet promotion.
 Separate sanitizer-backed fuzz targets cover raw broker XPC dictionaries,
-claim and ownership validation, manifest parsing and digest reproduction, the
-native broker callback/descriptor adapter, and the broader native API input
-surfaces. Their expensive build and execution are intentionally independent of
-the routine test gates, and the harness entry points are absent from shipped
-products.
+claim and ownership validation, manifest parsing and digest reproduction,
+peer-extension parsing and typed invariants, the native broker
+callback/descriptor adapter, and the broader native API input surfaces. Their
+expensive build and execution are intentionally independent of the routine test
+gates, and the harness entry points are absent from shipped products.
 
 The signed Enhanced Security integration gate currently verifies the real
 process lifecycle and authenticated broker handshake, but its staged dataset

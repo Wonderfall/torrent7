@@ -48,6 +48,32 @@ Validation followed by passing the same bytes to libtorrent is not a cutover.
   libtorrent as a differential oracle; production contains no raw-magnet bridge
   entry point or embedded-`.torrent` fallback to `parse_magnet_uri`.
 
+## Accepted peer-extension dialect
+
+- BEP 10 extension handshakes use the same canonical, bounded bencode scanner.
+  Every field is optional. Repeated handshakes are additive updates: an omitted
+  extension mapping leaves prior state unchanged, ID `0` disables an extension,
+  and positive peer-local IDs must be unique bytes. Client version text is valid
+  UTF-8 and at most 256 bytes. Metadata size, listen port, request queue,
+  completion age, external address, and upload-only values have explicit typed
+  bounds.
+- BEP 9 metadata messages consist of one canonical control dictionary followed
+  by an uninterpreted binary suffix. Request (`0`) and reject (`2`) messages
+  carry no suffix. Data (`1`) requires a positive bounded total size and a block
+  of 1 through 16 KiB. Unknown message types retain their numeric type and exact
+  suffix range so native policy can ignore them as the protocol requires. The
+  whole message is limited to 17 KiB and advertised metadata to 4 MiB.
+- BEP 11 peer exchange accepts exact six-byte IPv4 and eighteen-byte IPv6
+  compact contacts. Optional flag strings must match their contact count; only
+  public protocol bits 0 through 4 survive. Ports are nonzero, address encodings
+  are family-canonical, and unspecified, multicast, broadcast, IPv4-mapped IPv6,
+  duplicate, and add/drop-contradictory addresses are rejected. The initial
+  message is bounded to 100 additions and 100 drops; libtorrent retains its
+  stricter 50-plus-50 limit for later messages and all peer-admission policy.
+- Unknown dictionary fields are skipped structurally within the same depth,
+  token, key-byte, and container budgets. Noncanonical dictionaries are rejected
+  rather than normalized and passed onward.
+
 ## Native interoperability
 
 Swift parsers emit narrow types such as `ParsedMagnet`, `ValidatedInfoCore`,
@@ -70,6 +96,22 @@ pointers, nested spans, Swift objects, C++ objects, function pointers, or
 ABI-sized integers. Native code validates every range, derives redundant
 values, copies all retained data, and commits fully constructed state
 atomically.
+
+Peer-extension parsing uses a smaller synchronous typed boundary. Libtorrent
+passes one complete borrowed message to Swift and never exposes that pointer
+after the callback. Handshake and metadata callbacks return fixed zero-reserved
+POD records; PEX fills one caller-owned array of at most 200 fixed records.
+Swift never allocates output memory for native ownership. C++ independently
+checks every presence bit, enum, count, range, reserved byte, extension ID,
+address, port, flag, and payload offset before constructing libtorrent values.
+The callback context and each callback role are separately address-diversified
+with pointer authentication on arm64e.
+
+The incoming BEP 10 handshake, BEP 9 control dictionary, and BEP 11 compact-peer
+dictionary have no native bdecode fallback. Libtorrent still owns connection
+state, additive update semantics, metadata hash verification and assembly,
+message-rate rules, peer filtering, and admission. Its bencoding of outgoing
+self-generated messages is intentionally unchanged.
 
 ### Metainfo capsule schema v1
 

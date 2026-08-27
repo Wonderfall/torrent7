@@ -76,6 +76,60 @@ private func contractSwarmMetainfoParserCallbacks()
     return unsafe callbacks
 }
 
+private func contractPeerProtocolContextRetain(
+    _ context: UnsafeMutableRawPointer?
+) -> UInt8 {
+    unsafe context == nil ? 0 : 1
+}
+
+private func contractPeerProtocolContextRelease(_ context: UnsafeMutableRawPointer?) {}
+
+private func contractExtensionHandshakeParse(
+    _ context: UnsafeMutableRawPointer?,
+    _ message: UnsafePointer<CChar>,
+    _ messageSize: Int32,
+    _ clientVersionOut: UnsafeMutablePointer<UInt8>,
+    _ clientVersionCapacity: Int32,
+    _ resultOut: UnsafeMutablePointer<TTorrentExtensionHandshakeResult>
+) -> Int32 {
+    unsafe resultOut.pointee = TTorrentExtensionHandshakeResult()
+    return EINVAL
+}
+
+private func contractMetadataMessageParse(
+    _ context: UnsafeMutableRawPointer?,
+    _ message: UnsafePointer<CChar>,
+    _ messageSize: Int32,
+    _ resultOut: UnsafeMutablePointer<TTorrentMetadataMessageResult>
+) -> Int32 {
+    unsafe resultOut.pointee = TTorrentMetadataMessageResult()
+    return EINVAL
+}
+
+private func contractPeerExchangeParse(
+    _ context: UnsafeMutableRawPointer?,
+    _ message: UnsafePointer<CChar>,
+    _ messageSize: Int32,
+    _ recordsOut: UnsafeMutablePointer<TTorrentPeerExchangeRecord>,
+    _ recordCapacity: Int32,
+    _ resultOut: UnsafeMutablePointer<TTorrentPeerExchangeResult>
+) -> Int32 {
+    unsafe resultOut.pointee = TTorrentPeerExchangeResult()
+    return EINVAL
+}
+
+private func contractPeerProtocolParserCallbacks()
+    -> TTorrentPeerProtocolParserCallbacks {
+    var callbacks = unsafe TTorrentPeerProtocolParserCallbacks()
+    unsafe callbacks.context = UnsafeMutableRawPointer(bitPattern: 1)
+    unsafe callbacks.retain_context = contractPeerProtocolContextRetain
+    unsafe callbacks.release_context = contractPeerProtocolContextRelease
+    unsafe callbacks.parse_extension_handshake = contractExtensionHandshakeParse
+    unsafe callbacks.parse_metadata_message = contractMetadataMessageParse
+    unsafe callbacks.parse_peer_exchange = contractPeerExchangeParse
+    return unsafe callbacks
+}
+
 private func bridgeString(_ buffer: [CChar]) -> String {
     String(decoding: buffer.prefix { $0 != 0 }.map(UInt8.init(bitPattern:)), as: UTF8.self)
 }
@@ -84,7 +138,7 @@ private func bridgeString(_ buffer: [CChar]) -> String {
 struct TorrentBridgeContractTests {
     @Test("Pins bridge ABI version, limits, states, and native event kinds")
     func pinsBridgeConstants() {
-        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 61)
+        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 62)
         #expect(UInt32(TTORRENT_MAGNET_IMPORT_SCHEMA_VERSION) == 1)
         #expect(UInt32(TTORRENT_METAINFO_CAPSULE_MAGIC) == 0x494d_3754)
         #expect(UInt16(TTORRENT_METAINFO_CAPSULE_SCHEMA_VERSION) == 1)
@@ -216,12 +270,22 @@ struct TorrentBridgeContractTests {
         let ownedMetainfoCapsuleAlignment = unsafe MemoryLayout<TTorrentOwnedMetainfoCapsule>.alignment
         let swarmParserCallbacksSize = unsafe MemoryLayout<TTorrentSwarmMetainfoParserCallbacks>.size
         let swarmParserCallbacksAlignment = unsafe MemoryLayout<TTorrentSwarmMetainfoParserCallbacks>.alignment
+        let handshakeResultSize = MemoryLayout<TTorrentExtensionHandshakeResult>.size
+        let metadataResultSize = MemoryLayout<TTorrentMetadataMessageResult>.size
+        let pexRecordSize = MemoryLayout<TTorrentPeerExchangeRecord>.size
+        let pexResultSize = MemoryLayout<TTorrentPeerExchangeResult>.size
+        let peerParserCallbacksSize = unsafe MemoryLayout<TTorrentPeerProtocolParserCallbacks>.size
         #expect(payloadBrokerCallbacksSize == 40)
         #expect(payloadBrokerCallbacksAlignment == 8)
         #expect(ownedMetainfoCapsuleSize == 16)
         #expect(ownedMetainfoCapsuleAlignment == 8)
         #expect(swarmParserCallbacksSize == 40)
         #expect(swarmParserCallbacksAlignment == 8)
+        #expect(handshakeResultSize == 64)
+        #expect(metadataResultSize == 32)
+        #expect(pexRecordSize == 24)
+        #expect(pexResultSize == 16)
+        #expect(peerParserCallbacksSize == 48)
         #expect(MemoryLayout<TTorrentStorageActivation>.size == 96)
         #expect(MemoryLayout<TTorrentStorageActivation>.alignment == 8)
         #expect(MemoryLayout<TTorrentStorageActivation>.offset(of: \.claim_generation) == 16)
@@ -330,6 +394,7 @@ struct TorrentBridgeContractTests {
                         1,
                         contractPayloadBrokerCallbacks(),
                         TTorrentSwarmMetainfoParserCallbacks(),
+                        contractPeerProtocolParserCallbacks(),
                         &error
                     )
                 }
@@ -343,6 +408,35 @@ struct TorrentBridgeContractTests {
             #expect(
                 errorBuffer.string
                     == "The swarm metainfo parser callback table is incomplete."
+            )
+        }
+    }
+
+    @Test("Create rejects an incomplete peer protocol parser table")
+    func createRejectsIncompletePeerProtocolParser() throws {
+        try withTemporaryDirectory { stateDirectory in
+            var errorBuffer = BridgeErrorBuffer()
+            let maybeClient = unsafe errorBuffer.withMutableBuffer { buffer in
+                var error: MutableSpan<CChar>? = buffer.mutableSpan
+                defer { error = nil }
+                return unsafe stateDirectory.torrentFilePath.withCString { path in
+                    unsafe TorrentClientCreateWithError(
+                        path,
+                        1,
+                        contractPayloadBrokerCallbacks(),
+                        contractSwarmMetainfoParserCallbacks(),
+                        TTorrentPeerProtocolParserCallbacks(),
+                        &error
+                    )
+                }
+            }
+            if let client = unsafe maybeClient {
+                unsafe TorrentClientDestroyBlocking(client)
+            }
+            #expect(unsafe maybeClient == nil)
+            #expect(
+                errorBuffer.string
+                    == "The peer protocol parser callback table is incomplete."
             )
         }
     }
@@ -628,6 +722,7 @@ private func invalidCreateResult(path: String?) -> (didCreate: Bool, error: Stri
                     1,
                     contractPayloadBrokerCallbacks(),
                     contractSwarmMetainfoParserCallbacks(),
+                    contractPeerProtocolParserCallbacks(),
                     &error
                 )
             }
@@ -642,6 +737,7 @@ private func invalidCreateResult(path: String?) -> (didCreate: Bool, error: Stri
             1,
             contractPayloadBrokerCallbacks(),
             contractSwarmMetainfoParserCallbacks(),
+            contractPeerProtocolParserCallbacks(),
             &error
         )
         if let client = unsafe client {
@@ -709,6 +805,7 @@ private func emptyClientSmokeResult(statePath: String) -> EmptyClientSmokeResult
                 1,
                 contractPayloadBrokerCallbacks(),
                 contractSwarmMetainfoParserCallbacks(),
+                contractPeerProtocolParserCallbacks(),
                 &error
             )
         }

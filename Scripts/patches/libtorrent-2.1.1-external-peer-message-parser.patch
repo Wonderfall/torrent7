@@ -1,0 +1,683 @@
+diff --git a/include/libtorrent/add_torrent_params.hpp b/include/libtorrent/add_torrent_params.hpp
+index af9396a50..bc8e557e3 100644
+--- a/include/libtorrent/add_torrent_params.hpp
++++ b/include/libtorrent/add_torrent_params.hpp
+@@ -166,6 +166,11 @@ TORRENT_VERSION_NAMESPACE_3
+ 		// torrent_info without invoking libtorrent's native bdecode path.
+ 		std::shared_ptr<aux::swarm_metadata_parser> swarm_metadata_parser;
+ 
++		// Required for torrents accepting extension-protocol messages. The
++		// embedding application parses peer-controlled bencoded dictionaries
++		// into narrow typed results before libtorrent mutates connection state.
++		std::shared_ptr<aux::peer_message_parser> peer_message_parser;
++
+ 		// This is an optional field. If set, the part-file for this torrent
+ 		// will be stored in the specified subdirectory, still inside its
+ 		// download directory. i.e. ``part_file_dir`` is a relative directory.
+diff --git a/include/libtorrent/aux_/peer_message_parser.hpp b/include/libtorrent/aux_/peer_message_parser.hpp
+new file mode 100644
+index 000000000..6e2819f91
+--- /dev/null
++++ b/include/libtorrent/aux_/peer_message_parser.hpp
+@@ -0,0 +1,103 @@
++/*
++
++Copyright (c) 2026, Torrent7 contributors
++All rights reserved.
++
++You may use, distribute and modify this code under the terms of the BSD license,
++see LICENSE file.
++*/
++
++#ifndef TORRENT_PEER_MESSAGE_PARSER_HPP
++#define TORRENT_PEER_MESSAGE_PARSER_HPP
++
++#include <cstdint>
++#include <memory>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "libtorrent/config.hpp"
++#include "libtorrent/error_code.hpp"
++#include "libtorrent/pex_flags.hpp"
++#include "libtorrent/socket.hpp"
++#include "libtorrent/span.hpp"
++
++namespace libtorrent::aux {
++
++	struct extension_handshake
++	{
++		// -1 means absent from this additive update. 0 disables an
++		// extension, and positive values are peer-local message IDs.
++		int ut_metadata_id = -1;
++		int ut_pex_id = -1;
++		int upload_only_id = -1;
++		int holepunch_id = -1;
++		int dont_have_id = -1;
++
++		std::optional<int> metadata_size;
++		std::optional<int> listen_port;
++		std::optional<int> last_seen_complete;
++		std::optional<int> request_queue_limit;
++		std::optional<std::string> client_version;
++		std::optional<address> external_address;
++		std::optional<bool> upload_only;
++	};
++
++	enum class ut_metadata_message_type : std::uint8_t
++	{
++		request = 0,
++		piece = 1,
++		dont_have = 2,
++		unknown = 255,
++	};
++
++	struct ut_metadata_message
++	{
++		ut_metadata_message_type type = ut_metadata_message_type::unknown;
++		std::int64_t raw_type = 0;
++		int piece = 0;
++		int total_size = 0;
++		int payload_offset = 0;
++		int payload_size = 0;
++	};
++
++	enum class peer_exchange_action : std::uint8_t
++	{
++		add = 1,
++		drop = 2,
++	};
++
++	struct peer_exchange_contact
++	{
++		tcp::endpoint endpoint;
++		peer_exchange_action action = peer_exchange_action::add;
++		pex_flags_t flags{};
++	};
++
++	struct peer_exchange_message
++	{
++		std::vector<peer_exchange_contact> contacts;
++		int added_count = 0;
++		int dropped_count = 0;
++	};
++
++	// Parses the bounded bencoded control messages carried by the extension
++	// protocol. Implementations are supplied by the embedding application so
++	// peer-controlled dictionaries do not enter libtorrent's native bdecoder.
++	struct TORRENT_EXTRA_EXPORT peer_message_parser
++	{
++		virtual ~peer_message_parser() = default;
++
++		virtual bool parse_extension_handshake(span<char const> message
++			, extension_handshake& result, error_code& ec) noexcept = 0;
++
++		virtual bool parse_ut_metadata(span<char const> message
++			, ut_metadata_message& result, error_code& ec) noexcept = 0;
++
++		virtual bool parse_ut_pex(span<char const> message
++			, peer_exchange_message& result, error_code& ec) noexcept = 0;
++	};
++
++}
++
++#endif // TORRENT_PEER_MESSAGE_PARSER_HPP
+diff --git a/include/libtorrent/aux_/torrent.hpp b/include/libtorrent/aux_/torrent.hpp
+index 7ac7e822b..9da204969 100644
+--- a/include/libtorrent/aux_/torrent.hpp
++++ b/include/libtorrent/aux_/torrent.hpp
+@@ -543,6 +543,8 @@ namespace libtorrent::aux {
+ 		// can send a rendezvous connect message
+ 		bool allows_peer_exchange() const;
+ 		bool peer_endpoint_policy_enabled() const { return m_block_non_global_peers; }
++		peer_message_parser* extension_message_parser() const
++		{ return m_peer_message_parser.get(); }
+ 		bool is_peer_address_global(address const& addr) const;
+ 		void invalidate_peer_address_policy();
+ 		bt_peer_connection* find_introducer(tcp::endpoint const& ep) const;
+@@ -1680,6 +1682,7 @@ namespace libtorrent::aux {
+ 		// discarded after startup, while swarm metadata can arrive at any time.
+ 		std::shared_ptr<swarm_metadata_parser> m_swarm_metadata_parser;
+ 		bool m_swarm_metadata_rejected = false;
++		std::shared_ptr<peer_message_parser> m_peer_message_parser;
+ 
+ 		// if the torrent is started without metadata, it may
+ 		// still be given a name until the metadata is received
+diff --git a/include/libtorrent/extensions.hpp b/include/libtorrent/extensions.hpp
+index 36e7c0f54..4ad6cec82 100644
+--- a/include/libtorrent/extensions.hpp
++++ b/include/libtorrent/extensions.hpp
+@@ -402,6 +402,11 @@ TORRENT_VERSION_NAMESPACE_3_END
+ 		// this is not called for web seeds
+ 		virtual bool on_extension_handshake(bdecode_node const&) { return true; }
+ 
++		// Torrent7's typed extension parser invokes this overload after the
++		// peer-controlled dictionary has been parsed outside native code. The
++		// update is additive; absent extension IDs leave existing state intact.
++		virtual void on_extension_handshake_parsed(aux::extension_handshake const&) {}
++
+ 		// returning true from any of the message handlers
+ 		// indicates that the plugin has handled the message.
+ 		// it will break the plugin chain traversing and not let
+diff --git a/include/libtorrent/fwd.hpp b/include/libtorrent/fwd.hpp
+index e9e1c902c..fa62fbd2d 100644
+--- a/include/libtorrent/fwd.hpp
++++ b/include/libtorrent/fwd.hpp
+@@ -17,6 +17,8 @@ see LICENSE file.
+ namespace libtorrent {
+ 
+ namespace aux {
++struct extension_handshake;
++struct peer_message_parser;
+ struct payload_file_provider;
+ struct swarm_metadata_parser;
+ }
+diff --git a/src/bt_peer_connection.cpp b/src/bt_peer_connection.cpp
+index ef738300f..9e51bc9bd 100644
+--- a/src/bt_peer_connection.cpp
++++ b/src/bt_peer_connection.cpp
+@@ -49,6 +49,7 @@ see LICENSE file.
+ #include "libtorrent/performance_counters.hpp" // for counters
+ #include "libtorrent/aux_/alert_manager.hpp" // for alert_manager
+ #include "libtorrent/aux_/ip_helpers.hpp"
++#include "libtorrent/aux_/peer_message_parser.hpp"
+ #include "libtorrent/aux_/string_util.hpp" // for search
+ #include "libtorrent/aux_/generate_peer_id.hpp"
+ 
+@@ -2020,16 +2021,17 @@ namespace {
+ 		span<char const> recv_buffer = m_recv_buffer.get();
+ 
+ 		error_code ec;
+-		int pos;
+-		bdecode_node root = bdecode(recv_buffer.subspan(2), ec, &pos);
+-		if (ec || root.type() != bdecode_node::dict_t)
++		extension_handshake handshake;
++		peer_message_parser* const parser = t->extension_message_parser();
++		if (parser == nullptr
++			|| !parser->parse_extension_handshake(recv_buffer.subspan(2), handshake, ec))
+ 		{
+ #ifndef TORRENT_DISABLE_LOGGING
+ 			if (should_log(peer_log_alert::info))
+ 			{
+ 				peer_log(peer_log_alert::info, peer_log_alert::extension_message
+-					, "invalid extended handshake. pos: %d %s"
+-					, pos, print_error(ec).c_str());
++					, "invalid externally parsed extended handshake: %s"
++					, print_error(ec).c_str());
+ 			}
+ #endif
+ 			return;
+@@ -2039,96 +2041,57 @@ namespace {
+ 		if (should_log(peer_log_alert::incoming_message))
+ 		{
+ 			peer_log(peer_log_alert::incoming_message, peer_log_alert::extended_handshake
+-				, "%s", print_entry(root, true).c_str());
++				, "typed extension update");
+ 		}
+ #endif
+ 
+ #ifndef TORRENT_DISABLE_EXTENSIONS
+-		for (auto i = m_extensions.begin();
+-			!m_extensions.empty() && i != m_extensions.end();)
++		for (auto const& extension : m_extensions)
+ 		{
+-			// a false return value means that the extension
+-			// isn't supported by the other end. So, it is removed.
+-			if (!(*i)->on_extension_handshake(root))
+-				i = m_extensions.erase(i);
+-			else
+-				++i;
++			extension->on_extension_handshake_parsed(handshake);
+ 		}
+ 		if (is_disconnecting()) return;
+ #endif
+ 
+-		// upload_only
+-		if (bdecode_node const m = root.dict_find_dict("m"))
++		if (handshake.upload_only_id >= 0)
++			m_upload_only_id = std::uint8_t(handshake.upload_only_id);
++		if (handshake.holepunch_id >= 0)
+ 		{
+-			m_upload_only_id = std::uint8_t(m.dict_find_int_value("upload_only", 0));
+ 			m_holepunch_id = t->allows_peer_exchange()
+ 				&& (!t->peer_endpoint_policy_enabled()
+ 					|| t->is_peer_address_global(remote().address()))
+-				? std::uint8_t(m.dict_find_int_value("ut_holepunch", 0))
++				? std::uint8_t(handshake.holepunch_id)
+ 				: 0;
+-			m_dont_have_id = std::uint8_t(m.dict_find_int_value("lt_donthave", 0));
+ 		}
++		if (handshake.dont_have_id >= 0)
++			m_dont_have_id = std::uint8_t(handshake.dont_have_id);
+ 
+-		// there is supposed to be a remote listen port
+-		int const listen_port = int(root.dict_find_int_value("p"));
+-		if (listen_port > 0 && peer_info_struct() != nullptr)
++		if (handshake.listen_port && peer_info_struct() != nullptr)
+ 		{
+-			t->update_peer_port(listen_port, peer_info_struct(), peer_info::incoming);
++			t->update_peer_port(*handshake.listen_port, peer_info_struct(), peer_info::incoming);
+ 			received_listen_port();
+ 			if (is_disconnecting()) return;
+ 		}
+ 
+-		// there should be a version too
+-		// but where do we put that info?
+-
+-		int const last_seen_complete = int(root.dict_find_int_value("complete_ago", -1));
+-		if (last_seen_complete >= 0) set_last_seen_complete(last_seen_complete);
++		if (handshake.last_seen_complete)
++			set_last_seen_complete(*handshake.last_seen_complete);
+ 
+-		auto const client_info = root.dict_find_string_value("v");
+-		if (!client_info.empty())
++		if (handshake.client_version)
+ 		{
+-			m_client_version = std::string(client_info);
+-			// the client name is supposed to be UTF-8
+-			aux::verify_encoding(m_client_version);
++			m_client_version = std::move(*handshake.client_version);
+ 		}
+ 
+-		int const reqq = int(root.dict_find_int_value("reqq"));
+-		if (reqq > 0) max_out_request_queue(reqq);
+-
+-		if (root.dict_find_int_value("upload_only", 0))
+-			set_upload_only(true);
++		if (handshake.request_queue_limit && *handshake.request_queue_limit > 0)
++			max_out_request_queue(*handshake.request_queue_limit);
+ 
+-#ifndef TORRENT_DISABLE_SHARE_MODE
+-		if (m_settings.get_bool(settings_pack::support_share_mode)
+-			&& root.dict_find_int_value("share_mode", 0))
+-			set_share_mode(true);
+-#endif
++		if (handshake.upload_only)
++			set_upload_only(*handshake.upload_only);
+ 
+-		auto const myip = root.dict_find_string_value("yourip");
+-		if (!myip.empty())
++		if (handshake.external_address)
+ 		{
+-			if (myip.size() == std::tuple_size<address_v4::bytes_type>::value)
+-			{
+-				address_v4::bytes_type bytes;
+-				std::copy(myip.begin(), myip.end(), bytes.begin());
+-				m_ses.set_external_address(local_endpoint()
+-					, address_v4(bytes)
+-					, aux::session_interface::source_peer, remote().address());
+-			}
+-			else if (myip.size() == std::tuple_size<address_v6::bytes_type>::value)
+-			{
+-				address_v6::bytes_type bytes;
+-				std::copy(myip.begin(), myip.end(), bytes.begin());
+-				address_v6 ipv6_address(bytes);
+-				if (ipv6_address.is_v4_mapped())
+-					m_ses.set_external_address(local_endpoint()
+-						, make_address_v4(v4_mapped, ipv6_address)
+-						, aux::session_interface::source_peer, remote().address());
+-				else
+-					m_ses.set_external_address(local_endpoint()
+-						, ipv6_address
+-						, aux::session_interface::source_peer, remote().address());
+-			}
++			m_ses.set_external_address(local_endpoint()
++				, *handshake.external_address
++				, aux::session_interface::source_peer, remote().address());
+ 		}
+ 
+ 		// if we're finished and this peer is uploading only
+diff --git a/src/torrent.cpp b/src/torrent.cpp
+index 18f0d48fe..59edc6108 100644
+--- a/src/torrent.cpp
++++ b/src/torrent.cpp
+@@ -467,6 +467,7 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 		{
+ 			m_swarm_metadata_parser = std::move(p.swarm_metadata_parser);
+ 		}
++		m_peer_message_parser = std::move(p.peer_message_parser);
+ 
+ 		// TODO: 3 we could probably get away with just saving a few fields here
+ 		m_add_torrent_params = std::make_unique<add_torrent_params>(std::move(p));
+diff --git a/src/ut_metadata.cpp b/src/ut_metadata.cpp
+index 8deb3d53c..46821686b 100644
+--- a/src/ut_metadata.cpp
++++ b/src/ut_metadata.cpp
+@@ -31,6 +31,7 @@ see LICENSE file.
+ #include "libtorrent/alert_types.hpp"
+ #include "libtorrent/aux_/random.hpp"
+ #include "libtorrent/aux_/io_bytes.hpp"
++#include "libtorrent/aux_/peer_message_parser.hpp"
+ #include "libtorrent/performance_counters.hpp" // for counters
+ #include "libtorrent/aux_/time.hpp"
+ 
+@@ -179,25 +180,20 @@ namespace {
+ 		}
+ 
+ 		// called when the extension handshake from the other end is received
+-		bool on_extension_handshake(bdecode_node const& h) override
++		void on_extension_handshake_parsed(aux::extension_handshake const& h) override
+ 		{
+-			m_message_index = 0;
+-			if (h.type() != bdecode_node::dict_t) return false;
+-			bdecode_node const messages = h.dict_find_dict("m");
+-			if (!messages) return false;
++			if (h.ut_metadata_id >= 0)
++				m_message_index = h.ut_metadata_id;
+ 
+-			int index = int(messages.dict_find_int_value("ut_metadata", -1));
+-			if (index == -1) return false;
+-			m_message_index = index;
+-
+-			int metadata_size = int(h.dict_find_int_value("metadata_size"));
+-			if (metadata_size > 0)
+-				m_tp.metadata_size(metadata_size);
+-			else
+-				m_pc.set_has_metadata(false);
++			if (h.metadata_size)
++			{
++				if (*h.metadata_size > 0)
++					m_tp.metadata_size(*h.metadata_size);
++				else
++					m_pc.set_has_metadata(false);
++			}
+ 
+ 			maybe_send_request();
+-			return true;
+ 		}
+ 
+ 		void write_metadata_packet(msg_t const type, int const piece)
+@@ -284,39 +280,27 @@ namespace {
+ 			if (!m_pc.packet_finished()) return true;
+ 
+ 			error_code ec;
+-			bdecode_node msg = bdecode(body, ec);
+-			if (msg.type() != bdecode_node::dict_t)
+-			{
+-#ifndef TORRENT_DISABLE_LOGGING
+-				m_pc.peer_log(peer_log_alert::incoming_message, peer_log_alert::ut_metadata
+-					, "not a dictionary");
+-#endif
+-				m_pc.disconnect(errors::invalid_metadata_message, operation_t::bittorrent, peer_connection_interface::peer_error);
+-				return true;
+-			}
+-
+-			bdecode_node const& type_ent = msg.dict_find_int("msg_type");
+-			bdecode_node const& piece_ent = msg.dict_find_int("piece");
+-			if (!type_ent || !piece_ent)
++			aux::ut_metadata_message message;
++			aux::peer_message_parser* const parser = m_torrent.extension_message_parser();
++			if (parser == nullptr || !parser->parse_ut_metadata(body, message, ec))
+ 			{
+ #ifndef TORRENT_DISABLE_LOGGING
+ 				m_pc.peer_log(peer_log_alert::incoming_message, peer_log_alert::ut_metadata
+-					, "missing or invalid keys");
++					, "invalid externally parsed control dictionary");
+ #endif
+ 				m_pc.disconnect(errors::invalid_metadata_message, operation_t::bittorrent, peer_connection_interface::peer_error);
+ 				return true;
+ 			}
+-			auto const type = msg_t(type_ent.int_value());
+-			auto const piece = static_cast<int>(piece_ent.int_value());
++			auto const piece = message.piece;
+ 
+ #ifndef TORRENT_DISABLE_LOGGING
+ 			m_pc.peer_log(peer_log_alert::incoming_message, peer_log_alert::ut_metadata
+-				, "type: %d piece: %d", static_cast<int>(type), piece);
++				, "type: %lld piece: %d", static_cast<long long>(message.raw_type), piece);
+ #endif
+ 
+-			switch (type)
++			switch (message.type)
+ 			{
+-				case msg_t::request:
++				case aux::ut_metadata_message_type::request:
+ 				{
+ 					if (!m_torrent.valid_metadata()
+ 						|| piece < 0 || piece >= (m_tp.metadata().size() + 16 * 1024 - 1) / (16 * 1024))
+@@ -342,7 +326,7 @@ namespace {
+ 						write_metadata_packet(msg_t::dont_have, piece);
+ 				}
+ 				break;
+-				case msg_t::piece:
++				case aux::ut_metadata_message_type::piece:
+ 				{
+ 					auto const i = std::find(m_sent_requests.begin()
+ 						, m_sent_requests.end(), piece);
+@@ -358,13 +342,13 @@ namespace {
+ 					}
+ 
+ 					m_sent_requests.erase(i);
+-					auto const len = msg.data_section().size();
+-					auto const total_size = msg.dict_find_int_value("total_size", 0);
+-					m_tp.received_metadata(*this, body.subspan(len), piece, static_cast<int>(total_size));
++					m_tp.received_metadata(*this
++						, body.subspan(message.payload_offset, message.payload_size)
++						, piece, message.total_size);
+ 					maybe_send_request();
+ 				}
+ 				break;
+-				case msg_t::dont_have:
++				case aux::ut_metadata_message_type::dont_have:
+ 				{
+ 					m_request_limit = std::max(aux::time_now() + minutes(1), m_request_limit);
+ 					auto const i = std::find(m_sent_requests.begin()
+@@ -374,6 +358,8 @@ namespace {
+ 					m_sent_requests.erase(i);
+ 				}
+ 				break;
++				case aux::ut_metadata_message_type::unknown:
++					break;
+ 			}
+ 
+ 			m_pc.stats_counters().inc_stats_counter(counters::num_incoming_metadata);
+diff --git a/src/ut_pex.cpp b/src/ut_pex.cpp
+index 466dbcb1b..126d42df5 100644
+--- a/src/ut_pex.cpp
++++ b/src/ut_pex.cpp
+@@ -26,6 +26,7 @@ see LICENSE file.
+ #include "libtorrent/extensions/ut_pex.hpp"
+ #include "libtorrent/aux_/time.hpp"
+ #include "libtorrent/aux_/ip_helpers.hpp" // for is_v4
++#include "libtorrent/aux_/peer_message_parser.hpp"
+ 
+ #ifndef TORRENT_DISABLE_EXTENSIONS
+ 
+@@ -230,17 +231,10 @@ namespace libtorrent { namespace {
+ 			messages[extension_name] = extension_index;
+ 		}
+ 
+-		bool on_extension_handshake(bdecode_node const& h) override
++		void on_extension_handshake_parsed(aux::extension_handshake const& h) override
+ 		{
+-			m_message_index = 0;
+-			if (h.type() != bdecode_node::dict_t) return false;
+-			bdecode_node const messages = h.dict_find_dict("m");
+-			if (!messages) return false;
+-
+-			int const index = int(messages.dict_find_int_value(extension_name, -1));
+-			if (index == -1) return false;
+-			m_message_index = index;
+-			return true;
++			if (h.ut_pex_id >= 0)
++				m_message_index = h.ut_pex_id;
+ 		}
+ 
+ 		bool on_extended(int const length, int const msg, span<char const> body) override
+@@ -272,127 +266,79 @@ namespace libtorrent { namespace {
+ 				m_last_pex[i] = m_last_pex[i + 1];
+ 			m_last_pex[num_pex_timers - 1] = now;
+ 
+-			bdecode_node pex_msg;
+ 			error_code ec;
+-			int const ret = bdecode(body.begin(), body.end(), pex_msg, ec);
+-			if (ret != 0 || pex_msg.type() != bdecode_node::dict_t)
++			aux::peer_exchange_message pex_msg;
++			aux::peer_message_parser* const parser = m_torrent.extension_message_parser();
++			if (parser == nullptr
++				|| !parser->parse_ut_pex(body.first(length), pex_msg, ec))
+ 			{
+ 				m_pc.disconnect(errors::invalid_pex_message, operation_t::bittorrent, peer_connection_interface::peer_error);
+ 				return true;
+ 			}
+ 
+-			bdecode_node p = pex_msg.dict_find_string("dropped");
++			int const contact_limit = m_received_pex_message ? 50 : max_peer_entries;
++			if (pex_msg.added_count > contact_limit
++				|| pex_msg.dropped_count > contact_limit)
++			{
++				m_pc.disconnect(errors::invalid_pex_message, operation_t::bittorrent, peer_connection_interface::peer_error);
++				return true;
++			}
++			m_received_pex_message = true;
+ 
+ #ifndef TORRENT_DISABLE_LOGGING
+-			int num_dropped = 0;
+-			int num_added = 0;
+-			if (p) num_dropped += p.string_length() / 6;
++			int const num_dropped = pex_msg.dropped_count;
++			int const num_added = pex_msg.added_count;
+ #endif
+-			if (p)
++			for (auto const& contact : pex_msg.contacts)
+ 			{
+-				int const num_peers = p.string_length() / 6;
+-				char const* in = p.string_ptr();
+-
+-				for (int i = 0; i < num_peers; ++i)
++				if (contact.action != aux::peer_exchange_action::drop) continue;
++				if (aux::is_v4(contact.endpoint))
+ 				{
+-					auto const adr = aux::read_v4_endpoint<tcp::endpoint>(in);
+-					peers4_t::value_type const v(adr.address().to_v4().to_bytes(), adr.port());
++					peers4_t::value_type const v(
++						contact.endpoint.address().to_v4().to_bytes(), contact.endpoint.port());
+ 					auto const j = std::lower_bound(m_peers.begin(), m_peers.end(), v);
+ 					if (j != m_peers.end() && *j == v) m_peers.erase(j);
+ 				}
++				else
++				{
++					peers6_t::value_type const v(
++						contact.endpoint.address().to_v6().to_bytes(), contact.endpoint.port());
++					auto const j = std::lower_bound(m_peers6.begin(), m_peers6.end(), v);
++					if (j != m_peers6.end() && *j == v) m_peers6.erase(j);
++				}
+ 			}
+ 
+-			p = pex_msg.dict_find_string("added");
+-			bdecode_node const pf = pex_msg.dict_find_string("added.f");
+-
+ 			bool peers_added = false;
+-#ifndef TORRENT_DISABLE_LOGGING
+-			if (p) num_added += p.string_length() / 6;
+-#endif
+-			if (p && pf && pf.string_length() == p.string_length() / 6)
++			for (auto const& contact : pex_msg.contacts)
+ 			{
+-				int const num_peers = pf.string_length();
+-				char const* in = p.string_ptr();
+-				char const* fin = pf.string_ptr();
+-
+-				for (int i = 0; i < num_peers; ++i)
+-				{
+-					auto const adr = aux::read_v4_endpoint<tcp::endpoint>(in);
+-					pex_flags_t flags(static_cast<std::uint8_t>(*fin++));
+-					if (m_torrent.peer_endpoint_policy_enabled()
+-						&& !m_torrent.is_peer_address_global(adr.address())) continue;
++				if (contact.action != aux::peer_exchange_action::add) continue;
++				tcp::endpoint const& adr = contact.endpoint;
++				if (m_torrent.peer_endpoint_policy_enabled()
++					&& !m_torrent.is_peer_address_global(adr.address())) continue;
+ 
+-					// this is an internal flag. disregard it from the internet
+-					flags &= ~pex_lt_v2;
++				pex_flags_t flags = contact.flags & ~pex_lt_v2;
++				if (aux::is_local(adr.address()) && !aux::is_local(m_pc.remote().address())) continue;
+ 
++				if (aux::is_v4(adr))
++				{
+ 					if (int(m_peers.size()) >= m_torrent.settings().get_int(settings_pack::max_pex_peers))
+-						break;
+-
+-					// ignore local addresses unless the peer is local to us
+-					if (aux::is_local(adr.address()) && !aux::is_local(m_pc.remote().address())) continue;
+-
++						continue;
+ 					peers4_t::value_type const v(adr.address().to_v4().to_bytes(), adr.port());
+ 					auto const j = std::lower_bound(m_peers.begin(), m_peers.end(), v);
+-					// do we already know about this peer?
+ 					if (j != m_peers.end() && *j == v) continue;
+ 					m_peers.insert(j, v);
+-					m_torrent.add_peer(adr, peer_info::pex, flags);
+-					peers_added = true;
+ 				}
+-			}
+-
+-			bdecode_node p6 = pex_msg.dict_find_string("dropped6");
+-			if (p6)
+-			{
+-#ifndef TORRENT_DISABLE_LOGGING
+-				num_dropped += p6.string_length() / 18;
+-#endif
+-				int const num_peers = p6.string_length() / 18;
+-				char const* in = p6.string_ptr();
+-
+-				for (int i = 0; i < num_peers; ++i)
+-				{
+-					auto const adr = aux::read_v6_endpoint<tcp::endpoint>(in);
+-					peers6_t::value_type const v(adr.address().to_v6().to_bytes(), adr.port());
+-					auto const j = std::lower_bound(m_peers6.begin(), m_peers6.end(), v);
+-					if (j != m_peers6.end() && *j == v) m_peers6.erase(j);
+-				}
+-			}
+-
+-			p6 = pex_msg.dict_find_string("added6");
+-#ifndef TORRENT_DISABLE_LOGGING
+-			if (p6) num_added += p6.string_length() / 18;
+-#endif
+-			bdecode_node const p6f = pex_msg.dict_find_string("added6.f");
+-			if (p6 && p6f && p6f.string_length() == p6.string_length() / 18)
+-			{
+-				int const num_peers = p6f.string_length();
+-				char const* in = p6.string_ptr();
+-				char const* fin = p6f.string_ptr();
+-
+-				for (int i = 0; i < num_peers; ++i)
++				else
+ 				{
+-					auto const adr = aux::read_v6_endpoint<tcp::endpoint>(in);
+-					pex_flags_t flags(static_cast<std::uint8_t>(*fin++));
+-					if (m_torrent.peer_endpoint_policy_enabled()
+-						&& !m_torrent.is_peer_address_global(adr.address())) continue;
+-
+-					// this is an internal flag. disregard it from the internet
+-					flags &= ~pex_lt_v2;
+-
+-					// ignore local addresses unless the peer is local to us
+-					if (aux::is_local(adr.address()) && !aux::is_local(m_pc.remote().address())) continue;
+ 					if (int(m_peers6.size()) >= m_torrent.settings().get_int(settings_pack::max_pex_peers))
+-						break;
+-
++						continue;
+ 					peers6_t::value_type const v(adr.address().to_v6().to_bytes(), adr.port());
+ 					auto const j = std::lower_bound(m_peers6.begin(), m_peers6.end(), v);
+-					// do we already know about this peer?
+ 					if (j != m_peers6.end() && *j == v) continue;
+ 					m_peers6.insert(j, v);
+-					m_torrent.add_peer(adr, peer_info::pex, flags);
+-					peers_added = true;
+ 				}
++				m_torrent.add_peer(adr, peer_info::pex, flags);
++				peers_added = true;
+ 			}
+ #ifndef TORRENT_DISABLE_LOGGING
+ 			m_pc.peer_log(peer_log_alert::incoming_message, peer_log_alert::pex, "dropped: %d added: %d"
+@@ -587,6 +533,7 @@ namespace libtorrent { namespace {
+ 
+ 		time_point m_last_msg;
+ 		int m_message_index = 0;
++		bool m_received_pex_message = false;
+ 
+ 		// this is initialized to true, and set to
+ 		// false after the first pex message has been sent.

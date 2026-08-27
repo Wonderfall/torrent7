@@ -30,6 +30,11 @@ struct PointerAuthenticationProbe {
     int swarm_release_count = 0;
     int swarm_parse_count = 0;
     int swarm_capsule_release_count = 0;
+    int peer_retain_count = 0;
+    int peer_release_count = 0;
+    int peer_handshake_count = 0;
+    int peer_metadata_count = 0;
+    int peer_pex_count = 0;
 };
 
 std::uint8_t pointer_authentication_retain(void *context)
@@ -99,6 +104,57 @@ void pointer_authentication_swarm_capsule_release(
     ++static_cast<PointerAuthenticationProbe *>(context)->swarm_capsule_release_count;
 }
 
+std::uint8_t pointer_authentication_peer_retain(void *context)
+{
+    ++static_cast<PointerAuthenticationProbe *>(context)->peer_retain_count;
+    return 1U;
+}
+
+void pointer_authentication_peer_release(void *context)
+{
+    ++static_cast<PointerAuthenticationProbe *>(context)->peer_release_count;
+}
+
+int32_t pointer_authentication_peer_handshake(
+    void *context,
+    char const *,
+    int32_t,
+    std::uint8_t *,
+    int32_t,
+    TTorrentExtensionHandshakeResult *result
+)
+{
+    ++static_cast<PointerAuthenticationProbe *>(context)->peer_handshake_count;
+    *result = TTorrentExtensionHandshakeResult{};
+    return EINVAL;
+}
+
+int32_t pointer_authentication_peer_metadata(
+    void *context,
+    char const *,
+    int32_t,
+    TTorrentMetadataMessageResult *result
+)
+{
+    ++static_cast<PointerAuthenticationProbe *>(context)->peer_metadata_count;
+    *result = TTorrentMetadataMessageResult{};
+    return EINVAL;
+}
+
+int32_t pointer_authentication_peer_pex(
+    void *context,
+    char const *,
+    int32_t,
+    TTorrentPeerExchangeRecord *,
+    int32_t,
+    TTorrentPeerExchangeResult *result
+)
+{
+    ++static_cast<PointerAuthenticationProbe *>(context)->peer_pex_count;
+    *result = TTorrentPeerExchangeResult{};
+    return EINVAL;
+}
+
 void pointer_authentication_wake(void *context)
 {
     ++static_cast<PointerAuthenticationProbe *>(context)->wake_count;
@@ -140,6 +196,20 @@ __attribute__((noinline)) void replay_object_bytes(
         .release_context = pointer_authentication_swarm_release,
         .parse_info = pointer_authentication_swarm_parse,
         .release_capsule = pointer_authentication_swarm_capsule_release,
+    };
+}
+
+[[nodiscard]] PeerProtocolParserCallbacks make_peer_pointer_authentication_callbacks(
+    PointerAuthenticationProbe *context
+)
+{
+    return PeerProtocolParserCallbacks{
+        .context = context,
+        .retain_context = pointer_authentication_peer_retain,
+        .release_context = pointer_authentication_peer_release,
+        .parse_extension_handshake = pointer_authentication_peer_handshake,
+        .parse_metadata_message = pointer_authentication_peer_metadata,
+        .parse_peer_exchange = pointer_authentication_peer_pex,
     };
 }
 
@@ -232,6 +302,68 @@ extern "C" __attribute__((noinline, used)) void TorrentBridgeTestInvokeSwarmMeta
     callbacks->release_capsule(callbacks->context, TTorrentOwnedMetainfoCapsule{});
 }
 
+extern "C" __attribute__((noinline, used)) void TorrentBridgeTestInvokePeerProtocolRetain(
+    PeerProtocolParserCallbacks const *callbacks
+) noexcept
+{
+    static_cast<void>(callbacks->retain_context(callbacks->context));
+}
+
+extern "C" __attribute__((noinline, used)) void TorrentBridgeTestInvokePeerProtocolRelease(
+    PeerProtocolParserCallbacks const *callbacks
+) noexcept
+{
+    callbacks->release_context(callbacks->context);
+}
+
+extern "C" __attribute__((noinline, used)) void TorrentBridgeTestInvokePeerProtocolHandshake(
+    PeerProtocolParserCallbacks const *callbacks
+) noexcept
+{
+    std::array<char, 1U> message{{'d'}};
+    std::array<std::uint8_t, TTORRENT_MAX_PEER_CLIENT_VERSION_BYTES> version{};
+    TTorrentExtensionHandshakeResult result{};
+    static_cast<void>(callbacks->parse_extension_handshake(
+        callbacks->context,
+        message.data(),
+        static_cast<int32_t>(message.size()),
+        version.data(),
+        static_cast<int32_t>(version.size()),
+        &result
+    ));
+}
+
+extern "C" __attribute__((noinline, used)) void TorrentBridgeTestInvokePeerProtocolMetadata(
+    PeerProtocolParserCallbacks const *callbacks
+) noexcept
+{
+    std::array<char, 1U> message{{'d'}};
+    TTorrentMetadataMessageResult result{};
+    static_cast<void>(callbacks->parse_metadata_message(
+        callbacks->context,
+        message.data(),
+        static_cast<int32_t>(message.size()),
+        &result
+    ));
+}
+
+extern "C" __attribute__((noinline, used)) void TorrentBridgeTestInvokePeerProtocolPEX(
+    PeerProtocolParserCallbacks const *callbacks
+) noexcept
+{
+    std::array<char, 1U> message{{'d'}};
+    std::array<TTorrentPeerExchangeRecord, TTORRENT_MAX_PEX_MESSAGE_CONTACTS> records{};
+    TTorrentPeerExchangeResult result{};
+    static_cast<void>(callbacks->parse_peer_exchange(
+        callbacks->context,
+        message.data(),
+        static_cast<int32_t>(message.size()),
+        records.data(),
+        static_cast<int32_t>(records.size()),
+        &result
+    ));
+}
+
 extern "C" bool TorrentBridgeTestPACSlotsInvokeNormally() noexcept
 {
     PointerAuthenticationProbe probe;
@@ -242,6 +374,8 @@ extern "C" bool TorrentBridgeTestPACSlotsInvokeNormally() noexcept
     PayloadBrokerCallbacks const callbacks = make_pointer_authentication_callbacks(&probe);
     SwarmMetainfoParserCallbacks const swarm_callbacks =
         make_swarm_pointer_authentication_callbacks(&probe);
+    PeerProtocolParserCallbacks const peer_callbacks =
+        make_peer_pointer_authentication_callbacks(&probe);
 
     TorrentBridgeTestInvokeWake(&wake);
     TorrentBridgeTestInvokePayloadRetain(&callbacks);
@@ -252,6 +386,11 @@ extern "C" bool TorrentBridgeTestPACSlotsInvokeNormally() noexcept
     TorrentBridgeTestInvokeSwarmMetainfoRelease(&swarm_callbacks);
     TorrentBridgeTestInvokeSwarmMetainfoParse(&swarm_callbacks);
     TorrentBridgeTestInvokeSwarmMetainfoCapsuleRelease(&swarm_callbacks);
+    TorrentBridgeTestInvokePeerProtocolRetain(&peer_callbacks);
+    TorrentBridgeTestInvokePeerProtocolRelease(&peer_callbacks);
+    TorrentBridgeTestInvokePeerProtocolHandshake(&peer_callbacks);
+    TorrentBridgeTestInvokePeerProtocolMetadata(&peer_callbacks);
+    TorrentBridgeTestInvokePeerProtocolPEX(&peer_callbacks);
     return probe.wake_count == 1
         && probe.retain_count == 1
         && probe.release_count == 1
@@ -260,7 +399,12 @@ extern "C" bool TorrentBridgeTestPACSlotsInvokeNormally() noexcept
         && probe.swarm_retain_count == 1
         && probe.swarm_release_count == 1
         && probe.swarm_parse_count == 1
-        && probe.swarm_capsule_release_count == 1;
+        && probe.swarm_capsule_release_count == 1
+        && probe.peer_retain_count == 1
+        && probe.peer_release_count == 1
+        && probe.peer_handshake_count == 1
+        && probe.peer_metadata_count == 1
+        && probe.peer_pex_count == 1;
 }
 
 extern "C" void TorrentBridgeTestReplayWakeCallback() noexcept
@@ -445,6 +589,108 @@ extern "C" void TorrentBridgeTestReplaySwarmMetainfoContext() noexcept
     destination.parse_info = pointer_authentication_swarm_parse;
     destination.release_capsule = pointer_authentication_swarm_capsule_release;
     TorrentBridgeTestInvokeSwarmMetainfoRetain(&destination);
+}
+
+extern "C" void TorrentBridgeTestReplayPeerProtocolRetain() noexcept
+{
+    PointerAuthenticationProbe source_context;
+    PointerAuthenticationProbe destination_context;
+    PeerProtocolParserCallbacks source =
+        make_peer_pointer_authentication_callbacks(&source_context);
+    PeerProtocolParserCallbacks destination =
+        make_peer_pointer_authentication_callbacks(&destination_context);
+    replay_object_bytes(&destination, &source, sizeof(destination));
+    destination.context = &destination_context;
+    destination.release_context = pointer_authentication_peer_release;
+    destination.parse_extension_handshake = pointer_authentication_peer_handshake;
+    destination.parse_metadata_message = pointer_authentication_peer_metadata;
+    destination.parse_peer_exchange = pointer_authentication_peer_pex;
+    TorrentBridgeTestInvokePeerProtocolRetain(&destination);
+}
+
+extern "C" void TorrentBridgeTestReplayPeerProtocolRelease() noexcept
+{
+    PointerAuthenticationProbe source_context;
+    PointerAuthenticationProbe destination_context;
+    PeerProtocolParserCallbacks source =
+        make_peer_pointer_authentication_callbacks(&source_context);
+    PeerProtocolParserCallbacks destination =
+        make_peer_pointer_authentication_callbacks(&destination_context);
+    replay_object_bytes(&destination, &source, sizeof(destination));
+    destination.context = &destination_context;
+    destination.retain_context = pointer_authentication_peer_retain;
+    destination.parse_extension_handshake = pointer_authentication_peer_handshake;
+    destination.parse_metadata_message = pointer_authentication_peer_metadata;
+    destination.parse_peer_exchange = pointer_authentication_peer_pex;
+    TorrentBridgeTestInvokePeerProtocolRelease(&destination);
+}
+
+extern "C" void TorrentBridgeTestReplayPeerProtocolHandshake() noexcept
+{
+    PointerAuthenticationProbe source_context;
+    PointerAuthenticationProbe destination_context;
+    PeerProtocolParserCallbacks source =
+        make_peer_pointer_authentication_callbacks(&source_context);
+    PeerProtocolParserCallbacks destination =
+        make_peer_pointer_authentication_callbacks(&destination_context);
+    replay_object_bytes(&destination, &source, sizeof(destination));
+    destination.context = &destination_context;
+    destination.retain_context = pointer_authentication_peer_retain;
+    destination.release_context = pointer_authentication_peer_release;
+    destination.parse_metadata_message = pointer_authentication_peer_metadata;
+    destination.parse_peer_exchange = pointer_authentication_peer_pex;
+    TorrentBridgeTestInvokePeerProtocolHandshake(&destination);
+}
+
+extern "C" void TorrentBridgeTestReplayPeerProtocolMetadata() noexcept
+{
+    PointerAuthenticationProbe source_context;
+    PointerAuthenticationProbe destination_context;
+    PeerProtocolParserCallbacks source =
+        make_peer_pointer_authentication_callbacks(&source_context);
+    PeerProtocolParserCallbacks destination =
+        make_peer_pointer_authentication_callbacks(&destination_context);
+    replay_object_bytes(&destination, &source, sizeof(destination));
+    destination.context = &destination_context;
+    destination.retain_context = pointer_authentication_peer_retain;
+    destination.release_context = pointer_authentication_peer_release;
+    destination.parse_extension_handshake = pointer_authentication_peer_handshake;
+    destination.parse_peer_exchange = pointer_authentication_peer_pex;
+    TorrentBridgeTestInvokePeerProtocolMetadata(&destination);
+}
+
+extern "C" void TorrentBridgeTestReplayPeerProtocolPEX() noexcept
+{
+    PointerAuthenticationProbe source_context;
+    PointerAuthenticationProbe destination_context;
+    PeerProtocolParserCallbacks source =
+        make_peer_pointer_authentication_callbacks(&source_context);
+    PeerProtocolParserCallbacks destination =
+        make_peer_pointer_authentication_callbacks(&destination_context);
+    replay_object_bytes(&destination, &source, sizeof(destination));
+    destination.context = &destination_context;
+    destination.retain_context = pointer_authentication_peer_retain;
+    destination.release_context = pointer_authentication_peer_release;
+    destination.parse_extension_handshake = pointer_authentication_peer_handshake;
+    destination.parse_metadata_message = pointer_authentication_peer_metadata;
+    TorrentBridgeTestInvokePeerProtocolPEX(&destination);
+}
+
+extern "C" void TorrentBridgeTestReplayPeerProtocolContext() noexcept
+{
+    PointerAuthenticationProbe source_context;
+    PointerAuthenticationProbe destination_context;
+    PeerProtocolParserCallbacks source =
+        make_peer_pointer_authentication_callbacks(&source_context);
+    PeerProtocolParserCallbacks destination =
+        make_peer_pointer_authentication_callbacks(&destination_context);
+    replay_object_bytes(&destination, &source, sizeof(destination));
+    destination.retain_context = pointer_authentication_peer_retain;
+    destination.release_context = pointer_authentication_peer_release;
+    destination.parse_extension_handshake = pointer_authentication_peer_handshake;
+    destination.parse_metadata_message = pointer_authentication_peer_metadata;
+    destination.parse_peer_exchange = pointer_authentication_peer_pex;
+    TorrentBridgeTestInvokePeerProtocolRetain(&destination);
 }
 
 } // namespace torrent_bridge::internal

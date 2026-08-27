@@ -789,6 +789,76 @@ private enum MagnetParserFuzzer {
     }
 }
 
+private enum PeerProtocolParserFuzzer {
+    static func exercise(_ data: Data) {
+        guard let selector = data.first else {
+            return
+        }
+        let message = Data(data.dropFirst())
+        let parser = TorrentPeerProtocolParser()
+        switch selector % 3 {
+        case 0:
+            guard let parsed = try? parser.parseExtensionHandshake(message) else {
+                return
+            }
+            fuzzAssert((try? parser.parseExtensionHandshake(message)) == parsed)
+            let identifiers = [
+                parsed.utMetadataID,
+                parsed.utPEXID,
+                parsed.uploadOnlyID,
+                parsed.holepunchID,
+                parsed.dontHaveID,
+            ].compactMap { $0 }.filter { $0 != 0 }
+            fuzzAssert(Set(identifiers).count == identifiers.count)
+            fuzzAssert(parsed.metadataSize.map { (0 ... 4 * 1_024 * 1_024).contains($0) } ?? true)
+            fuzzAssert(parsed.listenPort.map { $0 > 0 } ?? true)
+            fuzzAssert(parsed.lastSeenComplete.map { $0 >= 0 } ?? true)
+            fuzzAssert(parsed.clientVersionUTF8.map {
+                $0.count <= 256 && String(data: $0, encoding: .utf8) != nil
+            } ?? true)
+            if let address = parsed.externalAddress {
+                fuzzAssert(address.family == .ipv4 ? address.high == 0 : true)
+                fuzzAssert(address.high != 0 || address.low != 0)
+            }
+        case 1:
+            guard let parsed = try? parser.parseMetadataControlMessage(message) else {
+                return
+            }
+            fuzzAssert((try? parser.parseMetadataControlMessage(message)) == parsed)
+            fuzzAssert(parsed.piece >= 0)
+            fuzzAssert(parsed.payloadOffset > 0)
+            fuzzAssert(Int(parsed.payloadOffset) <= message.count)
+            fuzzAssert(Int(parsed.payloadSize) == message.count - Int(parsed.payloadOffset))
+            switch parsed.kind {
+            case .request:
+                fuzzAssert(parsed.rawMessageType == 0 && parsed.payloadSize == 0)
+            case .data:
+                fuzzAssert(parsed.rawMessageType == 1)
+                fuzzAssert(parsed.totalSize.map { $0 > 0 } ?? false)
+                fuzzAssert((1 ... 16 * 1_024).contains(parsed.payloadSize))
+            case .reject:
+                fuzzAssert(parsed.rawMessageType == 2 && parsed.payloadSize == 0)
+            case .unknown:
+                fuzzAssert(!(0 ... 2).contains(parsed.rawMessageType))
+            }
+        default:
+            guard let parsed = try? parser.parsePeerExchange(message) else {
+                return
+            }
+            fuzzAssert((try? parser.parsePeerExchange(message)) == parsed)
+            fuzzAssert(parsed.addedCount <= 100)
+            fuzzAssert(parsed.droppedCount <= 100)
+            fuzzAssert(parsed.contacts.count == parsed.addedCount + parsed.droppedCount)
+            fuzzAssert(parsed.contacts.filter { $0.action == .add }.count == parsed.addedCount)
+            fuzzAssert(parsed.contacts.filter { $0.action == .drop }.count == parsed.droppedCount)
+            fuzzAssert(Set(parsed.contacts.map(\.address)).count == parsed.contacts.count)
+            fuzzAssert(parsed.contacts.allSatisfy {
+                $0.port > 0 && ($0.flags & 0xe0) == 0
+            })
+        }
+    }
+}
+
 private func fuzzData(
     _ bytes: UnsafePointer<UInt8>?,
     _ byteCount: UInt
@@ -845,5 +915,18 @@ public func torrentMagnetParserFuzzOneInput(
     }
     autoreleasepool {
         MagnetParserFuzzer.exercise(data)
+    }
+}
+
+@_cdecl("TorrentPeerProtocolParserFuzzOneInput")
+public func torrentPeerProtocolParserFuzzOneInput(
+    _ bytes: UnsafePointer<UInt8>?,
+    _ byteCount: UInt
+) {
+    guard let data = fuzzData(bytes, byteCount) else {
+        return
+    }
+    autoreleasepool {
+        PeerProtocolParserFuzzer.exercise(data)
     }
 }
