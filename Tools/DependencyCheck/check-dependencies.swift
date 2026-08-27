@@ -59,8 +59,19 @@ struct GitHubCommit: Decodable {
 }
 
 struct GitilesCommit: Decodable {
+    struct Identity: Decodable {
+        let time: String
+    }
+
     let commit: String
     let tree: String
+    let parents: [String]
+    let committer: Identity
+}
+
+struct GitilesLog: Decodable {
+    let log: [GitilesCommit]
+    let next: String?
 }
 
 @MainActor
@@ -228,6 +239,14 @@ final class DependencyChecker {
         return formatter
     }()
 
+    private static let gitilesDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE MMM d HH:mm:ss yyyy Z"
+        return formatter
+    }()
+
     private func recordFailure(_ message: String) {
         failures.append(message)
         print("[fail] \(message)")
@@ -344,6 +363,18 @@ final class DependencyChecker {
     private func fetchJSON<T: Decodable>(_ type: T.Type, from urlString: String) async throws -> T {
         let data = try await fetchData(from: urlString)
         return try JSONDecoder().decode(type, from: data)
+    }
+
+    private func fetchGitilesJSON<T: Decodable>(
+        _ type: T.Type,
+        from urlString: String
+    ) async throws -> T {
+        let data = try await fetchData(from: urlString)
+        let xssiPrefix = Data(")]}'\n".utf8)
+        guard data.starts(with: xssiPrefix) else {
+            throw CheckFailure.message("BoringSSL Gitiles response lacks its XSSI prefix")
+        }
+        return try JSONDecoder().decode(type, from: data.dropFirst(xssiPrefix.count))
     }
 
     private func buildDepDefault(_ name: String) throws -> String {
@@ -478,6 +509,13 @@ final class DependencyChecker {
         throw CheckFailure.message("Could not parse ISO-8601 date: \(value)")
     }
 
+    private func parseGitilesDate(_ value: String) throws -> Date {
+        if let date = Self.gitilesDateFormatter.date(from: value) {
+            return date
+        }
+        throw CheckFailure.message("Could not parse Gitiles date: \(value)")
+    }
+
     private func executablePath(_ name: String) -> String? {
         if name.contains("/") {
             return FileManager.default.isExecutableFile(atPath: name) ? name : nil
@@ -606,16 +644,9 @@ final class DependencyChecker {
             )
         }
 
-        let gitilesData = try await fetchData(
-            from: "https://boringssl.googlesource.com/boringssl/+/\(pinnedCommit)?format=JSON"
-        )
-        let xssiPrefix = Data(")]}'\n".utf8)
-        guard gitilesData.starts(with: xssiPrefix) else {
-            throw CheckFailure.message("BoringSSL Gitiles response lacks its XSSI prefix")
-        }
-        let pinnedMetadata = try JSONDecoder().decode(
+        let pinnedMetadata = try await fetchGitilesJSON(
             GitilesCommit.self,
-            from: gitilesData.dropFirst(xssiPrefix.count)
+            from: "https://boringssl.googlesource.com/boringssl/+/\(pinnedCommit)?format=JSON"
         )
         if pinnedMetadata.commit == pinnedCommit, pinnedMetadata.tree == pinnedTree {
             ok("BoringSSL pinned commit and tree match upstream metadata")
@@ -651,12 +682,31 @@ final class DependencyChecker {
         guard let observed = history.first else {
             throw CheckFailure.message("BoringSSL upstream history is empty")
         }
+        let officialHeadDate: Date
         if observed.sha == remoteHead {
+            officialHeadDate = observed.date
             ok("BoringSSL official repository and GitHub mirror agree on HEAD \(remoteHead)")
         } else {
-            recordFailure(
-                "BoringSSL mirror mismatch: official HEAD \(remoteHead), GitHub mirror \(observed.sha)"
+            let lag = try await verifiedBoringSSLMirrorLag(
+                officialHead: remoteHead,
+                mirrorHead: observed.sha
             )
+            officialHeadDate = lag.officialHeadDate
+            if let eligibleMissingCommit = lag.commits.first(where: {
+                isEligible($0.date, cooldownDays: boringSSLCooldownDays)
+            }) {
+                recordFailure(
+                    "BoringSSL GitHub mirror trails official HEAD by \(lag.commits.count) "
+                        + "verified commit(s), including cooldown-eligible commit "
+                        + "\(eligibleMissingCommit.sha) from "
+                        + dateString(eligibleMissingCommit.date)
+                )
+            } else {
+                info(
+                    "BoringSSL GitHub mirror trails official HEAD by \(lag.commits.count) "
+                        + "verified first-parent commit(s); all are still cooling down"
+                )
+            }
         }
 
         guard let pinnedIndex = history.firstIndex(where: { $0.sha == pinnedCommit }) else {
@@ -687,15 +737,64 @@ final class DependencyChecker {
         }
 
         if remoteHead != pinnedCommit,
-           !isEligible(observed.date, cooldownDays: boringSSLCooldownDays) {
+           !isEligible(officialHeadDate, cooldownDays: boringSSLCooldownDays) {
             info(
                 "BoringSSL HEAD \(remoteHead) is cooling down until "
                     + coolingUntil(
-                        observed.date,
+                        officialHeadDate,
                         cooldownDays: boringSSLCooldownDays
                     )
             )
         }
+    }
+
+    private func verifiedBoringSSLMirrorLag(
+        officialHead: String,
+        mirrorHead: String
+    ) async throws -> (commits: [(sha: String, date: Date)], officialHeadDate: Date) {
+        let shaPattern = #"^[0-9a-f]{40}$"#
+        guard officialHead.range(of: shaPattern, options: .regularExpression) != nil,
+              mirrorHead.range(of: shaPattern, options: .regularExpression) != nil else {
+            throw CheckFailure.message("BoringSSL mirror heads must be full lowercase SHA-1 values")
+        }
+
+        let maximumLagCommitCount = 1_000
+        let log = try await fetchGitilesJSON(
+            GitilesLog.self,
+            from: "https://boringssl.googlesource.com/boringssl/+log/"
+                + "\(mirrorHead)..\(officialHead)?format=JSON&n=\(maximumLagCommitCount + 1)"
+        )
+        guard log.next == nil,
+              !log.log.isEmpty,
+              log.log.count <= maximumLagCommitCount,
+              log.log.first?.commit == officialHead else {
+            throw CheckFailure.message(
+                "Could not bound BoringSSL mirror lag to \(maximumLagCommitCount) commits"
+            )
+        }
+
+        var expectedCommit = officialHead
+        var commits: [(sha: String, date: Date)] = []
+        commits.reserveCapacity(log.log.count)
+        for commit in log.log {
+            guard commit.commit == expectedCommit,
+                  let firstParent = commit.parents.first else {
+                throw CheckFailure.message(
+                    "BoringSSL GitHub mirror does not follow official first-parent history"
+                )
+            }
+            commits.append((
+                sha: commit.commit,
+                date: try parseGitilesDate(commit.committer.time)
+            ))
+            expectedCommit = firstParent
+        }
+        guard expectedCommit == mirrorHead, let officialHeadDate = commits.first?.date else {
+            throw CheckFailure.message(
+                "BoringSSL GitHub mirror diverges from official first-parent history"
+            )
+        }
+        return (commits: commits, officialHeadDate: officialHeadDate)
     }
 
     private func boostArchiveBasename(version: String) -> String {
