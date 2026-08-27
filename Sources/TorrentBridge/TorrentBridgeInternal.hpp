@@ -128,6 +128,10 @@ constexpr std::string_view kTempExtension = ".tmp";
 constexpr std::string_view kRemovalTombstoneExtension = ".remove";
 constexpr std::string_view kRemovalTombstonePrefix = "removal-";
 constexpr std::string_view kCanonicalIDResumeKey = "torrent-app-id";
+// Exact, already validated info-dictionary bytes are persisted as an opaque
+// string. They must return through the Swift InfoCore parser on restore rather
+// than becoming libtorrent's conventional nested `info` dictionary.
+constexpr std::string_view kPreparsedInfoResumeKey = "torrent-app-preparsed-info";
 constexpr std::string_view kStorageClaimIDResumeKey = "torrent-app-storage-claim-id";
 constexpr std::string_view kStorageClaimGenerationResumeKey = "torrent-app-storage-claim-generation";
 constexpr std::string_view kStorageManifestDigestResumeKey = "torrent-app-storage-manifest-digest";
@@ -563,6 +567,8 @@ using FileReadResult = std::expected<std::vector<char>, FileReadFailure>;
 using ResumeRemoveResult = std::expected<bool, std::string>;
 using ResumeSaveResult = std::expected<void, std::string>;
 using ResumeIDListResult = std::expected<std::vector<std::string>, std::string>;
+using ResumeInfoSectionResult =
+    std::expected<std::optional<std::vector<char>>, std::string>;
 using TorrentLoadResult = std::expected<lt::add_torrent_params, BridgeError>;
 using TorrentInfoLoadResult = std::expected<std::shared_ptr<lt::torrent_info>, BridgeError>;
 
@@ -1484,6 +1490,10 @@ std::vector<char> encoded_resume_data(
 );
 
 std::string canonical_id_from_resume_data(std::vector<char> const &buffer);
+
+ResumeInfoSectionResult preparsed_info_from_resume_data(
+    std::vector<char> const &buffer
+);
 
 bool metadata_validation_pending_from_resume_data(std::vector<char> const &buffer);
 

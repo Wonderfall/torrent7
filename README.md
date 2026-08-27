@@ -126,6 +126,9 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
   imports them through the preparsed libtorrent constructor. Swarm parsing is a
   synchronous per-torrent callback with balanced retained context and capsule
   ownership, and libtorrent has no native bdecode fallback for this route.
+  Resume files keep exact info bytes in an opaque application field and reload
+  them through that same Swift callback; conventional nested resume metainfo is
+  rejected before it can reach libtorrent's semantic parser.
 - **Typed peer-extension boundary:** incoming BEP 10 handshakes, BEP 9 metadata
   controls, and BEP 11 peer exchanges terminate in bounded canonical Swift
   parsers. Fixed POD records and one caller-owned PEX array cross the C ABI;

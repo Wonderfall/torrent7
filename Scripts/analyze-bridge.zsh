@@ -129,6 +129,29 @@ done
     "find_data_observer::reply(m)" "$libtorrent_source/src/kademlia/get_item.cpp" \
     || fail "Patched libtorrent must not import arbitrary BEP 44 response values"
 
+typeset -r resume_reader_source="$libtorrent_source/src/read_resume_data.cpp"
+typeset -r resume_support_source="$root_dir/Sources/TorrentBridge/TorrentBridgeSupport.cpp"
+typeset -r resume_restore_source="$root_dir/Sources/TorrentBridge/TorrentBridgeClientPersistence.cpp"
+if "$ripgrep" -n --fixed-strings \
+    "make_shared<torrent_info>(info" "$resume_reader_source"; then
+    fail "Retired native resume metainfo parser route is reachable"
+fi
+"$ripgrep" -q --fixed-strings \
+    'if (rd.dict_find("info"))' "$resume_reader_source" \
+    || fail "Patched libtorrent must reject legacy nested resume metainfo"
+"$ripgrep" -q --fixed-strings \
+    "state.ti.reset()" "$resume_support_source" \
+    || fail "Resume persistence must keep exact metainfo out of nested bencoding"
+"$ripgrep" -q --fixed-strings \
+    "kPreparsedInfoResumeKey" "$resume_support_source" \
+    || fail "Resume persistence must store exact metainfo as an opaque byte string"
+"$ripgrep" -q --fixed-strings \
+    "preparsed_info_from_resume_data(*buffer)" "$resume_restore_source" \
+    || fail "Resume restore must reject legacy metainfo before native resume decoding"
+"$ripgrep" -q --fixed-strings \
+    "swarm_metadata_parser->parse(" "$resume_restore_source" \
+    || fail "Resume metainfo must return through the shared Swift InfoCore parser"
+
 if [[ ! -x $clang_tidy ]]; then
     clang_tidy=${commands[clang-tidy]:-}
 fi

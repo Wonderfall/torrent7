@@ -367,6 +367,14 @@ on disk but skipped during restore. Payload data is untouched. There is no
 automatic path migration and no old filesystem-authority API in Swift, IPC, the
 C ABI, or native restore logic.
 
+Validated exact info-dictionary bytes are stored in a separate opaque
+application field, never as libtorrent's nested `info` resume dictionary. On
+reload those bytes return through the synchronous Swift `InfoCore` parser and
+typed importer, then must match the persisted torrent identity before storage
+activation. The pinned libtorrent resume reader rejects the retired nested
+representation, so a legacy or injected resume record cannot re-enter the
+native metainfo semantic parser.
+
 Resume state and removal tombstones remain in the helper's private container.
 The claim journal and security-scoped bookmarks remain in the GUI container.
 

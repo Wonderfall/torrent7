@@ -36,6 +36,7 @@ readonly -a LIBTORRENT_PATCHES=(
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-external-peer-message-parser.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-external-http-tracker-parser.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-external-dht-message-parser.patch"
+    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-disable-resume-metainfo-parser.patch"
 )
 
 fail() {

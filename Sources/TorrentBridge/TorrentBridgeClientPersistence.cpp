@@ -570,12 +570,29 @@ void TTorrentClient::load_resume_data()
             continue;
         }
 
+        ResumeInfoSectionResult persisted_info_result =
+            preparsed_info_from_resume_data(*buffer);
+        if (!persisted_info_result) {
+            remove_resume_file_locked(name);
+            sync_resume_directory_quietly();
+            continue;
+        }
+        std::optional<std::vector<char>> persisted_info =
+            std::move(*persisted_info_result);
+
         lt::error_code read_error;
         lt::add_torrent_params params = lt::read_resume_data(
             lt::span<char const>(buffer->data(), static_cast<int>(buffer->size())),
             read_error
         );
         if (read_error) {
+            remove_resume_file_locked(name);
+            sync_resume_directory_quietly();
+            continue;
+        }
+        if (params.ti) {
+            // preparsed_info_from_resume_data() rejects the legacy nested
+            // representation before libtorrent can semantically import it.
             remove_resume_file_locked(name);
             sync_resume_directory_quietly();
             continue;
@@ -601,19 +618,11 @@ void TTorrentClient::load_resume_data()
                 continue;
             }
         }
-        if (params.ti) {
-            BridgeResult const valid_info = validate_torrent_info(params);
-            if (!valid_info) {
-                remove_resume_file_locked(name);
-                sync_resume_directory_quietly();
-                continue;
-            }
-        }
-        bool const metadata_pending = !params.ti;
         bool const persisted_metadata_pending =
             metadata_validation_pending_from_resume_data(*buffer);
         std::optional<TTorrentStorageActivation> const storage_activation =
             storage_activation_from_resume_data(*buffer);
+        bool const metadata_pending = !persisted_info.has_value();
         if (metadata_pending) {
             if (storage_activation || !persisted_metadata_pending) {
                 record_unclaimed_resume();
@@ -622,6 +631,42 @@ void TTorrentClient::load_resume_data()
             params.save_path = staging_path(params.info_hashes);
             params.file_provider.reset();
         } else {
+            if (persisted_metadata_pending) {
+                remove_resume_file_locked(name);
+                sync_resume_directory_quietly();
+                continue;
+            }
+            if (!swarm_metadata_parser) {
+                if (!storage_activation) {
+                    record_unclaimed_resume();
+                    continue;
+                }
+                remove_resume_file_locked(name);
+                sync_resume_directory_quietly();
+                continue;
+            }
+            lt::error_code metadata_error;
+            std::shared_ptr<lt::torrent_info> imported_info =
+                swarm_metadata_parser->parse(
+                    lt::span<char const>(
+                        persisted_info->data(),
+                        static_cast<int>(persisted_info->size())
+                    ),
+                    metadata_error
+                );
+            if (metadata_error || !imported_info
+                || imported_info->info_hashes() != params.info_hashes) {
+                remove_resume_file_locked(name);
+                sync_resume_directory_quietly();
+                continue;
+            }
+            params.ti = std::move(imported_info);
+            BridgeResult const valid_info = validate_torrent_info(params);
+            if (!valid_info) {
+                remove_resume_file_locked(name);
+                sync_resume_directory_quietly();
+                continue;
+            }
             if (!storage_activation) {
                 record_unclaimed_resume();
                 continue;

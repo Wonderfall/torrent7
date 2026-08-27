@@ -236,3 +236,15 @@ metadata serving. They must never be decoded later, including through lazy or
 compatibility accessors. Production has no fallback to `load_torrent_buffer`,
 `parse_magnet_uri`, or generic bdecode after the corresponding route is cut
 over. Libtorrent remains available as a corpus and differential-test oracle.
+
+Resume persistence preserves the same boundary. Before calling libtorrent's
+resume writer, the bridge removes `torrent_info` from the copied state and
+stores the exact validated info dictionary as an opaque helper-private byte
+string. A 64 MiB read cap applies before native resume-state decoding. During
+restore, libtorrent may decode its own non-metainfo resume fields, but a
+downstream guard rejects every conventional nested `info` dictionary. The
+opaque bytes instead return through the same synchronous Swift `InfoCore`
+callback and typed importer used for swarm metadata; native code then requires
+an exact identity match and validates the reconstructed layout and storage
+activation before adding the torrent. Legacy nested-metainfo resume records are
+deleted rather than routed through a compatibility parser.

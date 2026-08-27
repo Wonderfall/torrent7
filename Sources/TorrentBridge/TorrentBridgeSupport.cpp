@@ -939,7 +939,26 @@ std::vector<char> encoded_resume_data(
     ResumePolicySnapshot const &policy
 )
 {
-    lt::entry resume_entry = lt::write_resume_data(params);
+    lt::add_torrent_params state = params;
+    std::optional<std::string> exact_info;
+    if (state.ti) {
+        lt::span<char const> const info = state.ti->info_section();
+        if (info.empty()
+            || std::cmp_greater(info.size(), kMaxTorrentFileBytes)
+            || state.info_hashes != state.ti->info_hashes()) {
+            return {};
+        }
+        exact_info.emplace(info.begin(), info.end());
+        state.ti.reset();
+    }
+
+    lt::entry resume_entry = lt::write_resume_data(state);
+    if (exact_info) {
+        resume_entry.dict().insert_or_assign(
+            std::string(kPreparsedInfoResumeKey),
+            lt::entry(std::move(*exact_info))
+        );
+    }
     if (policy.has_identity && is_canonical_torrent_id(policy.canonical_id)) {
         resume_entry.dict().insert_or_assign(
             std::string(kCanonicalIDResumeKey),
@@ -1098,6 +1117,49 @@ std::string canonical_id_from_resume_data(std::vector<char> const &buffer)
     }
     std::string id(value.data(), value.size());
     return is_canonical_torrent_id(id) ? id : std::string();
+}
+
+ResumeInfoSectionResult preparsed_info_from_resume_data(
+    std::vector<char> const &buffer
+)
+{
+    lt::error_code error;
+    lt::bdecode_node const root = lt::bdecode(
+        lt::span<char const>(buffer.data(), static_cast<int>(buffer.size())),
+        error
+    );
+    if (error || root.type() != lt::bdecode_node::dict_t) {
+        return std::unexpected("Resume data is not a valid dictionary.");
+    }
+
+    // Older files embedded a nested dictionary that read_resume_data() would
+    // pass to torrent_info's native semantic parser. There is deliberately no
+    // compatibility fallback for that retired representation.
+    lt::string_view const legacy_key("info");
+    if (root.dict_find(legacy_key)) {
+        return std::unexpected("Resume data uses retired nested metainfo.");
+    }
+
+    lt::string_view const key(
+        kPreparsedInfoResumeKey.data(),
+        kPreparsedInfoResumeKey.size()
+    );
+    lt::bdecode_node const value = root.dict_find(key);
+    if (!value) {
+        return std::optional<std::vector<char>>{};
+    }
+    if (value.type() != lt::bdecode_node::string_t) {
+        return std::unexpected("Resume metainfo is not an opaque byte string.");
+    }
+    lt::string_view const info = value.string_value();
+    if (info.empty() || info.size() > kMaxTorrentFileBytes) {
+        return std::unexpected("Resume metainfo has an invalid size.");
+    }
+    return std::optional<std::vector<char>>(
+        std::in_place,
+        info.begin(),
+        info.end()
+    );
 }
 
 std::optional<TTorrentStorageActivation> storage_activation_from_resume_data(

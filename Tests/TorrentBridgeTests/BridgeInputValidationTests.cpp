@@ -1009,6 +1009,81 @@ TEST_CASE("swarm metainfo callback ownership is balanced on accept and reject")
     CHECK(rejected_probe.context_release_count == 1);
 }
 
+TEST_CASE("resume metainfo stays opaque and returns through the typed importer")
+{
+    std::uint32_t piece_hash_offset = 0U;
+    std::string const info = v1_capsule_info(piece_hash_offset);
+    MetainfoCapsuleFixture const swarm_info = make_v1_capsule(
+        info,
+        piece_hash_offset,
+        TTORRENT_METAINFO_INPUT_INFO_DICTIONARY
+    );
+    TorrentInfoLoadResult imported = import_preparsed_info_capsule(swarm_info.bytes);
+    REQUIRE(imported);
+
+    lt::add_torrent_params params;
+    params.ti = *imported;
+    params.info_hashes = params.ti->info_hashes();
+    TorrentIdentity identity;
+    identity.canonical_id = "t:0123456789abcdef0123456789abcdef";
+
+    std::vector<char> const encoded = encoded_resume_data(params, &identity);
+    REQUIRE_FALSE(encoded.empty());
+    lt::error_code decode_error;
+    lt::bdecode_node const root = lt::bdecode(
+        lt::span<char const>(encoded),
+        decode_error
+    );
+    REQUIRE_FALSE(decode_error);
+    REQUIRE(root.type() == lt::bdecode_node::dict_t);
+    CHECK_FALSE(root.dict_find("info"));
+    lt::string_view const opaque_key(
+        kPreparsedInfoResumeKey.data(),
+        kPreparsedInfoResumeKey.size()
+    );
+    lt::bdecode_node const opaque_info = root.dict_find_string(opaque_key);
+    REQUIRE(opaque_info);
+    CHECK(opaque_info.string_value() == info);
+
+    lt::error_code resume_error;
+    lt::add_torrent_params const decoded = lt::read_resume_data(
+        root,
+        resume_error
+    );
+    REQUIRE_FALSE(resume_error);
+    CHECK_FALSE(decoded.ti);
+    ResumeInfoSectionResult extracted = preparsed_info_from_resume_data(encoded);
+    REQUIRE(extracted);
+    REQUIRE(extracted->has_value());
+    CHECK(std::ranges::equal(**extracted, info));
+
+    SwarmMetainfoParserProbe probe(swarm_info.bytes);
+    BridgeSwarmMetadataParser parser(probe.callbacks());
+    lt::error_code import_error;
+    std::shared_ptr<lt::torrent_info> restored = parser.parse(
+        lt::span<char const>(extracted->value()),
+        import_error
+    );
+    REQUIRE_FALSE(import_error);
+    REQUIRE(restored);
+    CHECK(restored->info_hashes() == params.info_hashes);
+    CHECK(std::ranges::equal(restored->info_section(), info));
+
+    lt::add_torrent_params legacy_state = params;
+    legacy_state.ti.reset();
+    lt::entry legacy = lt::write_resume_data(legacy_state);
+    legacy["info"].preformatted().assign(info.begin(), info.end());
+    std::vector<char> legacy_encoded;
+    lt::bencode(std::back_inserter(legacy_encoded), legacy);
+    CHECK_FALSE(preparsed_info_from_resume_data(legacy_encoded));
+    lt::error_code legacy_error;
+    static_cast<void>(lt::read_resume_data(
+        lt::span<char const>(legacy_encoded),
+        legacy_error
+    ));
+    CHECK(legacy_error == lt::errors::invalid_bencoding);
+}
+
 TEST_CASE("peer protocol callback ownership and typed imports are exact")
 {
     PeerProtocolParserProbe probe;

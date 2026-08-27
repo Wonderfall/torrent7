@@ -32,6 +32,40 @@ inline constexpr int32_t TTORRENT_SOURCE_POLICY_HTTPS_TRACKER_POLICY = 3;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_HTTPS_WEB_SEED_POLICY = 4;
 inline constexpr int32_t TTORRENT_SOURCE_POLICY_ALLOW_PRE_METADATA_DHT = 5;
 
+// Production resume restoration uses the Swift callback-backed importer. This
+// test-only oracle keeps lifecycle tests native while making callback routing
+// observable; it is never linked into a shipped target.
+class TestOnlyResumeInfoParser final : public lt::aux::swarm_metadata_parser {
+public:
+    [[nodiscard]] std::size_t invocation_count() const noexcept
+    {
+        return invocation_count_;
+    }
+
+    std::shared_ptr<lt::torrent_info> parse(
+        lt::span<char const> const info,
+        lt::error_code &error
+    ) noexcept override
+    {
+        ++invocation_count_;
+        lt::bdecode_node const root = lt::bdecode(info, error);
+        if (error || root.type() != lt::bdecode_node::dict_t) {
+            return nullptr;
+        }
+        lt::load_torrent_limits limits{};
+        auto parsed = std::make_shared<lt::torrent_info>(
+            root,
+            error,
+            limits,
+            lt::from_info_section
+        );
+        return error ? nullptr : parsed;
+    }
+
+private:
+    std::size_t invocation_count_ = 0U;
+};
+
 [[nodiscard]] std::string next_test_canonical_id()
 {
     static std::atomic_uint64_t next_value{1U};
@@ -2221,9 +2255,16 @@ TEST_CASE("resume persistence rejects unsafe serialized file renames")
         );
         REQUIRE(written.has_value());
 
-        TTorrentClient client(state_directory.string());
+        auto resume_info_parser = std::make_shared<TestOnlyResumeInfoParser>();
+        TTorrentClient client(
+            state_directory.string(),
+            true,
+            {},
+            resume_info_parser
+        );
         client.set_session_shutdown_asynchronous(false);
 
+        CHECK(resume_info_parser->invocation_count() == 1U);
         CHECK(client.session.get_torrents().empty());
         CHECK_FALSE(file_exists(resume_path));
 
@@ -2309,8 +2350,15 @@ TEST_CASE("resume metadata flows through add, Swift-directed save, and reload")
         CHECK(refreshed_metadata.front().created_time == expected_creation_date);
     }
 
-    TTorrentClient reloaded(state_directory.string(), true, broker.context());
+    auto resume_info_parser = std::make_shared<TestOnlyResumeInfoParser>();
+    TTorrentClient reloaded(
+        state_directory.string(),
+        true,
+        broker.context(),
+        resume_info_parser
+    );
     reloaded.set_session_shutdown_asynchronous(false);
+    CHECK(resume_info_parser->invocation_count() == 1U);
     std::vector<TTorrentPresentationMetadata> const reloaded_metadata =
         drained_presentation_metadata(reloaded);
     REQUIRE(reloaded_metadata.size() == 1U);
