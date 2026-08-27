@@ -445,6 +445,22 @@ struct TorrentManifestParserTests {
                 ]
             ))
         }
+
+        for (first, second) in [
+            ("stra\u{00df}e.txt", "strasse.txt"),
+            ("\u{03c2}.txt", "\u{03c3}.txt"),
+            ("\u{fb00}.txt", "ff.txt"),
+        ] {
+            try expectManifestError(.duplicatePath) {
+                _ = try TorrentManifestParser().parse(Self.v1Directory(
+                    name: "payload",
+                    files: [
+                        .init(path: [first], size: 1),
+                        .init(path: [second], size: 1),
+                    ]
+                ))
+            }
+        }
     }
 
     @Test("Traversal, symlinks, and file-directory conflicts fail closed")

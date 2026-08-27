@@ -1917,6 +1917,11 @@ struct TorrentStorageDestinationPlanner: Sendable {
                     directoryIdentities: &directoryIdentities
                 )
             }
+            guard TorrentFilesystemIdentity.allPresentObjectsAreDistinct(
+                fileIdentities
+            ) else {
+                throw TorrentStoragePlanningError.existingDataUnsafe
+            }
             return (
                 fileIdentities,
                 canonicalDirectoryIdentities(directoryIdentities)

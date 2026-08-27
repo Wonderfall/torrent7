@@ -1170,6 +1170,154 @@ struct TorrentStorageAuthorityTests {
         }
     }
 
+    @Test("Explicit imports reject duplicate physical file identities")
+    func explicitImportRejectsDuplicatePhysicalFiles() throws {
+        try withTemporaryDirectory { root in
+            let downloads = root.appending(
+                path: "Downloads",
+                directoryHint: .isDirectory
+            )
+            let payloadRoot = downloads.appending(
+                path: "bundle",
+                directoryHint: .isDirectory
+            )
+            try FileManager.default.createDirectory(
+                at: payloadRoot,
+                withIntermediateDirectories: true
+            )
+            try Data("seed".utf8).write(
+                to: payloadRoot.appending(path: "payload.bin")
+            )
+            let parent = try makeParent(downloads)
+            let logical = try makeLogicalManifest(
+                name: "bundle",
+                contentKind: .directory,
+                files: [
+                    .init(
+                        index: 0,
+                        pathComponents: ["payload.bin"],
+                        expectedSize: 8,
+                        isPadding: false
+                    ),
+                    .init(
+                        index: 1,
+                        pathComponents: ["payload.bin"],
+                        expectedSize: 8,
+                        isPadding: false
+                    ),
+                ]
+            )
+
+            #expect(throws: TorrentStoragePlanningError.existingDataUnsafe) {
+                _ = try TorrentStorageDestinationPlanner().importExisting(
+                    manifest: logical,
+                    in: parent,
+                    claimID: UUID(),
+                    generation: 1,
+                    selectedTopLevelName: logical.name
+                )
+            }
+        }
+    }
+
+    @Test("Claim validation rejects duplicate physical file identities")
+    func claimValidationRejectsDuplicatePhysicalFiles() throws {
+        try withTemporaryDirectory { root in
+            let downloads = root.appending(
+                path: "Downloads",
+                directoryHint: .isDirectory
+            )
+            try FileManager.default.createDirectory(
+                at: downloads,
+                withIntermediateDirectories: true
+            )
+            let parent = try makeParent(downloads)
+            let logical = try makeLogicalManifest(
+                name: "bundle",
+                contentKind: .directory,
+                files: [
+                    .init(
+                        index: 0,
+                        pathComponents: ["first.bin"],
+                        expectedSize: 8,
+                        isPadding: false
+                    ),
+                    .init(
+                        index: 1,
+                        pathComponents: ["second.bin"],
+                        expectedSize: 8,
+                        isPadding: false
+                    ),
+                ]
+            )
+            let planner = TorrentStorageDestinationPlanner()
+            let selected = try planner.planTopLevelName(for: logical, in: parent)
+            let reservation = try planner.reserve(
+                manifest: logical,
+                in: parent,
+                claimID: UUID(),
+                generation: 1,
+                ownershipKey: TorrentStorageDestinationPlanner.randomOwnershipKey(),
+                selectedTopLevelName: selected
+            )
+            let manifest = reservation.storageManifest
+            let firstIdentity = try #require(
+                manifest.physicalFileIdentities.first ?? nil
+            )
+            let duplicateIdentities: [TorrentFilesystemIdentity?] = [
+                firstIdentity,
+                firstIdentity,
+            ]
+            let forgedManifest = TorrentStorageManifest(
+                claimID: manifest.claimID,
+                generation: manifest.generation,
+                infoHashes: manifest.infoHashes,
+                sourceManifestDigest: manifest.sourceManifestDigest,
+                parentID: manifest.parentID,
+                contentKind: manifest.contentKind,
+                logicalFiles: manifest.logicalFiles,
+                physicalFileIdentities: duplicateIdentities,
+                physicalDirectoryIdentities:
+                    manifest.physicalDirectoryIdentities,
+                collisionSelectedTopLevelName:
+                    manifest.collisionSelectedTopLevelName,
+                authorityDigest: TorrentManifestDigest.authority(
+                    claimID: manifest.claimID,
+                    generation: manifest.generation,
+                    infoHashes: manifest.infoHashes,
+                    sourceManifestDigest: manifest.sourceManifestDigest,
+                    parentID: manifest.parentID,
+                    contentKind: manifest.contentKind,
+                    logicalFiles: manifest.logicalFiles,
+                    topLevelName: manifest.collisionSelectedTopLevelName,
+                    fileIdentities: duplicateIdentities,
+                    directoryIdentities: manifest.physicalDirectoryIdentities,
+                    ownership: manifest.ownership
+                ),
+                ownership: manifest.ownership
+            )
+            let forgedClaim = TorrentStorageClaim(
+                manifest: forgedManifest,
+                lease: TorrentStorageLease(
+                    state: .active,
+                    availabilityRevision:
+                        reservation.initialLease.availabilityRevision,
+                    fileAvailability: reservation.initialLease.fileAvailability
+                ),
+                torrentID: "t:\(String(repeating: "d", count: 32))",
+                operationNonce: UUID(),
+                removalIntent: nil,
+                deletionEvidence: nil
+            )
+
+            #expect(!TorrentStorageClaimValidation.isValid(forgedClaim))
+            let registry = TorrentStorageBrokerRegistry()
+            #expect(throws: TorrentStorageBrokerRegistryError.invalidClaim) {
+                try registry.install(claim: forgedClaim, parent: parent)
+            }
+        }
+    }
+
     @Test("A brokered FD exposes only an object-bound ownership tag")
     func brokeredDescriptorDoesNotExposeOwnershipKey() throws {
         try withTemporaryDirectory { root in

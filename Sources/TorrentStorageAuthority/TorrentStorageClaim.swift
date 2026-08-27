@@ -90,17 +90,46 @@ package struct ParsedTorrentManifest: Sendable {
 }
 
 package struct TorrentFilesystemIdentity: Codable, Equatable, Sendable {
+    private struct ObjectKey: Hashable {
+        let device: UInt64
+        let inode: UInt64
+        let ownerUserID: UInt32
+        let fileGeneration: UInt32
+    }
+
     package let device: UInt64
     package let inode: UInt64
     package let linkCount: UInt64
     package let ownerUserID: UInt32
     package let fileGeneration: UInt32
 
+    private var objectKey: ObjectKey {
+        ObjectKey(
+            device: device,
+            inode: inode,
+            ownerUserID: ownerUserID,
+            fileGeneration: fileGeneration
+        )
+    }
+
     package func refersToSameObject(as other: Self) -> Bool {
-        device == other.device
-            && inode == other.inode
-            && ownerUserID == other.ownerUserID
-            && fileGeneration == other.fileGeneration
+        objectKey == other.objectKey
+    }
+
+    package static func allPresentObjectsAreDistinct(
+        _ identities: [Self?]
+    ) -> Bool {
+        var seen = Set<ObjectKey>()
+        seen.reserveCapacity(identities.count)
+        for identity in identities {
+            guard let identity else {
+                continue
+            }
+            guard seen.insert(identity.objectKey).inserted else {
+                return false
+            }
+        }
+        return true
     }
 
     package init(
@@ -450,6 +479,9 @@ package enum TorrentStorageClaimValidation {
               manifest.logicalFiles.map(\.index) == expectedIndices,
               manifest.physicalFileIdentities.count
                 == manifest.logicalFiles.count,
+              TorrentFilesystemIdentity.allPresentObjectsAreDistinct(
+                  manifest.physicalFileIdentities
+              ),
               claim.lease.availabilityRevision > 0,
               TorrentStorageLeaseValidation.isValid(
                   logicalFiles: manifest.logicalFiles,

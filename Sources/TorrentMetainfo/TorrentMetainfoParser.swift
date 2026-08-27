@@ -1670,7 +1670,11 @@ package struct TorrentMetainfoParser: Sendable {
 
     private func normalizedComponent(_ component: String) -> String {
         component.precomposedStringWithCanonicalMapping
-            .lowercased(with: Locale(identifier: "en_US_POSIX"))
+            .folding(
+                options: .caseInsensitive,
+                locale: Locale(identifier: "en_US_POSIX")
+            )
+            .precomposedStringWithCanonicalMapping
     }
 
     private static func hex<S: Sequence>(_ bytes: S) -> String where S.Element == UInt8 {
