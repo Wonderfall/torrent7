@@ -106,7 +106,7 @@ jobs:
         shell: zsh {0}
         run: |
           set -euo pipefail
-          brew install cmake ninja llvm
+          brew install cmake ninja llvm ripgrep
 
       - name: Restore dependency cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
