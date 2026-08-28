@@ -9,6 +9,7 @@
 #include <atomic>
 #include <bit>
 #include <cerrno>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
@@ -16,6 +17,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -368,6 +370,15 @@ void write_capsule_range(
 
 class SwarmMetainfoParserProbe final {
 public:
+    enum class OutputMode : std::uint8_t {
+        valid,
+        allocation_failure,
+        failure_with_allocation,
+        null_with_positive_size,
+        allocation_with_zero_size,
+        allocation_with_oversized_size,
+    };
+
     explicit SwarmMetainfoParserProbe(std::vector<std::uint8_t> capsule)
         : capsule_(std::move(capsule))
     {
@@ -388,6 +399,36 @@ public:
     std::atomic_int context_release_count = 0;
     std::atomic_int parse_count = 0;
     std::atomic_int capsule_release_count = 0;
+    std::atomic_int active_callback_count = 0;
+    std::atomic_int outstanding_allocation_count = 0;
+    std::atomic_int context_release_during_callback_count = 0;
+    std::atomic_int context_release_with_allocation_count = 0;
+    OutputMode output_mode = OutputMode::valid;
+
+    void block_next_parse()
+    {
+        std::unique_lock guard(callback_lock_);
+        block_parse_ = true;
+        parse_entered_ = false;
+        allow_parse_to_return_ = false;
+    }
+
+    [[nodiscard]] bool wait_for_blocked_parse()
+    {
+        std::unique_lock guard(callback_lock_);
+        return callback_changed_.wait_for(guard, std::chrono::seconds(5), [this] {
+            return parse_entered_;
+        });
+    }
+
+    void unblock_parse()
+    {
+        {
+            std::unique_lock guard(callback_lock_);
+            allow_parse_to_return_ = true;
+        }
+        callback_changed_.notify_all();
+    }
 
 private:
     static std::uint8_t retain_callback(void *context) noexcept
@@ -404,6 +445,12 @@ private:
     {
         auto *probe = static_cast<SwarmMetainfoParserProbe *>(context);
         if (probe != nullptr) {
+            if (probe->active_callback_count.load() != 0) {
+                ++probe->context_release_during_callback_count;
+            }
+            if (probe->outstanding_allocation_count.load() != 0) {
+                ++probe->context_release_with_allocation_count;
+            }
             ++probe->context_release_count;
         }
     }
@@ -426,6 +473,38 @@ private:
             return EINVAL;
         }
         ++probe->parse_count;
+        ++probe->active_callback_count;
+        struct ActiveCallbackGuard final {
+            explicit ActiveCallbackGuard(std::atomic_int &stored_count) noexcept
+                : count(stored_count)
+            {
+            }
+
+            ~ActiveCallbackGuard()
+            {
+                --count;
+            }
+
+            std::atomic_int &count;
+        } active_guard(probe->active_callback_count);
+        {
+            std::unique_lock guard(probe->callback_lock_);
+            if (probe->block_parse_) {
+                probe->parse_entered_ = true;
+                probe->callback_changed_.notify_all();
+                probe->callback_changed_.wait(guard, [probe] {
+                    return probe->allow_parse_to_return_;
+                });
+                probe->block_parse_ = false;
+            }
+        }
+        if (probe->output_mode == OutputMode::allocation_failure) {
+            return ENOMEM;
+        }
+        if (probe->output_mode == OutputMode::null_with_positive_size) {
+            result->size = 1;
+            return 0;
+        }
         auto *copy = static_cast<std::uint8_t *>(std::malloc(probe->capsule_.size()));
         if (copy == nullptr) {
             return ENOMEM;
@@ -433,11 +512,18 @@ private:
         __unsafe_buffer_usage_begin
         std::memcpy(copy, probe->capsule_.data(), probe->capsule_.size());
         __unsafe_buffer_usage_end
+        ++probe->outstanding_allocation_count;
+        int32_t reported_size = static_cast<int32_t>(probe->capsule_.size());
+        if (probe->output_mode == OutputMode::allocation_with_zero_size) {
+            reported_size = 0;
+        } else if (probe->output_mode == OutputMode::allocation_with_oversized_size) {
+            reported_size = TTORRENT_METAINFO_CAPSULE_MAX_BYTES + 1;
+        }
         *result = TTorrentOwnedMetainfoCapsule{
             .bytes = copy,
-            .size = static_cast<int32_t>(probe->capsule_.size()),
+            .size = reported_size,
         };
-        return 0;
+        return probe->output_mode == OutputMode::failure_with_allocation ? EIO : 0;
     }
 
     static void release_capsule_callback(
@@ -449,15 +535,23 @@ private:
         if (probe != nullptr) {
             ++probe->capsule_release_count;
         }
-        if (capsule.bytes != nullptr && capsule.size > 0) {
+        if (capsule.bytes != nullptr && probe != nullptr) {
             __unsafe_buffer_usage_begin
-            std::memset(capsule.bytes, 0xa5, static_cast<std::size_t>(capsule.size));
+            std::memset(capsule.bytes, 0xa5, probe->capsule_.size());
             __unsafe_buffer_usage_end
         }
         std::free(capsule.bytes);
+        if (probe != nullptr) {
+            --probe->outstanding_allocation_count;
+        }
     }
 
     std::vector<std::uint8_t> capsule_;
+    std::mutex callback_lock_;
+    std::condition_variable callback_changed_;
+    bool block_parse_ = false;
+    bool parse_entered_ = false;
+    bool allow_parse_to_return_ = false;
 };
 
 class PeerProtocolParserProbe final {
@@ -1109,6 +1203,90 @@ TEST_CASE("swarm metainfo callback ownership is balanced on accept and reject")
     CHECK(rejected_probe.context_release_count == 1);
 }
 
+TEST_CASE("swarm callback allocations have exactly one owner on every return path")
+{
+    std::uint32_t piece_hash_offset = 0U;
+    std::string const info = v1_capsule_info(piece_hash_offset);
+    MetainfoCapsuleFixture const fixture = make_v1_capsule(
+        info,
+        piece_hash_offset,
+        TTORRENT_METAINFO_INPUT_INFO_DICTIONARY
+    );
+    struct ReturnCase {
+        SwarmMetainfoParserProbe::OutputMode mode;
+        int expected_capsule_releases;
+    };
+    std::array<ReturnCase, 5U> const cases{{
+        {SwarmMetainfoParserProbe::OutputMode::allocation_failure, 0},
+        {SwarmMetainfoParserProbe::OutputMode::failure_with_allocation, 1},
+        {SwarmMetainfoParserProbe::OutputMode::null_with_positive_size, 0},
+        {SwarmMetainfoParserProbe::OutputMode::allocation_with_zero_size, 1},
+        {SwarmMetainfoParserProbe::OutputMode::allocation_with_oversized_size, 1},
+    }};
+
+    for (ReturnCase const &return_case : cases) {
+        SwarmMetainfoParserProbe probe(fixture.bytes);
+        probe.output_mode = return_case.mode;
+        {
+            BridgeSwarmMetadataParser parser(probe.callbacks());
+            lt::error_code error;
+            CHECK_FALSE(parser.parse(lt::span<char const>(info), error));
+            CHECK(error == lt::errors::invalid_swarm_metadata);
+            CHECK(probe.parse_count == 1);
+            CHECK(probe.capsule_release_count == return_case.expected_capsule_releases);
+            CHECK(probe.outstanding_allocation_count == 0);
+            CHECK(probe.context_release_count == 0);
+        }
+        CHECK(probe.context_release_count == 1);
+        CHECK(probe.context_release_during_callback_count == 0);
+        CHECK(probe.context_release_with_allocation_count == 0);
+    }
+}
+
+TEST_CASE("client construction failure releases each previously retained parser context")
+{
+    std::uint32_t piece_hash_offset = 0U;
+    std::string const info = v1_capsule_info(piece_hash_offset);
+    MetainfoCapsuleFixture const fixture = make_v1_capsule(
+        info,
+        piece_hash_offset,
+        TTORRENT_METAINFO_INPUT_INFO_DICTIONARY
+    );
+    SwarmMetainfoParserProbe swarm_probe(fixture.bytes);
+    PeerProtocolParserProbe peer_probe;
+    TrackerResponseParserProbe tracker_probe;
+    DHTMessageParserProbe dht_probe;
+    TTorrentTrackerResponseParserCallbacks incomplete_tracker = tracker_probe.callbacks();
+    incomplete_tracker.parse_http_response = nullptr;
+    bridge_tests::TemporaryDirectory temporary_directory;
+    bridge_tests::TestPayloadBroker broker(temporary_directory.path() / "Payload");
+    std::array<char, 512U> error{};
+
+    TTorrentClient * const client = ::TorrentClientCreateWithError(
+        (temporary_directory.path() / "State").c_str(),
+        1U,
+        broker.callbacks(),
+        swarm_probe.callbacks(),
+        peer_probe.callbacks(),
+        incomplete_tracker,
+        dht_probe.callbacks(),
+        error.data(),
+        static_cast<int32_t>(error.size())
+    );
+
+    CHECK(client == nullptr);
+    CHECK(std::string_view(error.data())
+        == "The tracker response parser callback table is incomplete.");
+    CHECK(swarm_probe.retain_count == 1);
+    CHECK(swarm_probe.context_release_count == 1);
+    CHECK(peer_probe.retain_count == 1);
+    CHECK(peer_probe.release_count == 1);
+    CHECK(tracker_probe.retain_count == 0);
+    CHECK(tracker_probe.release_count == 0);
+    CHECK(dht_probe.retain_count == 0);
+    CHECK(dht_probe.release_count == 0);
+}
+
 TEST_CASE("resume metainfo stays opaque and returns through the typed importer")
 {
     std::uint32_t piece_hash_offset = 0U;
@@ -1689,6 +1867,66 @@ TEST_CASE("hash-verified swarm metadata installs only through the external parse
     CHECK(probe.context_release_count == 1);
 }
 
+TEST_CASE("session teardown cannot release a blocked swarm parser context")
+{
+    std::uint32_t piece_hash_offset = 0U;
+    std::string const info = v1_capsule_info(piece_hash_offset);
+    MetainfoCapsuleFixture const swarm_info = make_v1_capsule(
+        info,
+        piece_hash_offset,
+        TTORRENT_METAINFO_INPUT_INFO_DICTIONARY
+    );
+    SwarmMetainfoParserProbe probe(swarm_info.bytes);
+    probe.block_next_parse();
+    auto parser = std::make_shared<BridgeSwarmMetadataParser>(probe.callbacks());
+    bridge_tests::TemporaryDirectory temporary_directory;
+    auto session = std::make_unique<lt::session>(make_session_params(false));
+    lt::add_torrent_params params;
+    params.info_hashes = lt::info_hash_t(lt::hasher(lt::span<char const>(info)).final());
+    params.save_path = temporary_directory.path().string();
+    params.swarm_metadata_parser = parser;
+    params.flags |= lt::torrent_flags::paused;
+    lt::error_code add_error;
+    lt::torrent_handle handle = session->add_torrent(std::move(params), add_error);
+    REQUIRE_FALSE(add_error);
+    REQUIRE(handle.is_valid());
+    parser.reset();
+
+    std::jthread metadata_worker([handle, &info]() mutable {
+        static_cast<void>(handle.set_metadata(lt::span<char const>(info)));
+    });
+    bool const callback_entered = probe.wait_for_blocked_parse();
+    if (!callback_entered) {
+        probe.unblock_parse();
+        metadata_worker.join();
+        CHECK(callback_entered);
+        return;
+    }
+
+    std::atomic_bool shutdown_started = false;
+    std::jthread shutdown_worker([&session, &shutdown_started] {
+        shutdown_started.store(true);
+        shutdown_started.notify_all();
+        session.reset();
+    });
+    shutdown_started.wait(false);
+    CHECK(probe.active_callback_count == 1);
+    CHECK(probe.context_release_count == 0);
+    CHECK(probe.context_release_during_callback_count == 0);
+
+    probe.unblock_parse();
+    metadata_worker.join();
+    shutdown_worker.join();
+    handle = lt::torrent_handle{};
+
+    CHECK(probe.parse_count == 1);
+    CHECK(probe.capsule_release_count == 1);
+    CHECK(probe.outstanding_allocation_count == 0);
+    CHECK(probe.context_release_count == 1);
+    CHECK(probe.context_release_during_callback_count == 0);
+    CHECK(probe.context_release_with_allocation_count == 0);
+}
+
 TEST_CASE("bridge identity attachment carries every session parser")
 {
     std::uint32_t piece_hash_offset = 0U;
@@ -1704,6 +1942,8 @@ TEST_CASE("bridge identity attachment carries every session parser")
     auto peer_parser = std::make_shared<BridgePeerMessageParser>(peer_probe.callbacks());
     TrackerResponseParserProbe tracker_probe;
     auto tracker_parser = std::make_shared<BridgeTrackerResponseParser>(tracker_probe.callbacks());
+    DHTMessageParserProbe dht_probe;
+    auto dht_parser = std::make_shared<BridgeDHTMessageParser>(dht_probe.callbacks());
     bridge_tests::TemporaryDirectory temporary_directory;
     {
         TTorrentClient client(
@@ -1712,7 +1952,8 @@ TEST_CASE("bridge identity attachment carries every session parser")
             nullptr,
             parser,
             peer_parser,
-            tracker_parser
+            tracker_parser,
+            dht_parser
         );
         client.set_session_shutdown_asynchronous(false);
         lt::add_torrent_params params;
@@ -1726,13 +1967,23 @@ TEST_CASE("bridge identity attachment carries every session parser")
         CHECK(params.swarm_metadata_parser == parser);
         CHECK(params.peer_message_parser == peer_parser);
         CHECK(params.tracker_response_parser == tracker_parser);
+        CHECK(client.dht_message_parser == dht_parser);
+        params.swarm_metadata_parser.reset();
+        params.peer_message_parser.reset();
+        params.tracker_response_parser.reset();
+        parser.reset();
+        peer_parser.reset();
+        tracker_parser.reset();
+        dht_parser.reset();
+        CHECK(probe.context_release_count == 0);
+        CHECK(peer_probe.release_count == 0);
+        CHECK(tracker_probe.release_count == 0);
+        CHECK(dht_probe.release_count == 0);
     }
-    parser.reset();
-    peer_parser.reset();
-    tracker_parser.reset();
     CHECK(probe.context_release_count == 1);
     CHECK(peer_probe.release_count == 1);
     CHECK(tracker_probe.release_count == 1);
+    CHECK(dht_probe.release_count == 1);
 }
 
 TEST_CASE("a hash-valid rejected swarm dictionary enters a stable invalid state")

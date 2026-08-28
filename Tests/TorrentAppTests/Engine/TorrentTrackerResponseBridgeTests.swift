@@ -1,5 +1,7 @@
 import Darwin
+import Dispatch
 import Foundation
+import Synchronization
 import Testing
 import TorrentBridge
 @testable import TorrentEngineCore
@@ -216,6 +218,58 @@ struct TorrentTrackerResponseBridgeTests {
             #expect(status == EINVAL)
             #expect(result.peer_count == 0)
         }
+    }
+
+    @Test("One retained context serves concurrent tracker callbacks before teardown")
+    func supportsConcurrentCallbacksBeforeTeardown() {
+        let body = bencodedDictionary([
+            ("interval", bencodedInteger(60)),
+        ])
+        let context = TrackerConcurrentTestContext()
+        let failures = Mutex(0)
+
+        DispatchQueue.concurrentPerform(iterations: 500) { _ in
+            var peer = TTorrentTrackerPeerRecord()
+            var result = TTorrentHTTPTrackerResponseResult()
+            let status = unsafe body.withUnsafeBytes { rawBody in
+                unsafe torrentHTTPTrackerResponseParseCallback(
+                    context.pointer,
+                    rawBody.bindMemory(to: CChar.self).baseAddress!,
+                    Int32(rawBody.count),
+                    0,
+                    nil,
+                    0,
+                    &peer,
+                    1,
+                    &result
+                )
+            }
+            if status != 0 || result.interval != 60 || result.peer_count != 0 {
+                failures.withLock { count in
+                    count += 1
+                }
+            }
+        }
+
+        #expect(failures.withLock { $0 == 0 })
+        withExtendedLifetime(context) {}
+    }
+}
+
+/// The callback context is retained once for the whole concurrent batch and
+/// released only after every synchronous invocation has joined.
+@safe private final class TrackerConcurrentTestContext: @unchecked Sendable {
+    let pointer: UnsafeMutableRawPointer
+
+    init() {
+        unsafe pointer = Unmanaged.passRetained(TorrentTrackerResponseBridgeContext())
+            .toOpaque()
+    }
+
+    deinit {
+        unsafe Unmanaged<TorrentTrackerResponseBridgeContext>
+            .fromOpaque(pointer)
+            .release()
     }
 }
 

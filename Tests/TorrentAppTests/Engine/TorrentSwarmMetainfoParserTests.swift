@@ -1,5 +1,7 @@
 import Darwin
+import Dispatch
 import Foundation
+import Synchronization
 import Testing
 import TorrentBridge
 @testable import TorrentEngineCore
@@ -31,6 +33,52 @@ struct TorrentSwarmMetainfoParserTests {
         #expect(invocation.transferredPointerWasNil)
         #expect(invocation.transferredSize == 0)
         #expect(invocation.capsule == nil)
+    }
+
+    @Test("Concurrent swarm callbacks transfer independent allocations before teardown")
+    func supportsConcurrentOwnedResultsBeforeTeardown() {
+        let info = validV1Info()
+        let context = SwarmConcurrentTestContext()
+        let failures = Mutex(0)
+
+        DispatchQueue.concurrentPerform(iterations: 100) { _ in
+            var result = unsafe TTorrentOwnedMetainfoCapsule()
+            let status = unsafe info.withUnsafeBytes { rawInfo in
+                unsafe torrentSwarmMetainfoParseCallback(
+                    context.pointer,
+                    rawInfo.bindMemory(to: CChar.self).baseAddress!,
+                    Int32(rawInfo.count),
+                    &result
+                )
+            }
+            let valid = unsafe status == 0 && result.bytes != nil && result.size > 0
+            unsafe torrentSwarmMetainfoCapsuleReleaseCallback(context.pointer, result)
+            if !valid {
+                failures.withLock { count in
+                    count += 1
+                }
+            }
+        }
+
+        #expect(failures.withLock { $0 == 0 })
+        withExtendedLifetime(context) {}
+    }
+}
+
+/// Each callback result has its own malloc allocation; the shared immutable
+/// context remains retained until all synchronous invocations have joined.
+@safe private final class SwarmConcurrentTestContext: @unchecked Sendable {
+    let pointer: UnsafeMutableRawPointer
+
+    init() {
+        unsafe pointer = Unmanaged.passRetained(TorrentSwarmMetainfoParserBridgeContext())
+            .toOpaque()
+    }
+
+    deinit {
+        unsafe Unmanaged<TorrentSwarmMetainfoParserBridgeContext>
+            .fromOpaque(pointer)
+            .release()
     }
 }
 

@@ -1,5 +1,7 @@
 import Darwin
+import Dispatch
 import Foundation
+import Synchronization
 import Testing
 import TorrentBridge
 @testable import TorrentEngineCore
@@ -163,6 +165,52 @@ struct TorrentPeerProtocolBridgeTests {
             #expect(result.dropped_count == 0)
             #expect(result.reserved == 0)
         }
+    }
+
+    @Test("One retained context serves concurrent peer callbacks before teardown")
+    func supportsConcurrentCallbacksBeforeTeardown() {
+        let message = Data("d8:msg_typei0e5:piecei0ee".utf8)
+        let context = PeerConcurrentTestContext()
+        let failures = Mutex(0)
+
+        DispatchQueue.concurrentPerform(iterations: 500) { _ in
+            var result = TTorrentMetadataMessageResult()
+            let status = unsafe message.withUnsafeBytes { rawMessage in
+                unsafe torrentMetadataMessageParseCallback(
+                    context.pointer,
+                    rawMessage.bindMemory(to: CChar.self).baseAddress!,
+                    Int32(rawMessage.count),
+                    &result
+                )
+            }
+            if status != 0
+                || result.kind != UInt8(TTORRENT_METADATA_MESSAGE_REQUEST)
+                || result.piece != 0 {
+                failures.withLock { count in
+                    count += 1
+                }
+            }
+        }
+
+        #expect(failures.withLock { $0 == 0 })
+        withExtendedLifetime(context) {}
+    }
+}
+
+/// The callback context is retained once for the whole concurrent batch and
+/// released only after every synchronous invocation has joined.
+@safe private final class PeerConcurrentTestContext: @unchecked Sendable {
+    let pointer: UnsafeMutableRawPointer
+
+    init() {
+        unsafe pointer = Unmanaged.passRetained(TorrentPeerProtocolBridgeContext())
+            .toOpaque()
+    }
+
+    deinit {
+        unsafe Unmanaged<TorrentPeerProtocolBridgeContext>
+            .fromOpaque(pointer)
+            .release()
     }
 }
 

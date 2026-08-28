@@ -164,6 +164,16 @@ Roots and v1 piece hashes point into the same allocation later retained by
 `torrent_info`; the final object is constructed only after all typed layout
 semantics and both independently supplied hybrid hashes agree.
 
+The swarm-info callback is the only parser boundary that returns an allocation.
+It initializes an empty result before parsing; once it returns, any non-null
+capsule pointer has exactly one owner (C++) even when the callback reports an
+error or an invalid size. C++ either imports or rejects it and invokes the
+paired release callback exactly once. A null result is never released. Parser
+contexts are retained once by their C++ wrapper, and the client keeps those
+wrappers alive until synchronous session/proxy teardown has completed, so no
+context release can overlap an in-flight callback. Peer, tracker, and DHT
+callbacks transfer no allocation at all.
+
 Peer-extension parsing uses a smaller synchronous typed boundary. Libtorrent
 passes one complete borrowed message to Swift and never exposes that pointer
 after the callback. Handshake and metadata callbacks return fixed zero-reserved
