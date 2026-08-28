@@ -1022,7 +1022,12 @@ bool BridgePeerMessageParser::parse_ut_pex(
 
         lt::aux::peer_exchange_message imported;
         imported.contacts.reserve(static_cast<std::size_t>(parsed.record_count));
-        std::set<std::tuple<std::uint8_t, std::uint64_t, std::uint64_t>> seen_addresses;
+        std::set<std::tuple<
+            std::uint8_t,
+            std::uint64_t,
+            std::uint64_t,
+            std::uint16_t
+        >> seen_endpoints;
         int32_t added_count = 0;
         int32_t dropped_count = 0;
         for (int32_t index = 0; index < parsed.record_count; ++index) {
@@ -1033,8 +1038,11 @@ bool BridgePeerMessageParser::parse_ut_pex(
                 || record.port == 0U || (record.flags & 0xe0U) != 0U
                 || (record.action != TTORRENT_PEX_CONTACT_ADD
                     && record.action != TTORRENT_PEX_CONTACT_DROP)
-                || !seen_addresses.emplace(
-                    record.address_family, record.address_high, record.address_low
+                || !seen_endpoints.emplace(
+                    record.address_family,
+                    record.address_high,
+                    record.address_low,
+                    record.port
                 ).second) {
                 error = lt::errors::invalid_pex_message;
                 return false;

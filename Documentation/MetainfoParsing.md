@@ -69,7 +69,8 @@ Validation followed by passing the same bytes to libtorrent is not a cutover.
   compact contacts. Optional flag strings must match their contact count; only
   public protocol bits 0 through 4 survive. Ports are nonzero, address encodings
   are family-canonical, and unspecified, multicast, broadcast, IPv4-mapped IPv6,
-  duplicate, and add/drop-contradictory addresses are rejected. The initial
+  duplicate, and add/drop-contradictory endpoints are rejected. Multiple ports
+  at one address remain distinct contacts. The initial
   message is bounded to 100 additions and 100 drops; libtorrent retains its
   stricter 50-plus-50 limit for later messages and all peer-admission policy.
 - Unknown dictionary fields are skipped structurally within the same depth,

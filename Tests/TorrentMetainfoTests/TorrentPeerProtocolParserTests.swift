@@ -208,13 +208,29 @@ struct TorrentPeerProtocolParserTests {
         }
     }
 
-    @Test("PEX rejects duplicate addresses and add-drop contradictions")
-    func rejectsDuplicatePeerExchangeContacts() {
+    @Test("PEX identity includes the address family, address, and port")
+    func validatesPeerExchangeEndpointIdentity() throws {
         let first = Data([203, 0, 113, 9, 0x1a, 0xe1])
         let secondPort = Data([203, 0, 113, 9, 0x1a, 0xe2])
+
+        let twoAdded = try parser.parsePeerExchange(pexMessage(
+            added4: first + secondPort,
+            added4Flags: nil
+        ))
+        #expect(twoAdded.addedCount == 2)
+        #expect(twoAdded.contacts.map(\.port) == [6_881, 6_882])
+
+        let addAndDrop = try parser.parsePeerExchange(pexMessage(
+            added4: first,
+            added4Flags: nil,
+            dropped4: secondPort
+        ))
+        #expect(addAndDrop.addedCount == 1)
+        #expect(addAndDrop.droppedCount == 1)
+
         #expect(throws: TorrentPeerProtocolError.duplicatePeerExchangeContact) {
             _ = try parser.parsePeerExchange(pexMessage(
-                added4: first + secondPort,
+                added4: first + first,
                 added4Flags: nil
             ))
         }
@@ -222,7 +238,7 @@ struct TorrentPeerProtocolParserTests {
             _ = try parser.parsePeerExchange(pexMessage(
                 added4: first,
                 added4Flags: nil,
-                dropped4: secondPort
+                dropped4: first
             ))
         }
     }

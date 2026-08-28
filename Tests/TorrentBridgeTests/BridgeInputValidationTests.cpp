@@ -1283,6 +1283,47 @@ TEST_CASE("peer protocol typed boundary rejects malformed callback records atomi
     CHECK(pex.added_count == 93);
 }
 
+TEST_CASE("peer protocol PEX endpoint identity includes the port")
+{
+    PeerProtocolParserProbe probe;
+    TTorrentPeerExchangeRecord const first{
+        .address_high = 0U,
+        .address_low = 0xcb00'7109U,
+        .port = 6'881U,
+        .address_family = TTORRENT_PEER_ADDRESS_IPV4,
+        .action = TTORRENT_PEX_CONTACT_ADD,
+        .flags = 0U,
+        .reserved0 = 0U,
+        .reserved1 = 0U,
+    };
+    TTorrentPeerExchangeRecord second = first;
+    second.port = 6'882U;
+    second.action = TTORRENT_PEX_CONTACT_DROP;
+    probe.pex_records = {first, second};
+    probe.pex_result = TTorrentPeerExchangeResult{
+        .record_count = 2,
+        .added_count = 1,
+        .dropped_count = 1,
+        .reserved = 0U,
+    };
+
+    BridgePeerMessageParser parser(probe.callbacks());
+    lt::aux::peer_exchange_message imported;
+    lt::error_code error;
+    REQUIRE(parser.parse_ut_pex("de", imported, error));
+    REQUIRE_FALSE(error);
+    REQUIRE(imported.contacts.size() == 2U);
+    CHECK(imported.contacts.at(0).endpoint.port() == 6'881U);
+    CHECK(imported.contacts.at(1).endpoint.port() == 6'882U);
+
+    second.port = first.port;
+    probe.pex_records = {first, second};
+    imported.added_count = 91;
+    CHECK_FALSE(parser.parse_ut_pex("de", imported, error));
+    CHECK(error == lt::errors::invalid_pex_message);
+    CHECK(imported.added_count == 91);
+}
+
 TEST_CASE("HTTP tracker callback ownership and typed announce import are exact")
 {
     std::string const body = "tracker-idwarninghost.exampleABCDEFGHIJKLMNOPQRST";

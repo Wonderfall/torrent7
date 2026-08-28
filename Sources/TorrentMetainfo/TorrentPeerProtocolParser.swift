@@ -80,6 +80,11 @@ package struct TorrentPeerExchangeMessage: Equatable, Sendable {
 /// still carried by libtorrent's extension protocol. Connection state and all
 /// admission policy remain native; these values contain syntax only.
 package struct TorrentPeerProtocolParser: Sendable {
+    private struct PeerExchangeEndpointKey: Hashable {
+        let address: TorrentPeerAddress
+        let port: UInt16
+    }
+
     package struct Limits: Equatable, Sendable {
         package var maximumHandshakeBytes = 64 * 1_024
         package var maximumMetadataMessageBytes = 17 * 1_024
@@ -369,8 +374,8 @@ package struct TorrentPeerProtocolParser: Sendable {
         var contacts = [TorrentPeerExchangeContact]()
         let contactCount = try checkedSum(addedCount, droppedCount)
         contacts.reserveCapacity(contactCount)
-        var seenAddresses = Set<TorrentPeerAddress>()
-        seenAddresses.reserveCapacity(contactCount)
+        var seenEndpoints = Set<PeerExchangeEndpointKey>()
+        seenEndpoints.reserveCapacity(contactCount)
         try appendContacts(
             added4,
             flags: added4Flags,
@@ -379,7 +384,7 @@ package struct TorrentPeerProtocolParser: Sendable {
             stride: 6,
             document: document,
             to: &contacts,
-            seenAddresses: &seenAddresses
+            seenEndpoints: &seenEndpoints
         )
         try appendContacts(
             added6,
@@ -389,7 +394,7 @@ package struct TorrentPeerProtocolParser: Sendable {
             stride: 18,
             document: document,
             to: &contacts,
-            seenAddresses: &seenAddresses
+            seenEndpoints: &seenEndpoints
         )
         try appendContacts(
             dropped4,
@@ -399,7 +404,7 @@ package struct TorrentPeerProtocolParser: Sendable {
             stride: 6,
             document: document,
             to: &contacts,
-            seenAddresses: &seenAddresses
+            seenEndpoints: &seenEndpoints
         )
         try appendContacts(
             dropped6,
@@ -409,7 +414,7 @@ package struct TorrentPeerProtocolParser: Sendable {
             stride: 18,
             document: document,
             to: &contacts,
-            seenAddresses: &seenAddresses
+            seenEndpoints: &seenEndpoints
         )
         return TorrentPeerExchangeMessage(
             contacts: contacts,
@@ -566,7 +571,7 @@ package struct TorrentPeerProtocolParser: Sendable {
         stride: Int,
         document: BencodeRangeDocument,
         to contacts: inout [TorrentPeerExchangeContact],
-        seenAddresses: inout Set<TorrentPeerAddress>
+        seenEndpoints: inout Set<PeerExchangeEndpointKey>
     ) throws {
         guard let encoded else {
             return
@@ -576,13 +581,16 @@ package struct TorrentPeerProtocolParser: Sendable {
         var contactIndex = 0
         while offset < encoded.upperBound {
             let address = try decodeAddress(document.data[offset..<(offset + addressSize)])
-            guard seenAddresses.insert(address).inserted else {
-                throw TorrentPeerProtocolError.duplicatePeerExchangeContact
-            }
             let port = UInt16(document.data[offset + addressSize]) << 8
                 | UInt16(document.data[offset + addressSize + 1])
             guard port != 0 else {
                 throw TorrentPeerProtocolError.invalidField
+            }
+            guard seenEndpoints.insert(PeerExchangeEndpointKey(
+                address: address,
+                port: port
+            )).inserted else {
+                throw TorrentPeerProtocolError.duplicatePeerExchangeContact
             }
             let rawFlags = flags.map {
                 document.data[$0.lowerBound + contactIndex]
