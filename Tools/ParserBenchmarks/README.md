@@ -36,7 +36,7 @@ virtual machine with 12 cores and 32 GB RAM, macOS 26.6.2 (25G83), and Swift
 6.3.3.
 
 | Workload | Bytes | Native median ns | Swift median ns | Swift p95 ns | Swift p99/max ns | msg/s | MiB/s | Swift/native |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
 | `magnet_basic` | 60 | 109.05 | 10,848.78 | 11,002.46 | 11,040.62 | 92,176 | 5.27 | 99.48x |
 | `magnet_rich` | 321 | 1,809.69 | 111,730.66 | 112,462.39 | 112,724.99 | 8,950 | 2.74 | 61.74x |
 | `torrent_small` | 400 | 3,071.38 | 10,614.50 | 10,887.07 | 10,948.14 | 94,211 | 35.94 | 3.46x |
