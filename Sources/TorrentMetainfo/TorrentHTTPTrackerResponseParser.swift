@@ -26,7 +26,7 @@ package struct TorrentTrackerPeer: Equatable, Sendable {
     package let port: UInt16
 }
 
-/// A typed view of one canonical HTTP tracker response. Byte ranges refer to
+/// A typed view of one validated HTTP tracker response. Byte ranges refer to
 /// `body`, which owns the exact bytes scanned by the parser. The ranges let a
 /// native importer perform checked copying without parsing the bencoding again.
 package struct TorrentHTTPTrackerResponse: Equatable, Sendable {
@@ -93,7 +93,8 @@ package struct TorrentHTTPTrackerResponseParser: Sendable {
         do {
             document = try BencodeRangeDocument.scan(
                 bytes,
-                limits: scannerLimits
+                limits: scannerLimits,
+                dictionaryPolicy: .unorderedUnique
             )
         } catch {
             throw scanError(error)

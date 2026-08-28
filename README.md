@@ -133,20 +133,21 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
   them through that same Swift callback; conventional nested resume metainfo is
   rejected before it can reach libtorrent's semantic parser.
 - **Typed peer-extension boundary:** incoming BEP 10 handshakes, BEP 9 metadata
-  controls, and BEP 11 peer exchanges terminate in bounded canonical Swift
+  controls, and BEP 11 peer exchanges terminate in bounded Swift
   parsers. Fixed POD records and one caller-owned PEX array cross the C ABI;
   C++ revalidates them while libtorrent retains connection, rate, hash, and
   peer-admission policy. The retired native bdecode routes are build-gated, and
   every callback role and context has arm64e PAC replay and codegen coverage.
 - **Typed HTTP tracker-body boundary:** the final decompressed announce or
-  scrape body terminates in a canonical bounded Swift parser. Libtorrent keeps
+  scrape body terminates in a bounded Swift parser. Libtorrent keeps
   HTTP transport, TLS, redirects, chunking, gzip, scheduling, and peer policy;
   Swift returns fixed typed fields and caller-owned peer records that C++
   revalidates and commits atomically. The body is capped at 512 KiB before the
   callback and output at 3,000 peers. UDP tracker replies remain native as
   fixed binary, length-checked span parsing.
 - **Typed DHT boundary:** every inbound Mainline DHT KRPC datagram terminates in
-  a canonical bounded Swift parser. Swift returns a query-, response-, or
+  a bounded Swift parser. Network dictionaries may be unordered but must have
+  unique keys and canonical scalar encodings. Swift returns a query-, response-, or
   error-specific result plus caller-owned compact node and peer records; C++
   revalidates and copies them into an owning message before DHT dispatch. The
   datagram is capped at 1,500 bytes, with 64 nodes, 256 peers, and 64 sample

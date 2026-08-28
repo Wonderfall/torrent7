@@ -164,7 +164,11 @@ package struct TorrentDHTMessageParser: Sendable {
 
         let document: BencodeRangeDocument
         do {
-            document = try BencodeRangeDocument.scan(bytes, limits: scannerLimits)
+            document = try BencodeRangeDocument.scan(
+                bytes,
+                limits: scannerLimits,
+                dictionaryPolicy: .unorderedUnique
+            )
         } catch let error as BencodeScanError {
             throw scanError(error)
         } catch {

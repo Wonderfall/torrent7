@@ -85,6 +85,41 @@ struct TorrentDHTMessageParserTests {
             == Data("Example torrent".utf8))
     }
 
+    @Test("KRPC dictionaries accept unordered unique keys recursively")
+    func acceptsUnorderedUniqueKRPCDictionaries() throws {
+        let arguments = bencodedDictionary([
+            ("target", bencodedString(target)),
+            ("id", bencodedString(nodeID)),
+        ], sortedKeys: false)
+        let body = bencodedDictionary([
+            ("y", bencodedString(Data("q".utf8))),
+            ("t", bencodedString(Data([1, 2]))),
+            ("q", bencodedString(Data("find_node".utf8))),
+            ("future", bencodedInteger(1)),
+            ("a", arguments),
+        ], sortedKeys: false)
+
+        let message = try parser.parse(body, sourceFamily: .ipv4)
+        #expect(message.queryKind == .findNode)
+        #expect(message.queryIsValid)
+        #expect(message.targetRange.map { Data(message.body[$0]) } == target)
+
+        let duplicateArguments = bencodedDictionary([
+            ("id", bencodedString(nodeID)),
+            ("future", bencodedInteger(1)),
+            ("future", bencodedInteger(2)),
+        ], sortedKeys: false)
+        let duplicate = bencodedDictionary([
+            ("a", duplicateArguments),
+            ("q", bencodedString(Data("ping".utf8))),
+            ("t", bencodedString(Data([0, 1]))),
+            ("y", bencodedString(Data("q".utf8))),
+        ])
+        #expect(throws: TorrentDHTMessageError.malformedBencoding) {
+            _ = try parser.parse(duplicate, sourceFamily: .ipv4)
+        }
+    }
+
     @Test("Responses produce typed nodes, peers, tokens, and address hints")
     func parsesDiscoveryResponse() throws {
         let node4 = nodeID + Data([203, 0, 113, 7, 0x1a, 0xe1])
@@ -254,11 +289,11 @@ struct TorrentDHTMessageParserTests {
         #expect(message.transactionRange != nil)
     }
 
-    @Test("Canonical syntax and fixed work ceilings fail closed")
+    @Test("Malformed scalar syntax and fixed work ceilings fail closed")
     func rejectsMalformedAndRelaxedLimits() {
         #expect(throws: TorrentDHTMessageError.malformedBencoding) {
             _ = try parser.parse(
-                Data("d1:y1:q1:t2:aa1:q4:pinge".utf8),
+                Data("d1:ti01e1:y1:qe".utf8),
                 sourceFamily: .ipv4
             )
         }
@@ -309,12 +344,15 @@ private func bencodedList(_ values: [Data]) -> Data {
     } + Data([UInt8(ascii: "e")])
 }
 
-private func bencodedDictionary(_ fields: [(String, Data)]) -> Data {
-    let sorted = fields.sorted {
+private func bencodedDictionary(
+    _ fields: [(String, Data)],
+    sortedKeys: Bool = true
+) -> Data {
+    let ordered = sortedKeys ? fields.sorted {
         $0.0.utf8.lexicographicallyPrecedes($1.0.utf8)
-    }
+    } : fields
     var result = Data([UInt8(ascii: "d")])
-    for (key, value) in sorted {
+    for (key, value) in ordered {
         result.append(bencodedString(Data(key.utf8)))
         result.append(value)
     }

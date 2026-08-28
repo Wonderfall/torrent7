@@ -11,6 +11,11 @@ enum BencodeScanError: Error, Equatable, Sendable {
     case stringLengthDigitLimitExceeded
 }
 
+enum BencodeDictionaryPolicy: Equatable, Sendable {
+    case canonicalSortedUnique
+    case unorderedUnique
+}
+
 struct BencodeScanLimits: Equatable, Sendable {
     var maximumNestingDepth: Int
     var maximumValueCount: Int
@@ -46,7 +51,7 @@ enum BencodeValueKind: UInt8, Equatable, Sendable {
     case dictionary
 }
 
-/// A flat, immutable view of canonical bencoding. Tokens retain only ranges and
+/// A flat, immutable view of validated bencoding. Tokens retain only ranges and
 /// sibling links into the original input; strings and dictionary keys are not
 /// copied. Construction is iterative and validates the whole input, including
 /// unknown values, before this value can exist.
@@ -69,11 +74,18 @@ struct BencodeRangeDocument: Sendable {
 
     let data: Data
     let rootIndex: Int
+    private let dictionaryPolicy: BencodeDictionaryPolicy
     private let tokens: [Token]
 
-    private init(data: Data, rootIndex: Int, tokens: [Token]) {
+    private init(
+        data: Data,
+        rootIndex: Int,
+        dictionaryPolicy: BencodeDictionaryPolicy,
+        tokens: [Token]
+    ) {
         self.data = data
         self.rootIndex = rootIndex
+        self.dictionaryPolicy = dictionaryPolicy
         self.tokens = tokens
     }
 
@@ -142,8 +154,10 @@ struct BencodeRangeDocument: Sendable {
                     return index
                 }
                 // Canonical dictionaries are strictly sorted, so a key after
-                // the requested one proves it is absent.
-                if expected.lexicographicallyPrecedes(data[keyRange]) {
+                // the requested one proves it is absent. Network dictionaries
+                // may be unordered and must be searched completely.
+                if dictionaryPolicy == .canonicalSortedUnique,
+                   expected.lexicographicallyPrecedes(data[keyRange]) {
                     return nil
                 }
             }
@@ -165,11 +179,13 @@ struct BencodeRangeDocument: Sendable {
     static func scan(
         _ data: Data,
         limits: BencodeScanLimits,
+        dictionaryPolicy: BencodeDictionaryPolicy = .canonicalSortedUnique,
         checkCancellation: () throws -> Void = {}
     ) throws -> Self {
         try scan(
             data,
             limits: limits,
+            dictionaryPolicy: dictionaryPolicy,
             requiresCompleteInput: true,
             checkCancellation: checkCancellation
         )
@@ -181,11 +197,13 @@ struct BencodeRangeDocument: Sendable {
     static func scanPrefix(
         _ data: Data,
         limits: BencodeScanLimits,
+        dictionaryPolicy: BencodeDictionaryPolicy = .canonicalSortedUnique,
         checkCancellation: () throws -> Void = {}
     ) throws -> Self {
         try scan(
             data,
             limits: limits,
+            dictionaryPolicy: dictionaryPolicy,
             requiresCompleteInput: false,
             checkCancellation: checkCancellation
         )
@@ -194,6 +212,7 @@ struct BencodeRangeDocument: Sendable {
     private static func scan(
         _ data: Data,
         limits: BencodeScanLimits,
+        dictionaryPolicy: BencodeDictionaryPolicy,
         requiresCompleteInput: Bool,
         checkCancellation: () throws -> Void
     ) throws -> Self {
@@ -201,7 +220,11 @@ struct BencodeRangeDocument: Sendable {
         guard ownedData.count < Int(missingOffset) else {
             throw BencodeScanError.stringLimitExceeded
         }
-        var scanner = Scanner(data: ownedData, limits: limits)
+        var scanner = Scanner(
+            data: ownedData,
+            limits: limits,
+            dictionaryPolicy: dictionaryPolicy
+        )
         return try scanner.scan(
             requiresCompleteInput: requiresCompleteInput,
             checkCancellation: checkCancellation
@@ -226,10 +249,12 @@ struct BencodeRangeDocument: Sendable {
             var lastChildIndex = -1
             var pendingDictionaryKey: Range<Int>?
             var previousDictionaryKey: Range<Int>?
+            var unorderedDictionaryKeys = [Range<Int>]()
         }
 
         private let data: Data
         private let limits: BencodeScanLimits
+        private let dictionaryPolicy: BencodeDictionaryPolicy
         private var offset = 0
         private var valueCount = 0
         private var containerCount = 0
@@ -238,9 +263,14 @@ struct BencodeRangeDocument: Sendable {
         private var frames = [Frame]()
         private var rootIndex: Int?
 
-        init(data: Data, limits: BencodeScanLimits) {
+        init(
+            data: Data,
+            limits: BencodeScanLimits,
+            dictionaryPolicy: BencodeDictionaryPolicy
+        ) {
             self.data = data
             self.limits = limits
+            self.dictionaryPolicy = dictionaryPolicy
             tokens.reserveCapacity(max(0, min(limits.maximumValueCount, data.count)))
             frames.reserveCapacity(max(0, min(limits.maximumNestingDepth, data.count)))
         }
@@ -296,6 +326,7 @@ struct BencodeRangeDocument: Sendable {
             return BencodeRangeDocument(
                 data: data,
                 rootIndex: rootIndex,
+                dictionaryPolicy: dictionaryPolicy,
                 tokens: tokens
             )
         }
@@ -370,11 +401,16 @@ struct BencodeRangeDocument: Sendable {
             dictionaryKeyBytes = nextKeyBytes.partialValue
 
             let frameIndex = frames.index(before: frames.endIndex)
-            if let previous = frames[frameIndex].previousDictionaryKey,
-               !lexicographicallyPrecedes(previous, key) {
-                throw BencodeScanError.malformed
+            switch dictionaryPolicy {
+            case .canonicalSortedUnique:
+                if let previous = frames[frameIndex].previousDictionaryKey,
+                   !lexicographicallyPrecedes(previous, key) {
+                    throw BencodeScanError.malformed
+                }
+                frames[frameIndex].previousDictionaryKey = key
+            case .unorderedUnique:
+                frames[frameIndex].unorderedDictionaryKeys.append(key)
             }
-            frames[frameIndex].previousDictionaryKey = key
             frames[frameIndex].pendingDictionaryKey = key
         }
 
@@ -409,7 +445,20 @@ struct BencodeRangeDocument: Sendable {
 
         private mutating func closeContainer() throws {
             offset += 1
-            let frame = frames.removeLast()
+            var frame = frames.removeLast()
+            if frame.kind == .dictionary,
+               dictionaryPolicy == .unorderedUnique {
+                frame.unorderedDictionaryKeys.sort {
+                    lexicographicallyPrecedes($0, $1)
+                }
+                for index in frame.unorderedDictionaryKeys.indices.dropFirst() {
+                    let previous = frame.unorderedDictionaryKeys[index - 1]
+                    let current = frame.unorderedDictionaryKeys[index]
+                    guard !keysAreEqual(previous, current) else {
+                        throw BencodeScanError.malformed
+                    }
+                }
+            }
             guard let size = UInt32(exactly: offset - frame.startOffset) else {
                 throw BencodeScanError.malformed
             }
@@ -611,6 +660,13 @@ struct BencodeRangeDocument: Sendable {
             _ right: Range<Int>
         ) -> Bool {
             data[left].lexicographicallyPrecedes(data[right])
+        }
+
+        private func keysAreEqual(
+            _ left: Range<Int>,
+            _ right: Range<Int>
+        ) -> Bool {
+            left.count == right.count && data[left].elementsEqual(data[right])
         }
 
         private func isDigit(_ byte: UInt8) -> Bool {

@@ -46,6 +46,31 @@ struct TorrentPeerProtocolParserTests {
         #expect(update.uploadOnly == nil)
     }
 
+    @Test("Network dictionaries accept unordered unique keys recursively")
+    func acceptsUnorderedUniqueNetworkDictionaries() throws {
+        let handshake = Data(
+            "d1:v9:Torrent 71:md6:ut_pexi1e11:ut_metadatai2eee".utf8
+        )
+        let update = try parser.parseExtensionHandshake(handshake)
+        #expect(update.utMetadataID == 2)
+        #expect(update.utPEXID == 1)
+        #expect(update.clientVersionUTF8 == Data("Torrent 7".utf8))
+
+        var metadata = Data(
+            "d10:total_sizei4e5:piecei0e8:msg_typei1ee".utf8
+        )
+        metadata.append(contentsOf: [1, 2, 3, 4])
+        let control = try parser.parseMetadataControlMessage(metadata)
+        #expect(control.kind == .data)
+        #expect(control.payloadSize == 4)
+
+        #expect(throws: TorrentPeerProtocolError.malformedBencoding) {
+            _ = try parser.parseExtensionHandshake(
+                Data("d7:futurei1e1:md6:ut_pexi1ee7:futurei2ee".utf8)
+            )
+        }
+    }
+
     @Test("Extension IDs must be unique bytes")
     func rejectsInvalidExtensionMappings() {
         #expect(throws: TorrentPeerProtocolError.invalidField) {
@@ -60,7 +85,7 @@ struct TorrentPeerProtocolParserTests {
         }
         #expect(throws: TorrentPeerProtocolError.malformedBencoding) {
             _ = try parser.parseExtensionHandshake(
-                Data("d1:md6:ut_pexi1ee1:ai0ee".utf8)
+                Data("d1:md6:ut_pexi1ee1:ai0e1:ai1ee".utf8)
             )
         }
     }

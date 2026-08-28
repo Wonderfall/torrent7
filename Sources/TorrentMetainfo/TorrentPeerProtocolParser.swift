@@ -235,7 +235,8 @@ package struct TorrentPeerProtocolParser: Sendable {
         do {
             document = try BencodeRangeDocument.scanPrefix(
                 bytes,
-                limits: scannerLimits(maximumStringBytes: bytes.count)
+                limits: scannerLimits(maximumStringBytes: bytes.count),
+                dictionaryPolicy: .unorderedUnique
             )
         } catch {
             throw scanError(error)
@@ -431,7 +432,8 @@ package struct TorrentPeerProtocolParser: Sendable {
         do {
             return try BencodeRangeDocument.scan(
                 bytes,
-                limits: scannerLimits(maximumStringBytes: maximumBytes)
+                limits: scannerLimits(maximumStringBytes: maximumBytes),
+                dictionaryPolicy: .unorderedUnique
             )
         } catch {
             throw scanError(error)

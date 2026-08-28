@@ -116,6 +116,70 @@ struct BencodeRangeScannerTests {
         }
     }
 
+    @Test("Unordered dictionaries remain unique and searchable at every depth")
+    func acceptsOnlyUnorderedUniqueDictionaries() throws {
+        let data = Data("d1:zi9e1:ad1:yi2e1:xi1ee1:mi4ee".utf8)
+        let document = try BencodeRangeDocument.scan(
+            data,
+            limits: Self.limits(),
+            dictionaryPolicy: .unorderedUnique
+        )
+        let root = document.rootIndex
+
+        #expect(document.integer(
+            at: try #require(document.value(named: "z", inDictionaryAt: root))
+        ) == 9)
+        #expect(document.integer(
+            at: try #require(document.value(named: "m", inDictionaryAt: root))
+        ) == 4)
+        let nested = try #require(document.value(named: "a", inDictionaryAt: root))
+        #expect(document.integer(
+            at: try #require(document.value(named: "x", inDictionaryAt: nested))
+        ) == 1)
+        #expect(document.integer(
+            at: try #require(document.value(named: "y", inDictionaryAt: nested))
+        ) == 2)
+
+        for duplicate in [
+            "d1:ai1e1:ai2ee",
+            "d1:ad1:xi1e1:xi2eee",
+            "d7:unknowni1e7:unknowni2ee",
+            "d0:i1e0:i2ee",
+        ] {
+            #expect(throws: BencodeScanError.malformed) {
+                _ = try BencodeRangeDocument.scan(
+                    Data(duplicate.utf8),
+                    limits: Self.limits(),
+                    dictionaryPolicy: .unorderedUnique
+                )
+            }
+        }
+    }
+
+    @Test("Unordered prefix scanning keeps strict scalar syntax")
+    func scansUnorderedPrefixWithCanonicalScalars() throws {
+        let data = Data("d1:zi2e1:ai1ee\u{0}payload".utf8)
+        let document = try BencodeRangeDocument.scanPrefix(
+            data,
+            limits: Self.limits(),
+            dictionaryPolicy: .unorderedUnique
+        )
+
+        #expect(document.encodedRange(at: document.rootIndex) == 0..<14)
+        #expect(document.integer(
+            at: try #require(document.value(named: "a", inDictionaryAt: document.rootIndex))
+        ) == 1)
+        for malformed in ["d1:ai01ee", "d1:a01:xe"] {
+            #expect(throws: BencodeScanError.malformed) {
+                _ = try BencodeRangeDocument.scan(
+                    Data(malformed.utf8),
+                    limits: Self.limits(),
+                    dictionaryPolicy: .unorderedUnique
+                )
+            }
+        }
+    }
+
     @Test("Each scanner resource ceiling is enforced")
     func enforcesResourceCeilings() {
         #expect(throws: BencodeScanError.valueLimitExceeded) {

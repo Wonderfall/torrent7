@@ -110,6 +110,35 @@ struct TorrentHTTPTrackerResponseParserTests {
         #expect(response.peers.isEmpty)
     }
 
+    @Test("Tracker dictionaries accept unordered unique keys recursively")
+    func acceptsUnorderedUniqueTrackerDictionaries() throws {
+        let peer = bencodedDictionary([
+            ("port", bencodedInteger(6_881)),
+            ("ip", bencodedString(Data("peer.example".utf8))),
+        ], sortedKeys: false)
+        let body = bencodedDictionary([
+            ("warning message", bencodedString(Data("notice".utf8))),
+            ("peers", bencodedList([peer])),
+            ("interval", bencodedInteger(900)),
+            ("future", bencodedInteger(1)),
+        ], sortedKeys: false)
+
+        let response = try parser.parse(body)
+        #expect(response.interval == 900)
+        #expect(response.peers.count == 1)
+        #expect(response.peers.first?.port == 6_881)
+        #expect(response.warningMessageRange.map { Data(response.body[$0]) }
+            == Data("notice".utf8))
+
+        #expect(throws: TorrentHTTPTrackerResponseError.malformedBencoding) {
+            _ = try parser.parse(bencodedDictionary([
+                ("future", bencodedInteger(1)),
+                ("interval", bencodedInteger(900)),
+                ("future", bencodedInteger(2)),
+            ], sortedKeys: false))
+        }
+    }
+
     @Test("Scrape responses select only the exact binary info-hash key")
     func parsesScrapeResponse() throws {
         let expectedHash = Data(0..<20)
@@ -153,10 +182,10 @@ struct TorrentHTTPTrackerResponseParserTests {
         }
     }
 
-    @Test("Canonical bencoding and integer bounds fail closed")
+    @Test("Malformed scalar syntax and integer bounds fail closed")
     func rejectsMalformedAndAmbiguousResponses() {
         #expect(throws: TorrentHTTPTrackerResponseError.malformedBencoding) {
-            _ = try parser.parse(Data("d5:peers0:8:intervali1ee".utf8))
+            _ = try parser.parse(Data("d5:peers0:8:intervali01ee".utf8))
         }
         #expect(throws: TorrentHTTPTrackerResponseError.invalidField) {
             _ = try parser.parse(bencodedDictionary([
@@ -231,16 +260,25 @@ private func bencodedList(_ values: [Data]) -> Data {
     } + Data([UInt8(ascii: "e")])
 }
 
-private func bencodedDictionary(_ fields: [(String, Data)]) -> Data {
-    bencodedByteKeyedDictionary(fields.map { (Data($0.0.utf8), $0.1) })
+private func bencodedDictionary(
+    _ fields: [(String, Data)],
+    sortedKeys: Bool = true
+) -> Data {
+    bencodedByteKeyedDictionary(
+        fields.map { (Data($0.0.utf8), $0.1) },
+        sortedKeys: sortedKeys
+    )
 }
 
-private func bencodedByteKeyedDictionary(_ fields: [(Data, Data)]) -> Data {
-    let sorted = fields.sorted { left, right in
+private func bencodedByteKeyedDictionary(
+    _ fields: [(Data, Data)],
+    sortedKeys: Bool = true
+) -> Data {
+    let ordered = sortedKeys ? fields.sorted { left, right in
         left.0.lexicographicallyPrecedes(right.0)
-    }
+    } : fields
     var result = Data([UInt8(ascii: "d")])
-    for (key, value) in sorted {
+    for (key, value) in ordered {
         result.append(bencodedString(key))
         result.append(value)
     }

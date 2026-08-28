@@ -50,14 +50,16 @@ Validation followed by passing the same bytes to libtorrent is not a cutover.
 
 ## Accepted peer-extension dialect
 
-- BEP 10 extension handshakes use the same canonical, bounded bencode scanner.
+- BEP 10 extension handshakes use the same bounded bencode scanner. Network
+  dictionaries may arrive in any order but must have unique raw-byte keys;
+  integers and string lengths remain canonical.
   Every field is optional. Repeated handshakes are additive updates: an omitted
   extension mapping leaves prior state unchanged, ID `0` disables an extension,
   and positive peer-local IDs must be unique bytes. Client version text is valid
   UTF-8 and at most 256 bytes. Metadata size, listen port, request queue,
   completion age, external address, and upload-only values have explicit typed
   bounds.
-- BEP 9 metadata messages consist of one canonical control dictionary followed
+- BEP 9 metadata messages consist of one unordered-unique control dictionary followed
   by an uninterpreted binary suffix. Request (`0`) and reject (`2`) messages
   carry no suffix. Data (`1`) requires a positive bounded total size and a block
   of 1 through 16 KiB. Unknown message types retain their numeric type and exact
@@ -71,15 +73,16 @@ Validation followed by passing the same bytes to libtorrent is not a cutover.
   message is bounded to 100 additions and 100 drops; libtorrent retains its
   stricter 50-plus-50 limit for later messages and all peer-admission policy.
 - Unknown dictionary fields are skipped structurally within the same depth,
-  token, key-byte, and container budgets. Noncanonical dictionaries are rejected
-  rather than normalized and passed onward.
+  token, key-byte, and container budgets. Duplicate keys and noncanonical scalar
+  encodings are rejected before any typed result exists.
 
 ## Accepted HTTP tracker-response dialect
 
 - Only the final decompressed bencoded HTTP response body crosses into Swift.
   Native code continues to own DNS, TCP, TLS, HTTP status and header parsing,
   chunk framing, redirects, proxy behavior, and gzip inflation.
-- Announce and scrape dictionaries use the shared canonical iterative scanner.
+- Announce and scrape dictionaries use the shared iterative scanner with
+  unordered but unique raw-byte keys and canonical scalar encodings.
   Intervals and swarm statistics are fixed-width and bounded. Scrapes select
   only the exact binary 20-byte info-hash key requested by libtorrent.
 - IPv4 and IPv6 compact peer strings must be exact multiples of six and
@@ -103,16 +106,19 @@ WebTorrent and I2P are disabled in the product build.
 
 ## Accepted DHT KRPC dialect
 
-- One complete canonical bencoded dictionary is accepted per UDP datagram, up
-  to 1,500 bytes, nesting depth 10, 500 values, 128 containers, and bounded key
-  and integer syntax. Transaction IDs and binary hashes remain bytes.
+- One complete bencoded dictionary is accepted per UDP datagram, up to 1,500
+  bytes, nesting depth 10, 500 values, 128 containers, and bounded key and
+  integer syntax. Dictionaries may be unordered but duplicate raw-byte keys are
+  rejected recursively. Transaction IDs and binary hashes remain bytes.
 - Query envelopes recognize `ping`, `find_node`, `get_peers`, `announce_peer`,
   and `sample_infohashes`. Unknown queries are future-compatible only when they
   carry a fixed 20-byte target. `want`, read-only, scrape, seed, and announce
   controls are returned as typed fields for native policy and state handling.
 - BEP 44 `get` and `put` are identified, but their arbitrary values are not
   decoded. Torrent7 uses DHT only for peer discovery and returns an explicit
-  unsupported-method error for those queries.
+  unsupported-method error for those queries. Any future hash- or
+  signature-bearing value parser must use the canonical metainfo policy rather
+  than this tolerant network-dictionary policy.
 - Responses may contain at most 64 compact nodes, 256 peers, and 64 sample
   hashes. Both IPv4 and IPv6 compact records are decoded. The Mainline
   single-string aggregate IPv4 peer form is interpreted only for an IPv4

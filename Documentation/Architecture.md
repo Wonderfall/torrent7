@@ -475,7 +475,8 @@ Final decompressed HTTP tracker bodies follow a separate synchronous Swift
 callback. Libtorrent still owns DNS, TLS, HTTP framing, redirects, proxying,
 chunk handling, gzip inflation, tracker scheduling, and endpoint admission. It
 caps both the bottled response and inflated output at 512 KiB before invoking
-Swift. Swift canonical-bdecodes announce or scrape data into one fixed result
+Swift. Swift accepts unordered unique dictionaries while retaining canonical
+scalar syntax, then produces one fixed result
 and at most 3,000 caller-owned peer records; C++ revalidates all fields and
 commits an entirely constructed tracker response atomically. The retired HTTP
 tracker bdecode implementation is absent and build-gated. UDP tracker replies
@@ -483,7 +484,8 @@ remain native by design: they are fixed binary, length-checked span parsing,
 not another generic bencode surface. WebTorrent and I2P are disabled.
 
 Inbound Mainline DHT datagrams terminate in another synchronous Swift callback.
-The canonical scanner has a 1,500-byte envelope and independent limits for
+The scanner accepts unordered unique dictionaries within a 1,500-byte envelope
+and has independent limits for
 nesting, tokens, keys, transaction IDs, tokens, human-readable text, compact
 nodes, peers, and sample hashes. Swift writes one fixed result and caller-owned
 node and peer arrays; C++ revalidates the schema, ranges, enums, presence bits,
