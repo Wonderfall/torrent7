@@ -21,6 +21,8 @@
 #include <utility>
 #include <vector>
 
+#include <sys/mman.h>
+
 namespace {
 
 [[nodiscard]] lt::add_torrent_params make_source_torrent_params(bool const private_torrent = false)
@@ -964,12 +966,490 @@ private:
     info += "12:meta versioni2e4:name" + std::to_string(name.size()) + ":" + std::string(name)
         + "12:piece lengthi16384e";
     if (include_v1) {
-        info += "6:pieces20:";
+        auto const piece_count = static_cast<std::size_t>(
+            (size + 16 * 1024 - 1) / (16 * 1024)
+        );
+        auto const piece_hash_bytes = piece_count * 20U;
+        info += "6:pieces" + std::to_string(piece_hash_bytes) + ":";
         piece_hash_offset = static_cast<std::uint32_t>(info.size());
-        info.append(20U, 'h');
+        info.append(piece_hash_bytes, 'h');
     }
     info.push_back('e');
     return info;
+}
+
+struct MetainfoLifecycleFixture {
+    std::string label;
+    std::string info;
+    MetainfoCapsuleFixture local_capsule;
+    MetainfoCapsuleFixture swarm_capsule;
+    lt::info_hash_t hashes;
+    std::string effective_name;
+    std::string file_path;
+    std::int64_t file_size = 0;
+    std::optional<std::uint32_t> piece_hash_offset;
+    std::optional<lt::sha1_hash> piece_hash;
+    std::optional<std::uint32_t> root_offset;
+    std::optional<lt::sha256_hash> root;
+    std::vector<lt::sha256_hash> local_piece_layer;
+    bool private_torrent = false;
+};
+
+[[nodiscard]] std::string synthetic_rootless_name(std::string_view const info)
+{
+    constexpr std::array<char, 16U> alphabet{{
+        '0', '1', '2', '3', '4', '5', '6', '7',
+        '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
+    }};
+    std::string const digest = lt::hasher256(lt::span<char const>(info)).final().to_string();
+    std::string name = "Torrent-";
+    for (std::size_t index = 0U; index < 6U; ++index) {
+        auto const byte = static_cast<std::uint8_t>(digest.at(index));
+        name.push_back(alphabet.at(byte >> 4U));
+        name.push_back(alphabet.at(byte & 0x0fU));
+    }
+    return name;
+}
+
+[[nodiscard]] std::vector<MetainfoLifecycleFixture> metainfo_lifecycle_fixtures()
+{
+    std::vector<MetainfoLifecycleFixture> fixtures;
+    fixtures.reserve(6U);
+
+    {
+        std::uint32_t piece_hash_offset = 0U;
+        std::string const info = v1_capsule_info(piece_hash_offset);
+        auto make_capsule = [&](std::uint8_t const input_kind) {
+            return make_metainfo_capsule(
+                info,
+                "file.bin",
+                TTORRENT_METAINFO_KIND_V1,
+                TTORRENT_CONTENT_KIND_SINGLE_FILE,
+                {CapsuleFileFixture{.components = {"file.bin"}, .size = 4}},
+                std::pair{piece_hash_offset, 20U},
+                {},
+                true,
+                {},
+                {},
+                {},
+                -1,
+                input_kind
+            );
+        };
+        fixtures.push_back(MetainfoLifecycleFixture{
+            .label = "v1",
+            .info = info,
+            .local_capsule = make_capsule(TTORRENT_METAINFO_INPUT_TORRENT_FILE),
+            .swarm_capsule = make_capsule(TTORRENT_METAINFO_INPUT_INFO_DICTIONARY),
+            .hashes = lt::info_hash_t(lt::hasher(lt::span<char const>(info)).final()),
+            .effective_name = "file.bin",
+            .file_path = "file.bin",
+            .file_size = 4,
+            .piece_hash_offset = piece_hash_offset,
+            .piece_hash = lt::sha1_hash(std::string(20U, 'p')),
+            .private_torrent = true,
+        });
+    }
+
+    {
+        std::vector<std::uint8_t> layer_bytes(64U);
+        for (std::size_t index = 0U; index < layer_bytes.size(); ++index) {
+            layer_bytes.at(index) = static_cast<std::uint8_t>(index + 1U);
+        }
+        std::array<std::uint8_t, 32U> const root_bytes = v2_root(layer_bytes);
+        std::uint32_t root_offset = 0U;
+        std::uint32_t ignored_piece_hash_offset = 0U;
+        std::string const info = v2_capsule_info(
+            "modern.bin",
+            32'768,
+            root_bytes,
+            root_offset,
+            false,
+            ignored_piece_hash_offset
+        );
+        CapsuleFileFixture const file{
+            .components = {"modern.bin"},
+            .size = 32'768,
+            .info_root_offset = root_offset,
+        };
+        CapsuleLayerFixture const layer{
+            .root = root_bytes,
+            .hashes = layer_bytes,
+            .file_indices = {0},
+        };
+        std::vector<lt::sha256_hash> expected_layer;
+        expected_layer.reserve(2U);
+        expected_layer.emplace_back(reinterpret_cast<char const *>(layer_bytes.data()));
+        expected_layer.emplace_back(reinterpret_cast<char const *>(
+            std::span<std::uint8_t const>(layer_bytes).subspan(32U, 32U).data()
+        ));
+        fixtures.push_back(MetainfoLifecycleFixture{
+            .label = "v2 with piece layer",
+            .info = info,
+            .local_capsule = make_metainfo_capsule(
+                info,
+                "modern.bin",
+                TTORRENT_METAINFO_KIND_V2,
+                TTORRENT_CONTENT_KIND_SINGLE_FILE,
+                {file},
+                std::nullopt,
+                {layer}
+            ),
+            .swarm_capsule = make_metainfo_capsule(
+                info,
+                "modern.bin",
+                TTORRENT_METAINFO_KIND_V2,
+                TTORRENT_CONTENT_KIND_SINGLE_FILE,
+                {file},
+                std::nullopt,
+                {},
+                false,
+                {},
+                {},
+                {},
+                -1,
+                TTORRENT_METAINFO_INPUT_INFO_DICTIONARY
+            ),
+            .hashes = lt::info_hash_t(lt::hasher256(lt::span<char const>(info)).final()),
+            .effective_name = "modern.bin",
+            .file_path = "modern.bin",
+            .file_size = 32'768,
+            .root_offset = root_offset,
+            .root = lt::sha256_hash(reinterpret_cast<char const *>(root_bytes.data())),
+            .local_piece_layer = std::move(expected_layer),
+        });
+    }
+
+    {
+        std::array<std::uint8_t, 32U> root_bytes{};
+        root_bytes.fill(0x5aU);
+        std::uint32_t root_offset = 0U;
+        std::uint32_t piece_hash_offset = 0U;
+        std::string const info = v2_capsule_info(
+            "hybrid.bin",
+            3,
+            root_bytes,
+            root_offset,
+            true,
+            piece_hash_offset
+        );
+        CapsuleFileFixture const file{
+            .components = {"hybrid.bin"},
+            .size = 3,
+            .info_root_offset = root_offset,
+        };
+        auto make_capsule = [&](std::uint8_t const input_kind) {
+            return make_metainfo_capsule(
+                info,
+                "hybrid.bin",
+                TTORRENT_METAINFO_KIND_HYBRID,
+                TTORRENT_CONTENT_KIND_SINGLE_FILE,
+                {file},
+                std::pair{piece_hash_offset, 20U},
+                {},
+                false,
+                {},
+                {},
+                {},
+                -1,
+                input_kind
+            );
+        };
+        fixtures.push_back(MetainfoLifecycleFixture{
+            .label = "hybrid",
+            .info = info,
+            .local_capsule = make_capsule(TTORRENT_METAINFO_INPUT_TORRENT_FILE),
+            .swarm_capsule = make_capsule(TTORRENT_METAINFO_INPUT_INFO_DICTIONARY),
+            .hashes = lt::info_hash_t(
+                lt::hasher(lt::span<char const>(info)).final(),
+                lt::hasher256(lt::span<char const>(info)).final()
+            ),
+            .effective_name = "hybrid.bin",
+            .file_path = "hybrid.bin",
+            .file_size = 3,
+            .piece_hash_offset = piece_hash_offset,
+            .piece_hash = lt::sha1_hash(std::string(20U, 'h')),
+            .root_offset = root_offset,
+            .root = lt::sha256_hash(reinterpret_cast<char const *>(root_bytes.data())),
+        });
+    }
+
+    {
+        std::array<std::uint8_t, 32U> root_bytes{};
+        root_bytes.fill(0x6bU);
+        std::string info = "d9:file treed8:leaf.bind0:d6:lengthi16384e11:pieces root32:";
+        std::uint32_t const root_offset = static_cast<std::uint32_t>(info.size());
+        for (std::uint8_t const byte : root_bytes) {
+            info.push_back(static_cast<char>(byte));
+        }
+        info += "eee12:meta versioni2e12:piece lengthi16384ee";
+        std::string const effective_name = synthetic_rootless_name(info);
+        CapsuleFileFixture const file{
+            .components = {"leaf.bin"},
+            .size = 16'384,
+            .info_root_offset = root_offset,
+        };
+        auto make_capsule = [&](std::uint8_t const input_kind) {
+            return make_metainfo_capsule(
+                info,
+                effective_name,
+                TTORRENT_METAINFO_KIND_V2,
+                TTORRENT_CONTENT_KIND_DIRECTORY,
+                {file},
+                std::nullopt,
+                {},
+                false,
+                {},
+                {},
+                {},
+                -1,
+                input_kind
+            );
+        };
+        fixtures.push_back(MetainfoLifecycleFixture{
+            .label = "rootless v2",
+            .info = info,
+            .local_capsule = make_capsule(TTORRENT_METAINFO_INPUT_TORRENT_FILE),
+            .swarm_capsule = make_capsule(TTORRENT_METAINFO_INPUT_INFO_DICTIONARY),
+            .hashes = lt::info_hash_t(lt::hasher256(lt::span<char const>(info)).final()),
+            .effective_name = effective_name,
+            .file_path = effective_name + "/leaf.bin",
+            .file_size = 16'384,
+            .root_offset = root_offset,
+            .root = lt::sha256_hash(reinterpret_cast<char const *>(root_bytes.data())),
+        });
+    }
+
+    {
+        std::vector<std::uint8_t> layer_bytes(64U);
+        for (std::size_t index = 0U; index < layer_bytes.size(); ++index) {
+            layer_bytes.at(index) = static_cast<std::uint8_t>(index + 1U);
+        }
+        std::array<std::uint8_t, 32U> const root_bytes = v2_root(layer_bytes);
+        std::uint32_t root_offset = 0U;
+        std::uint32_t ignored_piece_hash_offset = 0U;
+        std::string const info = v2_capsule_info(
+            "modern.bin",
+            32'768,
+            root_bytes,
+            root_offset,
+            false,
+            ignored_piece_hash_offset
+        );
+        CapsuleFileFixture const file{
+            .components = {"modern.bin"},
+            .size = 32'768,
+            .info_root_offset = root_offset,
+        };
+        auto make_capsule = [&](std::uint8_t const input_kind) {
+            return make_metainfo_capsule(
+                info,
+                "modern.bin",
+                TTORRENT_METAINFO_KIND_V2,
+                TTORRENT_CONTENT_KIND_SINGLE_FILE,
+                {file},
+                std::nullopt,
+                {},
+                false,
+                {},
+                {},
+                {},
+                -1,
+                input_kind
+            );
+        };
+        fixtures.push_back(MetainfoLifecycleFixture{
+            .label = "v2 without piece layer",
+            .info = info,
+            .local_capsule = make_capsule(TTORRENT_METAINFO_INPUT_TORRENT_FILE),
+            .swarm_capsule = make_capsule(TTORRENT_METAINFO_INPUT_INFO_DICTIONARY),
+            .hashes = lt::info_hash_t(lt::hasher256(lt::span<char const>(info)).final()),
+            .effective_name = "modern.bin",
+            .file_path = "modern.bin",
+            .file_size = 32'768,
+            .root_offset = root_offset,
+            .root = lt::sha256_hash(reinterpret_cast<char const *>(root_bytes.data())),
+        });
+    }
+
+    {
+        std::vector<std::uint8_t> layer_bytes(64U);
+        for (std::size_t index = 0U; index < layer_bytes.size(); ++index) {
+            layer_bytes.at(index) = static_cast<std::uint8_t>(index + 65U);
+        }
+        std::array<std::uint8_t, 32U> const root_bytes = v2_root(layer_bytes);
+        std::uint32_t root_offset = 0U;
+        std::uint32_t piece_hash_offset = 0U;
+        std::string const info = v2_capsule_info(
+            "hybrid-layered.bin",
+            32'768,
+            root_bytes,
+            root_offset,
+            true,
+            piece_hash_offset
+        );
+        CapsuleFileFixture const file{
+            .components = {"hybrid-layered.bin"},
+            .size = 32'768,
+            .info_root_offset = root_offset,
+        };
+        CapsuleLayerFixture const layer{
+            .root = root_bytes,
+            .hashes = layer_bytes,
+            .file_indices = {0},
+        };
+        std::vector<lt::sha256_hash> expected_layer;
+        expected_layer.reserve(2U);
+        expected_layer.emplace_back(reinterpret_cast<char const *>(layer_bytes.data()));
+        expected_layer.emplace_back(reinterpret_cast<char const *>(
+            std::span<std::uint8_t const>(layer_bytes).subspan(32U, 32U).data()
+        ));
+        fixtures.push_back(MetainfoLifecycleFixture{
+            .label = "hybrid with piece layer",
+            .info = info,
+            .local_capsule = make_metainfo_capsule(
+                info,
+                "hybrid-layered.bin",
+                TTORRENT_METAINFO_KIND_HYBRID,
+                TTORRENT_CONTENT_KIND_SINGLE_FILE,
+                {file},
+                std::pair{piece_hash_offset, 40U},
+                {layer}
+            ),
+            .swarm_capsule = make_metainfo_capsule(
+                info,
+                "hybrid-layered.bin",
+                TTORRENT_METAINFO_KIND_HYBRID,
+                TTORRENT_CONTENT_KIND_SINGLE_FILE,
+                {file},
+                std::pair{piece_hash_offset, 40U},
+                {},
+                false,
+                {},
+                {},
+                {},
+                -1,
+                TTORRENT_METAINFO_INPUT_INFO_DICTIONARY
+            ),
+            .hashes = lt::info_hash_t(
+                lt::hasher(lt::span<char const>(info)).final(),
+                lt::hasher256(lt::span<char const>(info)).final()
+            ),
+            .effective_name = "hybrid-layered.bin",
+            .file_path = "hybrid-layered.bin",
+            .file_size = 32'768,
+            .piece_hash_offset = piece_hash_offset,
+            .piece_hash = lt::sha1_hash(std::string(20U, 'h')),
+            .root_offset = root_offset,
+            .root = lt::sha256_hash(reinterpret_cast<char const *>(root_bytes.data())),
+            .local_piece_layer = std::move(expected_layer),
+        });
+    }
+
+    return fixtures;
+}
+
+void check_lifecycle_torrent_info(
+    lt::torrent_info const &info,
+    MetainfoLifecycleFixture const &fixture
+)
+{
+    lt::span<char const> const exact_info = info.info_section();
+    REQUIRE(info.is_valid());
+    REQUIRE(exact_info.size() == fixture.info.size());
+    CHECK(std::ranges::equal(exact_info, fixture.info));
+    CHECK(info.info_hashes() == fixture.hashes);
+    CHECK(info.name() == fixture.effective_name);
+    CHECK(info.priv() == fixture.private_torrent);
+    CHECK(info.total_size() == fixture.file_size);
+    REQUIRE(info.layout().num_files() == 1);
+    CHECK(info.layout().file_path(lt::file_index_t(0)) == fixture.file_path);
+    CHECK(info.layout().file_size(lt::file_index_t(0)) == fixture.file_size);
+    CHECK_FALSE(info.layout().pad_file_at(lt::file_index_t(0)));
+    CHECK(info.num_pieces() == static_cast<int>(
+        (fixture.file_size + 16 * 1024 - 1) / (16 * 1024)
+    ));
+
+    if (fixture.hashes.has_v1()) {
+        CHECK(lt::hasher(exact_info).final() == fixture.hashes.v1);
+        REQUIRE(fixture.piece_hash_offset.has_value());
+        REQUIRE(fixture.piece_hash.has_value());
+        auto const first_piece_hash = static_cast<std::ptrdiff_t>(*fixture.piece_hash_offset);
+        for (int raw_piece = 0; raw_piece < info.num_pieces(); ++raw_piece) {
+            auto const expected_offset = first_piece_hash
+                + static_cast<std::ptrdiff_t>(raw_piece) * lt::sha1_hash::size();
+            lt::piece_index_t const piece(raw_piece);
+            CHECK(info.hash_for_piece_ptr(piece)
+                == exact_info.subspan(expected_offset, lt::sha1_hash::size()).data());
+            CHECK(info.hash_for_piece(piece) == *fixture.piece_hash);
+        }
+    } else {
+        CHECK_FALSE(fixture.piece_hash_offset.has_value());
+        CHECK_FALSE(fixture.piece_hash.has_value());
+    }
+
+    if (fixture.hashes.has_v2()) {
+        CHECK(lt::hasher256(exact_info).final() == fixture.hashes.v2);
+        REQUIRE(fixture.root_offset.has_value());
+        REQUIRE(fixture.root.has_value());
+        CHECK(info.layout().root_ptr(lt::file_index_t(0))
+            == exact_info.subspan(*fixture.root_offset, lt::sha256_hash::size()).data());
+        CHECK(info.layout().root(lt::file_index_t(0)) == *fixture.root);
+    } else {
+        CHECK_FALSE(fixture.root_offset.has_value());
+        CHECK_FALSE(fixture.root.has_value());
+    }
+
+    if (fixture.label == "rootless v2") {
+        CHECK(fixture.info.find("4:name") == std::string::npos);
+        CHECK(fixture.effective_name.starts_with("Torrent-"));
+    }
+}
+
+void check_lifecycle_piece_layers(
+    lt::torrent_handle const &handle,
+    std::vector<lt::sha256_hash> const &expected
+)
+{
+    std::vector<std::vector<lt::sha256_hash>> const layers = handle.piece_layers();
+    if (expected.empty()) {
+        CHECK(std::ranges::all_of(layers, [](auto const &layer) {
+            return layer.empty();
+        }));
+        return;
+    }
+    REQUIRE(layers.size() == 1U);
+    CHECK(layers.front() == expected);
+}
+
+[[nodiscard]] std::vector<std::uint8_t> copy_exact_metadata(
+    TTorrentClient &client,
+    std::uint64_t const native_token
+)
+{
+    int32_t required_count = -1;
+    std::uint8_t available = bridge_bool(false);
+    CHECK(::TorrentClientCopyTorrentMetadata(
+        &client,
+        native_token,
+        nullptr,
+        0,
+        &required_count,
+        &available
+    ) == 0);
+    REQUIRE(bridge_bool(available));
+    REQUIRE(required_count > 0);
+    std::vector<std::uint8_t> copied(static_cast<std::size_t>(required_count));
+    CHECK(::TorrentClientCopyTorrentMetadata(
+        &client,
+        native_token,
+        copied.data(),
+        static_cast<int32_t>(copied.size()),
+        &required_count,
+        &available
+    ) == required_count);
+    CHECK(bridge_bool(available));
+    return copied;
 }
 
 [[nodiscard]] std::shared_ptr<lt::torrent_info const> make_raw_v1_torrent_info(std::string_view files_payload)
@@ -1201,6 +1681,19 @@ TEST_CASE("swarm metainfo callback ownership is balanced on accept and reject")
     }
     CHECK(rejected_probe.retain_count == 1);
     CHECK(rejected_probe.context_release_count == 1);
+
+    std::string different_info = info;
+    different_info.at(piece_hash_offset) ^= 1;
+    SwarmMetainfoParserProbe mismatched_probe(swarm_info.bytes);
+    {
+        BridgeSwarmMetadataParser parser(mismatched_probe.callbacks());
+        lt::error_code error;
+        CHECK_FALSE(parser.parse(lt::span<char const>(different_info), error));
+        CHECK(error == lt::errors::invalid_swarm_metadata);
+        CHECK(mismatched_probe.parse_count == 1);
+        CHECK(mismatched_probe.capsule_release_count == 1);
+    }
+    CHECK(mismatched_probe.context_release_count == 1);
 }
 
 TEST_CASE("swarm callback allocations have exactly one owner on every return path")
@@ -1360,6 +1853,18 @@ TEST_CASE("resume metainfo stays opaque and returns through the typed importer")
         legacy_error
     ));
     CHECK(legacy_error == lt::errors::invalid_bencoding);
+
+    lt::entry simultaneous(root);
+    simultaneous["info"].preformatted().assign(info.begin(), info.end());
+    std::vector<char> simultaneous_encoded;
+    lt::bencode(std::back_inserter(simultaneous_encoded), simultaneous);
+    CHECK_FALSE(preparsed_info_from_resume_data(simultaneous_encoded));
+    lt::error_code simultaneous_error;
+    static_cast<void>(lt::read_resume_data(
+        lt::span<char const>(simultaneous_encoded),
+        simultaneous_error
+    ));
+    CHECK(simultaneous_error == lt::errors::invalid_bencoding);
 }
 
 TEST_CASE("peer protocol callback ownership and typed imports are exact")
@@ -2160,6 +2665,48 @@ TEST_CASE("preparsed v2 capsule imports verified piece layers with owned roots")
     CHECK(owned_root == owned_info.subspan(root_offset, lt::sha256_hash::size()).data());
 }
 
+TEST_CASE("resume merkle state is canonical and authenticated by the retained v2 root")
+{
+    std::vector<MetainfoLifecycleFixture> const fixtures = metainfo_lifecycle_fixtures();
+    MetainfoLifecycleFixture const &fixture = fixtures.at(1U);
+    TorrentLoadResult const imported = import_preparsed_metainfo_capsule(
+        fixture.local_capsule.bytes
+    );
+    REQUIRE(imported);
+    REQUIRE(imported->ti);
+    REQUIRE(validate_resume_merkle_state(*imported));
+    REQUIRE(imported->merkle_trees.size() == 1);
+    REQUIRE_FALSE(imported->merkle_trees[lt::file_index_t(0)].empty());
+
+    lt::add_torrent_params corrupted = *imported;
+    corrupted.merkle_trees[lt::file_index_t(0)].front()[0] ^= 1;
+    CHECK_FALSE(validate_resume_merkle_state(corrupted));
+
+    corrupted = *imported;
+    int const mask_size = corrupted.merkle_tree_mask[lt::file_index_t(0)].size();
+    corrupted.merkle_tree_mask[lt::file_index_t(0)] = lt::bitfield(mask_size + 1, false);
+    CHECK_FALSE(validate_resume_merkle_state(corrupted));
+
+    corrupted = *imported;
+    int const verified_size = corrupted.verified_leaf_hashes[lt::file_index_t(0)].size();
+    corrupted.verified_leaf_hashes[lt::file_index_t(0)] = lt::bitfield(
+        verified_size + 1,
+        false
+    );
+    CHECK_FALSE(validate_resume_merkle_state(corrupted));
+
+    corrupted = *imported;
+    corrupted.merkle_trees.clear();
+    CHECK_FALSE(validate_resume_merkle_state(corrupted));
+
+    MetainfoLifecycleFixture const &v1_fixture = fixtures.front();
+    TorrentLoadResult v1 = import_preparsed_metainfo_capsule(v1_fixture.local_capsule.bytes);
+    REQUIRE(v1);
+    REQUIRE(validate_resume_merkle_state(*v1));
+    v1->merkle_trees.resize(1);
+    CHECK_FALSE(validate_resume_merkle_state(*v1));
+}
+
 TEST_CASE("preparsed hybrid capsule accepts the compatible omitted tail pad")
 {
     std::array<std::uint8_t, 32U> root{};
@@ -2226,6 +2773,376 @@ TEST_CASE("preparsed capsule supports a synthetic root for rootless v2 metadata"
     CHECK(imported->ti->name() == "Torrent-0123456789ab");
     CHECK(imported->ti->layout().file_path(lt::file_index_t(0))
         == "Torrent-0123456789ab/leaf.bin");
+}
+
+TEST_CASE("all metainfo formats preserve exact native state across imports moves and swarm installation")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    std::vector<MetainfoLifecycleFixture> const fixtures = metainfo_lifecycle_fixtures();
+
+    for (MetainfoLifecycleFixture const &fixture : fixtures) {
+        INFO(fixture.label);
+        TorrentLoadResult imported = import_preparsed_metainfo_capsule(fixture.local_capsule.bytes);
+        REQUIRE(imported);
+        REQUIRE(imported->ti);
+        check_lifecycle_torrent_info(*imported->ti, fixture);
+        lt::sha256_hash const expected_manifest = testing_logical_manifest_digest(*imported);
+
+        auto copied_info = std::make_shared<lt::torrent_info>(*imported->ti);
+        check_lifecycle_torrent_info(*copied_info, fixture);
+        lt::torrent_info moved_info(copied_info->info_hashes());
+        moved_info = std::move(*copied_info);
+        copied_info.reset();
+        check_lifecycle_torrent_info(moved_info, fixture);
+
+        lt::add_torrent_params copied_params = *imported;
+        lt::add_torrent_params moved_params = std::move(copied_params);
+        REQUIRE(moved_params.ti);
+        check_lifecycle_torrent_info(*moved_params.ti, fixture);
+        CHECK(validate_resume_merkle_state(moved_params));
+        CHECK(testing_logical_manifest_digest(moved_params) == expected_manifest);
+
+        SwarmMetainfoParserProbe probe(fixture.swarm_capsule.bytes);
+        auto parser = std::make_shared<BridgeSwarmMetadataParser>(probe.callbacks());
+        {
+            lt::session session(make_session_params(false));
+            lt::add_torrent_params params;
+            params.info_hashes = fixture.hashes;
+            params.save_path = (temporary_directory.path() / fixture.label).string();
+            params.swarm_metadata_parser = parser;
+            params.flags |= lt::torrent_flags::paused;
+            lt::error_code add_error;
+            lt::torrent_handle handle = session.add_torrent(std::move(params), add_error);
+            REQUIRE_FALSE(add_error);
+            REQUIRE(handle.is_valid());
+            REQUIRE(handle.set_metadata(lt::span<char const>(fixture.info)));
+            std::shared_ptr<lt::torrent_info const> const installed = handle.torrent_file();
+            REQUIRE(installed);
+            check_lifecycle_torrent_info(*installed, fixture);
+            check_lifecycle_piece_layers(handle, {});
+            CHECK(probe.parse_count == 1);
+            CHECK(probe.capsule_release_count == 1);
+            CHECK(probe.outstanding_allocation_count == 0);
+        }
+        parser.reset();
+        CHECK(probe.context_release_count == 1);
+    }
+}
+
+TEST_CASE("local metainfo save reload and metadata serving preserve every supported format")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    std::vector<MetainfoLifecycleFixture> const fixtures = metainfo_lifecycle_fixtures();
+
+    for (MetainfoLifecycleFixture const &fixture : fixtures) {
+        INFO(fixture.label);
+        TorrentLoadResult const decoded = import_preparsed_metainfo_capsule(
+            fixture.local_capsule.bytes
+        );
+        REQUIRE(decoded);
+        REQUIRE(decoded->ti);
+        lt::sha256_hash const expected_manifest = testing_logical_manifest_digest(*decoded);
+        fs::path const case_directory = temporary_directory.path() / fixture.label;
+        fs::path const state_directory = case_directory / "State";
+        bridge_tests::TestPayloadBroker broker(case_directory / "Payload");
+        TTorrentStorageActivation const activation = broker.register_torrent(*decoded);
+        std::vector<std::uint8_t> expected_info;
+        expected_info.reserve(fixture.info.size());
+        std::ranges::transform(
+            fixture.info,
+            std::back_inserter(expected_info),
+            [](char const byte) { return static_cast<std::uint8_t>(byte); }
+        );
+
+        {
+            SwarmMetainfoParserProbe unused_restore_probe(fixture.swarm_capsule.bytes);
+            auto restore_parser = std::make_shared<BridgeSwarmMetadataParser>(
+                unused_restore_probe.callbacks()
+            );
+            TTorrentClient client(
+                state_directory.string(),
+                false,
+                broker.context(),
+                restore_parser
+            );
+            client.set_session_shutdown_asynchronous(false);
+            TTorrentAddOptions options = metainfo_capsule_add_options();
+            options.starts_paused = bridge_bool(true);
+            options.enable_dht = bridge_bool(false);
+            options.enable_peer_exchange = bridge_bool(false);
+            options.enable_lsd = bridge_bool(false);
+            char added_id[TTORRENT_ID_CAPACITY]{};
+            char error[512]{};
+            std::uint64_t native_token = 0U;
+            int32_t add_outcome = TTORRENT_ADD_OUTCOME_UNKNOWN;
+            REQUIRE(::TorrentClientAddMetainfoCapsule(
+                &client,
+                fixture.local_capsule.bytes.data(),
+                static_cast<int32_t>(fixture.local_capsule.bytes.size()),
+                activation,
+                options,
+                added_id,
+                static_cast<int32_t>(sizeof(added_id)),
+                &native_token,
+                &add_outcome,
+                error,
+                static_cast<int32_t>(sizeof(error))
+            ) == 0);
+            CHECK(add_outcome == TTORRENT_ADD_COMMITTED);
+            REQUIRE(native_token != 0U);
+            std::optional<lt::torrent_handle> const handle = client.find(native_token);
+            REQUIRE(handle.has_value());
+            std::shared_ptr<lt::torrent_info const> const installed = handle->torrent_file();
+            REQUIRE(installed);
+            check_lifecycle_torrent_info(*installed, fixture);
+            check_lifecycle_piece_layers(*handle, fixture.local_piece_layer);
+            CHECK(copy_exact_metadata(client, native_token) == expected_info);
+            lt::add_torrent_params observed;
+            observed.ti = std::make_shared<lt::torrent_info>(*installed);
+            observed.info_hashes = installed->info_hashes();
+            CHECK(testing_logical_manifest_digest(observed) == expected_manifest);
+            REQUIRE(client.save_resume_data_checked(native_token, ResumeSaveMode::full));
+            CHECK(unused_restore_probe.parse_count == 0);
+        }
+
+        SwarmMetainfoParserProbe restore_probe(fixture.swarm_capsule.bytes);
+        auto restore_parser = std::make_shared<BridgeSwarmMetadataParser>(
+            restore_probe.callbacks()
+        );
+        {
+            TTorrentClient reloaded(
+                state_directory.string(),
+                false,
+                broker.context(),
+                restore_parser
+            );
+            reloaded.set_session_shutdown_asynchronous(false);
+            CHECK(restore_probe.parse_count == 1);
+            CHECK(restore_probe.capsule_release_count == 1);
+            std::vector<lt::torrent_handle> const handles = reloaded.session.get_torrents();
+            REQUIRE(handles.size() == 1U);
+            TorrentIdentity * const identity = identity_from_handle(handles.front());
+            REQUIRE(identity != nullptr);
+            REQUIRE(identity->token != nullptr);
+            REQUIRE(identity->storage_activation.has_value());
+            CHECK(std::ranges::equal(
+                identity->storage_activation->source_manifest_digest,
+                activation.source_manifest_digest
+            ));
+            std::shared_ptr<lt::torrent_info const> const restored = handles.front().torrent_file();
+            REQUIRE(restored);
+            check_lifecycle_torrent_info(*restored, fixture);
+            check_lifecycle_piece_layers(handles.front(), fixture.local_piece_layer);
+            CHECK(copy_exact_metadata(reloaded, identity->token->value) == expected_info);
+            lt::add_torrent_params observed;
+            observed.ti = std::make_shared<lt::torrent_info>(*restored);
+            observed.info_hashes = restored->info_hashes();
+            CHECK(testing_logical_manifest_digest(observed) == expected_manifest);
+        }
+        restore_parser.reset();
+        CHECK(restore_probe.context_release_count == 1);
+        CHECK(restore_probe.context_release_with_allocation_count == 0);
+    }
+}
+
+TEST_CASE("corrupted restored metainfo and merkle state reject without a metadata-less fallback")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    std::vector<MetainfoLifecycleFixture> const fixtures = metainfo_lifecycle_fixtures();
+
+    auto const run_rejected_restore = [&]<typename Mutator>(
+        std::string_view const label,
+        MetainfoLifecycleFixture const &fixture,
+        Mutator mutate,
+        int const expected_parse_count,
+        bool const expect_resume_removal
+    ) {
+        fs::path const case_directory = temporary_directory.path() / std::string(label);
+        fs::path const state_directory = case_directory / "State";
+        fs::path const resume_directory = state_directory / "ResumeData";
+        REQUIRE(fs::create_directories(resume_directory));
+        bridge_tests::TestPayloadBroker broker(case_directory / "Payload");
+        TorrentLoadResult const imported = import_preparsed_metainfo_capsule(
+            fixture.local_capsule.bytes
+        );
+        REQUIRE(imported);
+        REQUIRE(imported->ti);
+        TTorrentStorageActivation const activation = broker.register_torrent(*imported);
+
+        lt::add_torrent_params params = *imported;
+        params.save_path = case_directory.string();
+        TorrentIdentity identity;
+        identity.canonical_id = "t:0123456789abcdef0123456789abcdef";
+        identity.storage_activation = activation;
+        std::vector<char> const encoded = encoded_resume_data(params, &identity);
+        REQUIRE_FALSE(encoded.empty());
+        lt::error_code decode_error;
+        lt::bdecode_node const decoded = lt::bdecode(lt::span<char const>(encoded), decode_error);
+        REQUIRE_FALSE(decode_error);
+        REQUIRE(decoded.type() == lt::bdecode_node::dict_t);
+        lt::entry corrupted(decoded);
+        lt::info_hash_t filename_hashes = params.info_hashes;
+        mutate(corrupted, filename_hashes);
+        std::vector<char> corrupted_encoded;
+        lt::bencode(std::back_inserter(corrupted_encoded), corrupted);
+
+        std::string const resume_id = primary_hash_key(filename_hashes);
+        REQUIRE_FALSE(resume_id.empty());
+        fs::path const resume_path = resume_directory
+            / (resume_id + std::string(kResumeExtension));
+        ResumeSaveResult const written = write_owner_only_file_checked(
+            resume_path,
+            std::string_view(corrupted_encoded.data(), corrupted_encoded.size())
+        );
+        REQUIRE(written);
+
+        SwarmMetainfoParserProbe probe(fixture.swarm_capsule.bytes);
+        auto parser = std::make_shared<BridgeSwarmMetadataParser>(probe.callbacks());
+        {
+            TTorrentClient reloaded(
+                state_directory.string(),
+                false,
+                broker.context(),
+                parser
+            );
+            reloaded.set_session_shutdown_asynchronous(false);
+            CHECK(reloaded.session.get_torrents().empty());
+            CHECK(probe.parse_count == expected_parse_count);
+            CHECK(probe.outstanding_allocation_count == 0);
+        }
+        parser.reset();
+        CHECK(probe.context_release_count == 1);
+        CHECK(fs::exists(resume_path) != expect_resume_removal);
+    };
+
+    MetainfoLifecycleFixture const &v1 = fixtures.at(0U);
+    run_rejected_restore(
+        "altered opaque info",
+        v1,
+        [&v1](lt::entry &resume, lt::info_hash_t &) {
+            std::string &opaque = resume[std::string(kPreparsedInfoResumeKey)].string();
+            opaque.at(*v1.piece_hash_offset) ^= 1;
+        },
+        1,
+        true
+    );
+    run_rejected_restore(
+        "altered expected hash",
+        v1,
+        [](lt::entry &resume, lt::info_hash_t &filename_hashes) {
+            resume["info-hash"].string().at(0) ^= 1;
+            filename_hashes.v1[0] ^= 1;
+        },
+        1,
+        true
+    );
+    run_rejected_restore(
+        "opaque and nested info",
+        v1,
+        [&v1](lt::entry &resume, lt::info_hash_t &) {
+            resume["info"].preformatted().assign(v1.info.begin(), v1.info.end());
+        },
+        0,
+        true
+    );
+
+    MetainfoLifecycleFixture const &v2 = fixtures.at(1U);
+    run_rejected_restore(
+        "altered merkle hashes",
+        v2,
+        [](lt::entry &resume, lt::info_hash_t &) {
+            auto &trees = resume["trees"].list();
+            REQUIRE_FALSE(trees.empty());
+            std::string &hashes = trees.front()["hashes"].string();
+            REQUIRE_FALSE(hashes.empty());
+            hashes.front() ^= 1;
+        },
+        1,
+        true
+    );
+    run_rejected_restore(
+        "altered merkle mask",
+        v2,
+        [](lt::entry &resume, lt::info_hash_t &) {
+            auto &trees = resume["trees"].list();
+            REQUIRE_FALSE(trees.empty());
+            trees.front()["mask"].string().push_back('\0');
+        },
+        1,
+        true
+    );
+    run_rejected_restore(
+        "altered verified leaves",
+        v2,
+        [](lt::entry &resume, lt::info_hash_t &) {
+            auto &trees = resume["trees"].list();
+            REQUIRE_FALSE(trees.empty());
+            trees.front()["verified"].string().push_back('\0');
+        },
+        1,
+        true
+    );
+    run_rejected_restore(
+        "altered storage manifest",
+        v2,
+        [](lt::entry &resume, lt::info_hash_t &) {
+            std::string &digest = resume[std::string(kStorageManifestDigestResumeKey)].string();
+            REQUIRE_FALSE(digest.empty());
+            digest.front() ^= 1;
+        },
+        1,
+        false
+    );
+}
+
+TEST_CASE("native metainfo remains independent after its mapped capsule source is inaccessible")
+{
+    std::vector<MetainfoLifecycleFixture> const fixtures = metainfo_lifecycle_fixtures();
+    MetainfoLifecycleFixture const &fixture = fixtures.at(2U);
+    long const page_size = ::sysconf(_SC_PAGESIZE);
+    REQUIRE(page_size > 0);
+    std::size_t const mapping_size = align_up(
+        fixture.local_capsule.bytes.size(),
+        static_cast<std::size_t>(page_size)
+    );
+    void * const mapping = ::mmap(
+        nullptr,
+        mapping_size,
+        PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANON,
+        -1,
+        0
+    );
+    REQUIRE(mapping != MAP_FAILED);
+    struct MappingGuard final {
+        void *address;
+        std::size_t size;
+
+        ~MappingGuard()
+        {
+            static_cast<void>(::munmap(address, size));
+        }
+    } mapping_guard{mapping, mapping_size};
+    __unsafe_buffer_usage_begin
+    std::memcpy(mapping, fixture.local_capsule.bytes.data(), fixture.local_capsule.bytes.size());
+    auto const *mapped_bytes = static_cast<std::uint8_t const *>(mapping);
+    TorrentLoadResult imported = import_preparsed_metainfo_capsule(
+        std::span(mapped_bytes, fixture.local_capsule.bytes.size())
+    );
+    char const * const mapped_info = reinterpret_cast<char const *>(mapped_bytes)
+        + fixture.local_capsule.info_offset;
+    __unsafe_buffer_usage_end
+    REQUIRE(imported);
+    REQUIRE(imported->ti);
+    CHECK(imported->ti->info_section().data() != mapped_info);
+    REQUIRE(::mprotect(mapping, mapping_size, PROT_NONE) == 0);
+
+    check_lifecycle_torrent_info(*imported->ti, fixture);
+    lt::add_torrent_params moved = std::move(*imported);
+    REQUIRE(moved.ti);
+    check_lifecycle_torrent_info(*moved.ti, fixture);
+    CHECK(testing_logical_manifest_digest(moved)
+        == testing_logical_manifest_digest(lt::add_torrent_params(moved)));
 }
 
 TEST_CASE("preparsed metainfo capsule rejects corrupted framing and semantic ranges")

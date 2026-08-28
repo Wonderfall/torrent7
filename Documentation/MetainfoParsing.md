@@ -267,7 +267,20 @@ string. A 64 MiB read cap applies before native resume-state decoding. During
 restore, libtorrent may decode its own non-metainfo resume fields, but a
 downstream guard rejects every conventional nested `info` dictionary. The
 opaque bytes instead return through the same synchronous Swift `InfoCore`
-callback and typed importer used for swarm metadata; native code then requires
-an exact identity match and validates the reconstructed layout and storage
-activation before adding the torrent. Legacy nested-metainfo resume records are
-deleted rather than routed through a compatibility parser.
+callback and typed importer used for swarm metadata. Native code requires the
+capsule's retained info section to equal the callback input byte for byte, then
+requires an exact identity match and validates the reconstructed native layout,
+root-authenticated canonical Merkle state, and storage activation before adding
+the torrent. The persistence copy discards a redundant verified-leaf tail that
+libtorrent can produce but never serialize; no redundant field is accepted on
+reload. Invalid opaque bytes, hashes, Merkle hashes or masks, legacy nested
+metainfo, and mismatched storage manifests cannot downgrade into a metadata-less
+torrent.
+
+Bridge integration tests exercise local import, bare-info swarm installation,
+copy and move operations, full resume save/reload, and exact metadata serving
+for v1, v2, hybrid, and rootless-v2 metadata. The same suite tests both present
+and deliberately absent local piece layers for v2 and hybrid
+metadata, revokes access to the original mapped capsule allocation, and
+independently mutates restore identity, exact info, Merkle, legacy nested-info,
+and storage-binding fields.

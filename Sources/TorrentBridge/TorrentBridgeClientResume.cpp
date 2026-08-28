@@ -29,6 +29,22 @@ namespace {
     }
 }
 
+void canonicalize_resume_merkle_state_for_persistence(lt::add_torrent_params &params)
+{
+    if (!params.ti || !params.ti->info_hashes().has_v2()) {
+        return;
+    }
+
+    auto const file_count = static_cast<std::size_t>(params.ti->layout().num_files());
+    // get_resume_data() may append a redundant verified-leaf vector when no
+    // hash picker exists. write_resume_data() addresses this vector only by
+    // Merkle-tree index, so discard the otherwise unconsumed tail before the
+    // helper validates or persists the snapshot.
+    if (params.verified_leaf_hashes.size() > file_count) {
+        params.verified_leaf_hashes.resize(file_count);
+    }
+}
+
 void append_resume_cleanup(
     std::vector<PendingResumeCleanup> &destination,
     PendingResumeCleanup cleanup
@@ -235,10 +251,16 @@ ResumeSaveResult TTorrentClient::write_resume_data_checked(
         sanitize_resume_endpoint_hints(persisted_params);
     }
 
+    canonicalize_resume_merkle_state_for_persistence(persisted_params);
+
     if (persisted_params.ti) {
         BridgeResult const valid_info = validate_torrent_info(persisted_params);
         if (!valid_info) {
             return std::unexpected(valid_info.error().message);
+        }
+        BridgeResult const valid_merkle_state = validate_resume_merkle_state(persisted_params);
+        if (!valid_merkle_state) {
+            return std::unexpected(valid_merkle_state.error().message);
         }
     }
     BridgeResult const valid_sources = validate_torrent_sources(persisted_params);

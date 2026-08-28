@@ -706,14 +706,15 @@ typedef struct TTorrentPayloadBrokerCallbacks {
 // Swarm metadata arrives as one exact, hash-verified bencoded info dictionary
 // on libtorrent's network thread. parse_info must initialize result_out to
 // {NULL, 0}, must not retain either input pointer, and on success must return a
-// newly allocated INFO_DICTIONARY capsule. Once parse_info returns, any
-// non-NULL result pointer is owned exclusively by the bridge regardless of the
-// callback status or reported size. The bridge copies/imports valid capsules,
-// then calls release_capsule exactly once for every non-NULL result; NULL
-// results are never released. release_capsule must accept the exact returned
-// pointer/size pair, including an invalid size, and release by pointer identity.
-// All callbacks must return promptly, must not throw, and must not reenter
-// TorrentBridge.
+// newly allocated INFO_DICTIONARY capsule containing the byte-for-byte same
+// info dictionary. The bridge verifies that equality after import. Once
+// parse_info returns, any non-NULL result pointer is owned exclusively by the
+// bridge regardless of the callback status or reported size. The bridge
+// copies/imports valid capsules, then calls release_capsule exactly once for
+// every non-NULL result; NULL results are never released. release_capsule must
+// accept the exact returned pointer/size pair, including an invalid size, and
+// release by pointer identity. All callbacks must return promptly, must not
+// throw, and must not reenter TorrentBridge.
 typedef struct TTorrentOwnedMetainfoCapsule {
     uint8_t * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(size) bytes;
     int32_t size;

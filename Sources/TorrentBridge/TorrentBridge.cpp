@@ -640,6 +640,12 @@ std::shared_ptr<lt::torrent_info> BridgeSwarmMetadataParser::parse(
             error = lt::errors::invalid_swarm_metadata;
             return nullptr;
         }
+        lt::span<char const> const imported_info = (*imported)->info_section();
+        if (imported_info.size() != info.size()
+            || !std::ranges::equal(imported_info, info)) {
+            error = lt::errors::invalid_swarm_metadata;
+            return nullptr;
+        }
         error.clear();
         return std::move(*imported);
     } catch (...) {

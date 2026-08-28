@@ -1755,6 +1755,8 @@ BridgeResult validate_torrent_info(
 
 BridgeResult validate_torrent_info(lt::add_torrent_params const &params);
 
+BridgeResult validate_resume_merkle_state(lt::add_torrent_params const &params);
+
 bool is_valid_file_priority(int32_t priority) noexcept;
 
 lt::download_priority_t file_priority_from_bridge(int32_t priority) noexcept;

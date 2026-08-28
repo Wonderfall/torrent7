@@ -5,6 +5,7 @@
 #include <libtorrent/extensions/ut_metadata.hpp>
 #include <libtorrent/extensions/ut_pex.hpp>
 #include <libtorrent/aux_/ip_helpers.hpp>
+#include <libtorrent/aux_/merkle_tree.hpp>
 #include <libtorrent/pread_disk_io.hpp>
 
 namespace torrent_bridge::internal {
@@ -2984,6 +2985,100 @@ BridgeResult validate_torrent_info(lt::add_torrent_params const &params)
     }
 
     return validate_torrent_info(*params.ti, params.renamed_files);
+}
+
+BridgeResult validate_resume_merkle_state(lt::add_torrent_params const &params)
+{
+    if (!params.ti) {
+        return bridge_error(2, "Resume data is missing validated metainfo.");
+    }
+
+    auto const invalid_state = [] {
+        return bridge_error(2, "Resume data contains invalid v2 hash state.");
+    };
+    auto const has_serialized_bit_count = [](lt::bitfield const &stored, std::size_t logical_size) {
+        std::size_t const padded_size = ((logical_size + 7U) / 8U) * 8U;
+        return std::cmp_equal(stored.size(), logical_size)
+            || std::cmp_equal(stored.size(), padded_size);
+    };
+    auto const matches_serialized_bitfield = [&has_serialized_bit_count](
+        lt::bitfield const &stored,
+        lt::bitfield const &expected
+    ) {
+        auto const logical_size = static_cast<std::size_t>(expected.size());
+        if (!has_serialized_bit_count(stored, logical_size)) {
+            return false;
+        }
+        for (int index = 0; index < expected.size(); ++index) {
+            if (stored.get_bit(index) != expected.get_bit(index)) {
+                return false;
+            }
+        }
+        for (int index = expected.size(); index < stored.size(); ++index) {
+            if (stored.get_bit(index)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    bool const has_any_state = !params.merkle_trees.empty()
+        || !params.merkle_tree_mask.empty()
+        || !params.verified_leaf_hashes.empty();
+    if (!has_any_state) {
+        return {};
+    }
+    if (!params.ti->info_hashes().has_v2()) {
+        return invalid_state();
+    }
+
+    lt::file_storage const &files = params.ti->layout();
+    int const file_count = files.num_files();
+    if (!std::cmp_equal(params.merkle_trees.size(), file_count)
+        || !std::cmp_equal(params.merkle_tree_mask.size(), file_count)
+        || !std::cmp_equal(params.verified_leaf_hashes.size(), file_count)) {
+        return invalid_state();
+    }
+
+    for (lt::file_index_t const file : files.file_range()) {
+        int const raw_file = static_cast<int>(file);
+        auto const &stored_tree = *std::next(params.merkle_trees.begin(), raw_file);
+        auto const &stored_mask = *std::next(params.merkle_tree_mask.begin(), raw_file);
+        auto const &stored_verified = *std::next(
+            params.verified_leaf_hashes.begin(),
+            raw_file
+        );
+        if (files.pad_file_at(file) || files.file_size(file) == 0) {
+            if (!stored_tree.empty() || !stored_mask.empty() || !stored_verified.empty()) {
+                return invalid_state();
+            }
+            continue;
+        }
+
+        char const * const root = files.root_ptr(file);
+        if (root == nullptr) {
+            return invalid_state();
+        }
+        lt::aux::merkle_tree canonical(
+            files.file_num_blocks(file),
+            files.blocks_per_piece(),
+            root
+        );
+        if (!has_serialized_bit_count(stored_mask, canonical.size())
+            || !has_serialized_bit_count(
+                stored_verified,
+                static_cast<std::size_t>(files.file_num_blocks(file))
+            )) {
+            return invalid_state();
+        }
+        canonical.load_sparse_tree(stored_tree, stored_mask, stored_verified);
+        auto const [canonical_tree, canonical_mask] = canonical.build_sparse_vector();
+        if (stored_tree != canonical_tree
+            || !matches_serialized_bitfield(stored_mask, canonical_mask)
+            || !matches_serialized_bitfield(stored_verified, canonical.verified_leafs())) {
+            return invalid_state();
+        }
+    }
+    return {};
 }
 
 bool is_valid_file_priority(int32_t priority) noexcept

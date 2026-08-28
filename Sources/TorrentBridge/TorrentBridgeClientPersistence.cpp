@@ -667,6 +667,12 @@ void TTorrentClient::load_resume_data()
                 sync_resume_directory_quietly();
                 continue;
             }
+            BridgeResult const valid_merkle_state = validate_resume_merkle_state(params);
+            if (!valid_merkle_state) {
+                remove_resume_file_locked(name);
+                sync_resume_directory_quietly();
+                continue;
+            }
             if (!storage_activation) {
                 record_unclaimed_resume();
                 continue;
