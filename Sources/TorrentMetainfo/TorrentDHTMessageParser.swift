@@ -6,6 +6,7 @@ package enum TorrentDHTMessageError: Error, Equatable, Sendable {
     case malformedBencoding
     case workLimitExceeded
     case invalidEnvelope
+    case invalidCompactRecords
     case tooManyNodes
     case tooManyPeers
 }
@@ -75,9 +76,10 @@ package struct TorrentDHTMessage: Equatable, Sendable {
 }
 
 /// Bounded, schema-directed parsing for one complete inbound DHT KRPC
-/// datagram. The accepted dialect is canonical bencoding. BEP 44 item get/put
-/// messages are identified but deliberately not decoded because Torrent7 uses
-/// DHT only for peer discovery.
+/// datagram. Dictionaries may be unordered but must have unique raw-byte keys;
+/// scalar encodings remain canonical. BEP 44 item get/put messages are
+/// identified but deliberately not decoded because Torrent7 uses DHT only for
+/// peer discovery.
 package struct TorrentDHTMessageParser: Sendable {
     package struct Limits: Equatable, Sendable {
         package var maximumMessageBytes = 1_500
@@ -483,8 +485,10 @@ package struct TorrentDHTMessageParser: Sendable {
             document: document,
             nodes: &fields.nodes
         )
-        if let values = document.value(named: "values", inDictionaryAt: response),
-           document.kind(at: values) == .list {
+        if let values = document.value(named: "values", inDictionaryAt: response) {
+            guard document.kind(at: values) == .list else {
+                throw TorrentDHTMessageError.invalidCompactRecords
+            }
             fields.peersPresent = true
             fields.peers = try parsePeers(
                 in: response,
@@ -563,9 +567,12 @@ package struct TorrentDHTMessageParser: Sendable {
         document: BencodeRangeDocument,
         nodes: inout [TorrentDHTNode]
     ) throws {
-        guard let value = document.value(named: name, inDictionaryAt: response),
-              let range = document.stringRange(at: value) else {
+        guard let value = document.value(named: name, inDictionaryAt: response) else {
             return
+        }
+        guard let range = document.stringRange(at: value),
+              range.count.isMultiple(of: stride) else {
+            throw TorrentDHTMessageError.invalidCompactRecords
         }
         let completeCount = range.count / stride
         guard completeCount <= limits.maximumNodeCount - nodes.count else {
@@ -593,9 +600,11 @@ package struct TorrentDHTMessageParser: Sendable {
         sourceFamily: TorrentPeerAddressFamily,
         document: BencodeRangeDocument
     ) throws -> [TorrentDHTEndpoint] {
-        guard let value = document.value(named: "values", inDictionaryAt: response),
-              document.kind(at: value) == .list else {
+        guard let value = document.value(named: "values", inDictionaryAt: response) else {
             return []
+        }
+        guard document.kind(at: value) == .list else {
+            throw TorrentDHTMessageError.invalidCompactRecords
         }
         var peers = [TorrentDHTEndpoint]()
         let childCount = document.childCount(of: value)
@@ -604,9 +613,12 @@ package struct TorrentDHTMessageParser: Sendable {
            childCount == 1,
            let first,
            let range = document.stringRange(at: first) {
+            guard range.count.isMultiple(of: 6) else {
+                throw TorrentDHTMessageError.invalidCompactRecords
+            }
             peers.reserveCapacity(min(range.count / 6, limits.maximumPeerCount))
             var offset = range.lowerBound
-            while range.upperBound - offset >= 6 {
+            while offset < range.upperBound {
                 try appendEndpoint(
                     document.data[offset..<(offset + 6)],
                     family: .ipv4,
@@ -621,7 +633,7 @@ package struct TorrentDHTMessageParser: Sendable {
         var child = first
         while let index = child {
             guard let range = document.stringRange(at: index) else {
-                return []
+                throw TorrentDHTMessageError.invalidCompactRecords
             }
             switch range.count {
             case 6:
@@ -629,7 +641,7 @@ package struct TorrentDHTMessageParser: Sendable {
             case 18:
                 try appendEndpoint(document.data[range], family: .ipv6, to: &peers)
             default:
-                break
+                throw TorrentDHTMessageError.invalidCompactRecords
             }
             child = document.nextSibling(of: index)
         }

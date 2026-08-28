@@ -121,9 +121,11 @@ WebTorrent and I2P are disabled in the product build.
   signature-bearing value parser must use the canonical metainfo policy rather
   than this tolerant network-dictionary policy.
 - Responses may contain at most 64 compact nodes, 256 peers, and 64 sample
-  hashes. Both IPv4 and IPv6 compact records are decoded. The Mainline
-  single-string aggregate IPv4 peer form is interpreted only for an IPv4
-  source, matching the pinned libtorrent behavior.
+  hashes. Both IPv4 and IPv6 compact records are decoded. Every recognized
+  compact field must consume complete records; a trailing partial node or peer
+  rejects the datagram atomically. Present empty fields represent zero records.
+  The Mainline single-string aggregate IPv4 peer form is interpreted only for
+  an IPv4 source, matching the pinned libtorrent behavior.
 - Error messages and announced names must be bounded valid UTF-8 without NUL.
   Missing or malformed query-specific fields retain the typed query identity so
   libtorrent can issue a protocol error; a malformed envelope is dropped.

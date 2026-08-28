@@ -196,11 +196,99 @@ struct TorrentDHTMessageParserTests {
         ])
 
         let fromIPv4 = try parser.parse(body, sourceFamily: .ipv4)
-        let fromIPv6 = try parser.parse(body, sourceFamily: .ipv6)
-
         #expect(fromIPv4.peers.count == 2)
         #expect(fromIPv4.peers.map(\.port) == [80, 443])
-        #expect(fromIPv6.peers.isEmpty)
+        #expect(throws: TorrentDHTMessageError.invalidCompactRecords) {
+            _ = try parser.parse(body, sourceFamily: .ipv6)
+        }
+    }
+
+    @Test("Compact response fields consume only exact complete records")
+    func rejectsPartialCompactRecords() throws {
+        let fields: [(name: String, stride: Int, peers: Bool)] = [
+            ("nodes", 26, false),
+            ("nodes6", 38, false),
+            ("values", 6, true),
+        ]
+        for field in fields {
+            for completeCount in [0, 1, 3] {
+                let complete = Data(
+                    repeating: 1,
+                    count: completeCount * field.stride
+                )
+                let encoded = field.peers
+                    ? bencodedList([bencodedString(complete)])
+                    : bencodedString(complete)
+                let valid = try parser.parse(response([
+                    ("id", bencodedString(nodeID)),
+                    (field.name, encoded),
+                ]), sourceFamily: .ipv4)
+                if field.peers {
+                    #expect(valid.peersPresent)
+                    #expect(valid.peers.count == completeCount)
+                } else {
+                    #expect(valid.nodes.count == completeCount)
+                }
+
+                for remainder in 1..<field.stride {
+                    let malformed = complete + Data(repeating: 2, count: remainder)
+                    let malformedValue = field.peers
+                        ? bencodedList([bencodedString(malformed)])
+                        : bencodedString(malformed)
+                    #expect(throws: TorrentDHTMessageError.invalidCompactRecords) {
+                        _ = try parser.parse(response([
+                            ("id", bencodedString(nodeID)),
+                            (field.name, malformedValue),
+                        ]), sourceFamily: .ipv4)
+                    }
+                }
+            }
+        }
+    }
+
+    @Test("List-form compact peers reject malformed members atomically")
+    func rejectsMalformedCompactPeerMembers() throws {
+        let ipv4 = Data([192, 0, 2, 1, 0x1a, 0xe1])
+        let ipv6 = Data(repeating: 1, count: 18)
+        let valid = try parser.parse(response([
+            ("id", bencodedString(nodeID)),
+            ("values", bencodedList([
+                bencodedString(ipv4),
+                bencodedString(ipv6),
+            ])),
+        ]), sourceFamily: .ipv6)
+        #expect(valid.peers.count == 2)
+
+        for malformedMember in [
+            bencodedInteger(1),
+            bencodedString(Data(repeating: 1, count: 5)),
+            bencodedString(Data(repeating: 1, count: 7)),
+            bencodedString(Data(repeating: 1, count: 17)),
+            bencodedString(Data(repeating: 1, count: 19)),
+        ] {
+            #expect(throws: TorrentDHTMessageError.invalidCompactRecords) {
+                _ = try parser.parse(response([
+                    ("id", bencodedString(nodeID)),
+                    ("values", bencodedList([
+                        bencodedString(ipv4),
+                        malformedMember,
+                    ])),
+                ]), sourceFamily: .ipv6)
+            }
+        }
+
+        #expect(throws: TorrentDHTMessageError.invalidCompactRecords) {
+            _ = try parser.parse(response([
+                ("id", bencodedString(nodeID)),
+                ("nodes", bencodedInteger(1)),
+            ]), sourceFamily: .ipv4)
+        }
+        #expect(throws: TorrentDHTMessageError.invalidCompactRecords) {
+            _ = try parser.parse(response([
+                ("id", bencodedString(nodeID)),
+                ("values", bencodedString(ipv4)),
+            ]), sourceFamily: .ipv4)
+        }
     }
 
     @Test("Sample-infohash responses retain one bounded contiguous hash range")

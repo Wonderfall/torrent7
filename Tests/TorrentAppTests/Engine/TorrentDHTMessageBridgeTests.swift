@@ -157,6 +157,48 @@ struct TorrentDHTMessageBridgeTests {
         }
     }
 
+    @Test("Malformed compact suffixes leave callback output untouched and empty")
+    func rejectsPartialCompactRecordsAtomically() {
+        let completeNode = Data(repeating: UInt8(ascii: "n"), count: 20)
+            + Data([203, 0, 113, 9, 0x1a, 0xe1])
+        let response = dhtBencodedDictionary([
+            ("id", dhtBencodedString(Data(repeating: 1, count: 20))),
+            ("nodes", dhtBencodedString(completeNode + Data([0xff]))),
+        ])
+        let body = dhtBencodedDictionary([
+            ("r", response),
+            ("y", dhtBencodedString(Data("r".utf8))),
+        ])
+
+        unsafe withDHTMessageContext { context in
+            var node = TTorrentDHTNodeRecord()
+            node.address_low = 0xfeed_face
+            var peer = TTorrentDHTPeerRecord()
+            peer.address_low = 0xdead_beef
+            var result = TTorrentDHTMessageResult()
+            result.node_count = 9
+            let status = unsafe body.withUnsafeBytes { rawBody in
+                unsafe torrentDHTMessageParseCallback(
+                    context,
+                    rawBody.bindMemory(to: CChar.self).baseAddress!,
+                    Int32(rawBody.count),
+                    UInt8(TTORRENT_PEER_ADDRESS_IPV4),
+                    &node,
+                    1,
+                    &peer,
+                    1,
+                    &result
+                )
+            }
+
+            #expect(status == EINVAL)
+            #expect(node.address_low == 0xfeed_face)
+            #expect(peer.address_low == 0xdead_beef)
+            #expect(result.node_count == 0)
+            #expect(result.present_fields == 0)
+        }
+    }
+
     @Test("Invalid source family clears stale scalar output")
     func rejectsInvalidArguments() {
         let body = Data("de".utf8)
