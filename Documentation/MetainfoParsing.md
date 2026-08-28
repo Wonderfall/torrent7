@@ -158,8 +158,11 @@ Variable-sized native imports use a versioned flat capsule containing fixed-
 width records and checked offsets into one byte blob. Capsules contain no
 pointers, nested spans, Swift objects, C++ objects, function pointers, or
 ABI-sized integers. Native code validates every range, derives redundant
-values, copies all retained data, and commits fully constructed state
-atomically.
+values, first copies the exact info dictionary into one address-stable native
+allocation, and computes every applicable info hash over that allocation.
+Roots and v1 piece hashes point into the same allocation later retained by
+`torrent_info`; the final object is constructed only after all typed layout
+semantics and both independently supplied hybrid hashes agree.
 
 Peer-extension parsing uses a smaller synchronous typed boundary. Libtorrent
 passes one complete borrowed message to Swift and never exposes that pointer
@@ -237,8 +240,9 @@ File roots and v1 piece hashes must point inside the copied exact-info range.
 Layer bytes, paths, sources, and descriptions live in the payload. Bare BEP 9
 info input must have zero envelope presence, tables, and descriptive ranges,
 with a `-1` creation date. The native importer recomputes both advertised
-identities, reconstructs file and Merkle state from typed records, owns every
-retained byte, and never bdecodes the exact-info payload.
+identities from the final retained exact-info allocation, reconstructs file and
+Merkle state from typed records, owns every retained byte, and never bdecodes
+the exact-info payload.
 
 Exact original `info` bytes may be retained for info-hash calculation and BEP 9
 metadata serving. They must never be decoded later, including through lazy or

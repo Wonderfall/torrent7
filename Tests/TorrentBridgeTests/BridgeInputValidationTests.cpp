@@ -2,6 +2,7 @@
 
 #include <doctest.h>
 
+#include <libtorrent/aux_/preparsed_metainfo.hpp>
 #include <libtorrent/create_torrent.hpp>
 
 #include <array>
@@ -943,6 +944,105 @@ TEST_CASE("preparsed v1 metainfo capsule constructs narrow native state")
     CHECK(imported->dht_nodes.empty());
     CHECK(imported->file_priorities.empty());
     CHECK(imported->piece_priorities.empty());
+}
+
+TEST_CASE("preparsed importer hashes and retains its final native-owned info bytes")
+{
+    std::uint32_t piece_hash_offset = 0U;
+    std::string source_info = v1_capsule_info(piece_hash_offset);
+    std::string const expected_info = source_info;
+    std::vector<lt::aux::preparsed_metainfo_file> files{{
+        .path = "file.bin",
+        .size = 4,
+    }};
+    lt::info_hash_t const expected_hashes(
+        lt::hasher(lt::span<char const>(source_info)).final()
+    );
+    lt::aux::preparsed_metainfo const input{
+        .info_section = lt::span<char const>(source_info),
+        .files = lt::span<lt::aux::preparsed_metainfo_file const>(files),
+        .expected_info_hashes = expected_hashes,
+        .name = "file.bin",
+        .piece_length = 16 * 1024,
+        .piece_hashes_offset = static_cast<std::int32_t>(piece_hash_offset),
+        .piece_hashes_size = 20,
+        .multifile = false,
+        .private_torrent = false,
+    };
+
+    char const * const borrowed_info = source_info.data();
+    lt::error_code error;
+    std::shared_ptr<lt::torrent_info> const imported
+        = lt::aux::import_preparsed_metainfo(input, error);
+
+    REQUIRE_FALSE(error);
+    REQUIRE(imported);
+    REQUIRE(imported->info_section().data() != borrowed_info);
+    CHECK(std::ranges::equal(imported->info_section(), expected_info));
+    CHECK(lt::hasher(imported->info_section()).final() == expected_hashes.v1);
+
+    std::ranges::fill(source_info, '\xa5');
+    CHECK(std::ranges::equal(imported->info_section(), expected_info));
+    CHECK(lt::hasher(imported->info_section()).final() == imported->info_hashes().v1);
+    CHECK(imported->hash_for_piece(lt::piece_index_t(0))
+        == lt::sha1_hash(std::string(20U, 'p')));
+}
+
+TEST_CASE("preparsed hybrid importer independently verifies both native-owned hashes")
+{
+    std::array<std::uint8_t, 32U> root{};
+    root.fill(0x5aU);
+    std::uint32_t root_offset = 0U;
+    std::uint32_t piece_hash_offset = 0U;
+    std::string const info = v2_capsule_info(
+        "tiny.bin",
+        3,
+        root,
+        root_offset,
+        true,
+        piece_hash_offset
+    );
+    std::vector<lt::aux::preparsed_metainfo_file> files{{
+        .path = "tiny.bin",
+        .size = 3,
+        .pieces_root_offset = static_cast<std::int32_t>(root_offset),
+    }};
+    lt::info_hash_t const expected_hashes(
+        lt::hasher(lt::span<char const>(info)).final(),
+        lt::hasher256(lt::span<char const>(info)).final()
+    );
+    lt::aux::preparsed_metainfo input{
+        .info_section = lt::span<char const>(info),
+        .files = lt::span<lt::aux::preparsed_metainfo_file const>(files),
+        .expected_info_hashes = expected_hashes,
+        .name = "tiny.bin",
+        .piece_length = 16 * 1024,
+        .piece_hashes_offset = static_cast<std::int32_t>(piece_hash_offset),
+        .piece_hashes_size = 20,
+        .multifile = false,
+        .private_torrent = false,
+    };
+
+    lt::info_hash_t wrong_v1 = expected_hashes;
+    wrong_v1.v1[0] ^= 1U;
+    input.expected_info_hashes = wrong_v1;
+    lt::error_code error;
+    CHECK_FALSE(lt::aux::import_preparsed_metainfo(input, error));
+    CHECK(error == lt::errors::mismatching_info_hash);
+
+    lt::info_hash_t wrong_v2 = expected_hashes;
+    wrong_v2.v2[0] ^= 1U;
+    input.expected_info_hashes = wrong_v2;
+    CHECK_FALSE(lt::aux::import_preparsed_metainfo(input, error));
+    CHECK(error == lt::errors::mismatching_info_hash);
+
+    input.expected_info_hashes = expected_hashes;
+    std::shared_ptr<lt::torrent_info> const imported
+        = lt::aux::import_preparsed_metainfo(input, error);
+    REQUIRE_FALSE(error);
+    REQUIRE(imported);
+    CHECK(lt::hasher(imported->info_section()).final() == imported->info_hashes().v1);
+    CHECK(lt::hasher256(imported->info_section()).final() == imported->info_hashes().v2);
 }
 
 TEST_CASE("metainfo capsule importers enforce their distinct input kinds")

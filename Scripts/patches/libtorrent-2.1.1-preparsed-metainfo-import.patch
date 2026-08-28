@@ -97,7 +97,7 @@ index 8f2874a81..740f4948f 100644
  
  #include "libtorrent/load_torrent.hpp" // for aux::parse_torrent_file()
  #if TORRENT_ABI_VERSION < 4
-@@ -1032,6 +1033,190 @@ TORRENT_VERSION_NAMESPACE_4
+@@ -1032,6 +1033,198 @@ TORRENT_VERSION_NAMESPACE_4
  
  	torrent_info::~torrent_info() = default;
  
@@ -121,8 +121,16 @@ index 8f2874a81..740f4948f 100644
 +			return {};
 +		}
 +
-+		sha1_hash const v1_hash = hasher(input.info_section).final();
-+		sha256_hash const v2_hash = hasher256(input.info_section).final();
++		std::int32_t const info_section_size
++			= static_cast<std::int32_t>(input.info_section.size());
++		boost::shared_array<char> info_storage(
++			new char[static_cast<std::size_t>(info_section_size)]);
++		std::memcpy(info_storage.get(), input.info_section.data()
++			, static_cast<std::size_t>(info_section_size));
++		span<char const> const owned_info(info_storage.get(), info_section_size);
++
++		sha1_hash const v1_hash = hasher(owned_info).final();
++		sha256_hash const v2_hash = hasher256(owned_info).final();
 +		if ((has_v1 && v1_hash != input.expected_info_hashes.v1)
 +			|| (has_v2 && v2_hash != input.expected_info_hashes.v2))
 +		{
@@ -145,12 +153,6 @@ index 8f2874a81..740f4948f 100644
 +		info_hash_t hashes;
 +		if (has_v1) hashes.v1 = v1_hash;
 +		if (has_v2) hashes.v2 = v2_hash;
-+		auto result = std::make_shared<torrent_info>(hashes);
-+		result->m_info_section_size = static_cast<std::int32_t>(input.info_section.size());
-+		char* info_copy = new char[static_cast<std::size_t>(result->m_info_section_size)];
-+		std::memcpy(info_copy, input.info_section.data()
-+			, static_cast<std::size_t>(result->m_info_section_size));
-+		result->m_info_section.reset(info_copy);
 +
 +		file_storage files;
 +		files.set_piece_length(input.piece_length);
@@ -174,12 +176,12 @@ index 8f2874a81..740f4948f 100644
 +			if (!padding && file.size > 0 && has_v2)
 +			{
 +				if (file.pieces_root_offset < 0
-+					|| file.pieces_root_offset > result->m_info_section_size - sha256_hash::size())
++					|| file.pieces_root_offset > info_section_size - sha256_hash::size())
 +				{
 +					ec = errors::torrent_missing_pieces_root;
 +					return {};
 +				}
-+				root = result->m_info_section.get() + file.pieces_root_offset;
++				root = info_storage.get() + file.pieces_root_offset;
 +				if (sha256_hash(root).is_all_zeros())
 +				{
 +					ec = errors::torrent_missing_pieces_root;
@@ -229,7 +231,7 @@ index 8f2874a81..740f4948f 100644
 +			}
 +			if (!padding && has_v2 && expected.size > 0)
 +			{
-+				char const* const root = result->m_info_section.get()
++				char const* const root = info_storage.get()
 +					+ expected.pieces_root_offset;
 +				if (files.root(index) != sha256_hash(root))
 +				{
@@ -259,13 +261,12 @@ index 8f2874a81..740f4948f 100644
 +			std::int64_t const hash_bytes = std::int64_t(files.num_pieces()) * sha1_hash::size();
 +			if (hash_bytes != input.piece_hashes_size
 +				|| input.piece_hashes_offset <= 0
-+				|| input.piece_hashes_offset > result->m_info_section_size
-+				|| hash_bytes > result->m_info_section_size - input.piece_hashes_offset)
++				|| input.piece_hashes_offset > info_section_size
++				|| hash_bytes > info_section_size - input.piece_hashes_offset)
 +			{
 +				ec = errors::torrent_invalid_hashes;
 +				return {};
 +			}
-+			result->m_piece_hashes = input.piece_hashes_offset;
 +		}
 +		else if (input.piece_hashes_offset != -1 || input.piece_hashes_size != 0)
 +		{
@@ -273,6 +274,13 @@ index 8f2874a81..740f4948f 100644
 +			return {};
 +		}
 +
++		// Publish only after every semantic field has been derived and checked.
++		// The const conversion shares the same allocation hashed above, so roots
++		// and v1 piece hashes retain stable addresses in the final object.
++		auto result = std::make_shared<torrent_info>(hashes);
++		result->m_info_section = info_storage;
++		result->m_info_section_size = info_section_size;
++		if (has_v1) result->m_piece_hashes = input.piece_hashes_offset;
 +		result->m_flags = input.multifile ? torrent_info::multifile
 +			: torrent_info_flags_t{};
 +		if (input.private_torrent) result->m_flags |= torrent_info::private_torrent;
