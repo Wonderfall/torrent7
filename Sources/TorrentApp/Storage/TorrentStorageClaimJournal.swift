@@ -447,7 +447,7 @@ actor TorrentStorageClaimJournal {
         operationNonce: UUID,
         topLevelName: String
     ) throws {
-        guard TorrentStoragePathComponent.isSafe(topLevelName) else {
+        guard TorrentPathComponentValidation.isSafe(topLevelName) else {
             throw TorrentStorageJournalError.invalidTransition
         }
         guard var preparation = snapshot.preparations[claimID] else {
@@ -934,11 +934,11 @@ actor TorrentStorageClaimJournal {
             && (preparation.ownershipKey?.count
                 == TorrentStorageOwnershipTag.keyByteCount
                 || preparation.ownershipKey == nil)
-            && TorrentStoragePathComponent.isSafe(
+            && TorrentPathComponentValidation.isSafe(
                 preparation.preferredTopLevelName
             )
             && (preparation.reservedTopLevelName.map(
-                TorrentStoragePathComponent.isSafe
+                TorrentPathComponentValidation.isSafe
             ) ?? true)
     }
 

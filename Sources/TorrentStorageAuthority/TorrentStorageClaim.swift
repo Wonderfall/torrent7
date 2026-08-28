@@ -444,17 +444,6 @@ package enum TorrentStorageLeaseValidation {
     }
 }
 
-package enum TorrentStoragePathComponent {
-    package static func isSafe(_ component: String) -> Bool {
-        !component.isEmpty
-            && component != "."
-            && component != ".."
-            && !component.utf8.contains(0)
-            && !component.contains("/")
-            && !component.contains("\\")
-    }
-}
-
 package enum TorrentStorageClaimValidation {
     package static func isValid(
         _ claim: TorrentStorageClaim,
@@ -487,7 +476,7 @@ package enum TorrentStorageClaimValidation {
                   logicalFiles: manifest.logicalFiles,
                   fileAvailability: claim.lease.fileAvailability
               ),
-              TorrentStoragePathComponent.isSafe(
+              TorrentPathComponentValidation.isSafe(
                   manifest.collisionSelectedTopLevelName
               ),
               hasValidOwnership(manifest.ownership),
@@ -514,7 +503,7 @@ package enum TorrentStorageClaimValidation {
             logicalFile.expectedSize >= 0
                 && !logicalFile.pathComponents.isEmpty
                 && logicalFile.pathComponents.allSatisfy(
-                    TorrentStoragePathComponent.isSafe
+                    TorrentPathComponentValidation.isSafe
                 )
                 && logicalFile.isPadding == (fileIdentity == nil)
                 && (fileIdentity.map({
@@ -537,7 +526,7 @@ package enum TorrentStorageClaimValidation {
               Set(directoryPaths).count == directoryPaths.count,
               manifest.physicalDirectoryIdentities.allSatisfy({ directory in
                   directory.relativePathComponents.allSatisfy(
-                      TorrentStoragePathComponent.isSafe
+                      TorrentPathComponentValidation.isSafe
                   )
                       && directory.identity.ownerUserID == ownerUserID
               }) else {

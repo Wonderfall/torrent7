@@ -345,6 +345,68 @@ struct TorrentManifestParserTests {
         #expect(parsed.manifest.files[1].pathComponents == [".pad", "3-1"])
     }
 
+    @Test("Path components reject every native-invalid control byte")
+    func rejectsControlBytesInPaths() throws {
+        let controlBytes = Array(UInt8(0)...UInt8(0x1f)) + [UInt8(0x7f)]
+        for byte in controlBytes {
+            let control = String(decoding: [byte], as: UTF8.self)
+            let component = "unsafe\(control)name"
+            #expect(!TorrentPathComponentValidation.isSafe(component))
+
+            try expectManifestError(.invalidName) {
+                _ = try TorrentManifestParser().parse(
+                    Self.v1SingleFile(name: component, size: 1)
+                )
+            }
+            try expectManifestError(.invalidFilePath) {
+                _ = try TorrentManifestParser().parse(Self.v1Directory(
+                    name: "payload",
+                    files: [.init(path: [component], size: 1)]
+                ))
+            }
+        }
+    }
+
+    @Test("Synthetic padding paths participate in collision validation")
+    func rejectsPaddingPathCollisions() throws {
+        try expectManifestError(.duplicatePath) {
+            _ = try TorrentManifestParser().parse(Self.v1Directory(
+                name: "payload",
+                files: [
+                    .init(path: [".pad", "3-1"], size: 1),
+                    .init(path: ["ignored"], size: 3, attributes: "p"),
+                ]
+            ))
+        }
+        try expectManifestError(.duplicatePath) {
+            _ = try TorrentManifestParser().parse(Self.v1Directory(
+                name: "payload",
+                files: [
+                    .init(path: ["ignored"], size: 3, attributes: "p"),
+                    .init(path: [".pad", "3-0"], size: 1),
+                ]
+            ))
+        }
+        try expectManifestError(.conflictingPath) {
+            _ = try TorrentManifestParser().parse(Self.v1Directory(
+                name: "payload",
+                files: [
+                    .init(path: [".pad"], size: 1),
+                    .init(path: ["ignored"], size: 3, attributes: "p"),
+                ]
+            ))
+        }
+        try expectManifestError(.conflictingPath) {
+            _ = try TorrentManifestParser().parse(Self.v1Directory(
+                name: "payload",
+                files: [
+                    .init(path: ["ignored"], size: 3, attributes: "p"),
+                    .init(path: [".pad", "3-0", "child"], size: 1),
+                ]
+            ))
+        }
+    }
+
     @Test("Advertised hashes must match the exact canonical info bytes")
     func advertisedHashesMustMatch() throws {
         let metadata = Self.v1SingleFile(name: "sample.bin", size: 5)

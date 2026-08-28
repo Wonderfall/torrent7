@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import System
+import TorrentEngineModel
 import TorrentStorageAuthority
 
 enum TorrentStoragePlanningError: LocalizedError, Equatable, Sendable {
@@ -388,7 +389,7 @@ struct TorrentStorageDestinationPlanner: Sendable {
     ) throws -> TorrentStorageReservation {
         try parent.validate()
         let topLevelName = selectedTopLevelName ?? logicalManifest.name
-        guard TorrentStoragePathComponent.isSafe(topLevelName),
+        guard TorrentPathComponentValidation.isSafe(topLevelName),
               !topLevelName.hasPrefix(".") else {
             throw TorrentStoragePlanningError.hiddenTopLevelName
         }
@@ -505,7 +506,7 @@ struct TorrentStorageDestinationPlanner: Sendable {
               let expectedIdentity = claim.manifest.physicalFileIdentities[
                   Int(fileIndex)
               ],
-              components.allSatisfy(TorrentStoragePathComponent.isSafe) else {
+              components.allSatisfy(TorrentPathComponentValidation.isSafe) else {
             return rootURL
         }
 
@@ -1936,7 +1937,7 @@ struct TorrentStorageDestinationPlanner: Sendable {
         directoryIdentities: inout [[String]: TorrentFilesystemIdentity]
     ) throws -> TorrentFilesystemIdentity {
         guard !components.isEmpty,
-              components.allSatisfy(TorrentStoragePathComponent.isSafe) else {
+              components.allSatisfy(TorrentPathComponentValidation.isSafe) else {
             throw TorrentStoragePlanningError.existingDataUnsafe
         }
         var current = Darwin.dup(rootDescriptor)

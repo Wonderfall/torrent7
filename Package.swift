@@ -564,7 +564,11 @@ let package = Package(
         ),
         .target(
             name: "TorrentStorageFuzzSupport",
-            dependencies: ["TorrentMetainfo", "TorrentStorageAuthority"],
+            dependencies: [
+                "TorrentEngineModel",
+                "TorrentMetainfo",
+                "TorrentStorageAuthority"
+            ],
             path: "Tools/IPCFuzzing/StorageSupport",
             swiftSettings: [
                 .swiftLanguageMode(.v6),

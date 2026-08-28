@@ -1526,9 +1526,6 @@ package struct TorrentMetainfoParser: Sendable {
                 }
             }
 
-            guard !file.isPadding else {
-                continue
-            }
             var nodeIndex = 0
             for component in file.pathComponents {
                 let normalized = normalizedComponent(component)
@@ -1638,14 +1635,10 @@ package struct TorrentMetainfoParser: Sendable {
         _ component: String,
         isTopLevel: Bool = false
     ) throws {
-        let byteCount = component.utf8.count
-        guard !component.isEmpty,
-              byteCount <= limits.maximumPathComponentBytes,
-              component != ".",
-              component != "..",
-              !component.utf8.contains(0),
-              !component.contains("/"),
-              !component.contains("\\") else {
+        guard TorrentPathComponentValidation.isSafe(
+            component,
+            maximumUTF8ByteCount: limits.maximumPathComponentBytes
+        ) else {
             throw isTopLevel
                 ? TorrentManifestError.invalidName
                 : TorrentManifestError.invalidFilePath

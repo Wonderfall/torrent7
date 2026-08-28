@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import TorrentEngineModel
 import TorrentMetainfo
 import TorrentStorageAuthority
 
@@ -470,13 +471,14 @@ private enum StorageClaimFuzzer {
             decoding: data.prefix(4_096),
             as: UTF8.self
         )
-        guard TorrentStoragePathComponent.isSafe(component) else {
+        guard TorrentPathComponentValidation.isSafe(component) else {
             return
         }
         fuzzAssert(!component.isEmpty)
         fuzzAssert(component != "." && component != "..")
-        fuzzAssert(!component.utf8.contains(0))
-        fuzzAssert(!component.contains("/") && !component.contains("\\"))
+        fuzzAssert(component.utf8.allSatisfy { byte in
+            byte >= 0x20 && byte != 0x2f && byte != 0x5c && byte != 0x7f
+        })
     }
 
     private static func exerciseDecodedClaim(_ data: Data) {
@@ -622,7 +624,7 @@ private enum StorageManifestFuzzer {
         fuzzAssert(manifest.files.allSatisfy {
             $0.expectedSize >= 0
                 && !$0.pathComponents.isEmpty
-                && $0.pathComponents.allSatisfy(TorrentStoragePathComponent.isSafe)
+                && $0.pathComponents.allSatisfy(TorrentPathComponentValidation.isSafe)
         })
         fuzzAssert(manifest.pieceLength > 0)
         fuzzAssert(TorrentManifestDigest.source(
@@ -737,7 +739,7 @@ private enum SwarmInfoParserFuzzer {
         fuzzAssert(core.files.allSatisfy {
             $0.expectedSize >= 0
                 && !$0.pathComponents.isEmpty
-                && $0.pathComponents.allSatisfy(TorrentStoragePathComponent.isSafe)
+                && $0.pathComponents.allSatisfy(TorrentPathComponentValidation.isSafe)
         })
 
         if let v1 = core.v1InfoHash {

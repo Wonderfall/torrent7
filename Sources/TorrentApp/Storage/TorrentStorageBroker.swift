@@ -3,6 +3,7 @@ import Foundation
 import Synchronization
 import TorrentEngineClient
 import TorrentEngineIPC
+import TorrentEngineModel
 import TorrentStorageAuthority
 import XPC
 
@@ -285,7 +286,7 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
         try resolved.parent.validate()
         guard let components = resolved.relativePathComponents,
               !components.isEmpty,
-              components.allSatisfy(TorrentStoragePathComponent.isSafe) else {
+              components.allSatisfy(TorrentPathComponentValidation.isSafe) else {
             throw TorrentStorageBrokerRegistryError.fileUnavailable
         }
 
