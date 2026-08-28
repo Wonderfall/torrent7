@@ -90,6 +90,8 @@ LIBFUZZER_ARGS="-jobs=4 -workers=4" Tools/BridgeFuzzing/run-libfuzzer.sh bridge_
 Crash artifacts are written under `Tools/BridgeFuzzing/libfuzzer-artifacts`.
 Learned corpus units are written under `Tools/BridgeFuzzing/libfuzzer-artifacts/corpus`;
 the checked-in `Tools/BridgeFuzzing/corpus` tree is used as seed input only.
+The parser-callback harness also exercises a seed without one terminal newline,
+which keeps checked-in text messages useful as accepted starting points.
 The run script disables ASan container-overflow checks by default because the
 Homebrew libFuzzer runtime can trip them while enumerating larger corpus
 directories. Pass `ASAN_OPTIONS=detect_container_overflow=1` to override that.

@@ -30,10 +30,17 @@ struct measurement
     int samples = 0;
     double median_ns = 0;
     double p95_ns = 0;
+    double p99_ns = 0;
     double minimum_ns = 0;
     double maximum_ns = 0;
     std::uint64_t checksum = 0;
 };
+
+double percentile(std::vector<double> const& sorted_values, int const value)
+{
+    auto const index = (std::size_t(value) * sorted_values.size() + 99U) / 100U - 1U;
+    return sorted_values[index];
+}
 
 template <typename Operation>
 [[gnu::noinline]] std::uint64_t run_batch(int const iterations, Operation& operation)
@@ -48,7 +55,7 @@ measurement measure(std::string name, std::size_t const bytes
     , int const iterations, Operation operation)
 {
     constexpr int warmups = 3;
-    constexpr int samples = 15;
+    constexpr int samples = 20;
     for (int i = 0; i < warmups; ++i) (void)run_batch(iterations, operation);
 
     std::vector<double> values;
@@ -64,7 +71,8 @@ measurement measure(std::string name, std::size_t const bytes
     }
     std::sort(values.begin(), values.end());
     return {std::move(name), bytes, iterations, samples, values[values.size() / 2]
-        , values.back(), values.front(), values.back(), checksum};
+        , percentile(values, 95), percentile(values, 99), values.front(), values.back()
+        , checksum};
 }
 
 std::string read_file(std::filesystem::path const& path)
@@ -286,8 +294,12 @@ void print(measurement const& value)
         << ",\"samples\":" << value.samples
         << ",\"median_ns\":" << value.median_ns
         << ",\"p95_ns\":" << value.p95_ns
+        << ",\"p99_ns\":" << value.p99_ns
         << ",\"min_ns\":" << value.minimum_ns
         << ",\"max_ns\":" << value.maximum_ns
+        << ",\"median_messages_per_second\":" << 1.0e9 / value.median_ns
+        << ",\"median_bytes_per_second\":"
+        << double(value.bytes) * 1.0e9 / value.median_ns
         << ",\"checksum\":" << value.checksum << "}\n";
 }
 

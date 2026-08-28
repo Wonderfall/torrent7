@@ -14,17 +14,34 @@ struct Measurement {
   let samples: Int
   let medianNS: Double
   let p95NS: Double
+  let p99NS: Double
   let minimumNS: Double
   let maximumNS: Double
   let checksum: UInt64
+
+  private var medianMessagesPerSecond: Double {
+    1_000_000_000 / medianNS
+  }
+
+  private var medianBytesPerSecond: Double {
+    Double(bytes) * medianMessagesPerSecond
+  }
 
   var json: String {
     "{\"runtime\":\"swift\",\"name\":\"\(name)\",\"bytes\":\(bytes),"
       + "\"iterations\":\(iterations),\"samples\":\(samples),"
       + "\"median_ns\":\(medianNS),\"p95_ns\":\(p95NS),"
+      + "\"p99_ns\":\(p99NS),"
       + "\"min_ns\":\(minimumNS),\"max_ns\":\(maximumNS),"
+      + "\"median_messages_per_second\":\(medianMessagesPerSecond),"
+      + "\"median_bytes_per_second\":\(medianBytesPerSecond),"
       + "\"checksum\":\(checksum)}"
   }
+}
+
+private func percentile(_ percentile: Int, in sortedValues: [Double]) -> Double {
+  let index = ((percentile * sortedValues.count + 99) / 100) - 1
+  return sortedValues[index]
 }
 
 @inline(never)
@@ -46,7 +63,7 @@ private func measure(
   operation: () throws -> UInt64
 ) throws -> Measurement {
   let warmups = 3
-  let samples = 15
+  let samples = 20
   for _ in 0..<warmups {
     _ = try runBatch(iterations: iterations, operation: operation)
   }
@@ -66,7 +83,8 @@ private func measure(
     iterations: iterations,
     samples: samples,
     medianNS: values[values.count / 2],
-    p95NS: values[values.count - 1],
+    p95NS: percentile(95, in: values),
+    p99NS: percentile(99, in: values),
     minimumNS: values[0],
     maximumNS: values[values.count - 1],
     checksum: checksum

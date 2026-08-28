@@ -1,0 +1,16 @@
+# workload	maximum p99 batch-average nanoseconds
+magnet_basic	50000
+magnet_rich	500000
+torrent_small	50000
+torrent_128	2500000
+torrent_4096	80000000
+info_128	2500000
+info_4096	80000000
+extension_handshake	30000
+ut_metadata	10000
+ut_pex	120000
+tracker_512	200000
+tracker_3000	1000000
+dht_ping	15000
+dht_dense	40000
+dht_maxwork	100000

@@ -843,6 +843,13 @@ private func rangedBytes(
 
 private enum MagnetParserFuzzer {
     static func exercise(_ data: Data) {
+        exerciseCandidateBytes(data)
+        if data.last == UInt8(ascii: "\n") {
+            exerciseCandidateBytes(Data(data.dropLast()))
+        }
+    }
+
+    private static func exerciseCandidateBytes(_ data: Data) {
         if let strict = String(data: data, encoding: .utf8) {
             exerciseCandidate(strict)
         }
@@ -879,7 +886,19 @@ private enum MagnetParserFuzzer {
 }
 
 private enum PeerProtocolParserFuzzer {
+    private struct Endpoint: Hashable {
+        let address: TorrentPeerAddress
+        let port: UInt16
+    }
+
     static func exercise(_ data: Data) {
+        exerciseCandidate(data)
+        if data.last == UInt8(ascii: "\n") {
+            exerciseCandidate(Data(data.dropLast()))
+        }
+    }
+
+    private static func exerciseCandidate(_ data: Data) {
         guard let selector = data.first else {
             return
         }
@@ -940,7 +959,10 @@ private enum PeerProtocolParserFuzzer {
             fuzzAssert(parsed.contacts.count == parsed.addedCount + parsed.droppedCount)
             fuzzAssert(parsed.contacts.filter { $0.action == .add }.count == parsed.addedCount)
             fuzzAssert(parsed.contacts.filter { $0.action == .drop }.count == parsed.droppedCount)
-            fuzzAssert(Set(parsed.contacts.map(\.address)).count == parsed.contacts.count)
+            let endpoints = parsed.contacts.map {
+                Endpoint(address: $0.address, port: $0.port)
+            }
+            fuzzAssert(Set(endpoints).count == parsed.contacts.count)
             fuzzAssert(parsed.contacts.allSatisfy {
                 $0.port > 0 && ($0.flags & 0xe0) == 0
             })
@@ -950,6 +972,13 @@ private enum PeerProtocolParserFuzzer {
 
 private enum HTTPTrackerResponseParserFuzzer {
     static func exercise(_ data: Data) {
+        exerciseCandidate(data)
+        if data.last == UInt8(ascii: "\n") {
+            exerciseCandidate(Data(data.dropLast()))
+        }
+    }
+
+    private static func exerciseCandidate(_ data: Data) {
         guard let selector = data.first else {
             return
         }
@@ -1059,6 +1088,13 @@ private enum HTTPTrackerResponseParserFuzzer {
 
 private enum DHTMessageParserFuzzer {
     static func exercise(_ data: Data) {
+        exerciseCandidate(data)
+        if data.last == UInt8(ascii: "\n") {
+            exerciseCandidate(Data(data.dropLast()))
+        }
+    }
+
+    private static func exerciseCandidate(_ data: Data) {
         guard let selector = data.first else {
             return
         }

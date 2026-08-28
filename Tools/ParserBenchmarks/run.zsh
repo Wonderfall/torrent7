@@ -42,12 +42,17 @@ print -ru2 -- "Running native/Swift/Swift/native passes..."
 typeset -r commit=$(git rev-parse --short=7 HEAD)
 print -- ""
 print -- "HEAD: \`$commit\` (working-tree changes are included)"
-print -- "Mean of the two per-pass medians (nanoseconds per parse):"
+print -- "Mean of the two per-pass distributions and median throughput:"
 print -- ""
 awk -f "$root_dir/Tools/ParserBenchmarks/summarize.awk" \
     "$results_dir/native-1.jsonl" \
     "$results_dir/swift-1.jsonl" \
     "$results_dir/swift-2.jsonl" \
     "$results_dir/native-2.jsonl"
+print -- ""
+awk -F $'\t' -f "$root_dir/Tools/ParserBenchmarks/verify-budgets.awk" \
+    "$root_dir/Tools/ParserBenchmarks/p99-budgets.tsv" \
+    "$results_dir/swift-1.jsonl" \
+    "$results_dir/swift-2.jsonl"
 print -- ""
 print -- "Raw JSONL: $results_dir"

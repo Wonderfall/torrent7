@@ -120,6 +120,37 @@ struct TorrentDHTMessageParserTests {
         }
     }
 
+    @Test("Every small KRPC dictionary permutation preserves typed semantics")
+    func krpcDictionaryPermutationsAreEquivalent() throws {
+        let argumentFields = [
+            ("future_argument", bencodeTestInteger(4)),
+            ("id", bencodeTestString(nodeID)),
+            ("target", bencodeTestString(target)),
+        ]
+        for argumentOrder in allPermutations(argumentFields) {
+            let fields = [
+                ("a", bencodeTestDictionary(argumentOrder)),
+                ("future", bencodeTestInteger(8)),
+                ("q", bencodeTestString(Data("find_node".utf8))),
+                ("t", bencodeTestString(Data([1, 2]))),
+                ("y", bencodeTestString(Data("q".utf8))),
+            ]
+            for fieldOrder in allPermutations(fields) {
+                let message = try parser.parse(
+                    bencodeTestDictionary(fieldOrder),
+                    sourceFamily: .ipv4
+                )
+                #expect(message.kind == .query)
+                #expect(message.queryKind == .findNode)
+                #expect(message.queryIsValid)
+                #expect(message.transactionRange.map { Data(message.body[$0]) }
+                    == Data([1, 2]))
+                #expect(message.nodeIDRange.map { Data(message.body[$0]) } == nodeID)
+                #expect(message.targetRange.map { Data(message.body[$0]) } == target)
+            }
+        }
+    }
+
     @Test("Responses produce typed nodes, peers, tokens, and address hints")
     func parsesDiscoveryResponse() throws {
         let node4 = nodeID + Data([203, 0, 113, 7, 0x1a, 0xe1])

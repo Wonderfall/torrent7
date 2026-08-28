@@ -71,6 +71,72 @@ struct TorrentPeerProtocolParserTests {
         }
     }
 
+    @Test("Every small peer dictionary permutation preserves typed semantics")
+    func peerDictionaryPermutationsAreEquivalent() throws {
+        let mappings = [
+            ("ut_metadata", bencodeTestInteger(2)),
+            ("ut_pex", bencodeTestInteger(1)),
+            ("future_mapping", bencodeTestInteger(9)),
+        ]
+        let expectedHandshake = try parser.parseExtensionHandshake(
+            bencodeTestDictionary([
+                ("future", bencodeTestInteger(7)),
+                ("m", bencodeTestDictionary(mappings, sortedKeys: true)),
+                ("metadata_size", bencodeTestInteger(32_768)),
+                ("v", bencodeTestString(Data("Permutation peer".utf8))),
+            ], sortedKeys: true)
+        )
+
+        for mappingOrder in allPermutations(mappings) {
+            let fields = [
+                ("future", bencodeTestInteger(7)),
+                ("m", bencodeTestDictionary(mappingOrder)),
+                ("metadata_size", bencodeTestInteger(32_768)),
+                ("v", bencodeTestString(Data("Permutation peer".utf8))),
+            ]
+            for fieldOrder in allPermutations(fields) {
+                #expect(try parser.parseExtensionHandshake(
+                    bencodeTestDictionary(fieldOrder)
+                ) == expectedHandshake)
+            }
+        }
+
+        let metadataFields = [
+            ("future", bencodeTestInteger(5)),
+            ("msg_type", bencodeTestInteger(1)),
+            ("piece", bencodeTestInteger(3)),
+            ("total_size", bencodeTestInteger(65_536)),
+        ]
+        var expectedMetadataBody = bencodeTestDictionary(
+            metadataFields,
+            sortedKeys: true
+        )
+        expectedMetadataBody.append(contentsOf: [1, 2, 3, 4])
+        let expectedMetadata = try parser.parseMetadataControlMessage(expectedMetadataBody)
+        for fieldOrder in allPermutations(metadataFields) {
+            var body = bencodeTestDictionary(fieldOrder)
+            body.append(contentsOf: [1, 2, 3, 4])
+            #expect(try parser.parseMetadataControlMessage(body) == expectedMetadata)
+        }
+
+        let first = Data([203, 0, 113, 9, 0x1a, 0xe1])
+        let secondPort = Data([203, 0, 113, 9, 0x1a, 0xe2])
+        let dropped = Data([203, 0, 113, 10, 0x1a, 0xe3])
+        let pexFields = [
+            ("added", bencodeTestString(first + secondPort)),
+            ("dropped", bencodeTestString(dropped)),
+            ("future", bencodeTestInteger(11)),
+        ]
+        let expectedPEX = try parser.parsePeerExchange(
+            bencodeTestDictionary(pexFields, sortedKeys: true)
+        )
+        for fieldOrder in allPermutations(pexFields) {
+            #expect(try parser.parsePeerExchange(
+                bencodeTestDictionary(fieldOrder)
+            ) == expectedPEX)
+        }
+    }
+
     @Test("Extension IDs must be unique bytes")
     func rejectsInvalidExtensionMappings() {
         #expect(throws: TorrentPeerProtocolError.invalidField) {

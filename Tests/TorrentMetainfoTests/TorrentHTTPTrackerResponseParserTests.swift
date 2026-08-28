@@ -139,6 +139,37 @@ struct TorrentHTTPTrackerResponseParserTests {
         }
     }
 
+    @Test("Every small tracker dictionary permutation preserves typed semantics")
+    func trackerDictionaryPermutationsAreEquivalent() throws {
+        let peerFields = [
+            ("future_peer", bencodeTestInteger(3)),
+            ("ip", bencodeTestString(Data("peer.example".utf8))),
+            ("port", bencodeTestInteger(6_881)),
+        ]
+        for peerOrder in allPermutations(peerFields) {
+            let fields = [
+                ("future", bencodeTestInteger(7)),
+                ("interval", bencodeTestInteger(900)),
+                ("peers", bencodedList([
+                    bencodeTestDictionary(peerOrder),
+                ])),
+                ("warning message", bencodeTestString(Data("notice".utf8))),
+            ]
+            for fieldOrder in allPermutations(fields) {
+                let response = try parser.parse(bencodeTestDictionary(fieldOrder))
+                #expect(response.interval == 900)
+                #expect(response.warningMessageRange.map { Data(response.body[$0]) }
+                    == Data("notice".utf8))
+                #expect(response.peers.count == 1)
+                #expect(response.peers.first?.kind == .hostname)
+                #expect(response.peers.first?.port == 6_881)
+                #expect(response.peers.first?.hostnameRange.map {
+                    Data(response.body[$0])
+                } == Data("peer.example".utf8))
+            }
+        }
+    }
+
     @Test("Scrape responses select only the exact binary info-hash key")
     func parsesScrapeResponse() throws {
         let expectedHash = Data(0..<20)

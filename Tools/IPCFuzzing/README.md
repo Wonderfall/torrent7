@@ -69,7 +69,9 @@ MAX_LEN=131072 LIBFUZZER_ARGS="-timeout=10" \
 Crash artifacts are written to per-target directories below
 `Tools/IPCFuzzing/libfuzzer-artifacts`. Learned corpus units live under its
 `corpus` child; the checked-in `Tools/IPCFuzzing/corpus` tree contains seed
-inputs only.
+inputs only. Parser targets exercise text-form seeds both exactly as stored and
+without one terminal newline, so source-control line endings do not turn valid
+starting messages into rejection-only inputs.
 
 The fuzz support libraries are developer tools. Neither is linked into any
 shipped app or extension.
