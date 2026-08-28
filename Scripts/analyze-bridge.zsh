@@ -55,6 +55,10 @@ done
     "m_swarm_metadata_parser->parse(metadata_buf, ec)" \
     "$libtorrent_source/src/torrent.cpp" \
     || fail "Patched libtorrent does not require the external swarm metadata parser"
+"$ripgrep" -q -U \
+    'if \(m_swarm_metadata_parser\)\s+info = m_swarm_metadata_parser->parse\(metadata_buf, ec\);\s+else\s+ec = errors::invalid_swarm_metadata;' \
+    "$libtorrent_source/src/torrent.cpp" \
+    || fail "Patched libtorrent must fail closed when the swarm metadata parser is absent"
 
 typeset -r peer_handshake_source="$libtorrent_source/src/bt_peer_connection.cpp"
 typeset -r metadata_extension_source="$libtorrent_source/src/ut_metadata.cpp"
@@ -79,12 +83,18 @@ done
 "$ripgrep" -q --fixed-strings \
     "parse_extension_handshake(recv_buffer.subspan(2)" "$peer_handshake_source" \
     || fail "Patched libtorrent does not require the external extension-handshake parser"
+"$ripgrep" -q --fixed-strings "parser == nullptr" "$peer_handshake_source" \
+    || fail "Patched libtorrent must fail closed when the extension-handshake parser is absent"
 "$ripgrep" -q --fixed-strings \
     "parse_ut_metadata(body" "$metadata_extension_source" \
     || fail "Patched libtorrent does not require the external ut_metadata parser"
+"$ripgrep" -q --fixed-strings "parser == nullptr" "$metadata_extension_source" \
+    || fail "Patched libtorrent must fail closed when the ut_metadata parser is absent"
 "$ripgrep" -q --fixed-strings \
     "parse_ut_pex(body.first(length)" "$pex_extension_source" \
     || fail "Patched libtorrent does not require the external ut_pex parser"
+"$ripgrep" -q --fixed-strings "parser == nullptr" "$pex_extension_source" \
+    || fail "Patched libtorrent must fail closed when the ut_pex parser is absent"
 
 typeset -r http_tracker_source="$libtorrent_source/src/http_tracker_connection.cpp"
 typeset -r http_tracker_header="$libtorrent_source/include/libtorrent/aux_/http_tracker_connection.hpp"
@@ -96,6 +106,8 @@ done
 [[ $("$ripgrep" --count-matches --fixed-strings \
     "response_parser->parse_http_response(data" "$http_tracker_source") == 1 ]] \
     || fail "Patched libtorrent must call the external HTTP tracker parser exactly once"
+"$ripgrep" -q --fixed-strings "response_parser == nullptr" "$http_tracker_source" \
+    || fail "Patched libtorrent must fail closed when the HTTP tracker parser is absent"
 "$ripgrep" -q --fixed-strings \
     "tracker_response_parser::maximum_http_body_size" "$http_tracker_source" \
     || fail "Patched libtorrent does not cap the final HTTP tracker body before parsing"

@@ -77,6 +77,8 @@ typeset -r expected_app_entitlements="$root_dir/Packaging/Torrent7.entitlements"
 typeset -r expected_engine_entitlements="$root_dir/Packaging/Torrent7Engine.entitlements"
 typeset -r expected_third_party_notices="$root_dir/Packaging/ThirdPartyNotices.txt"
 typeset -r boost_recycler_verifier="$root_dir/Scripts/verify-boost-asio-recycling-allocator.zsh"
+typeset -r parser_reachability_verifier="$root_dir/Scripts/verify-parser-reachability.zsh"
+typeset -r bridge_object_directory=${TORRENT7_BRIDGE_OBJECT_DIR:-}
 typeset -r temporary_dir=$(/usr/bin/mktemp -d)
 typeset -r app_entitlements_output="$temporary_dir/app-entitlements.plist"
 typeset -r app_signature_output="$temporary_dir/app-signature.txt"
@@ -373,6 +375,16 @@ case "$app_bundle_id" in
         ;;
 esac
 
+typeset parser_deps_prefix=${DEPS_PREFIX:-}
+if [[ -z $parser_deps_prefix ]]; then
+    case $expected_sanitizer in
+        none) parser_deps_prefix="$root_dir/.build/deps/arm64e/prefix" ;;
+        address) parser_deps_prefix="$root_dir/.build/deps/arm64e-address/prefix" ;;
+        thread) parser_deps_prefix="$root_dir/.build/deps/arm64e-thread/prefix" ;;
+    esac
+fi
+typeset -r libtorrent_archive="$parser_deps_prefix/lib/libtorrent-rasterbar.a"
+
 typeset -r engine_extension_dir="$plugins_dir/$expected_engine_bundle_id.appex"
 typeset -r engine_extension_info_plist="$engine_extension_dir/Contents/Info.plist"
 typeset -r engine_extension_executable="$engine_extension_dir/Contents/MacOS/TorrentEngineExtension"
@@ -575,6 +587,16 @@ reject_match "parse_magnet_uri" "$engine_symbol_output" \
     "Engine extension retains libtorrent's retired raw magnet parser"
 reject_match "TorrentClientAddMagnet" "$engine_symbol_output" \
     "Engine extension retains the retired raw magnet bridge entry point"
+[[ -x $parser_reachability_verifier ]] \
+    || fail "Missing parser-reachability verifier: $parser_reachability_verifier"
+typeset -a parser_reachability_arguments=(
+    "$engine_extension_executable"
+    "$libtorrent_archive"
+)
+if [[ -n $bridge_object_directory ]]; then
+    parser_reachability_arguments+=("$bridge_object_directory")
+fi
+"$parser_reachability_verifier" "${parser_reachability_arguments[@]}"
 /usr/bin/strings -a "$engine_extension_executable" >"$engine_strings_output"
 
 # The GUI is now pure Swift. Swift arm64e emits PAC but has no BTI codegen

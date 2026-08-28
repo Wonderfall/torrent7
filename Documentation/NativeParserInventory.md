@@ -38,6 +38,22 @@ coverage guidance and sanitizers.
 `Scripts/analyze-bridge.zsh` fails if the production bridge regains the retired
 magnet or raw-torrent APIs, or if the patched swarm, peer-extension, HTTP
 tracker-body, DHT, or resume-metainfo routes regain a native fallback.
+`Scripts/verify-parser-reachability.zsh` complements that source gate for every
+architecture slice in the shipped helper. It requires the Swift callbacks and
+typed C++ adapters in the final Mach-O, rejects uniquely retired parser symbols,
+and inspects undefined references from each affected libtorrent archive member.
+When invoked by `Scripts/build-app.zsh`, it also checks the production bridge
+objects before signing. Generic `bdecode` is deliberately not a final-product
+denylist item because bounded helper-private resume state still uses it.
+
+Runtime rejection is covered independently of symbol names. The bridge suite
+passes parser failures and malformed callback records through each production
+adapter, exercises a hash-valid but Swift-rejected swarm dictionary through a
+real session, and verifies that corrupt opaque resume metainfo cannot downgrade
+to a metadata-less torrent. The pinned libtorrent suite separately verifies
+that a DHT datagram is dropped when its external parser is absent. Together
+with the archive-member relocation checks, those tests make a rejected Swift
+parse terminal rather than a trigger for a native retry.
 
 ## Reachable native parsers retained by design
 

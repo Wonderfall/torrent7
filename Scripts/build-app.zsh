@@ -252,13 +252,15 @@ if [[ $sign_identity != "-" ]]; then
 fi
 
 if [[ $signing_mode == "distribution" ]]; then
-    "$root_dir/Scripts/verify-app.zsh" \
+    TORRENT7_BRIDGE_OBJECT_DIR="$swift_build_dir/arm64e-apple-macosx/$configuration/TorrentBridge.build" \
+        "$root_dir/Scripts/verify-app.zsh" \
         --mode distribution \
         --notarization pending \
         --team-id "$expected_team_id" \
         "$app_dir"
 else
-    "$root_dir/Scripts/verify-app.zsh" --mode development "$app_dir"
+    TORRENT7_BRIDGE_OBJECT_DIR="$swift_build_dir/arm64e-apple-macosx/$configuration/TorrentBridge.build" \
+        "$root_dir/Scripts/verify-app.zsh" --mode development "$app_dir"
 fi
 
 echo "$app_dir"

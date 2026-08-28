@@ -11,6 +11,7 @@ on:
       - "Packaging/**"
       - "Scripts/build-app.zsh"
       - "Scripts/build-deps.zsh"
+      - "Scripts/analyze-bridge.zsh"
       - "Scripts/boringssl-patch-series.sh"
       - "Scripts/verify-boringssl-hardening.zsh"
       - "Scripts/boost-patch-series.sh"
@@ -25,6 +26,7 @@ on:
       - "Scripts/verify-app.zsh"
       - "Scripts/verify-boost-asio-recycling-allocator.zsh"
       - "Scripts/verify-libtorrent-boringssl-tls.zsh"
+      - "Scripts/verify-parser-reachability.zsh"
       - "Scripts/verify-xcode.zsh"
       - "Sources/**"
       - "Tests/**"
@@ -42,6 +44,7 @@ on:
       - "Packaging/**"
       - "Scripts/build-app.zsh"
       - "Scripts/build-deps.zsh"
+      - "Scripts/analyze-bridge.zsh"
       - "Scripts/boringssl-patch-series.sh"
       - "Scripts/verify-boringssl-hardening.zsh"
       - "Scripts/boost-patch-series.sh"
@@ -56,6 +59,7 @@ on:
       - "Scripts/verify-app.zsh"
       - "Scripts/verify-boost-asio-recycling-allocator.zsh"
       - "Scripts/verify-libtorrent-boringssl-tls.zsh"
+      - "Scripts/verify-parser-reachability.zsh"
       - "Scripts/verify-xcode.zsh"
       - "Sources/**"
       - "Tests/**"
@@ -126,7 +130,8 @@ jobs:
         run: |
           set -euo pipefail
           zsh -n Scripts/build-app.zsh Scripts/release-app.zsh \
-            Scripts/test-enhanced-security-extension.zsh Scripts/verify-app.zsh
+            Scripts/test-enhanced-security-extension.zsh Scripts/verify-app.zsh \
+            Scripts/verify-parser-reachability.zsh
           xcrun swiftc -typecheck Scripts/compare-entitlements.swift
           xcrun swiftc -typecheck Scripts/verify-enhanced-security-metadata.swift
           xcrun swift Scripts/compare-entitlements.swift \
