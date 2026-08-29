@@ -3058,6 +3058,11 @@ BridgeResult validate_resume_merkle_state(lt::add_torrent_params const &params)
         if (root == nullptr) {
             return invalid_state();
         }
+        if (stored_tree.empty() && stored_mask.empty() && stored_verified.empty()) {
+            // An empty triplet represents an uncached tree. Its root remains
+            // authenticated by the exact retained info dictionary.
+            continue;
+        }
         lt::aux::merkle_tree canonical(
             files.file_num_blocks(file),
             files.blocks_per_piece(),

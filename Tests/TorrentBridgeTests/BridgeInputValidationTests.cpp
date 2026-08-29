@@ -944,6 +944,152 @@ private:
     return encoded;
 }
 
+struct MixedMerkleCapsuleFixture {
+    std::string label;
+    std::string info;
+    MetainfoCapsuleFixture local_capsule;
+    MetainfoCapsuleFixture swarm_capsule;
+};
+
+[[nodiscard]] MixedMerkleCapsuleFixture mixed_merkle_capsule_fixture(bool const hybrid)
+{
+    constexpr std::int64_t piece_length = 16 * 1024;
+    std::vector<std::uint8_t> piece_hashes(64U);
+    for (std::size_t index = 0U; index < piece_hashes.size(); ++index) {
+        piece_hashes.at(index) = static_cast<std::uint8_t>(index + 1U);
+    }
+    std::array<std::uint8_t, 32U> const large_root = v2_root(piece_hashes);
+    std::array<std::uint8_t, 32U> small_root{};
+    small_root.fill(0x5aU);
+
+    std::string info = "d";
+    append_bencoded_string(info, "file tree");
+    info.push_back('d');
+    auto append_v2_file = [&info](
+        std::string_view const name,
+        std::int64_t const size,
+        std::array<std::uint8_t, 32U> const &root
+    ) {
+        append_bencoded_string(info, name);
+        info += "d0:d";
+        append_bencoded_string(info, "length");
+        info += "i" + std::to_string(size) + "e";
+        append_bencoded_string(info, "pieces root");
+        info += "32:";
+        std::uint32_t const root_offset = static_cast<std::uint32_t>(info.size());
+        for (std::uint8_t const byte : root) {
+            info.push_back(static_cast<char>(byte));
+        }
+        info += "ee";
+        return root_offset;
+    };
+    std::uint32_t const first_root_offset = append_v2_file(
+        "a-large.bin",
+        piece_length * 2,
+        large_root
+    );
+    std::uint32_t const small_root_offset = append_v2_file(
+        "m-small.bin",
+        piece_length,
+        small_root
+    );
+    std::uint32_t const last_root_offset = append_v2_file(
+        "z-large.bin",
+        piece_length * 2,
+        large_root
+    );
+    info.push_back('e');
+
+    if (hybrid) {
+        append_bencoded_string(info, "files");
+        info.push_back('l');
+        auto append_v1_file = [&info](std::string_view const name, std::int64_t const size) {
+            info.push_back('d');
+            append_bencoded_string(info, "length");
+            info += "i" + std::to_string(size) + "e";
+            append_bencoded_string(info, "path");
+            info.push_back('l');
+            append_bencoded_string(info, name);
+            info += "ee";
+        };
+        append_v1_file("a-large.bin", piece_length * 2);
+        append_v1_file("m-small.bin", piece_length);
+        append_v1_file("z-large.bin", piece_length * 2);
+        info.push_back('e');
+    }
+
+    append_bencoded_string(info, "meta version");
+    info += "i2e";
+    append_bencoded_string(info, "name");
+    append_bencoded_string(info, "mixed");
+    append_bencoded_string(info, "piece length");
+    info += "i" + std::to_string(piece_length) + "e";
+
+    std::optional<std::pair<std::uint32_t, std::uint32_t>> v1_piece_hashes;
+    if (hybrid) {
+        append_bencoded_string(info, "pieces");
+        info += "100:";
+        std::uint32_t const piece_hash_offset = static_cast<std::uint32_t>(info.size());
+        info.append(100U, 'h');
+        v1_piece_hashes = std::pair{piece_hash_offset, 100U};
+    }
+    info.push_back('e');
+
+    std::vector<CapsuleFileFixture> const files{
+        CapsuleFileFixture{
+            .components = {"a-large.bin"},
+            .size = piece_length * 2,
+            .info_root_offset = first_root_offset,
+        },
+        CapsuleFileFixture{
+            .components = {"m-small.bin"},
+            .size = piece_length,
+            .info_root_offset = small_root_offset,
+        },
+        CapsuleFileFixture{
+            .components = {"z-large.bin"},
+            .size = piece_length * 2,
+            .info_root_offset = last_root_offset,
+        },
+    };
+    std::uint8_t const metainfo_kind = hybrid
+        ? TTORRENT_METAINFO_KIND_HYBRID
+        : TTORRENT_METAINFO_KIND_V2;
+    CapsuleLayerFixture const layer{
+        .root = large_root,
+        .hashes = piece_hashes,
+        .file_indices = {0, 2},
+    };
+    return MixedMerkleCapsuleFixture{
+        .label = hybrid ? "hybrid" : "v2",
+        .info = info,
+        .local_capsule = make_metainfo_capsule(
+            info,
+            "mixed",
+            metainfo_kind,
+            TTORRENT_CONTENT_KIND_DIRECTORY,
+            files,
+            v1_piece_hashes,
+            {layer}
+        ),
+        .swarm_capsule = make_metainfo_capsule(
+            info,
+            "mixed",
+            metainfo_kind,
+            TTORRENT_CONTENT_KIND_DIRECTORY,
+            files,
+            v1_piece_hashes,
+            {},
+            false,
+            {},
+            {},
+            {},
+            -1,
+            TTORRENT_METAINFO_INPUT_INFO_DICTIONARY
+        ),
+    };
+}
+
 [[nodiscard]] std::string v2_capsule_info(
     std::string_view const name,
     std::int64_t const size,
@@ -2705,6 +2851,144 @@ TEST_CASE("resume merkle state is canonical and authenticated by the retained v2
     REQUIRE(validate_resume_merkle_state(*v1));
     v1->merkle_trees.resize(1);
     CHECK_FALSE(validate_resume_merkle_state(*v1));
+}
+
+TEST_CASE("resume merkle state accepts only fully empty authenticated file entries")
+{
+    for (bool const hybrid : {false, true}) {
+        MixedMerkleCapsuleFixture const fixture = mixed_merkle_capsule_fixture(hybrid);
+        INFO(fixture.label);
+        TorrentLoadResult const imported = import_preparsed_metainfo_capsule(
+            fixture.local_capsule.bytes
+        );
+        REQUIRE(imported);
+        REQUIRE(imported->ti);
+        REQUIRE(imported->ti->layout().num_files() == 3);
+        REQUIRE(imported->merkle_trees.size() == 3);
+        REQUIRE(imported->merkle_tree_mask.size() == 3);
+        REQUIRE(imported->verified_leaf_hashes.size() == 3);
+        CHECK_FALSE(imported->merkle_trees[lt::file_index_t(0)].empty());
+        CHECK(imported->merkle_trees[lt::file_index_t(1)].empty());
+        CHECK(imported->merkle_tree_mask[lt::file_index_t(1)].empty());
+        CHECK(imported->verified_leaf_hashes[lt::file_index_t(1)].empty());
+        CHECK_FALSE(imported->merkle_trees[lt::file_index_t(2)].empty());
+        REQUIRE(validate_resume_merkle_state(*imported));
+
+        TorrentIdentity identity;
+        identity.canonical_id = "t:0123456789abcdef0123456789abcdef";
+        std::vector<char> const encoded = encoded_resume_data(*imported, &identity);
+        REQUIRE_FALSE(encoded.empty());
+        lt::error_code decode_error;
+        lt::add_torrent_params decoded = lt::read_resume_data(
+            lt::span<char const>(encoded),
+            decode_error
+        );
+        REQUIRE_FALSE(decode_error);
+        decoded.ti = imported->ti;
+        REQUIRE(decoded.merkle_trees.size() == 3);
+        CHECK(decoded.merkle_trees[lt::file_index_t(1)].empty());
+        CHECK(decoded.merkle_tree_mask[lt::file_index_t(1)].empty());
+        CHECK(decoded.verified_leaf_hashes[lt::file_index_t(1)].empty());
+        CHECK(validate_resume_merkle_state(decoded));
+
+        lt::add_torrent_params partially_cached = *imported;
+        partially_cached.merkle_trees[lt::file_index_t(2)].clear();
+        partially_cached.merkle_tree_mask[lt::file_index_t(2)].clear();
+        partially_cached.verified_leaf_hashes[lt::file_index_t(2)].clear();
+        REQUIRE(validate_resume_merkle_state(partially_cached));
+
+        lt::add_torrent_params malformed = partially_cached;
+        malformed.merkle_tree_mask[lt::file_index_t(2)] = lt::bitfield(1, false);
+        CHECK_FALSE(validate_resume_merkle_state(malformed));
+
+        malformed = partially_cached;
+        malformed.verified_leaf_hashes[lt::file_index_t(2)] = lt::bitfield(1, false);
+        CHECK_FALSE(validate_resume_merkle_state(malformed));
+
+        malformed = partially_cached;
+        malformed.merkle_trees[lt::file_index_t(2)].push_back(lt::sha256_hash{});
+        CHECK_FALSE(validate_resume_merkle_state(malformed));
+    }
+}
+
+TEST_CASE("mixed v2 and hybrid Merkle state survives initial save and reload")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    for (bool const hybrid : {false, true}) {
+        MixedMerkleCapsuleFixture const fixture = mixed_merkle_capsule_fixture(hybrid);
+        INFO(fixture.label);
+        fs::path const case_directory = temporary_directory.path() / fixture.label;
+        fs::path const state_directory = case_directory / "State";
+        bridge_tests::TestPayloadBroker broker(case_directory / "Payload");
+        TorrentLoadResult const imported = import_preparsed_metainfo_capsule(
+            fixture.local_capsule.bytes
+        );
+        REQUIRE(imported);
+        REQUIRE(imported->ti);
+        TTorrentStorageActivation const activation = broker.register_torrent(*imported);
+
+        SwarmMetainfoParserProbe unused_restore_probe(fixture.swarm_capsule.bytes);
+        auto unused_restore_parser = std::make_shared<BridgeSwarmMetadataParser>(
+            unused_restore_probe.callbacks()
+        );
+        {
+            TTorrentClient client(
+                state_directory.string(),
+                false,
+                broker.context(),
+                unused_restore_parser
+            );
+            client.set_session_shutdown_asynchronous(false);
+            TTorrentAddOptions options = metainfo_capsule_add_options();
+            options.starts_paused = bridge_bool(true);
+            options.enable_dht = bridge_bool(false);
+            options.enable_peer_exchange = bridge_bool(false);
+            options.enable_lsd = bridge_bool(false);
+            char added_id[TTORRENT_ID_CAPACITY]{};
+            char error[512]{};
+            std::uint64_t native_token = 0U;
+            int32_t add_outcome = TTORRENT_ADD_OUTCOME_UNKNOWN;
+            REQUIRE(::TorrentClientAddMetainfoCapsule(
+                &client,
+                fixture.local_capsule.bytes.data(),
+                static_cast<int32_t>(fixture.local_capsule.bytes.size()),
+                activation,
+                options,
+                added_id,
+                static_cast<int32_t>(sizeof(added_id)),
+                &native_token,
+                &add_outcome,
+                error,
+                static_cast<int32_t>(sizeof(error))
+            ) == 0);
+            CHECK(add_outcome == TTORRENT_ADD_COMMITTED);
+            REQUIRE(native_token != 0U);
+            REQUIRE(client.find(native_token).has_value());
+            CHECK(unused_restore_probe.parse_count == 0);
+        }
+        unused_restore_parser.reset();
+        CHECK(unused_restore_probe.context_release_count == 1);
+
+        SwarmMetainfoParserProbe restore_probe(fixture.swarm_capsule.bytes);
+        auto restore_parser = std::make_shared<BridgeSwarmMetadataParser>(
+            restore_probe.callbacks()
+        );
+        {
+            TTorrentClient restored(
+                state_directory.string(),
+                false,
+                broker.context(),
+                restore_parser
+            );
+            restored.set_session_shutdown_asynchronous(false);
+            CHECK(restore_probe.parse_count == 1);
+            CHECK(restore_probe.capsule_release_count == 1);
+            REQUIRE(restored.session.get_torrents().size() == 1U);
+        }
+        restore_parser.reset();
+        CHECK(restore_probe.context_release_count == 1);
+        CHECK(restore_probe.outstanding_allocation_count == 0);
+    }
 }
 
 TEST_CASE("preparsed hybrid capsule accepts the compatible omitted tail pad")
