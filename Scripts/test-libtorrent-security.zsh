@@ -90,6 +90,10 @@ restore_configuration=0
         "$source_dir/test/test_enum_net.cpp.nat64_prefix_discovery"
     ./test_enum_net --no-redirect \
         "$source_dir/test/test_enum_net.cpp.nat64_discovery_fails_closed_on_malformed_answers"
+    ./test_enum_net --no-redirect \
+        "$source_dir/test/test_enum_net.cpp.device_bind_failure_is_terminal"
+    ./test_enum_net --no-redirect \
+        "$source_dir/test/test_enum_net.cpp.native_device_binding_is_family_safe"
     ./test_disk_io --no-redirect \
         "$source_dir/test/test_disk_io.cpp.pread_hash_respects_checking_memory_budget"
     ./test_tracker_manager --no-redirect \
@@ -153,6 +157,8 @@ restore_configuration=0
         "$source_dir/test/test_http_connection.cpp.no_proxy_ssl"
     ./test_http_connection --no-redirect \
         "$source_dir/test/test_http_connection.cpp.endpoint_filter_rechecks_redirect_target"
+    ./test_http_connection --no-redirect \
+        "$source_dir/test/test_http_connection.cpp.device_bind_failure_prevents_http_connect"
     ./test_http_parser --no-redirect \
         "$source_dir/test/test_http_parser.cpp.http_parser"
     ./test_ip_voter --no-redirect

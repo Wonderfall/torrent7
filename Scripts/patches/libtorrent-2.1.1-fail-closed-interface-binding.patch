@@ -1,0 +1,352 @@
+diff --git a/include/libtorrent/aux_/bind_to_device.hpp b/include/libtorrent/aux_/bind_to_device.hpp
+index 72640260e..bdea0f97e 100644
+--- a/include/libtorrent/aux_/bind_to_device.hpp
++++ b/include/libtorrent/aux_/bind_to_device.hpp
+@@ -21,6 +21,24 @@ see LICENSE file.
+ 
+ namespace libtorrent { namespace aux {
+ 
++	namespace detail {
++
++		template <typename T>
++		void close_failed_device_binding(T& sock, error_code& ec)
++		{
++			if (!ec) return;
++
++			error_code const bind_error = ec;
++			error_code ignored;
++			if constexpr (requires { sock.close(ignored); })
++				sock.close(ignored);
++			else
++				sock.close();
++			ec = bind_error;
++		}
++
++	}
++
+ #if defined SO_BINDTODEVICE
+ 
+ 	struct bind_to_device
+@@ -42,6 +60,7 @@ namespace libtorrent { namespace aux {
+ 	void bind_device(T& sock, char const* device, error_code& ec)
+ 	{
+ 		sock.set_option(bind_to_device(device), ec);
++		detail::close_failed_device_binding(sock, ec);
+ 	}
+ 
+ #define TORRENT_HAS_BINDTODEVICE 1
+@@ -111,4 +130,3 @@ namespace libtorrent { namespace aux {
+ } }
+ 
+ #endif
+-
+diff --git a/include/libtorrent/aux_/enum_net.hpp b/include/libtorrent/aux_/enum_net.hpp
+index 2fdf3265f..f3fc0996e 100644
+--- a/include/libtorrent/aux_/enum_net.hpp
++++ b/include/libtorrent/aux_/enum_net.hpp
+@@ -132,19 +132,23 @@ enum class if_state : std::uint8_t {
+ 	// populated or not.
+ 	TORRENT_EXTRA_EXPORT bool has_any_internet_route(span<ip_route const> routes);
+ 
+-	// attempt to bind socket to the device with the specified name. For systems
+-	// that don't support SO_BINDTODEVICE the socket will be bound to one of the
+-	// IP addresses of the specified device. In this case it is necessary to
+-	// verify the local endpoint of the socket once the connection is established.
+-	// the returned address is the ip the socket was bound to (or address_v4::any()
+-	// in case SO_BINDTODEVICE succeeded and we don't need to verify it).
++	// Attempt to bind a socket to the device with the specified name. On systems
++	// with native device binding, failure is terminal and the socket is closed.
++	// Systems without native support bind to one of the device's IP addresses and
++	// must verify the local endpoint once the connection is established. The
++	// returned address is the IP the socket was bound to, or the unspecified
++	// address for its protocol when native device binding succeeded.
+ 	// TODO: 3 use string_view for device_name
+ 	template <class Socket>
+ 	address bind_socket_to_device(io_context& ios, Socket& sock
+ 		, tcp const& protocol
+ 		, char const* device_name, int port, error_code& ec)
+ 	{
+-		tcp::endpoint bind_ep(address_v4::any(), std::uint16_t(port));
++		tcp::endpoint bind_ep(
++			protocol == boost::asio::ip::tcp::v6()
++				? address(address_v6::any())
++				: address(address_v4::any()),
++			std::uint16_t(port));
+ 
+ 		address ip = make_address(device_name, ec);
+ 		if (!ec)
+@@ -163,13 +167,13 @@ enum class if_state : std::uint8_t {
+ 		ec.clear();
+ 
+ #if TORRENT_HAS_BINDTODEVICE
+-		// try to use SO_BINDTODEVICE here, if that exists. If it fails,
+-		// fall back to the mechanism we have below
++		// A configured native device binding is a security boundary. Never
++		// downgrade a failed device bind to an address-only bind.
++		TORRENT_UNUSED(ios);
+ 		aux::bind_device(sock, device_name, ec);
+-		if (ec)
+-#endif
++		if (ec) return bind_ep.address();
++#else
+ 		{
+-			ec.clear();
+ 			// TODO: 2 this could be done more efficiently by just looking up
+ 			// the interface with the given name, maybe even with if_nametoindex()
+ 			std::vector<ip_interface> ifs = enum_net_interfaces(ios, ec);
+@@ -197,6 +201,7 @@ enum class if_state : std::uint8_t {
+ 				return bind_ep.address();
+ 			}
+ 		}
++#endif
+ 		sock.bind(bind_ep, ec);
+ 		return bind_ep.address();
+ 	}
+diff --git a/src/http_connection.cpp b/src/http_connection.cpp
+index be73073cd..4beee357d 100644
+--- a/src/http_connection.cpp
++++ b/src/http_connection.cpp
+@@ -295,10 +295,11 @@ void http_connection::start(std::string const& hostname, int port
+ 			error_code ec;
+ 			m_sock->open(m_bind_addr->ip.is_v4() ? tcp::v4() : tcp::v6(), ec);
+ #if TORRENT_HAS_BINDTODEVICE
+-			error_code ignore;
+-			bind_device(*m_sock, m_bind_addr->device.c_str(), ignore);
++			if (!ec && !m_bind_addr->device.empty())
++				bind_device(*m_sock, m_bind_addr->device.c_str(), ec);
+ #endif
+-			m_sock->bind(tcp::endpoint(m_bind_addr->ip, 0), ec);
++			if (!ec)
++				m_sock->bind(tcp::endpoint(m_bind_addr->ip, 0), ec);
+ 			if (ec)
+ 			{
+ 				post(m_ios, std::bind(&http_connection::callback
+diff --git a/src/session_impl.cpp b/src/session_impl.cpp
+index c0d5ee092..0f28f9fb2 100644
+--- a/src/session_impl.cpp
++++ b/src/session_impl.cpp
+@@ -1764,6 +1764,7 @@ retry:
+ 				// have SO_BINDTODEVICE functionality, use it now.
+ #if TORRENT_HAS_BINDTODEVICE
+ 				bind_device(*ret->sock, lep.device.c_str(), ec);
++				last_op = operation_t::sock_bind_to_device;
+ #ifndef TORRENT_DISABLE_LOGGING
+ 				if (ec && should_log())
+ 				{
+@@ -1771,7 +1772,14 @@ retry:
+ 						, lep.device.c_str(), ec.message().c_str());
+ 				}
+ #endif // TORRENT_DISABLE_LOGGING
+-				ec.clear();
++				if (ec)
++				{
++					if (m_alerts.should_post<listen_failed_alert>())
++						m_alerts.emplace_alert<listen_failed_alert>(lep.device
++							, bind_ep, last_op, ec, sock_type);
++					ret->sock.reset();
++					return ret;
++				}
+ #endif // TORRENT_HAS_BINDTODEVICE
+ 			}
+ 
+@@ -1909,6 +1917,7 @@ retry:
+ 			if (!lep.device.empty())
+ 			{
+ 				bind_device(ret->udp_sock->sock, lep.device.c_str(), ec);
++				last_op = operation_t::sock_bind_to_device;
+ #ifndef TORRENT_DISABLE_LOGGING
+ 				if (ec && should_log())
+ 				{
+@@ -1916,7 +1925,13 @@ retry:
+ 						, lep.device.c_str(), ec.message().c_str());
+ 				}
+ #endif // TORRENT_DISABLE_LOGGING
+-				ec.clear();
++				if (ec)
++				{
++					if (m_alerts.should_post<listen_failed_alert>())
++						m_alerts.emplace_alert<listen_failed_alert>(lep.device
++							, udp_bind_ep, last_op, ec, udp_sock_type);
++					return ret;
++				}
+ 			}
+ #endif
+ 			ret->udp_sock->sock.bind(udp_bind_ep, ec);
+diff --git a/test/test_enum_net.cpp b/test/test_enum_net.cpp
+index 038a63b6d..d778bf071 100644
+--- a/test/test_enum_net.cpp
++++ b/test/test_enum_net.cpp
+@@ -10,6 +10,7 @@ see LICENSE file.
+ 
+ #include "test.hpp"
+ #include "setup_transfer.hpp" // for supports_ipv6
++#include "libtorrent/aux_/bind_to_device.hpp"
+ #include "libtorrent/aux_/enum_net.hpp"
+ #include "libtorrent/address.hpp"
+ #include "libtorrent/aux_/ip_helpers.hpp"
+@@ -20,6 +21,117 @@ see LICENSE file.
+ using namespace lt;
+ using namespace lt::aux;
+ 
++namespace {
++
++#if TORRENT_HAS_BINDTODEVICE
++	struct failing_device_bind_socket
++	{
++		template <typename Option>
++		void set_option(Option const&, error_code& ec)
++		{
++			++set_option_calls;
++			ec = error_code(boost::system::errc::permission_denied, generic_category());
++		}
++
++		void close(error_code& ec)
++		{
++			closed = true;
++			ec = error_code(boost::system::errc::io_error, generic_category());
++		}
++
++		void bind(tcp::endpoint const&, error_code& ec)
++		{
++			++address_bind_calls;
++			ec.clear();
++		}
++
++		int set_option_calls = 0;
++		int address_bind_calls = 0;
++		bool closed = false;
++	};
++
++	template <typename Protocol>
++	void expect_native_device_bind_succeeds(Protocol const protocol)
++	{
++		io_context ios;
++		typename Protocol::socket socket(ios);
++		error_code ec;
++		socket.open(protocol, ec);
++		TEST_CHECK(!ec);
++		bind_device(socket, "lo0", ec);
++		TEST_CHECK(!ec);
++		TEST_CHECK(socket.is_open());
++#if defined SO_BINDTODEVICE
++		std::array<char, IFNAMSIZ + 1> device{};
++		socklen_t size = socklen_t(device.size());
++		int const result = ::getsockopt(socket.native_handle(), SOL_SOCKET
++			, SO_BINDTODEVICE, device.data(), &size);
++		TEST_EQUAL(result, 0);
++		TEST_EQUAL(std::string(device.data()), "lo0");
++#endif
++	}
++
++	void expect_outgoing_device_bind_succeeds(tcp const protocol)
++	{
++		io_context ios;
++		tcp::socket socket(ios);
++		error_code ec;
++		socket.open(protocol, ec);
++		TEST_CHECK(!ec);
++		address const bound = bind_socket_to_device(
++			ios, socket, protocol, "lo0", 0, ec);
++		TEST_CHECK(!ec);
++		TEST_CHECK(bound.is_unspecified());
++		TEST_EQUAL(bound.is_v6(), protocol == tcp::v6());
++		TEST_CHECK(socket.is_open());
++	}
++#endif
++
++}
++
++#if TORRENT_HAS_BINDTODEVICE
++TORRENT_TEST(device_bind_failure_is_terminal)
++{
++	error_code const expected(
++		boost::system::errc::permission_denied, generic_category());
++
++	failing_device_bind_socket direct;
++	error_code ec;
++	bind_device(direct, "lo0", ec);
++	TEST_CHECK(ec == expected);
++	TEST_EQUAL(direct.set_option_calls, 1);
++	TEST_CHECK(direct.closed);
++
++	failing_device_bind_socket outgoing;
++	io_context ios;
++	address const bound = bind_socket_to_device(
++		ios, outgoing, tcp::v4(), "lo0", 0, ec);
++	TEST_CHECK(ec == expected);
++	TEST_CHECK(bound == address_v4::any());
++	TEST_EQUAL(outgoing.set_option_calls, 1);
++	TEST_EQUAL(outgoing.address_bind_calls, 0);
++	TEST_CHECK(outgoing.closed);
++}
++
++TORRENT_TEST(native_device_binding_is_family_safe)
++{
++#if defined SO_BINDTODEVICE
++	bind_to_device const option("lo0");
++	TEST_EQUAL(option.level(tcp::v4()), SOL_SOCKET);
++	TEST_EQUAL(option.name(tcp::v4()), SO_BINDTODEVICE);
++	TEST_EQUAL(option.level(tcp::v6()), SOL_SOCKET);
++	TEST_EQUAL(option.name(tcp::v6()), SO_BINDTODEVICE);
++#endif
++
++	expect_native_device_bind_succeeds(tcp::v4());
++	expect_native_device_bind_succeeds(tcp::v6());
++	expect_native_device_bind_succeeds(udp::v4());
++	expect_native_device_bind_succeeds(udp::v6());
++	expect_outgoing_device_bind_succeeds(tcp::v4());
++	expect_outgoing_device_bind_succeeds(tcp::v6());
++}
++#endif
++
+ TORRENT_TEST(is_local)
+ {
+ 	error_code ec;
+diff --git a/test/test_http_connection.cpp b/test/test_http_connection.cpp
+index b0284c7bd..6ceb6503b 100644
+--- a/test/test_http_connection.cpp
++++ b/test/test_http_connection.cpp
+@@ -16,6 +16,7 @@ see LICENSE file.
+ #include "test_utils.hpp"
+ 
+ #include "libtorrent/socket.hpp"
++#include "libtorrent/aux_/bind_to_device.hpp"
+ #include "libtorrent/aux_/socket_io.hpp" // print_endpoint
+ #include "libtorrent/aux_/http_connection.hpp"
+ #include "libtorrent/aux_/resolver.hpp"
+@@ -364,6 +365,35 @@ TORRENT_TEST(no_keepalive)
+ 	run_suite("http", settings_pack::none, 0);
+ }
+ 
++#if TORRENT_HAS_BINDTODEVICE
++TORRENT_TEST(device_bind_failure_prevents_http_connect)
++{
++	reset_globals();
++
++#if TORRENT_USE_SSL
++	auto ssl_ctx = aux::ssl::make_client_context(
++		aux::ssl::client_context_authentication::none);
++#endif
++	auto connection = std::make_shared<aux::http_connection>(ios, res
++		, &::http_handler_test, 1024 * 1024, &::http_connect_handler_test
++		, aux::http_filter_handler(), aux::hostname_filter_handler()
++#if TORRENT_USE_SSL
++		, &ssl_ctx
++#endif
++		);
++	aux::bind_info_t const bind_info{
++		"torrent7-interface-that-does-not-exist", address_v4::loopback()};
++	connection->start("127.0.0.1", 80, seconds(1), nullptr, false, 0, bind_info);
++	ios.restart();
++	ios.run();
++
++	TEST_EQUAL(connect_handler_called, 0);
++	TEST_EQUAL(handler_called, 1);
++	TEST_CHECK(bool(g_error_code));
++	TEST_CHECK(!connection->socket().is_open());
++}
++#endif
++
+ TORRENT_TEST(endpoint_filter_rechecks_redirect_target)
+ {
+ 	reset_globals();

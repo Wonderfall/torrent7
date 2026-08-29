@@ -233,7 +233,7 @@ BridgeResult apply_queue_state_locked(
 
 namespace {
 
-struct NativeNetworkStateExpectation {
+struct NativeNetworkConfigurationExpectation {
     std::string_view listen_interfaces;
     std::string_view outgoing_interfaces;
     bool enable_upnp;
@@ -250,15 +250,17 @@ struct NativeNetworkStateExpectation {
     bool session_paused;
 };
 
-BridgeResult acknowledge_network_state_locked(
+BridgeResult acknowledge_network_configuration_locked(
     TTorrentClient &client,
-    NativeNetworkStateExpectation const &expected,
+    NativeNetworkConfigurationExpectation const &expected,
     std::string_view failure_message
 ) TORRENT_BRIDGE_REQUIRES(client.lock)
 {
     // get_settings() and is_paused() are synchronous libtorrent-context calls.
     // They cannot complete until the settings and pause/resume operations queued
-    // before them have run on the session's single network executor.
+    // before them have run on the session's single network executor. This is a
+    // configuration barrier, not a probe of future sockets. The pinned
+    // libtorrent closes each socket if its native interface bind fails.
     lt::settings_pack const current = client.session.get_settings();
     bool const session_paused = client.session.is_paused();
     if (current.get_str(lt::settings_pack::listen_interfaces) != expected.listen_interfaces
@@ -304,9 +306,9 @@ BridgeResult block_network_locked(
     client.session.apply_settings(std::move(settings));
     client.session.pause();
 
-    BridgeResult const acknowledged = acknowledge_network_state_locked(
+    BridgeResult const acknowledged = acknowledge_network_configuration_locked(
         client,
-        NativeNetworkStateExpectation{
+        NativeNetworkConfigurationExpectation{
             .listen_interfaces = "",
             .outgoing_interfaces = "",
             .enable_upnp = false,
@@ -322,7 +324,7 @@ BridgeResult block_network_locked(
             .use_dht_as_fallback = std::nullopt,
             .session_paused = true,
         },
-        "Native network containment could not be confirmed."
+        "Native network containment configuration could not be confirmed."
     );
     if (!acknowledged) {
         return acknowledged;
@@ -2649,7 +2651,7 @@ BridgeResult rollback_source_applications_or_contain(
     BridgeResult const containment = block_network_locked(client, containment_changes);
     publisher.add(containment_changes);
     if (!containment) {
-        message += " Source-policy rollback was incomplete, and network containment could not be confirmed: ";
+        message += " Source-policy rollback was incomplete, and network containment configuration could not be confirmed: ";
         message += containment.error().message;
         return bridge_error(2, std::move(message));
     }
@@ -4821,9 +4823,9 @@ extern "C" int32_t TorrentClientApplySettings(
             client->session.resume();
         }
 
-        BridgeResult const acknowledged = acknowledge_network_state_locked(
+        BridgeResult const acknowledged = acknowledge_network_configuration_locked(
             *client,
-            NativeNetworkStateExpectation{
+            NativeNetworkConfigurationExpectation{
                 .listen_interfaces = listen_interface_settings,
                 .outgoing_interfaces = outgoing_interface_settings,
                 .enable_upnp = !network_blocked && enable_port_forwarding,
@@ -4840,8 +4842,8 @@ extern "C" int32_t TorrentClientApplySettings(
                 .session_paused = expected_session_paused,
             },
             network_blocked
-                ? "Native network containment could not be confirmed."
-                : "Native network binding could not be confirmed."
+                ? "Native network containment configuration could not be confirmed."
+                : "Native network configuration could not be confirmed."
         );
         if (!acknowledged) {
             return acknowledged;
