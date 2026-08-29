@@ -15,8 +15,35 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <vector>
 
 namespace {
+
+const void* volatile observed_protocol_method = nullptr;
+
+struct ReplaySSLContexts {
+  std::vector<bssl::UniquePtr<SSL_CTX>> decoys;
+  bssl::UniquePtr<SSL_CTX> source;
+  bssl::UniquePtr<SSL_CTX> destination;
+};
+
+[[nodiscard]] ReplaySSLContexts make_replay_ssl_contexts(std::size_t attempt)
+{
+  ReplaySSLContexts result;
+  result.decoys.reserve(attempt);
+  for (std::size_t index = 0; index < attempt; ++index) {
+    result.decoys.emplace_back(SSL_CTX_new(TLS_with_buffers_method()));
+    if (!result.decoys.back()) {
+      torrent7::test_support::fail_replay_attempt_setup();
+    }
+  }
+  result.source.reset(SSL_CTX_new(TLS_with_buffers_method()));
+  result.destination.reset(SSL_CTX_new(TLS_with_buffers_method()));
+  if (!result.source || !result.destination) {
+    torrent7::test_support::fail_replay_attempt_setup();
+  }
+  return result;
+}
 
 struct TypedAllocationA {
   std::array<std::uint8_t, 17> bytes{};
@@ -158,34 +185,45 @@ torrent7_new_boringssl_typed_b()
 int main()
 {
   bssl::UniquePtr<SSL_CTX> source(SSL_CTX_new(TLS_with_buffers_method()));
-  bssl::UniquePtr<SSL_CTX> destination(SSL_CTX_new(TLS_with_buffers_method()));
-  if (!source || !destination) {
-    std::fputs("could not create BoringSSL contexts\n", stderr);
+  if (!source) {
+    std::fputs("could not create BoringSSL context\n", stderr);
     return 1;
   }
   SSL_CTX_set_custom_verify(source.get(), SSL_VERIFY_PEER, verify_ok);
-  SSL_CTX_set_custom_verify(destination.get(), SSL_VERIFY_PEER, verify_ok);
   auto* const source_impl = bssl::FromOpaque(source.get());
-  auto* const destination_impl = bssl::FromOpaque(destination.get());
   if (torrent7_invoke_boringssl_custom_verify(source_impl) != ssl_verify_ok
       || torrent7_load_boringssl_protocol_method(source_impl) == nullptr) {
     std::fputs("normal BoringSSL authenticated pointer use failed\n", stderr);
     return 1;
   }
 
+  using torrent7::test_support::complete_replay_without_authentication_fault;
   using torrent7::test_support::replay_triggers_pointer_authentication_failure;
-  if (!replay_triggers_pointer_authentication_failure([&] {
-        replay_context_bytes(destination_impl, source_impl);
-        static_cast<void>(torrent7_invoke_boringssl_custom_verify(destination_impl));
+  if (!replay_triggers_pointer_authentication_failure([](std::size_t attempt) {
+        auto replay = make_replay_ssl_contexts(attempt);
+        SSL_CTX_set_custom_verify(replay.source.get(), SSL_VERIFY_PEER, verify_ok);
+        SSL_CTX_set_custom_verify(
+            replay.destination.get(), SSL_VERIFY_PEER, verify_ok);
+        auto* const replay_source_impl = bssl::FromOpaque(replay.source.get());
+        auto* const replay_destination_impl =
+            bssl::FromOpaque(replay.destination.get());
+        replay_context_bytes(replay_destination_impl, replay_source_impl);
+        static_cast<void>(
+            torrent7_invoke_boringssl_custom_verify(replay_destination_impl));
+        complete_replay_without_authentication_fault();
       })) {
     std::fputs("BoringSSL custom-verify callback replay was accepted\n", stderr);
     return 1;
   }
-  if (!replay_triggers_pointer_authentication_failure([&] {
-        replay_context_bytes(destination_impl, source_impl);
-        if (torrent7_load_boringssl_protocol_method(destination_impl) == nullptr) {
-          ::_exit(90);
-        }
+  if (!replay_triggers_pointer_authentication_failure([](std::size_t attempt) {
+        auto replay = make_replay_ssl_contexts(attempt);
+        auto* const replay_source_impl = bssl::FromOpaque(replay.source.get());
+        auto* const replay_destination_impl =
+            bssl::FromOpaque(replay.destination.get());
+        replay_context_bytes(replay_destination_impl, replay_source_impl);
+        observed_protocol_method =
+            torrent7_load_boringssl_protocol_method(replay_destination_impl);
+        complete_replay_without_authentication_fault();
       })) {
     std::fputs("BoringSSL protocol-method pointer replay was accepted\n", stderr);
     return 1;

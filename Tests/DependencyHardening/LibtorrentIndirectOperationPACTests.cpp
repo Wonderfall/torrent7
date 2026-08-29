@@ -86,9 +86,17 @@ int main()
     reinterpret_cast<queue_item*>(destination_item.data())->~queue_item();
   }
 
+  using torrent7::test_support::complete_replay_without_authentication_fault;
   using torrent7::test_support::replay_triggers_pointer_authentication_failure;
 
-  if (!replay_triggers_pointer_authentication_failure([] {
+  if (!replay_triggers_pointer_authentication_failure([](std::size_t attempt) {
+        std::vector<std::unique_ptr<libtorrent::aux::chained_buffer>> decoys;
+        decoys.reserve(attempt);
+        for (std::size_t index = 0; index < attempt; ++index) {
+          auto decoy = std::make_unique<libtorrent::aux::chained_buffer>();
+          decoy->append_buffer(std::vector<char>(4), 4);
+          decoys.push_back(std::move(decoy));
+        }
         libtorrent::aux::chained_buffer source;
         libtorrent::aux::chained_buffer destination;
         source.append_buffer(std::vector<char>(4), 4);
@@ -98,15 +106,22 @@ int main()
             &source.m_vec.front(),
             sizeof(source.m_vec.front()));
         torrent7_invoke_chained_buffer_destructor(&destination.m_vec.front());
-        ::_exit(90);
+        complete_replay_without_authentication_fault();
       }))
   {
     std::fputs("chained-buffer destructor callback replay was accepted\n", stderr);
     return 1;
   }
 
-  if (!replay_triggers_pointer_authentication_failure([] {
+  if (!replay_triggers_pointer_authentication_failure([](std::size_t attempt) {
         using queue_type = libtorrent::heterogeneous_queue<queue_base>;
+        std::vector<std::unique_ptr<queue_type>> decoys;
+        decoys.reserve(attempt);
+        for (std::size_t index = 0; index < attempt; ++index) {
+          auto decoy = std::make_unique<queue_type>();
+          static_cast<void>(decoy->emplace_back<queue_item>());
+          decoys.push_back(std::move(decoy));
+        }
         queue_type source;
         queue_type destination;
         static_cast<void>(source.emplace_back<queue_item>());
@@ -122,7 +137,7 @@ int main()
         new (source_item.data()) queue_item;
         torrent7_invoke_heterogeneous_queue_move(
             header, destination_item.data(), source_item.data());
-        ::_exit(90);
+        complete_replay_without_authentication_fault();
       }))
   {
     std::fputs("heterogeneous-queue move callback replay was accepted\n", stderr);

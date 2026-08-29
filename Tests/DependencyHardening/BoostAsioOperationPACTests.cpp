@@ -14,6 +14,7 @@
 #include <memory>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -200,6 +201,32 @@ private:
 };
 
 boost::asio::execution_context::id tracked_service::id;
+
+class tracked_service_allocation final
+{
+public:
+  tracked_service_allocation()
+  {
+    static_cast<void>(boost::asio::make_service<tracked_service>(
+        context_, &destroyed_));
+  }
+
+private:
+  bool destroyed_ = false;
+  boost::asio::execution_context context_;
+};
+
+template <typename Factory>
+[[nodiscard]] auto make_heap_replay_decoys(
+    std::size_t count, Factory factory)
+{
+  using decoy_type = std::invoke_result_t<Factory&>;
+  std::vector<decoy_type> decoys;
+  decoys.reserve(count);
+  for (std::size_t index = 0; index < count; ++index)
+    decoys.push_back(factory());
+  return decoys;
+}
 
 void replay_service_destroy_callback(
     tracked_service& destination, tracked_service const& source)
@@ -472,6 +499,7 @@ int main()
     std::fputs("execution_context service was not destroyed normally\n", stderr);
     return 1;
   }
+  using torrent7::test_support::complete_replay_without_authentication_fault;
   using torrent7::test_support::replay_triggers_pointer_authentication_failure;
 
   if (!replay_triggers_pointer_authentication_failure([] {
@@ -479,6 +507,7 @@ int main()
         scheduler_probe destination;
         replay_object_bytes(&destination, &source, sizeof(source));
         destination.complete(nullptr, boost::system::error_code(), 0);
+        complete_replay_without_authentication_fault();
       }))
   {
     std::fputs("scheduler callback replay was accepted\n", stderr);
@@ -490,6 +519,7 @@ int main()
         reactor_probe destination;
         replay_object_bytes(&destination, &source, sizeof(source));
         static_cast<void>(destination.perform());
+        complete_replay_without_authentication_fault();
       }))
   {
     std::fputs("reactor callback replay was accepted\n", stderr);
@@ -509,33 +539,44 @@ int main()
             executor_implementation(source),
             sizeof(void*));
         destination();
+        complete_replay_without_authentication_fault();
       }))
   {
     std::fputs("executor invocation callback replay was accepted\n", stderr);
     return 1;
   }
 
-  if (!replay_triggers_pointer_authentication_failure([] {
+  if (!replay_triggers_pointer_authentication_failure([](std::size_t attempt) {
         std::allocator<std::byte> child_allocator;
+        [[maybe_unused]] auto decoys = make_heap_replay_decoys(attempt, [&] {
+          return std::make_unique<boost::asio::detail::executor_function>(
+              executor_probe{nullptr}, child_allocator);
+        });
         auto* source = new boost::asio::detail::executor_function(
             executor_probe{nullptr}, child_allocator);
         auto* destination = new boost::asio::detail::executor_function(
             executor_probe{nullptr}, child_allocator);
         replay_executor_holder(*destination, *source);
         (*destination)();
+        complete_replay_without_authentication_fault();
       }))
   {
     std::fputs("executor implementation carrier replay was accepted\n", stderr);
     return 1;
   }
 
-  if (!replay_triggers_pointer_authentication_failure([] {
+  if (!replay_triggers_pointer_authentication_failure([](std::size_t attempt) {
+        [[maybe_unused]] auto decoys = make_heap_replay_decoys(attempt, [] {
+          return std::make_unique<any_executor_access>(
+              any_executor_probe{nullptr});
+        });
         auto* source = new any_executor_access(any_executor_probe{nullptr});
         auto* destination = new any_executor_access(
             any_executor_probe{nullptr});
         replay_object_bytes(destination, source, sizeof(*destination));
         observed_carrier =
             torrent7_any_executor_object_functions(destination);
+        complete_replay_without_authentication_fault();
       }))
   {
     std::fputs("any_executor object-functions carrier replay was accepted\n",
@@ -543,25 +584,35 @@ int main()
     return 1;
   }
 
-  if (!replay_triggers_pointer_authentication_failure([] {
+  if (!replay_triggers_pointer_authentication_failure([](std::size_t attempt) {
+        [[maybe_unused]] auto decoys = make_heap_replay_decoys(attempt, [] {
+          return std::make_unique<any_executor_access>(
+              any_executor_probe{nullptr});
+        });
         auto* source = new any_executor_access(any_executor_probe{nullptr});
         auto* destination = new any_executor_access(
             any_executor_probe{nullptr});
         replay_object_bytes(destination, source, sizeof(*destination));
         observed_carrier = torrent7_any_executor_target(destination);
+        complete_replay_without_authentication_fault();
       }))
   {
     std::fputs("any_executor target carrier replay was accepted\n", stderr);
     return 1;
   }
 
-  if (!replay_triggers_pointer_authentication_failure([] {
+  if (!replay_triggers_pointer_authentication_failure([](std::size_t attempt) {
+        [[maybe_unused]] auto decoys = make_heap_replay_decoys(attempt, [] {
+          return std::make_unique<any_executor_access>(
+              any_executor_probe{nullptr});
+        });
         auto* source = new any_executor_access(any_executor_probe{nullptr});
         auto* destination = new any_executor_access(
             any_executor_probe{nullptr});
         replay_object_bytes(destination, source, sizeof(*destination));
         observed_carrier =
             torrent7_any_executor_target_functions(destination);
+        complete_replay_without_authentication_fault();
       }))
   {
     std::fputs("any_executor target-functions carrier replay was accepted\n",
@@ -569,7 +620,11 @@ int main()
     return 1;
   }
 
-  if (!replay_triggers_pointer_authentication_failure([] {
+  if (!replay_triggers_pointer_authentication_failure([](std::size_t attempt) {
+        [[maybe_unused]] auto decoys = make_heap_replay_decoys(attempt, [] {
+          return std::make_unique<property_executor_access>(
+              boost::asio::system_executor());
+        });
         auto* source = new property_executor_access(
             boost::asio::system_executor());
         auto* destination = new property_executor_access(
@@ -577,6 +632,7 @@ int main()
         replay_object_bytes(destination, source, sizeof(*destination));
         observed_carrier =
             torrent7_any_executor_property_functions(destination);
+        complete_replay_without_authentication_fault();
       }))
   {
     std::fputs("any_executor property-functions carrier replay was accepted\n",
@@ -584,8 +640,12 @@ int main()
     return 1;
   }
 
-  if (!replay_triggers_pointer_authentication_failure([] {
+  if (!replay_triggers_pointer_authentication_failure([](std::size_t attempt) {
         std::allocator<std::byte> child_allocator;
+        [[maybe_unused]] auto decoys = make_heap_replay_decoys(attempt, [&] {
+          return std::make_unique<boost::asio::detail::executor_function>(
+              executor_probe{nullptr}, child_allocator);
+        });
         bool source_called = false;
         bool destination_called = false;
         auto source = std::make_unique<boost::asio::detail::executor_function>(
@@ -597,6 +657,7 @@ int main()
             executor_implementation(*source),
             sizeof(void*));
         destination.reset();
+        complete_replay_without_authentication_fault();
       }))
   {
     std::fputs("executor destruction callback replay was accepted\n", stderr);
@@ -611,6 +672,7 @@ int main()
         child_executor.invoke_from_replayed_table(
             static_cast<boost::asio::detail::executor_function&&>(
               child_function));
+        complete_replay_without_authentication_fault();
       }))
   {
     std::fputs("any_executor dispatch-table replay was accepted\n", stderr);
@@ -626,6 +688,7 @@ int main()
         any_executor_access child_executor{blocking_system_executor};
         child_executor.invoke_blocking_from_replayed_table(
             boost::asio::detail::executor_function_view(child_function));
+        complete_replay_without_authentication_fault();
       }))
   {
     std::fputs(
@@ -633,9 +696,12 @@ int main()
     return 1;
   }
 
-  if (!replay_triggers_pointer_authentication_failure([] {
+  if (!replay_triggers_pointer_authentication_failure([](std::size_t attempt) {
         static_assert(sizeof(tracked_service)
             == sizeof(boost::asio::execution_context::service) + sizeof(void*));
+        [[maybe_unused]] auto decoys = make_heap_replay_decoys(attempt, [] {
+          return std::make_unique<tracked_service_allocation>();
+        });
         auto source_context =
             std::make_unique<boost::asio::execution_context>();
         auto destination_context =
@@ -648,6 +714,7 @@ int main()
             *destination_context, &destination_destroyed);
         replay_service_destroy_callback(destination, source);
         destination_context.reset();
+        complete_replay_without_authentication_fault();
       }))
   {
     std::fputs("execution_context service destroy replay was accepted\n", stderr);
@@ -664,6 +731,7 @@ int main()
             destination_function);
         replay_executor_view_field(destination, source, 0);
         destination();
+        complete_replay_without_authentication_fault();
       }))
   {
     std::fputs("executor_function_view callback replay was accepted\n", stderr);
@@ -680,6 +748,7 @@ int main()
             destination_function);
         replay_executor_view_field(destination, source, sizeof(void*));
         destination();
+        complete_replay_without_authentication_fault();
       }))
   {
     std::fputs("executor_function_view context replay was accepted\n", stderr);
