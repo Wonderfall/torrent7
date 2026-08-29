@@ -1,0 +1,85 @@
+name: Parser Benchmarks
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+  XCODE_CACHE_KEY: xcode-26.6-17F113
+
+concurrency:
+  group: parser-benchmarks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    name: Check parser latency budgets
+    runs-on: macos-26
+    permissions: {}
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin "$GITHUB_REF"
+          git checkout --detach FETCH_HEAD
+
+      - name: Verify Apple Silicon runner
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+
+          if [[ "$(uname -m)" != "arm64" ]]; then
+            print -ru2 -- "Parser latency budgets require an Apple Silicon runner"
+            exit 1
+          fi
+
+      - name: Verify Xcode toolchain
+        shell: zsh {0}
+        run: Scripts/verify-xcode.zsh
+
+      - name: Install build tools
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          brew install cmake ninja
+
+      - name: Restore dependency cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .build/deps/source-cache
+            .build/deps/arm64e
+          key: deps-arm64e-${{ env.XCODE_CACHE_KEY }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.swift', 'Scripts/build-deps.zsh', 'Scripts/boringssl-patch-series.sh', 'Scripts/boost-patch-series.sh', 'Scripts/libtorrent-patch-series.sh', 'Scripts/verify-boringssl-hardening.zsh', 'Scripts/verify-xcode.zsh', 'Scripts/patches/**') }}
+
+      - name: Build pinned dependencies
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          Scripts/build-deps.zsh
+
+      - name: Run parser benchmarks
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+
+          mkdir -p artifacts
+          Tools/ParserBenchmarks/run.zsh | tee artifacts/parser-benchmarks.md
+          cat artifacts/parser-benchmarks.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: parser-benchmarks
+          path: |
+            artifacts/parser-benchmarks.md
+            .build/parser-benchmarks/results/*.jsonl
+          if-no-files-found: warn
+          retention-days: 14
