@@ -1,6 +1,37 @@
 name: Parser Benchmarks
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/parser-benchmarks.yml"
+      - "Package.swift"
+      - "Scripts/build-deps.zsh"
+      - "Scripts/libtorrent-patch-series.sh"
+      - "Scripts/native-deps-build-id.zsh"
+      - "Scripts/patches/libtorrent-*.patch"
+      - "Scripts/verify-xcode.zsh"
+      - "Sources/TorrentEngineModel/**"
+      - "Sources/TorrentMetainfo/**"
+      - "Tools/ParserBenchmarks/**"
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    paths:
+      - ".github/workflows/parser-benchmarks.yml"
+      - "Package.swift"
+      - "Scripts/build-deps.zsh"
+      - "Scripts/libtorrent-patch-series.sh"
+      - "Scripts/native-deps-build-id.zsh"
+      - "Scripts/patches/libtorrent-*.patch"
+      - "Scripts/verify-xcode.zsh"
+      - "Sources/TorrentEngineModel/**"
+      - "Sources/TorrentMetainfo/**"
+      - "Tools/ParserBenchmarks/**"
   workflow_dispatch:
 
 permissions: {}
