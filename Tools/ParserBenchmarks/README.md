@@ -31,35 +31,40 @@ the hard resource-security controls.
 ## Recorded baseline
 
 Lower is better. These measurements were taken over the production code at
-`e430173` with the reporting changes in this directory, in an Apple M3 Max
+`9e31ff3` with the benchmark changes in this directory, in an Apple M3 Max
 virtual machine with 12 cores and 32 GB RAM, macOS 26.6.2 (25G83), and Swift
 6.3.3.
 
-| Workload | Bytes | Native median ns | Swift median ns | Swift p95 ns | Swift p99/max ns | msg/s | MiB/s | Swift/native |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `magnet_basic` | 60 | 109.05 | 10,848.78 | 11,002.46 | 11,040.62 | 92,176 | 5.27 | 99.48x |
-| `magnet_rich` | 321 | 1,809.69 | 111,730.66 | 112,462.39 | 112,724.99 | 8,950 | 2.74 | 61.74x |
-| `torrent_small` | 400 | 3,071.38 | 10,614.50 | 10,887.07 | 10,948.14 | 94,211 | 35.94 | 3.46x |
-| `torrent_128` | 8,306 | 101,403.75 | 541,521.67 | 559,482.75 | 581,456.04 | 1,847 | 14.63 | 5.34x |
-| `torrent_4096` | 254,323 | 3,112,829.17 | 15,984,862.50 | 16,238,947.93 | 16,258,947.93 | 63 | 15.17 | 5.14x |
-| `info_128` | 8,019 | 79,220.71 | 509,576.29 | 515,799.38 | 516,233.79 | 1,962 | 15.01 | 6.43x |
-| `info_4096` | 254,036 | 2,468,700.00 | 15,902,768.75 | 16,086,320.82 | 16,146,777.07 | 63 | 15.23 | 6.44x |
-| `extension_handshake` | 216 | 886.07 | 6,058.42 | 6,172.50 | 6,214.09 | 165,059 | 34.00 | 6.84x |
-| `ut_metadata` | 16,431 | 332.46 | 1,343.63 | 1,374.08 | 1,386.21 | 744,255 | 11,662.34 | 4.04x |
-| `ut_pex` | 1,339 | 1,347.99 | 23,199.71 | 23,624.71 | 24,454.44 | 43,104 | 55.04 | 17.21x |
-| `tracker_512` | 3,248 | 3,146.72 | 38,610.94 | 39,422.02 | 39,836.23 | 25,899 | 80.22 | 12.27x |
-| `tracker_3000` | 18,177 | 14,762.75 | 206,584.04 | 209,581.58 | 211,843.12 | 4,841 | 83.91 | 13.99x |
-| `dht_ping` | 56 | 383.42 | 2,348.72 | 2,392.16 | 2,428.01 | 425,764 | 22.74 | 6.13x |
-| `dht_dense` | 1,489 | 547.29 | 5,958.02 | 6,106.98 | 6,126.39 | 167,841 | 238.34 | 10.89x |
-| `dht_maxwork` | 1,030 | — | 18,499.82 | 18,931.90 | 18,990.34 | 54,055 | 53.10 | — |
+| Workload | Bytes | Native median ns | Swift median ns | Swift p95 ns | Swift p99 ns | Swift max ns | msg/s | MiB/s | Swift/native |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `magnet_basic` | 60 | 109.94 | 10,829.42 | 11,082.99 | 11,158.31 | 11,158.31 | 92,341 | 5.28 | 98.50x |
+| `magnet_rich` | 321 | 1,792.50 | 111,285.65 | 112,334.03 | 113,186.86 | 113,186.86 | 8,986 | 2.75 | 62.08x |
+| `torrent_small` | 400 | 3,100.80 | 8,069.44 | 8,281.76 | 8,310.85 | 8,310.85 | 123,924 | 47.27 | 2.60x |
+| `torrent_128` | 8,306 | 101,157.62 | 338,236.88 | 349,574.67 | 352,558.50 | 352,558.50 | 2,957 | 23.42 | 3.34x |
+| `torrent_4096` | 254,323 | 3,119,843.72 | 9,600,626.03 | 9,803,634.38 | 9,889,462.50 | 9,889,462.50 | 104 | 25.26 | 3.08x |
+| `info_128` | 8,019 | 78,539.33 | 305,628.88 | 314,254.17 | 317,738.08 | 317,738.08 | 3,272 | 25.02 | 3.89x |
+| `info_4096` | 254,036 | 2,449,206.25 | 9,590,383.30 | 10,260,096.88 | 13,512,140.62 | 13,512,140.62 | 104 | 25.26 | 3.92x |
+| `extension_handshake` | 216 | 887.06 | 6,152.12 | 6,302.21 | 6,351.56 | 6,351.56 | 162,546 | 33.48 | 6.94x |
+| `extension_unordered_maxkeys` | 64,514 | 19,402.08 | 938,657.50 | 959,794.58 | 967,015.52 | 967,015.52 | 1,065 | 65.55 | 48.38x |
+| `ut_metadata` | 16,431 | 329.95 | 1,353.09 | 1,372.60 | 1,401.62 | 1,401.62 | 739,049 | 11,580.77 | 4.10x |
+| `ut_pex` | 1,339 | 1,400.74 | 23,467.63 | 24,271.15 | 24,694.59 | 24,694.59 | 42,612 | 54.41 | 16.75x |
+| `tracker_512` | 3,248 | 3,156.96 | 38,553.35 | 39,375.99 | 39,500.30 | 39,500.30 | 25,938 | 80.34 | 12.21x |
+| `tracker_3000` | 18,177 | 14,397.42 | 208,661.54 | 216,692.87 | 222,542.79 | 222,542.79 | 4,792 | 83.08 | 14.49x |
+| `tracker_unordered_maxkeys` | 494,594 | 17,746.88 | 6,531,755.20 | 6,681,039.58 | 6,901,167.70 | 6,901,167.70 | 153 | 72.21 | 368.05x |
+| `dht_ping` | 56 | 391.87 | 2,366.12 | 2,426.22 | 2,441.28 | 2,441.28 | 422,633 | 22.57 | 6.04x |
+| `dht_dense` | 1,489 | 538.74 | 6,004.01 | 6,118.05 | 6,151.80 | 6,151.80 | 166,555 | 236.51 | 11.14x |
+| `dht_unordered_maxkeys` | 1,415 | 2,862.81 | 42,913.46 | 44,527.60 | 44,753.48 | 44,753.48 | 23,303 | 31.45 | 14.99x |
+| `dht_maxwork` | 1,030 | — | 18,517.22 | 19,423.12 | 20,100.51 | 20,100.51 | 54,004 | 53.05 | — |
 
 The magnet and metainfo rows call libtorrent's public native parsers. The peer,
 tracker, and DHT rows use libtorrent bdecode plus the corresponding native
 field extraction because those retired parser paths no longer exist in the
 patched engine. The Swift side additionally performs its current bounded,
-canonical, schema, and duplicate validation. These are accepted-intersection
-microbenchmarks, so the ratios are not estimates of end-to-end application
-slowdown.
+canonical-scalar, schema, and duplicate-key validation. The three
+`unordered_maxkeys` rows use reverse-ordered unique keys with long common
+prefixes near their respective input and aggregate key-byte limits. These are
+accepted-intersection microbenchmarks, so the ratios are not estimates of
+end-to-end application slowdown.
 
 `dht_maxwork` has no native result: it is accepted at the Swift parser's
 500-value limit, while libtorrent's decoder uses different token accounting

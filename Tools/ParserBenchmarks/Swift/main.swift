@@ -103,6 +103,11 @@ private func encodedInteger(_ value: Int64) -> Data {
   Data("i\(value)e".utf8)
 }
 
+private func zeroPaddedDecimal(_ value: Int, width: Int) -> String {
+  let digits = String(value)
+  return String(repeating: "0", count: width - digits.count) + digits
+}
+
 private func encodedList(_ values: [Data]) -> Data {
   var result = Data([UInt8(ascii: "l")])
   for value in values {
@@ -113,9 +118,13 @@ private func encodedList(_ values: [Data]) -> Data {
 }
 
 private func encodedDictionary(_ fields: [(String, Data)]) -> Data {
-  let fields = fields.sorted {
-    $0.0.utf8.lexicographicallyPrecedes($1.0.utf8)
-  }
+  encodedDictionaryInOrder(
+    fields.sorted {
+      $0.0.utf8.lexicographicallyPrecedes($1.0.utf8)
+    })
+}
+
+private func encodedDictionaryInOrder(_ fields: [(String, Data)]) -> Data {
   var result = Data([UInt8(ascii: "d")])
   for (key, value) in fields {
     result.append(encodedString(key))
@@ -214,6 +223,16 @@ private func extensionHandshake() -> Data {
   ])
 }
 
+private func extensionHandshakeUnorderedMaximumKeys() -> Data {
+  let commonPrefix = String(repeating: "x", count: 112)
+  var fields = [(String, Data)]()
+  fields.reserveCapacity(512)
+  for index in (0..<512).reversed() {
+    fields.append((commonPrefix + zeroPaddedDecimal(index, width: 8), encodedString(Data())))
+  }
+  return encodedDictionaryInOrder(fields)
+}
+
 private func metadataMessage() -> Data {
   var result = encodedDictionary([
     ("msg_type", encodedInteger(1)),
@@ -259,6 +278,17 @@ private func trackerResponse(peerCount: Int) -> Data {
     ("tracker id", encodedString("benchmark-tracker")),
     ("warning message", encodedString("scheduled maintenance")),
   ])
+}
+
+private func trackerUnorderedMaximumKeys() -> Data {
+  let commonPrefix = String(repeating: "x", count: 952)
+  var fields = [(String, Data)]()
+  fields.reserveCapacity(512)
+  for index in (0..<512).reversed() {
+    let suffix = zeroPaddedDecimal(index, width: 8)
+    fields.append((commonPrefix + suffix, encodedString(Data())))
+  }
+  return encodedDictionaryInOrder(fields)
 }
 
 private func dhtPing() -> Data {
@@ -315,6 +345,23 @@ private func dhtMaximumWorkResponse() -> Data {
   ])
 }
 
+private func dhtUnorderedMaximumKeys() -> Data {
+  let commonPrefix = String(repeating: "x", count: 10)
+  var fields = [(String, Data)]()
+  fields.reserveCapacity(75)
+  for index in (0..<72).reversed() {
+    fields.append((commonPrefix + zeroPaddedDecimal(index, width: 4), encodedString(Data())))
+  }
+  fields.append(("y", encodedString("r")))
+  fields.append(("t", encodedString(Data([0, 1]))))
+  fields.append(
+    (
+      "r",
+      encodedDictionary([("id", encodedString(Data(repeating: 4, count: 20)))])
+    ))
+  return encodedDictionaryInOrder(fields)
+}
+
 private func writeFixture(_ fixture: Fixture, to directory: URL) throws {
   try fixture.bytes.write(to: directory.appending(path: fixture.name), options: .atomic)
 }
@@ -338,13 +385,16 @@ let smallTorrent = torrentFile(info: smallInfo, richEnvelope: false)
 let mediumTorrent = torrentFile(info: mediumInfo, richEnvelope: true)
 let stressTorrent = torrentFile(info: stressInfo, richEnvelope: true)
 let handshake = extensionHandshake()
+let unorderedHandshake = extensionHandshakeUnorderedMaximumKeys()
 let metadata = metadataMessage()
 let pex = peerExchange()
 let tracker512 = trackerResponse(peerCount: 512)
 let tracker3000 = trackerResponse(peerCount: 3_000)
+let trackerUnordered = trackerUnorderedMaximumKeys()
 let ping = dhtPing()
 let denseDHT = dhtDenseResponse()
 let maximumWorkDHT = dhtMaximumWorkResponse()
+let unorderedDHT = dhtUnorderedMaximumKeys()
 
 let fixtures = [
   Fixture(name: "magnet_basic.txt", bytes: Data(basicMagnet.utf8)),
@@ -355,13 +405,16 @@ let fixtures = [
   Fixture(name: "info_128.bin", bytes: mediumInfo),
   Fixture(name: "info_4096.bin", bytes: stressInfo),
   Fixture(name: "extension_handshake.bin", bytes: handshake),
+  Fixture(name: "extension_unordered_maxkeys.bin", bytes: unorderedHandshake),
   Fixture(name: "ut_metadata.bin", bytes: metadata),
   Fixture(name: "ut_pex.bin", bytes: pex),
   Fixture(name: "tracker_512.bin", bytes: tracker512),
   Fixture(name: "tracker_3000.bin", bytes: tracker3000),
+  Fixture(name: "tracker_unordered_maxkeys.bin", bytes: trackerUnordered),
   Fixture(name: "dht_ping.bin", bytes: ping),
   Fixture(name: "dht_dense.bin", bytes: denseDHT),
   Fixture(name: "dht_maxwork.bin", bytes: maximumWorkDHT),
+  Fixture(name: "dht_unordered_maxkeys.bin", bytes: unorderedDHT),
 ]
 for fixture in fixtures {
   try writeFixture(fixture, to: outputDirectory)
@@ -426,6 +479,15 @@ if !fixturesOnly {
         + UInt64(value.listenPort ?? 0)
     })
   measurements.append(
+    try measure(
+      name: "extension_unordered_maxkeys",
+      bytes: unorderedHandshake.count,
+      iterations: 200
+    ) {
+      let value = try peerParser.parseExtensionHandshake(unorderedHandshake)
+      return UInt64(value.utMetadataID ?? 0) + UInt64(value.clientVersionUTF8?.count ?? 0)
+    })
+  measurements.append(
     try measure(name: "ut_metadata", bytes: metadata.count, iterations: 30_000) {
       let value = try peerParser.parseMetadataControlMessage(metadata)
       return UInt64(value.piece) + UInt64(value.payloadOffset) + UInt64(value.payloadSize)
@@ -449,6 +511,15 @@ if !fixturesOnly {
       return UInt64(value.peers.count) + UInt64(value.interval) + UInt64(value.complete)
     })
   measurements.append(
+    try measure(
+      name: "tracker_unordered_maxkeys",
+      bytes: trackerUnordered.count,
+      iterations: 20
+    ) {
+      let value = try trackerParser.parse(trackerUnordered)
+      return UInt64(value.peers.count) + UInt64(value.interval)
+    })
+  measurements.append(
     try measure(name: "dht_ping", bytes: ping.count, iterations: 50_000) {
       let value = try dhtParser.parse(ping, sourceFamily: .ipv4)
       return UInt64(value.kind.rawValue) + UInt64(value.queryKind.rawValue)
@@ -463,6 +534,11 @@ if !fixturesOnly {
   measurements.append(
     try measure(name: "dht_maxwork", bytes: maximumWorkDHT.count, iterations: 2_000) {
       let value = try dhtParser.parse(maximumWorkDHT, sourceFamily: .ipv4)
+      return UInt64(value.kind.rawValue) + UInt64(value.nodeIDRange?.count ?? 0)
+    })
+  measurements.append(
+    try measure(name: "dht_unordered_maxkeys", bytes: unorderedDHT.count, iterations: 1_000) {
+      let value = try dhtParser.parse(unorderedDHT, sourceFamily: .ipv4)
       return UInt64(value.kind.rawValue) + UInt64(value.nodeIDRange?.count ?? 0)
     })
 

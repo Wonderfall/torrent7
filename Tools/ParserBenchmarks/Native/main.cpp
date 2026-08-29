@@ -234,9 +234,8 @@ lt::aux::tracker_response parse_tracker_response(std::string const& bytes, lt::e
 std::uint64_t tracker_checksum(lt::aux::tracker_response const& value)
 {
     std::uint64_t result = std::uint64_t(value.peers4.size())
-        + std::uint64_t(value.complete)
-        + value.trackerid.size()
-        + value.warning_message.size();
+        + value.trackerid.size() + value.warning_message.size();
+    if (value.complete >= 0) result += std::uint64_t(value.complete);
     for (auto const& peer : value.peers4)
     {
         for (auto const byte : peer.ip) result += std::uint64_t(byte);
@@ -318,13 +317,18 @@ int main(int argc, char** argv)
     std::string const info_128 = read_file(directory / "info_128.bin");
     std::string const info_4096 = read_file(directory / "info_4096.bin");
     std::string const handshake = read_file(directory / "extension_handshake.bin");
+    std::string const handshake_unordered = read_file(
+        directory / "extension_unordered_maxkeys.bin");
     std::string const metadata = read_file(directory / "ut_metadata.bin");
     std::string const pex = read_file(directory / "ut_pex.bin");
     std::string const tracker_512 = read_file(directory / "tracker_512.bin");
     std::string const tracker_3000 = read_file(directory / "tracker_3000.bin");
+    std::string const tracker_unordered = read_file(
+        directory / "tracker_unordered_maxkeys.bin");
     std::string const dht_ping = read_file(directory / "dht_ping.bin");
     std::string const dht_dense = read_file(directory / "dht_dense.bin");
     std::string const dht_maxwork = read_file(directory / "dht_maxwork.bin");
+    std::string const dht_unordered = read_file(directory / "dht_unordered_maxkeys.bin");
 
     print(measure("magnet_basic", basic_magnet.size(), 50000, [&] {
         lt::error_code ec;
@@ -375,6 +379,8 @@ int main(int argc, char** argv)
 
     print(measure("extension_handshake", handshake.size(), 30000
         , [&] { return handshake_checksum(handshake); }));
+    print(measure("extension_unordered_maxkeys", handshake_unordered.size(), 200
+        , [&] { return handshake_checksum(handshake_unordered); }));
     print(measure("ut_metadata", metadata.size(), 30000
         , [&] { return metadata_checksum(metadata); }));
     print(measure("ut_pex", pex.size(), 3000
@@ -391,6 +397,13 @@ int main(int argc, char** argv)
         if (ec) throw std::runtime_error("native tracker parse failed: " + ec.message());
         return tracker_checksum(value);
     }));
+    print(measure("tracker_unordered_maxkeys", tracker_unordered.size(), 20, [&] {
+        lt::error_code ec;
+        auto value = parse_tracker_response(tracker_unordered, ec);
+        if (ec) throw std::runtime_error(
+            "native unordered tracker parse failed: " + ec.message());
+        return tracker_checksum(value);
+    }));
 
     print(measure("dht_ping", dht_ping.size(), 50000, [&] {
         lt::error_code ec;
@@ -405,6 +418,14 @@ int main(int argc, char** argv)
         auto const dense_root = lt::bdecode(as_span(dht_dense), ec, &position, 10, 500);
         if (ec) throw std::runtime_error("native dense DHT parse failed");
         return dht_checksum(dense_root);
+    }));
+    print(measure("dht_unordered_maxkeys", dht_unordered.size(), 1000, [&] {
+        lt::error_code ec;
+        int position = 0;
+        auto const unordered_root = lt::bdecode(
+            as_span(dht_unordered), ec, &position, 10, 500);
+        if (ec) throw std::runtime_error("native unordered DHT parse failed");
+        return dht_checksum(unordered_root);
     }));
     // The Swift maximum-work fixture is intentionally accepted at its own
     // 500-value limit. Libtorrent's retired decoder counts tokens differently
