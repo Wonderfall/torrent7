@@ -6,7 +6,7 @@ import TorrentEngineModel
 import TorrentMetainfo
 import TorrentStorageAuthority
 
-enum TorrentStorageJournalError: LocalizedError, Equatable, Sendable {
+package enum TorrentStorageJournalError: LocalizedError, Equatable, Sendable {
     case unavailable
     case corrupt
     case unsupportedVersion(UInt64)
@@ -19,7 +19,7 @@ enum TorrentStorageJournalError: LocalizedError, Equatable, Sendable {
     case promotionAlreadyExists
     case unknownPromotion
 
-    var errorDescription: String? {
+    package var errorDescription: String? {
         switch self {
         case .unavailable: "The storage claim journal is unavailable."
         case .corrupt: "The storage claim journal is corrupt and was preserved."
@@ -37,17 +37,35 @@ enum TorrentStorageJournalError: LocalizedError, Equatable, Sendable {
     }
 }
 
-struct TorrentStoragePreparation: Codable, Equatable, Sendable {
-    let claimID: UUID
-    let generation: UInt64
-    let parentID: TorrentStorageParentID
-    let preferredTopLevelName: String
-    let ownershipKey: Data?
-    let operationNonce: UUID
-    var reservedTopLevelName: String?
+package struct TorrentStoragePreparation: Codable, Equatable, Sendable {
+    package let claimID: UUID
+    package let generation: UInt64
+    package let parentID: TorrentStorageParentID
+    package let preferredTopLevelName: String
+    package let ownershipKey: Data?
+    package let operationNonce: UUID
+    package var reservedTopLevelName: String?
+
+    package init(
+        claimID: UUID,
+        generation: UInt64,
+        parentID: TorrentStorageParentID,
+        preferredTopLevelName: String,
+        ownershipKey: Data?,
+        operationNonce: UUID,
+        reservedTopLevelName: String?
+    ) {
+        self.claimID = claimID
+        self.generation = generation
+        self.parentID = parentID
+        self.preferredTopLevelName = preferredTopLevelName
+        self.ownershipKey = ownershipKey
+        self.operationNonce = operationNonce
+        self.reservedTopLevelName = reservedTopLevelName
+    }
 }
 
-enum TorrentMagnetPromotionState: String, Codable, Sendable {
+package enum TorrentMagnetPromotionState: String, Codable, Sendable {
     case awaitingMetadata
     case metadataReady
     case awaitingDestination
@@ -55,34 +73,82 @@ enum TorrentMagnetPromotionState: String, Codable, Sendable {
     case outcomeUnknown
 }
 
-struct TorrentMagnetPromotionRuntimeState: Codable, Equatable, Sendable {
-    let wasPaused: Bool
-    let queuePosition: Int32
-    let options: TorrentOptions
-    let sourcePolicy: TorrentSourcePolicy
-    let filePriorities: [Int32: TorrentFilePriority]
-    let labelIDs: Set<TorrentLabel.ID>
+package struct TorrentMagnetPromotionRuntimeState: Codable, Equatable, Sendable {
+    package let wasPaused: Bool
+    package let queuePosition: Int32
+    package let options: TorrentOptions
+    package let sourcePolicy: TorrentSourcePolicy
+    package let filePriorities: [Int32: TorrentFilePriority]
+    package let labelIDs: Set<TorrentLabel.ID>
+
+    package init(
+        wasPaused: Bool,
+        queuePosition: Int32,
+        options: TorrentOptions,
+        sourcePolicy: TorrentSourcePolicy,
+        filePriorities: [Int32: TorrentFilePriority],
+        labelIDs: Set<TorrentLabel.ID>
+    ) {
+        self.wasPaused = wasPaused
+        self.queuePosition = queuePosition
+        self.options = options
+        self.sourcePolicy = sourcePolicy
+        self.filePriorities = filePriorities
+        self.labelIDs = labelIDs
+    }
 }
 
-struct TorrentMagnetPromotionActivation: Codable, Equatable, Sendable {
-    let claimID: UUID
-    let claimOperationNonce: UUID
-    let runtime: TorrentMagnetPromotionRuntimeState
+package struct TorrentMagnetPromotionActivation: Codable, Equatable, Sendable {
+    package let claimID: UUID
+    package let claimOperationNonce: UUID
+    package let runtime: TorrentMagnetPromotionRuntimeState
+
+    package init(
+        claimID: UUID,
+        claimOperationNonce: UUID,
+        runtime: TorrentMagnetPromotionRuntimeState
+    ) {
+        self.claimID = claimID
+        self.claimOperationNonce = claimOperationNonce
+        self.runtime = runtime
+    }
 }
 
-struct TorrentMagnetPromotion: Codable, Equatable, Sendable {
-    let id: UUID
-    let torrentID: String
-    let originalMagnet: String
-    let advertisedInfoHashes: TorrentStorageInfoHashes
-    var destinationPath: String
-    let operationNonce: UUID
-    var state: TorrentMagnetPromotionState
-    var exactInfoDictionary: Data?
-    var activation: TorrentMagnetPromotionActivation?
+package struct TorrentMagnetPromotion: Codable, Equatable, Sendable {
+    package let id: UUID
+    package let torrentID: String
+    package let originalMagnet: String
+    package let advertisedInfoHashes: TorrentStorageInfoHashes
+    package var destinationPath: String
+    package let operationNonce: UUID
+    package var state: TorrentMagnetPromotionState
+    package var exactInfoDictionary: Data?
+    package var activation: TorrentMagnetPromotionActivation?
+
+    package init(
+        id: UUID,
+        torrentID: String,
+        originalMagnet: String,
+        advertisedInfoHashes: TorrentStorageInfoHashes,
+        destinationPath: String,
+        operationNonce: UUID,
+        state: TorrentMagnetPromotionState,
+        exactInfoDictionary: Data?,
+        activation: TorrentMagnetPromotionActivation?
+    ) {
+        self.id = id
+        self.torrentID = torrentID
+        self.originalMagnet = originalMagnet
+        self.advertisedInfoHashes = advertisedInfoHashes
+        self.destinationPath = destinationPath
+        self.operationNonce = operationNonce
+        self.state = state
+        self.exactInfoDictionary = exactInfoDictionary
+        self.activation = activation
+    }
 }
 
-enum TorrentStorageRemovalContext: Sendable {
+package enum TorrentStorageRemovalContext: Sendable {
     case claim(
         TorrentStorageClaim,
         linkedPromotion: TorrentMagnetPromotion?
@@ -91,7 +157,7 @@ enum TorrentStorageRemovalContext: Sendable {
     case missingOrAmbiguous
 }
 
-actor TorrentStorageClaimJournal {
+package actor TorrentStorageClaimJournal {
     private struct Snapshot: Codable, Sendable {
         static let currentSchemaVersion: UInt64 = 5
 
@@ -138,7 +204,7 @@ actor TorrentStorageClaimJournal {
     private let directoryDescriptor: FileDescriptor
     private var snapshot: Snapshot
 
-    init(directory: URL) throws {
+    package init(directory: URL) throws {
         let path = directory.standardizedFileURL.path(percentEncoded: false)
         try FileManager.default.createDirectory(
             at: directory,
@@ -170,25 +236,25 @@ actor TorrentStorageClaimJournal {
         try? directoryDescriptor.close()
     }
 
-    func allClaims() -> [TorrentStorageClaim] {
+    package func allClaims() -> [TorrentStorageClaim] {
         snapshot.claims.values.sorted {
             $0.manifest.claimID.uuidString < $1.manifest.claimID.uuidString
         }
     }
 
-    func unresolvedPreparations() -> [TorrentStoragePreparation] {
+    package func unresolvedPreparations() -> [TorrentStoragePreparation] {
         snapshot.preparations.values.sorted {
             $0.claimID.uuidString < $1.claimID.uuidString
         }
     }
 
-    func allPromotions() -> [TorrentMagnetPromotion] {
+    package func allPromotions() -> [TorrentMagnetPromotion] {
         snapshot.promotions.values.sorted {
             $0.id.uuidString < $1.id.uuidString
         }
     }
 
-    func removalContext(for torrentID: String) -> TorrentStorageRemovalContext {
+    package func removalContext(for torrentID: String) -> TorrentStorageRemovalContext {
         let matchingClaims = snapshot.claims.values.filter {
             $0.torrentID == torrentID
         }
@@ -253,7 +319,7 @@ actor TorrentStorageClaimJournal {
         }
     }
 
-    func requiredFolderAccess() -> (
+    package func requiredFolderAccess() -> (
         parentIDs: Set<TorrentStorageParentID>,
         paths: Set<String>
     ) {
@@ -267,15 +333,15 @@ actor TorrentStorageClaimJournal {
         )
     }
 
-    func promotion(id: UUID) -> TorrentMagnetPromotion? {
+    package func promotion(id: UUID) -> TorrentMagnetPromotion? {
         snapshot.promotions[id]
     }
 
-    func claim(id: UUID) -> TorrentStorageClaim? {
+    package func claim(id: UUID) -> TorrentStorageClaim? {
         snapshot.claims[id]
     }
 
-    func beginPreparation(_ preparation: TorrentStoragePreparation) throws {
+    package func beginPreparation(_ preparation: TorrentStoragePreparation) throws {
         guard snapshot.claims.count + snapshot.preparations.count
                 + snapshot.promotions.count
                 < Self.maximumClaimCount else {
@@ -299,7 +365,7 @@ actor TorrentStorageClaimJournal {
         snapshot = updated
     }
 
-    func beginPromotion(_ promotion: TorrentMagnetPromotion) throws {
+    package func beginPromotion(_ promotion: TorrentMagnetPromotion) throws {
         guard snapshot.claims.count + snapshot.preparations.count
                 + snapshot.promotions.count < Self.maximumClaimCount else {
             throw TorrentStorageJournalError.capacityExceeded
@@ -326,7 +392,7 @@ actor TorrentStorageClaimJournal {
     }
 
     @discardableResult
-    func recordPromotionMetadata(
+    package func recordPromotionMetadata(
         id: UUID,
         operationNonce: UUID,
         exactInfoDictionary: Data
@@ -359,7 +425,7 @@ actor TorrentStorageClaimJournal {
     }
 
     @discardableResult
-    func beginPromotionActivation(
+    package func beginPromotionActivation(
         id: UUID,
         operationNonce: UUID,
         activation: TorrentMagnetPromotionActivation
@@ -392,7 +458,7 @@ actor TorrentStorageClaimJournal {
     }
 
     @discardableResult
-    func markPromotionAwaitingDestination(
+    package func markPromotionAwaitingDestination(
         id: UUID,
         operationNonce: UUID
     ) throws -> TorrentMagnetPromotion {
@@ -419,7 +485,7 @@ actor TorrentStorageClaimJournal {
     }
 
     @discardableResult
-    func replacePromotionDestination(
+    package func replacePromotionDestination(
         id: UUID,
         operationNonce: UUID,
         destinationPath: String
@@ -448,7 +514,7 @@ actor TorrentStorageClaimJournal {
     }
 
     @discardableResult
-    func beginPromotionDestinationActivation(
+    package func beginPromotionDestinationActivation(
         id: UUID,
         operationNonce: UUID
     ) throws -> TorrentMagnetPromotion {
@@ -475,7 +541,7 @@ actor TorrentStorageClaimJournal {
     }
 
     @discardableResult
-    func markPromotionOutcomeUnknown(
+    package func markPromotionOutcomeUnknown(
         id: UUID,
         operationNonce: UUID
     ) throws -> TorrentMagnetPromotion {
@@ -499,7 +565,7 @@ actor TorrentStorageClaimJournal {
         return promotion
     }
 
-    func retirePromotion(
+    package func retirePromotion(
         id: UUID,
         operationNonce: UUID
     ) throws {
@@ -515,7 +581,7 @@ actor TorrentStorageClaimJournal {
         snapshot = updated
     }
 
-    func noteReservation(
+    package func noteReservation(
         claimID: UUID,
         generation: UInt64,
         operationNonce: UUID,
@@ -546,7 +612,7 @@ actor TorrentStorageClaimJournal {
         snapshot = updated
     }
 
-    func commitReserved(_ claim: TorrentStorageClaim) throws {
+    package func commitReserved(_ claim: TorrentStorageClaim) throws {
         let id = claim.manifest.claimID
         if let existing = snapshot.claims[id] {
             guard existing == claim else {
@@ -579,7 +645,7 @@ actor TorrentStorageClaimJournal {
     }
 
     @discardableResult
-    func transition(
+    package func transition(
         claimID: UUID,
         generation: UInt64,
         operationNonce: UUID,
@@ -661,7 +727,7 @@ actor TorrentStorageClaimJournal {
     }
 
     @discardableResult
-    func replaceAvailability(
+    package func replaceAvailability(
         claimID: UUID,
         generation: UInt64,
         expectedAvailabilityRevision: UInt64,
@@ -701,7 +767,7 @@ actor TorrentStorageClaimJournal {
     }
 
     @discardableResult
-    func recordDeletionEvidence(
+    package func recordDeletionEvidence(
         claimID: UUID,
         generation: UInt64,
         operationNonce: UUID,
@@ -735,7 +801,7 @@ actor TorrentStorageClaimJournal {
         return claim
     }
 
-    func completeClaimRemoval(
+    package func completeClaimRemoval(
         claimID: UUID,
         generation: UInt64,
         operationNonce: UUID,
@@ -812,7 +878,7 @@ actor TorrentStorageClaimJournal {
     /// Relinquishes broker authority without asserting that any payload was
     /// removed. Generation binding prevents stale recovery work from retiring
     /// a replacement claim.
-    func retireClaimPreservingPayload(
+    package func retireClaimPreservingPayload(
         claimID: UUID,
         generation: UInt64
     ) throws {
@@ -828,7 +894,7 @@ actor TorrentStorageClaimJournal {
         snapshot = updated
     }
 
-    func cancelPreparation(
+    package func cancelPreparation(
         claimID: UUID,
         generation: UInt64,
         operationNonce: UUID

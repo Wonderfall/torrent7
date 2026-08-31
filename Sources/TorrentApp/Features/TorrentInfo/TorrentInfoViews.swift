@@ -1,7 +1,8 @@
 import SwiftUI
+import TorrentAppInfrastructure
 import TorrentEngineModel
 
-struct TorrentTrackerSummary: Equatable, Sendable {
+nonisolated struct TorrentTrackerSummary: Equatable, Sendable {
     let text: String?
 
     @concurrent
@@ -108,7 +109,7 @@ struct TorrentInfoWindow: View {
     }
 }
 
-enum TorrentInfoFileGroup: CaseIterable, Identifiable, Sendable {
+nonisolated enum TorrentInfoFileGroup: CaseIterable, Identifiable, Sendable {
     case complete
     case downloading
     case skipped
@@ -141,7 +142,7 @@ enum TorrentInfoFileGroup: CaseIterable, Identifiable, Sendable {
 
 }
 
-struct TorrentInfoFileSection: Identifiable, Sendable {
+nonisolated struct TorrentInfoFileSection: Identifiable, Sendable {
     let group: TorrentInfoFileGroup
     let files: [TorrentFileItem]
 
@@ -150,7 +151,7 @@ struct TorrentInfoFileSection: Identifiable, Sendable {
     }
 }
 
-struct TorrentFileBatchPresentation: Sendable {
+nonisolated struct TorrentFileBatchPresentation: Sendable {
     static let visibleFileLimit = 100
 
     let revision: UInt64

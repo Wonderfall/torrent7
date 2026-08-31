@@ -4,7 +4,7 @@ import System
 import TorrentEngineModel
 import TorrentStorageAuthority
 
-enum TorrentStoragePlanningError: LocalizedError, Equatable, Sendable {
+package enum TorrentStoragePlanningError: LocalizedError, Equatable, Sendable {
     case unsafeParentDirectory
     case hiddenTopLevelName
     case invalidParentAuthority
@@ -17,7 +17,7 @@ enum TorrentStoragePlanningError: LocalizedError, Equatable, Sendable {
     case existingDataUnavailable
     case existingDataUnsafe
 
-    var errorDescription: String? {
+    package var errorDescription: String? {
         switch self {
         case .unsafeParentDirectory:
             "Choose a specific download folder instead of the filesystem root or home directory."
@@ -45,15 +45,15 @@ enum TorrentStoragePlanningError: LocalizedError, Equatable, Sendable {
     }
 }
 
-final class TorrentStorageParentAuthority: @unchecked Sendable {
-    let id: TorrentStorageParentID
-    let canonicalPath: String
-    let identity: TorrentFilesystemIdentity
-    let descriptor: Int32
+package final class TorrentStorageParentAuthority: @unchecked Sendable {
+    package let id: TorrentStorageParentID
+    package let canonicalPath: String
+    package let identity: TorrentFilesystemIdentity
+    package let descriptor: Int32
 
     private let accessLifetime: DownloadFolderAccessLease
 
-    init(lease: DownloadFolderAccessLease) throws {
+    package init(lease: DownloadFolderAccessLease) throws {
         let path = lease.url.standardizedFileURL
             .resolvingSymlinksInPath()
             .path(percentEncoded: false)
@@ -102,7 +102,7 @@ final class TorrentStorageParentAuthority: @unchecked Sendable {
         _ = Darwin.close(descriptor)
     }
 
-    func validate() throws {
+    package func validate() throws {
         var metadata = stat()
         guard unsafe Darwin.fstat(descriptor, &metadata) == 0,
               (metadata.st_mode & S_IFMT) == S_IFDIR,
@@ -122,12 +122,12 @@ final class TorrentStorageParentAuthority: @unchecked Sendable {
     }
 }
 
-struct TorrentStorageLocation: Sendable {
-    let torrentID: String
-    let claim: TorrentStorageClaim
-    let parent: TorrentStorageParentAuthority
+package struct TorrentStorageLocation: Sendable {
+    package let torrentID: String
+    package let claim: TorrentStorageClaim
+    package let parent: TorrentStorageParentAuthority
 
-    init?(
+    package init?(
         claim: TorrentStorageClaim,
         parent: TorrentStorageParentAuthority
     ) {
@@ -140,7 +140,7 @@ struct TorrentStorageLocation: Sendable {
         self.parent = parent
     }
 
-    var displayURL: URL {
+    package var displayURL: URL {
         URL(
             filePath: parent.canonicalPath,
             directoryHint: .isDirectory
@@ -152,42 +152,44 @@ struct TorrentStorageLocation: Sendable {
         )
     }
 
-    var displayPath: String {
+    package var displayPath: String {
         displayURL.path(percentEncoded: false)
     }
 }
 
-struct TorrentStorageReservation: Sendable {
-    let storageManifest: TorrentStorageManifest
-    let initialLease: TorrentStorageLease
+package struct TorrentStorageReservation: Sendable {
+    package let storageManifest: TorrentStorageManifest
+    package let initialLease: TorrentStorageLease
 }
 
-struct TorrentStorageDestinationConflict: Equatable, Sendable {
-    let existingTopLevelName: String
-    let separateCopyTopLevelName: String
-    let parentPath: String
-    let canUseExistingFiles: Bool
+package struct TorrentStorageDestinationConflict: Equatable, Sendable {
+    package let existingTopLevelName: String
+    package let separateCopyTopLevelName: String
+    package let parentPath: String
+    package let canUseExistingFiles: Bool
 
-    var parentDisplayName: String {
+    package var parentDisplayName: String {
         URL(filePath: parentPath, directoryHint: .isDirectory)
             .lastPathComponent
     }
 }
 
-enum TorrentStorageDestinationChoice: Equatable, Sendable {
+package enum TorrentStorageDestinationChoice: Equatable, Sendable {
     case preferredName
     case separateCopy(topLevelName: String)
     case useExistingFiles
 }
 
-struct TorrentStorageDestinationPlanner: Sendable {
-    static let ownershipAttribute = "app.torrent7.storage-claim"
+package struct TorrentStorageDestinationPlanner: Sendable {
+    package static let ownershipAttribute = "app.torrent7.storage-claim"
     private static let maximumCollisionAttempts = 10_000
     private static let deletionRenameFlags = UInt32(
         RENAME_EXCL | RENAME_NOFOLLOW_ANY | RENAME_RESOLVE_BENEATH
     )
 
-    func planTopLevelName(
+    package init() {}
+
+    package func planTopLevelName(
         for logicalManifest: TorrentLogicalManifest,
         in parent: TorrentStorageParentAuthority
     ) throws -> String {
@@ -220,7 +222,7 @@ struct TorrentStorageDestinationPlanner: Sendable {
         throw TorrentStoragePlanningError.destinationNameExhausted
     }
 
-    func inspectDestination(
+    package func inspectDestination(
         for logicalManifest: TorrentLogicalManifest,
         in parent: TorrentStorageParentAuthority
     ) throws -> TorrentStorageDestinationConflict? {
@@ -245,7 +247,7 @@ struct TorrentStorageDestinationPlanner: Sendable {
         )
     }
 
-    func reserve(
+    package func reserve(
         manifest logicalManifest: TorrentLogicalManifest,
         in parent: TorrentStorageParentAuthority,
         claimID: UUID,
@@ -380,7 +382,7 @@ struct TorrentStorageDestinationPlanner: Sendable {
     /// writable files must be regular, owned by this user, no larger than the
     /// torrent layout, and have exactly one hard link before their identities
     /// are pinned into the claim.
-    func importExisting(
+    package func importExisting(
         manifest logicalManifest: TorrentLogicalManifest,
         in parent: TorrentStorageParentAuthority,
         claimID: UUID,
@@ -437,14 +439,14 @@ struct TorrentStorageDestinationPlanner: Sendable {
         )
     }
 
-    static func randomOwnershipKey() -> Data {
+    package static func randomOwnershipKey() -> Data {
         var generator = SystemRandomNumberGenerator()
         return Data((0..<TorrentStorageOwnershipTag.keyByteCount).map { _ in
             UInt8.random(in: .min ... .max, using: &generator)
         })
     }
 
-    func validateClaimRoot(
+    package func validateClaimRoot(
         _ claim: TorrentStorageClaim,
         in parent: TorrentStorageParentAuthority
     ) throws {
@@ -489,7 +491,7 @@ struct TorrentStorageDestinationPlanner: Sendable {
     /// The root and any requested file are reopened descriptor-relatively and
     /// checked against their pinned identities before a path is returned to
     /// Finder. Engine-reported save paths and file paths are never consulted.
-    func revealURL(
+    package func revealURL(
         for location: TorrentStorageLocation,
         fileIndex: Int32? = nil
     ) throws -> URL {
@@ -563,7 +565,7 @@ struct TorrentStorageDestinationPlanner: Sendable {
         }
     }
 
-    func prepareDeletion(
+    package func prepareDeletion(
         claim: TorrentStorageClaim,
         from parent: TorrentStorageParentAuthority
     ) throws -> TorrentStorageDeletionEvidence {
@@ -579,7 +581,7 @@ struct TorrentStorageDestinationPlanner: Sendable {
     /// Returns true only when durable deletion evidence and the current
     /// descriptor-relative filesystem state prove that no deletion work
     /// remains. Any ambiguous or replaced object fails closed.
-    func deletionIsComplete(
+    package func deletionIsComplete(
         claim: TorrentStorageClaim,
         in parent: TorrentStorageParentAuthority
     ) throws -> Bool {
@@ -694,7 +696,7 @@ struct TorrentStorageDestinationPlanner: Sendable {
     /// Deletes only objects captured out of mutable payload directories. The
     /// quarantine identity must already be durable before this method moves the
     /// top-level payload.
-    func deleteClaimedPayload(
+    package func deleteClaimedPayload(
         claim: TorrentStorageClaim,
         from parent: TorrentStorageParentAuthority,
         afterCapture: (@Sendable () -> Void)? = nil

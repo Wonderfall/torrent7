@@ -6,12 +6,20 @@ private struct TorrentLabelStorage: Codable {
     var assignments: [TorrentItem.ID: [TorrentLabel.ID]]
 }
 
-struct TorrentLabelSnapshot: Sendable {
-    let labels: [TorrentLabel]
-    let assignments: [TorrentItem.ID: Set<TorrentLabel.ID>]
+package struct TorrentLabelSnapshot: Sendable {
+    package let labels: [TorrentLabel]
+    package let assignments: [TorrentItem.ID: Set<TorrentLabel.ID>]
+
+    package init(
+        labels: [TorrentLabel],
+        assignments: [TorrentItem.ID: Set<TorrentLabel.ID>]
+    ) {
+        self.labels = labels
+        self.assignments = assignments
+    }
 }
 
-enum TorrentLabelMutationRequest: Sendable {
+package enum TorrentLabelMutationRequest: Sendable {
     case set(
         labelIDs: Set<TorrentLabel.ID>,
         torrentID: TorrentItem.ID,
@@ -25,12 +33,12 @@ enum TorrentLabelMutationRequest: Sendable {
     case removeAssignments(torrentIDs: Set<TorrentItem.ID>)
 }
 
-struct TorrentLabelMutationPlan: Sendable {
-    let revision: UInt64
-    let snapshot: TorrentLabelSnapshot?
+package struct TorrentLabelMutationPlan: Sendable {
+    package let revision: UInt64
+    package let snapshot: TorrentLabelSnapshot?
 
     @concurrent
-    static func prepare(
+    package static func prepare(
         request: TorrentLabelMutationRequest,
         labels: [TorrentLabel],
         assignments: [TorrentItem.ID: Set<TorrentLabel.ID>],
@@ -261,12 +269,12 @@ struct TorrentLabelMutationPlan: Sendable {
     }
 }
 
-struct TorrentLabelPrunePlan: Sendable {
-    let revision: UInt64
-    let assignments: [TorrentItem.ID: Set<TorrentLabel.ID>]?
+package struct TorrentLabelPrunePlan: Sendable {
+    package let revision: UInt64
+    package let assignments: [TorrentItem.ID: Set<TorrentLabel.ID>]?
 
     @concurrent
-    static func prepare(
+    package static func prepare(
         assignments: [TorrentItem.ID: Set<TorrentLabel.ID>],
         activeTorrentIDs: Set<TorrentItem.ID>,
         revision: UInt64
@@ -292,16 +300,16 @@ struct TorrentLabelPrunePlan: Sendable {
     }
 }
 
-struct TorrentLabelStore {
-    static let defaultsKey = "TorrentLabels.v1"
+package struct TorrentLabelStore {
+    package static let defaultsKey = "TorrentLabels.v1"
 
-    let defaults: UserDefaults
+    package let defaults: UserDefaults
 
-    init(defaults: UserDefaults = .standard) {
+    package init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
     }
 
-    func load() -> TorrentLabelSnapshot {
+    package func load() -> TorrentLabelSnapshot {
         Self.decode(defaults.data(forKey: Self.defaultsKey))
     }
 
@@ -393,7 +401,7 @@ struct TorrentLabelStore {
     }
 }
 
-protocol TorrentLabelPersisting: Actor {
+package protocol TorrentLabelPersisting: Actor {
     func load() async throws -> TorrentLabelSnapshot
     func save(
         labels: [TorrentLabel],
@@ -402,16 +410,16 @@ protocol TorrentLabelPersisting: Actor {
     ) async throws
 }
 
-actor TorrentLabelPersistenceStore: TorrentLabelPersisting {
+package actor TorrentLabelPersistenceStore: TorrentLabelPersisting {
     private let domain: TorrentDefaultsDomain
     private var defaults: UserDefaults?
     private var newestRevision: UInt64 = 0
 
-    init(domain: TorrentDefaultsDomain = .standard) {
+    package init(domain: TorrentDefaultsDomain = .standard) {
         self.domain = domain
     }
 
-    func load() async throws -> TorrentLabelSnapshot {
+    package func load() async throws -> TorrentLabelSnapshot {
         try Task.checkCancellation()
         let data = userDefaults.data(forKey: TorrentLabelStore.defaultsKey)
         let snapshot = try TorrentLabelStore.decode(
@@ -424,7 +432,7 @@ actor TorrentLabelPersistenceStore: TorrentLabelPersisting {
         return snapshot
     }
 
-    func save(
+    package func save(
         labels: [TorrentLabel],
         assignments: [TorrentItem.ID: Set<TorrentLabel.ID>],
         revision: UInt64

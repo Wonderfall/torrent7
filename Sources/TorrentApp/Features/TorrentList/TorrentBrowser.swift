@@ -1,15 +1,16 @@
 import Observation
 import SwiftUI
+import TorrentAppInfrastructure
 import TorrentEngineModel
 
-struct TorrentBrowserFilterRequestID: Hashable, Sendable {
+nonisolated struct TorrentBrowserFilterRequestID: Hashable, Sendable {
     let rowRevision: UInt64
     let metadataRevision: UInt64
     let selection: TorrentSidebarSelection
     let query: String
 }
 
-struct TorrentBrowserProjection: Sendable {
+nonisolated struct TorrentBrowserProjection: Sendable {
     private static let maximumQueryByteCount = 1_024
 
     let rows: [TorrentRowSnapshot]
@@ -115,7 +116,7 @@ struct TorrentBrowserProjection: Sendable {
     }
 }
 
-struct TorrentListSelectionSummary: Sendable {
+nonisolated struct TorrentListSelectionSummary: Sendable {
     let selectionRevision: UInt64
     let filterRevision: UInt64
     let ids: Set<TorrentItem.ID>
@@ -232,7 +233,7 @@ struct TorrentListSelectionSummary: Sendable {
     }
 }
 
-struct TorrentListSelectionRequest: Identifiable, Sendable {
+nonisolated struct TorrentListSelectionRequest: Identifiable, Sendable {
     enum Members: Sendable {
         case ids(Set<TorrentItem.ID>)
         case range(
@@ -250,7 +251,7 @@ struct TorrentListSelectionRequest: Identifiable, Sendable {
     let focusID: TorrentItem.ID?
 }
 
-struct TorrentListSelectionProjection: Sendable {
+nonisolated struct TorrentListSelectionProjection: Sendable {
     let ids: Set<TorrentItem.ID>
 
     @concurrent
@@ -290,7 +291,7 @@ struct TorrentListSelectionProjection: Sendable {
     }
 }
 
-struct TorrentVisibleSelectionProjection: Sendable {
+nonisolated struct TorrentVisibleSelectionProjection: Sendable {
     let ids: Set<TorrentItem.ID>
 
     @concurrent

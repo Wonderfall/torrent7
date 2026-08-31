@@ -3,6 +3,7 @@ import CryptoKit
 import Foundation
 import Synchronization
 import Testing
+import TorrentAppInfrastructure
 import TorrentEngineIPC
 import TorrentStorageAuthority
 import XPC

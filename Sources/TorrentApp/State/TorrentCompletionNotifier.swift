@@ -1,13 +1,9 @@
 import AppKit
 import Foundation
+import TorrentAppInfrastructure
 import TorrentEngineModel
 
-struct TorrentCompletionCandidate: Sendable {
-    let id: TorrentItem.ID
-    let name: String
-}
-
-struct TorrentCompletionProjection: Sendable {
+nonisolated struct TorrentCompletionProjection: Sendable {
     let completedTorrents: [TorrentCompletionCandidate]
     let completedIDs: Set<TorrentItem.ID>
     let activeIDs: Set<TorrentItem.ID>
@@ -57,6 +53,7 @@ final class TorrentCompletionNotifier {
     private var badgeCount = 0
     private var pendingNotifications = [TorrentCompletionCandidate]()
     private var nextPendingNotificationIndex = 0
+    private var configurationTask: Task<Void, Never>?
     private var notificationDrainTask: Task<Void, Never>?
     private var notificationDrainID: UUID?
     private var badgeTask: Task<Void, Never>?
@@ -75,12 +72,19 @@ final class TorrentCompletionNotifier {
     }
 
     isolated deinit {
+        configurationTask?.cancel()
         notificationDrainTask?.cancel()
         badgeTask?.cancel()
     }
 
     func configure() {
-        notificationService.configure()
+        guard configurationTask == nil else {
+            return
+        }
+        let notificationService = notificationService
+        configurationTask = Task {
+            await notificationService.configure()
+        }
     }
 
     func beginBaseline() {
@@ -228,10 +232,14 @@ final class TorrentCompletionNotifier {
         }
         let drainID = UUID()
         let notificationService = notificationService
+        let configurationTask = configurationTask
         notificationDrainID = drainID
         notificationDrainTask = Task { @MainActor [weak self, notificationService] in
             defer {
                 self?.finishNotificationDrain(drainID: drainID)
+            }
+            if let configurationTask {
+                await configurationTask.value
             }
             while !Task.isCancelled {
                 guard let notification = self?.takePendingNotification(drainID: drainID) else {

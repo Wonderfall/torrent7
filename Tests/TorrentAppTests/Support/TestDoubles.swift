@@ -1,5 +1,6 @@
 import Foundation
 import Synchronization
+import TorrentAppInfrastructure
 import TorrentEngineModel
 @testable import TorrentApp
 
@@ -85,8 +86,7 @@ actor RecordingNotificationService: TorrentNotificationServicing {
     private(set) var notifications = [Notification]()
     private(set) var clearBadgeCount = 0
 
-    @MainActor
-    func configure() {}
+    func configure() async {}
 
     func notifyDownloadFinished(torrentName: String?, playsSound: Bool) async {
         notifications.append(Notification(torrentName: torrentName, playsSound: playsSound))
@@ -116,6 +116,7 @@ struct FixedApplicationActivationProvider: ApplicationActivationProviding {
     let isApplicationActive: Bool
 }
 
+@MainActor
 final class RecordingSleepPreventionService: SleepPreventionServicing {
     private(set) var updates = [(isEnabled: Bool, hasActiveTransfers: Bool)]()
 
@@ -124,8 +125,7 @@ final class RecordingSleepPreventionService: SleepPreventionServicing {
     }
 }
 
-@MainActor
-final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
+actor RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
     var defaultURL: URL?
     private(set) var accessRevision: UInt64 = 0
     var restoreDefaultResult: Result<URL?, Error> = .success(nil)
@@ -141,6 +141,16 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
     private(set) var leaseCalls = [String]()
     private(set) var pruneCalls = [Set<String>]()
     private(set) var bootstrapCount = 0
+
+    func setRestoreDefaultResult(_ result: Result<URL?, Error>) {
+        restoreDefaultResult = result
+    }
+
+    func setPrepareForAddResult(
+        _ result: Result<PreparedDownloadFolder, Error>?
+    ) {
+        prepareForAddResult = result
+    }
 
     func bootstrap() async -> DownloadFolderBootstrapResult {
         bootstrapCount += 1
@@ -273,8 +283,7 @@ final class RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
 
 }
 
-@MainActor
-final class RecordingTorrentFileLocationService: TorrentFileLocationServicing {
+actor RecordingTorrentFileLocationService: TorrentFileLocationServicing {
     var revealURLs = [TorrentItem.ID: URL]()
     private var revealURLSuspensionCount = 0
     private var revealURLContinuations = [CheckedContinuation<Void, Never>]()

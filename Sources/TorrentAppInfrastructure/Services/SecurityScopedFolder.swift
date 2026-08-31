@@ -1,42 +1,42 @@
 import Foundation
 
-protocol DownloadFolderAccessing: AnyObject, Sendable {
+package protocol DownloadFolderAccessing: AnyObject, Sendable {
     var url: URL { get }
     func bookmarkData() throws -> Data
 }
 
-protocol DownloadFolderAccessProviding: Sendable {
+package protocol DownloadFolderAccessProviding: Sendable {
     func createAccess(url: URL, savesBookmark: Bool, defaults: UserDefaults) throws -> DownloadFolderAccessing
     func restoreDefault(defaults: UserDefaults) throws -> DownloadFolderAccessing?
     func restore(from bookmark: Data) throws -> DownloadFolderAccessing
     func clearDefaultBookmark(defaults: UserDefaults)
 }
 
-struct SecurityScopedFolderAccessProvider: DownloadFolderAccessProviding {
-    func createAccess(url: URL, savesBookmark: Bool, defaults: UserDefaults) throws -> DownloadFolderAccessing {
+package struct SecurityScopedFolderAccessProvider: DownloadFolderAccessProviding {
+    package func createAccess(url: URL, savesBookmark: Bool, defaults: UserDefaults) throws -> DownloadFolderAccessing {
         try SecurityScopedFolder(url: url, savesBookmark: savesBookmark, defaults: defaults)
     }
 
-    func restoreDefault(defaults: UserDefaults) throws -> DownloadFolderAccessing? {
+    package func restoreDefault(defaults: UserDefaults) throws -> DownloadFolderAccessing? {
         try SecurityScopedFolder.restore(defaults: defaults)
     }
 
-    func restore(from bookmark: Data) throws -> DownloadFolderAccessing {
+    package func restore(from bookmark: Data) throws -> DownloadFolderAccessing {
         try SecurityScopedFolder.restore(from: bookmark)
     }
 
-    func clearDefaultBookmark(defaults: UserDefaults) {
+    package func clearDefaultBookmark(defaults: UserDefaults) {
         SecurityScopedFolder.clearBookmark(defaults: defaults)
     }
 }
 
-final class SecurityScopedFolder: DownloadFolderAccessing {
-    static let defaultsKey = "DownloadFolderBookmark"
+package final class SecurityScopedFolder: DownloadFolderAccessing {
+    package static let defaultsKey = "DownloadFolderBookmark"
 
-    let url: URL
+    package let url: URL
     private let isAccessing: Bool
 
-    init(url: URL, savesBookmark: Bool = true, defaults: UserDefaults = .standard) throws {
+    package init(url: URL, savesBookmark: Bool = true, defaults: UserDefaults = .standard) throws {
         let accessed = url.startAccessingSecurityScopedResource()
         guard accessed else {
             throw TorrentStoreError.downloadFolderAccessDenied
@@ -68,15 +68,15 @@ final class SecurityScopedFolder: DownloadFolderAccessing {
         }
     }
 
-    static func clearBookmark(defaults: UserDefaults = .standard) {
+    package static func clearBookmark(defaults: UserDefaults = .standard) {
         defaults.removeObject(forKey: defaultsKey)
     }
 
-    func bookmarkData() throws -> Data {
+    package func bookmarkData() throws -> Data {
         try url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil)
     }
 
-    static func restore(defaults: UserDefaults = .standard) throws -> SecurityScopedFolder? {
+    package static func restore(defaults: UserDefaults = .standard) throws -> SecurityScopedFolder? {
         guard let bookmark = defaults.data(forKey: defaultsKey) else {
             return nil
         }
@@ -88,7 +88,7 @@ final class SecurityScopedFolder: DownloadFolderAccessing {
         return access
     }
 
-    static func restore(from bookmark: Data) throws -> SecurityScopedFolder {
+    package static func restore(from bookmark: Data) throws -> SecurityScopedFolder {
         var stale = false
         let url = try URL(
             resolvingBookmarkData: bookmark,

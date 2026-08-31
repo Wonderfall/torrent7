@@ -3,15 +3,15 @@ import TorrentEngineModel
 import TorrentMetainfo
 import TorrentStorageAuthority
 
-enum TorrentMagnetEnvelopeError: LocalizedError, Equatable, Sendable {
+package enum TorrentMagnetEnvelopeError: LocalizedError, Equatable, Sendable {
     case promotedMetadataTooLarge
 
-    var errorDescription: String? {
+    package var errorDescription: String? {
         "The promoted torrent metadata exceeds the safe size limit."
     }
 }
 
-extension ParsedMagnet {
+package extension ParsedMagnet {
     var storageInfoHashes: TorrentStorageInfoHashes {
         get throws {
             try TorrentStorageInfoHashes(v1: v1InfoHash, v2: v2InfoHash)

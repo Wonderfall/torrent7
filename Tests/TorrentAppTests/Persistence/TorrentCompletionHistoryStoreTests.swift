@@ -1,4 +1,5 @@
 import Testing
+import TorrentAppInfrastructure
 @testable import TorrentApp
 
 @Suite("Torrent completion history")

@@ -1,13 +1,8 @@
 import Foundation
+import TorrentAppInfrastructure
 import UserNotifications
 
-protocol TorrentNotificationServicing: Sendable {
-    @MainActor func configure()
-    func notifyDownloadFinished(torrentName: String?, playsSound: Bool) async
-    func clearBadge() async
-}
-
-private final class TorrentNotificationPresentationDelegate: NSObject, UNUserNotificationCenterDelegate, Sendable {
+nonisolated private final class TorrentNotificationPresentationDelegate: NSObject, UNUserNotificationCenterDelegate, Sendable {
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
@@ -30,9 +25,11 @@ actor TorrentNotificationService: TorrentNotificationServicing {
         self.center = center
     }
 
-    @MainActor
-    func configure() {
-        UNUserNotificationCenter.current().delegate = Self.presentationDelegate
+    func configure() async {
+        let presentationDelegate = Self.presentationDelegate
+        await MainActor.run {
+            UNUserNotificationCenter.current().delegate = presentationDelegate
+        }
     }
 
     func notifyDownloadFinished(torrentName: String?, playsSound: Bool) async {

@@ -1,19 +1,19 @@
 import AppKit
 import Foundation
 
-struct TorrentDefaultApplicationContext: Sendable {
+nonisolated struct TorrentDefaultApplicationContext: Sendable {
     let bundleURL: URL
     let bundleIdentifier: String?
     let runningApplicationBundleURL: URL?
 }
 
-struct TorrentDefaultApplicationStatus: Equatable, Sendable {
+nonisolated struct TorrentDefaultApplicationStatus: Equatable, Sendable {
     let applicationURL: URL
     let isDefaultForTorrentFiles: Bool
     let isDefaultForMagnetLinks: Bool
 }
 
-enum TorrentDefaultApplicationService {
+nonisolated enum TorrentDefaultApplicationService {
     @concurrent
     static func status(
         for context: TorrentDefaultApplicationContext

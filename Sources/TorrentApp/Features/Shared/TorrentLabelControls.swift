@@ -1,4 +1,5 @@
 import SwiftUI
+import TorrentAppInfrastructure
 
 struct TorrentLabelSelectionRow: View {
     let labels: [TorrentLabel]

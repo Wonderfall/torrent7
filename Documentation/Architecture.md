@@ -22,6 +22,14 @@ submit a path or receive a directory capability. An issued file descriptor may
 reveal its pathname through facilities such as `F_GETPATH`; path knowledge is
 therefore neither treated as secret nor accepted as filesystem authority.
 
+Within the GUI process, `TorrentApp` is the MainActor-isolated SwiftUI and
+presentation module. `TorrentAppInfrastructure` contains concurrency-neutral
+domain values plus actor-owned persistence, bookmark, and storage-authority
+services. This module split is an isolation boundary for Swift concurrency, not
+a process or trust boundary; both modules execute with the GUI's sandbox
+authority. All Swift targets enable approachable-concurrency semantics, while
+non-UI modules retain explicit nonisolated default isolation.
+
 ## Process and authority split
 
 | Responsibility | GUI application | Engine helper extension |

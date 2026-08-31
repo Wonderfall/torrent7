@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TorrentAppInfrastructure
 import TorrentEngineModel
 @testable import TorrentApp
 
@@ -581,8 +582,7 @@ private actor SuspendingNotificationService: TorrentNotificationServicing {
     private var shouldSuspendNextNotification = true
     private var continuation: CheckedContinuation<Void, Never>?
 
-    @MainActor
-    func configure() {}
+    func configure() async {}
 
     func notifyDownloadFinished(torrentName: String?, playsSound: Bool) async {
         if shouldSuspendNextNotification {

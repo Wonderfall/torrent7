@@ -144,7 +144,7 @@ private actor FileIconService {
     }
 }
 
-private enum FileItemIconSource: Hashable {
+nonisolated private enum FileItemIconSource: Hashable {
     case existingItem(String)
     case fileExtension(String)
     case folder
@@ -174,7 +174,7 @@ private enum FileItemIconSource: Hashable {
     }
 }
 
-enum TorrentFileIconSource: Hashable {
+nonisolated enum TorrentFileIconSource: Hashable {
     case fileExtension(String)
     case genericFile
     case folder

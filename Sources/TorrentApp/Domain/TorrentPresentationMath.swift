@@ -1,4 +1,4 @@
-enum TorrentPresentationMath {
+nonisolated enum TorrentPresentationMath {
     static func estimatedRemainingSeconds(
         totalWanted: Int64,
         totalDone: Int64,

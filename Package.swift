@@ -212,14 +212,24 @@ let bridgeSafeInteropSwiftSettings: [SwiftSetting] = [
     .unsafeFlags(["-Xcc", "-fexperimental-bounds-safety-attributes"])
 ]
 // Swift 6.3 IRGen crashes when lifetime-dependent imported wrappers are emitted
-// under whole-module optimization in this multi-file target. Keep normal -O
-// per-file optimization until the compiler can emit this module under WMO.
-let engineBridgeSafeInteropWorkaround: [SwiftSetting] = [
+// under whole-module optimization in affected multi-file targets. Keep normal
+// -O per-file optimization until the compiler can emit these modules under WMO.
+let bridgeSafeInteropWholeModuleWorkaround: [SwiftSetting] = [
     .unsafeFlags(["-no-whole-module-optimization"], .when(configuration: .release))
 ]
 let engineExtensionSwiftFlags = appSwiftStrictnessFlags
     + appSwiftPointerAuthenticationFlags
     + ["-application-extension"]
+let approachableConcurrencySwiftSettings: [SwiftSetting] = [
+    .enableUpcomingFeature("InferIsolatedConformances"),
+    .enableUpcomingFeature("NonisolatedNonsendingByDefault")
+]
+let nonisolatedConcurrencySwiftSettings = approachableConcurrencySwiftSettings + [
+    .defaultIsolation(nil)
+]
+let mainActorConcurrencySwiftSettings = approachableConcurrencySwiftSettings + [
+    .defaultIsolation(MainActor.self)
+]
 let engineExtensionLinkerFlags = [
     "-Xlinker", "-e",
     "-Xlinker", "_NSExtensionMain"
@@ -291,7 +301,7 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(engineExtensionSwiftFlags)
-            ]
+            ] + nonisolatedConcurrencySwiftSettings
         ),
         .target(
             name: "TorrentMetainfo",
@@ -301,7 +311,7 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(engineExtensionSwiftFlags)
-            ]
+            ] + nonisolatedConcurrencySwiftSettings
         ),
         .target(
             name: "TorrentStorageAuthority",
@@ -311,7 +321,7 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
-            ]
+            ] + nonisolatedConcurrencySwiftSettings
         ),
         .target(
             name: "TorrentEngineIPC",
@@ -321,7 +331,7 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(engineExtensionSwiftFlags)
-            ]
+            ] + nonisolatedConcurrencySwiftSettings
         ),
         .target(
             name: "TorrentEngineClient",
@@ -331,7 +341,7 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
-            ]
+            ] + nonisolatedConcurrencySwiftSettings
         ),
         .executableTarget(
             name: "TorrentEngineXPCIntegrationHost",
@@ -342,7 +352,7 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
-            ]
+            ] + nonisolatedConcurrencySwiftSettings
         ),
         .executableTarget(
             name: "DHTMessageParserBenchmark",
@@ -353,7 +363,9 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(engineExtensionSwiftFlags)
-            ] + bridgeSafeInteropSwiftSettings + engineBridgeSafeInteropWorkaround
+            ] + nonisolatedConcurrencySwiftSettings
+                + bridgeSafeInteropSwiftSettings
+                + bridgeSafeInteropWholeModuleWorkaround
         ),
         .executableTarget(
             name: "SwiftParserBenchmark",
@@ -364,7 +376,7 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(engineExtensionSwiftFlags)
-            ]
+            ] + nonisolatedConcurrencySwiftSettings
         ),
         .executableTarget(
             name: "LibtorrentParserBenchmark",
@@ -388,7 +400,7 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(engineExtensionSwiftFlags)
-            ]
+            ] + nonisolatedConcurrencySwiftSettings
         ),
         .target(
             name: "TorrentEngineCore",
@@ -398,7 +410,9 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(engineExtensionSwiftFlags)
-            ] + bridgeSafeInteropSwiftSettings + engineBridgeSafeInteropWorkaround
+            ] + nonisolatedConcurrencySwiftSettings
+                + bridgeSafeInteropSwiftSettings
+                + bridgeSafeInteropWholeModuleWorkaround
         ),
         .target(
             name: "TorrentEngineService",
@@ -414,7 +428,7 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(engineExtensionSwiftFlags)
-            ]
+            ] + nonisolatedConcurrencySwiftSettings
         ),
         .executableTarget(
             name: "TorrentEngineExtension",
@@ -424,7 +438,7 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(engineExtensionSwiftFlags)
-            ],
+            ] + nonisolatedConcurrencySwiftSettings,
             linkerSettings: [
                 .unsafeFlags(engineExtensionLinkerFlags)
             ]
@@ -437,7 +451,7 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(engineExtensionSwiftFlags)
-            ] + diagnosticsExtensionIdentityFlags,
+            ] + nonisolatedConcurrencySwiftSettings + diagnosticsExtensionIdentityFlags,
             linkerSettings: [
                 .unsafeFlags(engineExtensionLinkerFlags)
             ]
@@ -450,7 +464,7 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(engineExtensionSwiftFlags)
-            ] + integrationExtensionIdentityFlags,
+            ] + nonisolatedConcurrencySwiftSettings + integrationExtensionIdentityFlags,
             linkerSettings: [
                 .unsafeFlags(engineExtensionLinkerFlags)
             ]
@@ -469,8 +483,8 @@ let package = Package(
                 .unsafeFlags(bridgeStaticLibraryFlags + bridgeLinkerHardeningFlags)
             ]
         ),
-        .executableTarget(
-            name: "TorrentApp",
+        .target(
+            name: "TorrentAppInfrastructure",
             dependencies: [
                 "TorrentEngineClient",
                 "TorrentEngineIPC",
@@ -483,12 +497,30 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
+            ] + nonisolatedConcurrencySwiftSettings
+        ),
+        .executableTarget(
+            name: "TorrentApp",
+            dependencies: [
+                "TorrentAppInfrastructure",
+                "TorrentEngineClient",
+                "TorrentEngineIPC",
+                "TorrentEngineModel",
+                "TorrentMetainfo",
+                "TorrentStorageAuthority"
             ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .treatAllWarnings(as: .error),
+                .strictMemorySafety(),
+                .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
+            ] + mainActorConcurrencySwiftSettings,
         ),
         .testTarget(
             name: "TorrentAppTests",
             dependencies: [
                 "TorrentApp",
+                "TorrentAppInfrastructure",
                 "TorrentBridge",
                 "TorrentEngineCore",
                 "TorrentEngineModel",
@@ -500,7 +532,9 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
-            ] + bridgeSafeInteropSwiftSettings
+            ] + nonisolatedConcurrencySwiftSettings
+                + bridgeSafeInteropSwiftSettings
+                + bridgeSafeInteropWholeModuleWorkaround
         ),
         .testTarget(
             name: "TorrentMetainfoTests",
@@ -510,7 +544,7 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
-            ]
+            ] + nonisolatedConcurrencySwiftSettings
         ),
         .testTarget(
             name: "TorrentEngineIPCTests",
@@ -520,7 +554,7 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
-            ]
+            ] + nonisolatedConcurrencySwiftSettings
         ),
         .testTarget(
             name: "TorrentEngineClientTests",
@@ -530,7 +564,7 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
-            ]
+            ] + nonisolatedConcurrencySwiftSettings
         ),
         .testTarget(
             name: "TorrentEngineServiceTests",
@@ -540,7 +574,7 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
-            ]
+            ] + nonisolatedConcurrencySwiftSettings
         ),
         .testTarget(
             name: "TorrentNetworkSecurityTests",
@@ -550,7 +584,7 @@ let package = Package(
                 .treatAllWarnings(as: .error),
                 .strictMemorySafety(),
                 .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
-            ]
+            ] + nonisolatedConcurrencySwiftSettings
         ),
         .target(
             name: "TorrentEngineIPCFuzzSupport",
@@ -560,7 +594,7 @@ let package = Package(
                 .swiftLanguageMode(.v6),
                 .treatAllWarnings(as: .error),
                 .unsafeFlags(appSwiftStrictnessFlags)
-            ]
+            ] + nonisolatedConcurrencySwiftSettings
         ),
         .target(
             name: "TorrentStorageFuzzSupport",
@@ -574,7 +608,7 @@ let package = Package(
                 .swiftLanguageMode(.v6),
                 .treatAllWarnings(as: .error),
                 .unsafeFlags(appSwiftStrictnessFlags)
-            ]
+            ] + nonisolatedConcurrencySwiftSettings
         ),
         .executableTarget(
             name: "TorrentBridgeTests",

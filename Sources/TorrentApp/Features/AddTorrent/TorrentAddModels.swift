@@ -1,11 +1,15 @@
 import Foundation
+import TorrentAppInfrastructure
 import TorrentEngineModel
 import TorrentMetainfo
 import UniformTypeIdentifiers
 
-let bittorrentFileType = UTType(importedAs: "org.bittorrent.torrent", conformingTo: .data)
+nonisolated let bittorrentFileType = UTType(
+    importedAs: "org.bittorrent.torrent",
+    conformingTo: .data
+)
 
-enum FileImportMode {
+nonisolated enum FileImportMode {
     case torrentFiles
     case downloadFolder
     case magnetDestination(promotionID: UUID)
@@ -29,7 +33,7 @@ enum FileImportMode {
     }
 }
 
-struct TorrentAddDraft: Identifiable, Equatable, Sendable {
+nonisolated struct TorrentAddDraft: Identifiable, Equatable, Sendable {
     enum Source: Equatable, Sendable {
         case torrentFile(URL)
         case magnet(String)
@@ -62,22 +66,22 @@ struct TorrentAddDraft: Identifiable, Equatable, Sendable {
     }
 }
 
-struct TorrentFileDraftBatch: Sendable {
+nonisolated struct TorrentFileDraftBatch: Sendable {
     let drafts: [TorrentAddDraft]
     let exceededLimit: Bool
 }
 
-struct TorrentMagnetDraftPreparation: Sendable {
+nonisolated struct TorrentMagnetDraftPreparation: Sendable {
     let draft: TorrentAddDraft?
     let isTooLarge: Bool
 }
 
-struct TorrentMagnetPreparationRequest: Identifiable, Sendable {
+nonisolated struct TorrentMagnetPreparationRequest: Identifiable, Sendable {
     let id = UUID()
     let value: String
 }
 
-enum TorrentAddSourceParser {
+nonisolated enum TorrentAddSourceParser {
     static func magnetDraft(from value: String) -> TorrentAddDraft? {
         magnetDraftPreparation(from: value).draft
     }
@@ -153,7 +157,7 @@ enum TorrentAddSourceParser {
     }
 }
 
-struct TorrentAddOptions {
+nonisolated struct TorrentAddOptions {
     let downloadFolder: URL
     let torrentData: Data?
     let filePriorities: [Int32: TorrentFilePriority]?
@@ -166,7 +170,7 @@ struct TorrentAddOptions {
     let destinationChoice: TorrentStorageDestinationChoice
 }
 
-enum TorrentSourceSecurityInspector {
+nonisolated enum TorrentSourceSecurityInspector {
     static func summary(magnetURI: String) -> TorrentSourceSecuritySummary {
         (try? ParsedMagnet.parse(magnetURI).sourceSecuritySummary) ?? .empty
     }

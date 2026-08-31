@@ -1,21 +1,21 @@
 import Foundation
 
-struct TorrentLabel: Identifiable, Hashable, Codable, Sendable {
-    typealias ID = String
-    static let maximumCount = 256
-    static let maxNameLength = 48
-    static let maxNameInputByteCount = 512
-    static let maxIDByteCount = 128
+package struct TorrentLabel: Identifiable, Hashable, Codable, Sendable {
+    package typealias ID = String
+    package static let maximumCount = 256
+    package static let maxNameLength = 48
+    package static let maxNameInputByteCount = 512
+    package static let maxIDByteCount = 128
 
-    let id: ID
-    var name: String
+    package let id: ID
+    package var name: String
 
-    init(id: ID = UUID().uuidString, name: String) {
+    package init(id: ID = UUID().uuidString, name: String) {
         self.id = id
         self.name = name
     }
 
-    static func normalizedName(_ name: String) -> String {
+    package static func normalizedName(_ name: String) -> String {
         let boundedName = String(
             decoding: name.utf8.prefix(maxNameInputByteCount),
             as: UTF8.self
@@ -27,7 +27,7 @@ struct TorrentLabel: Identifiable, Hashable, Codable, Sendable {
         )
     }
 
-    func matches(name otherName: String) -> Bool {
+    package func matches(name otherName: String) -> Bool {
         name.compare(
             Self.normalizedName(otherName),
             options: [.caseInsensitive, .diacriticInsensitive],

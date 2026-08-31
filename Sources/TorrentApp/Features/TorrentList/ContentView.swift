@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TorrentAppInfrastructure
 import TorrentEngineModel
 
 struct ContentView: View {
@@ -771,7 +772,7 @@ private struct TorrentFileIntakeRequest: Identifiable, Sendable {
     let urls: [URL]
 }
 
-private struct TorrentRemovalConfirmationRequest: Sendable {
+nonisolated private struct TorrentRemovalConfirmationRequest: Sendable {
     let ids: Set<TorrentItem.ID>
     let count: Int
     let singleTorrentDownloadPath: String?

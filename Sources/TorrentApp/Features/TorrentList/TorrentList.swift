@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TorrentAppInfrastructure
 import TorrentEngineModel
 
 private enum TorrentCardStyle {

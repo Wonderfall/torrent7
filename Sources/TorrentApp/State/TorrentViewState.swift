@@ -1,8 +1,9 @@
 import Foundation
 import Observation
+import TorrentAppInfrastructure
 import TorrentEngineModel
 
-struct TorrentCommandSnapshot: Equatable, Sendable {
+nonisolated struct TorrentCommandSnapshot: Equatable, Sendable {
     var hasTorrents = false
     var sortOrder = TorrentSortOrder.dateAdded
     var sortDirection = TorrentSortDirection.ascending
@@ -64,7 +65,7 @@ struct TorrentCommandSnapshot: Equatable, Sendable {
     }
 }
 
-struct TorrentListPresentation: Sendable {
+nonisolated struct TorrentListPresentation: Sendable {
     let torrents: [TorrentItem]
     let torrentsChanged: Bool
     let torrentsByID: [TorrentItem.ID: TorrentItem]
@@ -384,7 +385,7 @@ final class TorrentTransferMetricsState {
     }
 }
 
-struct TorrentSidebarLabelSnapshot: Equatable, Identifiable, Sendable {
+nonisolated struct TorrentSidebarLabelSnapshot: Equatable, Identifiable, Sendable {
     var label: TorrentLabel
     var count: Int
 
@@ -393,7 +394,7 @@ struct TorrentSidebarLabelSnapshot: Equatable, Identifiable, Sendable {
     }
 }
 
-struct TorrentSidebarTrackerHostSnapshot: Equatable, Identifiable, Sendable {
+nonisolated struct TorrentSidebarTrackerHostSnapshot: Equatable, Identifiable, Sendable {
     var host: String
     var count: Int
 
@@ -402,7 +403,7 @@ struct TorrentSidebarTrackerHostSnapshot: Equatable, Identifiable, Sendable {
     }
 }
 
-struct TorrentSidebarSnapshot: Equatable, Sendable {
+nonisolated struct TorrentSidebarSnapshot: Equatable, Sendable {
     var scopeCounts: [TorrentSidebarScope: Int] = [:]
     var unlabeledCount = 0
     var labelRows: [TorrentSidebarLabelSnapshot] = []

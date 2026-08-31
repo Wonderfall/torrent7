@@ -1,12 +1,12 @@
 import Foundation
 
-struct PreparedDownloadFolder: Sendable {
-    let path: String
-    let defaultURL: URL?
-    let lease: DownloadFolderAccessLease
-    let bookmarkData: Data?
+package struct PreparedDownloadFolder: Sendable {
+    package let path: String
+    package let defaultURL: URL?
+    package let lease: DownloadFolderAccessLease
+    package let bookmarkData: Data?
 
-    init(access: DownloadFolderAccessing, defaultURL: URL?, bookmarkData: Data?) {
+    package init(access: DownloadFolderAccessing, defaultURL: URL?, bookmarkData: Data?) {
         path = access.url.torrentFilePath
         self.defaultURL = defaultURL
         lease = DownloadFolderAccessLease(access: access)
@@ -14,27 +14,27 @@ struct PreparedDownloadFolder: Sendable {
     }
 }
 
-final class DownloadFolderAccessLease: Sendable {
+package final class DownloadFolderAccessLease: Sendable {
     fileprivate let access: DownloadFolderAccessing
 
-    var url: URL {
+    package var url: URL {
         access.url
     }
 
-    init(access: DownloadFolderAccessing) {
+    package init(access: DownloadFolderAccessing) {
         self.access = access
     }
 }
 
-struct DownloadFolderAccessSnapshot: Sendable {
-    static let maximumPathCount = 32
+package struct DownloadFolderAccessSnapshot: Sendable {
+    package static let maximumPathCount = 32
 
-    let revision: UInt64
-    let paths: [String]
+    package let revision: UInt64
+    package let paths: [String]
     // Security-scoped access remains live for the lifetime of this snapshot.
-    let leases: [DownloadFolderAccessLease]
+    package let leases: [DownloadFolderAccessLease]
 
-    init(
+    package init(
         revision: UInt64 = 0,
         defaultAccess: DownloadFolderAccessing?,
         additionalAccesses: [DownloadFolderAccessing]
@@ -68,17 +68,27 @@ struct DownloadFolderAccessSnapshot: Sendable {
     }
 }
 
-struct DownloadFolderBootstrapResult: Sendable {
-    let defaultURL: URL?
-    let discardedInvalidDefault: Bool
+package struct DownloadFolderBootstrapResult: Sendable {
+    package let defaultURL: URL?
+    package let discardedInvalidDefault: Bool
+
+    package init(defaultURL: URL?, discardedInvalidDefault: Bool) {
+        self.defaultURL = defaultURL
+        self.discardedInvalidDefault = discardedInvalidDefault
+    }
 }
 
-struct DownloadFolderDefaultUpdate: Sendable {
-    let url: URL
-    let didChange: Bool
+package struct DownloadFolderDefaultUpdate: Sendable {
+    package let url: URL
+    package let didChange: Bool
+
+    package init(url: URL, didChange: Bool) {
+        self.url = url
+        self.didChange = didChange
+    }
 }
 
-protocol DownloadFolderAccessStoring: AnyObject, Sendable {
+package protocol DownloadFolderAccessStoring: Actor {
     func bootstrap() async -> DownloadFolderBootstrapResult
     func currentDefaultURL() async -> URL?
     func makeAccessSnapshot() async -> DownloadFolderAccessSnapshot
@@ -108,7 +118,7 @@ protocol DownloadFolderAccessStoring: AnyObject, Sendable {
     ) async -> Bool
 }
 
-actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
+package actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
     private let defaultsDomain: TorrentDefaultsDomain
     private var cachedDefaults: UserDefaults?
     private let accessProvider: DownloadFolderAccessProviding
@@ -119,7 +129,7 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
     private var discardedInvalidDefault = false
     private var accessRevision: UInt64 = 0
 
-    init(
+    package init(
         domain: TorrentDefaultsDomain = .standard,
         accessProvider: DownloadFolderAccessProviding = SecurityScopedFolderAccessProvider()
     ) {
@@ -136,7 +146,7 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
         return defaults
     }
 
-    func bootstrap() async -> DownloadFolderBootstrapResult {
+    package func bootstrap() async -> DownloadFolderBootstrapResult {
         restoreAdditionalAccessesIfNeeded()
         guard !didRestoreDefaultAccess else {
             return DownloadFolderBootstrapResult(
@@ -165,11 +175,11 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
         )
     }
 
-    func currentDefaultURL() async -> URL? {
+    package func currentDefaultURL() async -> URL? {
         defaultAccess?.url
     }
 
-    func makeAccessSnapshot() async -> DownloadFolderAccessSnapshot {
+    package func makeAccessSnapshot() async -> DownloadFolderAccessSnapshot {
         restoreAdditionalAccessesIfNeeded()
         return DownloadFolderAccessSnapshot(
             revision: accessRevision,
@@ -178,7 +188,7 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
         )
     }
 
-    func clearDefaultBookmarkAndAccess() async {
+    package func clearDefaultBookmarkAndAccess() async {
         let previousIdentity = accessIdentity
         defer { advanceAccessRevision(ifChangedFrom: previousIdentity) }
         didRestoreDefaultAccess = true
@@ -186,7 +196,7 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
         defaultAccess = nil
     }
 
-    func validateSelection(_ url: URL) async throws {
+    package func validateSelection(_ url: URL) async throws {
         _ = try accessProvider.createAccess(
             url: url,
             savesBookmark: false,
@@ -195,7 +205,7 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
     }
 
     @discardableResult
-    func setDefault(
+    package func setDefault(
         _ url: URL,
         retaining paths: Set<String>
     ) async throws -> DownloadFolderDefaultUpdate {
@@ -238,7 +248,7 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
         )
     }
 
-    func clearDefault(retaining paths: Set<String>) async {
+    package func clearDefault(retaining paths: Set<String>) async {
         restoreAdditionalAccessesIfNeeded()
         let previousIdentity = accessIdentity
         defer { advanceAccessRevision(ifChangedFrom: previousIdentity) }
@@ -257,7 +267,7 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
         enforceAdditionalAccessLimit()
     }
 
-    func prepareForAdd(
+    package func prepareForAdd(
         _ url: URL,
         setsDefault: Bool,
         retaining paths: Set<String>
@@ -299,7 +309,7 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
     }
 
     @discardableResult
-    func commitPreparedForAdd(
+    package func commitPreparedForAdd(
         _ preparedFolder: PreparedDownloadFolder,
         retaining paths: Set<String>
     ) async -> URL? {
@@ -342,7 +352,7 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
         return nil
     }
 
-    func lease(forSavePath path: String) async throws -> DownloadFolderAccessLease {
+    package func lease(forSavePath path: String) async throws -> DownloadFolderAccessLease {
         restoreAdditionalAccessesIfNeeded()
         guard !path.isEmpty, (path as NSString).isAbsolutePath else {
             throw TorrentStoreError.downloadFolderAccessDenied
@@ -364,7 +374,7 @@ actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
         return DownloadFolderAccessLease(access: access)
     }
 
-    func prune(
+    package func prune(
         retaining paths: Set<String>,
         ifRevisionMatches revision: UInt64
     ) async -> Bool {

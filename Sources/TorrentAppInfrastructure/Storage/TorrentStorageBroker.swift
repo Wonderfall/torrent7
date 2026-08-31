@@ -7,7 +7,7 @@ import TorrentEngineModel
 import TorrentStorageAuthority
 import XPC
 
-enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
+package enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
     case invalidClaim
     case claimUnavailable
     case generationMismatch
@@ -17,7 +17,7 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
     case filesystemObjectChanged
     case deadlineExceeded
 
-    var errorDescription: String? {
+    package var errorDescription: String? {
         switch self {
         case .invalidClaim:
             "The storage claim is invalid."
@@ -39,7 +39,7 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
     }
 }
 
-@safe final class TorrentStorageBrokerRegistry: Sendable {
+@safe package final class TorrentStorageBrokerRegistry: Sendable {
     private struct State: Sendable {
         var registrations = [UUID: Registration]()
     }
@@ -61,7 +61,9 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
 
     private let state = Mutex(State())
 
-    func install(
+    package init() {}
+
+    package func install(
         claim: TorrentStorageClaim,
         parent: TorrentStorageParentAuthority
     ) throws {
@@ -84,7 +86,7 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
         }
     }
 
-    func replace(claim: TorrentStorageClaim) throws {
+    package func replace(claim: TorrentStorageClaim) throws {
         try Self.validate(claim)
         try state.withLock { state in
             guard var registration = state.registrations[
@@ -97,7 +99,7 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
         }
     }
 
-    func removeClaim(claimID: UUID, generation: UInt64) throws {
+    package func removeClaim(claimID: UUID, generation: UInt64) throws {
         try state.withLock { state in
             guard let registration = state.registrations[claimID] else {
                 return
@@ -110,11 +112,11 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
         }
     }
 
-    func installedClaimIDs() -> Set<UUID> {
+    package func installedClaimIDs() -> Set<UUID> {
         state.withLock { Set($0.registrations.keys) }
     }
 
-    func locationsByTorrentID() -> [String: TorrentStorageLocation] {
+    package func locationsByTorrentID() -> [String: TorrentStorageLocation] {
         state.withLock { state in
             var locations = [String: TorrentStorageLocation]()
             var ambiguousIDs = Set<String>()
@@ -143,7 +145,7 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
         }
     }
 
-    func openPayload(
+    package func openPayload(
         claimID: UUID,
         generation: UInt64,
         fileIndex: Int32,
@@ -179,7 +181,7 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
         }
     }
 
-    func statBatch(
+    package func statBatch(
         claimID: UUID,
         generation: UInt64,
         fileIndices: [Int32],
@@ -423,21 +425,21 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
 
 }
 
-@safe final class TorrentStorageBrokerSessionGate: Sendable {
-    struct Limits: Sendable {
-        static let production = Limits(
+@safe package final class TorrentStorageBrokerSessionGate: Sendable {
+    package struct Limits: Sendable {
+        package static let production = Limits(
             maximumInFlightRequests: 64,
             maximumRequestsPerInterval: 2_048,
             rateIntervalNanoseconds: 1_000_000_000,
             maximumFutureDeadlineNanoseconds: 6_000_000_000
         )
 
-        let maximumInFlightRequests: Int
-        let maximumRequestsPerInterval: Int
-        let rateIntervalNanoseconds: UInt64
-        let maximumFutureDeadlineNanoseconds: UInt64
+        package let maximumInFlightRequests: Int
+        package let maximumRequestsPerInterval: Int
+        package let rateIntervalNanoseconds: UInt64
+        package let maximumFutureDeadlineNanoseconds: UInt64
 
-        init(
+        package init(
             maximumInFlightRequests: Int,
             maximumRequestsPerInterval: Int,
             rateIntervalNanoseconds: UInt64,
@@ -469,7 +471,7 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
     private let limits: Limits
     private let state = Mutex(State())
 
-    init(
+    package init(
         registry: TorrentStorageBrokerRegistry,
         sessionNonce: UUID,
         limits: Limits = .production
@@ -479,7 +481,7 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
         self.limits = limits
     }
 
-    func reserveSession() -> Bool {
+    package func reserveSession() -> Bool {
         state.withLock { state in
             guard !state.isCancelled, !state.didAcceptSession else {
                 return false
@@ -489,7 +491,7 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
         }
     }
 
-    func install(session: XPCSession) {
+    package func install(session: XPCSession) {
         let shouldCancel = state.withLock { state in
             guard !state.isCancelled else {
                 return true
@@ -502,7 +504,7 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
         }
     }
 
-    func handle(_ dictionary: XPCDictionary) -> XPCDictionary? {
+    package func handle(_ dictionary: XPCDictionary) -> XPCDictionary? {
         let requestStart = DispatchTime.now().uptimeNanoseconds
         guard beginRequest(at: requestStart) else {
             return nil
@@ -589,7 +591,7 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
         return try? TorrentStorageBrokerIPCCodec.encode(reply, for: request)
     }
 
-    func cancel() {
+    package func cancel() {
         cancel(reason: "The storage broker session ended")
     }
 
@@ -734,14 +736,14 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
     }
 }
 
-@safe final class TorrentStorageBrokerServer: Sendable {
-    let endpoint: XPCEndpoint
-    let sessionNonce: UUID
+@safe package final class TorrentStorageBrokerServer: Sendable {
+    package let endpoint: XPCEndpoint
+    package let sessionNonce: UUID
 
     private let listener: XPCListener
     private let gate: TorrentStorageBrokerSessionGate
 
-    init(
+    package init(
         registry: TorrentStorageBrokerRegistry,
         engineConfiguration: TorrentEngineXPCConfiguration
     ) throws {
@@ -790,7 +792,7 @@ enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
         try listener.activate()
     }
 
-    func cancel() {
+    package func cancel() {
         gate.cancel()
         listener.cancel()
     }

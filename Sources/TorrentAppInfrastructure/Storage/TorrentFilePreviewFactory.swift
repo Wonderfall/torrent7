@@ -2,7 +2,7 @@ import Foundation
 import TorrentEngineModel
 import TorrentStorageAuthority
 
-extension ParsedTorrentManifest {
+package extension ParsedTorrentManifest {
     func filePreview(torrentData: Data) -> TorrentFilePreview {
         let directoryPrefix = manifest.contentKind == .directory
             ? [manifest.name]

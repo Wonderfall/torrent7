@@ -1,13 +1,15 @@
 import Foundation
 
+@MainActor
 protocol SleepPreventionServicing: AnyObject {
     func update(isEnabled: Bool, hasActiveTransfers: Bool)
 }
 
+@MainActor
 final class SleepPreventionService: SleepPreventionServicing {
     private var activity: (any NSObjectProtocol)?
 
-    deinit {
+    isolated deinit {
         endActivity()
     }
 

@@ -2,6 +2,7 @@ import Dispatch
 import Foundation
 import Synchronization
 import Testing
+import TorrentAppInfrastructure
 import TorrentBridge
 import TorrentEngineClient
 import TorrentEngineModel
@@ -34,14 +35,14 @@ struct TorrentStoreIntegrationTests {
             }
         }
 
-        #expect(harness.accessStore.bootstrapCount == 0)
+        #expect(await harness.accessStore.bootstrapCount == 0)
         #expect(startupCount.withLock { $0 } == 0)
 
         harness.store.start()
         harness.store.start()
         await harness.store.saveAll()
 
-        #expect(harness.accessStore.bootstrapCount == 1)
+        #expect(await harness.accessStore.bootstrapCount == 1)
         #expect(startupCount.withLock { $0 } == 1)
         #expect(!harness.engine.isAvailable)
         #expect(harness.store.engineAvailable)
@@ -285,7 +286,7 @@ struct TorrentStoreIntegrationTests {
         #expect(harness.dock.transferRateUpdates.map(\.uploadRate) == [3])
         #expect(harness.sleep.updates.count == 1)
         #expect(harness.sleep.updates.first?.hasActiveTransfers == true)
-        #expect(harness.accessStore.pruneCalls.isEmpty)
+        #expect(await harness.accessStore.pruneCalls.isEmpty)
         #expect(await harness.engine.snapshotRequests.last?.sortOrder == .name)
     }
 
@@ -421,7 +422,7 @@ struct TorrentStoreIntegrationTests {
             await harness.store.saveAll()
             #expect(harness.store.downloadLocationPath(for: alpha.id)
                 == downloadFolder.appending(path: "sample.bin").torrentFilePath)
-            harness.fileLocationService.suspendNextRevealURLs()
+            await harness.fileLocationService.suspendNextRevealURLs()
 
             harness.store.revealTorrentInFinder(id: alpha.id)
             await harness.fileLocationService.waitForSuspendedRevealURLs()
@@ -430,7 +431,7 @@ struct TorrentStoreIntegrationTests {
                 torrents: [alpha, makeTorrent(id: "beta", name: "Beta")]
             ))
             await harness.store.refreshNow()
-            harness.fileLocationService.resumeSuspendedRevealURLs()
+            await harness.fileLocationService.resumeSuspendedRevealURLs()
             for _ in 0..<20 where harness.store.lastError == nil {
                 await Task.yield()
             }
@@ -976,8 +977,8 @@ struct TorrentStoreIntegrationTests {
             let request = try #require(
                 harness.store.magnetDestinationConflict
             )
-            harness.accessStore.prepareForAddResult = .failure(
-                FakeBookmarkError()
+            await harness.accessStore.setPrepareForAddResult(
+                .failure(FakeBookmarkError())
             )
             #expect(harness.store.chooseAnotherFolderForMagnetConflict(
                 id: request.id,
@@ -989,7 +990,7 @@ struct TorrentStoreIntegrationTests {
             #expect(await journal.allPromotions().first?.state
                 == .awaitingDestination)
 
-            harness.accessStore.prepareForAddResult = nil
+            await harness.accessStore.setPrepareForAddResult(nil)
             #expect(harness.store.chooseAnotherFolderForMagnetConflict(
                 id: request.id,
                 folder: otherFolder
@@ -1000,9 +1001,9 @@ struct TorrentStoreIntegrationTests {
                 atPath: otherFolder.appending(path: "sample.bin")
                     .torrentFilePath
             ))
-            #expect(harness.accessStore.prepareForAddCalls.last?.url
+            #expect(await harness.accessStore.prepareForAddCalls.last?.url
                 == otherFolder)
-            #expect(harness.accessStore.prepareForAddCalls.last?.setsDefault
+            #expect(await harness.accessStore.prepareForAddCalls.last?.setsDefault
                 == false)
             #expect(harness.store.magnetDestinationConflict == nil)
             #expect(await journal.allPromotions().isEmpty)
@@ -1452,7 +1453,9 @@ struct TorrentStoreIntegrationTests {
                 factory = { _ in productionEngine }
             }
             let restored = makeStoreHarness(storageClaimJournal: journal)
-            restored.accessStore.restoreDefaultResult = .success(downloadFolder)
+            await restored.accessStore.setRestoreDefaultResult(
+                .success(downloadFolder)
+            )
             restored.store.start()
             await restored.store.saveAll()
 
@@ -1526,7 +1529,9 @@ struct TorrentStoreIntegrationTests {
                 factory = { _ in productionEngine }
             }
             let restored = makeStoreHarness(storageClaimJournal: journal)
-            restored.accessStore.restoreDefaultResult = .success(downloadFolder)
+            await restored.accessStore.setRestoreDefaultResult(
+                .success(downloadFolder)
+            )
             restored.store.start()
             await restored.store.saveAll()
 

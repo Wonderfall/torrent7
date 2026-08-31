@@ -76,7 +76,7 @@ final class TorrentDockTileService: TorrentDockTileServicing {
     }
 }
 
-enum DockTransferRateFormat {
+nonisolated enum DockTransferRateFormat {
     static func string(_ bytesPerSecond: Int64) -> String {
         let units = [
             (1_000_000_000_000.0, "T/s"),

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TorrentAppInfrastructure
 import TorrentStorageAuthority
 @testable import TorrentApp
 

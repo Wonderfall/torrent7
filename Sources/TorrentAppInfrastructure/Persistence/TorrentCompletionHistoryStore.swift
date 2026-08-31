@@ -1,12 +1,17 @@
 import Foundation
 import TorrentEngineModel
 
-struct TorrentCompletionClaim: Sendable {
-    let id: UUID
-    let candidates: [TorrentCompletionCandidate]
+package struct TorrentCompletionClaim: Sendable {
+    package let id: UUID
+    package let candidates: [TorrentCompletionCandidate]
+
+    package init(id: UUID, candidates: [TorrentCompletionCandidate]) {
+        self.id = id
+        self.candidates = candidates
+    }
 }
 
-protocol TorrentCompletionHistoryStoring: Actor {
+package protocol TorrentCompletionHistoryStoring: Actor {
     func contains(_ id: TorrentItem.ID) async throws -> Bool
     func claimNewlyCompleted(
         from candidates: [TorrentCompletionCandidate]
@@ -21,23 +26,23 @@ protocol TorrentCompletionHistoryStoring: Actor {
     func prune(retaining activeIDs: Set<TorrentItem.ID>) async throws
 }
 
-actor TorrentCompletionHistoryStore: TorrentCompletionHistoryStoring {
+package actor TorrentCompletionHistoryStore: TorrentCompletionHistoryStoring {
     private let suiteName: String?
     private var defaults: UserDefaults?
     private var completedIDs: Set<TorrentItem.ID>?
     private var reservedIDs = Set<TorrentItem.ID>()
     private var reservedIDsByClaim = [UUID: Set<TorrentItem.ID>]()
 
-    init(suiteName: String? = nil) {
+    package init(suiteName: String? = nil) {
         self.suiteName = suiteName
     }
 
-    func contains(_ id: TorrentItem.ID) async throws -> Bool {
+    package func contains(_ id: TorrentItem.ID) async throws -> Bool {
         try Task.checkCancellation()
         return try loadCompletedIDs().contains(id)
     }
 
-    func claimNewlyCompleted(
+    package func claimNewlyCompleted(
         from candidates: [TorrentCompletionCandidate]
     ) async throws -> TorrentCompletionClaim {
         let knownIDs = try loadCompletedIDs()
@@ -66,7 +71,7 @@ actor TorrentCompletionHistoryStore: TorrentCompletionHistoryStoring {
         )
     }
 
-    func finalizeCompletionClaim(
+    package func finalizeCompletionClaim(
         _ id: UUID,
         remembering completedIDs: Set<TorrentItem.ID>
     ) {
@@ -74,11 +79,11 @@ actor TorrentCompletionHistoryStore: TorrentCompletionHistoryStoring {
         rememberAfterPublication(completedIDs)
     }
 
-    func abandonCompletionClaim(_ id: UUID) {
+    package func abandonCompletionClaim(_ id: UUID) {
         releaseCompletionClaim(id)
     }
 
-    func remember(_ ids: Set<TorrentItem.ID>) async throws {
+    package func remember(_ ids: Set<TorrentItem.ID>) async throws {
         try rememberSynchronously(ids)
     }
 
@@ -120,7 +125,7 @@ actor TorrentCompletionHistoryStore: TorrentCompletionHistoryStoring {
         commitWithoutCancellation(updatedIDs)
     }
 
-    func forget(_ ids: Set<TorrentItem.ID>) async throws {
+    package func forget(_ ids: Set<TorrentItem.ID>) async throws {
         try Task.checkCancellation()
         guard !ids.isEmpty else {
             return
@@ -141,7 +146,7 @@ actor TorrentCompletionHistoryStore: TorrentCompletionHistoryStoring {
         try commit(updatedIDs)
     }
 
-    func prune(retaining activeIDs: Set<TorrentItem.ID>) async throws {
+    package func prune(retaining activeIDs: Set<TorrentItem.ID>) async throws {
         let currentIDs = try loadCompletedIDs()
         var updatedIDs = Set<TorrentItem.ID>()
         updatedIDs.reserveCapacity(min(currentIDs.count, activeIDs.count))

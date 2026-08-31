@@ -1,6 +1,6 @@
 import Foundation
 
-protocol TorrentFileLocationServicing: Sendable {
+package protocol TorrentFileLocationServicing: Sendable {
     func revealURL(
         for location: TorrentStorageLocation,
         fileIndex: Int32?
@@ -11,9 +11,11 @@ protocol TorrentFileLocationServicing: Sendable {
     ) async throws -> [URL]
 }
 
-struct TorrentFileLocationService: TorrentFileLocationServicing {
+package struct TorrentFileLocationService: TorrentFileLocationServicing {
+    package init() {}
+
     @concurrent
-    func revealURL(
+    package func revealURL(
         for location: TorrentStorageLocation,
         fileIndex: Int32?
     ) async throws -> URL? {
@@ -27,7 +29,7 @@ struct TorrentFileLocationService: TorrentFileLocationServicing {
     }
 
     @concurrent
-    func revealURLs(
+    package func revealURLs(
         for locations: [TorrentStorageLocation]
     ) async throws -> [URL] {
         var urls = [URL]()

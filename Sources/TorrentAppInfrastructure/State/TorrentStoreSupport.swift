@@ -1,15 +1,15 @@
 import Foundation
 import TorrentEngineModel
 
-enum TorrentBookmarkKeys {
-    static let additionalDownloadFolders = "AdditionalDownloadFolderBookmarks"
+package enum TorrentBookmarkKeys {
+    package static let additionalDownloadFolders = "AdditionalDownloadFolderBookmarks"
 }
 
-enum TorrentCompletionKeys {
-    static let completedTorrentIDs = "CompletedTorrentIDs"
+package enum TorrentCompletionKeys {
+    package static let completedTorrentIDs = "CompletedTorrentIDs"
 }
 
-enum TorrentStoreError: LocalizedError {
+package enum TorrentStoreError: LocalizedError {
     case magnetTooLarge
     case torrentFileTooLarge
     case emptyTorrentFile
@@ -21,7 +21,7 @@ enum TorrentStoreError: LocalizedError {
     case downloadFolderAccessDenied
     case downloadFolderNotWritable
 
-    var errorDescription: String? {
+    package var errorDescription: String? {
         switch self {
         case .magnetTooLarge:
             return "The magnet link is too large."

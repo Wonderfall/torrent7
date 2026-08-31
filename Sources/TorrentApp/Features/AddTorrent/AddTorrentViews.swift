@@ -1,4 +1,5 @@
 import SwiftUI
+import TorrentAppInfrastructure
 import TorrentEngineModel
 import UniformTypeIdentifiers
 
@@ -78,7 +79,7 @@ struct AddMagnetView: View {
     }
 }
 
-struct TorrentAddFileSelectionPresentation: Sendable {
+nonisolated struct TorrentAddFileSelectionPresentation: Sendable {
     let generation: UInt64
     let filePriorities: [Int32: TorrentFilePriority]?
     let selectedFileCount: Int

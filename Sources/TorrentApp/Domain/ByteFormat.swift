@@ -1,6 +1,6 @@
 import Foundation
 
-enum ByteFormat {
+nonisolated enum ByteFormat {
     static func size(_ bytes: Int64) -> String {
         if bytes == 0 {
             return "0 KB"

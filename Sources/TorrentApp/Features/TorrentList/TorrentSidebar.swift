@@ -1,4 +1,5 @@
 import SwiftUI
+import TorrentAppInfrastructure
 
 struct TorrentSidebar: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency

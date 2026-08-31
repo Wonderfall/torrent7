@@ -1,10 +1,10 @@
 import Foundation
 
-enum TorrentDefaultsDomain: Sendable {
+package enum TorrentDefaultsDomain: Sendable {
     case standard
     case suite(String)
 
-    func makeUserDefaults() -> UserDefaults {
+    package func makeUserDefaults() -> UserDefaults {
         switch self {
         case .standard:
             return .standard

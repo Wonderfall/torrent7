@@ -4,6 +4,7 @@ import Foundation
 import Observation
 import Synchronization
 import System
+import TorrentAppInfrastructure
 import TorrentEngineClient
 import TorrentEngineIPC
 import TorrentEngineModel

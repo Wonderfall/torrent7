@@ -1,27 +1,27 @@
 import Foundation
 import TorrentEngineModel
 
-struct TorrentPreferencesSnapshot: Sendable {
-    let settings: TorrentSettings
-    let sortOrder: TorrentSortOrder
-    let sortDirections: [TorrentSortOrder: TorrentSortDirection]
+package struct TorrentPreferencesSnapshot: Sendable {
+    package let settings: TorrentSettings
+    package let sortOrder: TorrentSortOrder
+    package let sortDirections: [TorrentSortOrder: TorrentSortDirection]
 
-    var selectedSortDirection: TorrentSortDirection {
+    package var selectedSortDirection: TorrentSortDirection {
         sortDirections[sortOrder] ?? sortOrder.defaultDirection
     }
 }
 
-actor TorrentPreferencesStore {
+package actor TorrentPreferencesStore {
     private let domain: TorrentDefaultsDomain
     private var defaults: UserDefaults?
     private var newestSettingsRevision: UInt64 = 0
     private var newestSortRevision: UInt64 = 0
 
-    init(domain: TorrentDefaultsDomain = .standard) {
+    package init(domain: TorrentDefaultsDomain = .standard) {
         self.domain = domain
     }
 
-    func load() async throws -> TorrentPreferencesSnapshot {
+    package func load() async throws -> TorrentPreferencesSnapshot {
         try Task.checkCancellation()
         let defaults = userDefaults
         let settings = TorrentSettings.load(defaults: defaults)
@@ -42,7 +42,7 @@ actor TorrentPreferencesStore {
         )
     }
 
-    func saveSettings(
+    package func saveSettings(
         _ settings: TorrentSettings,
         revision: UInt64
     ) async throws {
@@ -54,7 +54,7 @@ actor TorrentPreferencesStore {
         settings.save(defaults: userDefaults)
     }
 
-    func saveSorting(
+    package func saveSorting(
         order: TorrentSortOrder,
         direction: TorrentSortDirection,
         revision: UInt64
