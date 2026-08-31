@@ -1835,10 +1835,23 @@ final class TorrentStore {
                 "The torrent was removed, but its payload was preserved because no authenticated storage claim was available."
             )
         }
-        let matchingClaims = await storageClaimJournal.allClaims().filter {
-            $0.torrentID == torrent.id
-        }
-        guard matchingClaims.count == 1, let storedClaim = matchingClaims.first else {
+        let removalContext = await storageClaimJournal.removalContext(
+            for: torrent.id
+        )
+        let storedClaim: TorrentStorageClaim
+        let linkedPromotion: TorrentMagnetPromotion?
+        switch removalContext {
+        case .claim(let claim, let promotion):
+            storedClaim = claim
+            linkedPromotion = promotion
+        case .stagedMagnet(let promotion):
+            let outcome = try await engine.remove(id: torrent.id)
+            try await storageClaimJournal.retirePromotion(
+                id: promotion.id,
+                operationNonce: promotion.operationNonce
+            )
+            return outcome
+        case .missingOrAmbiguous:
             let outcome = try await engine.remove(id: torrent.id)
             guard deleteFiles else {
                 return outcome
@@ -1891,7 +1904,8 @@ final class TorrentStore {
             try await storageClaimJournal.completeClaimRemoval(
                 claimID: claim.manifest.claimID,
                 generation: claim.manifest.generation,
-                operationNonce: nonce
+                operationNonce: nonce,
+                linkedPromotionToRetire: linkedPromotion
             )
             return outcome
         }
@@ -1902,7 +1916,8 @@ final class TorrentStore {
                 generation: claim.manifest.generation,
                 operationNonce: nonce,
                 from: [.removing],
-                to: .deletionPending
+                to: .deletionPending,
+                linkedPromotionToRetire: linkedPromotion
             )
             return outcome
         }
@@ -1932,7 +1947,8 @@ final class TorrentStore {
             try await storageClaimJournal.completeClaimRemoval(
                 claimID: claim.manifest.claimID,
                 generation: claim.manifest.generation,
-                operationNonce: nonce
+                operationNonce: nonce,
+                linkedPromotionToRetire: linkedPromotion
             )
             return .removed
         } catch {
@@ -1941,7 +1957,8 @@ final class TorrentStore {
                 generation: claim.manifest.generation,
                 operationNonce: nonce,
                 from: [.deleting],
-                to: .deletionPending
+                to: .deletionPending,
+                linkedPromotionToRetire: linkedPromotion
             )
             return .removedWithWarning(error.localizedDescription)
         }

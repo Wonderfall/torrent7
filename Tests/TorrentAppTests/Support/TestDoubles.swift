@@ -433,6 +433,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private(set) var pieceMapBatchRequests = [(id: String, revision: UInt64?)]()
     private(set) var sourcePolicyUpdates = [(id: String, mutation: TorrentSourcePolicyMutation)]()
     private(set) var torrentOptionsUpdates = [(id: String, options: TorrentOptions)]()
+    private var torrentOptionsUpdateError: Error?
     private(set) var filePriorityUpdates = [(id: String, fileIndex: Int32, priority: TorrentFilePriority)]()
     private(set) var queueMoves = [(id: String, move: TorrentQueueMove)]()
     var sourcePolicyValue = TorrentSourcePolicy(
@@ -515,6 +516,10 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func setTorrentOptions(_ options: TorrentOptions) {
         torrentOptionsValue = options
+    }
+
+    func setTorrentOptionsUpdateError(_ error: Error?) {
+        torrentOptionsUpdateError = error
     }
 
     func setPieceMapBatch(_ batch: TorrentPieceMapBatch) {
@@ -1057,6 +1062,9 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func setTorrentOptions(id: String, options: TorrentOptions) async throws {
         torrentOptionsUpdates.append((id, options))
+        if let torrentOptionsUpdateError {
+            throw torrentOptionsUpdateError
+        }
         torrentOptionsValue = options
     }
 

@@ -628,6 +628,83 @@ struct TorrentStoreIntegrationTests {
         #expect(harness.store.labelIDs(for: "v1:beta").isEmpty)
     }
 
+    @Test(
+        "Removing a metadata-pending magnet retires its promotion",
+        arguments: [false, true]
+    )
+    func removingMetadataPendingMagnetRetiresPromotion(
+        deleteFiles: Bool
+    ) async throws {
+        try await withKnownTorrentHarness { harness, downloadFolder in
+            let fixture = try magnetPromotionFixture()
+            await configureMetadataPendingMagnet(
+                harness,
+                fixture: fixture
+            )
+
+            #expect(harness.store.addMagnet(
+                fixture.magnet,
+                downloadFolder: downloadFolder,
+                setsDownloadFolderAsDefault: false,
+                allowPreMetadataDHT: false
+            ))
+            await harness.store.saveAll()
+
+            let journal = try #require(harness.storageClaimJournal)
+            #expect(await journal.allClaims().isEmpty)
+            #expect(await journal.allPromotions().first?.state
+                == .awaitingMetadata)
+
+            harness.store.removeTorrent(
+                id: fixture.torrentID,
+                deleteFiles: deleteFiles
+            )
+            await harness.store.saveAll()
+
+            #expect(await harness.engine.removedIDs == [fixture.torrentID])
+            #expect(await journal.allClaims().isEmpty)
+            #expect(await journal.allPromotions().isEmpty)
+            #expect(await journal.requiredFolderAccess().paths.isEmpty)
+            #expect(harness.store.lastError == nil)
+        }
+    }
+
+    @Test("Ambiguous metadata-pending magnet removal preserves its promotion")
+    func ambiguousMetadataPendingMagnetRemovalPreservesPromotion() async throws {
+        try await withKnownTorrentHarness { harness, downloadFolder in
+            let fixture = try magnetPromotionFixture()
+            await configureMetadataPendingMagnet(
+                harness,
+                fixture: fixture
+            )
+
+            #expect(harness.store.addMagnet(
+                fixture.magnet,
+                downloadFolder: downloadFolder,
+                setsDownloadFolderAsDefault: false,
+                allowPreMetadataDHT: false
+            ))
+            await harness.store.saveAll()
+            await harness.engine.setRemoveError(
+                TorrentEngineClientError.operationOutcomeUnknown(
+                    "Removal outcome unknown."
+                )
+            )
+
+            harness.store.removeTorrent(
+                id: fixture.torrentID,
+                deleteFiles: true
+            )
+            await harness.store.saveAll()
+
+            let journal = try #require(harness.storageClaimJournal)
+            #expect(await harness.engine.removedIDs.isEmpty)
+            #expect(await journal.allPromotions().first?.state
+                == .awaitingMetadata)
+            #expect(harness.store.lastError == "Removal outcome unknown.")
+        }
+    }
+
     @Test("Folder-backed magnets promote exact metadata while preserving identity and runtime")
     func folderBackedMagnetPromotionPreservesState() async throws {
         let suiteName = "app.torrent7.magnet-promotion.\(UUID().uuidString)"
@@ -1020,6 +1097,118 @@ struct TorrentStoreIntegrationTests {
             #expect(pending.activation?.runtime.queuePosition == 2)
             #expect(pending.activation?.runtime.filePriorities == [0: .normal])
             #expect(harness.store.lastError == "Removal outcome unknown.")
+        }
+    }
+
+    @Test("Removal retires an active claim and its failed promotion")
+    func removalRetiresActiveClaimAndLinkedPromotion() async throws {
+        try await withKnownTorrentHarness { harness, downloadFolder in
+            let fixture = try magnetPromotionFixture()
+            let payload = downloadFolder.appending(path: "sample.bin")
+            await configureMetadataReadyMagnet(
+                harness,
+                fixture: fixture
+            )
+            await harness.engine.setTorrentOptionsUpdateError(
+                FakeBookmarkError()
+            )
+
+            #expect(harness.store.addMagnet(
+                fixture.magnet,
+                downloadFolder: downloadFolder,
+                setsDownloadFolderAsDefault: false
+            ))
+            await harness.store.saveAll()
+
+            let journal = try #require(harness.storageClaimJournal)
+            let claim = try #require(await journal.allClaims().first)
+            let promotion = try #require(
+                await journal.allPromotions().first
+            )
+            #expect(claim.lease.state == .active)
+            #expect(claim.torrentID == fixture.torrentID)
+            #expect(promotion.state == .outcomeUnknown)
+            #expect(promotion.activation?.claimID
+                == claim.manifest.claimID)
+            #expect(FileManager.default.fileExists(
+                atPath: payload.torrentFilePath
+            ))
+
+            await harness.engine.setTorrentOptionsUpdateError(nil)
+            harness.store.removeTorrent(
+                id: fixture.torrentID,
+                deleteFiles: false
+            )
+            await harness.store.saveAll()
+
+            #expect(await harness.engine.removedIDs == [
+                fixture.torrentID,
+                fixture.torrentID,
+            ])
+            #expect(await journal.allClaims().isEmpty)
+            #expect(await journal.allPromotions().isEmpty)
+            #expect(await journal.requiredFolderAccess().paths.isEmpty)
+            #expect(FileManager.default.fileExists(
+                atPath: payload.torrentFilePath
+            ))
+            #expect(harness.store.lastError == nil)
+        }
+    }
+
+    @Test("Removal resolves an activation-unknown claim through its promotion")
+    func removalResolvesActivationUnknownLinkedClaim() async throws {
+        try await withKnownTorrentHarness { harness, downloadFolder in
+            let fixture = try magnetPromotionFixture()
+            let payload = downloadFolder.appending(path: "sample.bin")
+            await configureMetadataReadyMagnet(
+                harness,
+                fixture: fixture
+            )
+            await harness.engine.setAddTorrentFileError(
+                TorrentEngineClientError.operationOutcomeUnknown(
+                    "Activation outcome unknown."
+                )
+            )
+
+            #expect(harness.store.addMagnet(
+                fixture.magnet,
+                downloadFolder: downloadFolder,
+                setsDownloadFolderAsDefault: false
+            ))
+            await harness.store.saveAll()
+
+            let journal = try #require(harness.storageClaimJournal)
+            let claim = try #require(await journal.allClaims().first)
+            let promotion = try #require(
+                await journal.allPromotions().first
+            )
+            #expect(claim.lease.state == .activationUnknown)
+            #expect(claim.torrentID == nil)
+            #expect(promotion.state == .outcomeUnknown)
+            #expect(promotion.activation?.claimID
+                == claim.manifest.claimID)
+            #expect(FileManager.default.fileExists(
+                atPath: payload.torrentFilePath
+            ))
+
+            await harness.engine.setAddTorrentFileError(nil)
+            harness.store.removeTorrent(
+                id: fixture.torrentID,
+                deleteFiles: true
+            )
+            await harness.store.saveAll()
+
+            #expect(await harness.engine.removedIDs == [
+                fixture.torrentID,
+                fixture.torrentID,
+            ])
+            #expect(await journal.allClaims().isEmpty)
+            #expect(await journal.allPromotions().isEmpty)
+            #expect(await journal.requiredFolderAccess().paths.isEmpty)
+            #expect(!FileManager.default.fileExists(
+                atPath: payload.torrentFilePath
+            ))
+            #expect(harness.store.lastError == nil)
         }
     }
 
@@ -3142,6 +3331,23 @@ private func configureMetadataReadyMagnet(
             name: "sample.bin",
             contentKind: .singleFile,
             hasMetadata: true
+        )]
+    ))
+}
+
+@MainActor
+private func configureMetadataPendingMagnet(
+    _ harness: StoreHarness,
+    fixture: MagnetPromotionFixture
+) async {
+    await harness.engine.setNextAddedMagnetID(fixture.torrentID)
+    await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+        revision: 1,
+        torrents: [makeTorrent(
+            id: fixture.torrentID,
+            paused: true,
+            autoManaged: true,
+            hasMetadata: false
         )]
     ))
 }

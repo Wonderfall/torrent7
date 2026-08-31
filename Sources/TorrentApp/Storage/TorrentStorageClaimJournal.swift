@@ -82,6 +82,15 @@ struct TorrentMagnetPromotion: Codable, Equatable, Sendable {
     var activation: TorrentMagnetPromotionActivation?
 }
 
+enum TorrentStorageRemovalContext: Sendable {
+    case claim(
+        TorrentStorageClaim,
+        linkedPromotion: TorrentMagnetPromotion?
+    )
+    case stagedMagnet(TorrentMagnetPromotion)
+    case missingOrAmbiguous
+}
+
 actor TorrentStorageClaimJournal {
     private struct Snapshot: Codable, Sendable {
         static let currentSchemaVersion: UInt64 = 5
@@ -176,6 +185,71 @@ actor TorrentStorageClaimJournal {
     func allPromotions() -> [TorrentMagnetPromotion] {
         snapshot.promotions.values.sorted {
             $0.id.uuidString < $1.id.uuidString
+        }
+    }
+
+    func removalContext(for torrentID: String) -> TorrentStorageRemovalContext {
+        let matchingClaims = snapshot.claims.values.filter {
+            $0.torrentID == torrentID
+        }
+        let matchingPromotions = snapshot.promotions.values.filter {
+            $0.torrentID == torrentID
+        }
+        guard matchingClaims.count <= 1,
+              matchingPromotions.count <= 1 else {
+            return .missingOrAmbiguous
+        }
+
+        let promotion = matchingPromotions.first
+        if let claim = matchingClaims.first {
+            guard let promotion else {
+                let linkedPromotions = snapshot.promotions.values.filter {
+                    $0.activation?.claimID == claim.manifest.claimID
+                }
+                return linkedPromotions.isEmpty
+                    ? .claim(claim, linkedPromotion: nil)
+                    : .missingOrAmbiguous
+            }
+            let promotionLinksClaim = switch promotion.state {
+            case .promoting, .outcomeUnknown:
+                promotion.activation?.claimID == claim.manifest.claimID
+            case .awaitingMetadata, .metadataReady, .awaitingDestination:
+                false
+            }
+            let linkedPromotions = snapshot.promotions.values.filter {
+                $0.activation?.claimID == claim.manifest.claimID
+            }
+            guard promotionLinksClaim,
+                  linkedPromotions.count == 1,
+                  linkedPromotions.first?.id == promotion.id else {
+                return .missingOrAmbiguous
+            }
+            return .claim(claim, linkedPromotion: promotion)
+        }
+
+        guard let promotion else {
+            return .missingOrAmbiguous
+        }
+        switch promotion.state {
+        case .awaitingMetadata, .metadataReady:
+            return .stagedMagnet(promotion)
+        case .promoting, .outcomeUnknown:
+            guard let claimID = promotion.activation?.claimID,
+                  let claim = snapshot.claims[claimID],
+                  claim.lease.state == .activationUnknown,
+                  claim.torrentID == nil else {
+                return .missingOrAmbiguous
+            }
+            let linkedPromotions = snapshot.promotions.values.filter {
+                $0.activation?.claimID == claimID
+            }
+            guard linkedPromotions.count == 1,
+                  linkedPromotions.first?.id == promotion.id else {
+                return .missingOrAmbiguous
+            }
+            return .claim(claim, linkedPromotion: promotion)
+        case .awaitingDestination:
+            return .missingOrAmbiguous
         }
     }
 
@@ -512,7 +586,8 @@ actor TorrentStorageClaimJournal {
         from expectedStates: Set<TorrentStorageClaimState>,
         to newState: TorrentStorageClaimState,
         torrentID: String? = nil,
-        removalIntent: TorrentStorageRemovalIntent? = nil
+        removalIntent: TorrentStorageRemovalIntent? = nil,
+        linkedPromotionToRetire: TorrentMagnetPromotion? = nil
     ) throws -> TorrentStorageClaim {
         guard var claim = snapshot.claims[claimID] else {
             throw TorrentStorageJournalError.unknownClaim
@@ -520,8 +595,23 @@ actor TorrentStorageClaimJournal {
         guard claim.manifest.generation == generation else {
             throw TorrentStorageJournalError.generationMismatch
         }
+        if linkedPromotionToRetire != nil,
+           newState != .deletionPending {
+            throw TorrentStorageJournalError.invalidTransition
+        }
         if claim.operationNonce == operationNonce,
            claim.lease.state == newState {
+            guard let linkedPromotionToRetire else {
+                return claim
+            }
+            var updated = snapshot
+            try Self.retireLinkedPromotion(
+                linkedPromotionToRetire,
+                claimID: claimID,
+                from: &updated
+            )
+            try persist(updated)
+            snapshot = updated
             return claim
         }
         guard expectedStates.contains(claim.lease.state),
@@ -560,6 +650,11 @@ actor TorrentStorageClaimJournal {
         }
         var updated = snapshot
         updated.claims[claimID] = claim
+        try Self.retireLinkedPromotion(
+            linkedPromotionToRetire,
+            claimID: claimID,
+            from: &updated
+        )
         try persist(updated)
         snapshot = updated
         return claim
@@ -643,7 +738,8 @@ actor TorrentStorageClaimJournal {
     func completeClaimRemoval(
         claimID: UUID,
         generation: UInt64,
-        operationNonce: UUID
+        operationNonce: UUID,
+        linkedPromotionToRetire: TorrentMagnetPromotion? = nil
     ) throws {
         guard let claim = snapshot.claims[claimID] else {
             return
@@ -661,8 +757,56 @@ actor TorrentStorageClaimJournal {
         }
         var updated = snapshot
         updated.claims.removeValue(forKey: claimID)
+        try Self.retireLinkedPromotion(
+            linkedPromotionToRetire,
+            claimID: claimID,
+            from: &updated
+        )
         try persist(updated)
         snapshot = updated
+    }
+
+    private static func retireLinkedPromotion(
+        _ promotion: TorrentMagnetPromotion?,
+        claimID: UUID,
+        from snapshot: inout Snapshot
+    ) throws {
+        guard let promotion else {
+            return
+        }
+        let hasLinkedState = switch promotion.state {
+        case .promoting, .outcomeUnknown:
+            true
+        case .awaitingMetadata, .metadataReady, .awaitingDestination:
+            false
+        }
+        guard hasLinkedState,
+              promotion.activation?.claimID == claimID else {
+            throw TorrentStorageJournalError.invalidTransition
+        }
+        let linkedPromotions = snapshot.promotions.values.filter {
+            $0.activation?.claimID == claimID
+        }
+        guard let stored = snapshot.promotions[promotion.id] else {
+            guard linkedPromotions.isEmpty else {
+                throw TorrentStorageJournalError.invalidTransition
+            }
+            return
+        }
+        guard linkedPromotions.count == 1,
+              linkedPromotions.first?.id == stored.id,
+              stored.operationNonce == promotion.operationNonce,
+              stored.torrentID == promotion.torrentID,
+              stored.activation?.claimID == claimID else {
+            throw TorrentStorageJournalError.invalidTransition
+        }
+        switch stored.state {
+        case .promoting, .outcomeUnknown:
+            break
+        case .awaitingMetadata, .metadataReady, .awaitingDestination:
+            throw TorrentStorageJournalError.invalidTransition
+        }
+        snapshot.promotions.removeValue(forKey: promotion.id)
     }
 
     /// Relinquishes broker authority without asserting that any payload was
