@@ -75,6 +75,31 @@ struct TorrentItemTests {
         #expect(torrent.displayedAllTimeDownload == 60)
     }
 
+    @Test("Only finished torrents with wanted payload qualify as completed payloads")
+    func completedWantedPayloadRequiresWantedBytes() {
+        let metadataStagingTorrent = makeTorrent(
+            totalWanted: 0,
+            finished: true,
+            hasMetadata: true
+        )
+
+        #expect(metadataStagingTorrent.downloadComplete)
+        #expect(!metadataStagingTorrent.hasCompletedWantedPayload)
+        #expect(!makeTorrent(
+            totalWanted: 100,
+            finished: true,
+            hasMetadata: false
+        ).hasCompletedWantedPayload)
+        #expect(makeTorrent(
+            totalWanted: 100,
+            finished: true
+        ).hasCompletedWantedPayload)
+        #expect(makeTorrent(
+            totalWanted: 100,
+            seeding: true
+        ).hasCompletedWantedPayload)
+    }
+
     @Test("Torrent state maps bridge raw values and titles")
     func torrentStateMapsBridgeRawValuesAndTitles() {
         #expect(TorrentState(rawBridgeValue: Int32(TTORRENT_BRIDGE_STATE_CHECKING_FILES)) == .checkingFiles)

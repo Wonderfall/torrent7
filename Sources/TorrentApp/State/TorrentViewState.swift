@@ -119,7 +119,7 @@ nonisolated struct TorrentListPresentation: Sendable {
             activeIDs.insert(torrent.id)
             rows.append(TorrentRowSnapshot(torrent))
             metricsByID[torrent.id] = TorrentTransferMetrics(torrent)
-            if torrent.downloadComplete {
+            if torrent.hasCompletedWantedPayload {
                 completedTorrents.append(TorrentCompletionCandidate(
                     id: torrent.id,
                     name: torrent.name

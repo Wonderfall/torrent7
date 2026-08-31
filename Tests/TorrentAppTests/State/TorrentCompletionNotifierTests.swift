@@ -623,7 +623,7 @@ private extension TorrentCompletionNotifier {
     ) async {
         updateConfiguration(settings)
         let completedTorrents = snapshots.compactMap { torrent in
-            torrent.downloadComplete
+            torrent.hasCompletedWantedPayload
                 ? TorrentCompletionCandidate(id: torrent.id, name: torrent.name)
                 : nil
         }

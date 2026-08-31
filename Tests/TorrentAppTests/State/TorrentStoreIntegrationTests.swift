@@ -370,6 +370,82 @@ struct TorrentStoreIntegrationTests {
         #expect(await harness.notifications.notifications.count == 1)
     }
 
+    @Test("Metadata-ready magnet staging does not consume the real completion notification")
+    func metadataReadyMagnetStagingDoesNotConsumeCompletion() async {
+        let harness = makeStoreHarness()
+        let torrentID = "magnet"
+        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+            revision: 1,
+            torrents: []
+        ))
+        await harness.store.refreshNow()
+        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+            revision: 2,
+            torrents: [makeTorrent(
+                id: torrentID,
+                name: "Magnet",
+                totalWanted: 0,
+                state: .downloadingMetadata,
+                hasMetadata: false
+            )]
+        ))
+        await harness.store.refreshNow()
+
+        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+            revision: 3,
+            torrents: [makeTorrent(
+                id: torrentID,
+                name: "Magnet",
+                progress: 1,
+                totalWanted: 0,
+                state: .finished,
+                finished: true,
+                hasMetadata: true
+            )]
+        ))
+        await harness.store.refreshNow()
+
+        #expect(harness.store.torrents.first?.downloadComplete == true)
+        #expect(await harness.history.completedIDs.isEmpty)
+        #expect(harness.dock.completionBadgeUpdates.isEmpty)
+        #expect(await harness.notifications.notifications.isEmpty)
+
+        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+            revision: 4,
+            torrents: [makeTorrent(
+                id: torrentID,
+                name: "Magnet",
+                progress: 0,
+                totalWanted: 100,
+                state: .downloading,
+                finished: false,
+                hasMetadata: true
+            )]
+        ))
+        await harness.store.refreshNow()
+        await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+            revision: 5,
+            torrents: [makeTorrent(
+                id: torrentID,
+                name: "Magnet",
+                progress: 1,
+                totalDone: 100,
+                totalWanted: 100,
+                state: .finished,
+                finished: true,
+                hasMetadata: true
+            )]
+        ))
+        await harness.store.refreshNow()
+        for _ in 0..<20 where await harness.notifications.notifications.isEmpty {
+            await Task.yield()
+        }
+
+        #expect(await harness.history.completedIDs == [torrentID])
+        #expect(harness.dock.completionBadgeUpdates == [1])
+        #expect(await harness.notifications.notifications.count == 1)
+    }
+
     @Test("Command snapshot ignores live rate-only torrent changes")
     func commandSnapshotIgnoresLiveRateOnlyTorrentChanges() async {
         let harness = makeStoreHarness()

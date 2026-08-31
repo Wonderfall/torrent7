@@ -184,6 +184,10 @@ package struct TorrentItem: Codable, Identifiable, Hashable, Sendable {
         finished || seeding
     }
 
+    package var hasCompletedWantedPayload: Bool {
+        hasMetadata && totalWanted > 0 && downloadComplete
+    }
+
     package var hasPeerInformation: Bool {
         knownPeerCount > 0
     }
