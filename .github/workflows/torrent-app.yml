@@ -16,7 +16,9 @@ on:
       - "Scripts/verify-boringssl-hardening.zsh"
       - "Scripts/boost-patch-series.sh"
       - "Scripts/libtorrent-patch-series.sh"
+      - "Scripts/lint-unsafe-boundaries.zsh"
       - "Scripts/native-deps-build-id.zsh"
+      - "Scripts/**/*.swift"
       - "Scripts/compare-entitlements.swift"
       - "Scripts/verify-enhanced-security-metadata.swift"
       - "Scripts/patches/**"
@@ -30,7 +32,7 @@ on:
       - "Scripts/verify-xcode.zsh"
       - "Sources/**"
       - "Tests/**"
-      - "Tools/XPCIntegrationHost/**"
+      - "Tools/**"
   pull_request:
     types:
       - opened
@@ -49,7 +51,9 @@ on:
       - "Scripts/verify-boringssl-hardening.zsh"
       - "Scripts/boost-patch-series.sh"
       - "Scripts/libtorrent-patch-series.sh"
+      - "Scripts/lint-unsafe-boundaries.zsh"
       - "Scripts/native-deps-build-id.zsh"
+      - "Scripts/**/*.swift"
       - "Scripts/compare-entitlements.swift"
       - "Scripts/verify-enhanced-security-metadata.swift"
       - "Scripts/patches/**"
@@ -63,7 +67,7 @@ on:
       - "Scripts/verify-xcode.zsh"
       - "Sources/**"
       - "Tests/**"
-      - "Tools/XPCIntegrationHost/**"
+      - "Tools/**"
   workflow_dispatch:
 
 permissions: {}
@@ -105,6 +109,16 @@ jobs:
       - name: Verify Xcode toolchain
         shell: zsh {0}
         run: Scripts/verify-xcode.zsh
+
+      - name: Test and run unsafe boundary lint
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          swift test \
+            --package-path Tools/UnsafeBoundaryLint \
+            --scratch-path .build/unsafe-boundary-lint \
+            --only-use-versions-from-resolved-file
+          Scripts/lint-unsafe-boundaries.zsh
 
       - name: Install build tools
         shell: zsh {0}
