@@ -14,6 +14,8 @@ typeset -r scratch_path=${SWIFT_TEST_SCRATCH_PATH:-"$root_dir/.build/swift-test-
 
 cd -- "$root_dir"
 
+"$root_dir/Scripts/lint-unsafe-boundaries.zsh"
+
 export CC="${CC:-$(xcrun --find clang)}"
 export CXX="${CXX:-$(xcrun --find clang++)}"
 export TORRENT7_NATIVE_DEPS_BUILD_ID=$("$root_dir/Scripts/native-deps-build-id.zsh")
