@@ -1,23 +1,39 @@
 import Foundation
 import TorrentEngineIPC
 
-@_cdecl("TorrentEngineIPCJSONPreflightFuzzOneInput")
+func copiedIPCFuzzInput(
+    _ bytes: UnsafePointer<UInt8>?,
+    _ byteCount: UInt
+) -> Data? {
+    // SAFETY: Ownership/lifetime: libFuzzer owns the input buffer for the synchronous export
+    // call and Data copies it before returning; bounds/alignment: byteCount must describe the
+    // readable allocation, UInt8 has alignment one, and conversion to Int is checked;
+    // synchronization: the immutable input is copied into call-local storage; safe alternative:
+    // libFuzzer's C ABI provides input only as a pointer/count pair.
+    guard byteCount <= UInt(Int.max) else {
+        return nil
+    }
+    let count = Int(byteCount)
+    guard unsafe bytes != nil || count == 0 else {
+        return nil
+    }
+    guard let bytes = unsafe bytes else {
+        return Data()
+    }
+    return unsafe Data(bytes: bytes, count: count)
+}
+
+@c(TorrentEngineIPCJSONPreflightFuzzOneInput)
 public func torrentEngineIPCJSONPreflightFuzzOneInput(
     _ bytes: UnsafePointer<UInt8>?,
     _ byteCount: UInt
 ) {
-    guard byteCount <= UInt(Int.max) else {
+    // SAFETY: Ownership/lifetime: libFuzzer keeps bytes alive for this synchronous call;
+    // bounds/alignment: its ABI supplies byteCount readable UInt8 values and the helper checks
+    // nullability and Int conversion; synchronization: the input is immutable and call-local;
+    // safe alternative: the @c libFuzzer entry ABI requires a raw pointer/count pair.
+    guard let data = unsafe copiedIPCFuzzInput(bytes, byteCount) else {
         return
-    }
-    let count = Int(byteCount)
-    let data: Data
-    if let bytes {
-        data = Data(bytes: bytes, count: count)
-    } else {
-        guard count == 0 else {
-            return
-        }
-        data = Data()
     }
 
     autoreleasepool {

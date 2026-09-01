@@ -122,7 +122,7 @@ private enum StorageBrokerIPCFuzzer {
                 for: request
             )
         case .openPayload(_, _, _, let fileIndex, _):
-            let descriptor = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+            let descriptor = openNullDescriptor()
             fuzzAssert(descriptor >= 0)
             defer { _ = Darwin.close(descriptor) }
             roundTrip(
@@ -184,7 +184,7 @@ private enum StorageBrokerIPCFuzzer {
             case 5:
                 dictionary[key] = Double(bitPattern: cursor.uint64())
             default:
-                let descriptor = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+                let descriptor = openNullDescriptor()
                 if descriptor >= 0 {
                     dictionary[key] = xpc_fd_create(descriptor)
                     _ = Darwin.close(descriptor)
@@ -283,6 +283,17 @@ private enum StorageBrokerIPCFuzzer {
         }
     }
 
+    private static func openNullDescriptor() -> Int32 {
+        // SAFETY: Ownership/lifetime: the returned descriptor is owned and closed by each caller,
+        // while the temporary C string lives through open; bounds/alignment: withCString supplies
+        // an aligned NUL-terminated path; synchronization: each invocation creates independent
+        // descriptor state; safe alternative: the XPC descriptor codec requires a raw Int32 file
+        // descriptor, which Foundation does not expose as a transfer-safe value.
+        unsafe "/dev/null".withCString { path in
+            unsafe Darwin.open(path, O_RDONLY | O_CLOEXEC)
+        }
+    }
+
     private static func fuzzAssert(_ condition: @autoclosure () -> Bool) {
         if !condition() {
             Darwin.abort()
@@ -290,19 +301,18 @@ private enum StorageBrokerIPCFuzzer {
     }
 }
 
-@_cdecl("TorrentStorageBrokerIPCFuzzOneInput")
+@c(TorrentStorageBrokerIPCFuzzOneInput)
 public func torrentStorageBrokerIPCFuzzOneInput(
     _ bytes: UnsafePointer<UInt8>?,
     _ byteCount: UInt
 ) {
-    guard byteCount <= UInt(Int.max) else {
+    // SAFETY: Ownership/lifetime: libFuzzer keeps bytes alive for this synchronous call;
+    // bounds/alignment: its ABI supplies byteCount readable UInt8 values and the helper checks
+    // nullability and Int conversion; synchronization: the input is immutable and call-local;
+    // safe alternative: the @c libFuzzer entry ABI requires a raw pointer/count pair.
+    guard let data = unsafe copiedIPCFuzzInput(bytes, byteCount) else {
         return
     }
-    let count = Int(byteCount)
-    guard bytes != nil || count == 0 else {
-        return
-    }
-    let data = bytes.map { Data(bytes: $0, count: count) } ?? Data()
     autoreleasepool {
         StorageBrokerIPCFuzzer.exercise(data)
     }

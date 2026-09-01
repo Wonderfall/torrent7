@@ -593,6 +593,7 @@ let package = Package(
             swiftSettings: [
                 .swiftLanguageMode(.v6),
                 .treatAllWarnings(as: .error),
+                .strictMemorySafety(),
                 .unsafeFlags(appSwiftStrictnessFlags)
             ] + nonisolatedConcurrencySwiftSettings
         ),
@@ -607,6 +608,7 @@ let package = Package(
             swiftSettings: [
                 .swiftLanguageMode(.v6),
                 .treatAllWarnings(as: .error),
+                .strictMemorySafety(),
                 .unsafeFlags(appSwiftStrictnessFlags)
             ] + nonisolatedConcurrencySwiftSettings
         ),

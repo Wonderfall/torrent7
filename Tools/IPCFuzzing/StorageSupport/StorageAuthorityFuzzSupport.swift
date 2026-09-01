@@ -1186,14 +1186,22 @@ private func fuzzData(
     _ bytes: UnsafePointer<UInt8>?,
     _ byteCount: UInt
 ) -> Data? {
+    // SAFETY: Ownership/lifetime: libFuzzer owns the input buffer for the synchronous export
+    // call and Data copies it before returning; bounds/alignment: byteCount must describe the
+    // readable allocation, UInt8 has alignment one, and conversion to Int is checked;
+    // synchronization: the immutable input is copied into call-local storage; safe alternative:
+    // libFuzzer's C ABI provides input only as a pointer/count pair.
     guard byteCount <= UInt(Int.max) else {
         return nil
     }
     let count = Int(byteCount)
-    guard bytes != nil || count == 0 else {
+    guard unsafe bytes != nil || count == 0 else {
         return nil
     }
-    return bytes.map { Data(bytes: $0, count: count) } ?? Data()
+    guard let bytes = unsafe bytes else {
+        return Data()
+    }
+    return unsafe Data(bytes: bytes, count: count)
 }
 
 private func fuzzAssert(_ condition: @autoclosure () -> Bool) {
@@ -1202,12 +1210,16 @@ private func fuzzAssert(_ condition: @autoclosure () -> Bool) {
     }
 }
 
-@_cdecl("TorrentStorageClaimFuzzOneInput")
+@c(TorrentStorageClaimFuzzOneInput)
 public func torrentStorageClaimFuzzOneInput(
     _ bytes: UnsafePointer<UInt8>?,
     _ byteCount: UInt
 ) {
-    guard let data = fuzzData(bytes, byteCount) else {
+    // SAFETY: Ownership/lifetime: libFuzzer keeps bytes alive for this synchronous call;
+    // bounds/alignment: its ABI supplies byteCount readable UInt8 values and fuzzData checks
+    // nullability and Int conversion; synchronization: the input is immutable and call-local;
+    // safe alternative: the @c libFuzzer entry ABI requires a raw pointer/count pair.
+    guard let data = unsafe fuzzData(bytes, byteCount) else {
         return
     }
     autoreleasepool {
@@ -1215,12 +1227,16 @@ public func torrentStorageClaimFuzzOneInput(
     }
 }
 
-@_cdecl("TorrentStorageManifestFuzzOneInput")
+@c(TorrentStorageManifestFuzzOneInput)
 public func torrentStorageManifestFuzzOneInput(
     _ bytes: UnsafePointer<UInt8>?,
     _ byteCount: UInt
 ) {
-    guard let data = fuzzData(bytes, byteCount) else {
+    // SAFETY: Ownership/lifetime: libFuzzer keeps bytes alive for this synchronous call;
+    // bounds/alignment: its ABI supplies byteCount readable UInt8 values and fuzzData checks
+    // nullability and Int conversion; synchronization: the input is immutable and call-local;
+    // safe alternative: the @c libFuzzer entry ABI requires a raw pointer/count pair.
+    guard let data = unsafe fuzzData(bytes, byteCount) else {
         return
     }
     autoreleasepool {
@@ -1228,12 +1244,16 @@ public func torrentStorageManifestFuzzOneInput(
     }
 }
 
-@_cdecl("TorrentMagnetParserFuzzOneInput")
+@c(TorrentMagnetParserFuzzOneInput)
 public func torrentMagnetParserFuzzOneInput(
     _ bytes: UnsafePointer<UInt8>?,
     _ byteCount: UInt
 ) {
-    guard let data = fuzzData(bytes, byteCount) else {
+    // SAFETY: Ownership/lifetime: libFuzzer keeps bytes alive for this synchronous call;
+    // bounds/alignment: its ABI supplies byteCount readable UInt8 values and fuzzData checks
+    // nullability and Int conversion; synchronization: the input is immutable and call-local;
+    // safe alternative: the @c libFuzzer entry ABI requires a raw pointer/count pair.
+    guard let data = unsafe fuzzData(bytes, byteCount) else {
         return
     }
     autoreleasepool {
@@ -1241,12 +1261,16 @@ public func torrentMagnetParserFuzzOneInput(
     }
 }
 
-@_cdecl("TorrentSwarmInfoParserFuzzOneInput")
+@c(TorrentSwarmInfoParserFuzzOneInput)
 public func torrentSwarmInfoParserFuzzOneInput(
     _ bytes: UnsafePointer<UInt8>?,
     _ byteCount: UInt
 ) {
-    guard let data = fuzzData(bytes, byteCount) else {
+    // SAFETY: Ownership/lifetime: libFuzzer keeps bytes alive for this synchronous call;
+    // bounds/alignment: its ABI supplies byteCount readable UInt8 values and fuzzData checks
+    // nullability and Int conversion; synchronization: the input is immutable and call-local;
+    // safe alternative: the @c libFuzzer entry ABI requires a raw pointer/count pair.
+    guard let data = unsafe fuzzData(bytes, byteCount) else {
         return
     }
     autoreleasepool {
@@ -1254,12 +1278,16 @@ public func torrentSwarmInfoParserFuzzOneInput(
     }
 }
 
-@_cdecl("TorrentPeerProtocolParserFuzzOneInput")
+@c(TorrentPeerProtocolParserFuzzOneInput)
 public func torrentPeerProtocolParserFuzzOneInput(
     _ bytes: UnsafePointer<UInt8>?,
     _ byteCount: UInt
 ) {
-    guard let data = fuzzData(bytes, byteCount) else {
+    // SAFETY: Ownership/lifetime: libFuzzer keeps bytes alive for this synchronous call;
+    // bounds/alignment: its ABI supplies byteCount readable UInt8 values and fuzzData checks
+    // nullability and Int conversion; synchronization: the input is immutable and call-local;
+    // safe alternative: the @c libFuzzer entry ABI requires a raw pointer/count pair.
+    guard let data = unsafe fuzzData(bytes, byteCount) else {
         return
     }
     autoreleasepool {
@@ -1267,12 +1295,16 @@ public func torrentPeerProtocolParserFuzzOneInput(
     }
 }
 
-@_cdecl("TorrentHTTPTrackerResponseParserFuzzOneInput")
+@c(TorrentHTTPTrackerResponseParserFuzzOneInput)
 public func torrentHTTPTrackerResponseParserFuzzOneInput(
     _ bytes: UnsafePointer<UInt8>?,
     _ byteCount: UInt
 ) {
-    guard let data = fuzzData(bytes, byteCount) else {
+    // SAFETY: Ownership/lifetime: libFuzzer keeps bytes alive for this synchronous call;
+    // bounds/alignment: its ABI supplies byteCount readable UInt8 values and fuzzData checks
+    // nullability and Int conversion; synchronization: the input is immutable and call-local;
+    // safe alternative: the @c libFuzzer entry ABI requires a raw pointer/count pair.
+    guard let data = unsafe fuzzData(bytes, byteCount) else {
         return
     }
     autoreleasepool {
@@ -1280,12 +1312,16 @@ public func torrentHTTPTrackerResponseParserFuzzOneInput(
     }
 }
 
-@_cdecl("TorrentDHTMessageParserFuzzOneInput")
+@c(TorrentDHTMessageParserFuzzOneInput)
 public func torrentDHTMessageParserFuzzOneInput(
     _ bytes: UnsafePointer<UInt8>?,
     _ byteCount: UInt
 ) {
-    guard let data = fuzzData(bytes, byteCount) else {
+    // SAFETY: Ownership/lifetime: libFuzzer keeps bytes alive for this synchronous call;
+    // bounds/alignment: its ABI supplies byteCount readable UInt8 values and fuzzData checks
+    // nullability and Int conversion; synchronization: the input is immutable and call-local;
+    // safe alternative: the @c libFuzzer entry ABI requires a raw pointer/count pair.
+    guard let data = unsafe fuzzData(bytes, byteCount) else {
         return
     }
     autoreleasepool {

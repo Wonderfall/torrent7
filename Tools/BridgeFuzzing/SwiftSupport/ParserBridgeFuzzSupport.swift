@@ -6,7 +6,7 @@ private let peerProtocolContext = TorrentPeerProtocolBridgeContext()
 private let trackerResponseContext = TorrentTrackerResponseBridgeContext()
 private let dhtMessageContext = TorrentDHTMessageBridgeContext()
 
-@_cdecl("TorrentParserFuzzMakeSwarmMetainfoCallbacks")
+@c(TorrentParserFuzzMakeSwarmMetainfoCallbacks)
 public func torrentParserFuzzMakeSwarmMetainfoCallbacks(
     _ output: UnsafeMutablePointer<TTorrentSwarmMetainfoParserCallbacks>?
 ) -> Int32 {
@@ -27,7 +27,7 @@ public func torrentParserFuzzMakeSwarmMetainfoCallbacks(
     return 0
 }
 
-@_cdecl("TorrentParserFuzzMakePeerProtocolCallbacks")
+@c(TorrentParserFuzzMakePeerProtocolCallbacks)
 public func torrentParserFuzzMakePeerProtocolCallbacks(
     _ output: UnsafeMutablePointer<TTorrentPeerProtocolParserCallbacks>?
 ) -> Int32 {
@@ -49,7 +49,7 @@ public func torrentParserFuzzMakePeerProtocolCallbacks(
     return 0
 }
 
-@_cdecl("TorrentParserFuzzMakeTrackerResponseCallbacks")
+@c(TorrentParserFuzzMakeTrackerResponseCallbacks)
 public func torrentParserFuzzMakeTrackerResponseCallbacks(
     _ output: UnsafeMutablePointer<TTorrentTrackerResponseParserCallbacks>?
 ) -> Int32 {
@@ -69,7 +69,7 @@ public func torrentParserFuzzMakeTrackerResponseCallbacks(
     return 0
 }
 
-@_cdecl("TorrentParserFuzzMakeDHTMessageCallbacks")
+@c(TorrentParserFuzzMakeDHTMessageCallbacks)
 public func torrentParserFuzzMakeDHTMessageCallbacks(
     _ output: UnsafeMutablePointer<TTorrentDHTMessageParserCallbacks>?
 ) -> Int32 {
