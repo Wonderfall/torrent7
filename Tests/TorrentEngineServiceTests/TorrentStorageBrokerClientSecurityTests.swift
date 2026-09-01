@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import Synchronization
 import Testing
 import XPC
 @testable import TorrentEngineIPC
@@ -46,6 +47,109 @@ struct TorrentStorageBrokerClientSecurityTests {
         #expect(lateInstalledTimeout.isCancelled)
         await installedTimeout.value
         await lateInstalledTimeout.value
+    }
+
+    @Test("Reply, timeout, and cancellation race to complete exactly once")
+    func terminalCompletionRaceIsExactlyOnce() async throws {
+        for _ in 0..<64 {
+            try await exerciseTerminalCompletionRace()
+        }
+    }
+
+    private func exerciseTerminalCompletionRace() async throws {
+        let requestID = UUID()
+        let reply = TorrentStorageBrokerReply.success(
+            requestID: requestID,
+            metadata: nil,
+            statistics: [],
+            fileDescriptor: nil
+        )
+        let pending = TorrentStorageBrokerPendingReply()
+        let barrier = BrokerPendingReplyRaceBarrier(participantCount: 4)
+        let completionCount = Mutex(0)
+        let waiting = Task<TorrentStorageBrokerReply, any Error> {
+            defer { completionCount.withLock { $0 += 1 } }
+            return try await pending.wait()
+        }
+        let attempts = AsyncStream<BrokerPendingReplyAttempt>.makeStream(
+            bufferingPolicy: .bufferingNewest(3)
+        )
+
+        let replyContender = Task {
+            await barrier.arriveAndWait()
+            let accepted = pending.finish(.success(reply))
+            attempts.continuation.yield(.init(
+                terminal: .reply,
+                accepted: accepted
+            ))
+        }
+        let cancellationContender = Task {
+            await barrier.arriveAndWait()
+            let accepted = pending.finish(.failure(CancellationError()))
+            attempts.continuation.yield(.init(
+                terminal: .cancellation,
+                accepted: accepted
+            ))
+        }
+        let timeoutTask = Task.detached {
+            await barrier.arriveAndWait()
+            let accepted = pending.finish(.failure(
+                TorrentStorageBrokerClientError.timedOut
+            ))
+            attempts.continuation.yield(.init(
+                terminal: .timeout,
+                accepted: accepted
+            ))
+        }
+        pending.installTimeoutTask(timeoutTask)
+
+        // The fourth participant releases all contenders only after the timeout
+        // task belongs to the pending reply, avoiding timing-based coordination.
+        await barrier.arriveAndWait()
+
+        var iterator = attempts.stream.makeAsyncIterator()
+        var observedAttempts = [BrokerPendingReplyAttempt]()
+        for _ in BrokerPendingReplyTerminal.allCases {
+            observedAttempts.append(try #require(await iterator.next()))
+        }
+        attempts.continuation.finish()
+        await replyContender.value
+        await cancellationContender.value
+        await timeoutTask.value
+
+        let acceptedAttempts = observedAttempts.filter(\.accepted)
+        let winner = try #require(acceptedAttempts.first)
+        #expect(acceptedAttempts.count == 1)
+        #expect(
+            Set(observedAttempts.map(\.terminal))
+                == Set(BrokerPendingReplyTerminal.allCases)
+        )
+        #expect(timeoutTask.isCancelled)
+
+        let observedTerminal: BrokerPendingReplyTerminal
+        do {
+            guard case .success(let observedID, nil, let statistics, nil) =
+                try await waiting.value else {
+                Issue.record("Expected a valid broker reply")
+                return
+            }
+            #expect(observedID == requestID)
+            #expect(statistics.isEmpty)
+            observedTerminal = .reply
+        } catch is CancellationError {
+            observedTerminal = .cancellation
+        } catch let error as TorrentStorageBrokerClientError {
+            guard case .timedOut = error else {
+                Issue.record("Expected timeout, received \(error)")
+                return
+            }
+            observedTerminal = .timeout
+        } catch {
+            Issue.record("Unexpected terminal error: \(error)")
+            return
+        }
+        #expect(observedTerminal == winner.terminal)
+        #expect(completionCount.withLock { $0 } == 1)
     }
 
     @Test("The client accepts an exact regular payload descriptor")
@@ -119,6 +223,56 @@ struct TorrentStorageBrokerClientSecurityTests {
             appIdentifier: nil,
             authentication: .reducedAssuranceAdHocDevelopment
         )
+    }
+}
+
+private enum BrokerPendingReplyTerminal: CaseIterable, Hashable, Sendable {
+    case reply
+    case timeout
+    case cancellation
+}
+
+private struct BrokerPendingReplyAttempt: Sendable {
+    let terminal: BrokerPendingReplyTerminal
+    let accepted: Bool
+}
+
+@safe private final class BrokerPendingReplyRaceBarrier: Sendable {
+    private struct State: Sendable {
+        let participantCount: Int
+        var arrivals = 0
+        var isOpen = false
+        var waiters = [CheckedContinuation<Void, Never>]()
+    }
+
+    private let state: Mutex<State>
+
+    init(participantCount: Int) {
+        precondition(participantCount > 0)
+        state = Mutex(State(participantCount: participantCount))
+    }
+
+    func arriveAndWait() async {
+        await withCheckedContinuation {
+            (continuation: CheckedContinuation<Void, Never>) in
+            let waiters = state.withLock { state in
+                if state.isOpen {
+                    return [continuation]
+                }
+                state.arrivals += 1
+                state.waiters.append(continuation)
+                guard state.arrivals == state.participantCount else {
+                    return [CheckedContinuation<Void, Never>]()
+                }
+                state.isOpen = true
+                let waiters = state.waiters
+                state.waiters.removeAll(keepingCapacity: false)
+                return waiters
+            }
+            for waiter in waiters {
+                waiter.resume()
+            }
+        }
     }
 }
 
