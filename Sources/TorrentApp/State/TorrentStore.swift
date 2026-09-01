@@ -179,9 +179,60 @@ private struct TorrentStorePendingLabelMutation {
     let state: TorrentStoreQueuedOperationState<Void>?
 }
 
-typealias TorrentStoreEngineStartupFactory = @Sendable (
+typealias TorrentStoreEngineFactory = @Sendable (
     _ enablePeerExchangePlugin: Bool
 ) throws -> any TorrentEngineServicing
+
+nonisolated struct TorrentStoreEngineStartup: Sendable {
+    let engine: any TorrentEngineServicing
+    let storageBrokerServer: TorrentStorageBrokerServer?
+}
+
+typealias TorrentStoreEngineStartupFactory = @Sendable (
+    _ enablePeerExchangePlugin: Bool,
+    _ storageBrokerRegistry: TorrentStorageBrokerRegistry,
+    _ connectionRetryMode: TorrentEngineConnectionRetryMode
+) async throws -> TorrentStoreEngineStartup
+
+nonisolated struct TorrentStoreDependencies: Sendable {
+    let startEngine: TorrentStoreEngineStartupFactory
+
+    static let live = Self(startEngine: { enablePeerExchangePlugin, registry, retryMode in
+        let configuration = try TorrentEngineXPCIdentity.configuration()
+        let brokerServer = try TorrentStorageBrokerServer(
+            registry: registry,
+            engineConfiguration: configuration
+        )
+        do {
+            let engine = try await TorrentXPCClient.connect(
+                enablePeerExchangePlugin: enablePeerExchangePlugin,
+                brokerEndpoint: brokerServer.endpoint,
+                brokerSessionNonce: brokerServer.sessionNonce,
+                retryMode: retryMode
+            )
+            return TorrentStoreEngineStartup(
+                engine: engine,
+                storageBrokerServer: brokerServer
+            )
+        } catch {
+            brokerServer.cancel()
+            throw error
+        }
+    })
+
+    init(makeEngine: @escaping TorrentStoreEngineFactory) {
+        startEngine = { enablePeerExchangePlugin, _, _ in
+            TorrentStoreEngineStartup(
+                engine: try makeEngine(enablePeerExchangePlugin),
+                storageBrokerServer: nil
+            )
+        }
+    }
+
+    private init(startEngine: @escaping TorrentStoreEngineStartupFactory) {
+        self.startEngine = startEngine
+    }
+}
 
 @MainActor
 @Observable
@@ -190,7 +241,6 @@ final class TorrentStore {
     private static let maximumPendingOperationCount = maximumPendingUserOperationCount * 2 + 1
     private static let maximumPendingLabelMutationCount = 64
     private static let engineRestartRefreshDrainTimeout: Duration = .seconds(5)
-    static let engineStartupFactoryOverride = Mutex<TorrentStoreEngineStartupFactory?>(nil)
 
     let commandState = TorrentCommandState()
     let selectionState = TorrentSelectionState()
@@ -217,6 +267,7 @@ final class TorrentStore {
 
     private(set) var libtorrentVersion: String
 
+    private let dependencies: TorrentStoreDependencies
     private var engine: any TorrentEngineServicing
     private let storageBrokerRegistry = TorrentStorageBrokerRegistry()
     private let storageClaimJournal: TorrentStorageClaimJournal?
@@ -323,7 +374,8 @@ final class TorrentStore {
     private var engineStartupFailed = false
     private var backgroundRefreshesEnabled = false
 
-    init() {
+    init(dependencies: TorrentStoreDependencies) {
+        self.dependencies = dependencies
         let defaultsDomain = TorrentDefaultsDomain.standard
         let initialSettings = TorrentSettings().clamped()
         let initialSortOrder = TorrentSortOrder.dateAdded
@@ -375,6 +427,7 @@ final class TorrentStore {
     }
 
     init(
+        dependencies: TorrentStoreDependencies,
         settings: TorrentSettings = TorrentSettings(),
         sortOrder: TorrentSortOrder = .dateAdded,
         sortDirection: TorrentSortDirection = .ascending,
@@ -398,6 +451,7 @@ final class TorrentStore {
             initialLabels.count <= TorrentLabel.maximumCount,
             "Injected label state exceeds the UI capacity."
         )
+        self.dependencies = dependencies
         self.settings = settings
         self.sortOrder = sortOrder
         self.sortDirection = sortDirection
@@ -3451,7 +3505,7 @@ final class TorrentStore {
         }
         precondition(!isEngineRestarting)
 
-        let startupFactory = Self.engineStartupFactoryOverride.withLock { $0 }
+        let startupFactory = dependencies.startEngine
         let connectionRetryMode: TorrentEngineConnectionRetryMode = switch kind {
         case .initial:
             .initial
@@ -4992,7 +5046,7 @@ final class TorrentStore {
 
     @concurrent
     private static func createProductionEngine(
-        startupFactory: TorrentStoreEngineStartupFactory?,
+        startupFactory: TorrentStoreEngineStartupFactory,
         enablePeerExchangePlugin: Bool,
         storageBrokerRegistry: TorrentStorageBrokerRegistry,
         connectionRetryMode: TorrentEngineConnectionRetryMode
@@ -5001,40 +5055,20 @@ final class TorrentStore {
             return .cancelled
         }
         do {
-            let engine: any TorrentEngineServicing
-            if let startupFactory {
-                engine = try startupFactory(
-                    enablePeerExchangePlugin
-                )
-            } else {
-                let configuration = try TorrentEngineXPCIdentity.configuration()
-                let brokerServer = try TorrentStorageBrokerServer(
-                    registry: storageBrokerRegistry,
-                    engineConfiguration: configuration
-                )
-                do {
-                    engine = try await TorrentXPCClient.connect(
-                        enablePeerExchangePlugin: enablePeerExchangePlugin,
-                        brokerEndpoint: brokerServer.endpoint,
-                        brokerSessionNonce: brokerServer.sessionNonce,
-                        retryMode: connectionRetryMode
-                    )
-                } catch {
-                    brokerServer.cancel()
-                    throw error
-                }
-                guard !Task.isCancelled else {
-                    await engine.shutdown()
-                    brokerServer.cancel()
-                    return .cancelled
-                }
-                return .started(engine, brokerServer)
-            }
+            let startup = try await startupFactory(
+                enablePeerExchangePlugin,
+                storageBrokerRegistry,
+                connectionRetryMode
+            )
             guard !Task.isCancelled else {
-                await engine.shutdown()
+                await startup.engine.shutdown()
+                startup.storageBrokerServer?.cancel()
                 return .cancelled
             }
-            return .started(engine, nil)
+            return .started(
+                startup.engine,
+                startup.storageBrokerServer
+            )
         } catch {
             guard !Task.isCancelled else {
                 return .cancelled

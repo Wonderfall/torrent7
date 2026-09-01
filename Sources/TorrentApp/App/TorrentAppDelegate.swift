@@ -2,7 +2,7 @@ import AppKit
 
 @MainActor
 final class TorrentAppDelegate: NSObject, NSApplicationDelegate {
-    let store = TorrentStore()
+    let store = TorrentStore(dependencies: .live)
     private var isSavingBeforeTermination = false
     private var terminationTask: Task<Void, Never>?
 

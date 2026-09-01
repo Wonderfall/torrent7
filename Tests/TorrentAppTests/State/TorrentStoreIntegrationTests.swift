@@ -20,20 +20,17 @@ struct TorrentStoreIntegrationTests {
         defaults.removePersistentDomain(forName: suiteName)
         defer {
             defaults.removePersistentDomain(forName: suiteName)
-            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
         }
 
-        let harness = makeStoreHarness(
-            defaultsDomain: .suite(suiteName)
-        )
         let productionEngine = FakeTorrentEngine()
         let startupCount = Mutex(0)
-        TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _ in
+        let harness = makeStoreHarness(
+            defaultsDomain: .suite(suiteName),
+            engineStartupFactory: { _ in
                 startupCount.withLock { $0 += 1 }
                 return productionEngine
             }
-        }
+        )
 
         #expect(await harness.accessStore.bootstrapCount == 0)
         #expect(startupCount.withLock { $0 } == 0)
@@ -82,13 +79,9 @@ struct TorrentStoreIntegrationTests {
             var observedCancellation = false
         }
 
-        let harness = makeStoreHarness()
         let state = Mutex(StartupState())
-        defer {
-            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
-        }
-        TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _ in
+        let harness = makeStoreHarness(
+            engineStartupFactory: { _ in
                 state.withLock { $0.didEnter = true }
                 while !Task.isCancelled {
                     Thread.sleep(forTimeInterval: 0.001)
@@ -96,7 +89,7 @@ struct TorrentStoreIntegrationTests {
                 state.withLock { $0.observedCancellation = true }
                 throw CancellationError()
             }
-        }
+        )
 
         harness.store.startProductionEngine(enablePeerExchangePlugin: true)
         while !state.withLock({ $0.didEnter }) {
@@ -117,16 +110,14 @@ struct TorrentStoreIntegrationTests {
             var enablePeerExchangePlugin = false
         }
 
-        let harness = makeStoreHarness()
         let installedEngine = FakeTorrentEngine()
         let capture = Mutex(StartupCapture())
         let releaseStartup = DispatchSemaphore(value: 0)
         defer {
             releaseStartup.signal()
-            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
         }
-        TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { enablePeerExchangePlugin in
+        let harness = makeStoreHarness(
+            engineStartupFactory: { enablePeerExchangePlugin in
                 capture.withLock { state in
                     state.didEnter = true
                     state.ranOffMainThread = !Thread.isMainThread
@@ -135,7 +126,7 @@ struct TorrentStoreIntegrationTests {
                 releaseStartup.wait()
                 return installedEngine
             }
-        }
+        )
 
         harness.store.startProductionEngine(
             enablePeerExchangePlugin: false
@@ -166,19 +157,15 @@ struct TorrentStoreIntegrationTests {
             var firstCallEntered = false
         }
 
-        let harness = makeStoreHarness()
         let abandonedEngine = FakeTorrentEngine()
         let installedEngine = FakeTorrentEngine()
         let state = Mutex(StartupState())
         let releaseFirstStartup = DispatchSemaphore(value: 0)
         defer {
             releaseFirstStartup.signal()
-            TorrentStore.engineStartupFactoryOverride.withLock {
-                $0 = nil
-            }
         }
-        TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _ in
+        let harness = makeStoreHarness(
+            engineStartupFactory: { _ in
                 let call = state.withLock { state in
                     state.callCount += 1
                     if state.callCount == 1 {
@@ -192,7 +179,7 @@ struct TorrentStoreIntegrationTests {
                 }
                 return installedEngine
             }
-        }
+        )
 
         harness.store.startProductionEngine(
             enablePeerExchangePlugin: true
@@ -236,20 +223,20 @@ struct TorrentStoreIntegrationTests {
         var settings = TorrentSettings()
         settings.requireNetworkInterface = true
         settings.requiredNetworkInterfaceName = "utun4"
-        let harness = makeStoreHarness(settings: settings, networkInterfaces: interfaces)
         let startupEntered = Mutex(false)
         let releaseStartup = DispatchSemaphore(value: 0)
         defer {
             releaseStartup.signal()
-            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
         }
-        TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _ in
+        let harness = makeStoreHarness(
+            settings: settings,
+            networkInterfaces: interfaces,
+            engineStartupFactory: { _ in
                 startupEntered.withLock { $0 = true }
                 releaseStartup.wait()
                 return FakeTorrentEngine()
             }
-        }
+        )
 
         harness.store.startProductionEngine(enablePeerExchangePlugin: true)
         while !startupEntered.withLock({ $0 }) {
@@ -1431,9 +1418,6 @@ struct TorrentStoreIntegrationTests {
 
     @Test("Restart finishes an interrupted keep-payload removal")
     func restartCompletesInterruptedKeepPayloadRemoval() async throws {
-        defer {
-            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
-        }
         try await withKnownTorrentHarness { harness, downloadFolder in
             await harness.engine.setNextAddedTorrentFileID("interrupted")
             await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
@@ -1474,10 +1458,10 @@ struct TorrentStoreIntegrationTests {
                     )]
                 )
             )
-            TorrentStore.engineStartupFactoryOverride.withLock { factory in
-                factory = { _ in productionEngine }
-            }
-            let restored = makeStoreHarness(storageClaimJournal: journal)
+            let restored = makeStoreHarness(
+                storageClaimJournal: journal,
+                engineStartupFactory: { _ in productionEngine }
+            )
             restored.store.start()
             await restored.store.saveAll()
 
@@ -1492,9 +1476,6 @@ struct TorrentStoreIntegrationTests {
 
     @Test("Restart retains a valid active storage claim")
     func restartRetainsActiveStorageClaim() async throws {
-        defer {
-            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
-        }
         try await withKnownTorrentHarness { harness, downloadFolder in
             await harness.engine.setNextAddedTorrentFileID("restored")
             await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
@@ -1525,10 +1506,10 @@ struct TorrentStoreIntegrationTests {
                     )]
                 )
             )
-            TorrentStore.engineStartupFactoryOverride.withLock { factory in
-                factory = { _ in productionEngine }
-            }
-            let restored = makeStoreHarness(storageClaimJournal: journal)
+            let restored = makeStoreHarness(
+                storageClaimJournal: journal,
+                engineStartupFactory: { _ in productionEngine }
+            )
             await restored.accessStore.setRestoreDefaultResult(
                 .success(downloadFolder)
             )
@@ -1548,9 +1529,6 @@ struct TorrentStoreIntegrationTests {
 
     @Test("Restart resumes an acknowledged payload deletion")
     func restartResumesAcknowledgedPayloadDeletion() async throws {
-        defer {
-            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
-        }
         try await withKnownTorrentHarness { harness, downloadFolder in
             await harness.engine.setNextAddedTorrentFileID("deleting")
             await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
@@ -1601,10 +1579,10 @@ struct TorrentStoreIntegrationTests {
                     torrents: []
                 )
             )
-            TorrentStore.engineStartupFactoryOverride.withLock { factory in
-                factory = { _ in productionEngine }
-            }
-            let restored = makeStoreHarness(storageClaimJournal: journal)
+            let restored = makeStoreHarness(
+                storageClaimJournal: journal,
+                engineStartupFactory: { _ in productionEngine }
+            )
             await restored.accessStore.setRestoreDefaultResult(
                 .success(downloadFolder)
             )
@@ -1628,7 +1606,6 @@ struct TorrentStoreIntegrationTests {
         defaults.removePersistentDomain(forName: suiteName)
         defer {
             defaults.removePersistentDomain(forName: suiteName)
-            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
         }
 
         try await withKnownTorrentHarness(
@@ -1667,12 +1644,10 @@ struct TorrentStoreIntegrationTests {
                     torrents: []
                 )
             )
-            TorrentStore.engineStartupFactoryOverride.withLock { factory in
-                factory = { _ in productionEngine }
-            }
             let restored = makeStoreHarness(
                 defaultsDomain: .suite(suiteName),
-                storageClaimJournal: journal
+                storageClaimJournal: journal,
+                engineStartupFactory: { _ in productionEngine }
             )
             restored.store.start()
             await restored.store.saveAll()
@@ -1935,7 +1910,10 @@ struct TorrentStoreIntegrationTests {
 
     @Test("A detail batch from a superseded engine is discarded")
     func staleDetailBatchIsDiscarded() async {
-        let harness = makeStoreHarness()
+        let replacementEngine = FakeTorrentEngine()
+        let harness = makeStoreHarness(
+            engineStartupFactory: { _ in replacementEngine }
+        )
         await harness.engine.setTrackerBatch(
             TorrentTrackerBatch(revision: 9, trackers: [])
         )
@@ -1947,16 +1925,6 @@ struct TorrentStoreIntegrationTests {
             )
         }
         await harness.engine.waitForSuspendedTrackerBatchCall()
-
-        let replacementEngine = FakeTorrentEngine()
-        defer {
-            TorrentStore.engineStartupFactoryOverride.withLock {
-                $0 = nil
-            }
-        }
-        TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _ in replacementEngine }
-        }
 
         harness.store.startProductionEngine(
             enablePeerExchangePlugin: true
@@ -2319,17 +2287,13 @@ struct TorrentStoreIntegrationTests {
 
     @Test("A stale pre-containment poll cannot revoke a confirmed network block")
     func stalePreContainmentPollCannotRevokeConfirmedBlock() async {
-        let harness = makeStoreHarness()
         let replacementCount = Mutex(0)
-        defer {
-            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
-        }
-        TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _ in
+        let harness = makeStoreHarness(
+            engineStartupFactory: { _ in
                 replacementCount.withLock { $0 += 1 }
                 return FakeTorrentEngine()
             }
-        }
+        )
 
         await harness.engine.suspendNextSnapshotBatchCall()
         let stalePoll = Task { @MainActor in
@@ -2741,7 +2705,18 @@ struct TorrentStoreIntegrationTests {
                 isLikelyVPN: true
             ),
         ]
-        let harness = makeStoreHarness(networkInterfaces: interfaces)
+        let replacementEngine = FakeTorrentEngine()
+        await replacementEngine.setNetworkInterfaceSnapshot(
+            TorrentNetworkInterfaceSnapshot(revision: 1, interfaces: interfaces)
+        )
+        let replacementCount = Mutex(0)
+        let harness = makeStoreHarness(
+            networkInterfaces: interfaces,
+            engineStartupFactory: { _ in
+                replacementCount.withLock { $0 += 1 }
+                return replacementEngine
+            }
+        )
         var initialBinding = harness.store.settings
         initialBinding.requireNetworkInterface = true
         initialBinding.requiredNetworkInterfaceName = "utun1"
@@ -2753,20 +2728,6 @@ struct TorrentStoreIntegrationTests {
         }
         await harness.engine.waitForSuspendedSnapshotBatchCall()
 
-        let replacementEngine = FakeTorrentEngine()
-        await replacementEngine.setNetworkInterfaceSnapshot(
-            TorrentNetworkInterfaceSnapshot(revision: 1, interfaces: interfaces)
-        )
-        let replacementCount = Mutex(0)
-        defer {
-            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
-        }
-        TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _ in
-                replacementCount.withLock { $0 += 1 }
-                return replacementEngine
-            }
-        }
         await harness.engine.requireControllerReplacementOnNextNetworkBlock()
         let expectedNetworkBlockCount = await harness.engine.blockNetworkCount + 1
 
@@ -2826,7 +2787,6 @@ struct TorrentStoreIntegrationTests {
             vpnServiceName: "ProtonVPN",
             isLikelyVPN: true
         )
-        let harness = makeStoreHarness(networkInterfaces: [vpn])
         let replacementEngine = FakeTorrentEngine(
             networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot(
                 revision: 1,
@@ -2835,15 +2795,13 @@ struct TorrentStoreIntegrationTests {
             suspendsInitialSnapshotBatch: true
         )
         let replacementCount = Mutex(0)
-        defer {
-            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
-        }
-        TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _ in
+        let harness = makeStoreHarness(
+            networkInterfaces: [vpn],
+            engineStartupFactory: { _ in
                 replacementCount.withLock { $0 += 1 }
                 return replacementEngine
             }
-        }
+        )
         await harness.engine.requireControllerReplacementOnNextNetworkBlock()
         await harness.engine.suspendNextNetworkBlock()
 
@@ -2881,19 +2839,15 @@ struct TorrentStoreIntegrationTests {
 
     @Test("Replacement startup failure resolves a queued async operation")
     func replacementStartupFailureResolvesQueuedAsyncOperation() async {
-        let harness = makeStoreHarness()
         let replacementCount = Mutex(0)
         let operationStarted = Mutex(false)
         let operationOutcome = Mutex<String?>(nil)
-        defer {
-            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
-        }
-        TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _ in
+        let harness = makeStoreHarness(
+            engineStartupFactory: { _ in
                 replacementCount.withLock { $0 += 1 }
                 throw FakeBookmarkError()
             }
-        }
+        )
         await harness.engine.requireControllerReplacementOnNextNetworkBlock()
         await harness.engine.suspendNextNetworkBlock()
 
@@ -2943,18 +2897,14 @@ struct TorrentStoreIntegrationTests {
 
     @Test("A recoverable background poll failure replaces the controller")
     func recoverablePollFailureReplacesController() async {
-        let harness = makeStoreHarness()
         let replacementEngine = FakeTorrentEngine()
         let replacementCount = Mutex(0)
-        defer {
-            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
-        }
-        TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _ in
+        let harness = makeStoreHarness(
+            engineStartupFactory: { _ in
                 replacementCount.withLock { $0 += 1 }
                 return replacementEngine
             }
-        }
+        )
         await harness.engine.failNextSnapshotBatchCall(
             recoveryDisposition: .replaceController
         )
@@ -2969,17 +2919,13 @@ struct TorrentStoreIntegrationTests {
 
     @Test("A terminal background poll failure is not automatically reconnected")
     func terminalPollFailureDoesNotReconnect() async {
-        let harness = makeStoreHarness()
         let replacementCount = Mutex(0)
-        defer {
-            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
-        }
-        TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _ in
+        let harness = makeStoreHarness(
+            engineStartupFactory: { _ in
                 replacementCount.withLock { $0 += 1 }
                 return FakeTorrentEngine()
             }
-        }
+        )
         await harness.store.refreshNow(notifiesCompletions: false)
         #expect(harness.store.bridgeHealth == .healthy)
         #expect(!harness.store.networkStatus.networkBlocked)
@@ -3005,17 +2951,14 @@ struct TorrentStoreIntegrationTests {
             vpnServiceName: "ProtonVPN",
             isLikelyVPN: true
         )
-        let harness = makeStoreHarness(networkInterfaces: [vpn])
         let replacementCount = Mutex(0)
-        defer {
-            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
-        }
-        TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _ in
+        let harness = makeStoreHarness(
+            networkInterfaces: [vpn],
+            engineStartupFactory: { _ in
                 replacementCount.withLock { $0 += 1 }
                 return FakeTorrentEngine()
             }
-        }
+        )
         await harness.engine.requireControllerReplacementOnNextNetworkBlock(
             recoveryDisposition: .terminal
         )
@@ -3041,17 +2984,14 @@ struct TorrentStoreIntegrationTests {
             vpnServiceName: "ProtonVPN",
             isLikelyVPN: true
         )
-        let harness = makeStoreHarness(networkInterfaces: [vpn])
         let replacementCount = Mutex(0)
-        defer {
-            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
-        }
-        TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _ in
+        let harness = makeStoreHarness(
+            networkInterfaces: [vpn],
+            engineStartupFactory: { _ in
                 replacementCount.withLock { $0 += 1 }
                 return FakeTorrentEngine()
             }
-        }
+        )
         await harness.engine.setRecoveryDisposition(.replaceController)
         await harness.engine.setNextNetworkBlockError(
             TorrentEngineClientError.serviceRejected("Rejected by the service.")
@@ -3072,24 +3012,21 @@ struct TorrentStoreIntegrationTests {
 
     @Test("Controller replacement does not await a cancellation-insensitive refresh task")
     func controllerReplacementDoesNotAwaitStaleRefreshTask() async {
-        let harness = makeStoreHarness(startsTasks: true, keepsWakeStreamOpen: true)
+        let replacementEngine = FakeTorrentEngine()
+        let replacementCount = Mutex(0)
+        let harness = makeStoreHarness(
+            startsTasks: true,
+            keepsWakeStreamOpen: true,
+            engineStartupFactory: { _ in
+                replacementCount.withLock { $0 += 1 }
+                return replacementEngine
+            }
+        )
         await harness.store.saveAll()
         await harness.engine.waitForOpenWakeStream()
         await harness.engine.suspendNextSnapshotBatchCall()
         await harness.engine.emitWake()
         await harness.engine.waitForSuspendedSnapshotBatchCall()
-
-        let replacementEngine = FakeTorrentEngine()
-        let replacementCount = Mutex(0)
-        defer {
-            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
-        }
-        TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _ in
-                replacementCount.withLock { $0 += 1 }
-                return replacementEngine
-            }
-        }
         await harness.engine.requireControllerReplacementOnNextNetworkBlock()
         let expectedNetworkBlockCount = await harness.engine.blockNetworkCount + 1
 
@@ -3121,18 +3058,14 @@ struct TorrentStoreIntegrationTests {
 
     @Test("An unconfirmed network block terminates and replaces an available engine")
     func failedNetworkBlockTerminatesAvailableEngine() async {
-        let harness = makeStoreHarness()
         let replacementEngine = FakeTorrentEngine()
         let replacementCount = Mutex(0)
-        defer {
-            TorrentStore.engineStartupFactoryOverride.withLock { $0 = nil }
-        }
-        TorrentStore.engineStartupFactoryOverride.withLock { factory in
-            factory = { _ in
+        let harness = makeStoreHarness(
+            engineStartupFactory: { _ in
                 replacementCount.withLock { $0 += 1 }
                 return replacementEngine
             }
-        }
+        )
         await harness.engine.setNextNetworkBlockError(FakeBookmarkError())
 
         var restricted = harness.store.settings
@@ -3271,7 +3204,8 @@ private func makeStoreHarness(
     startsTasks: Bool = false,
     keepsWakeStreamOpen: Bool = false,
     suspendsInitialSnapshotBatch: Bool = false,
-    storageClaimJournal: TorrentStorageClaimJournal? = nil
+    storageClaimJournal: TorrentStorageClaimJournal? = nil,
+    engineStartupFactory: TorrentStoreEngineFactory? = nil
 ) -> StoreHarness {
     let engine = FakeTorrentEngine(
         keepsWakeStreamOpen: keepsWakeStreamOpen,
@@ -3291,7 +3225,13 @@ private func makeStoreHarness(
     let sleep = RecordingSleepPreventionService()
     let accessStore = RecordingDownloadFolderAccessStore()
     let fileLocationService = RecordingTorrentFileLocationService()
+    let dependencies = if let engineStartupFactory {
+        TorrentStoreDependencies(makeEngine: engineStartupFactory)
+    } else {
+        TorrentStoreDependencies.live
+    }
     let store = TorrentStore(
+        dependencies: dependencies,
         settings: settings,
         sortOrder: sortOrder,
         sortDirection: sortDirection,
