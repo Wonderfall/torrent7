@@ -599,6 +599,10 @@ package enum TorrentEngineIPCXPCValues {
     }
 
     /// Copies XPC's storage after checking the declared per-call byte bound.
+    // SAFETY: Ownership/lifetime: the dictionary retains the XPC object throughout
+    // this synchronous copy; bounds/alignment: its reported length is validated before
+    // the returned pointer is copied as bytes; synchronization: the immutable message
+    // cannot change during decoding; safe alternative: XPC exposes data only via C pointers.
     package static func copyPayload(
         from dictionary: XPCDictionary,
         maximumBytes: Int,
@@ -608,10 +612,6 @@ package enum TorrentEngineIPCXPCValues {
         guard dictionary.keys.contains(field) else {
             return nil
         }
-        // SAFETY: Ownership/lifetime: the dictionary retains the XPC object throughout
-        // this synchronous copy; bounds/alignment: its reported length is validated before
-        // the returned pointer is copied as bytes; synchronization: the immutable message
-        // cannot change during decoding; safe alternative: XPC exposes data only via C pointers.
         guard let object = unsafe dictionary[field, as: XPC_TYPE_DATA] else {
             throw TorrentEngineIPCError.wrongFieldType(field: field, expected: "data")
         }

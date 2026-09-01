@@ -778,14 +778,14 @@ private struct AddedTorrentIdentity: Sendable {
         }
     }
 
+    // SAFETY: Ownership/lifetime: the actor-owned handle and local CChar array live through
+    // the synchronous copy; bounds/alignment: MutableSpan carries the exact 1,024-element
+    // capacity and decoding stops at NUL; synchronization: actor isolation serializes drain;
+    // safe alternative: the native alert queue is exposed only through the C bridge.
     package func takeAlertError() -> String? {
         if let alertErrorReader {
             return alertErrorReader()
         }
-        // SAFETY: Ownership/lifetime: the actor-owned handle and local CChar array live through
-        // the synchronous copy; bounds/alignment: MutableSpan carries the exact 1,024-element
-        // capacity and decoding stops at NUL; synchronization: actor isolation serializes drain;
-        // safe alternative: the native alert queue is exposed only through the C bridge.
         guard let pointer = unsafe client?.pointer else {
             return nil
         }
@@ -800,15 +800,15 @@ private struct AddedTorrentIdentity: Sendable {
         return stringFromBridgeBuffer(errorBuffer)
     }
 
+    // SAFETY: Ownership/lifetime: the actor-owned handle and each event buffer live through
+    // synchronous bridge drains; bounds/alignment: SafeInterop MutableSpan communicates exact
+    // capacities and every required count is capped before allocation/copy; synchronization:
+    // actor isolation serializes drain/state updates; safe alternative: native events are
+    // available only through the C bridge ABI.
     package func takeChanges() -> UInt32 {
         guard criticalFaults.isEmpty else {
             return TorrentEngineDirtySet.allKnown.rawValue
         }
-        // SAFETY: Ownership/lifetime: the actor-owned handle and each event buffer live through
-        // synchronous bridge drains; bounds/alignment: SafeInterop MutableSpan communicates exact
-        // capacities and every required count is capped before allocation/copy; synchronization:
-        // actor isolation serializes drain/state updates; safe alternative: native events are
-        // available only through the C bridge ABI.
         guard let pointer = unsafe client?.pointer else {
             return 0
         }

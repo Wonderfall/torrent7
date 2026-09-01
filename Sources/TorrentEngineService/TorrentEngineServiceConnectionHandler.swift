@@ -367,16 +367,20 @@ package enum TorrentEngineExtensionConfiguration {
         let canonical = requested.resolvingSymlinksInPath().standardizedFileURL
         var requestedMetadata = stat()
         var canonicalMetadata = stat()
+        let requestedStatus: Int32
+        let canonicalStatus: Int32
         // SAFETY: Ownership/lifetime: each String owns its temporary C string and each
         // `stat` value lives through its synchronous lstat; bounds/alignment: Swift supplies
         // NUL-terminated strings and correctly aligned `stat` storage; synchronization:
         // startup exclusively initializes this directory; safe alternative: lstat identity
         // comparison is required to reject a symlink/rename race in path-only Foundation APIs.
-        let requestedStatus = unsafe requested.path(percentEncoded: false).withCString {
-            unsafe Darwin.lstat($0, &requestedMetadata)
-        }
-        let canonicalStatus = unsafe canonical.path(percentEncoded: false).withCString {
-            unsafe Darwin.lstat($0, &canonicalMetadata)
+        do {
+            requestedStatus = unsafe requested.path(percentEncoded: false).withCString {
+                unsafe Darwin.lstat($0, &requestedMetadata)
+            }
+            canonicalStatus = unsafe canonical.path(percentEncoded: false).withCString {
+                unsafe Darwin.lstat($0, &canonicalMetadata)
+            }
         }
         guard requestedStatus == 0,
               canonicalStatus == 0,

@@ -181,11 +181,208 @@ struct UnsafeBoundaryLinterTests {
     func boundarySpellingsInStringsAreIgnored() {
         let diagnostics = lint(
             #"""
-            let text = "Unmanaged @unchecked Sendable malloc(1) value.deallocate()"
+            let text = "unsafe for unsafe @unsafe @preconcurrency nonisolated(unsafe)"
+                + " unowned(unsafe) Unmanaged @unchecked Sendable malloc(1) value.deallocate()"
             """#
         )
 
         #expect(diagnostics.isEmpty)
+    }
+
+    @Test("Unsafe expression requires documentation")
+    func unsafeExpressionRequiresDocumentation() {
+        let diagnostics = lint(
+            """
+            func read(_ pointer: UnsafePointer<Int>) -> Int {
+                unsafe pointer.pointee
+            }
+            """
+        )
+
+        #expect(diagnostics.map(\.kind) == [.unsafeOperation])
+    }
+
+    @Test("Statement proofs cover guard, initializer, and return expressions")
+    func statementProofsCoverCommonExpressions() {
+        let diagnostics = lint(
+            """
+            func read(_ pointer: UnsafePointer<Int>?) -> Int {
+                // SAFETY: the caller keeps the optional pointer valid for this synchronous read.
+                guard let pointer = unsafe pointer else { return 0 }
+                // SAFETY: the bound pointer contains one initialized Int.
+                let value = unsafe pointer.pointee
+                // SAFETY: returning this copied value does not extend pointer access.
+                return unsafe value
+            }
+            """
+        )
+
+        #expect(diagnostics.isEmpty)
+    }
+
+    @Test("Multiple unsafe operations in one statement produce one diagnostic")
+    func multipleUnsafeOperationsInOneStatementProduceOneDiagnostic() {
+        let diagnostics = lint(
+            """
+            func sum(_ first: UnsafePointer<Int>, _ second: UnsafePointer<Int>) -> Int {
+                unsafe first.pointee + unsafe second.pointee
+            }
+            """
+        )
+
+        #expect(diagnostics.map(\.kind) == [.unsafeOperation])
+    }
+
+    @Test("Specialized ownership diagnostic wins over generic unsafe diagnostic")
+    func specializedOwnershipDiagnosticWins() {
+        let diagnostics = lint(
+            """
+            func allocate() {
+                _ = unsafe Darwin.malloc(16)
+            }
+            """
+        )
+
+        #expect(diagnostics.map(\.kind) == [.rawAllocation])
+    }
+
+    @Test("For unsafe requires documentation")
+    func forUnsafeRequiresDocumentation() {
+        let diagnostics = lint(
+            """
+            func visit(_ values: [Int]) {
+                for unsafe value in values {
+                    _ = value
+                }
+            }
+            """
+        )
+
+        #expect(diagnostics.map(\.kind) == [.unsafeOperation])
+    }
+
+    @Test("Statement proof documents for unsafe")
+    func statementProofDocumentsForUnsafe() {
+        let diagnostics = lint(
+            """
+            func visit(_ values: [Int]) {
+                // SAFETY: the collection remains unchanged for the complete iteration.
+                for unsafe value in values {
+                    _ = value
+                }
+            }
+            """
+        )
+
+        #expect(diagnostics.isEmpty)
+    }
+
+    @Test("Unsafe import acknowledgements require exact declaration proofs")
+    func unsafeImportAcknowledgementsRequireExactDeclarationProofs() {
+        let diagnostics = lint(
+            """
+            // SAFETY: LegacyKit's imported declarations are externally synchronized.
+            @preconcurrency import LegacyKit
+            @unsafe import UnsafeKit
+            """
+        )
+
+        #expect(diagnostics.map(\.kind) == [.unsafeDeclaration])
+        #expect(diagnostics.first?.line == 3)
+    }
+
+    @Test("One declaration proof covers combined import acknowledgements")
+    func oneDeclarationProofCoversCombinedImportAcknowledgements() {
+        let diagnostics = lint(
+            """
+            // SAFETY: this import is confined behind a checked adapter.
+            @preconcurrency @unsafe import LegacyKit
+            """
+        )
+
+        #expect(diagnostics.isEmpty)
+    }
+
+    @Test("Unsafe declaration modifiers require documentation")
+    func unsafeDeclarationModifiersRequireDocumentation() {
+        let diagnostics = lint(
+            """
+            final class Owner {}
+            final class Container {
+                nonisolated(unsafe) static var shared = 0
+                unowned(unsafe) var owner: Owner
+            }
+            """
+        )
+
+        #expect(diagnostics.map(\.kind) == [.unsafeDeclaration, .unsafeDeclaration])
+    }
+
+    @Test("Declaration proof documents an unsafe modifier")
+    func declarationProofDocumentsUnsafeModifier() {
+        let diagnostics = lint(
+            """
+            // SAFETY: all access occurs while the process-wide startup lock is held.
+            nonisolated(unsafe) var shared = 0
+            """
+        )
+
+        #expect(diagnostics.isEmpty)
+    }
+
+    @Test("Unsafe conformance requires documentation")
+    func unsafeConformanceRequiresDocumentation() {
+        let diagnostics = lint(
+            """
+            struct ImportedBox: @unsafe LegacyProtocol {}
+            """
+        )
+
+        #expect(diagnostics.map(\.kind) == [.unsafeDeclaration])
+    }
+
+    @Test("Unowned unsafe capture requires documentation")
+    func unownedUnsafeCaptureRequiresDocumentation() {
+        let diagnostics = lint(
+            """
+            let callback = { [unowned(unsafe) owner] in
+                owner.run()
+            }
+            """
+        )
+
+        #expect(diagnostics.map(\.kind) == [.unsafeOperation])
+    }
+
+    @Test("Statement proof documents an unowned unsafe capture")
+    func statementProofDocumentsUnownedUnsafeCapture() {
+        let diagnostics = lint(
+            """
+            // SAFETY: the callback cannot outlive owner because both belong to one request.
+            let callback = { [unowned(unsafe) owner] in
+                owner.run()
+            }
+            """
+        )
+
+        #expect(diagnostics.isEmpty)
+    }
+
+    @Test("Outer callable proof does not document a nested callable")
+    func outerCallableProofDoesNotDocumentNestedCallable() {
+        let diagnostics = lint(
+            """
+            // SAFETY: this proof belongs to outer only.
+            func outer(_ pointer: UnsafePointer<Int>) {
+                func nested() {
+                    _ = unsafe pointer.pointee
+                }
+                nested()
+            }
+            """
+        )
+
+        #expect(diagnostics.map(\.kind) == [.unsafeOperation])
     }
 
     @Test("Function proof covers paired C allocation ownership")

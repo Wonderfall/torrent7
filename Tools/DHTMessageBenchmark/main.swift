@@ -217,64 +217,66 @@ let sampleCount = 9
 // call and defer balances it; bounds/alignment: the opaque pointer is the exact aligned class
 // address and each called helper validates its buffers; synchronization: top-level batches run
 // serially; safe alternative: the benchmark must pass an opaque context through the C callback ABI.
-let retainedContext = unsafe Unmanaged.passRetained(TorrentDHTMessageBridgeContext())
-defer {
-    unsafe retainedContext.release()
-}
-let context = unsafe retainedContext.toOpaque()
-
-precondition(smallQuery.count <= Int(TTORRENT_MAX_DHT_MESSAGE_BYTES))
-precondition(dense.message.count <= Int(TTORRENT_MAX_DHT_MESSAGE_BYTES))
-precondition(dense.nodeCount <= Int(TTORRENT_MAX_DHT_MESSAGE_NODES))
-precondition(maximumWork.count <= Int(TTORRENT_MAX_DHT_MESSAGE_BYTES))
-
-let smallResult = unsafe benchmarkDistribution(
-    message: smallQuery,
-    context: context,
-    iterationCount: iterationCount,
-    warmupCount: warmupCount,
-    sampleCount: sampleCount
-)
-let denseResult = unsafe benchmarkDistribution(
-    message: dense.message,
-    context: context,
-    iterationCount: iterationCount,
-    warmupCount: warmupCount,
-    sampleCount: sampleCount
-)
-let maximumWorkResult = unsafe benchmarkDistribution(
-    message: maximumWork,
-    context: context,
-    iterationCount: iterationCount,
-    warmupCount: warmupCount,
-    sampleCount: sampleCount
-)
-let allocationBaseline = mallocBytesInUse()
-_ = unsafe benchmarkBatch(
-    message: maximumWork,
-    context: context,
-    iterationCount: iterationCount
-)
-let allocationAfter = mallocBytesInUse()
-let retainedAllocationBytes = allocationBaseline.flatMap { baseline in
-    allocationAfter.map { after in
-        after >= baseline ? after - baseline : 0
+do {
+    let retainedContext = unsafe Unmanaged.passRetained(TorrentDHTMessageBridgeContext())
+    defer {
+        unsafe retainedContext.release()
     }
-}
-let retainedAllocationJSON = retainedAllocationBytes.map(String.init) ?? "null"
-precondition(smallResult.checksum > 0)
-precondition(denseResult.checksum > 0)
-precondition(maximumWorkResult.checksum > 0)
+    let context = unsafe retainedContext.toOpaque()
 
-print(
-    "DHT_MESSAGE_CALLBACK {"
-        + "\"iterations_per_sample\":\(iterationCount),"
-        + "\"samples\":\(sampleCount),"
-        + "\"dense_node_count\":\(dense.nodeCount),"
-        + "\"maximum_work_value_count\":500,"
-        + "\"retained_allocation_bytes\":\(retainedAllocationJSON),"
-        + "\"small_query\":\(smallResult.json),"
-        + "\"dense_response\":\(denseResult.json),"
-        + "\"maximum_work_response\":\(maximumWorkResult.json)"
-        + "}"
-)
+    precondition(smallQuery.count <= Int(TTORRENT_MAX_DHT_MESSAGE_BYTES))
+    precondition(dense.message.count <= Int(TTORRENT_MAX_DHT_MESSAGE_BYTES))
+    precondition(dense.nodeCount <= Int(TTORRENT_MAX_DHT_MESSAGE_NODES))
+    precondition(maximumWork.count <= Int(TTORRENT_MAX_DHT_MESSAGE_BYTES))
+
+    let smallResult = unsafe benchmarkDistribution(
+        message: smallQuery,
+        context: context,
+        iterationCount: iterationCount,
+        warmupCount: warmupCount,
+        sampleCount: sampleCount
+    )
+    let denseResult = unsafe benchmarkDistribution(
+        message: dense.message,
+        context: context,
+        iterationCount: iterationCount,
+        warmupCount: warmupCount,
+        sampleCount: sampleCount
+    )
+    let maximumWorkResult = unsafe benchmarkDistribution(
+        message: maximumWork,
+        context: context,
+        iterationCount: iterationCount,
+        warmupCount: warmupCount,
+        sampleCount: sampleCount
+    )
+    let allocationBaseline = mallocBytesInUse()
+    _ = unsafe benchmarkBatch(
+        message: maximumWork,
+        context: context,
+        iterationCount: iterationCount
+    )
+    let allocationAfter = mallocBytesInUse()
+    let retainedAllocationBytes = allocationBaseline.flatMap { baseline in
+        allocationAfter.map { after in
+            after >= baseline ? after - baseline : 0
+        }
+    }
+    let retainedAllocationJSON = retainedAllocationBytes.map(String.init) ?? "null"
+    precondition(smallResult.checksum > 0)
+    precondition(denseResult.checksum > 0)
+    precondition(maximumWorkResult.checksum > 0)
+
+    print(
+        "DHT_MESSAGE_CALLBACK {"
+            + "\"iterations_per_sample\":\(iterationCount),"
+            + "\"samples\":\(sampleCount),"
+            + "\"dense_node_count\":\(dense.nodeCount),"
+            + "\"maximum_work_value_count\":500,"
+            + "\"retained_allocation_bytes\":\(retainedAllocationJSON),"
+            + "\"small_query\":\(smallResult.json),"
+            + "\"dense_response\":\(denseResult.json),"
+            + "\"maximum_work_response\":\(maximumWorkResult.json)"
+            + "}"
+    )
+}

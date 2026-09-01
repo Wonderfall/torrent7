@@ -8,16 +8,20 @@ code.
 
 The lint covers:
 
-- `@unchecked Sendable` conformances;
+- every explicit `unsafe` expression and `for unsafe` iteration;
+- `@unchecked Sendable`, `nonisolated(unsafe)`, `unowned(unsafe)`,
+  `@preconcurrency`, `@unsafe`, and unsafe conformances or imports;
 - explicit `Unmanaged` references; and
 - known C allocation functions plus Swift raw-pointer `allocate` and
   `deallocate` calls.
 
-For `@unchecked Sendable`, the explanation must lead that exact declaration.
-For ownership operations, an explanation may lead the containing statement,
-the first statement of an enclosing code block, or the owning callable or
-property declaration. Comments on an enclosing type do not silently cover its
-methods.
+Declaration escape hatches require an explanation leading that exact
+declaration or import. Executable operations may inherit an explanation from
+the containing statement, the first statement of an enclosing code block, or
+the owning callable or property declaration. Comments on an enclosing type do
+not silently cover its methods. Multiple boundaries in one proof scope produce
+one diagnostic, with specialized ownership diagnostics preferred over the
+generic `unsafe` diagnostic.
 
 Run the repository-wide check from the project root:
 

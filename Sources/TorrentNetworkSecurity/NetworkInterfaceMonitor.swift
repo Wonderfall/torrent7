@@ -35,13 +35,13 @@ package protocol NetworkInterfaceMonitoring: AnyObject, Sendable {
         self.monitor = monitor
     }
 
+    // SAFETY: Ownership/lifetime: SCDynamicStore passes the exact Unmanaged pointer
+    // installed in its context and this callback adds its requested retain;
+    // bounds/alignment: the pointer addresses that class instance with no byte access;
+    // synchronization: ARC retain is thread-safe; safe alternative: the C context ABI
+    // cannot store a managed Swift reference.
     static let retainCallback:
         @convention(c) (UnsafeRawPointer) -> UnsafeRawPointer = { info in
-        // SAFETY: Ownership/lifetime: SCDynamicStore passes the exact Unmanaged pointer
-        // installed in its context and this callback adds its requested retain;
-        // bounds/alignment: the pointer addresses that class instance with no byte access;
-        // synchronization: ARC retain is thread-safe; safe alternative: the C context ABI
-        // cannot store a managed Swift reference.
         let retained = unsafe Unmanaged<NetworkInterfaceMonitorDynamicStoreContext>
             .fromOpaque(info)
             .retain()
@@ -495,25 +495,29 @@ package final class NetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchec
                 continue
             }
 
+            let status: [String: Any]
             // SAFETY: Ownership/lifetime: the local zero-callback context lives through
             // synchronous connection creation and Core Foundation returns a managed object;
             // bounds/alignment: context storage has its exact imported type; synchronization:
             // discovery is serialized on the monitor queue; safe alternative: service status
             // is available only through SystemConfiguration's C context API.
-            var context = unsafe SCNetworkConnectionContext(
-                version: 0,
-                info: nil,
-                retain: nil,
-                release: nil,
-                copyDescription: nil
-            )
-            guard let connection = unsafe SCNetworkConnectionCreateWithServiceID(
-                nil,
-                serviceID as CFString,
-                nil,
-                &context
-            ), let status = SCNetworkConnectionCopyExtendedStatus(connection) as? [String: Any] else {
-                continue
+            do {
+                var context = unsafe SCNetworkConnectionContext(
+                    version: 0,
+                    info: nil,
+                    retain: nil,
+                    release: nil,
+                    copyDescription: nil
+                )
+                guard let connection = unsafe SCNetworkConnectionCreateWithServiceID(
+                    nil,
+                    serviceID as CFString,
+                    nil,
+                    &context
+                ), let extendedStatus = SCNetworkConnectionCopyExtendedStatus(connection) as? [String: Any] else {
+                    continue
+                }
+                status = extendedStatus
             }
 
             interfaceNames(inConnectionStatus: status).forEach {

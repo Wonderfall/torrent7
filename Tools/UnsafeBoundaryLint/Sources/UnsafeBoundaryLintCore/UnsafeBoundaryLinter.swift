@@ -3,6 +3,8 @@ import SwiftSyntax
 
 public enum UnsafeBoundaryKind: String, Sendable {
     case uncheckedSendable = "unchecked-sendable"
+    case unsafeDeclaration = "unsafe-declaration"
+    case unsafeOperation = "unsafe-operation"
     case unmanaged = "unmanaged"
     case rawAllocation = "raw-allocation"
 }
@@ -41,6 +43,17 @@ public struct UnsafeBoundaryLinter {
         let converter = SourceLocationConverter(fileName: path, tree: sourceFile)
         let tokens = Array(sourceFile.tokens(viewMode: .sourceAccurate))
         var boundaries = unmanagedBoundaries(in: tokens)
+        boundaries.append(contentsOf: unsafeKeywordBoundaries(in: tokens))
+
+        let unsafeSyntaxVisitor = UnsafeSyntaxVisitor(viewMode: .sourceAccurate)
+        unsafeSyntaxVisitor.walk(sourceFile)
+        boundaries.append(contentsOf: unsafeSyntaxVisitor.boundaries)
+
+        let preconcurrencyVisitor = PreconcurrencyVisitor(
+            viewMode: .sourceAccurate
+        )
+        preconcurrencyVisitor.walk(sourceFile)
+        boundaries.append(contentsOf: preconcurrencyVisitor.boundaries)
 
         let uncheckedSendableVisitor = UncheckedSendableVisitor(
             viewMode: .sourceAccurate
@@ -52,8 +65,23 @@ public struct UnsafeBoundaryLinter {
         allocationVisitor.walk(sourceFile)
         boundaries.append(contentsOf: allocationVisitor.boundaries)
 
-        return boundaries
+        let uncovered = boundaries
             .filter { !hasSafetyProof(for: $0.syntax, kind: $0.kind) }
+
+        var grouped = [ProofScope: Boundary]()
+        for boundary in uncovered {
+            let scope = proofScope(for: boundary)
+            if let existing = grouped[scope] {
+                grouped[scope] = preferredDiagnosticBoundary(
+                    existing,
+                    boundary
+                )
+            } else {
+                grouped[scope] = boundary
+            }
+        }
+
+        return grouped.values
             .map { boundary in
                 let location = converter.location(
                     for: boundary.position
@@ -91,6 +119,32 @@ public struct UnsafeBoundaryLinter {
 
         return boundaries
     }
+
+    private func unsafeKeywordBoundaries(in tokens: [TokenSyntax]) -> [Boundary] {
+        tokens.compactMap { token in
+            guard token.tokenKind == .keyword(.unsafe) else {
+                return nil
+            }
+
+            let syntax = Syntax(token)
+            if unsafeKeywordRequiresDeclarationProof(syntax) {
+                return Boundary(
+                    kind: .unsafeDeclaration,
+                    syntax: syntax,
+                    position: token.positionAfterSkippingLeadingTrivia,
+                    message: "unsafe declaration acknowledgement requires an exact "
+                        + "declaration-scoped SAFETY: explanation"
+                )
+            }
+
+            return Boundary(
+                kind: .unsafeOperation,
+                syntax: syntax,
+                position: token.positionAfterSkippingLeadingTrivia,
+                message: "unsafe operation requires a syntax-scoped SAFETY: explanation"
+            )
+        }
+    }
 }
 
 private struct Boundary {
@@ -98,6 +152,103 @@ private struct Boundary {
     let syntax: Syntax
     let position: AbsolutePosition
     let message: String
+}
+
+private struct ProofScope: Hashable {
+    enum Kind: Hashable {
+        case declaration
+        case operation
+    }
+
+    let kind: Kind
+    let position: Int
+}
+
+private final class UnsafeSyntaxVisitor: SyntaxVisitor {
+    fileprivate var boundaries = [Boundary]()
+
+    override func visit(_ node: AttributeSyntax) -> SyntaxVisitorContinueKind {
+        guard attributeName(node) == "unsafe" else {
+            return .visitChildren
+        }
+
+        boundaries.append(
+            Boundary(
+                kind: .unsafeDeclaration,
+                syntax: Syntax(node),
+                position: node.atSign.positionAfterSkippingLeadingTrivia,
+                message: "@unsafe requires an exact declaration-scoped SAFETY: explanation"
+            )
+        )
+        return .skipChildren
+    }
+
+    override func visit(_ node: DeclModifierSyntax) -> SyntaxVisitorContinueKind {
+        guard node.name.text == "nonisolated" || node.name.text == "unowned",
+              let detail = node.detail?.detail,
+              detail.text == "unsafe" else {
+            return .visitChildren
+        }
+
+        boundaries.append(
+            Boundary(
+                kind: .unsafeDeclaration,
+                syntax: Syntax(node),
+                position: detail.positionAfterSkippingLeadingTrivia,
+                message: "\(node.name.text)(unsafe) requires an exact declaration-scoped "
+                    + "SAFETY: explanation"
+            )
+        )
+        return .skipChildren
+    }
+
+    override func visit(
+        _ node: ClosureCaptureSpecifierSyntax
+    ) -> SyntaxVisitorContinueKind {
+        guard node.specifier.text == "unowned",
+              let detail = node.detail,
+              detail.text == "unsafe" else {
+            return .visitChildren
+        }
+
+        boundaries.append(
+            Boundary(
+                kind: .unsafeOperation,
+                syntax: Syntax(node),
+                position: detail.positionAfterSkippingLeadingTrivia,
+                message: "unowned(unsafe) capture requires a syntax-scoped "
+                    + "SAFETY: explanation"
+            )
+        )
+        return .skipChildren
+    }
+}
+
+private final class PreconcurrencyVisitor: SyntaxVisitor {
+    fileprivate var boundaries = [Boundary]()
+
+    override func visit(_ node: AttributeSyntax) -> SyntaxVisitorContinueKind {
+        guard attributeName(node) == "preconcurrency" else {
+            return .visitChildren
+        }
+
+        boundaries.append(
+            Boundary(
+                kind: .unsafeDeclaration,
+                syntax: Syntax(node),
+                position: node.atSign.positionAfterSkippingLeadingTrivia,
+                message: "@preconcurrency requires an exact declaration-scoped "
+                    + "SAFETY: explanation"
+            )
+        )
+        return .skipChildren
+    }
+}
+
+private func attributeName(_ node: AttributeSyntax) -> String {
+    node.attributeName.tokens(viewMode: .sourceAccurate)
+        .map(\.text)
+        .joined()
 }
 
 private final class UncheckedSendableVisitor: SyntaxVisitor {
@@ -240,11 +391,115 @@ private func hasSafetyProof(
     for boundary: Syntax,
     kind: UnsafeBoundaryKind
 ) -> Bool {
-    if kind == .uncheckedSendable {
+    if requiresDeclarationProof(kind) {
         return hasDeclarationProof(for: boundary)
     }
 
     return hasOperationProof(for: boundary)
+}
+
+private func requiresDeclarationProof(_ kind: UnsafeBoundaryKind) -> Bool {
+    kind == .uncheckedSendable || kind == .unsafeDeclaration
+}
+
+private func unsafeKeywordRequiresDeclarationProof(_ boundary: Syntax) -> Bool {
+    var current: Syntax? = boundary
+
+    while let syntax = current {
+        if syntax.as(UnsafeExprSyntax.self) != nil
+            || syntax.as(ForStmtSyntax.self) != nil
+            || syntax.as(ClosureCaptureSpecifierSyntax.self) != nil {
+            return false
+        }
+
+        if syntax.as(DeclModifierSyntax.self) != nil
+            || syntax.as(AttributeSyntax.self) != nil
+            || syntax.as(InheritedTypeSyntax.self) != nil {
+            return true
+        }
+
+        if syntax.as(CodeBlockItemSyntax.self) != nil {
+            return false
+        }
+
+        if syntax.isProtocol(DeclSyntaxProtocol.self) {
+            return true
+        }
+        current = syntax.parent
+    }
+
+    return false
+}
+
+private func proofScope(for boundary: Boundary) -> ProofScope {
+    if requiresDeclarationProof(boundary.kind) {
+        return ProofScope(
+            kind: .declaration,
+            position: enclosingDeclarationPosition(for: boundary.syntax)
+                ?? boundary.position.utf8Offset
+        )
+    }
+
+    return ProofScope(
+        kind: .operation,
+        position: enclosingOperationPosition(for: boundary.syntax)
+            ?? boundary.position.utf8Offset
+    )
+}
+
+private func enclosingDeclarationPosition(for boundary: Syntax) -> Int? {
+    var current: Syntax? = boundary
+
+    while let syntax = current {
+        if syntax.isProtocol(DeclSyntaxProtocol.self) {
+            return syntax.positionAfterSkippingLeadingTrivia.utf8Offset
+        }
+        current = syntax.parent
+    }
+
+    return nil
+}
+
+private func enclosingOperationPosition(for boundary: Syntax) -> Int? {
+    var current: Syntax? = boundary
+
+    while let syntax = current {
+        if let item = syntax.as(CodeBlockItemSyntax.self) {
+            return item.positionAfterSkippingLeadingTrivia.utf8Offset
+        }
+
+        if syntax.as(VariableDeclSyntax.self) != nil || isCallableDeclaration(syntax) {
+            return syntax.positionAfterSkippingLeadingTrivia.utf8Offset
+        }
+        current = syntax.parent
+    }
+
+    return nil
+}
+
+private func preferredDiagnosticBoundary(
+    _ first: Boundary,
+    _ second: Boundary
+) -> Boundary {
+    let firstPriority = diagnosticPriority(first.kind)
+    let secondPriority = diagnosticPriority(second.kind)
+    if firstPriority != secondPriority {
+        return firstPriority > secondPriority ? first : second
+    }
+    return first.position < second.position ? first : second
+}
+
+private func diagnosticPriority(_ kind: UnsafeBoundaryKind) -> Int {
+    switch kind {
+    case .rawAllocation:
+        4
+    case .unmanaged:
+        3
+    case .uncheckedSendable:
+        2
+    case .unsafeDeclaration, .unsafeOperation:
+        1
+    }
 }
 
 private func hasDeclarationProof(for boundary: Syntax) -> Bool {
