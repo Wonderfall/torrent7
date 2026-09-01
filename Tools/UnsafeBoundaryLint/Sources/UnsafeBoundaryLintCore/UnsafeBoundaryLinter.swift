@@ -526,12 +526,6 @@ private func hasOperationProof(for boundary: Syntax) -> Bool {
             return true
         }
 
-        if let block = syntax.as(CodeBlockSyntax.self),
-           let firstItem = block.statements.first,
-           hasSafetyMarker(inLeadingTriviaOf: firstItem.firstToken(viewMode: .sourceAccurate)) {
-            return true
-        }
-
         if syntax.as(VariableDeclSyntax.self) != nil,
            hasSafetyMarker(inLeadingTriviaOf: syntax.firstToken(viewMode: .sourceAccurate)) {
             return true

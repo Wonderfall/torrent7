@@ -17,11 +17,12 @@ The lint covers:
 
 Declaration escape hatches require an explanation leading that exact
 declaration or import. Executable operations may inherit an explanation from
-the containing statement, the first statement of an enclosing code block, or
-the owning callable or property declaration. Comments on an enclosing type do
-not silently cover its methods. Multiple boundaries in one proof scope produce
-one diagnostic, with specialized ownership diagnostics preferred over the
-generic `unsafe` diagnostic.
+the containing statement, an explicitly documented `do` region, or the owning
+callable or property declaration. Merely placing a comment on the first
+statement in an arbitrary code block does not cover later statements, and
+comments on an enclosing type do not silently cover its methods. Multiple
+boundaries in one proof scope produce one diagnostic, with specialized
+ownership diagnostics preferred over the generic `unsafe` diagnostic.
 
 Run the repository-wide check from the project root:
 

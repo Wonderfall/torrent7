@@ -10,13 +10,13 @@ import TorrentMetainfo
     package init() {}
 }
 
+// SAFETY: Ownership/lifetime: the pointer came from Unmanaged.passRetained and this
+// callback adds the native owner's requested retain; bounds/alignment: it addresses
+// the exact class instance with no indexed bytes; synchronization: ARC retain is
+// thread-safe; safe alternative: a C callback context cannot carry a Swift reference.
 package func torrentSwarmMetainfoContextRetainCallback(
     _ context: UnsafeMutableRawPointer?
 ) -> UInt8 {
-    // SAFETY: Ownership/lifetime: the pointer came from Unmanaged.passRetained and this
-    // callback adds the native owner's requested retain; bounds/alignment: it addresses
-    // the exact class instance with no indexed bytes; synchronization: ARC retain is
-    // thread-safe; safe alternative: a C callback context cannot carry a Swift reference.
     guard let context = unsafe context else {
         return 0
     }
@@ -26,13 +26,13 @@ package func torrentSwarmMetainfoContextRetainCallback(
     return 1
 }
 
+// SAFETY: Ownership/lifetime: native releases exactly one retain previously accepted
+// by the paired callback; bounds/alignment: the opaque pointer still addresses the exact
+// class instance with no indexed bytes; synchronization: ARC release is thread-safe;
+// safe alternative: a C callback context cannot carry a Swift reference.
 package func torrentSwarmMetainfoContextReleaseCallback(
     _ context: UnsafeMutableRawPointer?
 ) {
-    // SAFETY: Ownership/lifetime: native releases exactly one retain previously accepted
-    // by the paired callback; bounds/alignment: the opaque pointer still addresses the exact
-    // class instance with no indexed bytes; synchronization: ARC release is thread-safe;
-    // safe alternative: a C callback context cannot carry a Swift reference.
     guard let context = unsafe context else {
         return
     }
@@ -41,17 +41,17 @@ package func torrentSwarmMetainfoContextReleaseCallback(
         .release()
 }
 
+// SAFETY: Ownership/lifetime: C++ retains the context and input for this synchronous
+// callback, then owns the successful malloc allocation until the paired release callback;
+// bounds/alignment: the typed input size is capped, malloc alignment is sufficient, and
+// exactly capsule.count bytes are copied; synchronization: each allocation is independent;
+// safe alternative: the C ABI requires a malloc-owned result that C++ can release later.
 package func torrentSwarmMetainfoParseCallback(
     _ context: UnsafeMutableRawPointer?,
     _ info: UnsafePointer<CChar>,
     _ infoSize: Int32,
     _ resultOut: UnsafeMutablePointer<TTorrentOwnedMetainfoCapsule>
 ) -> Int32 {
-    // SAFETY: Ownership/lifetime: C++ retains the context and input for this synchronous
-    // callback, then owns the successful malloc allocation until the paired release callback;
-    // bounds/alignment: the typed input size is capped, malloc alignment is sufficient, and
-    // exactly capsule.count bytes are copied; synchronization: each allocation is independent;
-    // safe alternative: the C ABI requires a malloc-owned result that C++ can release later.
     unsafe resultOut.pointee = TTorrentOwnedMetainfoCapsule(bytes: nil, size: 0)
     guard unsafe context != nil,
           infoSize > 0,
@@ -90,14 +90,14 @@ package func torrentSwarmMetainfoParseCallback(
     }
 }
 
+// SAFETY: Ownership/lifetime: a nonnil pointer is the unique allocation returned by the
+// paired parse callback and native releases it once; bounds/alignment: free accepts that
+// original malloc pointer without dereferencing it; synchronization: ownership transfer
+// prevents concurrent reuse; safe alternative: the C ABI cannot return Swift-managed Data.
 package func torrentSwarmMetainfoCapsuleReleaseCallback(
     _ context: UnsafeMutableRawPointer?,
     _ capsule: TTorrentOwnedMetainfoCapsule
 ) {
-    // SAFETY: Ownership/lifetime: a nonnil pointer is the unique allocation returned by the
-    // paired parse callback and native releases it once; bounds/alignment: free accepts that
-    // original malloc pointer without dereferencing it; synchronization: ownership transfer
-    // prevents concurrent reuse; safe alternative: the C ABI cannot return Swift-managed Data.
     guard unsafe context != nil,
           let bytes = unsafe capsule.bytes else {
         return

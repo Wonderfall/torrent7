@@ -24,6 +24,10 @@ struct BenchmarkDistribution {
     }
 }
 
+// SAFETY: Ownership/lifetime: the top-level retained context and immutable message outlive all
+// synchronous batches; bounds/alignment: benchmarkBatch enforces exact typed buffer capacities;
+// synchronization: batches execute serially; safe alternative: measuring callback overhead
+// requires invoking the raw C callback path.
 private func benchmarkDistribution(
     message: Data,
     context: UnsafeMutableRawPointer,
@@ -31,10 +35,6 @@ private func benchmarkDistribution(
     warmupCount: Int,
     sampleCount: Int
 ) -> BenchmarkDistribution {
-    // SAFETY: Ownership/lifetime: the top-level retained context and immutable message outlive all
-    // synchronous batches; bounds/alignment: benchmarkBatch enforces exact typed buffer capacities;
-    // synchronization: batches execute serially; safe alternative: measuring callback overhead
-    // requires invoking the raw C callback path.
     for _ in 0..<warmupCount {
         _ = unsafe benchmarkBatch(
             message: message,
@@ -66,15 +66,15 @@ private func benchmarkDistribution(
     )
 }
 
+// SAFETY: Ownership/lifetime: retained context, immutable message, and output arrays live
+// through all synchronous callbacks; bounds/alignment: nonempty bytes bind between alignment-1
+// types and exact maximum typed capacities are supplied; synchronization: batch state is local;
+// safe alternative: the benchmark intentionally measures the imported C callback ABI.
 private func benchmarkBatch(
     message: Data,
     context: UnsafeMutableRawPointer,
     iterationCount: Int
 ) -> Int64 {
-    // SAFETY: Ownership/lifetime: retained context, immutable message, and output arrays live
-    // through all synchronous callbacks; bounds/alignment: nonempty bytes bind between alignment-1
-    // types and exact maximum typed capacities are supplied; synchronization: batch state is local;
-    // safe alternative: the benchmark intentionally measures the imported C callback ABI.
     var nodes = [TTorrentDHTNodeRecord](
         repeating: TTorrentDHTNodeRecord(),
         count: Int(TTORRENT_MAX_DHT_MESSAGE_NODES)
@@ -194,11 +194,11 @@ private func dictionary(_ fields: [(String, Data)]) -> Data {
     return result
 }
 
+// SAFETY: Ownership/lifetime: the default malloc zone has process lifetime and local statistics
+// storage lives through the synchronous query; bounds/alignment: the zone pointer and exact
+// aligned malloc_statistics_t output are supplied; synchronization: malloc serializes its zone
+// statistics; safe alternative: allocator usage is exposed only through Darwin's C API.
 private func mallocBytesInUse() -> UInt64? {
-    // SAFETY: Ownership/lifetime: the default malloc zone has process lifetime and local statistics
-    // storage lives through the synchronous query; bounds/alignment: the zone pointer and exact
-    // aligned malloc_statistics_t output are supplied; synchronization: malloc serializes its zone
-    // statistics; safe alternative: allocator usage is exposed only through Darwin's C API.
     guard let zone = unsafe malloc_default_zone() else {
         return nil
     }

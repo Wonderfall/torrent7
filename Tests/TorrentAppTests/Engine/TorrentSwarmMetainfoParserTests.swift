@@ -35,13 +35,13 @@ struct TorrentSwarmMetainfoParserTests {
         #expect(invocation.capsule == nil)
     }
 
+    // SAFETY: Ownership/lifetime: immutable input/context outlive concurrentPerform and each
+    // successful malloc result is released once in its invocation; bounds/alignment: nonempty
+    // bytes bind to alignment-1 CChar with exact count and the callback owns result layout;
+    // synchronization: only immutable input is shared and failures use Mutex; safe alternative:
+    // allocation transfer/concurrency must be tested through the C callback ABI.
     @Test("Concurrent swarm callbacks transfer independent allocations before teardown")
     func supportsConcurrentOwnedResultsBeforeTeardown() {
-        // SAFETY: Ownership/lifetime: immutable input/context outlive concurrentPerform and each
-        // successful malloc result is released once in its invocation; bounds/alignment: nonempty
-        // bytes bind to alignment-1 CChar with exact count and the callback owns result layout;
-        // synchronization: only immutable input is shared and failures use Mutex; safe alternative:
-        // allocation transfer/concurrency must be tested through the C callback ABI.
         let info = validV1Info()
         let context = SwarmConcurrentTestContext()
         let failures = Mutex(0)
@@ -80,20 +80,20 @@ struct TorrentSwarmMetainfoParserTests {
 @safe private final class SwarmConcurrentTestContext: @unchecked Sendable {
     let pointer: UnsafeMutableRawPointer
 
+    // SAFETY: Ownership/lifetime: passRetained creates the unique retain released after all
+    // callbacks join; bounds/alignment: this is the exact aligned class address with no byte
+    // access; synchronization: context is immutable; safe alternative: C callbacks accept
+    // only an opaque context pointer.
     init() {
-        // SAFETY: Ownership/lifetime: passRetained creates the unique retain released after all
-        // callbacks join; bounds/alignment: this is the exact aligned class address with no byte
-        // access; synchronization: context is immutable; safe alternative: C callbacks accept
-        // only an opaque context pointer.
         unsafe pointer = Unmanaged.passRetained(TorrentSwarmMetainfoParserBridgeContext())
             .toOpaque()
     }
 
+    // SAFETY: Ownership/lifetime: this balances init's retain after concurrent work joined;
+    // bounds/alignment: pointer is the exact class address with no byte access;
+    // synchronization: teardown follows concurrentPerform; safe alternative: opaque C
+    // ownership must be modeled with Unmanaged.
     deinit {
-        // SAFETY: Ownership/lifetime: this balances init's retain after concurrent work joined;
-        // bounds/alignment: pointer is the exact class address with no byte access;
-        // synchronization: teardown follows concurrentPerform; safe alternative: opaque C
-        // ownership must be modeled with Unmanaged.
         unsafe Unmanaged<TorrentSwarmMetainfoParserBridgeContext>
             .fromOpaque(pointer)
             .release()
@@ -107,12 +107,12 @@ private struct SwarmParserInvocation {
     let transferredSize: Int32
 }
 
+// SAFETY: Ownership/lifetime: retained context and input live through the synchronous callback,
+// returned malloc storage is copied before one release callback, and defer balances context;
+// bounds/alignment: nonempty input binds to alignment-1 CChar with exact count and returned
+// size governs the copy; synchronization: all state is local; safe alternative: ownership
+// transfer can only be exercised through the raw C callback.
 private func invokeSwarmParser(_ input: Data) -> SwarmParserInvocation {
-    // SAFETY: Ownership/lifetime: retained context and input live through the synchronous callback,
-    // returned malloc storage is copied before one release callback, and defer balances context;
-    // bounds/alignment: nonempty input binds to alignment-1 CChar with exact count and returned
-    // size governs the copy; synchronization: all state is local; safe alternative: ownership
-    // transfer can only be exercised through the raw C callback.
     let context = TorrentSwarmMetainfoParserBridgeContext()
     let retained = unsafe Unmanaged.passRetained(context)
     defer {

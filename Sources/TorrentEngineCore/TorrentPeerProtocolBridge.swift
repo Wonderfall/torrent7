@@ -10,13 +10,13 @@ import TorrentMetainfo
     package init() {}
 }
 
+// SAFETY: Ownership/lifetime: the pointer came from Unmanaged.passRetained and this
+// callback adds the native owner's requested retain; bounds/alignment: it addresses
+// the exact class instance with no indexed bytes; synchronization: ARC retain is
+// thread-safe; safe alternative: a C callback context cannot carry a Swift reference.
 package func torrentPeerProtocolContextRetainCallback(
     _ context: UnsafeMutableRawPointer?
 ) -> UInt8 {
-    // SAFETY: Ownership/lifetime: the pointer came from Unmanaged.passRetained and this
-    // callback adds the native owner's requested retain; bounds/alignment: it addresses
-    // the exact class instance with no indexed bytes; synchronization: ARC retain is
-    // thread-safe; safe alternative: a C callback context cannot carry a Swift reference.
     guard let context = unsafe context else {
         return 0
     }
@@ -26,13 +26,13 @@ package func torrentPeerProtocolContextRetainCallback(
     return 1
 }
 
+// SAFETY: Ownership/lifetime: native releases exactly one retain previously accepted
+// by the paired callback; bounds/alignment: the opaque pointer still addresses the exact
+// class instance with no indexed bytes; synchronization: ARC release is thread-safe;
+// safe alternative: a C callback context cannot carry a Swift reference.
 package func torrentPeerProtocolContextReleaseCallback(
     _ context: UnsafeMutableRawPointer?
 ) {
-    // SAFETY: Ownership/lifetime: native releases exactly one retain previously accepted
-    // by the paired callback; bounds/alignment: the opaque pointer still addresses the exact
-    // class instance with no indexed bytes; synchronization: ARC release is thread-safe;
-    // safe alternative: a C callback context cannot carry a Swift reference.
     guard let context = unsafe context else {
         return
     }
@@ -41,6 +41,11 @@ package func torrentPeerProtocolContextReleaseCallback(
         .release()
 }
 
+// SAFETY: Ownership/lifetime: C++ retains the context and owns all buffers for this
+// nonescaping synchronous callback; bounds/alignment: the ABI supplies typed pointers,
+// messageSize and versionCapacity are validated before access, and writes remain bounded;
+// synchronization: parsing is local and concurrent calls do not share state; safe alternative:
+// the C callback ABI cannot encode Swift ownership or bounded buffer types.
 package func torrentExtensionHandshakeParseCallback(
     _ context: UnsafeMutableRawPointer?,
     _ message: UnsafePointer<CChar>,
@@ -49,11 +54,6 @@ package func torrentExtensionHandshakeParseCallback(
     _ clientVersionCapacity: Int32,
     _ resultOut: UnsafeMutablePointer<TTorrentExtensionHandshakeResult>
 ) -> Int32 {
-    // SAFETY: Ownership/lifetime: C++ retains the context and owns all buffers for this
-    // nonescaping synchronous callback; bounds/alignment: the ABI supplies typed pointers,
-    // messageSize and versionCapacity are validated before access, and writes remain bounded;
-    // synchronization: parsing is local and concurrent calls do not share state; safe alternative:
-    // the C callback ABI cannot encode Swift ownership or bounded buffer types.
     unsafe resultOut.pointee = emptyHandshakeResult()
     guard unsafe context != nil,
           messageSize > 0,
@@ -126,16 +126,16 @@ package func torrentExtensionHandshakeParseCallback(
     }
 }
 
+// SAFETY: Ownership/lifetime: C++ retains the context and owns input/output storage for
+// this synchronous callback; bounds/alignment: the ABI supplies typed pointers and the
+// message byte count is validated before its exact copy; synchronization: parsing uses
+// only local state; safe alternative: the C callback ABI cannot express Swift ownership.
 package func torrentMetadataMessageParseCallback(
     _ context: UnsafeMutableRawPointer?,
     _ message: UnsafePointer<CChar>,
     _ messageSize: Int32,
     _ resultOut: UnsafeMutablePointer<TTorrentMetadataMessageResult>
 ) -> Int32 {
-    // SAFETY: Ownership/lifetime: C++ retains the context and owns input/output storage for
-    // this synchronous callback; bounds/alignment: the ABI supplies typed pointers and the
-    // message byte count is validated before its exact copy; synchronization: parsing uses
-    // only local state; safe alternative: the C callback ABI cannot express Swift ownership.
     unsafe resultOut.pointee = TTorrentMetadataMessageResult()
     guard unsafe context != nil,
           messageSize > 0,
@@ -162,6 +162,11 @@ package func torrentMetadataMessageParseCallback(
     }
 }
 
+// SAFETY: Ownership/lifetime: C++ retains the context and owns all buffers for this
+// nonescaping synchronous callback; bounds/alignment: the ABI supplies typed pointers,
+// messageSize and recordCapacity are validated, and writes stay within that capacity;
+// synchronization: parsing is local and supports concurrent calls; safe alternative:
+// the C callback ABI cannot encode Swift ownership or bounded buffer types.
 package func torrentPeerExchangeParseCallback(
     _ context: UnsafeMutableRawPointer?,
     _ message: UnsafePointer<CChar>,
@@ -170,11 +175,6 @@ package func torrentPeerExchangeParseCallback(
     _ recordCapacity: Int32,
     _ resultOut: UnsafeMutablePointer<TTorrentPeerExchangeResult>
 ) -> Int32 {
-    // SAFETY: Ownership/lifetime: C++ retains the context and owns all buffers for this
-    // nonescaping synchronous callback; bounds/alignment: the ABI supplies typed pointers,
-    // messageSize and recordCapacity are validated, and writes stay within that capacity;
-    // synchronization: parsing is local and supports concurrent calls; safe alternative:
-    // the C callback ABI cannot encode Swift ownership or bounded buffer types.
     unsafe resultOut.pointee = TTorrentPeerExchangeResult()
     guard unsafe context != nil,
           messageSize > 0,

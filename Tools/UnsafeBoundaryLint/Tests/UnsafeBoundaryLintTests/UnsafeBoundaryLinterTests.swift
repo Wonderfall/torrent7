@@ -85,19 +85,19 @@ struct UnsafeBoundaryLinterTests {
         #expect(diagnostics.map(\.kind) == [.unmanaged])
     }
 
-    @Test("First-item proof covers its code block")
-    func firstItemProofCoversItsCodeBlock() {
+    @Test("First-item proof does not cover later statements in its code block")
+    func firstItemProofDoesNotCoverLaterStatements() {
         let diagnostics = lint(
             """
             func retain(_ object: AnyObject) {
-                // SAFETY: this function owns and balances its one opaque retain.
+                // SAFETY: this assertion itself has no unsafe behavior.
                 precondition(true)
                 _ = Unmanaged.passRetained(object)
             }
             """
         )
 
-        #expect(diagnostics.isEmpty)
+        #expect(diagnostics.map(\.kind) == [.unmanaged])
     }
 
     @Test("Callable declaration proof covers its body")
@@ -136,11 +136,13 @@ struct UnsafeBoundaryLinterTests {
             """
             func retain(_ object: AnyObject) {
                 // SAFETY: this synchronous function owns and balances its one opaque retain.
-                precondition(true)
-                withoutActuallyEscaping({
-                    _ = Unmanaged.passRetained(object)
-                }) { body in
-                    body()
+                do {
+                    precondition(true)
+                    withoutActuallyEscaping({
+                        _ = Unmanaged.passRetained(object)
+                    }) { body in
+                        body()
+                    }
                 }
             }
             """
@@ -389,8 +391,8 @@ struct UnsafeBoundaryLinterTests {
     func functionProofCoversPairedCAllocationOwnership() {
         let diagnostics = lint(
             """
+            // SAFETY: this function uniquely owns and releases the allocation.
             func copyBytes(_ count: Int) {
-                // SAFETY: this function uniquely owns and releases the allocation.
                 guard let bytes = malloc(count) else { return }
                 free(bytes)
             }

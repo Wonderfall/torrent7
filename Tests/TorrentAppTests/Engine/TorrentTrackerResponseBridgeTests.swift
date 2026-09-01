@@ -8,12 +8,12 @@ import TorrentBridge
 
 @Suite("Swift HTTP tracker response callback")
 struct TorrentTrackerResponseBridgeTests {
+    // SAFETY: Ownership/lifetime: retained context, body, and output array live through the
+    // synchronous callback; bounds/alignment: nonempty bytes bind between alignment-1 types
+    // and exact record capacity is supplied; synchronization: locals are unshared;
+    // safe alternative: caller-owned output must be tested through the C callback ABI.
     @Test("Announce callback emits bounded caller-owned typed records")
     func importsAnnounceResponse() {
-        // SAFETY: Ownership/lifetime: retained context, body, and output array live through the
-        // synchronous callback; bounds/alignment: nonempty bytes bind between alignment-1 types
-        // and exact record capacity is supplied; synchronization: locals are unshared;
-        // safe alternative: caller-owned output must be tested through the C callback ABI.
         let hostnamePeer = bencodedDictionary([
             ("ip", bencodedString(Data("peer.example".utf8))),
             ("peer id", bencodedString(Data("abcdefghijklmnopqrst".utf8))),
@@ -103,12 +103,12 @@ struct TorrentTrackerResponseBridgeTests {
         }
     }
 
+    // SAFETY: Ownership/lifetime: retained context, body/hash Data, and outputs live through the
+    // synchronous callback; bounds/alignment: both nonempty byte buffers have alignment 1 and
+    // exact counts (including the 20-byte hash) are supplied; synchronization: locals are
+    // unshared; safe alternative: binary scrape selection is a raw C callback contract.
     @Test("Scrape callback selects the exact binary info-hash")
     func importsScrapeResponse() {
-        // SAFETY: Ownership/lifetime: retained context, body/hash Data, and outputs live through the
-        // synchronous callback; bounds/alignment: both nonempty byte buffers have alignment 1 and
-        // exact counts (including the 20-byte hash) are supplied; synchronization: locals are
-        // unshared; safe alternative: binary scrape selection is a raw C callback contract.
         let infoHash = Data(0..<20)
         let statistics = bencodedDictionary([
             ("complete", bencodedInteger(11)),
@@ -150,12 +150,12 @@ struct TorrentTrackerResponseBridgeTests {
         }
     }
 
+    // SAFETY: Ownership/lifetime: retained context, body, and outputs live through the
+    // synchronous callback; bounds/alignment: nonempty body bytes bind at alignment 1 and zero
+    // declared capacity prevents record writes; synchronization: locals are unshared;
+    // safe alternative: capacity rejection must exercise the raw C callback.
     @Test("Capacity failure leaves caller records untouched and result empty")
     func rejectsInsufficientCapacityAtomically() {
-        // SAFETY: Ownership/lifetime: retained context, body, and outputs live through the
-        // synchronous callback; bounds/alignment: nonempty body bytes bind at alignment 1 and zero
-        // declared capacity prevents record writes; synchronization: locals are unshared;
-        // safe alternative: capacity rejection must exercise the raw C callback.
         let body = bencodedDictionary([
             ("peers", bencodedString(Data([203, 0, 113, 8, 0x1a, 0xe1]))),
         ])
@@ -206,12 +206,12 @@ struct TorrentTrackerResponseBridgeTests {
         }
     }
 
+    // SAFETY: Ownership/lifetime: retained context, nonempty body, and outputs live through the
+    // synchronous callback; bounds/alignment: bytes bind to alignment-1 CChar and record capacity
+    // matches storage; synchronization: locals are unshared; safe alternative: invalid scalar
+    // handling must be exercised through the raw callback.
     @Test("Callback argument validation clears stale scalar output")
     func rejectsInvalidArguments() {
-        // SAFETY: Ownership/lifetime: retained context, nonempty body, and outputs live through the
-        // synchronous callback; bounds/alignment: bytes bind to alignment-1 CChar and record capacity
-        // matches storage; synchronization: locals are unshared; safe alternative: invalid scalar
-        // handling must be exercised through the raw callback.
         let body = Data("de".utf8)
         unsafe withTrackerResponseContext { context in
             var peer = TTorrentTrackerPeerRecord()
@@ -236,12 +236,12 @@ struct TorrentTrackerResponseBridgeTests {
         }
     }
 
+    // SAFETY: Ownership/lifetime: immutable body/context outlive concurrentPerform and each
+    // output is local; bounds/alignment: nonempty bytes bind to alignment-1 CChar and capacity
+    // matches one record; synchronization: only immutable input is shared and failures use
+    // Mutex; safe alternative: callback concurrency must be tested through the C ABI.
     @Test("One retained context serves concurrent tracker callbacks before teardown")
     func supportsConcurrentCallbacksBeforeTeardown() {
-        // SAFETY: Ownership/lifetime: immutable body/context outlive concurrentPerform and each
-        // output is local; bounds/alignment: nonempty bytes bind to alignment-1 CChar and capacity
-        // matches one record; synchronization: only immutable input is shared and failures use
-        // Mutex; safe alternative: callback concurrency must be tested through the C ABI.
         let body = bencodedDictionary([
             ("interval", bencodedInteger(60)),
         ])
@@ -286,33 +286,33 @@ struct TorrentTrackerResponseBridgeTests {
 @safe private final class TrackerConcurrentTestContext: @unchecked Sendable {
     let pointer: UnsafeMutableRawPointer
 
+    // SAFETY: Ownership/lifetime: passRetained creates the unique retain released after all
+    // callbacks join; bounds/alignment: this is the exact aligned class address with no byte
+    // access; synchronization: context is immutable; safe alternative: C callbacks accept
+    // only an opaque context pointer.
     init() {
-        // SAFETY: Ownership/lifetime: passRetained creates the unique retain released after all
-        // callbacks join; bounds/alignment: this is the exact aligned class address with no byte
-        // access; synchronization: context is immutable; safe alternative: C callbacks accept
-        // only an opaque context pointer.
         unsafe pointer = Unmanaged.passRetained(TorrentTrackerResponseBridgeContext())
             .toOpaque()
     }
 
+    // SAFETY: Ownership/lifetime: this balances init's retain after concurrent work joined;
+    // bounds/alignment: pointer is the exact class address with no byte access;
+    // synchronization: teardown follows concurrentPerform; safe alternative: opaque C
+    // ownership must be modeled with Unmanaged.
     deinit {
-        // SAFETY: Ownership/lifetime: this balances init's retain after concurrent work joined;
-        // bounds/alignment: pointer is the exact class address with no byte access;
-        // synchronization: teardown follows concurrentPerform; safe alternative: opaque C
-        // ownership must be modeled with Unmanaged.
         unsafe Unmanaged<TorrentTrackerResponseBridgeContext>
             .fromOpaque(pointer)
             .release()
     }
 }
 
+// SAFETY: Ownership/lifetime: the retain spans the nonescaping synchronous body and defer
+// balances it; bounds/alignment: the opaque pointer is the exact aligned class address;
+// synchronization: helper use is single-threaded unless body joins its work; safe alternative:
+// invoking the callback requires an opaque C context pointer.
 private func withTrackerResponseContext(
     _ body: (UnsafeMutableRawPointer) -> Void
 ) {
-    // SAFETY: Ownership/lifetime: the retain spans the nonescaping synchronous body and defer
-    // balances it; bounds/alignment: the opaque pointer is the exact aligned class address;
-    // synchronization: helper use is single-threaded unless body joins its work; safe alternative:
-    // invoking the callback requires an opaque C context pointer.
     let retained = unsafe Unmanaged.passRetained(TorrentTrackerResponseBridgeContext())
     defer {
         unsafe retained.release()

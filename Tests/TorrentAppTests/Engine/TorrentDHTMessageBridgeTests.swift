@@ -8,12 +8,12 @@ import TorrentBridge
 
 @Suite("Swift DHT message callback")
 struct TorrentDHTMessageBridgeTests {
+    // SAFETY: Ownership/lifetime: retained context, Data, and output arrays live through the
+    // synchronous callback; bounds/alignment: nonempty byte storage is rebound only between
+    // alignment-1 byte types and exact array capacities are supplied; synchronization: locals
+    // are unshared; safe alternative: callback behavior must be tested through its C ABI.
     @Test("Response callback emits bounded typed KRPC records")
     func importsResponse() {
-        // SAFETY: Ownership/lifetime: retained context, Data, and output arrays live through the
-        // synchronous callback; bounds/alignment: nonempty byte storage is rebound only between
-        // alignment-1 byte types and exact array capacities are supplied; synchronization: locals
-        // are unshared; safe alternative: callback behavior must be tested through its C ABI.
         let nodeID = Data(repeating: UInt8(ascii: "n"), count: 20)
         let senderID = Data(repeating: UInt8(ascii: "s"), count: 20)
         let sample = Data(repeating: UInt8(ascii: "h"), count: 20)
@@ -119,12 +119,12 @@ struct TorrentDHTMessageBridgeTests {
         }
     }
 
+    // SAFETY: Ownership/lifetime: retained context, Data, and scalar outputs live through the
+    // synchronous callback; bounds/alignment: nonempty bytes use alignment-1 CChar binding and
+    // declared capacities match the single records; synchronization: locals are unshared;
+    // safe alternative: capacity rejection is a raw callback ABI contract.
     @Test("Capacity rejection leaves record buffers untouched and clears result")
     func rejectsInsufficientCapacityAtomically() {
-        // SAFETY: Ownership/lifetime: retained context, Data, and scalar outputs live through the
-        // synchronous callback; bounds/alignment: nonempty bytes use alignment-1 CChar binding and
-        // declared capacities match the single records; synchronization: locals are unshared;
-        // safe alternative: capacity rejection is a raw callback ABI contract.
         let node = Data(repeating: UInt8(ascii: "n"), count: 20)
             + Data([203, 0, 113, 9, 0x1a, 0xe1])
         let response = dhtBencodedDictionary([
@@ -165,12 +165,12 @@ struct TorrentDHTMessageBridgeTests {
         }
     }
 
+    // SAFETY: Ownership/lifetime: retained context, Data, and scalar outputs live through the
+    // synchronous callback; bounds/alignment: nonempty bytes use alignment-1 CChar binding and
+    // declared capacities match the records; synchronization: locals are unshared;
+    // safe alternative: malformed-input atomicity is a raw callback ABI contract.
     @Test("Malformed compact suffixes leave callback output untouched and empty")
     func rejectsPartialCompactRecordsAtomically() {
-        // SAFETY: Ownership/lifetime: retained context, Data, and scalar outputs live through the
-        // synchronous callback; bounds/alignment: nonempty bytes use alignment-1 CChar binding and
-        // declared capacities match the records; synchronization: locals are unshared;
-        // safe alternative: malformed-input atomicity is a raw callback ABI contract.
         let completeNode = Data(repeating: UInt8(ascii: "n"), count: 20)
             + Data([203, 0, 113, 9, 0x1a, 0xe1])
         let response = dhtBencodedDictionary([
@@ -211,12 +211,12 @@ struct TorrentDHTMessageBridgeTests {
         }
     }
 
+    // SAFETY: Ownership/lifetime: retained context, nonempty Data, and outputs live through the
+    // synchronous callback; bounds/alignment: byte binding has alignment 1 and one-record
+    // capacities match storage; synchronization: locals are unshared; safe alternative:
+    // invalid scalar behavior must be exercised through the raw C callback.
     @Test("Invalid source family clears stale scalar output")
     func rejectsInvalidArguments() {
-        // SAFETY: Ownership/lifetime: retained context, nonempty Data, and outputs live through the
-        // synchronous callback; bounds/alignment: byte binding has alignment 1 and one-record
-        // capacities match storage; synchronization: locals are unshared; safe alternative:
-        // invalid scalar behavior must be exercised through the raw C callback.
         let body = Data("de".utf8)
         unsafe withDHTMessageContext { context in
             var node = TTorrentDHTNodeRecord()
@@ -242,12 +242,12 @@ struct TorrentDHTMessageBridgeTests {
         }
     }
 
+    // SAFETY: Ownership/lifetime: immutable Data/context outlive concurrentPerform and every
+    // output is invocation-local; bounds/alignment: nonempty bytes bind to alignment-1 CChar
+    // and single-record capacities are exact; synchronization: only immutable inputs are shared
+    // and failures use Mutex; safe alternative: thread-safety must exercise the raw callback.
     @Test("One retained context safely serves concurrent callbacks before teardown")
     func supportsConcurrentCallbacksBeforeTeardown() {
-        // SAFETY: Ownership/lifetime: immutable Data/context outlive concurrentPerform and every
-        // output is invocation-local; bounds/alignment: nonempty bytes bind to alignment-1 CChar
-        // and single-record capacities are exact; synchronization: only immutable inputs are shared
-        // and failures use Mutex; safe alternative: thread-safety must exercise the raw callback.
         let body = dhtBencodedDictionary([
             ("a", dhtBencodedDictionary([
                 ("id", dhtBencodedString(Data(repeating: 1, count: 20))),
@@ -302,33 +302,33 @@ struct TorrentDHTMessageBridgeTests {
 @safe private final class DHTConcurrentTestContext: @unchecked Sendable {
     let pointer: UnsafeMutableRawPointer
 
+    // SAFETY: Ownership/lifetime: passRetained creates the unique retain released in deinit
+    // after concurrentPerform joins; bounds/alignment: the opaque pointer is the exact aligned
+    // class address with no byte access; synchronization: the context is immutable;
+    // safe alternative: the C callback accepts only an opaque pointer.
     init() {
-        // SAFETY: Ownership/lifetime: passRetained creates the unique retain released in deinit
-        // after concurrentPerform joins; bounds/alignment: the opaque pointer is the exact aligned
-        // class address with no byte access; synchronization: the context is immutable;
-        // safe alternative: the C callback accepts only an opaque pointer.
         unsafe pointer = Unmanaged.passRetained(TorrentDHTMessageBridgeContext())
             .toOpaque()
     }
 
+    // SAFETY: Ownership/lifetime: this balances the single init retain after all callbacks
+    // joined; bounds/alignment: pointer is the exact class address with no byte access;
+    // synchronization: teardown is after concurrentPerform; safe alternative: opaque C
+    // context ownership must be modeled with Unmanaged.
     deinit {
-        // SAFETY: Ownership/lifetime: this balances the single init retain after all callbacks
-        // joined; bounds/alignment: pointer is the exact class address with no byte access;
-        // synchronization: teardown is after concurrentPerform; safe alternative: opaque C
-        // context ownership must be modeled with Unmanaged.
         unsafe Unmanaged<TorrentDHTMessageBridgeContext>
             .fromOpaque(pointer)
             .release()
     }
 }
 
+// SAFETY: Ownership/lifetime: the retain spans the nonescaping synchronous body and defer
+// balances it; bounds/alignment: the opaque pointer is the exact aligned class address;
+// synchronization: helper use is single-threaded unless the body joins its work;
+// safe alternative: invoking the C callback requires an opaque context pointer.
 private func withDHTMessageContext(
     _ body: (UnsafeMutableRawPointer) -> Void
 ) {
-    // SAFETY: Ownership/lifetime: the retain spans the nonescaping synchronous body and defer
-    // balances it; bounds/alignment: the opaque pointer is the exact aligned class address;
-    // synchronization: helper use is single-threaded unless the body joins its work;
-    // safe alternative: invoking the C callback requires an opaque context pointer.
     let retained = unsafe Unmanaged.passRetained(TorrentDHTMessageBridgeContext())
     defer {
         unsafe retained.release()

@@ -309,11 +309,11 @@ struct TorrentBridgeMappingTests {
     }
 }
 
+// SAFETY: Ownership/lifetime: the inout tuple remains exclusively borrowed for the closure;
+// bounds/alignment: writes use only buffer indices and UTF-8 is capped one byte short for NUL;
+// synchronization: test setup is single-threaded; safe alternative: imported fixed C
+// character arrays have no mutable Swift collection API.
 private func writeCString<T>(_ string: String, to tuple: inout T) {
-    // SAFETY: Ownership/lifetime: the inout tuple remains exclusively borrowed for the closure;
-    // bounds/alignment: writes use only buffer indices and UTF-8 is capped one byte short for NUL;
-    // synchronization: test setup is single-threaded; safe alternative: imported fixed C
-    // character arrays have no mutable Swift collection API.
     unsafe withUnsafeMutableBytes(of: &tuple) { bytes in
         for index in bytes.indices {
             unsafe bytes[index] = 0

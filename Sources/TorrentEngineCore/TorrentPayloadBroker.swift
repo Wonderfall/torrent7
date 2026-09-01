@@ -35,13 +35,13 @@ package protocol TorrentPayloadBrokerAccess: AnyObject, Sendable {
     }
 }
 
+// SAFETY: Ownership/lifetime: the pointer came from Unmanaged.passRetained and this
+// callback adds the native owner's requested retain; bounds/alignment: it addresses
+// the exact class instance with no indexed bytes; synchronization: ARC retain is
+// thread-safe; safe alternative: a C callback context cannot carry a Swift reference.
 package func torrentPayloadContextRetainCallback(
     _ context: UnsafeMutableRawPointer?
 ) -> UInt8 {
-    // SAFETY: Ownership/lifetime: the pointer came from Unmanaged.passRetained and this
-    // callback adds the native owner's requested retain; bounds/alignment: it addresses
-    // the exact class instance with no indexed bytes; synchronization: ARC retain is
-    // thread-safe; safe alternative: a C callback context cannot carry a Swift reference.
     guard let context = unsafe context else {
         return 0
     }
@@ -51,13 +51,13 @@ package func torrentPayloadContextRetainCallback(
     return 1
 }
 
+// SAFETY: Ownership/lifetime: native releases exactly one retain previously accepted
+// by the paired callback; bounds/alignment: the opaque pointer still addresses the exact
+// class instance with no indexed bytes; synchronization: ARC release is thread-safe;
+// safe alternative: a C callback context cannot carry a Swift reference.
 package func torrentPayloadContextReleaseCallback(
     _ context: UnsafeMutableRawPointer?
 ) {
-    // SAFETY: Ownership/lifetime: native releases exactly one retain previously accepted
-    // by the paired callback; bounds/alignment: the opaque pointer still addresses the exact
-    // class instance with no indexed bytes; synchronization: ARC release is thread-safe;
-    // safe alternative: a C callback context cannot carry a Swift reference.
     guard let context = unsafe context else {
         return
     }
@@ -66,11 +66,11 @@ package func torrentPayloadContextReleaseCallback(
         .release()
 }
 
+// SAFETY: Ownership/lifetime: the native caller owns and keeps the UUID bytes alive for
+// this synchronous copy; bounds/alignment: the bridge contract guarantees at least 16
+// byte-aligned UInt8 elements and indices are exactly 0...15; synchronization: input is
+// immutable during the callback; safe alternative: the C ABI supplies a pointer, not Span.
 private func claimUUID(_ bytes: UnsafePointer<UInt8>) -> UUID {
-    // SAFETY: Ownership/lifetime: the native caller owns and keeps the UUID bytes alive for
-    // this synchronous copy; bounds/alignment: the bridge contract guarantees at least 16
-    // byte-aligned UInt8 elements and indices are exactly 0...15; synchronization: input is
-    // immutable during the callback; safe alternative: the C ABI supplies a pointer, not Span.
     let value: uuid_t = unsafe (
         bytes[0], bytes[1], bytes[2], bytes[3],
         bytes[4], bytes[5], bytes[6], bytes[7],
@@ -80,6 +80,11 @@ private func claimUUID(_ bytes: UnsafePointer<UInt8>) -> UUID {
     return UUID(uuid: value)
 }
 
+// SAFETY: Ownership/lifetime: C++ retains the context and owns UUID/output storage for
+// this synchronous callback; bounds/alignment: the ABI supplies 16 UUID bytes and an
+// aligned Int32 output, while scalar inputs are validated; synchronization: the Sendable
+// broker implements its own coordination; safe alternative: the C callback ABI cannot
+// express Swift references, UUID values, or inout results.
 package func torrentPayloadOpenCallback(
     _ context: UnsafeMutableRawPointer?,
     _ claimIDBytes: UnsafePointer<UInt8>,
@@ -88,11 +93,6 @@ package func torrentPayloadOpenCallback(
     _ writable: UInt8,
     _ descriptorOut: UnsafeMutablePointer<Int32>
 ) -> Int32 {
-    // SAFETY: Ownership/lifetime: C++ retains the context and owns UUID/output storage for
-    // this synchronous callback; bounds/alignment: the ABI supplies 16 UUID bytes and an
-    // aligned Int32 output, while scalar inputs are validated; synchronization: the Sendable
-    // broker implements its own coordination; safe alternative: the C callback ABI cannot
-    // express Swift references, UUID values, or inout results.
     guard let context = unsafe context,
           generation > 0,
           fileIndex >= 0,
@@ -122,6 +122,11 @@ package func torrentPayloadOpenCallback(
     }
 }
 
+// SAFETY: Ownership/lifetime: C++ retains the context and owns UUID/output storage for
+// this synchronous callback; bounds/alignment: the ABI supplies 16 UUID bytes and an
+// aligned Int64 output, while scalar inputs are validated; synchronization: the Sendable
+// broker implements its own coordination; safe alternative: the C callback ABI cannot
+// express Swift references, UUID values, or inout results.
 package func torrentPayloadSizeCallback(
     _ context: UnsafeMutableRawPointer?,
     _ claimIDBytes: UnsafePointer<UInt8>,
@@ -129,11 +134,6 @@ package func torrentPayloadSizeCallback(
     _ fileIndex: Int32,
     _ sizeOut: UnsafeMutablePointer<Int64>
 ) -> Int32 {
-    // SAFETY: Ownership/lifetime: C++ retains the context and owns UUID/output storage for
-    // this synchronous callback; bounds/alignment: the ABI supplies 16 UUID bytes and an
-    // aligned Int64 output, while scalar inputs are validated; synchronization: the Sendable
-    // broker implements its own coordination; safe alternative: the C callback ABI cannot
-    // express Swift references, UUID values, or inout results.
     guard let context = unsafe context,
           generation > 0,
           fileIndex >= 0 else {

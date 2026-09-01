@@ -6,14 +6,14 @@ private let peerProtocolContext = TorrentPeerProtocolBridgeContext()
 private let trackerResponseContext = TorrentTrackerResponseBridgeContext()
 private let dhtMessageContext = TorrentDHTMessageBridgeContext()
 
+// SAFETY: Ownership/lifetime: globals outlive the fuzz process, native retains through the
+// installed callbacks, and output is caller-owned for this synchronous call; bounds/alignment:
+// output points to one aligned imported table; synchronization: contexts are immutable and
+// callbacks thread-safe; safe alternative: libFuzzer's C harness requires a C callback table.
 @c(TorrentParserFuzzMakeSwarmMetainfoCallbacks)
 public func torrentParserFuzzMakeSwarmMetainfoCallbacks(
     _ output: UnsafeMutablePointer<TTorrentSwarmMetainfoParserCallbacks>?
 ) -> Int32 {
-    // SAFETY: Ownership/lifetime: globals outlive the fuzz process, native retains through the
-    // installed callbacks, and output is caller-owned for this synchronous call; bounds/alignment:
-    // output points to one aligned imported table; synchronization: contexts are immutable and
-    // callbacks thread-safe; safe alternative: libFuzzer's C harness requires a C callback table.
     guard let output = unsafe output else {
         return EINVAL
     }
@@ -27,14 +27,14 @@ public func torrentParserFuzzMakeSwarmMetainfoCallbacks(
     return 0
 }
 
+// SAFETY: Ownership/lifetime: globals outlive the fuzz process, native retains through the
+// installed callbacks, and output is caller-owned for this synchronous call; bounds/alignment:
+// output points to one aligned imported table; synchronization: contexts are immutable and
+// callbacks thread-safe; safe alternative: libFuzzer's C harness requires a C callback table.
 @c(TorrentParserFuzzMakePeerProtocolCallbacks)
 public func torrentParserFuzzMakePeerProtocolCallbacks(
     _ output: UnsafeMutablePointer<TTorrentPeerProtocolParserCallbacks>?
 ) -> Int32 {
-    // SAFETY: Ownership/lifetime: globals outlive the fuzz process, native retains through the
-    // installed callbacks, and output is caller-owned for this synchronous call; bounds/alignment:
-    // output points to one aligned imported table; synchronization: contexts are immutable and
-    // callbacks thread-safe; safe alternative: libFuzzer's C harness requires a C callback table.
     guard let output = unsafe output else {
         return EINVAL
     }
@@ -49,14 +49,14 @@ public func torrentParserFuzzMakePeerProtocolCallbacks(
     return 0
 }
 
+// SAFETY: Ownership/lifetime: globals outlive the fuzz process, native retains through the
+// installed callbacks, and output is caller-owned for this synchronous call; bounds/alignment:
+// output points to one aligned imported table; synchronization: contexts are immutable and
+// callbacks thread-safe; safe alternative: libFuzzer's C harness requires a C callback table.
 @c(TorrentParserFuzzMakeTrackerResponseCallbacks)
 public func torrentParserFuzzMakeTrackerResponseCallbacks(
     _ output: UnsafeMutablePointer<TTorrentTrackerResponseParserCallbacks>?
 ) -> Int32 {
-    // SAFETY: Ownership/lifetime: globals outlive the fuzz process, native retains through the
-    // installed callbacks, and output is caller-owned for this synchronous call; bounds/alignment:
-    // output points to one aligned imported table; synchronization: contexts are immutable and
-    // callbacks thread-safe; safe alternative: libFuzzer's C harness requires a C callback table.
     guard let output = unsafe output else {
         return EINVAL
     }
@@ -69,14 +69,14 @@ public func torrentParserFuzzMakeTrackerResponseCallbacks(
     return 0
 }
 
+// SAFETY: Ownership/lifetime: globals outlive the fuzz process, native retains through the
+// installed callbacks, and output is caller-owned for this synchronous call; bounds/alignment:
+// output points to one aligned imported table; synchronization: contexts are immutable and
+// callbacks thread-safe; safe alternative: libFuzzer's C harness requires a C callback table.
 @c(TorrentParserFuzzMakeDHTMessageCallbacks)
 public func torrentParserFuzzMakeDHTMessageCallbacks(
     _ output: UnsafeMutablePointer<TTorrentDHTMessageParserCallbacks>?
 ) -> Int32 {
-    // SAFETY: Ownership/lifetime: globals outlive the fuzz process, native retains through the
-    // installed callbacks, and output is caller-owned for this synchronous call; bounds/alignment:
-    // output points to one aligned imported table; synchronization: contexts are immutable and
-    // callbacks thread-safe; safe alternative: libFuzzer's C harness requires a C callback table.
     guard let output = unsafe output else {
         return EINVAL
     }

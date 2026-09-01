@@ -3,10 +3,10 @@ import Foundation
 import Testing
 import TorrentBridge
 
+// SAFETY: Ownership/lifetime: this contract stub only tests pointer presence and never owns
+// or dereferences it; bounds/alignment: no memory is accessed; synchronization: the stub is
+// stateless; safe alternative: the production callback table requires a C pointer signature.
 private func contractPayloadContextRetain(_ context: UnsafeMutableRawPointer?) -> UInt8 {
-    // SAFETY: Ownership/lifetime: this contract stub only tests pointer presence and never owns
-    // or dereferences it; bounds/alignment: no memory is accessed; synchronization: the stub is
-    // stateless; safe alternative: the production callback table requires a C pointer signature.
     unsafe context == nil ? 0 : 1
 }
 
@@ -33,11 +33,11 @@ private func contractPayloadSize(
     2
 }
 
+// SAFETY: Ownership/lifetime: the nonnull sentinel is never dereferenced by these stubs and
+// the table is copied synchronously by client creation; bounds/alignment: no sentinel memory
+// is accessed and the table has its exact imported layout; synchronization: callbacks are
+// stateless; safe alternative: ABI contract tests must construct the imported C callback table.
 private func contractPayloadBrokerCallbacks() -> TTorrentPayloadBrokerCallbacks {
-    // SAFETY: Ownership/lifetime: the nonnull sentinel is never dereferenced by these stubs and
-    // the table is copied synchronously by client creation; bounds/alignment: no sentinel memory
-    // is accessed and the table has its exact imported layout; synchronization: callbacks are
-    // stateless; safe alternative: ABI contract tests must construct the imported C callback table.
     var callbacks = unsafe TTorrentPayloadBrokerCallbacks()
     unsafe callbacks.context = UnsafeMutableRawPointer(bitPattern: 1)
     unsafe callbacks.retain_context = contractPayloadContextRetain
@@ -47,48 +47,48 @@ private func contractPayloadBrokerCallbacks() -> TTorrentPayloadBrokerCallbacks 
     return unsafe callbacks
 }
 
+// SAFETY: Ownership/lifetime: this stub only tests pointer presence without ownership or
+// dereference; bounds/alignment: no memory is accessed; synchronization: it is stateless;
+// safe alternative: the production C callback signature requires an opaque pointer.
 private func contractSwarmMetainfoContextRetain(
     _ context: UnsafeMutableRawPointer?
 ) -> UInt8 {
-    // SAFETY: Ownership/lifetime: this stub only tests pointer presence without ownership or
-    // dereference; bounds/alignment: no memory is accessed; synchronization: it is stateless;
-    // safe alternative: the production C callback signature requires an opaque pointer.
     unsafe context == nil ? 0 : 1
 }
 
 private func contractSwarmMetainfoContextRelease(_ context: UnsafeMutableRawPointer?) {}
 
+// SAFETY: Ownership/lifetime: the native contract-test caller owns resultOut for this
+// synchronous stub; bounds/alignment: the ABI supplies one aligned typed result value;
+// synchronization: the stub is stateless; safe alternative: ABI validation requires the
+// real C callback signature.
 private func contractSwarmMetainfoParse(
     _ context: UnsafeMutableRawPointer?,
     _ info: UnsafePointer<CChar>,
     _ infoSize: Int32,
     _ resultOut: UnsafeMutablePointer<TTorrentOwnedMetainfoCapsule>
 ) -> Int32 {
-    // SAFETY: Ownership/lifetime: the native contract-test caller owns resultOut for this
-    // synchronous stub; bounds/alignment: the ABI supplies one aligned typed result value;
-    // synchronization: the stub is stateless; safe alternative: ABI validation requires the
-    // real C callback signature.
     unsafe resultOut.pointee = TTorrentOwnedMetainfoCapsule(bytes: nil, size: 0)
     return EINVAL
 }
 
+// SAFETY: Ownership/lifetime: the callback receives ownership only of a malloc pointer from
+// its paired parser (nil in this stub); bounds/alignment: free does not dereference and accepts
+// that original pointer; synchronization: each capsule is uniquely owned; safe alternative:
+// the C callback contract requires C allocator-compatible release.
 private func contractSwarmMetainfoCapsuleRelease(
     _ context: UnsafeMutableRawPointer?,
     _ capsule: TTorrentOwnedMetainfoCapsule
 ) {
-    // SAFETY: Ownership/lifetime: the callback receives ownership only of a malloc pointer from
-    // its paired parser (nil in this stub); bounds/alignment: free does not dereference and accepts
-    // that original pointer; synchronization: each capsule is uniquely owned; safe alternative:
-    // the C callback contract requires C allocator-compatible release.
     unsafe free(capsule.bytes)
 }
 
+// SAFETY: Ownership/lifetime: the nonnull sentinel is never dereferenced and the callback
+// table is copied synchronously; bounds/alignment: the imported table has exact C layout;
+// synchronization: stubs are stateless; safe alternative: the ABI test must construct the
+// imported callback table directly.
 private func contractSwarmMetainfoParserCallbacks()
     -> TTorrentSwarmMetainfoParserCallbacks {
-    // SAFETY: Ownership/lifetime: the nonnull sentinel is never dereferenced and the callback
-    // table is copied synchronously; bounds/alignment: the imported table has exact C layout;
-    // synchronization: stubs are stateless; safe alternative: the ABI test must construct the
-    // imported callback table directly.
     var callbacks = unsafe TTorrentSwarmMetainfoParserCallbacks()
     unsafe callbacks.context = UnsafeMutableRawPointer(bitPattern: 1)
     unsafe callbacks.retain_context = contractSwarmMetainfoContextRetain
@@ -98,17 +98,20 @@ private func contractSwarmMetainfoParserCallbacks()
     return unsafe callbacks
 }
 
+// SAFETY: Ownership/lifetime: this stub only tests pointer presence without dereference;
+// bounds/alignment: no memory is accessed; synchronization: it is stateless; safe alternative:
+// the production C callback signature requires an opaque pointer.
 private func contractPeerProtocolContextRetain(
     _ context: UnsafeMutableRawPointer?
 ) -> UInt8 {
-    // SAFETY: Ownership/lifetime: this stub only tests pointer presence without dereference;
-    // bounds/alignment: no memory is accessed; synchronization: it is stateless; safe alternative:
-    // the production C callback signature requires an opaque pointer.
     unsafe context == nil ? 0 : 1
 }
 
 private func contractPeerProtocolContextRelease(_ context: UnsafeMutableRawPointer?) {}
 
+// SAFETY: Ownership/lifetime: the native test caller owns resultOut for this synchronous stub;
+// bounds/alignment: it supplies one aligned typed result value; synchronization: the stub is
+// stateless; safe alternative: ABI validation requires the actual C callback signature.
 private func contractExtensionHandshakeParse(
     _ context: UnsafeMutableRawPointer?,
     _ message: UnsafePointer<CChar>,
@@ -117,26 +120,26 @@ private func contractExtensionHandshakeParse(
     _ clientVersionCapacity: Int32,
     _ resultOut: UnsafeMutablePointer<TTorrentExtensionHandshakeResult>
 ) -> Int32 {
-    // SAFETY: Ownership/lifetime: the native test caller owns resultOut for this synchronous stub;
-    // bounds/alignment: it supplies one aligned typed result value; synchronization: the stub is
-    // stateless; safe alternative: ABI validation requires the actual C callback signature.
     unsafe resultOut.pointee = TTorrentExtensionHandshakeResult()
     return EINVAL
 }
 
+// SAFETY: Ownership/lifetime: the native test caller owns resultOut for this synchronous stub;
+// bounds/alignment: it supplies one aligned typed result value; synchronization: the stub is
+// stateless; safe alternative: ABI validation requires the actual C callback signature.
 private func contractMetadataMessageParse(
     _ context: UnsafeMutableRawPointer?,
     _ message: UnsafePointer<CChar>,
     _ messageSize: Int32,
     _ resultOut: UnsafeMutablePointer<TTorrentMetadataMessageResult>
 ) -> Int32 {
-    // SAFETY: Ownership/lifetime: the native test caller owns resultOut for this synchronous stub;
-    // bounds/alignment: it supplies one aligned typed result value; synchronization: the stub is
-    // stateless; safe alternative: ABI validation requires the actual C callback signature.
     unsafe resultOut.pointee = TTorrentMetadataMessageResult()
     return EINVAL
 }
 
+// SAFETY: Ownership/lifetime: the native test caller owns resultOut for this synchronous stub;
+// bounds/alignment: it supplies one aligned typed result value; synchronization: the stub is
+// stateless; safe alternative: ABI validation requires the actual C callback signature.
 private func contractPeerExchangeParse(
     _ context: UnsafeMutableRawPointer?,
     _ message: UnsafePointer<CChar>,
@@ -145,19 +148,16 @@ private func contractPeerExchangeParse(
     _ recordCapacity: Int32,
     _ resultOut: UnsafeMutablePointer<TTorrentPeerExchangeResult>
 ) -> Int32 {
-    // SAFETY: Ownership/lifetime: the native test caller owns resultOut for this synchronous stub;
-    // bounds/alignment: it supplies one aligned typed result value; synchronization: the stub is
-    // stateless; safe alternative: ABI validation requires the actual C callback signature.
     unsafe resultOut.pointee = TTorrentPeerExchangeResult()
     return EINVAL
 }
 
+// SAFETY: Ownership/lifetime: the nonnull sentinel is never dereferenced and the callback
+// table is copied synchronously; bounds/alignment: the imported table has exact C layout;
+// synchronization: stubs are stateless; safe alternative: the ABI test must construct the
+// imported callback table directly.
 private func contractPeerProtocolParserCallbacks()
     -> TTorrentPeerProtocolParserCallbacks {
-    // SAFETY: Ownership/lifetime: the nonnull sentinel is never dereferenced and the callback
-    // table is copied synchronously; bounds/alignment: the imported table has exact C layout;
-    // synchronization: stubs are stateless; safe alternative: the ABI test must construct the
-    // imported callback table directly.
     var callbacks = unsafe TTorrentPeerProtocolParserCallbacks()
     unsafe callbacks.context = UnsafeMutableRawPointer(bitPattern: 1)
     unsafe callbacks.retain_context = contractPeerProtocolContextRetain
@@ -168,17 +168,20 @@ private func contractPeerProtocolParserCallbacks()
     return unsafe callbacks
 }
 
+// SAFETY: Ownership/lifetime: this stub only tests pointer presence without dereference;
+// bounds/alignment: no memory is accessed; synchronization: it is stateless; safe alternative:
+// the production C callback signature requires an opaque pointer.
 private func contractTrackerParserContextRetain(
     _ context: UnsafeMutableRawPointer?
 ) -> UInt8 {
-    // SAFETY: Ownership/lifetime: this stub only tests pointer presence without dereference;
-    // bounds/alignment: no memory is accessed; synchronization: it is stateless; safe alternative:
-    // the production C callback signature requires an opaque pointer.
     unsafe context == nil ? 0 : 1
 }
 
 private func contractTrackerParserContextRelease(_ context: UnsafeMutableRawPointer?) {}
 
+// SAFETY: Ownership/lifetime: the native test caller owns resultOut for this synchronous stub;
+// bounds/alignment: it supplies one aligned typed result value; synchronization: the stub is
+// stateless; safe alternative: ABI validation requires the actual C callback signature.
 private func contractHTTPTrackerResponseParse(
     _ context: UnsafeMutableRawPointer?,
     _ body: UnsafePointer<CChar>,
@@ -190,19 +193,16 @@ private func contractHTTPTrackerResponseParse(
     _ peerCapacity: Int32,
     _ resultOut: UnsafeMutablePointer<TTorrentHTTPTrackerResponseResult>
 ) -> Int32 {
-    // SAFETY: Ownership/lifetime: the native test caller owns resultOut for this synchronous stub;
-    // bounds/alignment: it supplies one aligned typed result value; synchronization: the stub is
-    // stateless; safe alternative: ABI validation requires the actual C callback signature.
     unsafe resultOut.pointee = TTorrentHTTPTrackerResponseResult()
     return EINVAL
 }
 
+// SAFETY: Ownership/lifetime: the nonnull sentinel is never dereferenced and the callback
+// table is copied synchronously; bounds/alignment: the imported table has exact C layout;
+// synchronization: stubs are stateless; safe alternative: the ABI test must construct the
+// imported callback table directly.
 private func contractTrackerResponseParserCallbacks()
     -> TTorrentTrackerResponseParserCallbacks {
-    // SAFETY: Ownership/lifetime: the nonnull sentinel is never dereferenced and the callback
-    // table is copied synchronously; bounds/alignment: the imported table has exact C layout;
-    // synchronization: stubs are stateless; safe alternative: the ABI test must construct the
-    // imported callback table directly.
     var callbacks = unsafe TTorrentTrackerResponseParserCallbacks()
     unsafe callbacks.context = UnsafeMutableRawPointer(bitPattern: 1)
     unsafe callbacks.retain_context = contractTrackerParserContextRetain
@@ -211,17 +211,20 @@ private func contractTrackerResponseParserCallbacks()
     return unsafe callbacks
 }
 
+// SAFETY: Ownership/lifetime: this stub only tests pointer presence without dereference;
+// bounds/alignment: no memory is accessed; synchronization: it is stateless; safe alternative:
+// the production C callback signature requires an opaque pointer.
 private func contractDHTParserContextRetain(
     _ context: UnsafeMutableRawPointer?
 ) -> UInt8 {
-    // SAFETY: Ownership/lifetime: this stub only tests pointer presence without dereference;
-    // bounds/alignment: no memory is accessed; synchronization: it is stateless; safe alternative:
-    // the production C callback signature requires an opaque pointer.
     unsafe context == nil ? 0 : 1
 }
 
 private func contractDHTParserContextRelease(_ context: UnsafeMutableRawPointer?) {}
 
+// SAFETY: Ownership/lifetime: the native test caller owns resultOut for this synchronous stub;
+// bounds/alignment: it supplies one aligned typed result value; synchronization: the stub is
+// stateless; safe alternative: ABI validation requires the actual C callback signature.
 private func contractDHTMessageParse(
     _ context: UnsafeMutableRawPointer?,
     _ body: UnsafePointer<CChar>,
@@ -233,19 +236,16 @@ private func contractDHTMessageParse(
     _ peerCapacity: Int32,
     _ resultOut: UnsafeMutablePointer<TTorrentDHTMessageResult>
 ) -> Int32 {
-    // SAFETY: Ownership/lifetime: the native test caller owns resultOut for this synchronous stub;
-    // bounds/alignment: it supplies one aligned typed result value; synchronization: the stub is
-    // stateless; safe alternative: ABI validation requires the actual C callback signature.
     unsafe resultOut.pointee = TTorrentDHTMessageResult()
     return EINVAL
 }
 
+// SAFETY: Ownership/lifetime: the nonnull sentinel is never dereferenced and the callback
+// table is copied synchronously; bounds/alignment: the imported table has exact C layout;
+// synchronization: stubs are stateless; safe alternative: the ABI test must construct the
+// imported callback table directly.
 private func contractDHTMessageParserCallbacks()
     -> TTorrentDHTMessageParserCallbacks {
-    // SAFETY: Ownership/lifetime: the nonnull sentinel is never dereferenced and the callback
-    // table is copied synchronously; bounds/alignment: the imported table has exact C layout;
-    // synchronization: stubs are stateless; safe alternative: the ABI test must construct the
-    // imported callback table directly.
     var callbacks = unsafe TTorrentDHTMessageParserCallbacks()
     unsafe callbacks.context = UnsafeMutableRawPointer(bitPattern: 1)
     unsafe callbacks.retain_context = contractDHTParserContextRetain
@@ -367,12 +367,12 @@ struct TorrentBridgeContractTests {
         #expect(UInt8(TTORRENT_CONTENT_KIND_DIRECTORY) == 2)
     }
 
+    // SAFETY: Ownership/lifetime: MemoryLayout inspects only compile-time imported types;
+    // bounds/alignment: no instances or addresses are accessed and expected C sizes/alignments
+    // are asserted; synchronization: this metadata query is immutable; safe alternative:
+    // strict memory safety marks callback-bearing C structs unsafe even for layout inspection.
     @Test("Pins Swift-imported C struct layout")
     func pinsSwiftImportedCStructLayout() {
-        // SAFETY: Ownership/lifetime: MemoryLayout inspects only compile-time imported types;
-        // bounds/alignment: no instances or addresses are accessed and expected C sizes/alignments
-        // are asserted; synchronization: this metadata query is immutable; safe alternative:
-        // strict memory safety marks callback-bearing C structs unsafe even for layout inspection.
         #expect(MemoryLayout<TTorrentEvent>.size == 16)
         #expect(MemoryLayout<TTorrentEvent>.alignment == 8)
         #expect(MemoryLayout<TTorrentEvent>.offset(of: \.native_token) == 0)
@@ -520,12 +520,12 @@ struct TorrentBridgeContractTests {
         #expect(MemoryLayout.size(ofValue: health.last_alert_worker_error) == 512)
     }
 
+    // SAFETY: Ownership/lifetime: the bridge returns process-static version storage;
+    // bounds/alignment: its contract guarantees a NUL-terminated CChar sequence;
+    // synchronization: immutable storage is read once; safe alternative: the bridge exposes
+    // the version only as a C string pointer.
     @Test("Libtorrent version is pinned to 2.1.1")
     func libtorrentVersionIsPinned() {
-        // SAFETY: Ownership/lifetime: the bridge returns process-static version storage;
-        // bounds/alignment: its contract guarantees a NUL-terminated CChar sequence;
-        // synchronization: immutable storage is read once; safe alternative: the bridge exposes
-        // the version only as a C string pointer.
         let version = unsafe String(cString: TorrentBridgeLibtorrentVersion())
 
         #expect(version == "2.1.1.0")
@@ -542,12 +542,12 @@ struct TorrentBridgeContractTests {
         #expect(relativePathResult.error == "The state path must be absolute.")
     }
 
+    // SAFETY: Ownership/lifetime: temporary path/error storage lives through synchronous
+    // creation and any returned client is uniquely destroyed; bounds/alignment: MutableSpan
+    // and withCString provide exact capacities/NUL termination; synchronization: test state
+    // is local; safe alternative: this negative ABI contract can only be exercised via C API.
     @Test("Create rejects an incomplete swarm metainfo parser table")
     func createRejectsIncompleteSwarmMetainfoParser() throws {
-        // SAFETY: Ownership/lifetime: temporary path/error storage lives through synchronous
-        // creation and any returned client is uniquely destroyed; bounds/alignment: MutableSpan
-        // and withCString provide exact capacities/NUL termination; synchronization: test state
-        // is local; safe alternative: this negative ABI contract can only be exercised via C API.
         try withTemporaryDirectory { stateDirectory in
             var errorBuffer = BridgeErrorBuffer()
             let maybeClient = unsafe errorBuffer.withMutableBuffer { buffer in
@@ -579,12 +579,12 @@ struct TorrentBridgeContractTests {
         }
     }
 
+    // SAFETY: Ownership/lifetime: temporary path/error storage lives through synchronous
+    // creation and any returned client is uniquely destroyed; bounds/alignment: MutableSpan
+    // and withCString provide exact capacities/NUL termination; synchronization: test state
+    // is local; safe alternative: this negative ABI contract can only be exercised via C API.
     @Test("Create rejects an incomplete peer protocol parser table")
     func createRejectsIncompletePeerProtocolParser() throws {
-        // SAFETY: Ownership/lifetime: temporary path/error storage lives through synchronous
-        // creation and any returned client is uniquely destroyed; bounds/alignment: MutableSpan
-        // and withCString provide exact capacities/NUL termination; synchronization: test state
-        // is local; safe alternative: this negative ABI contract can only be exercised via C API.
         try withTemporaryDirectory { stateDirectory in
             var errorBuffer = BridgeErrorBuffer()
             let maybeClient = unsafe errorBuffer.withMutableBuffer { buffer in
@@ -614,12 +614,12 @@ struct TorrentBridgeContractTests {
         }
     }
 
+    // SAFETY: Ownership/lifetime: temporary path/error storage lives through synchronous
+    // creation and any returned client is uniquely destroyed; bounds/alignment: MutableSpan
+    // and withCString provide exact capacities/NUL termination; synchronization: test state
+    // is local; safe alternative: this negative ABI contract can only be exercised via C API.
     @Test("Create rejects an incomplete tracker response parser table")
     func createRejectsIncompleteTrackerResponseParser() throws {
-        // SAFETY: Ownership/lifetime: temporary path/error storage lives through synchronous
-        // creation and any returned client is uniquely destroyed; bounds/alignment: MutableSpan
-        // and withCString provide exact capacities/NUL termination; synchronization: test state
-        // is local; safe alternative: this negative ABI contract can only be exercised via C API.
         try withTemporaryDirectory { stateDirectory in
             var errorBuffer = BridgeErrorBuffer()
             let maybeClient = unsafe errorBuffer.withMutableBuffer { buffer in
@@ -649,12 +649,12 @@ struct TorrentBridgeContractTests {
         }
     }
 
+    // SAFETY: Ownership/lifetime: temporary path/error storage lives through synchronous
+    // creation and any returned client is uniquely destroyed; bounds/alignment: MutableSpan
+    // and withCString provide exact capacities/NUL termination; synchronization: test state
+    // is local; safe alternative: this negative ABI contract can only be exercised via C API.
     @Test("Create rejects an incomplete DHT message parser table")
     func createRejectsIncompleteDHTMessageParser() throws {
-        // SAFETY: Ownership/lifetime: temporary path/error storage lives through synchronous
-        // creation and any returned client is uniquely destroyed; bounds/alignment: MutableSpan
-        // and withCString provide exact capacities/NUL termination; synchronization: test state
-        // is local; safe alternative: this negative ABI contract can only be exercised via C API.
         try withTemporaryDirectory { stateDirectory in
             var errorBuffer = BridgeErrorBuffer()
             let maybeClient = unsafe errorBuffer.withMutableBuffer { buffer in
@@ -684,12 +684,12 @@ struct TorrentBridgeContractTests {
         }
     }
 
+    // SAFETY: Ownership/lifetime: all output scalars/arrays are local for synchronous null-client
+    // calls; bounds/alignment: typed pointers and exact spans/capacities are supplied and the
+    // one fixed-array byte read is within its asserted layout; synchronization: locals are
+    // unshared; safe alternative: null-behavior and raw ABI bounds require direct C calls.
     @Test("Null client query APIs zero outputs")
     func nullClientQueryAPIsZeroOutputs() {
-        // SAFETY: Ownership/lifetime: all output scalars/arrays are local for synchronous null-client
-        // calls; bounds/alignment: typed pointers and exact spans/capacities are supplied and the
-        // one fixed-array byte read is within its asserted layout; synchronization: locals are
-        // unshared; safe alternative: null-behavior and raw ABI bounds require direct C calls.
         var eventSpan: MutableSpan<TTorrentEvent>?
         var eventCount: Int32 = -1
         var eventsAvailable: UInt8 = 1
@@ -822,12 +822,12 @@ struct TorrentBridgeContractTests {
         #expect(errorBuffer.string == "")
     }
 
+    // SAFETY: Ownership/lifetime: local arrays outlive each synchronous bridge invocation;
+    // bounds/alignment: imported Span wrappers carry their exact typed capacities;
+    // synchronization: test storage is unshared; safe alternative: verifying the generated
+    // safe-interop ABI requires direct calls to the imported C functions.
     @Test("Imports bounded bridge buffers as lifetime-scoped Swift spans")
     func importsBoundedBuffersAsSwiftSpans() {
-        // SAFETY: Ownership/lifetime: local arrays outlive each synchronous bridge invocation;
-        // bounds/alignment: imported Span wrappers carry their exact typed capacities;
-        // synchronization: test storage is unshared; safe alternative: verifying the generated
-        // safe-interop ABI requires direct calls to the imported C functions.
         var snapshotStorage = [TTorrentSnapshot()]
         var snapshots: MutableSpan<TTorrentSnapshot>? = snapshotStorage.mutableSpan
         var requiredCount: Int32 = -1
@@ -860,12 +860,12 @@ struct TorrentBridgeContractTests {
         #expect(settingsResult != 0)
     }
 
+    // SAFETY: Ownership/lifetime: local output/error storage lives through every synchronous
+    // null-client call; bounds/alignment: exact spans and aligned scalar inouts are supplied;
+    // synchronization: all state is local; safe alternative: null-input mutation contracts
+    // must be exercised directly at the C ABI boundary.
     @Test("Null client mutation APIs report contract errors")
     func nullClientMutationAPIsReportContractErrors() {
-        // SAFETY: Ownership/lifetime: local output/error storage lives through every synchronous
-        // null-client call; bounds/alignment: exact spans and aligned scalar inouts are supplied;
-        // synchronization: all state is local; safe alternative: null-input mutation contracts
-        // must be exercised directly at the C ABI boundary.
         var addOutcome = Int32.max
         var nativeToken = UInt64.max
         var addedIDStorage = Array<CChar>(repeating: 1, count: Int(TTORRENT_ID_CAPACITY))
@@ -965,11 +965,11 @@ private struct BridgeErrorBuffer {
     }
 }
 
+// SAFETY: Ownership/lifetime: local error/path storage lives through synchronous creation and
+// any returned client is uniquely destroyed; bounds/alignment: MutableSpan is exact and
+// withCString provides NUL termination; synchronization: helper state is local;
+// safe alternative: validating nullable C creation inputs requires the raw bridge API.
 private func invalidCreateResult(path: String?) -> (didCreate: Bool, error: String) {
-    // SAFETY: Ownership/lifetime: local error/path storage lives through synchronous creation and
-    // any returned client is uniquely destroyed; bounds/alignment: MutableSpan is exact and
-    // withCString provides NUL termination; synchronization: helper state is local;
-    // safe alternative: validating nullable C creation inputs requires the raw bridge API.
     var errorBuffer = BridgeErrorBuffer()
     let didCreate = errorBuffer.withMutableBuffer { buffer -> Bool in
         var error: MutableSpan<CChar>? = buffer.mutableSpan
@@ -1056,12 +1056,12 @@ private struct EmptyClientSmokeResult {
     var recoverPendingRemovalsError = ""
 }
 
+// SAFETY: Ownership/lifetime: the path/error/output values live through synchronous calls and
+// the uniquely owned client is deferred-destroyed; bounds/alignment: C strings are terminated,
+// error capacities are exact, and null snapshot output advertises zero capacity;
+// synchronization: one test thread owns the client; safe alternative: end-to-end ABI smoke
+// coverage requires invoking the raw C bridge.
 private func emptyClientSmokeResult(statePath: String) -> EmptyClientSmokeResult {
-    // SAFETY: Ownership/lifetime: the path/error/output values live through synchronous calls and
-    // the uniquely owned client is deferred-destroyed; bounds/alignment: C strings are terminated,
-    // error capacities are exact, and null snapshot output advertises zero capacity;
-    // synchronization: one test thread owns the client; safe alternative: end-to-end ABI smoke
-    // coverage requires invoking the raw C bridge.
     var result = EmptyClientSmokeResult()
     var creationErrorBuffer = BridgeErrorBuffer()
     let maybeClient = unsafe creationErrorBuffer.withMutableBuffer { buffer in

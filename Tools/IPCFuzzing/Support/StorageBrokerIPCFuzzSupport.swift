@@ -273,22 +273,22 @@ private enum StorageBrokerIPCFuzzer {
         _ = Darwin.close(descriptor)
     }
 
+    // SAFETY: Ownership/lifetime: Data pins its bytes for the synchronous call and XPC copies
+    // them; bounds/alignment: exact count is passed with byte alignment; synchronization:
+    // immutable fuzz input is not mutated; safe alternative: constructing adversarial XPC data
+    // requires xpc_data_create's C pointer API.
     private static func xpcData(_ data: Data) -> xpc_object_t {
-        // SAFETY: Ownership/lifetime: Data pins its bytes for the synchronous call and XPC copies
-        // them; bounds/alignment: exact count is passed with byte alignment; synchronization:
-        // immutable fuzz input is not mutated; safe alternative: constructing adversarial XPC data
-        // requires xpc_data_create's C pointer API.
         unsafe data.withUnsafeBytes { bytes in
             unsafe xpc_data_create(bytes.baseAddress, bytes.count)
         }
     }
 
+    // SAFETY: Ownership/lifetime: the returned descriptor is owned and closed by each caller,
+    // while the temporary C string lives through open; bounds/alignment: withCString supplies
+    // an aligned NUL-terminated path; synchronization: each invocation creates independent
+    // descriptor state; safe alternative: the XPC descriptor codec requires a raw Int32 file
+    // descriptor, which Foundation does not expose as a transfer-safe value.
     private static func openNullDescriptor() -> Int32 {
-        // SAFETY: Ownership/lifetime: the returned descriptor is owned and closed by each caller,
-        // while the temporary C string lives through open; bounds/alignment: withCString supplies
-        // an aligned NUL-terminated path; synchronization: each invocation creates independent
-        // descriptor state; safe alternative: the XPC descriptor codec requires a raw Int32 file
-        // descriptor, which Foundation does not expose as a transfer-safe value.
         unsafe "/dev/null".withCString { path in
             unsafe Darwin.open(path, O_RDONLY | O_CLOEXEC)
         }
@@ -301,15 +301,15 @@ private enum StorageBrokerIPCFuzzer {
     }
 }
 
+// SAFETY: Ownership/lifetime: libFuzzer keeps bytes alive for this synchronous call;
+// bounds/alignment: its ABI supplies byteCount readable UInt8 values and the helper checks
+// nullability and Int conversion; synchronization: the input is immutable and call-local;
+// safe alternative: the @c libFuzzer entry ABI requires a raw pointer/count pair.
 @c(TorrentStorageBrokerIPCFuzzOneInput)
 public func torrentStorageBrokerIPCFuzzOneInput(
     _ bytes: UnsafePointer<UInt8>?,
     _ byteCount: UInt
 ) {
-    // SAFETY: Ownership/lifetime: libFuzzer keeps bytes alive for this synchronous call;
-    // bounds/alignment: its ABI supplies byteCount readable UInt8 values and the helper checks
-    // nullability and Int conversion; synchronization: the input is immutable and call-local;
-    // safe alternative: the @c libFuzzer entry ABI requires a raw pointer/count pair.
     guard let data = unsafe copiedIPCFuzzInput(bytes, byteCount) else {
         return
     }

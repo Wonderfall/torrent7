@@ -281,16 +281,16 @@ package enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Senda
         }
     }
 
+    // SAFETY: Ownership/lifetime: each String pins its C string for the synchronous
+    // syscall and every local descriptor is closed or deliberately returned;
+    // bounds/alignment: every path component is validated, NUL-terminated, and never
+    // used for raw memory access; synchronization: the immutable resolution is captured
+    // under the registry lock and descriptor traversal is local; safe alternative:
+    // openat with O_NOFOLLOW is required to avoid path re-resolution and symlink races.
     private static func open(
         _ resolved: ResolvedFile,
         access: TorrentStorageBrokerAccess
     ) throws -> Int32 {
-        // SAFETY: Ownership/lifetime: each String pins its C string for the synchronous
-        // syscall and every local descriptor is closed or deliberately returned;
-        // bounds/alignment: every path component is validated, NUL-terminated, and never
-        // used for raw memory access; synchronization: the immutable resolution is captured
-        // under the registry lock and descriptor traversal is local; safe alternative:
-        // openat with O_NOFOLLOW is required to avoid path re-resolution and symlink races.
         try resolved.parent.validate()
         guard let components = resolved.relativePathComponents,
               !components.isEmpty,
