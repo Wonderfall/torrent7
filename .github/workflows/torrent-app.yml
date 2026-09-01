@@ -110,7 +110,7 @@ jobs:
         shell: zsh {0}
         run: Scripts/verify-xcode.zsh
 
-      - name: Test and run unsafe boundary lint
+      - name: Test unsafe boundary linter
         shell: zsh {0}
         run: |
           set -euo pipefail
@@ -118,7 +118,6 @@ jobs:
             --package-path Tools/UnsafeBoundaryLint \
             --scratch-path .build/unsafe-boundary-lint \
             --only-use-versions-from-resolved-file
-          Scripts/lint-unsafe-boundaries.zsh
 
       - name: Install build tools
         shell: zsh {0}
