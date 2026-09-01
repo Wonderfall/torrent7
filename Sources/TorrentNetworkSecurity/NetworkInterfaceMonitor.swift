@@ -28,6 +28,29 @@ package protocol NetworkInterfaceMonitoring: AnyObject, Sendable {
     func cancel()
 }
 
+@safe final class NetworkInterfaceMonitorDynamicStoreContext {
+    weak var monitor: NetworkInterfaceMonitor?
+
+    init(monitor: NetworkInterfaceMonitor?) {
+        self.monitor = monitor
+    }
+
+    static let retainCallback:
+        @convention(c) (UnsafeRawPointer) -> UnsafeRawPointer = { info in
+        let retained = unsafe Unmanaged<NetworkInterfaceMonitorDynamicStoreContext>
+            .fromOpaque(info)
+            .retain()
+        return unsafe UnsafeRawPointer(retained.toOpaque())
+    }
+
+    static let releaseCallback:
+        @convention(c) (UnsafeRawPointer) -> Void = { info in
+        unsafe Unmanaged<NetworkInterfaceMonitorDynamicStoreContext>
+            .fromOpaque(info)
+            .release()
+    }
+}
+
 private struct InterfaceSnapshot {
     let name: String
     let index: UInt32
@@ -183,19 +206,27 @@ package final class NetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchec
     }
 
     private func startDynamicStoreMonitoringOnQueue() {
+        // SCDynamicStore owns this box through its context callbacks. The weak
+        // monitor link avoids a monitor -> store -> context -> monitor cycle.
+        let callbackContext = NetworkInterfaceMonitorDynamicStoreContext(
+            monitor: self
+        )
         var context = unsafe SCDynamicStoreContext(
             version: 0,
-            info: Unmanaged.passUnretained(self).toOpaque(),
-            retain: nil,
-            release: nil,
+            info: Unmanaged.passUnretained(callbackContext).toOpaque(),
+            retain: NetworkInterfaceMonitorDynamicStoreContext.retainCallback,
+            release: NetworkInterfaceMonitorDynamicStoreContext.releaseCallback,
             copyDescription: nil
         )
-        guard let store = unsafe SCDynamicStoreCreate(
-            nil,
-            "TorrentApp.NetworkInterfaceMonitor" as CFString,
-            Self.dynamicStoreCallback,
-            &context
-        ) else {
+        let store = withExtendedLifetime(callbackContext) {
+            unsafe SCDynamicStoreCreate(
+                nil,
+                "TorrentApp.NetworkInterfaceMonitor" as CFString,
+                Self.dynamicStoreCallback,
+                &context
+            )
+        }
+        guard let store else {
             return
         }
 
@@ -219,8 +250,10 @@ package final class NetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchec
             return
         }
 
-        let monitor = unsafe Unmanaged<NetworkInterfaceMonitor>.fromOpaque(info).takeUnretainedValue()
-        monitor.emitCurrentOptionsOnQueue()
+        let context = unsafe Unmanaged<NetworkInterfaceMonitorDynamicStoreContext>
+            .fromOpaque(info)
+            .takeUnretainedValue()
+        context.monitor?.emitCurrentOptionsOnQueue()
     }
 
     private static func pathNames(from path: NWPath) -> Set<String> {
