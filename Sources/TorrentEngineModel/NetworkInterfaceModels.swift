@@ -93,12 +93,12 @@ package enum TorrentNetworkInterfaceSnapshotValidator {
         !name.isEmpty
             && name.utf8.count <= TorrentEngineLimits.maximumNetworkInterfaceNameBytes
             && name.utf8.allSatisfy { byte in
-                (byte >= Character("a").asciiValue! && byte <= Character("z").asciiValue!)
-                    || (byte >= Character("A").asciiValue! && byte <= Character("Z").asciiValue!)
-                    || (byte >= Character("0").asciiValue! && byte <= Character("9").asciiValue!)
-                    || byte == Character("_").asciiValue!
-                    || byte == Character("-").asciiValue!
-                    || byte == Character(".").asciiValue!
+                (UInt8(ascii: "a")...UInt8(ascii: "z")).contains(byte)
+                    || (UInt8(ascii: "A")...UInt8(ascii: "Z")).contains(byte)
+                    || (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte)
+                    || byte == UInt8(ascii: "_")
+                    || byte == UInt8(ascii: "-")
+                    || byte == UInt8(ascii: ".")
             }
     }
 

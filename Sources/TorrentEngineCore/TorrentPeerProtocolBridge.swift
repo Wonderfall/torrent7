@@ -93,11 +93,18 @@ package func torrentExtensionHandshakeParseCallback(
                   let compactSize = Int32(exactly: clientVersion.count) else {
                 return EOVERFLOW
             }
-            unsafe clientVersion.withUnsafeBytes { source in
+            let copiedClientVersion = unsafe clientVersion.withUnsafeBytes { source in
+                guard let sourceAddress = unsafe source.bindMemory(to: UInt8.self).baseAddress else {
+                    return false
+                }
                 unsafe clientVersionOut.update(
-                    from: source.bindMemory(to: UInt8.self).baseAddress!,
+                    from: sourceAddress,
                     count: source.count
                 )
+                return true
+            }
+            guard copiedClientVersion else {
+                return EINVAL
             }
             output.present_fields |= UInt32(TTORRENT_HANDSHAKE_HAS_CLIENT_VERSION)
             output.client_version_size = compactSize

@@ -447,9 +447,9 @@ enum TorrentEngineClientResponseValidator {
     }
 
     private static func isLowercaseHex<S: StringProtocol>(_ value: S, count: Int) -> Bool {
-        value.utf8.count == count && value.utf8.allSatisfy {
-            ($0 >= Character("0").asciiValue! && $0 <= Character("9").asciiValue!)
-                || ($0 >= Character("a").asciiValue! && $0 <= Character("f").asciiValue!)
+        value.utf8.count == count && value.utf8.allSatisfy { byte in
+            (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte)
+                || (UInt8(ascii: "a")...UInt8(ascii: "f")).contains(byte)
         }
     }
 }

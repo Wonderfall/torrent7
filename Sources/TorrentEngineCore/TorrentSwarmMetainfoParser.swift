@@ -68,20 +68,23 @@ package func torrentSwarmMetainfoParseCallback(
               let outputSize = Int32(exactly: capsule.count) else {
             return EOVERFLOW
         }
-        guard let allocation = unsafe Darwin.malloc(capsule.count) else {
-            return ENOMEM
-        }
-        unsafe capsule.withUnsafeBytes { source in
+        return unsafe capsule.withUnsafeBytes { source in
+            guard let sourceAddress = source.baseAddress else {
+                return EINVAL
+            }
+            guard let allocation = unsafe Darwin.malloc(source.count) else {
+                return ENOMEM
+            }
             unsafe allocation.copyMemory(
-                from: source.baseAddress!,
+                from: sourceAddress,
                 byteCount: source.count
             )
+            unsafe resultOut.pointee = TTorrentOwnedMetainfoCapsule(
+                bytes: allocation.assumingMemoryBound(to: UInt8.self),
+                size: outputSize
+            )
+            return 0
         }
-        unsafe resultOut.pointee = TTorrentOwnedMetainfoCapsule(
-            bytes: allocation.assumingMemoryBound(to: UInt8.self),
-            size: outputSize
-        )
-        return 0
     } catch {
         return EINVAL
     }
