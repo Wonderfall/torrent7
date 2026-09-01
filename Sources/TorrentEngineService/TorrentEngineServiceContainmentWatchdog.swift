@@ -8,17 +8,30 @@ import Synchronization
 /// terminates only the isolated helper; ExtensionFoundation can start a clean
 /// instance for the next connection attempt.
 @safe final class TorrentEngineServiceContainmentWatchdog: Sendable {
+    typealias Scheduler = @Sendable (
+        _ delay: DispatchTimeInterval,
+        _ operation: @escaping @Sendable () -> Void
+    ) -> Void
+
     private let timeout: DispatchTimeInterval
+    private let scheduler: Scheduler
     private let terminationHandler: @Sendable () -> Void
     private let armedTokens = Mutex(Set<UUID>())
 
     init(
         timeout: DispatchTimeInterval = .seconds(30),
+        scheduler: @escaping Scheduler = { delay, operation in
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(
+                deadline: .now() + delay,
+                execute: operation
+            )
+        },
         terminationHandler: @escaping @Sendable () -> Void = {
             Darwin._exit(70)
         }
     ) {
         self.timeout = timeout
+        self.scheduler = scheduler
         self.terminationHandler = terminationHandler
     }
 
@@ -27,9 +40,7 @@ import Synchronization
         armedTokens.withLock { armedTokens in
             _ = armedTokens.insert(token)
         }
-        DispatchQueue.global(qos: .userInitiated).asyncAfter(
-            deadline: .now() + timeout
-        ) { [weak self] in
+        scheduler(timeout) { [weak self] in
             guard let self, consume(token) else {
                 return
             }
