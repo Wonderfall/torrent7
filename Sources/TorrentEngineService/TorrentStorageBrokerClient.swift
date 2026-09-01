@@ -75,10 +75,12 @@ package enum TorrentStorageBrokerClientError: LocalizedError, Sendable {
     }
 }
 
-@safe private final class TorrentStorageBrokerPendingReply: Sendable {
+@safe final class TorrentStorageBrokerPendingReply: Sendable {
     private struct State: Sendable {
+        var isFinished = false
         var continuation: CheckedContinuation<TorrentStorageBrokerReply, any Error>?
         var earlyResult: Result<TorrentStorageBrokerReply, any Error>?
+        var timeoutTask: Task<Void, Never>?
     }
 
     private let state = Mutex(State())
@@ -91,6 +93,10 @@ package enum TorrentStorageBrokerClientError: LocalizedError, Sendable {
                     state.earlyResult = nil
                     return result
                 }
+                guard !state.isFinished,
+                      state.continuation == nil else {
+                    return .failure(TorrentStorageBrokerClientError.invalidReply)
+                }
                 state.continuation = continuation
                 return nil
             }
@@ -100,22 +106,43 @@ package enum TorrentStorageBrokerClientError: LocalizedError, Sendable {
         }
     }
 
+    func installTimeoutTask(_ task: Task<Void, Never>) {
+        let shouldCancel = state.withLock { state in
+            guard !state.isFinished,
+                  state.timeoutTask == nil else {
+                return true
+            }
+            state.timeoutTask = task
+            return false
+        }
+        if shouldCancel {
+            task.cancel()
+        }
+    }
+
     @discardableResult
     func finish(_ result: Result<TorrentStorageBrokerReply, any Error>) -> Bool {
         let completion: (
             continuation: CheckedContinuation<TorrentStorageBrokerReply, any Error>?,
+            timeoutTask: Task<Void, Never>?,
             didStore: Bool
         ) = state.withLock { state in
+            guard !state.isFinished else {
+                return (nil, nil, false)
+            }
+            state.isFinished = true
             if let continuation = state.continuation {
                 state.continuation = nil
-                return (continuation, false)
-            }
-            guard state.earlyResult == nil else {
-                return (nil, false)
+                let timeoutTask = state.timeoutTask
+                state.timeoutTask = nil
+                return (continuation, timeoutTask, false)
             }
             state.earlyResult = result
-            return (nil, true)
+            let timeoutTask = state.timeoutTask
+            state.timeoutTask = nil
+            return (nil, timeoutTask, true)
         }
+        completion.timeoutTask?.cancel()
         guard let continuation = completion.continuation else {
             return completion.didStore
         }
@@ -358,7 +385,7 @@ package enum TorrentStorageBrokerClientError: LocalizedError, Sendable {
             pending.finish(decoded)
         }
 
-        Task.detached { [state, pending] in
+        let timeoutTask = Task.detached { [state, pending] in
             do {
                 try await ContinuousClock().sleep(for: .seconds(5))
             } catch {
@@ -369,6 +396,7 @@ package enum TorrentStorageBrokerClientError: LocalizedError, Sendable {
             }
             pending.finish(.failure(TorrentStorageBrokerClientError.timedOut))
         }
+        pending.installTimeoutTask(timeoutTask)
 
         let reply = try await withTaskCancellationHandler {
             try await pending.wait()

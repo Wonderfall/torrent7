@@ -7,6 +7,47 @@ import XPC
 
 @Suite("Torrent storage broker client security", .serialized)
 struct TorrentStorageBrokerClientSecurityTests {
+    @Test("Every broker reply completion cancels its timeout task")
+    func replyCompletionCancelsTimeoutTask() async throws {
+        let requestID = UUID()
+        let reply = TorrentStorageBrokerReply.success(
+            requestID: requestID,
+            metadata: nil,
+            statistics: [],
+            fileDescriptor: nil
+        )
+
+        let pending = TorrentStorageBrokerPendingReply()
+        let installedTimeout = Task.detached { () -> Void in
+            _ = try? await ContinuousClock().sleep(for: .seconds(30))
+        }
+        defer { installedTimeout.cancel() }
+        pending.installTimeoutTask(installedTimeout)
+
+        #expect(pending.finish(.success(reply)))
+        #expect(installedTimeout.isCancelled)
+        guard case .success(let observedID, nil, let statistics, nil) =
+            try await pending.wait() else {
+            Issue.record("Expected the completed broker reply")
+            return
+        }
+        #expect(observedID == requestID)
+        #expect(statistics.isEmpty)
+        #expect(!pending.finish(.success(reply)))
+
+        let earlyPending = TorrentStorageBrokerPendingReply()
+        #expect(earlyPending.finish(.success(reply)))
+        let lateInstalledTimeout = Task.detached { () -> Void in
+            _ = try? await ContinuousClock().sleep(for: .seconds(30))
+        }
+        defer { lateInstalledTimeout.cancel() }
+        earlyPending.installTimeoutTask(lateInstalledTimeout)
+
+        #expect(lateInstalledTimeout.isCancelled)
+        await installedTimeout.value
+        await lateInstalledTimeout.value
+    }
+
     @Test("The client accepts an exact regular payload descriptor")
     func exactRegularDescriptorIsAccepted() async throws {
         let broker = try TestStorageBroker(scenario: .valid)
