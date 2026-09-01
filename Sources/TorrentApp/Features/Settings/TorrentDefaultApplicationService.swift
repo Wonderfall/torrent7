@@ -40,7 +40,6 @@ nonisolated enum TorrentDefaultApplicationService {
         )
     }
 
-    @concurrent
     static func setAsTorrentFileDefault(
         applicationURL: URL
     ) async throws {
