@@ -462,7 +462,7 @@ private actor InvalidationRecorder {
     }
 }
 
-private final class TestNetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchecked Sendable {
+private final class TestNetworkInterfaceMonitor: NetworkInterfaceMonitoring, Sendable {
     private struct State {
         var continuation: AsyncStream<[NetworkInterfaceOption]>.Continuation?
         var initialInterfaces: [NetworkInterfaceOption]

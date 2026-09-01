@@ -50,6 +50,10 @@ struct TorrentStorageBrokerClientSecurityTests {
 
     @Test("The client accepts an exact regular payload descriptor")
     func exactRegularDescriptorIsAccepted() async throws {
+        // SAFETY: Ownership/lifetime: the returned descriptor remains open and mutable Data is
+        // pinned for the synchronous pread; bounds/alignment: exact Data capacity and offset zero
+        // are supplied with byte alignment; synchronization: the test exclusively owns both;
+        // safe alternative: reading the broker-returned descriptor without a path requires pread.
         let broker = try TestStorageBroker(scenario: .valid)
         let client = try await connect(to: broker)
         defer { client.cancel() }
@@ -214,6 +218,11 @@ private enum BrokerDescriptorScenario: Equatable, Sendable {
         rootPath: String,
         payloadPath: String
     ) -> XPCDictionary? {
+        // SAFETY: Ownership/lifetime: path C strings and local stat storage live through synchronous
+        // calls and each descriptor is deferred-closed after XPC duplicates it; bounds/alignment:
+        // withCString NUL-terminates paths and stat storage is exact/aligned; synchronization:
+        // each response owns local state; safe alternative: adversarial descriptor construction
+        // and authentication require direct Darwin open/fstat calls.
         switch request {
         case .handshake:
             return try? TorrentStorageBrokerIPCCodec.encode(

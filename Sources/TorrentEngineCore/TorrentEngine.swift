@@ -49,6 +49,11 @@ private func stringFromBridgeBuffer(_ buffer: [CChar]) -> String {
 }
 
 private func torrentWakeCallback(_ context: UnsafeMutableRawPointer?) {
+    // SAFETY: Ownership/lifetime: TorrentClientHandle keeps the relay alive while native may
+    // invoke this nonescaping callback; bounds/alignment: the opaque pointer is the exact class
+    // pointer installed at registration and no bytes are indexed; synchronization: signal uses
+    // Mutex and is callback-thread safe; safe alternative: the C callback ABI cannot carry a
+    // managed Swift reference.
     guard let context = unsafe context else {
         return
     }
@@ -131,6 +136,10 @@ private struct AddedTorrentIdentity: Sendable {
         payloadBroker: any TorrentPayloadBrokerAccess,
         alertErrorReader: TorrentAlertErrorReader? = nil
     ) throws {
+        // SAFETY: Ownership/lifetime: the bridge version pointer has process-static lifetime;
+        // bounds/alignment: the bridge contract guarantees a NUL-terminated CChar sequence;
+        // synchronization: immutable version storage is read during actor initialization;
+        // safe alternative: the C bridge exposes its version only as a C string pointer.
         self.stateDirectory = stateDirectory
         self.payloadBroker = payloadBroker
         self.alertErrorReader = alertErrorReader
@@ -148,6 +157,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package init(startupFailureMessage: String) {
+        // SAFETY: Ownership/lifetime: the bridge version pointer has process-static lifetime;
+        // bounds/alignment: the bridge contract guarantees a NUL-terminated CChar sequence;
+        // synchronization: immutable version storage is read during actor initialization;
+        // safe alternative: the C bridge exposes its version only as a C string pointer.
         stateDirectory = nil
         payloadBroker = nil
         alertErrorReader = nil
@@ -199,6 +212,11 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func shutdownSafely() async throws {
+        // SAFETY: Ownership/lifetime: the actor-owned handle keeps each captured client pointer
+        // alive until destroyClient after all synchronous bridge calls; bounds/alignment: called
+        // helpers use typed scalars/spans and validate returned counts; synchronization: actor
+        // isolation serializes shutdown and native blocking waits for worker quiescence;
+        // safe alternative: the C++ client lifecycle is available only through the C bridge.
         guard let initialClient = unsafe client?.pointer else {
             isShutdown = true
             runtimeFailureMessage.withLock { message in
@@ -284,6 +302,11 @@ private struct AddedTorrentIdentity: Sendable {
         httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride = .inherit,
         allowPreMetadataDHT: Bool = false
     ) throws -> String {
+        // SAFETY: Ownership/lifetime: the actor-owned client and all payload/output arrays live
+        // through the synchronous add call; bounds/alignment: SafeInterop Span wrappers carry
+        // exact element counts and the fixed output capacity is bridge-defined; synchronization:
+        // actor isolation serializes client mutation; safe alternative: adding to the C++ engine
+        // requires its C ABI despite bounded Swift wrappers.
         let client = try unsafe requireClient()
         let bridgePayload = try TorrentMagnetBridgePayload(magnet)
         guard let requestedID = identityStore.makeCanonicalID() else {
@@ -362,6 +385,11 @@ private struct AddedTorrentIdentity: Sendable {
         httpsTrackerPolicy: TorrentHTTPSTrackerPolicyOverride = .inherit,
         httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride = .inherit
     ) throws -> String {
+        // SAFETY: Ownership/lifetime: the actor-owned client, parsed capsule, priorities, and
+        // output buffers live through each synchronous add call; bounds/alignment: SafeInterop
+        // spans carry exact element counts and fixed fields are populated by bounded helpers;
+        // synchronization: actor isolation serializes client mutation; safe alternative: the
+        // C++ engine can only consume the capsule through its C ABI.
         let client = try unsafe requireClient()
         try Self.validateTorrentData(data)
         let metainfo = try TorrentMetainfoParser().parse(data)
@@ -443,6 +471,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func pause(id: String) throws {
+        // SAFETY: Ownership/lifetime: the actor-owned handle keeps the client alive through the
+        // synchronous bridge call; bounds/alignment: the token is a validated scalar and the
+        // error span is bounded; synchronization: actor isolation serializes mutation;
+        // safe alternative: pause is exposed only by the C++ bridge ABI.
         let client = try unsafe requireClient()
         let nativeToken = try nativeToken(for: id)
         try throwingBridgeCall { errorBuffer in
@@ -451,6 +483,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func resume(id: String) throws {
+        // SAFETY: Ownership/lifetime: the actor-owned handle keeps the client alive through all
+        // synchronous calls; bounds/alignment: validated scalar tokens and bounded spans are used;
+        // synchronization: actor isolation serializes resume and queue-state application;
+        // safe alternative: native resume/queue operations exist only behind the C bridge ABI.
         let client = try unsafe requireClient()
         let nativeToken = try nativeToken(for: id)
         try unsafe ensureQueueState(client: client)
@@ -461,6 +497,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func reannounce(id: String) throws {
+        // SAFETY: Ownership/lifetime: the actor-owned handle keeps the client alive through the
+        // synchronous call; bounds/alignment: the token is validated and the error span bounded;
+        // synchronization: actor isolation serializes client access; safe alternative:
+        // reannounce is exposed only by the C++ bridge ABI.
         let client = try unsafe requireClient()
         let nativeToken = try nativeToken(for: id)
         try throwingBridgeCall { errorBuffer in
@@ -469,6 +509,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func forceRecheck(id: String) throws {
+        // SAFETY: Ownership/lifetime: the actor-owned handle keeps the client alive through the
+        // synchronous call; bounds/alignment: the token is validated and the error span bounded;
+        // synchronization: actor isolation serializes client access; safe alternative:
+        // force-recheck is exposed only by the C++ bridge ABI.
         let client = try unsafe requireClient()
         let nativeToken = try nativeToken(for: id)
         try throwingBridgeCall { errorBuffer in
@@ -477,6 +521,11 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func remove(id: String) throws -> TorrentRemovalOutcome {
+        // SAFETY: Ownership/lifetime: the actor-owned handle keeps `client` alive across this
+        // nonsuspending removal transaction and every local bridge buffer remains in scope;
+        // bounds/alignment: native tokens, spans, and returned counts are validated by helpers;
+        // synchronization: actor isolation plus durable tombstone sequencing serializes removal;
+        // safe alternative: native removal/persistence operations exist only through the C ABI.
         let client = try unsafe requireClient()
         guard let nativeToken = identityStore.beginRemoval(id: id) else {
             throw TorrentEngineError.bridgeError("Torrent not found.")
@@ -597,6 +646,10 @@ private struct AddedTorrentIdentity: Sendable {
         _ settings: TorrentSettings,
         networkBinding: TorrentNetworkBinding
     ) throws {
+        // SAFETY: Ownership/lifetime: the actor-owned client remains alive for all synchronous
+        // settings/state calls; bounds/alignment: settings use typed fields and exact spans;
+        // synchronization: actor isolation serializes configuration changes and network blocking;
+        // safe alternative: libtorrent settings are available only through the C bridge ABI.
         let client = try unsafe requireClient()
         try unsafe applyNativeSettings(settings, networkBlocked: true, client: client)
         if sourcePolicyStore.updateDefaults(settings) {
@@ -613,6 +666,10 @@ private struct AddedTorrentIdentity: Sendable {
         networkBlocked: Bool,
         client: OpaquePointer
     ) throws {
+        // SAFETY: Ownership/lifetime: the caller's handle owns `client` and local settings/name
+        // bytes live through the synchronous call; bounds/alignment: SafeInterop Span supplies
+        // the exact CChar count and the error buffer is bounded; synchronization: callers are
+        // actor-isolated; safe alternative: the native settings API is a C bridge function.
         try throwingBridgeCall { errorBuffer in
             let networkInterfaceBytes = settings.libtorrentRequiredNetworkInterfaceName.utf8.map {
                 CChar(bitPattern: $0)
@@ -648,18 +705,30 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func blockNetworkNow() throws -> TorrentNetworkBlockDisposition {
+        // SAFETY: Ownership/lifetime: the actor-owned handle keeps the client alive for the
+        // synchronous block; bounds/alignment: only a bounded error span is passed;
+        // synchronization: actor isolation serializes containment; safe alternative:
+        // native network containment is exposed only through the C bridge.
         let client = try unsafe requireClient()
         try unsafe blockNetwork(client: client)
         return .engineRemainsAvailable
     }
 
     private func blockNetwork(client: OpaquePointer) throws {
+        // SAFETY: Ownership/lifetime: the caller's actor-owned handle keeps `client` alive;
+        // bounds/alignment: the mutable error span has exact array capacity; synchronization:
+        // callers serialize access through the actor; safe alternative: blocking the native
+        // engine network requires the C bridge function.
         try throwingBridgeCall { errorBuffer in
             unsafe TorrentClientBlockNetwork(client, &errorBuffer)
         }
     }
 
     package func saveAll() {
+        // SAFETY: Ownership/lifetime: the actor-owned handle keeps the pointer alive for these
+        // nonsuspending calls; bounds/alignment: persistence helpers validate tokens/counts and
+        // use bounded spans; synchronization: actor isolation serializes client/persistence state;
+        // safe alternative: native snapshot/resume persistence is only exposed by the C bridge.
         guard let pointer = unsafe client?.pointer else {
             return
         }
@@ -679,11 +748,19 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func saveAllChecked() throws {
+        // SAFETY: Ownership/lifetime: the actor-owned handle keeps the client alive for the
+        // synchronous helper; bounds/alignment: bounded bridge helpers validate all buffers;
+        // synchronization: actor isolation serializes persistence; safe alternative:
+        // native resume persistence is available only through the C bridge.
         let client = try unsafe requireClient()
         try unsafe saveAllChecked(client: client)
     }
 
     private func saveAllChecked(client: OpaquePointer) throws {
+        // SAFETY: Ownership/lifetime: the caller's handle owns `client` for this nonsuspending
+        // function; bounds/alignment: persistence helpers validate tokens/counts and spans;
+        // synchronization: callers are actor-isolated; safe alternative: native persistence
+        // operations are available only through the C bridge ABI.
         if !identityStore.isInitialized {
             try unsafe refreshNativeState(client: client)
         }
@@ -705,6 +782,10 @@ private struct AddedTorrentIdentity: Sendable {
         if let alertErrorReader {
             return alertErrorReader()
         }
+        // SAFETY: Ownership/lifetime: the actor-owned handle and local CChar array live through
+        // the synchronous copy; bounds/alignment: MutableSpan carries the exact 1,024-element
+        // capacity and decoding stops at NUL; synchronization: actor isolation serializes drain;
+        // safe alternative: the native alert queue is exposed only through the C bridge.
         guard let pointer = unsafe client?.pointer else {
             return nil
         }
@@ -723,6 +804,11 @@ private struct AddedTorrentIdentity: Sendable {
         guard criticalFaults.isEmpty else {
             return TorrentEngineDirtySet.allKnown.rawValue
         }
+        // SAFETY: Ownership/lifetime: the actor-owned handle and each event buffer live through
+        // synchronous bridge drains; bounds/alignment: SafeInterop MutableSpan communicates exact
+        // capacities and every required count is capped before allocation/copy; synchronization:
+        // actor isolation serializes drain/state updates; safe alternative: native events are
+        // available only through the C bridge ABI.
         guard let pointer = unsafe client?.pointer else {
             return 0
         }
@@ -897,6 +983,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func networkStatus() -> TorrentNetworkStatus {
+        // SAFETY: Ownership/lifetime: the actor-owned handle keeps the client alive through the
+        // by-value synchronous query; bounds/alignment: the bridge returns a fixed typed struct;
+        // synchronization: actor isolation serializes access; safe alternative: native network
+        // status is available only through the C bridge ABI.
         guard let pointer = unsafe client?.pointer else {
             return .empty
         }
@@ -909,6 +999,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func bridgeHealth() -> TorrentBridgeHealth {
+        // SAFETY: Ownership/lifetime: the actor-owned handle keeps the client alive through the
+        // by-value synchronous query; bounds/alignment: the bridge returns a fixed typed struct;
+        // synchronization: actor isolation serializes access; safe alternative: native health
+        // state is available only through the C bridge ABI.
         guard let pointer = unsafe client?.pointer else {
             return .unavailable
         }
@@ -1007,6 +1101,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func sourcePolicy(id: String) throws -> TorrentSourcePolicy {
+        // SAFETY: Ownership/lifetime: the actor-owned handle keeps the client alive while state
+        // is synchronously refreshed; bounds/alignment: refresh helpers use exact bounded spans;
+        // synchronization: actor isolation serializes native/Swift state reconciliation;
+        // safe alternative: native source policy is available only through the C bridge.
         let client = try unsafe requireClient()
         try unsafe ensureSourcePolicyState(client: client)
         guard let policy = sourcePolicyStore.policy(for: id) else {
@@ -1016,6 +1114,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func setSourcePolicy(id: String, mutation: TorrentSourcePolicyMutation) throws {
+        // SAFETY: Ownership/lifetime: the actor-owned handle keeps the client alive during
+        // synchronous refresh/application; bounds/alignment: typed applications use exact spans;
+        // synchronization: actor isolation serializes transactional policy updates;
+        // safe alternative: native source-policy mutation is exposed only through the C bridge.
         let client = try unsafe requireClient()
         try unsafe ensureSourcePolicyState(client: client)
         var nextStore = sourcePolicyStore
@@ -1040,6 +1142,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func torrentOptions(id: String) throws -> TorrentOptions {
+        // SAFETY: Ownership/lifetime: the actor-owned client and local result/error storage live
+        // through synchronous calls; bounds/alignment: fixed typed results and bounded error
+        // spans are used; synchronization: actor isolation serializes state access;
+        // safe alternative: native torrent options are available only through the C bridge.
         let client = try unsafe requireClient()
         let nativeToken = try nativeToken(for: id)
         try unsafe ensureQueueState(client: client)
@@ -1057,6 +1163,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func setTorrentOptions(id: String, options: TorrentOptions) throws {
+        // SAFETY: Ownership/lifetime: the actor-owned client and local option/error values live
+        // through synchronous calls; bounds/alignment: only fixed structs and exact queue spans
+        // cross the bridge; synchronization: actor isolation serializes the transactional update;
+        // safe alternative: native option and queue mutation require the C bridge ABI.
         let client = try unsafe requireClient()
         let nativeToken = try nativeToken(for: id)
         try unsafe ensureQueueState(client: client)
@@ -1073,6 +1183,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func moveTorrentInQueue(id: String, move: TorrentQueueMove) throws {
+        // SAFETY: Ownership/lifetime: the actor-owned handle keeps the client alive through the
+        // synchronous queue application; bounds/alignment: an exact typed placement span is used;
+        // synchronization: actor isolation serializes queue reconciliation; safe alternative:
+        // native queue mutation is available only through the C bridge ABI.
         let client = try unsafe requireClient()
         try unsafe ensureQueueState(client: client)
         var nextQueueStore = queueStore
@@ -1084,6 +1198,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func setFilePriority(id: String, fileIndex: Int32, priority: TorrentFilePriority) throws {
+        // SAFETY: Ownership/lifetime: the actor-owned handle and local error buffer live through
+        // the synchronous call; bounds/alignment: token/index/priority are validated typed scalars
+        // and the error span is bounded; synchronization: actor isolation serializes mutation;
+        // safe alternative: native file-priority mutation requires the C bridge ABI.
         let client = try unsafe requireClient()
         let nativeToken = try nativeToken(for: id)
         try throwingBridgeCall { errorBuffer in
@@ -1092,6 +1210,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func trackerBatch(id: String, since previousRevision: UInt64?) -> TorrentTrackerBatch? {
+        // SAFETY: Ownership/lifetime: the actor-owned handle and each local snapshot array live
+        // through synchronous copies; bounds/alignment: MutableSpan supplies exact capacities and
+        // required counts are nonnegative, capped, and equality-checked; synchronization: actor
+        // isolation serializes copies; safe alternative: native tracker snapshots use the C ABI.
         guard let client, let pointer = unsafe client.pointer else {
             return nil
         }
@@ -1164,6 +1286,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func trackerHostBatch() throws -> TorrentTrackerHostBatch {
+        // SAFETY: Ownership/lifetime: the actor-owned handle and local host arrays live through
+        // synchronous bridge copies; bounds/alignment: exact MutableSpan capacities are capped and
+        // returned counts are checked before indexing; synchronization: actor isolation serializes
+        // reconciliation; safe alternative: native tracker-host snapshots use the C bridge ABI.
         guard let client, let pointer = unsafe client.pointer else {
             return trackerHostStore.batch()
         }
@@ -1257,6 +1383,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func webSeedBatch(id: String, since previousRevision: UInt64?) -> TorrentWebSeedBatch? {
+        // SAFETY: Ownership/lifetime: the actor-owned handle and local web-seed arrays live through
+        // synchronous copies; bounds/alignment: MutableSpan carries exact capped capacity and
+        // returned counts are checked before use; synchronization: actor isolation serializes copy;
+        // safe alternative: native web-seed snapshots are exposed only through the C bridge.
         guard let client, let pointer = unsafe client.pointer else {
             return nil
         }
@@ -1329,6 +1459,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func webSeedActivity(id: String) -> TorrentWebSeedActivity? {
+        // SAFETY: Ownership/lifetime: the actor-owned handle keeps the client alive for the
+        // synchronous by-value query; bounds/alignment: the bridge returns a fixed typed struct;
+        // synchronization: actor isolation serializes access; safe alternative: native web-seed
+        // activity is available only through the C bridge ABI.
         guard let client, let pointer = unsafe client.pointer else {
             return nil
         }
@@ -1347,6 +1481,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func peerSources(id: String) -> TorrentPeerSources? {
+        // SAFETY: Ownership/lifetime: the actor-owned handle keeps the client alive for the
+        // synchronous by-value query; bounds/alignment: the bridge returns a fixed typed struct;
+        // synchronization: actor isolation serializes access; safe alternative: native peer-source
+        // state is available only through the C bridge ABI.
         guard let client, let pointer = unsafe client.pointer else {
             return nil
         }
@@ -1365,6 +1503,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func fileBatch(id: String, since previousRevision: UInt64?) -> TorrentFileBatch? {
+        // SAFETY: Ownership/lifetime: the actor-owned handle and each local file array live through
+        // synchronous copies; bounds/alignment: exact MutableSpan capacities are capped and
+        // returned counts are equality-checked before indexing; synchronization: actor isolation
+        // serializes access; safe alternative: native file snapshots use the C bridge ABI.
         guard let client, let pointer = unsafe client.pointer else {
             return nil
         }
@@ -1437,6 +1579,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func pieceMapBatch(id: String, since previousRevision: UInt64?) -> TorrentPieceMapBatch? {
+        // SAFETY: Ownership/lifetime: the actor-owned handle and local byte arrays live through
+        // synchronous copies; bounds/alignment: MutableSpan carries exact capped byte capacity and
+        // returned counts are checked before slicing; synchronization: actor isolation serializes
+        // access; safe alternative: the native piece map is exposed only through the C bridge.
         guard let client, let pointer = unsafe client.pointer else {
             return nil
         }
@@ -1510,6 +1656,11 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     package func torrentMetadata(id: String) throws -> Data? {
+        // SAFETY: Ownership/lifetime: the actor-owned handle and local byte array live through the
+        // synchronous metadata copy; bounds/alignment: the announced count is positive, capped by
+        // the torrent input limit, represented by an exact MutableSpan, and equality-checked;
+        // synchronization: actor isolation serializes access; safe alternative: native metadata
+        // is exposed only through the C bridge ABI.
         guard let client, let pointer = unsafe client.pointer else {
             return nil
         }
@@ -1581,6 +1732,10 @@ private struct AddedTorrentIdentity: Sendable {
         ifChangedSince previousRevision: UInt64?,
         refreshNative: Bool
     ) throws -> TorrentSnapshotBatch? {
+        // SAFETY: Ownership/lifetime: the passed handle keeps its pointer alive for the
+        // nonsuspending refresh; bounds/alignment: refresh helpers use exact capped spans;
+        // synchronization: actor isolation serializes handle and store access; safe alternative:
+        // native snapshot refresh is available only through the C bridge.
         if refreshNative {
             guard let pointer = unsafe client.pointer else {
                 throw TorrentEngineError.bridgeError("The torrent engine is unavailable.")
@@ -1591,6 +1746,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     private func ensureQueueState(client: OpaquePointer) throws {
+        // SAFETY: Ownership/lifetime: the caller's actor-owned handle keeps `client` alive;
+        // bounds/alignment: refresh uses typed, capped spans; synchronization: actor isolation
+        // serializes queue reconciliation; safe alternative: native state is available only
+        // through the C bridge ABI.
         guard !queueStore.isInitialized || queueNeedsApplication else {
             return
         }
@@ -1598,6 +1757,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     private func ensureSourcePolicyState(client: OpaquePointer) throws {
+        // SAFETY: Ownership/lifetime: the caller's actor-owned handle keeps `client` alive;
+        // bounds/alignment: refresh uses typed, capped spans; synchronization: actor isolation
+        // serializes source-policy reconciliation; safe alternative: native state is available
+        // only through the C bridge ABI.
         guard !sourcePolicyStore.isInitialized || sourcePolicyNeedsApplication else {
             return
         }
@@ -1605,6 +1768,11 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     private func refreshNativeState(client: OpaquePointer) throws {
+        // SAFETY: Ownership/lifetime: the caller's actor-owned handle owns `client` throughout
+        // this nonsuspending reconciliation; bounds/alignment: all copy/apply helpers use exact
+        // typed spans, capped counts, and validated identities; synchronization: actor isolation
+        // makes reconciliation transactional; safe alternative: native state exists only behind
+        // the C bridge ABI.
         var snapshots = try reconcileNativeSnapshots(
             unsafe copyNativeSnapshots(client: client)
         )
@@ -1673,6 +1841,10 @@ private struct AddedTorrentIdentity: Sendable {
         _ state: TorrentQueueStore,
         client: OpaquePointer
     ) throws {
+        // SAFETY: Ownership/lifetime: the caller owns `client` and the placement array/error
+        // buffer live through the synchronous call; bounds/alignment: Span carries the exact
+        // typed element count; synchronization: actor isolation serializes queue application;
+        // safe alternative: native queue state is accepted only by the C bridge.
         let placements = try state.placements.map { placement in
             try nativeQueuePlacement(placement)
         }
@@ -1692,6 +1864,10 @@ private struct AddedTorrentIdentity: Sendable {
         _ state: TorrentSourcePolicyStore,
         client: OpaquePointer
     ) throws {
+        // SAFETY: Ownership/lifetime: the caller owns `client` and the application array/error
+        // buffer live through the synchronous call; bounds/alignment: Span carries the exact
+        // typed element count; synchronization: actor isolation serializes policy application;
+        // safe alternative: native source policy is accepted only by the C bridge.
         let applications = try state.applications.map { application in
             try nativeSourcePolicyApplication(application)
         }
@@ -1710,6 +1886,10 @@ private struct AddedTorrentIdentity: Sendable {
     private func copyNativeSourcePolicyStates(
         client: OpaquePointer
     ) throws -> [TorrentSourcePolicyStore.NativeState] {
+        // SAFETY: Ownership/lifetime: the caller owns `client` and each local state array lives
+        // through synchronous copies; bounds/alignment: MutableSpan carries exact capacity,
+        // counts are nonnegative/capped/equality-checked; synchronization: actor isolation
+        // serializes copy/reconciliation; safe alternative: native states use the C bridge ABI.
         var requiredCount: Int32 = 0
         var available: UInt8 = 0
         var stateSpan: MutableSpan<TTorrentSourcePolicyState>?
@@ -1778,6 +1958,10 @@ private struct AddedTorrentIdentity: Sendable {
     private func copyNativeSnapshots(
         client: OpaquePointer
     ) throws -> [TorrentIdentityStore.NativeSnapshot] {
+        // SAFETY: Ownership/lifetime: the caller owns `client` and each local snapshot array
+        // lives through synchronous copies; bounds/alignment: MutableSpan carries exact capacity,
+        // counts are nonnegative/capped/equality-checked; synchronization: actor isolation
+        // serializes copy/reconciliation; safe alternative: native snapshots use the C bridge ABI.
         var requiredCount: Int32 = 0
         var available: UInt8 = 0
         var snapshotSpan: MutableSpan<TTorrentSnapshot>?
@@ -1846,6 +2030,11 @@ private struct AddedTorrentIdentity: Sendable {
     private func drainNativePresentationMetadata(
         client: OpaquePointer
     ) throws -> [TTorrentPresentationMetadata] {
+        // SAFETY: Ownership/lifetime: the caller owns `client` and local metadata arrays live
+        // through synchronous drains; bounds/alignment: exact MutableSpan capacities and hard
+        // maximums bound all writes, with returned counts equality-checked; synchronization:
+        // actor isolation provides a single drainer; safe alternative: native metadata is exposed
+        // only by the C bridge ABI.
         var requiredCount: Int32 = 0
         var available: UInt8 = 0
         var metadataSpan: MutableSpan<TTorrentPresentationMetadata>?
@@ -1916,6 +2105,10 @@ private struct AddedTorrentIdentity: Sendable {
     private func processPendingPersistence(
         client: OpaquePointer
     ) -> [String] {
+        // SAFETY: Ownership/lifetime: the caller's actor-owned handle owns `client` and error
+        // buffers live through synchronous saves; bounds/alignment: tokens are tracked scalars and
+        // error spans are exact; synchronization: actor isolation serializes persistence attempts;
+        // safe alternative: resume save/recovery operations exist only through the C bridge.
         var errors = [String]()
         for attempt in persistenceStore.pendingAttempts() {
             do {
@@ -1942,6 +2135,11 @@ private struct AddedTorrentIdentity: Sendable {
     private func processPendingRemovalCleanups(
         client: OpaquePointer
     ) -> [String] {
+        // SAFETY: Ownership/lifetime: the caller's actor-owned handle owns `client` for all
+        // synchronous cleanup calls; bounds/alignment: resume rows/error spans are exact and
+        // filenames are validated/NUL-terminated; synchronization: actor isolation and the
+        // persistence state machine serialize retries; safe alternative: native removal cleanup
+        // is available only through the C bridge ABI.
         var errors = [String]()
         for cleanup in persistenceStore.pendingRemovalCleanups {
             if !cleanup.resumeDataWasRemoved {
@@ -1998,6 +2196,10 @@ private struct AddedTorrentIdentity: Sendable {
         client: OpaquePointer,
         nativeToken: UInt64
     ) throws -> [String] {
+        // SAFETY: Ownership/lifetime: the caller owns `client` and the local row array lives
+        // through synchronous copies; bounds/alignment: exact MutableSpan capacity is bounded by
+        // TTORRENT_MAX_RESUME_ID_COUNT and counts are equality-checked; synchronization: actor
+        // isolation serializes access; safe alternative: native resume IDs use the C bridge ABI.
         var requiredCount: Int32 = 0
         var available: UInt8 = 0
         var idSpan: MutableSpan<TTorrentResumeID>?
@@ -2049,6 +2251,11 @@ private struct AddedTorrentIdentity: Sendable {
         client: OpaquePointer,
         resumeIDs: [String]
     ) throws -> String {
+        // SAFETY: Ownership/lifetime: the caller owns `client` and row/filename/error buffers live
+        // through the synchronous call; bounds/alignment: exact Span/MutableSpan capacities are
+        // bridge-defined and each ID was bounded during conversion; synchronization: actor
+        // isolation serializes durable removal state; safe alternative: native tombstone creation
+        // exists only through the C bridge ABI.
         let rows = try nativeResumeIDs(resumeIDs)
         var filenameBuffer = Array<CChar>(
             repeating: 0,
@@ -2077,6 +2284,10 @@ private struct AddedTorrentIdentity: Sendable {
         client: OpaquePointer,
         resumeIDs: [String]
     ) throws {
+        // SAFETY: Ownership/lifetime: the caller owns `client` and row/error buffers live through
+        // the synchronous call; bounds/alignment: the exact row Span contains validated bounded
+        // IDs; synchronization: actor isolation serializes persistence cleanup; safe alternative:
+        // native resume-data deletion exists only through the C bridge ABI.
         let rows = try nativeResumeIDs(resumeIDs)
         try throwingBridgeCall { errorBuffer in
             let idSpan: Span<TTorrentResumeID>? = rows.span
@@ -2092,6 +2303,10 @@ private struct AddedTorrentIdentity: Sendable {
         client: OpaquePointer,
         filename: String
     ) throws {
+        // SAFETY: Ownership/lifetime: the caller owns `client`, the String pins its C storage, and
+        // the error buffer lives through the synchronous call; bounds/alignment: filename was
+        // produced by the bounded bridge and withCString NUL-terminates it; synchronization:
+        // actor isolation serializes cleanup; safe alternative: native tombstone deletion is a C API.
         try throwingBridgeCall { errorBuffer in
             unsafe filename.withCString { filenamePointer in
                 unsafe TorrentClientClearRemovalTombstone(
@@ -2104,6 +2319,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     private func nativeResumeIDs(_ ids: [String]) throws -> [TTorrentResumeID] {
+        // SAFETY: Ownership/lifetime: each local imported row and UTF-8 array lives through its
+        // synchronous copy; bounds/alignment: IDs are shorter than the fixed destination field,
+        // indices come from the source array, and tuple storage is byte-addressable; synchronization:
+        // locals are unshared; safe alternative: imported fixed C arrays lack a Swift collection API.
         guard !ids.isEmpty,
               ids.count <= Int(TTORRENT_MAX_RESUME_ID_COUNT),
               Set(ids).count == ids.count else {
@@ -2143,6 +2362,14 @@ private struct AddedTorrentIdentity: Sendable {
         enablePeerExchangePlugin: Bool,
         payloadBroker: any TorrentPayloadBrokerAccess
     ) throws -> TorrentClientHandle {
+        // SAFETY: Ownership/lifetime: each Swift context starts with one local retain, native
+        // synchronously takes its own retain through the installed callback before creation returns,
+        // deferred releases balance only the local retains, and the returned handle uniquely owns
+        // the client; bounds/alignment: callback tables are exact imported structs, the path is
+        // NUL-terminated, and MutableSpan bounds the error buffer; synchronization: Sendable callback
+        // contexts provide their own locking and the client is not published until construction ends;
+        // safe alternative: C callback tables and opaque client creation cannot be represented by a
+        // wholly safe Swift API.
         try clientCreationPreflight.withLock { $0 }?(
             stateDirectory,
             enablePeerExchangePlugin
@@ -2245,6 +2472,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     private func requireClient() throws -> OpaquePointer {
+        // SAFETY: Ownership/lifetime: the actor-owned TorrentClientHandle remains stored while the
+        // returned pointer is used by nonsuspending actor methods; bounds/alignment: this is an
+        // opaque handle and no raw bytes are accessed; synchronization: actor isolation prevents
+        // concurrent destruction; safe alternative: the C bridge identifies its client by pointer.
         if let startupFailureMessage {
             throw TorrentEngineError.startupFailed(startupFailureMessage)
         }
@@ -2262,6 +2493,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     private func nativeToken(for id: TorrentItem.ID) throws -> UInt64 {
+        // SAFETY: Ownership/lifetime: the actor-owned handle keeps the client alive during any
+        // synchronous refresh; bounds/alignment: refresh helpers use bounded typed spans;
+        // synchronization: actor isolation serializes identity reconciliation; safe alternative:
+        // native token discovery requires querying the C bridge.
         let client = try unsafe requireClient()
         if !identityStore.isInitialized {
             try unsafe refreshNativeState(client: client)
@@ -2301,6 +2536,11 @@ private struct AddedTorrentIdentity: Sendable {
             inout MutableSpan<CChar>?
         ) -> Int32
     ) throws -> AddedTorrentIdentity {
+        // SAFETY: Ownership/lifetime: output/error arrays and scalar inout values remain alive for
+        // the nonescaping synchronous body invocation; bounds/alignment: MutableSpan exposes exact
+        // capacities and Swift supplies aligned typed scalar pointers; synchronization: caller is
+        // actor-isolated and locals are unshared; safe alternative: the C add ABI requires pointer
+        // outputs even though its buffers use SafeInterop wrappers.
         var outputBuffer = Array<CChar>(repeating: 0, count: capacity)
         var errorBuffer = Array<CChar>(repeating: 0, count: 1_024)
         var addOutcome = Int32(TTORRENT_ADD_REJECTED)
@@ -2351,6 +2591,11 @@ private struct AddedTorrentIdentity: Sendable {
         httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride,
         allowPreMetadataDHT: Bool
     ) -> TTorrentAddOptions {
+        // SAFETY: Ownership/lifetime: the local imported struct and canonical-ID Data live through
+        // the synchronous copy; bounds/alignment: canonical IDs are generated within the fixed
+        // TTORRENT canonical_id capacity and copyBytes is bounded by destination storage;
+        // synchronization: local values are unshared; safe alternative: the imported fixed C array
+        // has no mutable Swift collection API.
         var options = TTorrentAddOptions()
         options.starts_paused = startsPaused.bridgeFlag
         options.queue_priority = queuePriority.bridgeByteValue
@@ -2376,6 +2621,11 @@ private struct AddedTorrentIdentity: Sendable {
     private static func nativeStorageActivation(
         _ activation: TorrentStorageActivation
     ) -> TTorrentStorageActivation {
+        // SAFETY: Ownership/lifetime: the local imported struct, UUID, digest, and ID bytes live
+        // through each synchronous copy; bounds/alignment: UUID/digest sizes are fixed by validated
+        // model invariants and preserved IDs fit their bridge field, while copyBytes remains bounded;
+        // synchronization: locals are unshared; safe alternative: imported fixed C arrays have no
+        // mutable Swift collection API.
         var native = TTorrentStorageActivation()
         native.claim_generation = activation.generation
         var uuid = activation.claimID.uuid
@@ -2512,10 +2762,20 @@ private struct AddedTorrentIdentity: Sendable {
     private let wakeRelay: TorrentWakeRelay
 
     var pointer: OpaquePointer? {
+        // SAFETY: Ownership/lifetime: `self` uniquely owns rawPointer until destroy sets it nil;
+        // bounds/alignment: it is an opaque bridge handle with no byte access; synchronization:
+        // the enclosing TorrentEngine actor serializes all access; safe alternative: the C bridge
+        // exposes no non-pointer client identity.
         unsafe rawPointer
     }
 
     init(_ pointer: OpaquePointer, wakeRelay: TorrentWakeRelay) {
+        // SAFETY: Ownership/lifetime: this handle assumes unique ownership of `pointer` and stores
+        // a strong wakeRelay before installing its unretained callback context; client destruction
+        // clears and quiesces callbacks before either object dies; bounds/alignment: both are exact
+        // opaque object pointers with no byte access; synchronization: native callback bookkeeping
+        // and TorrentWakeRelay's Mutex support cross-thread wakes; safe alternative: the C bridge
+        // callback/context API cannot retain a Swift object directly.
         unsafe rawPointer = pointer
         self.wakeRelay = wakeRelay
         unsafe TorrentClientSetWakeCallback(
@@ -2526,6 +2786,10 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     func destroyBlocking() {
+        // SAFETY: Ownership/lifetime: taking then niling rawPointer transfers its unique ownership
+        // to the consuming destroy call; bounds/alignment: it is the exact opaque handle returned
+        // by creation; synchronization: the engine actor is the sole caller and blocking destroy
+        // quiesces callbacks/workers; safe alternative: native destruction requires the C bridge.
         guard let pointer = unsafe rawPointer else {
             return
         }
@@ -2535,6 +2799,11 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     deinit {
+        // SAFETY: Ownership/lifetime: a remaining rawPointer is still uniquely owned by this handle
+        // and the consuming native destructor clears/quiesces the wake callback before returning;
+        // bounds/alignment: it is the exact opaque handle returned by creation; synchronization:
+        // no actor operation can retain this dead handle; safe alternative: RAII fallback cleanup
+        // must call the C bridge destructor.
         if let rawPointer = unsafe rawPointer {
             unsafe TorrentClientDestroy(rawPointer)
         }

@@ -449,6 +449,10 @@ package enum TorrentEngineIPCEnvelopeCodec {
         guard dictionary.keys.contains(field) else {
             throw TorrentEngineIPCError.missingField(field)
         }
+        // SAFETY: Ownership/lifetime: the immutable dictionary retains the borrowed XPC
+        // value for this lookup; bounds/alignment: no raw buffer is exposed; synchronization:
+        // decoding does not mutate the dictionary; safe alternative: XPCDictionary's
+        // metatype-checked raw-object subscript is imported as unsafe.
         guard let object = unsafe dictionary[field, as: XPC_TYPE_UINT64] else {
             throw TorrentEngineIPCError.wrongFieldType(field: field, expected: "uint64")
         }
@@ -472,6 +476,10 @@ package enum TorrentEngineIPCEnvelopeCodec {
         guard dictionary.keys.contains(field) else {
             throw TorrentEngineIPCError.missingField(field)
         }
+        // SAFETY: Ownership/lifetime: the immutable dictionary retains the checked XPC
+        // string until Swift copies it; bounds/alignment: no raw buffer is exposed;
+        // synchronization: decoding does not mutate the dictionary; safe alternative:
+        // checking an XPC value's concrete type requires the unsafe raw-object subscript.
         guard unsafe dictionary[field, as: XPC_TYPE_STRING] != nil,
               let value = dictionary[field, as: String.self] else {
             throw TorrentEngineIPCError.wrongFieldType(field: field, expected: "string")
@@ -559,6 +567,10 @@ package enum TorrentEngineIPCXPCValues {
         guard dictionary.keys.contains(field) else {
             return 0
         }
+        // SAFETY: Ownership/lifetime: the dictionary retains the borrowed XPC data object
+        // for the length query; bounds/alignment: no bytes are dereferenced; synchronization:
+        // the immutable message is decoded synchronously; safe alternative: concrete XPC
+        // data type validation requires the unsafe raw-object subscript.
         guard let object = unsafe dictionary[field, as: XPC_TYPE_DATA] else {
             throw TorrentEngineIPCError.wrongFieldType(field: field, expected: "data")
         }
@@ -576,6 +588,10 @@ package enum TorrentEngineIPCXPCValues {
             return
         }
         try TorrentEngineIPCPayloadBounds.validate(payload, maximumBytes: maximumBytes)
+        // SAFETY: Ownership/lifetime: Data pins its bytes for the synchronous create call
+        // and XPC copies them before the closure returns; bounds/alignment: the exact Data
+        // count is supplied and XPC accepts byte alignment; synchronization: `payload` is
+        // immutable; safe alternative: xpc_data_create has no buffer-safe Swift overload.
         let object = unsafe payload.withUnsafeBytes { bytes in
             unsafe xpc_data_create(bytes.baseAddress, bytes.count)
         }
@@ -592,6 +608,10 @@ package enum TorrentEngineIPCXPCValues {
         guard dictionary.keys.contains(field) else {
             return nil
         }
+        // SAFETY: Ownership/lifetime: the dictionary retains the XPC object throughout
+        // this synchronous copy; bounds/alignment: its reported length is validated before
+        // the returned pointer is copied as bytes; synchronization: the immutable message
+        // cannot change during decoding; safe alternative: XPC exposes data only via C pointers.
         guard let object = unsafe dictionary[field, as: XPC_TYPE_DATA] else {
             throw TorrentEngineIPCError.wrongFieldType(field: field, expected: "data")
         }

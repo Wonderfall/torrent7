@@ -639,6 +639,10 @@ struct TorrentStorageAuthorityTests {
 
     @Test("Atomic deletion capture preserves a replacement file")
     func deletionCapturePreservesReplacementFile() throws {
+        // SAFETY: Ownership/lifetime: test paths pin C strings for synchronous open and the
+        // descriptor remains open until deferred close; bounds/alignment: paths are NUL-terminated
+        // and local stat storage is exact/aligned; synchronization: test filesystem mutation is
+        // serial; safe alternative: validating inode capture/replacement requires descriptor syscalls.
         try withTemporaryDirectory { root in
             let fixture = try reserveSingleFile(
                 in: root,
@@ -982,6 +986,10 @@ struct TorrentStorageAuthorityTests {
 
     @Test("Explicit imports authorize identity-pinned deletion")
     func explicitImportAuthorizesDeletion() throws {
+        // SAFETY: Ownership/lifetime: path/name/tag storage lives through synchronous open/xattr
+        // calls and the descriptor is deferred-closed; bounds/alignment: C strings are terminated,
+        // exact tag count is supplied with byte alignment; synchronization: test mutations are
+        // serial; safe alternative: injecting stale descriptor xattrs requires Darwin APIs.
         try withTemporaryDirectory { root in
             let downloads = root.appending(path: "Downloads", directoryHint: .isDirectory)
             try FileManager.default.createDirectory(
@@ -1385,6 +1393,10 @@ struct TorrentStorageAuthorityTests {
 
     @Test("A brokered file FD cannot act as directory namespace authority")
     func brokeredDescriptorIsNotDirectoryAuthority() throws {
+        // SAFETY: Ownership/lifetime: the brokered descriptor stays open and every literal String
+        // pins its C bytes for synchronous capability probes; bounds/alignment: names are
+        // NUL-terminated and no raw buffer is indexed; synchronization: probes execute serially;
+        // safe alternative: proving denied directory capabilities requires direct *at syscalls.
         try withTemporaryDirectory { root in
             let fixture = try reserveSingleFile(
                 in: root,
@@ -1491,6 +1503,10 @@ struct TorrentStorageAuthorityTests {
 
     @Test("A stale issued FD remains bound to its unlinked inode")
     func claimRemovalIsSoftRevocation() throws {
+        // SAFETY: Ownership/lifetime: open descriptors remain valid and each Data value is pinned
+        // only for its synchronous pread/pwrite; bounds/alignment: exact byte counts and offset zero
+        // stay within storage; synchronization: test I/O is serial; safe alternative: verifying
+        // existing descriptor semantics requires positioned Darwin I/O.
         try withTemporaryDirectory { root in
             let fixture = try reserveSingleFile(
                 in: root,
@@ -1585,6 +1601,10 @@ struct TorrentStorageAuthorityTests {
 
     @Test("Imported payloads revalidate owner and file generation")
     func importedIdentityIncludesOwnerAndGeneration() throws {
+        // SAFETY: Ownership/lifetime: the URL path pins its C string and local stat storage lives
+        // through synchronous lstat; bounds/alignment: the path is NUL-terminated and stat storage
+        // exact/aligned; synchronization: test mutation is serial; safe alternative: generation
+        // and no-follow identity are available only from Darwin lstat.
         try withTemporaryDirectory { root in
             let downloads = root.appending(path: "Downloads", directoryHint: .isDirectory)
             try FileManager.default.createDirectory(
@@ -1711,6 +1731,10 @@ struct TorrentStorageAuthorityTests {
 
     @Test("A substituted FIFO cannot block a broker worker")
     func brokerRejectsFIFOWithoutBlocking() throws {
+        // SAFETY: Ownership/lifetime: path Strings live through synchronous mkfifo/open and any
+        // successful descriptor is explicitly closed; bounds/alignment: paths are NUL-terminated
+        // and no raw buffer is accessed; synchronization: test setup/access is serial;
+        // safe alternative: constructing and probing FIFO behavior requires Darwin filesystem APIs.
         try withTemporaryDirectory { root in
             let fixture = try reserveSingleFile(in: root, name: "payload.bin", size: 16)
             let claim = makeClaim(fixture.reservation, state: .active)
@@ -2250,6 +2274,10 @@ struct TorrentStorageAuthorityTests {
     }
 
     private func contents(of descriptor: Int32, count: Int) throws -> Data {
+        // SAFETY: Ownership/lifetime: caller keeps the descriptor open and mutable Data is pinned
+        // for synchronous pread; bounds/alignment: allocated count is passed exactly at offset zero
+        // with byte alignment; synchronization: helper is used serially; safe alternative:
+        // descriptor contents must be read without resolving a path.
         var result = Data(count: count)
         let bytesRead = unsafe result.withUnsafeMutableBytes { bytes in
             unsafe Darwin.pread(
@@ -2266,6 +2294,10 @@ struct TorrentStorageAuthorityTests {
     }
 
     private func ownershipTag(on descriptor: Int32) -> Data? {
+        // SAFETY: Ownership/lifetime: local tag/name storage lives through synchronous fgetxattr;
+        // bounds/alignment: exact tag capacity is passed with byte alignment and returned count is
+        // equality-checked; synchronization: helper only reads the test-owned descriptor;
+        // safe alternative: descriptor-based extended attributes have no safe Swift API.
         var tag = Data(count: TorrentStorageOwnershipTag.tagByteCount)
         let count = unsafe tag.withUnsafeMutableBytes { bytes in
             unsafe TorrentStorageDestinationPlanner.ownershipAttribute.withCString { name in

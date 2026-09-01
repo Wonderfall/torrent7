@@ -37,6 +37,11 @@ package protocol NetworkInterfaceMonitoring: AnyObject, Sendable {
 
     static let retainCallback:
         @convention(c) (UnsafeRawPointer) -> UnsafeRawPointer = { info in
+        // SAFETY: Ownership/lifetime: SCDynamicStore passes the exact Unmanaged pointer
+        // installed in its context and this callback adds its requested retain;
+        // bounds/alignment: the pointer addresses that class instance with no byte access;
+        // synchronization: ARC retain is thread-safe; safe alternative: the C context ABI
+        // cannot store a managed Swift reference.
         let retained = unsafe Unmanaged<NetworkInterfaceMonitorDynamicStoreContext>
             .fromOpaque(info)
             .retain()
@@ -45,6 +50,10 @@ package protocol NetworkInterfaceMonitoring: AnyObject, Sendable {
 
     static let releaseCallback:
         @convention(c) (UnsafeRawPointer) -> Void = { info in
+        // SAFETY: Ownership/lifetime: SCDynamicStore balances one retain previously returned
+        // by retainCallback; bounds/alignment: the opaque pointer still addresses the exact
+        // class instance with no byte access; synchronization: ARC release is thread-safe;
+        // safe alternative: the C context ABI cannot store a managed Swift reference.
         unsafe Unmanaged<NetworkInterfaceMonitorDynamicStoreContext>
             .fromOpaque(info)
             .release()
@@ -79,6 +88,12 @@ private struct VPNServiceAssociation {
     let interfaceName: String
 }
 
+// SAFETY: Ownership/lifetime: the monitor owns its framework monitors and continuation until
+// queue-confined cancellation, and installed callbacks capture it weakly; bounds/alignment:
+// the conformance itself exposes no raw memory, while each C boundary validates its own storage;
+// synchronization: every mutable field is accessed on the private serial queue and cancel()
+// synchronously enters that queue when needed; safe alternative: the callback-driven framework
+// APIs are not actor-isolated, so their queue confinement cannot be expressed as checked Sendable.
 package final class NetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchecked Sendable {
     private static let connectedVPNStatus = SCNetworkConnectionStatus(rawValue: 2)
 
@@ -206,8 +221,12 @@ package final class NetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchec
     }
 
     private func startDynamicStoreMonitoringOnQueue() {
-        // SCDynamicStore owns this box through its context callbacks. The weak
-        // monitor link avoids a monitor -> store -> context -> monitor cycle.
+        // SAFETY: Ownership/lifetime: withExtendedLifetime keeps the initial unretained box
+        // alive until SCDynamicStore synchronously invokes its retain callback, after which
+        // the paired callbacks own it; bounds/alignment: the context is an exact aligned
+        // SCDynamicStoreContext and no variable buffer is exposed; synchronization: creation
+        // and later callbacks run on `queue`; safe alternative: SystemConfiguration exposes
+        // only the C context/callback API. The weak monitor link avoids a retain cycle.
         let callbackContext = NetworkInterfaceMonitorDynamicStoreContext(
             monitor: self
         )
@@ -246,6 +265,10 @@ package final class NetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchec
     }
 
     private static let dynamicStoreCallback: SCDynamicStoreCallBack = { _, _, info in
+        // SAFETY: Ownership/lifetime: SCDynamicStore retains the installed context for the
+        // callback duration; bounds/alignment: `info` is the exact class pointer installed
+        // above and no bytes are indexed; synchronization: the store dispatches this callback
+        // on the monitor queue; safe alternative: the C callback cannot carry a Swift reference.
         guard let info = unsafe info else {
             return
         }
@@ -316,6 +339,12 @@ package final class NetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchec
     }
 
     private static func interfaceSnapshots() -> [String: InterfaceSnapshot] {
+        // SAFETY: Ownership/lifetime: getifaddrs owns the linked list until the single deferred
+        // freeifaddrs and every pointer/string is copied before then; bounds/alignment: Darwin
+        // supplies aligned ifaddrs/sockaddr records and NUL-terminated names, family-specific
+        // address lengths are passed to getnameinfo, and traversal follows only OS-provided links;
+        // synchronization: the list and result are local to this call; safe alternative: Network
+        // framework does not expose address, flag, and interface-index data needed here.
         var interfaces: UnsafeMutablePointer<ifaddrs>?
         guard unsafe getifaddrs(&interfaces) == 0, let firstInterface = unsafe interfaces else {
             return [:]
@@ -374,6 +403,10 @@ package final class NetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchec
     }
 
     private static func interfaceIndex(for name: String) -> UInt32 {
+        // SAFETY: Ownership/lifetime: String pins the temporary C string for the synchronous
+        // lookup; bounds/alignment: withCString supplies a NUL-terminated byte sequence;
+        // synchronization: if_nametoindex is a read-only system query; safe alternative:
+        // Darwin exposes no String-taking interface-index API.
         unsafe name.withCString { pointer in
             unsafe if_nametoindex(pointer)
         }
@@ -388,6 +421,11 @@ package final class NetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchec
     }
 
     private static func numericAddress(from address: UnsafePointer<sockaddr>) -> String? {
+        // SAFETY: Ownership/lifetime: the enclosing getifaddrs traversal keeps `address` alive
+        // and the local host buffer lives through getnameinfo; bounds/alignment: the typed
+        // sockaddr is aligned, sa_len bounds its family record, and host capacity is passed
+        // exactly; synchronization: all storage is local; safe alternative: numeric conversion
+        // for an arbitrary sockaddr is only exposed by the Darwin C API.
         var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
         let result = unsafe getnameinfo(
             address,
@@ -457,6 +495,11 @@ package final class NetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchec
                 continue
             }
 
+            // SAFETY: Ownership/lifetime: the local zero-callback context lives through
+            // synchronous connection creation and Core Foundation returns a managed object;
+            // bounds/alignment: context storage has its exact imported type; synchronization:
+            // discovery is serialized on the monitor queue; safe alternative: service status
+            // is available only through SystemConfiguration's C context API.
             var context = unsafe SCNetworkConnectionContext(
                 version: 0,
                 info: nil,
@@ -602,6 +645,11 @@ package final class NetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchec
     }
 
     private static func connectedVPNConnection(for serviceID: String) -> SCNetworkConnection? {
+        // SAFETY: Ownership/lifetime: the local zero-callback context lives through synchronous
+        // creation and the returned connection is retained by its Swift CF wrapper;
+        // bounds/alignment: context storage has its exact imported type; synchronization:
+        // discovery is serialized on the monitor queue; safe alternative: VPN connection state
+        // is available only through SystemConfiguration's C context API.
         var context = unsafe SCNetworkConnectionContext(
             version: 0,
             info: nil,

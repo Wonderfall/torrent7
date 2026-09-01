@@ -228,6 +228,11 @@ package enum TorrentStorageBrokerIPCCodec {
                  Field.sessionNonce, Field.deadline, Field.operation,
                  Field.claimID, Field.generation, Field.fileIndices]
             )
+            // SAFETY: Ownership/lifetime: the dictionary retains the borrowed XPC data
+            // object through its immediate bounded copy; bounds/alignment: the decoder
+            // validates the byte count before interpreting bytes; synchronization: this
+            // immutable request is decoded synchronously; safe alternative: raw XPC type
+            // validation requires the unsafe object subscript.
             guard let claimID = uuid(in: dictionary, forKey: Field.claimID),
                   let generation: UInt64 = dictionary[Field.generation],
                   generation > 0,
@@ -308,6 +313,11 @@ package enum TorrentStorageBrokerIPCCodec {
         _ dictionary: XPCDictionary,
         for request: TorrentStorageBrokerRequest
     ) throws -> TorrentStorageBrokerReply {
+        // SAFETY: Ownership/lifetime: `dictionary` retains each borrowed XPC object until
+        // its data is copied or descriptor duplicated; bounds/alignment: data helpers bound
+        // every byte copy and no borrowed bytes are reinterpreted; synchronization: reply
+        // decoding is synchronous and read-only; safe alternative: validating raw XPC value
+        // types and duplicating file descriptors has no fully safe Swift API.
         guard dictionary.count <= 7,
               let version: UInt64 = dictionary[Field.version],
               version == TorrentStorageBrokerProtocol.version,
@@ -501,6 +511,10 @@ package enum TorrentStorageBrokerIPCCodec {
     }
 
     private static func dataObject(_ data: Data) -> xpc_object_t {
+        // SAFETY: Ownership/lifetime: Data pins its bytes for the synchronous call and XPC
+        // copies them; bounds/alignment: its exact count is passed and byte alignment is valid;
+        // synchronization: immutable local data is not concurrently mutated; safe alternative:
+        // xpc_data_create has no buffer-safe Swift overload.
         unsafe data.withUnsafeBytes { bytes in
             unsafe xpc_data_create(bytes.baseAddress, bytes.count)
         }
@@ -510,6 +524,10 @@ package enum TorrentStorageBrokerIPCCodec {
         from object: xpc_object_t,
         maximumBytes: Int
     ) throws -> Data {
+        // SAFETY: Ownership/lifetime: the caller's dictionary retains `object` for this
+        // synchronous copy; bounds/alignment: the XPC-reported count is nonzero and bounded
+        // before copying byte-aligned storage; synchronization: the message is immutable;
+        // safe alternative: XPC exposes its payload only as a borrowed C pointer.
         let count = xpc_data_get_length(object)
         guard count > 0,
               count <= maximumBytes,
@@ -550,6 +568,10 @@ package enum TorrentStorageBrokerIPCCodec {
         forKey key: String,
         exactUTF8Bytes: Int
     ) -> String? {
+        // SAFETY: Ownership/lifetime: the dictionary retains the XPC string until Swift
+        // completes validation and copies it; bounds/alignment: XPC guarantees NUL termination
+        // and the exact UTF-8 byte count is checked; synchronization: decoding is read-only;
+        // safe alternative: XPC's checked string pointer has no safe Swift representation.
         guard let object = unsafe dictionary[key, as: XPC_TYPE_STRING],
               xpc_string_get_length(object) == exactUTF8Bytes,
               let pointer = unsafe xpc_string_get_string_ptr(object) else {
@@ -563,6 +585,10 @@ package enum TorrentStorageBrokerIPCCodec {
         forKey key: String,
         maximumUTF8Bytes: Int
     ) -> String? {
+        // SAFETY: Ownership/lifetime: the dictionary retains the XPC string until Swift
+        // copies it; bounds/alignment: XPC guarantees NUL termination and the UTF-8 length
+        // is capped before conversion; synchronization: decoding is read-only; safe alternative:
+        // XPC's checked string pointer has no safe Swift representation.
         guard let object = unsafe dictionary[key, as: XPC_TYPE_STRING],
               xpc_string_get_length(object) <= maximumUTF8Bytes,
               let pointer = unsafe xpc_string_get_string_ptr(object) else {
@@ -575,6 +601,10 @@ package enum TorrentStorageBrokerIPCCodec {
         _ dictionary: XPCDictionary,
         forKey key: String
     ) -> Bool {
+        // SAFETY: Ownership/lifetime: the dictionary and String remain alive for both nested
+        // synchronous closures; bounds/alignment: withCString supplies a valid NUL-terminated
+        // byte sequence; synchronization: the immutable dictionary is only queried;
+        // safe alternative: XPCDictionary has no safe presence check that distinguishes null.
         dictionary.withUnsafeUnderlyingDictionary { rawDictionary in
             unsafe key.withCString { pointer in
                 unsafe xpc_dictionary_get_value(rawDictionary, pointer) != nil

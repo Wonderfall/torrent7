@@ -82,8 +82,14 @@ package protocol TorrentEngineIPCTransport: Sendable {
     func cancel()
 }
 
+// SAFETY: Ownership/lifetime: the transport strongly owns its activated session until all
+// registered replies are finished or cancelled; bounds/alignment: this conformance exposes no
+// raw memory and all XPC payload bounds are validated by the envelope codec; synchronization:
+// ReplyCoordinator and PendingReply serialize mutable state, while XPCSession supports its
+// documented concurrent send/cancel callbacks; safe alternative: XPCSession does not declare
+// Sendable, so a checked conformance cannot express the framework's concurrency contract.
 @safe package final class TorrentEngineXPCTransport: TorrentEngineIPCTransport, @unchecked Sendable {
-    @safe package final class PendingReply: @unchecked Sendable {
+    @safe package final class PendingReply: Sendable {
         private struct State: Sendable {
             var continuation: CheckedContinuation<TorrentEngineIPCReply, any Error>?
             var timeoutTask: Task<Void, Never>?

@@ -367,6 +367,11 @@ package enum TorrentEngineExtensionConfiguration {
         let canonical = requested.resolvingSymlinksInPath().standardizedFileURL
         var requestedMetadata = stat()
         var canonicalMetadata = stat()
+        // SAFETY: Ownership/lifetime: each String owns its temporary C string and each
+        // `stat` value lives through its synchronous lstat; bounds/alignment: Swift supplies
+        // NUL-terminated strings and correctly aligned `stat` storage; synchronization:
+        // startup exclusively initializes this directory; safe alternative: lstat identity
+        // comparison is required to reject a symlink/rename race in path-only Foundation APIs.
         let requestedStatus = unsafe requested.path(percentEncoded: false).withCString {
             unsafe Darwin.lstat($0, &requestedMetadata)
         }
@@ -683,8 +688,11 @@ package enum TorrentEngineExtensionConfiguration {
     }
 }
 
-/// XPCDictionary lacks Sendable conformance. The destination is immutable, and
-/// `didReply` transfers it to exactly one synchronous sender.
+// SAFETY: Ownership/lifetime: the immutable destination retains its XPC dictionary or observer
+// until the reply object is released; bounds/alignment: no raw memory is exposed and reply
+// payload validation occurs before this one-shot sender; synchronization: didReply is guarded
+// by a Mutex and permits exactly one synchronous use of the destination; safe alternative:
+// XPCDictionary lacks Sendable conformance but must cross the scheduled request boundary.
 @safe final class TorrentEnginePendingReply: @unchecked Sendable {
     private enum Destination {
         case message(XPCDictionary)

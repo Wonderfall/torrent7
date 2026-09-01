@@ -17,12 +17,20 @@ struct TorrentMagnetBridgePayload: Sendable {
 
         if let v1InfoHash = magnet.v1InfoHash {
             header.flags |= UInt32(TTORRENT_MAGNET_HAS_V1)
+            // SAFETY: Ownership/lifetime: `header` and the Data value live through the
+            // synchronous copy; bounds/alignment: validated v1 hashes are exactly the
+            // imported 20-byte field size; synchronization: both values are local;
+            // safe alternative: the imported fixed C array has no mutable Swift collection API.
             _ = unsafe withUnsafeMutableBytes(of: &header.v1_info_hash) { destination in
                 _ = unsafe v1InfoHash.copyBytes(to: destination)
             }
         }
         if let v2InfoHash = magnet.v2InfoHash {
             header.flags |= UInt32(TTORRENT_MAGNET_HAS_V2)
+            // SAFETY: Ownership/lifetime: `header` and the Data value live through the
+            // synchronous copy; bounds/alignment: validated v2 hashes are exactly the
+            // imported 32-byte field size; synchronization: both values are local;
+            // safe alternative: the imported fixed C array has no mutable Swift collection API.
             _ = unsafe withUnsafeMutableBytes(of: &header.v2_info_hash) { destination in
                 _ = unsafe v2InfoHash.copyBytes(to: destination)
             }

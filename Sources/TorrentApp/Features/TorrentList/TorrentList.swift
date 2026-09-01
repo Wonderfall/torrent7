@@ -1038,6 +1038,10 @@ private struct RightClickSelectionMonitor: NSViewRepresentable {
         }
 
         private func handle(_ event: NSEvent) {
+            // SAFETY: Ownership/lifetime: the weak view is promoted strongly for this
+            // main-actor event callback and AppKit owns its window; bounds/alignment:
+            // no raw memory is accessed; synchronization: the monitor and view are
+            // main-actor isolated; safe alternative: NSView.window uses unsafe unowned ownership.
             guard let view, let window = unsafe view.window, event.window === window else {
                 return
             }
@@ -1153,6 +1157,10 @@ private final class SelectAllNSView: NSView, NSUserInterfaceValidations {
     }
 
     func becomeSelectAllResponderIfPossible() {
+        // SAFETY: Ownership/lifetime: AppKit owns this attached view and window for
+        // the synchronous main-actor call; bounds/alignment: no raw memory is accessed;
+        // synchronization: responder changes are main-actor isolated; safe alternative:
+        // NSView.window is imported with unsafe unowned ownership.
         guard
             let window = unsafe self.window,
             canBecomeSelectAllResponder(in: window)
@@ -1235,6 +1243,10 @@ private extension NSView {
             return true
         }
 
+        // SAFETY: Ownership/lifetime: AppKit owns the view hierarchy throughout this
+        // synchronous main-actor traversal; bounds/alignment: no raw memory is accessed;
+        // synchronization: hierarchy access is confined to the main actor; safe alternative:
+        // NSView.superview is imported with unsafe unowned ownership.
         guard let superview = unsafe self.superview else {
             return false
         }

@@ -5277,8 +5277,10 @@ final class TorrentStore {
             }
         }
         let fileManager = FileManager()
-        // Foundation imports the unused result parameter as an unsafe
-        // Objective-C out pointer. Passing nil keeps that pointer unowned.
+        // SAFETY: Ownership/lifetime: Foundation owns all internal objects and the
+        // optional result pointer is nil; bounds/alignment: no caller-provided storage
+        // is dereferenced; synchronization: this local FileManager call does not share
+        // mutable state; safe alternative: Foundation exposes only the unsafe ObjC out-pointer API.
         try unsafe fileManager.trashItem(
             at: url,
             resultingItemURL: nil
@@ -5299,6 +5301,11 @@ final class TorrentStore {
 
     private nonisolated static func validatedTorrentFileSize(descriptor: FileDescriptor) throws -> Int {
         var metadata = stat()
+        // SAFETY: Ownership/lifetime: the caller keeps the descriptor open for this
+        // synchronous call and `metadata` lives through it; bounds/alignment: Darwin
+        // receives a correctly aligned `stat` value of its exact size; synchronization:
+        // the descriptor is immutable here; safe alternative: fstat is needed to validate
+        // the already-open no-follow descriptor without a path-based race.
         guard unsafe Darwin.fstat(descriptor.rawValue, &metadata) == 0 else {
             throw TorrentStoreError.unreadableTorrentFile
         }

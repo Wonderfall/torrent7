@@ -211,6 +211,10 @@ private func indexedMaximumLengthASCII(label: String, index: Int, capacity: Int)
 }
 
 private func writeBenchmarkCString<T>(_ string: String, to tuple: inout T) {
+    // SAFETY: Ownership/lifetime: the inout tuple remains exclusively borrowed for the closure;
+    // bounds/alignment: writes use only buffer indices and UTF-8 is capped one byte short for NUL;
+    // synchronization: benchmark setup is single-threaded; safe alternative: imported fixed C
+    // character arrays have no mutable Swift collection API.
     unsafe withUnsafeMutableBytes(of: &tuple) { bytes in
         for index in bytes.indices {
             unsafe bytes[index] = 0
@@ -222,6 +226,10 @@ private func writeBenchmarkCString<T>(_ string: String, to tuple: inout T) {
 }
 
 private func copySnapshots(_ snapshots: [TTorrentSnapshot]) -> [TTorrentSnapshot] {
+    // SAFETY: Ownership/lifetime: both arrays are pinned for the nested synchronous copy;
+    // bounds/alignment: source/destination have identical element count/type and byteCount is
+    // exactly count * stride; synchronization: benchmark arrays are unshared; safe alternative:
+    // the benchmark intentionally measures raw snapshot transport rather than element-wise copy.
     var copied = Array(repeating: TTorrentSnapshot(), count: snapshots.count)
     let byteCount = snapshots.count * MemoryLayout<TTorrentSnapshot>.stride
     unsafe snapshots.withUnsafeBufferPointer { source in
@@ -255,6 +263,10 @@ private func measureIncrementalTransportFootprint(_ snapshots: [TTorrentSnapshot
 }
 
 private func physicalFootprintBytes() -> UInt64? {
+    // SAFETY: Ownership/lifetime: local task_vm_info storage is exclusively borrowed until the
+    // synchronous Mach call returns; bounds/alignment: its alignment satisfies integer_t and
+    // informationCount is exactly the struct-size word count; synchronization: output is local;
+    // safe alternative: TASK_VM_INFO is exposed only through Mach's rebound integer pointer ABI.
     var information = task_vm_info_data_t()
     var informationCount = mach_msg_type_number_t(
         MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size

@@ -285,6 +285,12 @@ package enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Senda
         _ resolved: ResolvedFile,
         access: TorrentStorageBrokerAccess
     ) throws -> Int32 {
+        // SAFETY: Ownership/lifetime: each String pins its C string for the synchronous
+        // syscall and every local descriptor is closed or deliberately returned;
+        // bounds/alignment: every path component is validated, NUL-terminated, and never
+        // used for raw memory access; synchronization: the immutable resolution is captured
+        // under the registry lock and descriptor traversal is local; safe alternative:
+        // openat with O_NOFOLLOW is required to avoid path re-resolution and symlink races.
         try resolved.parent.validate()
         guard let components = resolved.relativePathComponents,
               !components.isEmpty,
@@ -339,6 +345,10 @@ package enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Senda
             throw TorrentStorageBrokerRegistryError.fileUnavailable
         }
         var metadata = stat()
+        // SAFETY: Ownership/lifetime: the opened descriptor remains owned by the caller and
+        // `metadata` lives through fstat; bounds/alignment: Swift supplies exact aligned stat
+        // storage; synchronization: validation completes before the descriptor is published;
+        // safe alternative: fstat authenticates the opened object without a pathname race.
         guard unsafe Darwin.fstat(descriptor, &metadata) == 0 else {
             throw TorrentStorageBrokerRegistryError.filesystemObjectChanged
         }
@@ -396,6 +406,11 @@ package enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Senda
             repeating: 0,
             count: TorrentStorageOwnershipTag.tagByteCount
         )
+        // SAFETY: Ownership/lifetime: the local byte array and attribute-name String remain
+        // alive for synchronous fgetxattr; bounds/alignment: the exact tag capacity is passed,
+        // byte alignment is sufficient, and the result must equal that capacity; synchronization:
+        // the descriptor is only observed during validation; safe alternative: descriptor-based
+        // extended attributes have no memory-safe Swift API and avoid a path substitution race.
         let count = unsafe tag.withUnsafeMutableBytes { bytes in
             unsafe TorrentStorageDestinationPlanner.ownershipAttribute.withCString { name in
                 unsafe Darwin.fgetxattr(

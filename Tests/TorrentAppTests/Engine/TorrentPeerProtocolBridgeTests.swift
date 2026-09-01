@@ -10,6 +10,10 @@ import TorrentBridge
 struct TorrentPeerProtocolBridgeTests {
     @Test("Extension handshake callback fills only present typed fields")
     func importsExtensionHandshake() {
+        // SAFETY: Ownership/lifetime: retained context, message, and outputs live through the
+        // synchronous callback; bounds/alignment: nonempty bytes bind between alignment-1 types
+        // and the exact output capacity is supplied; synchronization: locals are unshared;
+        // safe alternative: callback behavior must be tested through its C ABI.
         var message = Data(
             "d1:md11:lt_donthavei7e11:upload_onlyi3e12:ut_holepunchi4e11:ut_metadatai2e6:ut_pexi1ee13:metadata_sizei1234e1:pi6881e4:reqqi250e11:upload_onlyi1e1:v9:Torrent 76:yourip4:".utf8
         )
@@ -61,6 +65,10 @@ struct TorrentPeerProtocolBridgeTests {
 
     @Test("Metadata callback preserves the exact binary payload range")
     func importsMetadataMessage() {
+        // SAFETY: Ownership/lifetime: retained context, message, and result live through the
+        // synchronous callback; bounds/alignment: nonempty bytes bind to alignment-1 CChar and
+        // exact count is supplied; synchronization: locals are unshared; safe alternative:
+        // payload-range behavior must be tested through the raw C callback.
         var message = Data("d8:msg_typei1e5:piecei2e10:total_sizei40000ee".utf8)
         let payloadOffset = message.count
         message.append(Data(repeating: 0xa5, count: 16_384))
@@ -89,6 +97,10 @@ struct TorrentPeerProtocolBridgeTests {
 
     @Test("PEX callback emits ordered, bounded caller-owned records")
     func importsPeerExchange() {
+        // SAFETY: Ownership/lifetime: retained context, message, and output array live through the
+        // synchronous callback; bounds/alignment: bytes bind to alignment-1 CChar and exact record
+        // capacity is supplied; synchronization: locals are unshared; safe alternative:
+        // caller-owned record output is a C callback ABI contract.
         var message = Data("d5:added6:".utf8)
         message.append(contentsOf: [203, 0, 113, 9, 0x1a, 0xe1])
         message.append(Data("7:added.f1:".utf8))
@@ -134,6 +146,10 @@ struct TorrentPeerProtocolBridgeTests {
 
     @Test("PEX capacity failure leaves caller storage and result empty")
     func rejectsInsufficientPeerExchangeCapacityAtomically() {
+        // SAFETY: Ownership/lifetime: retained context, message, and outputs live through the
+        // synchronous callback; bounds/alignment: bytes bind at alignment 1 and the deliberately
+        // invalid declared capacity is not used to index storage; synchronization: locals are
+        // unshared; safe alternative: rejection behavior must exercise the raw C callback.
         let message = Data("d5:added6:".utf8)
             + Data([203, 0, 113, 9, 0x1a, 0xe1])
             + Data("e".utf8)
@@ -169,6 +185,10 @@ struct TorrentPeerProtocolBridgeTests {
 
     @Test("One retained context serves concurrent peer callbacks before teardown")
     func supportsConcurrentCallbacksBeforeTeardown() {
+        // SAFETY: Ownership/lifetime: immutable message/context outlive concurrentPerform and each
+        // result is local; bounds/alignment: nonempty bytes bind to alignment-1 CChar with exact
+        // count; synchronization: only immutable input is shared and failures use Mutex;
+        // safe alternative: callback concurrency must be tested through the C ABI.
         let message = Data("d8:msg_typei0e5:piecei0ee".utf8)
         let context = PeerConcurrentTestContext()
         let failures = Mutex(0)
@@ -199,15 +219,28 @@ struct TorrentPeerProtocolBridgeTests {
 
 /// The callback context is retained once for the whole concurrent batch and
 /// released only after every synchronous invocation has joined.
+// SAFETY: Ownership/lifetime: the single retained context outlives the whole concurrent batch;
+// bounds/alignment: pointer is the exact aligned opaque class address and is not byte-indexed;
+// synchronization: the pointer is immutable, the parser context is stateless, and all callbacks
+// join before deinit; safe alternative: UnsafeMutableRawPointer is not Sendable, but the C ABI
+// requires the same opaque context address for every callback.
 @safe private final class PeerConcurrentTestContext: @unchecked Sendable {
     let pointer: UnsafeMutableRawPointer
 
     init() {
+        // SAFETY: Ownership/lifetime: passRetained creates the unique retain released after all
+        // callbacks join; bounds/alignment: this is the exact aligned class address with no byte
+        // access; synchronization: context is immutable; safe alternative: C callbacks accept
+        // only an opaque context pointer.
         unsafe pointer = Unmanaged.passRetained(TorrentPeerProtocolBridgeContext())
             .toOpaque()
     }
 
     deinit {
+        // SAFETY: Ownership/lifetime: this balances init's retain after concurrent work joined;
+        // bounds/alignment: pointer is the exact class address with no byte access;
+        // synchronization: teardown follows concurrentPerform; safe alternative: opaque C
+        // ownership must be modeled with Unmanaged.
         unsafe Unmanaged<TorrentPeerProtocolBridgeContext>
             .fromOpaque(pointer)
             .release()
@@ -217,6 +250,10 @@ struct TorrentPeerProtocolBridgeTests {
 private func withPeerProtocolContext(
     _ body: (UnsafeMutableRawPointer) -> Void
 ) {
+    // SAFETY: Ownership/lifetime: the retain spans the nonescaping synchronous body and defer
+    // balances it; bounds/alignment: the opaque pointer is the exact aligned class address;
+    // synchronization: helper use is single-threaded unless body joins its work; safe alternative:
+    // invoking the callback requires an opaque C context pointer.
     let retained = unsafe Unmanaged.passRetained(TorrentPeerProtocolBridgeContext())
     defer {
         unsafe retained.release()

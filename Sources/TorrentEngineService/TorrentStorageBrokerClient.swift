@@ -419,6 +419,11 @@ package enum TorrentStorageBrokerClientError: LocalizedError, Sendable {
     ) throws {
         var actual = stat()
         let flags = Darwin.fcntl(descriptor, F_GETFL)
+        // SAFETY: Ownership/lifetime: the reply owns an open descriptor for this
+        // synchronous validation and `actual` lives through fstat; bounds/alignment:
+        // `actual` is exact, aligned `stat` storage; synchronization: validation precedes
+        // publishing the descriptor; safe alternative: fstat is required to authenticate
+        // the received descriptor itself instead of a race-prone pathname.
         guard unsafe Darwin.fstat(descriptor, &actual) == 0,
               flags >= 0,
               (actual.st_mode & S_IFMT) == S_IFREG,

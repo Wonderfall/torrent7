@@ -274,6 +274,10 @@ private enum StorageBrokerIPCFuzzer {
     }
 
     private static func xpcData(_ data: Data) -> xpc_object_t {
+        // SAFETY: Ownership/lifetime: Data pins its bytes for the synchronous call and XPC copies
+        // them; bounds/alignment: exact count is passed with byte alignment; synchronization:
+        // immutable fuzz input is not mutated; safe alternative: constructing adversarial XPC data
+        // requires xpc_data_create's C pointer API.
         unsafe data.withUnsafeBytes { bytes in
             unsafe xpc_data_create(bytes.baseAddress, bytes.count)
         }

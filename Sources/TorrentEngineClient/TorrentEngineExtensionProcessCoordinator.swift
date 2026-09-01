@@ -1,5 +1,7 @@
-// ExtensionFoundation has not adopted strict concurrency annotations yet.
-// Monitor and AppExtensionProcess access remain isolated to dedicated actors.
+// SAFETY: Ownership/lifetime: ExtensionFoundation objects remain strongly owned by
+// their Swift wrappers; bounds/alignment: no raw buffers are imported; synchronization:
+// Monitor and AppExtensionProcess access is isolated to dedicated actors; safe alternative:
+// the SDK module lacks strict concurrency and strict-memory-safety annotations.
 @preconcurrency @unsafe import ExtensionFoundation
 import Foundation
 import TorrentEngineIPC
@@ -237,9 +239,11 @@ package actor TorrentEngineProcessSingleFlight<Handle: Sendable> {
     }
 }
 
-/// `AppExtensionProcess` is not declared `Sendable`. This private wrapper only
-/// moves the launched value into the single-flight actor; all process API access
-/// is then generation-validated and serialized by that actor.
+// SAFETY: Ownership/lifetime: this wrapper strongly owns the launched process while the
+// coordinator retains the handle; bounds/alignment: no raw memory is accessed; synchronization:
+// all process API access is generation-validated and serialized by the single-flight actor;
+// safe alternative: AppExtensionProcess does not declare Sendable, so the framework value
+// cannot be transferred into its owning actor with a checked conformance.
 private final class TorrentEngineExtensionProcessHandle: @unchecked Sendable {
     private let process: AppExtensionProcess
 

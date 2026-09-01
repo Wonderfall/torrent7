@@ -922,6 +922,11 @@ package actor TorrentStorageClaimJournal {
         _ value: Snapshot,
         in directoryDescriptor: Int32
     ) throws {
+        // SAFETY: Ownership/lifetime: temporary/target Strings pin C strings per synchronous
+        // syscall and the created descriptor is closed exactly once; bounds/alignment: validated
+        // NUL-free names are passed as NUL-terminated bytes with no raw indexing; synchronization:
+        // the journal actor serializes persistence and rename publishes atomically; safe alternative:
+        // openat/renameat/unlinkat are required for descriptor-relative, race-resistant replacement.
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(value)
@@ -973,6 +978,11 @@ package actor TorrentStorageClaimJournal {
     private static func load(
         from directoryDescriptor: Int32
     ) throws -> Snapshot {
+        // SAFETY: Ownership/lifetime: the filename pins its C string for openat, the opened
+        // descriptor is deferred-closed, and local stat storage spans fstat; bounds/alignment:
+        // the C string is NUL-terminated and `stat` is exact aligned storage; synchronization:
+        // the journal actor serializes reads/writes; safe alternative: openat plus fstat verifies
+        // the no-follow object itself and avoids Foundation pathname races.
         let descriptor = unsafe filename.withCString { pointer in
             unsafe Darwin.openat(
                 directoryDescriptor,
@@ -1048,6 +1058,11 @@ package actor TorrentStorageClaimJournal {
     }
 
     private static func writeAll(_ data: Data, to descriptor: Int32) throws {
+        // SAFETY: Ownership/lifetime: Data pins its immutable storage for the entire synchronous
+        // loop and the caller keeps the descriptor open; bounds/alignment: offsets advance only
+        // by successful byte counts and each remaining length stays inside the buffer;
+        // synchronization: actor serialization prevents concurrent journal writes; safe alternative:
+        // Darwin write is required for explicit EINTR handling and descriptor durability.
         try unsafe data.withUnsafeBytes { bytes in
             var written = 0
             while written < bytes.count {
@@ -1071,6 +1086,11 @@ package actor TorrentStorageClaimJournal {
         from descriptor: Int32,
         expectedSize: Int
     ) throws -> Data {
+        // SAFETY: Ownership/lifetime: mutable Data storage is pinned for the synchronous loop
+        // and the caller keeps the descriptor open; bounds/alignment: offsets advance only by
+        // successful reads within the exact allocated byte count; synchronization: actor
+        // serialization prevents concurrent journal access; safe alternative: Darwin read is
+        // required for bounded exact-length reads with explicit EINTR handling.
         var data = Data(count: expectedSize)
         let count = try unsafe data.withUnsafeMutableBytes { bytes in
             var readCount = 0

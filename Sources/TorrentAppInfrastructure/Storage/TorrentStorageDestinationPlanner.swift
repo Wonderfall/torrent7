@@ -45,7 +45,7 @@ package enum TorrentStoragePlanningError: LocalizedError, Equatable, Sendable {
     }
 }
 
-package final class TorrentStorageParentAuthority: @unchecked Sendable {
+package final class TorrentStorageParentAuthority: Sendable {
     package let id: TorrentStorageParentID
     package let canonicalPath: String
     package let identity: TorrentFilesystemIdentity
@@ -54,6 +54,11 @@ package final class TorrentStorageParentAuthority: @unchecked Sendable {
     private let accessLifetime: DownloadFolderAccessLease
 
     package init(lease: DownloadFolderAccessLease) throws {
+        // SAFETY: Ownership/lifetime: the security lease outlives the stored descriptor,
+        // temporary C strings live through lstat, and local stat values live through calls;
+        // bounds/alignment: withCString is NUL-terminated and stat storage is exact/aligned;
+        // synchronization: immutable authority is published only after validation;
+        // safe alternative: fstat/lstat identity comparison is needed to reject path races.
         let path = lease.url.standardizedFileURL
             .resolvingSymlinksInPath()
             .path(percentEncoded: false)
@@ -104,6 +109,10 @@ package final class TorrentStorageParentAuthority: @unchecked Sendable {
 
     package func validate() throws {
         var metadata = stat()
+        // SAFETY: Ownership/lifetime: this authority owns the open descriptor and local stat
+        // storage spans fstat; bounds/alignment: Swift supplies exact aligned stat storage;
+        // synchronization: immutable descriptor identity is only read; safe alternative:
+        // fstat must validate the open directory authority without re-resolving a path.
         guard unsafe Darwin.fstat(descriptor, &metadata) == 0,
               (metadata.st_mode & S_IFMT) == S_IFDIR,
               Self.identity(metadata).refersToSameObject(as: identity) else {
@@ -193,6 +202,11 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         for logicalManifest: TorrentLogicalManifest,
         in parent: TorrentStorageParentAuthority
     ) throws -> String {
+        // SAFETY: Ownership/lifetime: candidate Strings pin their C strings per synchronous
+        // fstatat and the parent owns its descriptor; bounds/alignment: validated candidates
+        // are NUL-terminated and stat storage is exact/aligned; synchronization: no filesystem
+        // state is cached as authority; safe alternative: descriptor-relative fstatat with
+        // AT_SYMLINK_NOFOLLOW is needed for race-resistant collision inspection.
         try parent.validate()
         guard !logicalManifest.name.hasPrefix(".") else {
             throw TorrentStoragePlanningError.hiddenTopLevelName
@@ -450,6 +464,11 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         _ claim: TorrentStorageClaim,
         in parent: TorrentStorageParentAuthority
     ) throws {
+        // SAFETY: Ownership/lifetime: the parent owns its descriptor, the name pins its C
+        // string for openat, and the returned descriptor is deferred-closed; bounds/alignment:
+        // the manifest name is validated and NUL-terminated; synchronization: immutable claim
+        // evidence is checked before use; safe alternative: openat with O_NOFOLLOW must bind
+        // validation to the opened object instead of a race-prone pathname.
         try parent.validate()
         guard claim.manifest.parentID == parent.id,
               let expectedIdentity = claim.manifest.topLevelIdentity else {
@@ -495,6 +514,11 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         for location: TorrentStorageLocation,
         fileIndex: Int32? = nil
     ) throws -> URL {
+        // SAFETY: Ownership/lifetime: parent/containing descriptors stay open while the leaf
+        // String pins its C form, and the leaf descriptor is deferred-closed; bounds/alignment:
+        // manifest indices/components are checked before NUL-terminated openat; synchronization:
+        // immutable claim identities are verified before returning a path; safe alternative:
+        // descriptor-relative O_NOFOLLOW reopening is required to prevent Finder path races.
         let claim = location.claim
         let parent = location.parent
         try validateClaimRoot(claim, in: parent)
@@ -790,7 +814,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         try removeDeletionQuarantine(quarantine, from: parent.descriptor)
     }
 
-    private final class DeletionQuarantine: @unchecked Sendable {
+    private final class DeletionQuarantine {
         let name: String
         private(set) var descriptor: Int32
         private(set) var entriesDescriptor: Int32
@@ -871,6 +895,11 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         in parentDescriptor: Int32,
         identifier: UUID
     ) throws -> DeletionQuarantine {
+        // SAFETY: Ownership/lifetime: names pin C strings for each synchronous syscall and
+        // every created descriptor is transferred to DeletionQuarantine or closed on failure;
+        // bounds/alignment: fixed validated names are NUL-terminated with no raw indexing;
+        // synchronization: exclusive creation plus pinned identities coordinates deletion;
+        // safe alternative: mkdirat/openat/unlinkat are required for race-resistant quarantine.
         let name = deletionQuarantineName(identifier)
         let status = unsafe name.withCString { pointer in
             unsafe Darwin.mkdirat(parentDescriptor, pointer, mode_t(0o700))
@@ -975,6 +1004,11 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         identity: TorrentFilesystemIdentity,
         entriesDescriptor: Int32?
     ) {
+        // SAFETY: Ownership/lifetime: the literal C string exists for the synchronous unlinkat
+        // and all passed descriptors remain open until cleanup finishes; bounds/alignment:
+        // the fixed name is NUL-terminated; synchronization: this handles an unpublished,
+        // exclusively owned quarantine; safe alternative: descriptor-relative unlinkat avoids
+        // re-resolving attacker-replaceable paths.
         if let entriesDescriptor {
             _ = Darwin.close(entriesDescriptor)
         }
@@ -1366,6 +1400,11 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         startingAt rootDescriptor: Int32,
         manifest: TorrentStorageManifest
     ) throws -> Int32? {
+        // SAFETY: Ownership/lifetime: each component pins its C string during openat and the
+        // descriptor chain is closed or returned exactly once; bounds/alignment: manifest path
+        // components are validated before this helper and withCString NUL-terminates them;
+        // synchronization: every opened directory is checked against immutable pinned identity;
+        // safe alternative: openat/O_NOFOLLOW traversal is required to resist component swaps.
         var current = Darwin.dup(rootDescriptor)
         guard current >= 0 else {
             throw TorrentStoragePlanningError.deletionNotProvable
@@ -1451,6 +1490,11 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         expectedIdentity: TorrentFilesystemIdentity,
         isDirectory: Bool
     ) throws -> CapturedUnlinkResult {
+        // SAFETY: Ownership/lifetime: the caller keeps both descriptors open, the name pins its
+        // C bytes per call, and local stat storage spans each syscall; bounds/alignment: the name
+        // is validated/NUL-terminated and stat values are exact/aligned; synchronization: pinned
+        // descriptor and path identities are compared immediately before unlink; safe alternative:
+        // fstat/fstatat/unlinkat are required to bind deletion to the captured object.
         var descriptorMetadata = stat()
         var pathMetadata = stat()
         let descriptorStatus = unsafe Darwin.fstat(descriptor, &descriptorMetadata)
@@ -1494,6 +1538,11 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         as captureName: String,
         in quarantineDescriptor: Int32
     ) throws -> Bool {
+        // SAFETY: Ownership/lifetime: both Strings pin C storage for the nested synchronous
+        // rename and both descriptors remain open; bounds/alignment: validated names are
+        // NUL-terminated; synchronization: RENAME_EXCL|NOFOLLOW_ANY|RESOLVE_BENEATH performs
+        // an atomic non-overwriting move; safe alternative: Foundation has no equivalent
+        // descriptor-relative hardened rename.
         let status = unsafe sourceName.withCString { source in
             unsafe captureName.withCString { destination in
                 unsafe Darwin.renameatx_np(
@@ -1520,6 +1569,10 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         as destinationName: String,
         in destinationDirectory: Int32
     ) throws {
+        // SAFETY: Ownership/lifetime: both Strings pin C storage for the nested synchronous
+        // rename and descriptors remain open; bounds/alignment: validated names are NUL-terminated;
+        // synchronization: hardened rename flags atomically reject replacement and traversal;
+        // safe alternative: Foundation has no descriptor-relative hardened rename equivalent.
         let status = unsafe captureName.withCString { source in
             unsafe destinationName.withCString { destination in
                 unsafe Darwin.renameatx_np(
@@ -1540,6 +1593,10 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         named name: String,
         in directoryDescriptor: Int32
     ) throws -> Bool {
+        // SAFETY: Ownership/lifetime: the String and local stat storage live through fstatat;
+        // bounds/alignment: the validated name is NUL-terminated and stat storage exact/aligned;
+        // synchronization: this is an immediate descriptor-relative observation; safe alternative:
+        // fstatat with AT_SYMLINK_NOFOLLOW avoids following or re-resolving a path.
         var metadata = stat()
         let status = unsafe name.withCString { pointer in
             unsafe Darwin.fstatat(
@@ -1563,6 +1620,11 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         in directoryDescriptor: Int32,
         isDirectory: Bool
     ) throws -> Int32 {
+        // SAFETY: Ownership/lifetime: the String and stat storage live through each call and
+        // the successful descriptor is returned to its owner; bounds/alignment: the validated
+        // name is NUL-terminated and stat storage exact/aligned; synchronization: type is checked
+        // immediately before no-follow open; safe alternative: fstatat/openat bind access to
+        // directory authority and reject symlink traversal.
         var metadata = stat()
         let status = unsafe name.withCString { pointer in
             unsafe Darwin.fstatat(
@@ -1609,6 +1671,11 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         ownershipKey: Data,
         created: inout [CreatedObject]
     ) throws -> ReservedTopLevel {
+        // SAFETY: Ownership/lifetime: each candidate pins its C string for openat and the
+        // successful descriptor is returned or closed on failure; bounds/alignment: validated
+        // candidate names are NUL-terminated; synchronization: O_EXCL atomically reserves the
+        // name before ownership evidence is published; safe alternative: Foundation cannot
+        // atomically create relative to trusted directory authority with O_NOFOLLOW.
         let attempts = selectedName == nil ? Self.maximumCollisionAttempts : 1
         for attempt in 1...attempts {
             let candidate = selectedName
@@ -1665,6 +1732,11 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         ownershipKey: Data,
         created: inout [CreatedObject]
     ) throws -> ReservedTopLevel {
+        // SAFETY: Ownership/lifetime: each candidate pins its C string for synchronous mkdirat
+        // and the reopened descriptor is returned or closed on failure; bounds/alignment:
+        // validated candidate names are NUL-terminated; synchronization: mkdirat atomically
+        // reserves the name before identity/tag publication; safe alternative: Foundation has
+        // no descriptor-relative directory creation tied to trusted parent authority.
         let attempts = selectedName == nil ? Self.maximumCollisionAttempts : 1
         for attempt in 1...attempts {
             let candidate = selectedName
@@ -1723,6 +1795,11 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         fileIdentities: [TorrentFilesystemIdentity?],
         directoryIdentities: [TorrentPhysicalDirectoryIdentity]
     ) {
+        // SAFETY: Ownership/lifetime: each leaf pins its C string during openat and every
+        // descriptor is closed by the local control flow; bounds/alignment: logical paths were
+        // validated by the manifest and withCString NUL-terminates them; synchronization:
+        // O_EXCL publishes each file atomically before recording identity; safe alternative:
+        // descriptor-relative O_NOFOLLOW creation is required to resist directory substitution.
         defer {
             _ = Darwin.close(topLevel.descriptor)
         }
@@ -1808,6 +1885,11 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         identities: inout [[String]: TorrentFilesystemIdentity],
         created: inout [CreatedObject]
     ) throws -> Int32 {
+        // SAFETY: Ownership/lifetime: each component pins its C string for mkdirat and the
+        // descriptor chain is closed or returned exactly once; bounds/alignment: manifest
+        // components are validated and NUL-terminated; synchronization: creation/identity
+        // checks occur serially and every existing directory is reopened no-follow;
+        // safe alternative: descriptor-relative mkdirat is required to avoid path races.
         guard !components.isEmpty else {
             return topLevelDescriptor
         }
@@ -2014,6 +2096,11 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         named name: String,
         relativeTo descriptor: Int32
     ) throws -> Int32 {
+        // SAFETY: Ownership/lifetime: the name pins its C string for synchronous openat and
+        // the successful descriptor is returned to the caller; bounds/alignment: the imported
+        // manifest name is validated and NUL-terminated; synchronization: the object is opened
+        // no-follow before identity validation; safe alternative: descriptor-relative openat
+        // is required to avoid symlink and parent-substitution races.
         let opened = unsafe name.withCString { pointer in
             unsafe Darwin.openat(
                 descriptor,
@@ -2032,6 +2119,10 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         maximumSize: Int64
     ) throws -> TorrentFilesystemIdentity {
         var metadata = stat()
+        // SAFETY: Ownership/lifetime: the caller owns the open descriptor and local stat storage
+        // spans fstat; bounds/alignment: Swift supplies exact aligned stat storage;
+        // synchronization: validation happens before the imported descriptor is accepted;
+        // safe alternative: fstat authenticates the open object without re-resolving a path.
         guard maximumSize >= 0,
               unsafe Darwin.fstat(descriptor, &metadata) == 0,
               (metadata.st_mode & S_IFMT) == S_IFREG,
@@ -2045,6 +2136,10 @@ package struct TorrentStorageDestinationPlanner: Sendable {
     }
 
     private func openDirectory(named name: String, relativeTo descriptor: Int32) throws -> Int32 {
+        // SAFETY: Ownership/lifetime: the name pins its C string during synchronous openat and
+        // the successful descriptor is returned; bounds/alignment: validated names are
+        // NUL-terminated; synchronization: callers validate identity before publishing access;
+        // safe alternative: openat with O_NOFOLLOW preserves trusted directory authority.
         let opened = unsafe name.withCString { pointer in
             unsafe Darwin.openat(
                 descriptor,
@@ -2060,6 +2155,10 @@ package struct TorrentStorageDestinationPlanner: Sendable {
 
     private func validateDirectoryDescriptor(_ descriptor: Int32) throws -> TorrentFilesystemIdentity {
         var metadata = stat()
+        // SAFETY: Ownership/lifetime: the caller keeps the descriptor open and local stat storage
+        // spans fstat; bounds/alignment: Swift supplies exact aligned stat storage;
+        // synchronization: validation precedes use/publication; safe alternative: fstat verifies
+        // the opened directory itself without a pathname race.
         guard unsafe Darwin.fstat(descriptor, &metadata) == 0,
               (metadata.st_mode & S_IFMT) == S_IFDIR,
               metadata.st_uid == geteuid() else {
@@ -2073,6 +2172,10 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         writable: Bool
     ) throws -> TorrentFilesystemIdentity {
         var metadata = stat()
+        // SAFETY: Ownership/lifetime: the caller keeps the descriptor open and local stat storage
+        // spans fstat; bounds/alignment: Swift supplies exact aligned stat storage;
+        // synchronization: validation precedes use/publication; safe alternative: fstat verifies
+        // the opened regular file itself without a pathname race.
         guard unsafe Darwin.fstat(descriptor, &metadata) == 0,
               (metadata.st_mode & S_IFMT) == S_IFREG,
               metadata.st_uid == geteuid(),
@@ -2111,6 +2214,11 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         ) else {
             throw TorrentStoragePlanningError.ownershipTagFailed
         }
+        // SAFETY: Ownership/lifetime: tag Data and attribute-name String stay alive for
+        // synchronous fsetxattr; bounds/alignment: the exact authenticated tag byte count is
+        // passed and byte alignment is sufficient; synchronization: the descriptor is exclusively
+        // reserved while its tag is installed; safe alternative: descriptor-based xattrs have no
+        // safe Swift API and avoid path substitution.
         let status = unsafe tag.withUnsafeBytes { bytes in
             unsafe Self.ownershipAttribute.withCString { name in
                 unsafe Darwin.fsetxattr(
@@ -2138,6 +2246,11 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         descriptor: Int32
     ) throws {
         var tag = Data(count: TorrentStorageOwnershipTag.tagByteCount)
+        // SAFETY: Ownership/lifetime: mutable Data and the attribute-name String are pinned for
+        // synchronous fgetxattr; bounds/alignment: exact tag capacity is passed, byte alignment
+        // is sufficient, and the returned count must match; synchronization: validation only
+        // reads the open descriptor; safe alternative: descriptor-based xattrs have no safe Swift
+        // API and avoid path substitution.
         let result = unsafe tag.withUnsafeMutableBytes { bytes in
             unsafe Self.ownershipAttribute.withCString { name in
                 unsafe Darwin.fgetxattr(
@@ -2186,6 +2299,11 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         parentDescriptor: Int32,
         claimID: UUID
     ) {
+        // SAFETY: Ownership/lifetime: the capture name pins its C string for synchronous unlinkat
+        // and the quarantine owns open descriptors until deferred close; bounds/alignment: the
+        // fixed name is NUL-terminated; synchronization: the object is atomically captured and
+        // identity-verified before unlink; safe alternative: descriptor-relative unlinkat is
+        // necessary to delete only the proven captured object.
         guard let root = objects.first,
               root.components.count == 1,
               let rootName = root.components.first,
@@ -2259,6 +2377,11 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         _ object: CreatedObject,
         relativeTo rootDescriptor: Int32
     ) throws {
+        // SAFETY: Ownership/lifetime: the leaf String pins its C bytes for openat/unlinkat and
+        // every local descriptor is closed; bounds/alignment: recorded manifest components are
+        // validated and NUL-terminated; synchronization: the opened identity is compared with
+        // creation evidence immediately before deletion; safe alternative: descriptor-relative
+        // no-follow operations are required to resist object substitution.
         let components = Array(object.components.dropFirst())
         guard !components.isEmpty,
               let leaf = components.last else {

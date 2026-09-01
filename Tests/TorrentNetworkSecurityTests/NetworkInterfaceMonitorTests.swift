@@ -5,6 +5,11 @@ import Testing
 struct NetworkInterfaceMonitorTests {
     @Test("Dynamic store callbacks balance context ownership")
     func dynamicStoreCallbacksBalanceContextOwnership() {
+        // SAFETY: Ownership/lifetime: the initial strong optional keeps the passUnretained pointer
+        // alive until retainCallback adds ownership, then releaseCallback balances it;
+        // bounds/alignment: the pointer is the exact aligned class address with no byte access;
+        // synchronization: the test invokes callbacks serially; safe alternative: verifying the C
+        // context ownership protocol requires an opaque Unmanaged pointer.
         var context: NetworkInterfaceMonitorDynamicStoreContext? =
             NetworkInterfaceMonitorDynamicStoreContext(monitor: nil)
         weak let weakContext = context
