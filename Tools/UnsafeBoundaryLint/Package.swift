@@ -5,7 +5,10 @@ import PackageDescription
 let swiftSettings: [SwiftSetting] = [
     .swiftLanguageMode(.v6),
     .treatAllWarnings(as: .error),
-    .strictMemorySafety()
+    .strictMemorySafety(),
+    .enableUpcomingFeature("InferIsolatedConformances"),
+    .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
+    .defaultIsolation(nil)
 ]
 
 let package = Package(
