@@ -50,6 +50,9 @@ sources=(
     -package-name "$PACKAGE_IDENTITY" \
     -swift-version 6 \
     -strict-concurrency=complete \
+    -enable-upcoming-feature InferIsolatedConformances \
+    -enable-upcoming-feature NonisolatedNonsendingByDefault \
+    -default-isolation nonisolated \
     -warn-soft-deprecated \
     -strict-memory-safety \
     -warnings-as-errors \
