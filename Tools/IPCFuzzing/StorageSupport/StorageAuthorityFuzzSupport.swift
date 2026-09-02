@@ -1128,7 +1128,8 @@ private enum DHTMessageParserFuzzer {
             fuzzAssert(parsed.sampleCount == 0)
         }
         if parsed.kind == .query {
-            fuzzAssert(parsed.queryKind != .none)
+            fuzzAssert((parsed.queryKind == .none) == (parsed.queryNameRange == nil))
+            fuzzAssert(!parsed.queryIsValid || parsed.queryKind != .none)
             fuzzAssert(parsed.nodes.isEmpty)
             fuzzAssert(parsed.peers.isEmpty)
             fuzzAssert(parsed.sampleHashesRange == nil)
@@ -1136,6 +1137,7 @@ private enum DHTMessageParserFuzzer {
             fuzzAssert(parsed.errorMessageRange == nil)
         } else {
             fuzzAssert(parsed.queryKind == .none)
+            fuzzAssert(parsed.queryIsValid)
             fuzzAssert(parsed.queryNameRange == nil)
             fuzzAssert(parsed.targetRange == nil)
             fuzzAssert(parsed.nameRange == nil)

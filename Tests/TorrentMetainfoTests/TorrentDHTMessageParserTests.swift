@@ -408,6 +408,28 @@ struct TorrentDHTMessageParserTests {
         #expect(message.transactionRange != nil)
     }
 
+    @Test("Query envelopes without a method stay typed but invalid")
+    func retainsQueryEnvelopeWithoutMethod() throws {
+        let body = bencodedDictionary([
+            ("a", bencodedDictionary([
+                ("id", bencodedString(nodeID)),
+            ])),
+            ("=", bencodedString(Data("ping".utf8))),
+            ("t", bencodedString(Data("aa".utf8))),
+            ("y", bencodedString(Data("q".utf8))),
+        ])
+
+        let message = try parser.parse(body, sourceFamily: .ipv4)
+
+        #expect(message.kind == .query)
+        #expect(message.queryKind == .none)
+        #expect(!message.queryIsValid)
+        #expect(message.queryNameRange == nil)
+        #expect(message.nodeIDRange == nil)
+        #expect(message.transactionRange.map { Data(message.body[$0]) }
+            == Data("aa".utf8))
+    }
+
     @Test("Malformed scalar syntax and fixed work ceilings fail closed")
     func rejectsMalformedAndRelaxedLimits() {
         #expect(throws: TorrentDHTMessageError.malformedBencoding) {
