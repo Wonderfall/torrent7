@@ -179,6 +179,41 @@ private:
     std::shared_ptr<State> state_;
 };
 
+struct DetachedCleanupProbeState {
+    std::promise<void> entered_promise;
+    std::shared_future<void> entered = entered_promise.get_future().share();
+    std::promise<void> release_promise;
+    std::shared_future<void> release = release_promise.get_future().share();
+    std::promise<void> finished_promise;
+    std::future<void> finished = finished_promise.get_future();
+};
+
+class BlockingTerminalCleanup final {
+public:
+    explicit BlockingTerminalCleanup(std::shared_ptr<DetachedCleanupProbeState> state)
+        : state_(std::move(state))
+    {
+    }
+
+    BlockingTerminalCleanup(BlockingTerminalCleanup const &) = delete;
+    BlockingTerminalCleanup &operator=(BlockingTerminalCleanup const &) = delete;
+    BlockingTerminalCleanup(BlockingTerminalCleanup &&) noexcept = default;
+    BlockingTerminalCleanup &operator=(BlockingTerminalCleanup &&) = delete;
+
+    ~BlockingTerminalCleanup()
+    {
+        if (!state_) {
+            return;
+        }
+        state_->entered_promise.set_value();
+        state_->release.wait();
+        state_->finished_promise.set_value();
+    }
+
+private:
+    std::shared_ptr<DetachedCleanupProbeState> state_;
+};
+
 [[nodiscard]] TTorrentSessionSettings unblocked_session_settings()
 {
     TTorrentSessionSettings settings{};
@@ -1130,6 +1165,27 @@ TEST_CASE("TTorrentClient creates owner-only state directories and holds an excl
     CHECK(has_owner_directory_permissions(resume_directory));
 
     CHECK_THROWS_AS(static_cast<void>(TTorrentClient(state_directory.string())), std::system_error);
+}
+
+TEST_CASE("detached terminal cleanup returns before destroying its owned state")
+{
+    auto state = std::make_shared<DetachedCleanupProbeState>();
+    std::promise<void> handoff_returned_promise;
+    std::future<void> handoff_returned = handoff_returned_promise.get_future();
+    std::jthread launcher([state, &handoff_returned_promise] {
+        detach_terminal_cleanup(BlockingTerminalCleanup(state));
+        handoff_returned_promise.set_value();
+    });
+
+    CHECK(
+        handoff_returned.wait_for(std::chrono::seconds(2))
+        == std::future_status::ready
+    );
+    CHECK(state->entered.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    CHECK(state->finished.wait_for(std::chrono::milliseconds(100)) == std::future_status::timeout);
+
+    state->release_promise.set_value();
+    CHECK(state->finished.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
 }
 
 TEST_CASE("resume persistence retains its directory authority after root symlink replacement")

@@ -1244,6 +1244,14 @@ struct DeferredSessionShutdown {
     lt::session_proxy proxy;
 };
 
+template <typename Cleanup>
+void detach_terminal_cleanup(Cleanup cleanup)
+{
+    // Cleanup must own every resource it needs and must not refer back to its
+    // caller; the detached thread exists only to run that terminal destruction.
+    std::thread([cleanup = std::move(cleanup)]() mutable {}).detach();
+}
+
 class DeferredSessionProxy {
 public:
     DeferredSessionProxy() = default;
@@ -1260,7 +1268,13 @@ public:
 
         if (destroy_asynchronously_) {
             try {
-                std::thread([shutdown = std::move(*shutdown_)]() mutable {}).detach();
+                // After client-owned work is quiescent, the ordinary C ABI destroy
+                // path must not also wait for session_proxy to join libtorrent's
+                // internal threads. The helper's thread takes sole ownership of the
+                // proxy and state lock and never accesses the former TTorrentClient; a
+                // local std::jthread would join here and restore that final blocking
+                // wait.
+                detach_terminal_cleanup(std::move(*shutdown_));
             } catch (...) {
                 ignore_shutdown_failure();
             }
