@@ -35,28 +35,19 @@ struct TorrentSettingsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            TabView(selection: $state.selectedTab) {
-                Tab("General", systemImage: "slider.horizontal.3", value: .general) {
-                    generalSettings
-                }
-
-                Tab("Interface", systemImage: "macwindow", value: .interface) {
-                    interfaceSettings
-                }
-
-                Tab("Transfers", systemImage: "arrow.up.arrow.down", value: .transfers) {
-                    transfersSettings
-                }
-
-                Tab("Discovery", systemImage: "dot.radiowaves.left.and.right", value: .discovery) {
-                    discoverySettings
-                }
-
-                Tab("Network", systemImage: "network", value: .network) {
-                    networkSettings
-                }
+            switch state.availability {
+            case .loading:
+                ProgressView("Loading settings…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .recoveryRequired:
+                ContentUnavailableView(
+                    "Settings Could Not Be Loaded",
+                    systemImage: "exclamationmark.shield",
+                    description: Text("Torrent networking is blocked. Restore all defaults to replace the unreadable settings.")
+                )
+            case .available:
+                settingsTabs
             }
-            .scenePadding()
 
             Divider()
 
@@ -66,6 +57,7 @@ struct TorrentSettingsView: View {
                 Button("Restore All Defaults...") {
                     isConfirmingRestoreDefaults = true
                 }
+                .disabled(state.availability == .loading)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
@@ -77,7 +69,7 @@ struct TorrentSettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This resets General, Interface, Transfers, Network, Discovery, and the saved download folder.")
+            Text("This resets General, Interface, Transfers, Network, Discovery, and the saved download folder. Torrent networking will be allowed without network interface or VPN restrictions.")
         }
         .fileImporter(
             isPresented: $isChoosingDownloadFolder,
@@ -189,6 +181,31 @@ struct TorrentSettingsView: View {
         } message: {
             Text(peerExchangePluginConfirmationMessage)
         }
+    }
+
+    private var settingsTabs: some View {
+        TabView(selection: $state.selectedTab) {
+            Tab("General", systemImage: "slider.horizontal.3", value: .general) {
+                generalSettings
+            }
+
+            Tab("Interface", systemImage: "macwindow", value: .interface) {
+                interfaceSettings
+            }
+
+            Tab("Transfers", systemImage: "arrow.up.arrow.down", value: .transfers) {
+                transfersSettings
+            }
+
+            Tab("Discovery", systemImage: "dot.radiowaves.left.and.right", value: .discovery) {
+                discoverySettings
+            }
+
+            Tab("Network", systemImage: "network", value: .network) {
+                networkSettings
+            }
+        }
+        .scenePadding()
     }
 
     private var generalSettings: some View {

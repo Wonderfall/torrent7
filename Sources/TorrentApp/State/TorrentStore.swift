@@ -14,6 +14,7 @@ import TorrentStorageAuthority
 private typealias AppliedNetworkBinding = TorrentNetworkBinding
 
 private enum TorrentStoreErrorSource {
+    case settingsLoad
     case settingsApply
     case userAction
 }
@@ -412,6 +413,7 @@ final class TorrentStore {
         settingsState = TorrentSettingsState(
             settings: initialSettings,
             downloadFolder: nil,
+            availability: .loading,
             networkInterfacesAreAuthoritative: false
         )
 
@@ -521,6 +523,7 @@ final class TorrentStore {
         }
         hasStarted = true
         isEngineStarting = true
+        settingsState.availability = .loading
         backgroundRefreshesEnabled = true
         completionNotifier.updateConfiguration(settings)
         completionNotifier.configure()
@@ -2271,12 +2274,19 @@ final class TorrentStore {
 
     func updateSettings(_ settings: TorrentSettings) {
         let clampedSettings = settings.clamped()
-        guard clampedSettings != self.settings else {
+        guard settingsState.availability == .available,
+              clampedSettings != self.settings else {
             return
         }
 
+        replaceSettings(clampedSettings)
+    }
+
+    private func replaceSettings(_ clampedSettings: TorrentSettings) {
         self.settings = clampedSettings
         settingsState.settings = clampedSettings
+        settingsState.availability = .available
+        clearLastError(from: .settingsLoad)
         scheduleSettingsSave()
         completionNotifier.updateConfiguration(clampedSettings)
         updateDockTransferRates()
@@ -2303,7 +2313,10 @@ final class TorrentStore {
             }
             do {
                 try store.requireRestoreDefaultsQueueCapacity()
-                store.updateSettings(TorrentSettings())
+                if store.settingsState.availability != .available
+                    || store.settings != TorrentSettings() {
+                    store.replaceSettings(TorrentSettings())
+                }
                 try await store.clearDownloadFolder()
             } catch {
                 store.setLastError(error.localizedDescription, source: .userAction)
@@ -2316,6 +2329,9 @@ final class TorrentStore {
     }
 
     var requiredNetworkInterfaceAvailable: Bool {
+        guard settingsState.availability == .available else {
+            return false
+        }
         guard settings.requireNetworkInterface else {
             return true
         }
@@ -2333,6 +2349,9 @@ final class TorrentStore {
     }
 
     var networkProtectionStatusText: String {
+        guard settingsState.availability == .available else {
+            return settingsState.networkProtectionStatusText
+        }
         guard settings.requireNetworkInterface else {
             return "Off"
         }
@@ -3140,6 +3159,7 @@ final class TorrentStore {
                 }
                 self.productionBootstrapID = nil
                 self.engineStartupTask = nil
+                self.settingsState.availability = .recoveryRequired
                 self.setLastError(
                     "Saved application state could not be loaded: \(error.localizedDescription)",
                     source: .userAction
@@ -3157,9 +3177,18 @@ final class TorrentStore {
                 return
             }
             if self.settingsPersistenceRevision == settingsRevision {
-                let loadedSettings = preferences.settings.clamped()
-                self.settings = loadedSettings
-                self.settingsState.settings = loadedSettings
+                switch preferences.settings {
+                case .success(let loadedSettings):
+                    self.settings = loadedSettings
+                    self.settingsState.settings = loadedSettings
+                    self.settingsState.availability = .available
+                case .failure:
+                    self.settingsState.availability = .recoveryRequired
+                    self.setLastError(
+                        "Saved settings could not be read. Torrent networking is blocked. Open Settings to restore defaults.",
+                        source: .settingsLoad
+                    )
+                }
             }
             if self.sortPersistenceRevision == sortRevision {
                 self.sortOrder = preferences.sortOrder
@@ -4798,7 +4827,7 @@ final class TorrentStore {
         }
         let defaultSettings = TorrentSettings().clamped()
         let settingsApplicationNeedsSlot: Bool
-        if defaultSettings == settings {
+        if defaultSettings == settings, settingsState.availability == .available {
             settingsApplicationNeedsSlot = false
         } else if let lastOperation = pendingOperations.last,
                   case .applySettings = lastOperation {
@@ -5011,6 +5040,9 @@ final class TorrentStore {
     }
 
     private var currentNetworkBinding: AppliedNetworkBinding {
+        guard settingsState.availability == .available else {
+            return .unbound(networkBlocked: true)
+        }
         let interfaceName = settings.libtorrentRequiredNetworkInterfaceName
         let interface = networkInterfaces.first { $0.name == interfaceName }
         guard settings.requireNetworkInterface else {

@@ -81,6 +81,10 @@ package enum TorrentDHTDiscoveryPolicy: Int, Codable, CaseIterable, Identifiable
     }
 }
 
+package enum TorrentSettingsLoadError: Error, Equatable {
+    case invalidStoredSettings
+}
+
 package struct TorrentSettings: Codable, Equatable, Sendable {
     private static let defaultsKey = "TorrentSettings"
     private static let maximumRateLimitKBps = 1_000_000
@@ -121,87 +125,6 @@ package struct TorrentSettings: Codable, Equatable, Sendable {
     package var preventSleepDuringTransfers = false
 
     package init() {}
-
-    private enum CodingKeys: String, CodingKey {
-        case downloadRateLimitKBps
-        case uploadRateLimitKBps
-        case maximumActiveDownloads
-        case maximumActiveSeeds
-        case stopSeedingRatioPercent
-        case stopSeedingAfterHours
-        case incomingPort
-        case acceptIncomingConnections
-        case usePortForwarding
-        case enableDHTNetwork
-        case useDHTByDefault
-        case dhtDiscoveryPolicy
-        case reduceDHTContribution
-        case enablePeerExchangePlugin
-        case usePeerExchangeByDefault
-        case httpsTrackerPolicy
-        case httpsWebSeedPolicy
-        case enableLocalServiceDiscovery
-        case useLocalServiceDiscoveryByDefault
-        case protocolEncryption
-        case anonymousMode
-        case requireNetworkInterface
-        case showOnlyVPNInterfaces
-        case requiredNetworkInterfaceName
-        case completionNotificationsEnabled
-        case completionNotificationSoundEnabled
-        case completionNotificationNamesEnabled
-        case dockTransferRatesEnabled
-        case preventSleepDuringTransfers
-    }
-
-    private enum LegacyCodingKeys: String, CodingKey {
-        case useHTTPSTrackersOnly
-        case useHTTPSWebSeedsOnly
-    }
-
-    package init(from decoder: Decoder) throws {
-        let values = try decoder.container(keyedBy: CodingKeys.self)
-        var settings = TorrentSettings()
-        settings.downloadRateLimitKBps = try values.decodeIfPresent(Int.self, forKey: .downloadRateLimitKBps) ?? settings.downloadRateLimitKBps
-        settings.uploadRateLimitKBps = try values.decodeIfPresent(Int.self, forKey: .uploadRateLimitKBps) ?? settings.uploadRateLimitKBps
-        settings.maximumActiveDownloads = try values.decodeIfPresent(Int.self, forKey: .maximumActiveDownloads) ?? settings.maximumActiveDownloads
-        settings.maximumActiveSeeds = try values.decodeIfPresent(Int.self, forKey: .maximumActiveSeeds) ?? settings.maximumActiveSeeds
-        settings.stopSeedingRatioPercent = try values.decodeIfPresent(Int.self, forKey: .stopSeedingRatioPercent) ?? settings.stopSeedingRatioPercent
-        settings.stopSeedingAfterHours = try values.decodeIfPresent(Int.self, forKey: .stopSeedingAfterHours) ?? settings.stopSeedingAfterHours
-        settings.incomingPort = try values.decodeIfPresent(Int.self, forKey: .incomingPort) ?? settings.incomingPort
-        settings.acceptIncomingConnections = try values.decodeIfPresent(Bool.self, forKey: .acceptIncomingConnections) ?? settings.acceptIncomingConnections
-        settings.usePortForwarding = try values.decodeIfPresent(Bool.self, forKey: .usePortForwarding) ?? settings.usePortForwarding
-        settings.enableDHTNetwork = try values.decodeIfPresent(Bool.self, forKey: .enableDHTNetwork) ?? settings.enableDHTNetwork
-        settings.useDHTByDefault = try values.decodeIfPresent(Bool.self, forKey: .useDHTByDefault) ?? settings.useDHTByDefault
-        settings.dhtDiscoveryPolicy = try values.decodeIfPresent(TorrentDHTDiscoveryPolicy.self, forKey: .dhtDiscoveryPolicy) ?? settings.dhtDiscoveryPolicy
-        settings.reduceDHTContribution = try values.decodeIfPresent(Bool.self, forKey: .reduceDHTContribution) ?? settings.reduceDHTContribution
-        settings.enablePeerExchangePlugin = try values.decodeIfPresent(Bool.self, forKey: .enablePeerExchangePlugin) ?? settings.enablePeerExchangePlugin
-        settings.usePeerExchangeByDefault = try values.decodeIfPresent(Bool.self, forKey: .usePeerExchangeByDefault) ?? settings.usePeerExchangeByDefault
-        let legacyValues = try decoder.container(keyedBy: LegacyCodingKeys.self)
-        if let trackerPolicy = try values.decodeIfPresent(TorrentHTTPSTrackerPolicy.self, forKey: .httpsTrackerPolicy) {
-            settings.httpsTrackerPolicy = trackerPolicy
-        } else if let required = try legacyValues.decodeIfPresent(Bool.self, forKey: .useHTTPSTrackersOnly) {
-            settings.httpsTrackerPolicy = required ? .require : .prefer
-        }
-        if let webSeedPolicy = try values.decodeIfPresent(TorrentHTTPSWebSeedPolicy.self, forKey: .httpsWebSeedPolicy) {
-            settings.httpsWebSeedPolicy = webSeedPolicy
-        } else if let required = try legacyValues.decodeIfPresent(Bool.self, forKey: .useHTTPSWebSeedsOnly) {
-            settings.httpsWebSeedPolicy = required ? .require : .original
-        }
-        settings.enableLocalServiceDiscovery = try values.decodeIfPresent(Bool.self, forKey: .enableLocalServiceDiscovery) ?? settings.enableLocalServiceDiscovery
-        settings.useLocalServiceDiscoveryByDefault = try values.decodeIfPresent(Bool.self, forKey: .useLocalServiceDiscoveryByDefault) ?? settings.useLocalServiceDiscoveryByDefault
-        settings.protocolEncryption = try values.decodeIfPresent(TorrentProtocolEncryption.self, forKey: .protocolEncryption) ?? settings.protocolEncryption
-        settings.anonymousMode = try values.decodeIfPresent(Bool.self, forKey: .anonymousMode) ?? settings.anonymousMode
-        settings.requireNetworkInterface = try values.decodeIfPresent(Bool.self, forKey: .requireNetworkInterface) ?? settings.requireNetworkInterface
-        settings.showOnlyVPNInterfaces = try values.decodeIfPresent(Bool.self, forKey: .showOnlyVPNInterfaces) ?? settings.showOnlyVPNInterfaces
-        settings.requiredNetworkInterfaceName = try values.decodeIfPresent(String.self, forKey: .requiredNetworkInterfaceName) ?? settings.requiredNetworkInterfaceName
-        settings.completionNotificationsEnabled = try values.decodeIfPresent(Bool.self, forKey: .completionNotificationsEnabled) ?? settings.completionNotificationsEnabled
-        settings.completionNotificationSoundEnabled = try values.decodeIfPresent(Bool.self, forKey: .completionNotificationSoundEnabled) ?? settings.completionNotificationSoundEnabled
-        settings.completionNotificationNamesEnabled = try values.decodeIfPresent(Bool.self, forKey: .completionNotificationNamesEnabled) ?? settings.completionNotificationNamesEnabled
-        settings.dockTransferRatesEnabled = try values.decodeIfPresent(Bool.self, forKey: .dockTransferRatesEnabled) ?? settings.dockTransferRatesEnabled
-        settings.preventSleepDuringTransfers = try values.decodeIfPresent(Bool.self, forKey: .preventSleepDuringTransfers) ?? settings.preventSleepDuringTransfers
-        self = settings.clamped()
-    }
 
     package var libtorrentDownloadRateLimit: Int32 {
         rateLimitBytesPerSecond(downloadRateLimitKBps)
@@ -272,12 +195,26 @@ package struct TorrentSettings: Codable, Equatable, Sendable {
         requireNetworkInterface ? requiredNetworkInterfaceName.trimmingCharacters(in: .whitespacesAndNewlines) : ""
     }
 
-    package static func load(defaults: UserDefaults = .standard) -> TorrentSettings {
-        guard let data = defaults.data(forKey: defaultsKey),
-              let settings = try? JSONDecoder().decode(TorrentSettings.self, from: data) else {
+    /// Only an absent record means first launch. Existing records must be complete
+    /// and canonical; filling missing fields or clamping corruption can relax policy.
+    package static func load(
+        defaults: UserDefaults = .standard
+    ) throws(TorrentSettingsLoadError) -> TorrentSettings {
+        guard let storedValue = defaults.object(forKey: defaultsKey) else {
             return TorrentSettings()
         }
-        return settings.clamped()
+        guard let data = storedValue as? Data else {
+            throw .invalidStoredSettings
+        }
+        do {
+            let settings = try JSONDecoder().decode(TorrentSettings.self, from: data)
+            guard settings == settings.clamped() else {
+                throw TorrentSettingsLoadError.invalidStoredSettings
+            }
+            return settings
+        } catch {
+            throw .invalidStoredSettings
+        }
     }
 
     package func save(defaults: UserDefaults = .standard) {

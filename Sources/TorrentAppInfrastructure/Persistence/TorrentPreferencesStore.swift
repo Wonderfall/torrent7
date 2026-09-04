@@ -2,7 +2,7 @@ import Foundation
 import TorrentEngineModel
 
 package struct TorrentPreferencesSnapshot: Sendable {
-    package let settings: TorrentSettings
+    package let settings: Result<TorrentSettings, TorrentSettingsLoadError>
     package let sortOrder: TorrentSortOrder
     package let sortDirections: [TorrentSortOrder: TorrentSortDirection]
 
@@ -24,7 +24,9 @@ package actor TorrentPreferencesStore {
     package func load() async throws -> TorrentPreferencesSnapshot {
         try Task.checkCancellation()
         let defaults = userDefaults
-        let settings = TorrentSettings.load(defaults: defaults)
+        let settings = Result { () throws(TorrentSettingsLoadError) in
+            try TorrentSettings.load(defaults: defaults)
+        }
         let sortOrder = TorrentSortOrder.load(defaults: defaults)
         var sortDirections = [TorrentSortOrder: TorrentSortDirection]()
         sortDirections.reserveCapacity(TorrentSortOrder.allCases.count)

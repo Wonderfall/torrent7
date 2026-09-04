@@ -5,6 +5,121 @@ import TorrentEngineModel
 
 @Suite("Torrent settings")
 struct TorrentSettingsTests {
+    @Test("Only absent settings use first-launch defaults")
+    func absentSettingsUseDefaults() throws {
+        try withIsolatedDefaults { defaults in
+            let loaded = try TorrentSettings.load(defaults: defaults)
+            #expect(loaded == TorrentSettings())
+            #expect(defaults.object(forKey: "TorrentSettings") == nil)
+        }
+    }
+
+    @Test("An invalid unrelated preference cannot reset VPN restrictions")
+    func unrelatedCorruptionRejectsEntireRecord() throws {
+        try withIsolatedDefaults { defaults in
+            let data = try corruptedVPNSettingsData()
+            defaults.set(data, forKey: "TorrentSettings")
+
+            #expect(throws: TorrentSettingsLoadError.invalidStoredSettings) {
+                try TorrentSettings.load(defaults: defaults)
+            }
+            #expect(defaults.data(forKey: "TorrentSettings") == data)
+        }
+    }
+
+    @Test("Present settings with the wrong storage type are rejected")
+    func wrongStorageTypeIsRejected() throws {
+        try withIsolatedDefaults { defaults in
+            defaults.set("invalid", forKey: "TorrentSettings")
+            #expect(throws: TorrentSettingsLoadError.invalidStoredSettings) {
+                try TorrentSettings.load(defaults: defaults)
+            }
+            #expect(defaults.string(forKey: "TorrentSettings") == "invalid")
+        }
+    }
+
+    @Test("Malformed and obsolete settings remain intact for explicit recovery", arguments: [
+        "", "{", "{}", "null", "[]", "true",
+        #"{"requireNetworkInterface":true,"showOnlyVPNInterfaces":true}"#,
+        #"{"useHTTPSTrackersOnly":true,"useHTTPSWebSeedsOnly":true}"#
+    ])
+    func malformedSettingsAreRejected(_ json: String) throws {
+        try withIsolatedDefaults { defaults in
+            let data = Data(json.utf8)
+            defaults.set(data, forKey: "TorrentSettings")
+            #expect(throws: TorrentSettingsLoadError.invalidStoredSettings) {
+                try TorrentSettings.load(defaults: defaults)
+            }
+            #expect(defaults.data(forKey: "TorrentSettings") == data)
+        }
+    }
+
+    @Test("Every persisted field is required and rejects null or an invalid type", arguments: [
+        Optional<String>.none, "null", "{}"
+    ])
+    func rejectsIncompleteSettings(_ replacement: String?) throws {
+        try withIsolatedDefaults { defaults in
+            var settings = TorrentSettings()
+            settings.requireNetworkInterface = true
+            settings.showOnlyVPNInterfaces = true
+            settings.requiredNetworkInterfaceName = "utun4"
+            let encoded = String(decoding: try JSONEncoder().encode(settings), as: UTF8.self)
+            // This fixture contains only scalar values, with no commas in strings.
+            let fields = encoded.dropFirst().dropLast().split(separator: ",").map(String.init)
+            for fieldIndex in fields.indices {
+                var mutated = fields
+                if let replacement {
+                    let key = try #require(fields[fieldIndex].split(separator: ":").first)
+                    mutated[fieldIndex] = "\(key):\(replacement)"
+                } else {
+                    mutated.remove(at: fieldIndex)
+                }
+                let data = Data("{\(mutated.joined(separator: ","))}".utf8)
+                defaults.set(data, forKey: "TorrentSettings")
+                #expect(throws: TorrentSettingsLoadError.invalidStoredSettings) {
+                    try TorrentSettings.load(defaults: defaults)
+                }
+                #expect(defaults.data(forKey: "TorrentSettings") == data)
+            }
+        }
+    }
+
+    @Test("Noncanonical settings cannot silently relax policy")
+    func rejectsNoncanonicalSettings() throws {
+        try withIsolatedDefaults { defaults in
+            var inconsistentVPN = TorrentSettings()
+            inconsistentVPN.showOnlyVPNInterfaces = true
+            var invalidPort = TorrentSettings()
+            invalidPort.incomingPort = 70_000
+            var invalidInterface = TorrentSettings()
+            invalidInterface.requiredNetworkInterfaceName = String(repeating: "x", count: 65)
+            for settings in [inconsistentVPN, invalidPort, invalidInterface] {
+                let data = try JSONEncoder().encode(settings)
+                defaults.set(data, forKey: "TorrentSettings")
+                #expect(throws: TorrentSettingsLoadError.invalidStoredSettings) {
+                    try TorrentSettings.load(defaults: defaults)
+                }
+                #expect(defaults.data(forKey: "TorrentSettings") == data)
+            }
+        }
+    }
+
+    @Test("Complete current settings preserve VPN and HTTPS policy")
+    func validSecuritySettingsRoundTrip() throws {
+        try withIsolatedDefaults { defaults in
+            var settings = TorrentSettings()
+            settings.requireNetworkInterface = true
+            settings.showOnlyVPNInterfaces = true
+            settings.requiredNetworkInterfaceName = "utun4"
+            settings.httpsTrackerPolicy = .require
+            settings.protocolEncryption = .required
+            settings.save(defaults: defaults)
+
+            let loaded = try TorrentSettings.load(defaults: defaults)
+            #expect(loaded == settings)
+        }
+    }
+
     @Test("Clamps invalid limits")
     func clampsInvalidLimits() {
         var settings = TorrentSettings()
@@ -86,7 +201,10 @@ struct TorrentSettingsTests {
     @Test("Network exposure defaults are hardened")
     func networkExposureDefaultsAreHardened() throws {
         let settings = TorrentSettings()
-        let decoded = try JSONDecoder().decode(TorrentSettings.self, from: Data("{}".utf8))
+        let decoded = try JSONDecoder().decode(
+            TorrentSettings.self,
+            from: JSONEncoder().encode(settings)
+        )
 
         for candidate in [settings, decoded] {
             #expect(candidate.acceptIncomingConnections == false)
@@ -97,29 +215,6 @@ struct TorrentSettingsTests {
             #expect(candidate.httpsTrackerPolicy == .prefer)
             #expect(candidate.httpsWebSeedPolicy == .require)
         }
-    }
-
-    @Test("Legacy HTTPS booleans migrate to explicit policies")
-    func legacyHTTPSBooleansMigrateToExplicitPolicies() throws {
-        let permissive = try JSONDecoder().decode(
-            TorrentSettings.self,
-            from: Data(#"{"useHTTPSTrackersOnly":false,"useHTTPSWebSeedsOnly":false}"#.utf8)
-        )
-        #expect(permissive.httpsTrackerPolicy == .prefer)
-        #expect(permissive.httpsWebSeedPolicy == .original)
-
-        let strict = try JSONDecoder().decode(
-            TorrentSettings.self,
-            from: Data(#"{"useHTTPSTrackersOnly":true,"useHTTPSWebSeedsOnly":true}"#.utf8)
-        )
-        #expect(strict.httpsTrackerPolicy == .require)
-        #expect(strict.httpsWebSeedPolicy == .require)
-
-        let encoded = String(decoding: try JSONEncoder().encode(strict), as: UTF8.self)
-        #expect(encoded.contains("httpsTrackerPolicy"))
-        #expect(encoded.contains("httpsWebSeedPolicy"))
-        #expect(!encoded.contains("useHTTPSTrackersOnly"))
-        #expect(!encoded.contains("useHTTPSWebSeedsOnly"))
     }
 
     @Test("Reduced DHT contribution is opt-in and persisted")
@@ -146,7 +241,6 @@ struct TorrentSettingsTests {
         let decoded = try JSONDecoder().decode(TorrentSettings.self, from: data)
 
         #expect(decoded.dhtDiscoveryPolicy == .afterAllTrackersFail)
-        #expect(try JSONDecoder().decode(TorrentSettings.self, from: Data("{}".utf8)).dhtDiscoveryPolicy == .alongsideTrackers)
     }
 
     @Test("Completion notifications hide torrent names by default")
@@ -287,23 +381,6 @@ struct TorrentSettingsTests {
         #expect(settings.libtorrentRequiredNetworkInterfaceName == "")
     }
 
-    @Test("Decoding clamps persisted invalid values")
-    func decodingClampsPersistedInvalidValues() throws {
-        let data = Data("""
-        {
-          "downloadRateLimitKBps": -1,
-          "incomingPort": 70000,
-          "requiredNetworkInterfaceName": "  utun4  "
-        }
-        """.utf8)
-
-        let settings = try JSONDecoder().decode(TorrentSettings.self, from: data)
-
-        #expect(settings.downloadRateLimitKBps == 0)
-        #expect(settings.incomingPort == 65_535)
-        #expect(settings.requiredNetworkInterfaceName == "utun4")
-    }
-
     @Test("Persists clamped settings in an isolated defaults suite")
     func persistsClampedSettingsInIsolatedDefaultsSuite() throws {
         try withIsolatedDefaults { defaults in
@@ -312,7 +389,7 @@ struct TorrentSettingsTests {
             settings.protocolEncryption = .required
 
             settings.save(defaults: defaults)
-            let loadedSettings = TorrentSettings.load(defaults: defaults)
+            let loadedSettings = try TorrentSettings.load(defaults: defaults)
 
             #expect(loadedSettings.incomingPort == 65_535)
             #expect(loadedSettings.protocolEncryption == .required)

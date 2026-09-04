@@ -13,6 +13,126 @@ import TorrentStorageAuthority
 @MainActor
 @Suite("Torrent store integration", .serialized)
 struct TorrentStoreIntegrationTests {
+    @Test("Corrupted settings stay blocked across launches and unrelated edits")
+    func corruptedSettingsStayBlockedAcrossLaunches() async throws {
+        try await withIsolatedDefaults { defaults, suiteName in
+            let data = try corruptedVPNSettingsData()
+            defaults.set(data, forKey: "TorrentSettings")
+
+            for _ in 0..<2 {
+                let productionEngine = FakeTorrentEngine()
+                let replacementEngine = FakeTorrentEngine()
+                let startupCount = Mutex(0)
+                let harness = makeStoreHarness(
+                    defaultsDomain: .suite(suiteName),
+                    engineStartupFactory: { _ in
+                        let count = startupCount.withLock {
+                            $0 += 1
+                            return $0
+                        }
+                        return count == 1 ? productionEngine : replacementEngine
+                    }
+                )
+                harness.store.start()
+                await harness.store.saveAll()
+
+                #expect(harness.store.engineAvailable)
+                #expect(harness.store.settingsState.availability == .recoveryRequired)
+                #expect(!harness.store.requiredNetworkInterfaceAvailable)
+                #expect(!harness.store.settingsState.requiredNetworkInterfaceAvailable)
+                #expect(harness.store.networkProtectionStatusText == "Settings recovery required")
+                try #require(await !productionEngine.appliedSettings.isEmpty)
+                #expect(await productionEngine.appliedSettings.allSatisfy(\.networkBlocked))
+
+                var edited = harness.store.settings
+                edited.dockTransferRatesEnabled.toggle()
+                harness.store.updateSettings(edited)
+                harness.store.setRequireNetworkInterface(false)
+                harness.store.setRequiredNetworkInterfaceName("en0")
+                harness.store.setSortOrder(.progress)
+                harness.store.refresh()
+                await harness.store.saveAll()
+
+                #expect(harness.store.settingsState.availability == .recoveryRequired)
+                #expect(await productionEngine.currentNetworkBlocked)
+                #expect(await productionEngine.appliedSettings.allSatisfy(\.networkBlocked))
+                #expect(defaults.data(forKey: "TorrentSettings") == data)
+
+                harness.store.startProductionEngine(enablePeerExchangePlugin: false)
+                await harness.store.saveAll()
+                #expect(harness.store.settingsState.availability == .recoveryRequired)
+                try #require(await !replacementEngine.appliedSettings.isEmpty)
+                #expect(await replacementEngine.appliedSettings.allSatisfy(\.networkBlocked))
+                #expect(defaults.data(forKey: "TorrentSettings") == data)
+            }
+        }
+    }
+
+    @Test("Explicit defaults restoration replaces corrupt settings and releases the network block")
+    func explicitDefaultsRestorationRecoversSettings() async throws {
+        try await withIsolatedDefaults { defaults, suiteName in
+            defaults.set(try corruptedVPNSettingsData(), forKey: "TorrentSettings")
+            let productionEngine = FakeTorrentEngine()
+            let harness = makeStoreHarness(
+                defaultsDomain: .suite(suiteName),
+                engineStartupFactory: { _ in productionEngine }
+            )
+            harness.store.start()
+            await harness.store.saveAll()
+            #expect(await productionEngine.currentNetworkBlocked)
+            // The placeholder already equals defaults; recovery must still save
+            // and apply them when the user explicitly confirms restoration.
+            #expect(harness.store.settings == TorrentSettings())
+
+            harness.store.restoreDefaultSettings()
+            await harness.store.saveAll()
+
+            #expect(harness.store.settingsState.availability == .available)
+            #expect(try TorrentSettings.load(defaults: defaults) == TorrentSettings())
+            #expect(await productionEngine.appliedSettings.last?.networkBlocked == false)
+            #expect(await harness.accessStore.clearDefaultCalls == [Set<String>()])
+
+            let restartedEngine = FakeTorrentEngine()
+            let restarted = makeStoreHarness(
+                defaultsDomain: .suite(suiteName),
+                engineStartupFactory: { _ in restartedEngine }
+            )
+            restarted.store.start()
+            await restarted.store.saveAll()
+            #expect(restarted.store.settingsState.availability == .available)
+            #expect(await restartedEngine.appliedSettings.last?.networkBlocked == false)
+        }
+    }
+
+    @Test("Edits before bootstrap completes cannot overwrite saved VPN policy")
+    func editsDuringBootstrapCannotReplaceVPNSettings() async throws {
+        try await withIsolatedDefaults { defaults, suiteName in
+            var saved = TorrentSettings()
+            saved.requireNetworkInterface = true
+            saved.showOnlyVPNInterfaces = true
+            saved.requiredNetworkInterfaceName = "utun4"
+            saved.save(defaults: defaults)
+            let productionEngine = FakeTorrentEngine()
+            let harness = makeStoreHarness(
+                defaultsDomain: .suite(suiteName),
+                engineStartupFactory: { _ in productionEngine }
+            )
+            harness.store.start()
+            #expect(harness.store.settingsState.availability == .loading)
+            var edited = TorrentSettings()
+            edited.dockTransferRatesEnabled = false
+            harness.store.updateSettings(edited)
+            await harness.store.saveAll()
+
+            #expect(harness.store.settingsState.availability == .available)
+            #expect(harness.store.settings == saved)
+            let loaded = try TorrentSettings.load(defaults: defaults)
+            #expect(loaded == saved)
+            #expect(await productionEngine.appliedSettings.last?.networkBlocked == true)
+            #expect(await productionEngine.appliedSettings.last?.settings == saved)
+        }
+    }
+
     @Test("Application services start explicitly and only once")
     func applicationServicesStartExplicitlyAndOnlyOnce() async throws {
         let suiteName = "app.torrent7.startup.\(UUID().uuidString)"
@@ -43,6 +163,8 @@ struct TorrentStoreIntegrationTests {
         #expect(startupCount.withLock { $0 } == 1)
         #expect(!harness.engine.isAvailable)
         #expect(harness.store.engineAvailable)
+        #expect(harness.store.settingsState.availability == .available)
+        #expect(await productionEngine.appliedSettings.last?.networkBlocked == false)
     }
 
     @Test("Best-effort save suppresses engine failures")
@@ -2186,7 +2308,7 @@ struct TorrentStoreIntegrationTests {
         #expect(harness.dock.completionBadgeUpdates == [0])
         #expect(await harness.engine.blockNetworkCount >= 1)
         #expect(await harness.engine.appliedSettings.last?.networkBlocked == true)
-        #expect(TorrentSettings.load(defaults: defaults).libtorrentRequiredNetworkInterfaceName == "utun4")
+        #expect(try TorrentSettings.load(defaults: defaults).libtorrentRequiredNetworkInterfaceName == "utun4")
     }
 
     @Test("Changing PEX plugin setting restarts engine")

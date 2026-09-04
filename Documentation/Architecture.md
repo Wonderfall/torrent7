@@ -55,6 +55,24 @@ or libtorrent. The helper has no user-selected-file or bookmark entitlement.
 The former folder-wide authority model was removed at the cutover; there is no
 parallel compatibility path.
 
+## Saved settings and network authorization
+
+Only an absent settings record uses first-launch defaults. An existing record
+must contain every field in the current format, with valid types and canonical
+values. Missing or null fields, obsolete partial records, inconsistent VPN
+policy, and other corruption require explicit recovery; loading never repairs
+or overwrites them. Current records written by the app remain valid without
+migration.
+
+During settings loading or recovery, every engine settings application keeps
+networking blocked, including after engine replacement. Ordinary settings edits
+cannot overwrite the unreadable record or release that block. Settings presents
+a recovery view; the existing Restore All Defaults action replaces the record
+only after confirmation that network interface and VPN restrictions will be
+removed. An explicit reset is persisted and applied even when the displayed
+placeholder already equals the defaults. Sorting and other independent saved
+state can still load without granting network authorization.
+
 ## Command channel
 
 The application-scoped Enhanced Security helper is discovered and launched by

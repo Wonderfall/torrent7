@@ -519,9 +519,16 @@ final class TorrentSidebarState {
     }
 }
 
+enum TorrentSettingsAvailability: Equatable, Sendable {
+    case loading
+    case available
+    case recoveryRequired
+}
+
 @MainActor
 @Observable
 final class TorrentSettingsState {
+    var availability: TorrentSettingsAvailability
     var settings: TorrentSettings
     var downloadFolder: URL?
     var networkInterfaces: [NetworkInterfaceOption]
@@ -531,12 +538,14 @@ final class TorrentSettingsState {
     init(
         settings: TorrentSettings,
         downloadFolder: URL?,
+        availability: TorrentSettingsAvailability = .available,
         networkInterfaces: [NetworkInterfaceOption] = [],
         networkInterfacesAreAuthoritative: Bool = true,
         selectedTab: TorrentSettingsTab = .general
     ) {
         self.settings = settings
         self.downloadFolder = downloadFolder
+        self.availability = availability
         self.networkInterfaces = networkInterfaces
         self.networkInterfacesAreAuthoritative = networkInterfacesAreAuthoritative
         self.selectedTab = selectedTab
@@ -547,6 +556,9 @@ final class TorrentSettingsState {
     }
 
     var requiredNetworkInterfaceAvailable: Bool {
+        guard availability == .available else {
+            return false
+        }
         guard settings.requireNetworkInterface else {
             return true
         }
@@ -564,6 +576,14 @@ final class TorrentSettingsState {
     }
 
     var networkProtectionStatusText: String {
+        switch availability {
+        case .loading:
+            return "Loading settings…"
+        case .recoveryRequired:
+            return "Settings recovery required"
+        case .available:
+            break
+        }
         guard settings.requireNetworkInterface else {
             return "Off"
         }
