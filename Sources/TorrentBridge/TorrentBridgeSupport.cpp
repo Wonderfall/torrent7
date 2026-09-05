@@ -959,6 +959,12 @@ std::vector<char> encoded_resume_data(
             std::string(kPreparsedInfoResumeKey),
             lt::entry(std::move(*exact_info))
         );
+        if (policy.has_identity && !policy.storage_activation && !policy.metadata_validation_pending) {
+            resume_entry.dict().insert_or_assign(
+                std::string(kStagedMetadataResumeKey),
+                lt::entry(1)
+            );
+        }
     }
     if (policy.has_identity && is_canonical_torrent_id(policy.canonical_id)) {
         resume_entry.dict().insert_or_assign(
@@ -1244,6 +1250,29 @@ int32_t resume_data_int(std::vector<char> const &buffer, std::string_view key_na
 bool metadata_validation_pending_from_resume_data(std::vector<char> const &buffer)
 {
     return resume_data_bool(buffer, kMetadataValidationPendingResumeKey);
+}
+
+std::expected<bool, std::string> staged_metadata_from_resume_data(std::vector<char> const &buffer)
+{
+    lt::error_code error;
+    lt::bdecode_node const root = lt::bdecode(lt::span<char const>(buffer), error);
+    if (error || root.type() != lt::bdecode_node::dict_t) {
+        return std::unexpected("Resume data is not a valid dictionary.");
+    }
+
+    lt::bdecode_node const marker = root.dict_find(kStagedMetadataResumeKey);
+    if (!marker) {
+        return false;
+    }
+    if (marker.type() != lt::bdecode_node::int_t || marker.int_value() != 1) {
+        return std::unexpected("Resume data has an invalid staged metadata marker.");
+    }
+    if (root.dict_find(kStorageClaimIDResumeKey)
+        || root.dict_find(kStorageClaimGenerationResumeKey)
+        || root.dict_find(kStorageManifestDigestResumeKey)) {
+        return std::unexpected("Staged metadata cannot carry storage authority.");
+    }
+    return true;
 }
 
 bool allow_pre_metadata_dht_from_resume_data(std::vector<char> const &buffer)

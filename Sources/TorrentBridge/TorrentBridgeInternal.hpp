@@ -136,6 +136,7 @@ constexpr std::string_view kStorageClaimIDResumeKey = "torrent-app-storage-claim
 constexpr std::string_view kStorageClaimGenerationResumeKey = "torrent-app-storage-claim-generation";
 constexpr std::string_view kStorageManifestDigestResumeKey = "torrent-app-storage-manifest-digest";
 constexpr std::string_view kMetadataValidationPendingResumeKey = "torrent-app-metadata-validation-pending";
+constexpr std::string_view kStagedMetadataResumeKey = "torrent-app-staged-metadata";
 constexpr std::string_view kAllowPreMetadataDHTResumeKey = "torrent-app-allow-pre-metadata-dht";
 constexpr std::string_view kHTTPSTrackerPolicyResumeKey = "torrent-app-https-tracker-policy";
 constexpr std::string_view kHTTPSWebSeedPolicyResumeKey = "torrent-app-https-web-seed-policy";
@@ -1510,6 +1511,8 @@ ResumeInfoSectionResult preparsed_info_from_resume_data(
 );
 
 bool metadata_validation_pending_from_resume_data(std::vector<char> const &buffer);
+
+[[nodiscard]] std::expected<bool, std::string> staged_metadata_from_resume_data(std::vector<char> const &buffer);
 
 bool allow_pre_metadata_dht_from_resume_data(std::vector<char> const &buffer);
 

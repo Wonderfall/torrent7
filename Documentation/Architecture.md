@@ -337,6 +337,15 @@ priorities, options, source policy, and validated metadata. The journal records
 awaiting-metadata, metadata-ready, promoting, and outcome-unknown states so a
 crash does not silently refetch or guess the result.
 
+After metadata validation and before broker-backed re-add, the helper persists
+the exact info bytes with an explicit staged-metadata marker and the intended
+file priorities. Restore revalidates the metadata through Swift, retains the
+public torrent ID, and keeps payload priorities disabled in helper-private
+staging until promotion completes. The marker cannot coexist with storage
+claim fields or pending metadata validation. Metadata-bearing records without
+either the staged marker or valid storage authority remain unclaimed; there is
+no migration of previously unclaimed records.
+
 ## Removal and revocation
 
 Removal uses soft revocation. The GUI first records the in-progress removal in
@@ -388,9 +397,11 @@ not expand spatial authority beyond objects the broker previously granted.
 ## Persistence cutover
 
 Broker-backed resume records contain the pathless storage activation and an
-explicit broker validation marker. Records without that authority are preserved
-on disk but skipped during restore. Payload data is untouched. There is no
-automatic path migration and no old filesystem-authority API in Swift, IPC, the
+explicit broker validation marker. Metadata-less discovery and explicitly
+marked staged metadata restore only into helper-private staging. Other records
+without storage authority are preserved on disk but skipped during restore.
+Payload data is untouched. There is no automatic path migration and no old
+filesystem-authority API in Swift, IPC, the
 C ABI, or native restore logic.
 
 Validated exact info-dictionary bytes are stored in a separate opaque

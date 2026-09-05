@@ -225,6 +225,10 @@ ResumeSaveResult TTorrentClient::write_resume_data_checked(
     lt::add_torrent_params persisted_params = params;
     if (policy.metadata_validation_pending) {
         persisted_params.ti.reset();
+    }
+    // Staging lasts until broker-backed re-add, even after metadata validation.
+    // Persist user intent instead of the temporary payload and discovery guards.
+    if (policy.has_identity && !policy.storage_activation) {
         persisted_params.file_priorities = policy.intended_file_priorities;
         if (policy.intended_default_dont_download) {
             persisted_params.flags |= lt::torrent_flags::default_dont_download;
@@ -246,6 +250,8 @@ ResumeSaveResult TTorrentClient::write_resume_data_checked(
         } else {
             persisted_params.flags &= ~lt::torrent_flags::disable_lsd;
         }
+    }
+    if (policy.metadata_validation_pending) {
         sanitize_magnet_endpoint_hints(persisted_params);
     } else {
         sanitize_resume_endpoint_hints(persisted_params);
@@ -261,6 +267,15 @@ ResumeSaveResult TTorrentClient::write_resume_data_checked(
         BridgeResult const valid_merkle_state = validate_resume_merkle_state(persisted_params);
         if (!valid_merkle_state) {
             return std::unexpected(valid_merkle_state.error().message);
+        }
+        if (policy.has_identity && !policy.storage_activation) {
+            // default_dont_download is an import-only flag, absent from native
+            // resume encoding. Materialize every validated file's intended
+            // priority so omitted magnet selections survive a restart.
+            persisted_params.file_priorities.resize(
+                static_cast<std::size_t>(persisted_params.ti->layout().num_files()),
+                policy.intended_default_dont_download ? lt::dont_download : lt::default_priority
+            );
         }
     }
     BridgeResult const valid_sources = validate_torrent_sources(persisted_params);

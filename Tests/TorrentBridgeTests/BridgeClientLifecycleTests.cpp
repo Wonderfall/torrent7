@@ -5180,6 +5180,179 @@ TEST_CASE("metadata validation gate survives resume reload")
     ));
 }
 
+TEST_CASE("validated staged magnets retain metadata and user intent across resume reloads")
+{
+    bool change_priority = false;
+    SUBCASE("original magnet file selection") {}
+    SUBCASE("file priority changed after metadata arrival") { change_priority = true; }
+    for (bool const private_torrent : {false, true}) {
+        for (ResumeSaveMode const mode : {ResumeSaveMode::routine, ResumeSaveMode::policy, ResumeSaveMode::full}) {
+            CAPTURE(private_torrent);
+            CAPTURE(static_cast<int>(mode));
+            bridge_tests::TemporaryDirectory temporary;
+            fs::path const state = temporary.path() / "State";
+            fs::path const restart_state = temporary.path() / "RestartState";
+            fs::path const restart_resume_directory = restart_state / "ResumeData";
+            REQUIRE(fs::create_directories(restart_resume_directory));
+            std::vector<lt::create_file_entry> payload_files;
+            payload_files.emplace_back("staged/selected.bin", 4);
+            payload_files.emplace_back("staged/unselected.bin", 4);
+            lt::create_torrent creator(std::move(payload_files), 16 * 1024, lt::create_torrent::v1_only);
+            creator.set_priv(private_torrent);
+            creator.set_hash(lt::piece_index_t(0), bridge_tests::sha1_hash_from_seed(9U));
+            auto const info = bridge_tests::load_torrent_params(creator.generate_buf(), "staged metadata").ti;
+            std::string const resume_id = primary_hash_key(info->info_hashes());
+            std::string const magnet = "magnet:?xt=urn:btih:" + resume_id.substr(3U) + "&so=0";
+            auto parser = std::make_shared<TestOnlyResumeInfoParser>();
+            std::array<char, TTORRENT_ID_CAPACITY> canonical_id{};
+            std::array<char, 512> error{};
+            {
+                TTorrentClient client(state.string(), false, nullptr, parser);
+                client.set_session_shutdown_asynchronous(false);
+                client.stop_alert_worker();
+                TTorrentAddOptions options = default_add_options();
+                options.starts_paused = bridge_bool(true);
+                options.queue_priority = TTORRENT_QUEUE_PRIORITY_HIGH;
+                int32_t outcome = TTORRENT_ADD_REJECTED;
+                REQUIRE(TorrentClientAddMagnet(
+                    &client, magnet.c_str(), options,
+                    canonical_id.data(), static_cast<int32_t>(canonical_id.size()), &outcome,
+                    error.data(), static_cast<int32_t>(error.size())
+                ) == 0);
+                lt::torrent_handle const handle = mapped_torrent_handle(client, resume_id);
+                REQUIRE(handle.is_valid());
+                REQUIRE(handle.set_metadata(info->info_section()));
+                DirtyMask changes = 0U;
+                REQUIRE(BRIDGE_WITH_CLIENT_LOCK(
+                    client, client.validate_or_remove_loaded_metadata(handle, changes)
+                ));
+                TorrentIdentity const *identity = identity_from_handle(handle);
+                REQUIRE(identity != nullptr);
+                REQUIRE_FALSE(identity->storage_activation);
+                REQUIRE_FALSE(BRIDGE_WITH_CLIENT_LOCK(
+                    client, client.metadata_validation_pending.contains(identity)
+                ));
+                if (change_priority) {
+                    REQUIRE(::TorrentClientSetFilePriority(
+                        &client, identity->token->value, 0, TTORRENT_FILE_PRIORITY_HIGH,
+                        error.data(), static_cast<int32_t>(error.size())
+                    ) == 0);
+                }
+                REQUIRE(client.save_resume_data_checked(identity->token->value, mode));
+                fs::path const resume_path = state / "ResumeData" / (resume_id + std::string(kResumeExtension));
+                FileReadResult const persisted = read_file(resume_path, kMaxResumeFileBytes);
+                REQUIRE(persisted);
+                auto const staged_metadata = staged_metadata_from_resume_data(*persisted);
+                REQUIRE(staged_metadata);
+                CHECK(*staged_metadata);
+                CHECK_FALSE(metadata_validation_pending_from_resume_data(*persisted));
+                CHECK_FALSE(storage_activation_from_resume_data(*persisted));
+                // Restore the exact save made before teardown, then exercise
+                // graceful shutdown persistence through two further reloads.
+                REQUIRE(fs::copy_file(resume_path, restart_resume_directory / resume_path.filename()));
+            }
+            for (int restart = 0; restart < 2; ++restart) {
+                CAPTURE(restart);
+                std::size_t const previous_parse_count = parser->invocation_count();
+                TTorrentClient reloaded(restart_state.string(), false, nullptr, parser);
+                reloaded.set_session_shutdown_asynchronous(false);
+                reloaded.stop_alert_worker();
+                CHECK(parser->invocation_count() == previous_parse_count + 1U);
+                std::vector<TTorrentSnapshot> const snapshots = copied_snapshots(reloaded);
+                REQUIRE(snapshots.size() == 1U);
+                CHECK(std::string(snapshots.front().id) == canonical_id.data());
+                CHECK(bridge_bool(snapshots.front().has_metadata));
+                CHECK(snapshots.front().queue_priority == TTORRENT_QUEUE_PRIORITY_HIGH);
+                lt::torrent_handle const handle = mapped_torrent_handle(reloaded, resume_id);
+                REQUIRE(handle.is_valid());
+                auto const restored_info = handle.torrent_file();
+                REQUIRE(restored_info);
+                CHECK(std::ranges::equal(restored_info->info_section(), info->info_section()));
+                TorrentIdentity const *identity = identity_from_handle(handle);
+                REQUIRE(identity != nullptr);
+                CHECK_FALSE(identity->storage_activation);
+                CHECK_FALSE(identity->allow_pre_metadata_dht);
+                CHECK(identity->dht_locked_by_source == private_torrent);
+                CHECK(identity->peer_exchange_locked_by_source == private_torrent);
+                CHECK(identity->lsd_locked_by_source == private_torrent);
+                CHECK_FALSE(BRIDGE_WITH_CLIENT_LOCK(
+                    reloaded, reloaded.metadata_validation_pending.contains(identity)
+                ));
+                CHECK(handle.get_file_priorities()
+                    == std::vector<lt::download_priority_t>{lt::dont_download, lt::dont_download});
+                CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::paused));
+                CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht));
+                CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_pex));
+                CHECK(static_cast<bool>(handle.flags() & lt::torrent_flags::disable_lsd));
+                CHECK(handle.status(lt::torrent_handle::query_save_path).save_path
+                    == reloaded.staging_path(info->info_hashes()));
+                std::array<TTorrentFileSnapshot, 2> files{};
+                int32_t required_count = 0;
+                std::uint8_t available = 0U;
+                REQUIRE(reloaded.copy_files(identity->token->value, files, &required_count, &available) == 2);
+                CHECK(bridge_bool(available));
+                CHECK(files.front().priority == (change_priority
+                    ? TTORRENT_FILE_PRIORITY_HIGH : TTORRENT_FILE_PRIORITY_NORMAL));
+                CHECK(files.back().priority == TTORRENT_FILE_PRIORITY_SKIP);
+                CHECK_FALSE(reloaded.take_alert_error(error));
+            }
+        }
+    }
+}
+
+TEST_CASE("staged metadata resume restoration rejects malformed and conflicting markers")
+{
+    auto const info = make_torrent_info(false);
+    lt::add_torrent_params params;
+    params.ti = info;
+    params.info_hashes = info->info_hashes();
+    TorrentIdentity identity;
+    identity.canonical_id = bridge_tests::canonical_id('a');
+    std::vector<char> const encoded = encoded_resume_data(params, &identity);
+    lt::error_code error;
+    lt::bdecode_node const decoded = lt::bdecode(lt::span<char const>(encoded), error);
+    REQUIRE_FALSE(error);
+
+    auto rejects = [&]<typename Mutator>(std::string const &label, Mutator mutate, bool const preserves_record) {
+        CAPTURE(label);
+        bridge_tests::TemporaryDirectory temporary;
+        fs::path const state = temporary.path() / "State";
+        fs::path const resume_directory = state / "ResumeData";
+        REQUIRE(fs::create_directories(resume_directory));
+        lt::entry record(decoded);
+        mutate(record);
+        std::string bytes;
+        lt::bencode(std::back_inserter(bytes), record);
+        fs::path const path = resume_directory / (primary_hash_key(params.info_hashes) + std::string(kResumeExtension));
+        REQUIRE(write_owner_only_file_checked(path, bytes));
+        auto parser = std::make_shared<TestOnlyResumeInfoParser>();
+        TTorrentClient client(state.string(), false, nullptr, parser);
+        client.set_session_shutdown_asynchronous(false);
+        CHECK(client.session.get_torrents().empty());
+        CHECK(fs::exists(path) == preserves_record);
+    };
+    rejects("missing marker", [](lt::entry &record) {
+        record.dict().erase(std::string(kStagedMetadataResumeKey));
+    }, true);
+    rejects("non-integer marker", [](lt::entry &record) {
+        record[std::string(kStagedMetadataResumeKey)] = "1";
+    }, false);
+    rejects("unknown marker value", [](lt::entry &record) {
+        record[std::string(kStagedMetadataResumeKey)] = 2;
+    }, false);
+    rejects("missing metadata", [](lt::entry &record) {
+        record.dict().erase(std::string(kPreparsedInfoResumeKey));
+    }, false);
+    rejects("pending validation", [](lt::entry &record) {
+        record[std::string(kMetadataValidationPendingResumeKey)] = 1;
+    }, false);
+    for (std::string_view const key : {kStorageClaimIDResumeKey, kStorageClaimGenerationResumeKey, kStorageManifestDigestResumeKey}) {
+        rejects(std::string(key), [key](lt::entry &record) {
+            record[std::string(key)] = 1;
+        }, false);
+    }
+}
+
 TEST_CASE("pending resume discovery guards do not become source locks")
 {
     bridge_tests::TemporaryDirectory temporary_directory;

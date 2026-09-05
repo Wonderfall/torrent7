@@ -623,13 +623,18 @@ void TTorrentClient::load_resume_data()
         std::optional<TTorrentStorageActivation> const storage_activation =
             storage_activation_from_resume_data(*buffer);
         bool const metadata_pending = !persisted_info.has_value();
+        auto const staged_metadata = staged_metadata_from_resume_data(*buffer);
+        if (!staged_metadata || (*staged_metadata && (metadata_pending || persisted_metadata_pending))) {
+            remove_resume_file_locked(name);
+            sync_resume_directory_quietly();
+            continue;
+        }
+        bool const staged = metadata_pending || *staged_metadata;
         if (metadata_pending) {
             if (storage_activation || !persisted_metadata_pending) {
                 record_unclaimed_resume();
                 continue;
             }
-            params.save_path = staging_path(params.info_hashes);
-            params.file_provider.reset();
         } else {
             if (persisted_metadata_pending) {
                 remove_resume_file_locked(name);
@@ -673,10 +678,12 @@ void TTorrentClient::load_resume_data()
                 sync_resume_directory_quietly();
                 continue;
             }
-            if (!storage_activation) {
+            if (!storage_activation && !staged) {
                 record_unclaimed_resume();
                 continue;
             }
+        }
+        if (storage_activation) {
             BridgeResult const valid_activation = validate_storage_activation(
                 params,
                 *storage_activation
@@ -687,13 +694,16 @@ void TTorrentClient::load_resume_data()
             }
             params.save_path = part_file_path(*storage_activation);
             params.file_provider = make_payload_provider(*storage_activation);
+        } else {
+            params.save_path = staging_path(params.info_hashes);
+            params.file_provider.reset();
         }
         bool const allow_pre_metadata_dht = metadata_pending
             && persisted_metadata_pending
             && allow_pre_metadata_dht_from_resume_data(*buffer);
-        bool const intended_default_dont_download = metadata_pending
+        bool const intended_default_dont_download = staged
             && static_cast<bool>(params.flags & lt::torrent_flags::default_dont_download);
-        std::vector<lt::download_priority_t> intended_file_priorities = metadata_pending
+        std::vector<lt::download_priority_t> intended_file_priorities = staged
             ? params.file_priorities
             : std::vector<lt::download_priority_t>{};
         if (metadata_pending) {
@@ -770,24 +780,28 @@ void TTorrentClient::load_resume_data()
         }
         if (dht_locked_by_source || dht_disabled_by_user
             || (app_disabled_dht && !(metadata_pending && allow_pre_metadata_dht))
-            || (metadata_pending && !allow_pre_metadata_dht)) {
+            || (staged && !allow_pre_metadata_dht)) {
             params.flags |= lt::torrent_flags::disable_dht;
         } else if (dht_enabled_by_user || allow_pre_metadata_dht) {
             params.flags &= ~lt::torrent_flags::disable_dht;
         }
-        if (peer_exchange_locked_by_source || peer_exchange_disabled_by_user || metadata_pending) {
+        if (peer_exchange_locked_by_source || peer_exchange_disabled_by_user || staged) {
             params.flags |= lt::torrent_flags::disable_pex;
         } else if (peer_exchange_enabled_by_user) {
             params.flags &= ~lt::torrent_flags::disable_pex;
         }
-        if (lsd_locked_by_source || lsd_disabled_by_user || app_disabled_lsd || metadata_pending) {
+        if (lsd_locked_by_source || lsd_disabled_by_user || app_disabled_lsd || staged) {
             params.flags |= lt::torrent_flags::disable_lsd;
         } else if (lsd_enabled_by_user) {
             params.flags &= ~lt::torrent_flags::disable_lsd;
         }
         params.flags |= lt::torrent_flags::block_non_global_peers;
-        if (metadata_pending) {
-            params.file_priorities.clear();
+        if (staged) {
+            params.file_priorities.assign(
+                params.ti ? static_cast<std::size_t>(params.ti->layout().num_files()) : 0U,
+                lt::dont_download
+            );
+            params.piece_priorities.clear();
             params.flags |= lt::torrent_flags::default_dont_download;
         }
         if (!metadata_pending && should_strip_resume_peer_cache(params, nullptr, app_disabled_dht)) {
