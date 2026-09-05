@@ -3429,6 +3429,48 @@ TEST_CASE("native metainfo remains independent after its mapped capsule source i
         == testing_logical_manifest_digest(lt::add_torrent_params(moved)));
 }
 
+TEST_CASE("preparsed metainfo capsule rejects file directory conflicts across intervening paths")
+{
+    auto import_paths = [](std::vector<std::vector<std::string>> const &paths) {
+        lt::entry info;
+        info["name"] = "root";
+        info["piece length"] = 16 * 1024;
+        info["pieces"] = std::string(20U, 'x');
+        std::vector<CapsuleFileFixture> files;
+        for (auto const &components : paths) {
+            lt::entry file;
+            file["length"] = 1;
+            for (std::string const &component : components) {
+                file["path"].list().emplace_back(component);
+            }
+            info["files"].list().push_back(std::move(file));
+            files.push_back(CapsuleFileFixture{.components = components, .size = 1});
+        }
+        std::string encoded_info;
+        lt::bencode(std::back_inserter(encoded_info), info);
+        constexpr std::string_view pieces_prefix = "6:pieces20:";
+        std::size_t const pieces_offset = encoded_info.find(pieces_prefix);
+        REQUIRE(pieces_offset != std::string::npos);
+        MetainfoCapsuleFixture const fixture = make_metainfo_capsule(
+            encoded_info,
+            "root",
+            TTORRENT_METAINFO_KIND_V1,
+            TTORRENT_CONTENT_KIND_DIRECTORY,
+            files,
+            std::pair{static_cast<std::uint32_t>(pieces_offset + pieces_prefix.size()), 20U}
+        );
+        return import_preparsed_metainfo_capsule(fixture.bytes);
+    };
+
+    CHECK_FALSE(import_paths({{"a"}, {"a", "c"}}));
+    CHECK_FALSE(import_paths({{"a"}, {"a-b"}, {"a", "c"}}));
+    CHECK_FALSE(import_paths({{"a", "c"}, {"a-b"}, {"a"}}));
+    CHECK_FALSE(import_paths({{"dir", "a"}, {"dir", "a.b"}, {"dir", "a", "c"}}));
+    CHECK_FALSE(import_paths({{"a"}, {"a"}}));
+    CHECK(import_paths({{"a-b"}, {"a", "c"}, {"a", "d"}}));
+    CHECK(import_paths({{"a"}, {"a-b"}, {"ab", "c"}}));
+}
+
 TEST_CASE("preparsed metainfo capsule rejects corrupted framing and semantic ranges")
 {
     std::uint32_t piece_hash_offset = 0U;

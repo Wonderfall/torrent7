@@ -625,12 +625,10 @@ decode_files(
         return std::unexpected(invalid_capsule());
     }
 
-    for (auto current = logical_paths.begin(); current != logical_paths.end(); ++current) {
-        auto next = std::next(current);
-        if (next != logical_paths.end()
-            && next->size() > current->size()
-            && next->starts_with(*current)
-            && next->at(current->size()) == '/') {
+    for (std::string const &path : logical_paths) {
+        std::string const directory_prefix = path + '/';
+        auto const descendant = logical_paths.lower_bound(directory_prefix);
+        if (descendant != logical_paths.end() && descendant->starts_with(directory_prefix)) {
             return std::unexpected(invalid_capsule());
         }
     }
