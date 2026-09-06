@@ -112,6 +112,28 @@ struct ParsedMagnetTests {
         }
     }
 
+    @Test("Magnet trackers and web seeds require a final IPv4 tail in IPv6", arguments: [
+        ("192.0.2.1::", false), ("192.0.2.1::198.51.100.1", false),
+        ("::ffff:192.0.2.1", true), ("2001:db8:1:2:3:4:192.0.2.1", true),
+        ("fe80::1%25en0", true),
+    ])
+    func ipv6SourceSyntax(host: String, valid: Bool) throws {
+        let source = "https://[\(host)]:443/content"
+        let encoded = try #require(source.addingPercentEncoding(withAllowedCharacters: .alphanumerics))
+        for field in ["tr", "ws"] {
+            let magnet = "magnet:?xt=urn:btih:\(String(repeating: "3", count: 40))&\(field)=\(encoded)"
+            if valid {
+                let parsed = try ParsedMagnet.parse(magnet)
+                #expect(parsed.trackers.map(\.url) == (field == "tr" ? [source] : []))
+                #expect(parsed.webSeeds == (field == "ws" ? [source] : []))
+            } else {
+                #expect(throws: ParsedMagnetError.invalidSourceURL) {
+                    _ = try ParsedMagnet.parse(magnet)
+                }
+            }
+        }
+    }
+
     @Test("Typed decoding revalidates hashes, sources, tiers, and selections")
     func decodingRevalidatesModel() throws {
         let valid = try ParsedMagnet.parse(

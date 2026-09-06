@@ -312,6 +312,22 @@ struct TorrentManifestParserTests {
         #expect(preview.torrentData == metadata)
     }
 
+    @Test("Source envelopes omit malformed IPv6 while retaining valid dotted tails")
+    func ipv6SourceEnvelopeSyntax() throws {
+        let validSource = "https://[::ffff:192.0.2.1]/content"
+        let invalidSources = ["https://[192.0.2.1::]/content", "https://[192.0.2.1::198.51.100.1]/content"]
+        let sources = (invalidSources + [validSource]).map(TestBencode.string)
+        let parsed = try TorrentManifestParser().parse(Self.torrent(
+            info: Self.v1SingleFileInfo(name: "sample.bin", size: 5),
+            topLevel: [
+                Self.key("announce-list", .list([.list(sources)])),
+                Self.key("url-list", .list(sources)),
+            ]
+        ))
+        #expect(parsed.envelope.trackers.map(\.url) == [validSource])
+        #expect(parsed.envelope.webSeeds == [validSource])
+    }
+
     @Test("Source envelope parsing enforces independent resource limits")
     func sourceEnvelopeLimits() throws {
         let info = Self.v1SingleFileInfo(

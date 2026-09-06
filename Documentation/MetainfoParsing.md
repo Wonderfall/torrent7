@@ -42,6 +42,8 @@ Validation followed by passing the same bytes to libtorrent is not a cutover.
   Trackers are limited to HTTP, HTTPS, and UDP URLs; web seeds are limited to
   HTTP and HTTPS URLs. Authorities, ports, escapes, and aggregate retained bytes
   are bounded before the typed value is created.
+- Bracketed IPv6 sources may have a dotted IPv4 tail only in the final 32 bits;
+  `::` compression cannot follow that tail. Scoped IPv6 hosts remain supported.
 - Display names are never storage names. Tracker tiers and select-only hints are
   canonical bounded data for a later engine-policy stage, not authority-bearing
   `add_torrent_params` input.

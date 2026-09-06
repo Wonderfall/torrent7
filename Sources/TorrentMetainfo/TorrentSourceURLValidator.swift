@@ -157,6 +157,11 @@ enum TorrentSourceURLValidator {
         }
         let left = compression.map { address[..<$0.lowerBound] } ?? address[...]
         let right = compression.map { address[$0.upperBound...] } ?? ""[...]
+        // Dotted IPv4 represents the final 32 bits, so compressed groups
+        // cannot follow it, even when the right side of :: is empty.
+        guard compression == nil || !left.contains(".") else {
+            return false
+        }
         guard let leftCount = ipv6GroupCount(left),
               let rightCount = ipv6GroupCount(right) else {
             return false
