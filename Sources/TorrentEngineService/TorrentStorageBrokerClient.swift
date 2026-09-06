@@ -28,7 +28,7 @@ package enum TorrentStorageBrokerClientError: LocalizedError, Sendable {
     }
 }
 
-@safe private final class TorrentStorageBrokerBlockingResult<Value: Sendable>: Sendable {
+@safe final class TorrentStorageBrokerBlockingResult<Value: Sendable>: Sendable {
     private enum State: Sendable {
         case waiting
         case finished(Result<Value, any Error>)
@@ -53,23 +53,20 @@ package enum TorrentStorageBrokerClientError: LocalizedError, Sendable {
     }
 
     func wait(timeout: DispatchTime) throws -> Value {
-        guard semaphore.wait(timeout: timeout) == .success else {
-            state.withLock { state in
-                if case .waiting = state {
-                    state = .abandoned
-                }
+        _ = semaphore.wait(timeout: timeout)
+        // The semaphore only wakes the waiter. Ownership is decided under the
+        // same lock as finish: a published value belongs to this caller even
+        // if the signal races the deadline; otherwise the producer retains it.
+        let result = state.withLock { state -> Result<Value, any Error> in
+            defer { state = .abandoned }
+            switch state {
+            case .finished(let result):
+                return result
+            case .waiting:
+                return .failure(TorrentStorageBrokerClientError.timedOut)
+            case .abandoned:
+                return .failure(TorrentStorageBrokerClientError.invalidReply)
             }
-            throw TorrentStorageBrokerClientError.timedOut
-        }
-        let result = state.withLock { state -> Result<Value, any Error>? in
-            guard case .finished(let result) = state else {
-                return nil
-            }
-            state = .abandoned
-            return result
-        }
-        guard let result else {
-            throw TorrentStorageBrokerClientError.invalidReply
         }
         return try result.get()
     }

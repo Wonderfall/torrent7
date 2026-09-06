@@ -8,6 +8,76 @@ import XPC
 
 @Suite("Torrent storage broker client security", .serialized)
 struct TorrentStorageBrokerClientSecurityTests {
+    @Test("A published blocking result is consumed once even at an expired deadline")
+    func blockingCompletionBeforeDeadline() throws {
+        let completion = TorrentStorageBrokerBlockingResult<Int>()
+        #expect(completion.finish(.success(42)))
+        #expect(try completion.wait(timeout: .now()) == 42)
+        #expect(!completion.finish(.success(43)))
+        #expect(throws: TorrentStorageBrokerClientError.self) {
+            try completion.wait(timeout: .now())
+        }
+    }
+
+    @Test("An abandoned blocking result leaves ownership with its producer")
+    func blockingDeadlineBeforeCompletion() {
+        let completion = TorrentStorageBrokerBlockingResult<Int>()
+        do {
+            _ = try completion.wait(timeout: .now())
+            Issue.record("An unfinished blocking result unexpectedly succeeded")
+        } catch {
+            guard case .timedOut = error as? TorrentStorageBrokerClientError else {
+                Issue.record("Expected a timeout, received \(error)")
+                return
+            }
+        }
+        #expect(!completion.finish(.success(42)))
+    }
+
+    // SAFETY: Swift pins the static NUL-terminated path for open. The test owns
+    // the source descriptor until defer; each duplicate transfers to exactly
+    // one of the producer or waiter, both of which close it before continuing.
+    @Test("Blocking completion and timeout transfer each descriptor to exactly one owner")
+    func blockingDescriptorOwnershipRace() async throws {
+        let original = unsafe "/dev/null".withCString {
+            unsafe Darwin.open($0, O_RDONLY | O_CLOEXEC)
+        }
+        try #require(original >= 0)
+        defer { _ = Darwin.close(original) }
+
+        for index in 0..<512 {
+            let descriptor = Darwin.dup(original)
+            try #require(descriptor >= 0)
+            let completion = TorrentStorageBrokerBlockingResult<Int32>()
+            let producer = Task.detached {
+                let accepted = completion.finish(.success(descriptor))
+                if !accepted {
+                    _ = Darwin.close(descriptor)
+                }
+                return accepted
+            }
+            // Short real deadlines exercise semaphore wakeup/timeout contention
+            // directly. Every legal winner is accepted; no timing outcome is required.
+            let outcome = Result {
+                try completion.wait(timeout: .now() + .nanoseconds((index % 32) * 500))
+            }
+            let accepted = await producer.value
+            switch outcome {
+            case .success(let received):
+                #expect(accepted)
+                #expect(received == descriptor)
+                _ = Darwin.close(received)
+            case .failure(let error):
+                #expect(!accepted)
+                #expect(error is TorrentStorageBrokerClientError)
+                if accepted {
+                    // Keep a failing regression test from leaking its fixture.
+                    _ = Darwin.close(descriptor)
+                }
+            }
+        }
+    }
+
     @Test("Every broker reply completion cancels its timeout task")
     func replyCompletionCancelsTimeoutTask() async throws {
         let requestID = UUID()
