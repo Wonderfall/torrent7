@@ -527,7 +527,7 @@ let package = Package(
         ),
         .target(
             name: "TorrentEngineIPCFuzzSupport",
-            dependencies: ["TorrentEngineIPC"],
+            dependencies: ["TorrentEngineIPC", "TorrentEngineModel"],
             path: "Tools/IPCFuzzing/Support",
             swiftSettings: swiftBaselineSettings + [
                 .unsafeFlags(appSwiftStrictnessFlags)

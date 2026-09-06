@@ -1671,6 +1671,44 @@ struct TorrentXPCClientSecurityTests {
         #expect(transport.operations == [.handshake, .blockNetwork])
     }
 
+    @Test("Queue restoration uses one ordered bounded request")
+    func queueRestorationUsesOrderedRequest() async throws {
+        let epoch = epoch
+        let torrentID = torrentID
+        let position = try #require(TorrentQueuePosition(rawValue: 7))
+        let transport = ScriptedTorrentEngineTransport { request in
+            switch request.header.operation {
+            case .handshake:
+                return try successReply(
+                    TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.0"),
+                    for: request,
+                    epoch: epoch
+                )
+            case .restoreQueuePosition:
+                let payload = try #require(request.payload)
+                let value = try TorrentEngineIPCJSONCodec.decode(
+                    TorrentEngineIPCRestoreQueuePositionRequest.self,
+                    from: payload,
+                    maximumBytes: request.header.operation.maximumRequestPayloadBytes,
+                    limits: request.header.operation.requestJSONLimits
+                )
+                #expect(value.id == torrentID)
+                #expect(value.position == position)
+                #expect(request.attachment == nil)
+                return try successReply(TorrentEngineIPCEmpty(), for: request, epoch: epoch)
+            case .resume:
+                return try successReply(TorrentEngineIPCEmpty(), for: request, epoch: epoch)
+            default:
+                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
+            }
+        }
+        let client = try await makeClient(transport: transport)
+        try await client.restoreQueuePosition(id: torrentID, position: position)
+        try await client.resume(id: torrentID)
+        #expect(transport.operations == [.handshake, .restoreQueuePosition, .resume])
+        #expect(transport.sequences == [1, 2, 3])
+    }
+
     private func makeClient(
         transport: ScriptedTorrentEngineTransport
     ) async throws -> TorrentXPCClient {

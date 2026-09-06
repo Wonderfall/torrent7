@@ -1197,6 +1197,25 @@ private struct AddedTorrentIdentity: Sendable {
         queueStore = nextQueueStore
     }
 
+    // SAFETY: Ownership/lifetime: the actor-owned client and local queue state live
+    // through synchronous refresh/application; bounds/alignment: helpers validate native
+    // identities and carry exact spans; synchronization: actor isolation serializes this
+    // transaction; safe alternative: native queue application requires the C bridge.
+    package func restoreQueuePosition(id: String, position: TorrentQueuePosition) throws {
+        let client = try unsafe requireClient()
+        _ = try nativeToken(for: id)
+        try unsafe refreshNativeState(client: client)
+        let queuedIDs = Set(snapshotStore.torrents.lazy
+            .filter { $0.queuePosition >= 0 }
+            .map(\.id))
+        var nextQueueStore = queueStore
+        guard nextQueueStore.restorePosition(id, to: position, queuedIDs: queuedIDs) else {
+            return
+        }
+        try unsafe applyQueueState(nextQueueStore, client: client)
+        queueStore = nextQueueStore
+    }
+
     // SAFETY: Ownership/lifetime: the actor-owned handle and local error buffer live through
     // the synchronous call; bounds/alignment: token/index/priority are validated typed scalars
     // and the error span is bounded; synchronization: actor isolation serializes mutation;

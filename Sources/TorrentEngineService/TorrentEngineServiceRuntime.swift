@@ -648,6 +648,11 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             try Self.validateTorrentID(value.id)
             try await requireEngine().moveTorrentInQueue(id: value.id, move: value.move)
             return try encode(TorrentEngineIPCEmpty(), for: operation)
+        case .restoreQueuePosition:
+            let value = try decode(TorrentEngineIPCRestoreQueuePositionRequest.self, from: request)
+            try Self.validateTorrentID(value.id)
+            try await requireEngine().restoreQueuePosition(id: value.id, position: value.position)
+            return try encode(TorrentEngineIPCEmpty(), for: operation)
         case .setFilePriority:
             let value = try decode(TorrentEngineIPCSetFilePriorityRequest.self, from: request)
             try Self.validateTorrentID(value.id)

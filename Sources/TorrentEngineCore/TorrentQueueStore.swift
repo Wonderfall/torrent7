@@ -113,6 +113,34 @@ import TorrentEngineModel
         return true
     }
 
+    /// `queuedIDs` comes from the latest validated native snapshot. Completed
+    /// torrents retain their relative order but consume no native queue slot.
+    package mutating func restorePosition(
+        _ id: TorrentItem.ID,
+        to position: TorrentQueuePosition,
+        queuedIDs: Set<TorrentItem.ID>
+    ) -> Bool {
+        guard let selected = entriesByID[id], queuedIDs.contains(id) else {
+            return false
+        }
+        let ordered = orderedIDs
+        let remainingQueue = ordered.filter { $0 != id && queuedIDs.contains($0) }
+        let predecessors = Set(remainingQueue.prefix(Int(position.rawValue)))
+        let previousGroup = ordered.filter { entriesByID[$0]?.priority == selected.priority }
+        var group = previousGroup.filter { $0 != id }
+        let destinationIndex = group.firstIndex {
+            queuedIDs.contains($0) && !predecessors.contains($0)
+        } ?? group.endIndex
+        group.insert(id, at: destinationIndex)
+        guard group != previousGroup else {
+            return false
+        }
+        for (rank, entryID) in group.enumerated() {
+            entriesByID[entryID]?.rank = rank
+        }
+        return true
+    }
+
     private var orderedIDs: [TorrentItem.ID] {
         entriesByID.keys.sorted { leftID, rightID in
             guard let left = entriesByID[leftID], let right = entriesByID[rightID] else {

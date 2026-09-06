@@ -3,7 +3,7 @@ import TorrentEngineModel
 import XPC
 
 package enum TorrentEngineIPCProtocol {
-    package static let version: UInt64 = 12
+    package static let version: UInt64 = 13
 }
 
 package enum TorrentEngineIPCLimits {
@@ -150,6 +150,7 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
 
     case readDataset = 51
     case closeDataset = 52
+    case restoreQueuePosition = 53
 
     case changeHint = 100
 

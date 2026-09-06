@@ -430,6 +430,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private(set) var pauseNetworkBlockedValues = [Bool]()
     private(set) var resumedIDs = [String]()
     private(set) var resumedSourcePolicies = [TorrentSourcePolicy]()
+    private(set) var resumedQueuePositions = [TorrentQueuePosition?]()
     private(set) var removedIDs = [String]()
     var removeError: Error?
     var removeOutcome = TorrentRemovalOutcome.removed
@@ -448,6 +449,8 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private var torrentOptionsUpdateError: Error?
     private(set) var filePriorityUpdates = [(id: String, fileIndex: Int32, priority: TorrentFilePriority)]()
     private(set) var queueMoves = [(id: String, move: TorrentQueueMove)]()
+    private(set) var restoredQueuePositions = [(id: String, position: TorrentQueuePosition)]()
+    private var restoreQueuePositionError: Error?
     var sourcePolicyValue = TorrentSourcePolicy(
         isDHTEnabled: true,
         isPeerExchangeEnabled: true,
@@ -540,6 +543,10 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func setTorrentOptionsUpdateError(_ error: Error?) {
         torrentOptionsUpdateError = error
+    }
+
+    func setRestoreQueuePositionError(_ error: Error?) {
+        restoreQueuePositionError = error
     }
 
     func setPieceMapBatch(_ batch: TorrentPieceMapBatch) {
@@ -899,6 +906,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     func resume(id: String) async throws {
         resumedIDs.append(id)
         resumedSourcePolicies.append(sourcePolicyValue)
+        resumedQueuePositions.append(restoredQueuePositions.last { $0.id == id }?.position)
     }
 
     func reannounce(id: String) async throws {}
@@ -1097,6 +1105,13 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func moveTorrentInQueue(id: String, move: TorrentQueueMove) async throws {
         queueMoves.append((id, move))
+    }
+
+    func restoreQueuePosition(id: String, position: TorrentQueuePosition) async throws {
+        if let restoreQueuePositionError {
+            throw restoreQueuePositionError
+        }
+        restoredQueuePositions.append((id, position))
     }
 
     func setFilePriority(id: String, fileIndex: Int32, priority: TorrentFilePriority) async throws {

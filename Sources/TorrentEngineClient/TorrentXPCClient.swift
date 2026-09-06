@@ -660,6 +660,13 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         try await invokeUnit(.moveTorrentInQueue, TorrentEngineIPCMoveQueueRequest(id: id, move: move))
     }
 
+    package func restoreQueuePosition(id: String, position: TorrentQueuePosition) async throws {
+        try await invokeUnit(
+            .restoreQueuePosition,
+            TorrentEngineIPCRestoreQueuePositionRequest(id: id, position: position)
+        )
+    }
+
     package func setFilePriority(
         id: String,
         fileIndex: Int32,

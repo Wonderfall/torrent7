@@ -30,6 +30,36 @@ package enum TorrentQueueMove: Int32, Codable, Sendable {
 
 }
 
+/// A zero-based position among unfinished torrents. Restoration respects
+/// priority groups and bounds the position to the remaining live queue.
+package struct TorrentQueuePosition: RawRepresentable, Codable, Equatable, Sendable {
+    package let rawValue: Int32
+
+    package init?(rawValue: Int32) {
+        guard (0..<TorrentEngineLimits.maximumTorrentSnapshotCount).contains(Int(rawValue)) else {
+            return nil
+        }
+        self.rawValue = rawValue
+    }
+
+    package init(from decoder: any Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let rawValue = try container.decode(Int32.self)
+        guard let position = Self(rawValue: rawValue) else {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "The torrent queue position is out of range."
+            )
+        }
+        self = position
+    }
+
+    package func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
 package struct TorrentOptions: Codable, Equatable, Sendable {
     package var downloadRateLimitKBps: Int
     package var uploadRateLimitKBps: Int

@@ -1202,7 +1202,8 @@ package actor TorrentStorageClaimJournal {
             guard let info = promotion.exactInfoDictionary,
                   exactInfoMatches(info, hashes: promotion.advertisedInfoHashes),
                   let activation = promotion.activation,
-                  activation.runtime.queuePosition >= -1,
+                  (activation.runtime.queuePosition == -1
+                      || TorrentQueuePosition(rawValue: activation.runtime.queuePosition) != nil),
                   activation.runtime.filePriorities.count
                     <= TorrentEngineLimits.maximumFileCount,
                   activation.runtime.filePriorities.allSatisfy({

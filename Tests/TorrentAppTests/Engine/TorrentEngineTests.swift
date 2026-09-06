@@ -4,6 +4,7 @@ import Synchronization
 import Testing
 import TorrentEngineModel
 import TorrentMetainfo
+import TorrentStorageAuthority
 @testable import TorrentEngineCore
 
 @Suite("Torrent engine", .serialized)
@@ -93,6 +94,92 @@ struct TorrentEngineTests {
         #expect(raisedAlpha)
         #expect(store.placements.map(\.id) == ["gamma", "alpha", "beta"])
         #expect(store.priority(for: "alpha") == .high)
+    }
+
+    @Test(
+        "Queue position restoration respects priority groups and excludes completed torrents",
+        arguments: [Int32(0), 2, Int32(TorrentEngineLimits.maximumTorrentSnapshotCount - 1)]
+    )
+    func queuePositionRestorationRespectsLiveQueue(_ rawPosition: Int32) throws {
+        var store = TorrentQueueStore()
+        let queuedIDs: Set<String> = ["high", "alpha", "selected", "beta", "low"]
+        #expect(store.reconcile([
+            makeTorrent(id: "high", queuePosition: 0, queuePriority: .high),
+            makeTorrent(id: "alpha", queuePosition: 1),
+            makeTorrent(id: "selected", queuePosition: 2),
+            makeTorrent(id: "beta", queuePosition: 3),
+            makeTorrent(id: "low", queuePosition: 4, queuePriority: .low),
+            makeTorrent(id: "seed", queuePosition: -1, seeding: true),
+        ]) == .updated)
+        let originalOthers = store.placements.map(\.id).filter { $0 != "selected" }
+        let position = try #require(TorrentQueuePosition(rawValue: rawPosition))
+        _ = store.restorePosition("selected", to: position, queuedIDs: queuedIDs)
+        let expected = switch rawPosition {
+        case 0: ["high", "selected", "alpha", "beta", "low"]
+        case 2: ["high", "alpha", "selected", "beta", "low"]
+        default: ["high", "alpha", "beta", "selected", "low"]
+        }
+        #expect(store.placements.map(\.id).filter { queuedIDs.contains($0) } == expected)
+        #expect(store.placements.map(\.id).filter { $0 != "selected" } == originalOthers)
+        let repeated = store.restorePosition("selected", to: position, queuedIDs: queuedIDs)
+        let completed = store.restorePosition("seed", to: position, queuedIDs: queuedIDs)
+        let missing = store.restorePosition("missing", to: position, queuedIDs: queuedIDs)
+        #expect(!repeated)
+        #expect(!completed)
+        #expect(!missing)
+    }
+
+    @Test("Promotion restores native queue order after a poll forgets the removed magnet")
+    func promotionRestoresNativeQueueOrder() async throws {
+        let stateDirectory = try temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let engine = try TorrentEngine(
+            stateDirectory: stateDirectory,
+            enablePeerExchangePlugin: false,
+            payloadBroker: TestPayloadBroker()
+        )
+        var data = Data("d4:infod6:lengthi4e4:name10:sample.bin12:piece lengthi16384e6:pieces20:".utf8)
+        data.append(Data(repeating: 0, count: 20))
+        data.append(Data("ee".utf8))
+        let parsed = try TorrentManifestParser().parse(data)
+        let hash = try #require(parsed.manifest.infoHashes.v1).map { byte in
+            let digits = String(byte, radix: 16)
+            return byte < 16 ? "0" + digits : digits
+        }.joined()
+        let first = try await engine.addMagnet(
+            ParsedMagnet.parse("magnet:?xt=urn:btih:\(hash)"), startsPaused: true
+        )
+        let second = try await engine.addMagnet(
+            ParsedMagnet.parse("magnet:?xt=urn:btih:\(String(repeating: "9", count: 40))"),
+            startsPaused: true
+        )
+        let initial = try await engine.snapshots().sorted { $0.queuePosition < $1.queuePosition }
+        #expect(initial.map(\.id) == [first, second])
+        let initialItem = try #require(initial.first)
+        let position = try #require(TorrentQueuePosition(rawValue: initialItem.queuePosition))
+        #expect(try await engine.remove(id: first) == .removed)
+        // A normal poll while the GUI waits for destination confirmation.
+        #expect(try await engine.snapshots().map(\.id) == [second])
+        let activation = try TorrentStorageActivation(
+            claimID: UUID(),
+            generation: 1,
+            sourceManifestDigest: parsed.manifest.sourceManifestDigest,
+            preservedTorrentID: first
+        )
+        #expect(try await engine.addTorrentFile(
+            data: data, activation: activation, startsPaused: true
+        ) == first)
+        try await engine.setTorrentOptions(id: first, options: .unlimited)
+        try await engine.restoreQueuePosition(id: first, position: position)
+        let restored = try await engine.snapshots().sorted { $0.queuePosition < $1.queuePosition }
+        #expect(restored.map(\.id) == [first, second])
+        try await engine.restoreQueuePosition(id: first, position: position)
+        let repeated = try await engine.snapshots().sorted { $0.queuePosition < $1.queuePosition }
+        #expect(repeated.map(\.id) == [first, second])
+        await #expect(throws: TorrentEngineError.self) {
+            try await engine.restoreQueuePosition(id: "missing", position: position)
+        }
+        try await engine.shutdownSafely()
     }
 
     @Test("Swift identity state owns canonical lookup generations and removal state")

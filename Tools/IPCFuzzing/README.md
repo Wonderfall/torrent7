@@ -21,7 +21,8 @@ Scripts/verify-xcode.zsh
   checks determinism, exact body-relative ranges, typed address/peer shapes,
   failure semantics, and the independent 512 KiB body and 3,000-peer bounds.
 - `ipc_json_preflight` feeds arbitrary bytes and both limit profiles to the
-  production bounded JSON allocation preflight.
+  production bounded JSON allocation preflight. It also checks typed queue
+  restoration decoding, position bounds, and canonical round trips.
 - `magnet_parser` feeds arbitrary UTF-8 and replacement-decoded text to the
   shared Swift magnet parser and checks typed Codable round trips and canonical
   file selections.

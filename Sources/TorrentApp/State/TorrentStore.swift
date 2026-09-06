@@ -2979,6 +2979,12 @@ final class TorrentStore {
                 mutation: .httpsWebSeed(runtime.sourcePolicy.httpsWebSeedPolicy)
             )
         }
+        if runtime.queuePosition != -1 {
+            guard let position = TorrentQueuePosition(rawValue: runtime.queuePosition) else {
+                throw TorrentStorageJournalError.corrupt
+            }
+            try await engine.restoreQueuePosition(id: torrentID, position: position)
+        }
         if runtime.wasPaused {
             try await engine.pause(id: torrentID)
         } else {

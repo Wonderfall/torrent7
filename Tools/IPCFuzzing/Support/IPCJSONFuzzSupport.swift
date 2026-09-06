@@ -1,5 +1,6 @@
 import Foundation
 import TorrentEngineIPC
+import TorrentEngineModel
 
 // SAFETY: Ownership/lifetime: libFuzzer owns the input buffer for the synchronous export
 // call and Data copies it before returning; bounds/alignment: byteCount must describe the
@@ -48,5 +49,36 @@ public func torrentEngineIPCJSONPreflightFuzzOneInput(
             data,
             limits: TorrentEngineIPCLimits.maximumJSONLimits
         )
+        checkQueueRestoration(data)
+    }
+}
+
+private func checkQueueRestoration(_ data: Data) {
+    let operation = TorrentEngineIPCOperation.restoreQueuePosition
+    guard let request = try? TorrentEngineIPCJSONCodec.decode(
+        TorrentEngineIPCRestoreQueuePositionRequest.self,
+        from: data,
+        maximumBytes: operation.maximumRequestPayloadBytes,
+        limits: operation.requestJSONLimits
+    ) else {
+        return
+    }
+    precondition((0..<TorrentEngineLimits.maximumTorrentSnapshotCount)
+        .contains(Int(request.position.rawValue)))
+    do {
+        let encoded = try TorrentEngineIPCJSONCodec.encode(
+            request,
+            maximumBytes: operation.maximumRequestPayloadBytes,
+            limits: operation.requestJSONLimits
+        )
+        let decoded = try TorrentEngineIPCJSONCodec.decode(
+            TorrentEngineIPCRestoreQueuePositionRequest.self,
+            from: encoded,
+            maximumBytes: operation.maximumRequestPayloadBytes,
+            limits: operation.requestJSONLimits
+        )
+        precondition(decoded == request)
+    } catch {
+        preconditionFailure("An accepted queue restoration request did not round trip.")
     }
 }

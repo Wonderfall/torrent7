@@ -983,6 +983,7 @@ struct TorrentStoreIntegrationTests {
             #expect(await harness.engine.removedIDs == [fixture.torrentID])
             #expect(await harness.engine.torrentOptionsUpdates.last?.options == options)
             #expect(await harness.engine.pausedIDs.last == fixture.torrentID)
+            #expect(await harness.engine.restoredQueuePositions.map(\.position.rawValue) == [7])
             #expect(harness.store.labelIDs(for: fixture.torrentID) == [label.id])
             #expect(harness.store.lastError == nil)
 
@@ -1149,6 +1150,58 @@ struct TorrentStoreIntegrationTests {
             #expect(await journal.allPromotions().isEmpty)
             #expect(harness.store.labelIDs(for: fixture.torrentID)
                 == [label.id])
+        }
+    }
+
+    @Test(
+        "Queue restoration survives a destination conflict and finishes before resume",
+        arguments: [false, true]
+    )
+    func magnetConflictRestoresQueuePosition(retriesAfterFailure: Bool) async throws {
+        try await withKnownTorrentHarness { harness, downloadFolder in
+            let fixture = try magnetPromotionFixture()
+            try Data("seed".utf8).write(to: downloadFolder.appending(path: "sample.bin"))
+            await configureMetadataReadyMagnet(harness, fixture: fixture, queuePosition: 7)
+            #expect(harness.store.addMagnet(
+                fixture.magnet,
+                downloadFolder: downloadFolder,
+                setsDownloadFolderAsDefault: false
+            ))
+            await harness.store.saveAll()
+            let request = try #require(harness.store.magnetDestinationConflict)
+            let journal = try #require(harness.storageClaimJournal)
+            #expect(await journal.allPromotions().first?.activation?.runtime.queuePosition == 7)
+
+            await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(revision: 2, torrents: []))
+            await harness.store.refreshNow()
+            if retriesAfterFailure {
+                await harness.engine.setRestoreQueuePositionError(FakeBookmarkError())
+            }
+            #expect(harness.store.resolveMagnetDestinationConflict(
+                id: request.id,
+                choice: .separateCopy(topLevelName: request.conflict.separateCopyTopLevelName)
+            ))
+            await harness.store.saveAll()
+
+            let added = try #require(await harness.engine.addedTorrentFiles.first)
+            #expect(added.startsPaused)
+            if retriesAfterFailure {
+                #expect(await harness.engine.resumedIDs.isEmpty)
+                #expect(await journal.allPromotions().first?.state == .outcomeUnknown)
+                await harness.engine.setRestoreQueuePositionError(nil)
+                await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+                    revision: 3,
+                    torrents: [makeTorrent(id: fixture.torrentID, paused: true)]
+                ))
+                await harness.store.refreshNow()
+                await harness.store.saveAll()
+            }
+            #expect(await harness.engine.addedTorrentFiles.count == 1)
+            #expect(await harness.engine.restoredQueuePositions.map(\.id) == [fixture.torrentID])
+            #expect(await harness.engine.restoredQueuePositions.map(\.position.rawValue) == [7])
+            #expect(await harness.engine.resumedIDs == [fixture.torrentID])
+            #expect(await harness.engine.resumedQueuePositions.map { $0?.rawValue } == [7])
+            #expect(await journal.allPromotions().isEmpty)
         }
     }
 
@@ -3550,7 +3603,8 @@ private func magnetPromotionFixture() throws -> MagnetPromotionFixture {
 @MainActor
 private func configureMetadataReadyMagnet(
     _ harness: StoreHarness,
-    fixture: MagnetPromotionFixture
+    fixture: MagnetPromotionFixture,
+    queuePosition: Int32 = -1
 ) async {
     await harness.engine.setNextAddedMagnetID(fixture.torrentID)
     await harness.engine.setNextAddedTorrentFileID(fixture.torrentID)
@@ -3575,6 +3629,7 @@ private func configureMetadataReadyMagnet(
         torrents: [makeTorrent(
             id: fixture.torrentID,
             name: "sample.bin",
+            queuePosition: queuePosition,
             contentKind: .singleFile,
             hasMetadata: true
         )]

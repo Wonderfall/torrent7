@@ -130,6 +130,12 @@ package actor TorrentUnavailableEngine: TorrentEngineServicing {
         throw unavailableError
     }
 
+    package func restoreQueuePosition(id: String, position: TorrentQueuePosition) throws {
+        _ = id
+        _ = position
+        throw unavailableError
+    }
+
 
     package func torrentMetadata(id: String) throws -> Data? {
         _ = id

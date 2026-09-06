@@ -116,6 +116,9 @@ package protocol TorrentEngineServicing: Sendable {
     func torrentOptions(id: String) async throws -> TorrentOptions
     func setTorrentOptions(id: String, options: TorrentOptions) async throws
     func moveTorrentInQueue(id: String, move: TorrentQueueMove) async throws
+    /// Restores a saved position within the torrent's current priority group.
+    /// Completed torrents have no queue position and remain unchanged.
+    func restoreQueuePosition(id: String, position: TorrentQueuePosition) async throws
     /// Returns libtorrent's exact immutable bencoded info dictionary once
     /// magnet metadata is resident. The bytes are never re-encoded.
     func torrentMetadata(id: String) async throws -> Data?

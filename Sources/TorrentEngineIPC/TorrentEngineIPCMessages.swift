@@ -304,6 +304,16 @@ package struct TorrentEngineIPCMoveQueueRequest: Codable, Equatable, Sendable {
     }
 }
 
+package struct TorrentEngineIPCRestoreQueuePositionRequest: Codable, Equatable, Sendable {
+    package let id: String
+    package let position: TorrentQueuePosition
+
+    package init(id: String, position: TorrentQueuePosition) {
+        self.id = id
+        self.position = position
+    }
+}
+
 package struct TorrentEngineIPCSetFilePriorityRequest: Codable, Equatable, Sendable {
     package let id: String
     package let fileIndex: Int32

@@ -5,6 +5,7 @@ import Synchronization
 import Testing
 import TorrentAppInfrastructure
 import TorrentEngineIPC
+import TorrentEngineModel
 import TorrentStorageAuthority
 import XPC
 @testable import TorrentApp
@@ -2162,6 +2163,29 @@ struct TorrentStorageAuthorityTests {
             )
             #expect(metadataReady.state == .metadataReady)
             #expect(metadataReady.exactInfoDictionary == info)
+
+            for invalidPosition in [Int32(-2), Int32(TorrentEngineLimits.maximumTorrentSnapshotCount)] {
+                let invalidActivation = TorrentMagnetPromotionActivation(
+                    claimID: UUID(),
+                    claimOperationNonce: UUID(),
+                    runtime: TorrentMagnetPromotionRuntimeState(
+                        wasPaused: true,
+                        queuePosition: invalidPosition,
+                        options: .unlimited,
+                        sourcePolicy: .unavailable,
+                        filePriorities: [0: .high],
+                        labelIDs: []
+                    )
+                )
+                await #expect(throws: TorrentStorageJournalError.invalidTransition) {
+                    _ = try await journal.beginPromotionActivation(
+                        id: promotionID,
+                        operationNonce: operationNonce,
+                        activation: invalidActivation
+                    )
+                }
+                #expect(await journal.promotion(id: promotionID) == metadataReady)
+            }
 
             let activation = TorrentMagnetPromotionActivation(
                 claimID: UUID(),

@@ -81,7 +81,7 @@ session. Identified builds require the expected application and helper signing
 identifiers from the same Team ID. Local ad-hoc integration fixtures use an
 explicit reduced-assurance mode.
 
-Command IPC version 12 uses typed, operation-specific envelopes with bounded
+Command IPC version 13 uses typed, operation-specific envelopes with bounded
 JSON and raw attachments. Requests carry an engine epoch, monotonic sequence,
 and replay identifier. The implementation bounds queue depth, nesting, value
 count, strings, raw torrent bytes, piece-map data, paged datasets, and response
@@ -342,6 +342,10 @@ restrictions are restored before automatic management is enabled; a failed or
 cancelled restoration leaves it paused for a later retry.
 The saved pause intent distinguishes a user pause from auto-managed queue
 suspension, so waiting magnets remain eligible when a queue slot becomes free.
+Before resuming, one bounded queue-restoration command reapplies the saved
+position within its priority group. The Swift queue owner excludes completed
+torrents from position counting and bounds the position to the remaining queue
+if other torrents were removed while destination confirmation was pending.
 
 After metadata validation and before broker-backed re-add, the helper persists
 the exact info bytes with an explicit staged-metadata marker and the intended

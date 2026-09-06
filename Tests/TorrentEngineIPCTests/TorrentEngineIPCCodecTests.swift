@@ -381,7 +381,7 @@ struct TorrentEngineIPCEnvelopeTests {
 
     @Test("Stable dataset and hint operation numbers")
     func stableOperationNumbers() {
-        #expect(TorrentEngineIPCProtocol.version == 12)
+        #expect(TorrentEngineIPCProtocol.version == 13)
         #expect(TorrentEngineIPCOperation(rawValue: 7) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 10) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 11) == nil)
@@ -393,6 +393,7 @@ struct TorrentEngineIPCEnvelopeTests {
         #expect(TorrentEngineIPCOperation(rawValue: 50) == nil)
         #expect(TorrentEngineIPCOperation.readDataset.rawValue == 51)
         #expect(TorrentEngineIPCOperation.closeDataset.rawValue == 52)
+        #expect(TorrentEngineIPCOperation.restoreQueuePosition.rawValue == 53)
         #expect(TorrentEngineIPCOperation(rawValue: 60) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 63) == nil)
         #expect(TorrentEngineIPCOperation.changeHint.rawValue == 100)
@@ -400,6 +401,47 @@ struct TorrentEngineIPCEnvelopeTests {
         #expect(TorrentEngineIPCFailureCode.controllerBusy.rawValue == 2)
         #expect(TorrentEngineIPCFailureCode.serviceShuttingDown.rawValue == 3)
         #expect(TorrentEngineIPCFailureCode.operationOutcomeUnknown.rawValue == 4)
+    }
+
+    @Test("Queue restoration round trips bounded positions")
+    func queueRestorationRoundTrips() throws {
+        for rawValue in [Int32(0), Int32(TorrentEngineLimits.maximumTorrentSnapshotCount - 1)] {
+            let position = try #require(TorrentQueuePosition(rawValue: rawValue))
+            let request = TorrentEngineIPCRestoreQueuePositionRequest(
+                id: "t:" + String(repeating: "a", count: 32),
+                position: position
+            )
+            let operation = TorrentEngineIPCOperation.restoreQueuePosition
+            let data = try TorrentEngineIPCJSONCodec.encode(
+                request,
+                maximumBytes: operation.maximumRequestPayloadBytes,
+                limits: operation.requestJSONLimits
+            )
+            let decoded = try TorrentEngineIPCJSONCodec.decode(
+                TorrentEngineIPCRestoreQueuePositionRequest.self,
+                from: data,
+                maximumBytes: operation.maximumRequestPayloadBytes,
+                limits: operation.requestJSONLimits
+            )
+            #expect(decoded == request)
+        }
+    }
+
+    @Test(
+        "Queue restoration rejects invalid positions before dispatch",
+        arguments: ["-1", "20000", "2147483647", "2147483648", "null", "true", "{}", "1.5"]
+    )
+    func queueRestorationRejectsInvalidPositions(_ position: String) {
+        let data = Data("{\"id\":\"t:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"position\":\(position)}".utf8)
+        let operation = TorrentEngineIPCOperation.restoreQueuePosition
+        #expect(throws: TorrentEngineIPCError.jsonDecodingFailed) {
+            _ = try TorrentEngineIPCJSONCodec.decode(
+                TorrentEngineIPCRestoreQueuePositionRequest.self,
+                from: data,
+                maximumBytes: operation.maximumRequestPayloadBytes,
+                limits: operation.requestJSONLimits
+            )
+        }
     }
 
     @Test("JSON and raw attachment limits remain independently bounded")
