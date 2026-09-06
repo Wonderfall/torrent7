@@ -19,11 +19,8 @@ readonly -a BOOST_PATCHED_FILES=(
 )
 readonly -a BOOST_PATCHES=(
     "$ROOT_DIR/Scripts/patches/boost-1.92.0-asio-operation-pac.patch"
-    "$ROOT_DIR/Scripts/patches/boost-1.92.0-asio-executor-function-pac.patch"
-    "$ROOT_DIR/Scripts/patches/boost-1.92.0-asio-any-executor-pac.patch"
+    "$ROOT_DIR/Scripts/patches/boost-1.92.0-asio-executor-pac.patch"
     "$ROOT_DIR/Scripts/patches/boost-1.92.0-asio-service-destroy-pac.patch"
-    "$ROOT_DIR/Scripts/patches/boost-1.92.0-asio-executor-function-view-pac.patch"
-    "$ROOT_DIR/Scripts/patches/boost-1.92.0-asio-type-erasure-carrier-pac.patch"
     "$ROOT_DIR/Scripts/patches/boost-1.92.0-asio-recycling-allocator-typing.patch"
 )
 # One exact tree per ordered patch-series stage. Recognizing intermediate
@@ -32,10 +29,7 @@ readonly -a BOOST_PATCHES=(
 readonly -a BOOST_PATCH_TREES=(
     "b8dd2f8c526b757b85a6a3e391db03b7a85328b346f78373f469f7d1e6b04e02"
     "5079b3d5607186e6bd4a883cf2ef9b45f5b1576840ffa4c59cfc5533a4f3c0b2"
-    "8ee166c6923fbffb51c09659c0d0fc0179e6b9561481513726050bbf15fa1761"
-    "422b26a5107192743666aaf50438f0f5a0c8c91bd2f5993decd2a1c7d5fe902e"
-    "80f19cd7ba60c77651a85b383ba45d5a4b6276892824ca754f01775246d8038d"
-    "c354d9431c448edfb00a927dc90e9c745a7c9794ce24f04ce3ef13f30e140911"
+    "75f39bcd820e9fef3d0087f65e01c519a18b64e729b58199f4c5644ef2680091"
     "42a7e71f1148a57c5556740184de36e431b6884bbb4bffc16eecc616de262663"
     "41c2d583d20ec9768db0b70e12f01e50d2a388c7d7301da908009ebe943d83c0"
 )

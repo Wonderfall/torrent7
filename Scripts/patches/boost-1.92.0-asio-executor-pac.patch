@@ -1,0 +1,191 @@
+diff --git a/boost/asio/detail/executor_function.hpp b/boost/asio/detail/executor_function.hpp
+index a613a3668..5706b95c9 100644
+--- a/boost/asio/detail/executor_function.hpp
++++ b/boost/asio/detail/executor_function.hpp
+@@ -19,6 +19,10 @@
+ #include <boost/asio/detail/handler_alloc_helpers.hpp>
+ #include <boost/asio/detail/memory.hpp>
+ 
++#if defined(__PTRAUTH__)
++# include <ptrauth.h>
++#endif // defined(__PTRAUTH__)
++
+ #include <boost/asio/detail/push_options.hpp>
+ 
+ namespace boost {
+@@ -67,7 +71,16 @@ private:
+   // Base class for polymorphic function implementations.
+   struct impl_base
+   {
+-    void (*complete_)(impl_base*, bool);
++    typedef void (*complete_func_type)(impl_base*, bool);
++#if defined(__PTRAUTH__)
++    using stored_complete_func_type = complete_func_type __ptrauth(
++        ptrauth_key_function_pointer, 1,
++        ptrauth_string_discriminator(
++          "boost.asio.executor-function.complete"));
++#else // defined(__PTRAUTH__)
++    typedef complete_func_type stored_complete_func_type;
++#endif // defined(__PTRAUTH__)
++    stored_complete_func_type complete_;
+   };
+ 
+   // Polymorphic function implementation.
+@@ -115,7 +128,15 @@ private:
+     }
+   }
+ 
+-  impl_base* impl_;
++#if defined(__PTRAUTH__)
++  using stored_impl_type = impl_base* __ptrauth(
++      ptrauth_key_process_dependent_data, 1,
++      ptrauth_string_discriminator(
++        "boost.asio.executor-function.impl"));
++#else // defined(__PTRAUTH__)
++  typedef impl_base* stored_impl_type;
++#endif // defined(__PTRAUTH__)
++  stored_impl_type impl_;
+ };
+ 
+ // Lightweight, non-owning, copyable function object wrapper.
+@@ -129,6 +150,23 @@ public:
+   {
+   }
+ 
++  executor_function_view(const executor_function_view& other) noexcept
++    : complete_(other.complete_),
++      function_(other.function_)
++  {
++  }
++
++  executor_function_view& operator=(
++      const executor_function_view& other) noexcept
++  {
++    if (this != &other)
++    {
++      complete_ = other.complete_;
++      function_ = other.function_;
++    }
++    return *this;
++  }
++
+   void operator()()
+   {
+     complete_(function_);
+@@ -142,8 +180,22 @@ private:
+     (*static_cast<F*>(f))();
+   }
+ 
+-  void (*complete_)(void*);
+-  void* function_;
++  typedef void (*complete_func_type)(void*);
++#if defined(__PTRAUTH__)
++  using stored_complete_func_type = complete_func_type __ptrauth(
++      ptrauth_key_function_pointer, 1,
++      ptrauth_string_discriminator(
++        "boost.asio.executor-function-view.complete"));
++  using stored_function_type = void* __ptrauth(
++      ptrauth_key_process_dependent_data, 1,
++      ptrauth_string_discriminator(
++        "boost.asio.executor-function-view.context"));
++#else // defined(__PTRAUTH__)
++  typedef complete_func_type stored_complete_func_type;
++  typedef void* stored_function_type;
++#endif // defined(__PTRAUTH__)
++  stored_complete_func_type complete_;
++  stored_function_type function_;
+ };
+ 
+ } // namespace detail
+diff --git a/boost/asio/execution/any_executor.hpp b/boost/asio/execution/any_executor.hpp
+index 564403df9..7263e0b1a 100644
+--- a/boost/asio/execution/any_executor.hpp
++++ b/boost/asio/execution/any_executor.hpp
+@@ -34,6 +34,10 @@
+ #include <boost/asio/query.hpp>
+ #include <boost/asio/require.hpp>
+ 
++#if defined(__PTRAUTH__)
++# include <ptrauth.h>
++#endif // defined(__PTRAUTH__)
++
+ #include <boost/asio/detail/push_options.hpp>
+ 
+ namespace boost {
+@@ -864,8 +868,26 @@ protected:
+     const void* (*target_type)();
+ #endif // !defined(BOOST_ASIO_NO_TYPEID)
+     bool (*equal)(const any_executor_base&, const any_executor_base&);
+-    void (*execute)(const any_executor_base&, function&&);
+-    void (*blocking_execute)(const any_executor_base&, function_view);
++    typedef void (*execute_func_type)(
++        const any_executor_base&, function&&);
++    typedef void (*blocking_execute_func_type)(
++        const any_executor_base&, function_view);
++#if defined(__PTRAUTH__)
++    using stored_execute_func_type = execute_func_type __ptrauth(
++        ptrauth_key_function_pointer, 1,
++        ptrauth_string_discriminator(
++          "boost.asio.any-executor.execute"));
++    using stored_blocking_execute_func_type =
++      blocking_execute_func_type __ptrauth(
++        ptrauth_key_function_pointer, 1,
++        ptrauth_string_discriminator(
++          "boost.asio.any-executor.blocking-execute"));
++#else // defined(__PTRAUTH__)
++    typedef execute_func_type stored_execute_func_type;
++    typedef blocking_execute_func_type stored_blocking_execute_func_type;
++#endif // defined(__PTRAUTH__)
++    stored_execute_func_type execute;
++    stored_blocking_execute_func_type blocking_execute;
+   };
+ 
+ #if !defined(BOOST_ASIO_NO_TYPEID)
+@@ -1199,9 +1221,27 @@ private:
+     >::type object_type;
+ 
+   object_type object_;
+-  const object_fns* object_fns_;
+-  void* target_;
+-  const target_fns* target_fns_;
++#if defined(__PTRAUTH__)
++  using stored_object_fns_type = const object_fns* __ptrauth(
++      ptrauth_key_process_dependent_data, 1,
++      ptrauth_string_discriminator(
++        "boost.asio.any-executor.object-fns"));
++  using stored_target_type = void* __ptrauth(
++      ptrauth_key_process_dependent_data, 1,
++      ptrauth_string_discriminator(
++        "boost.asio.any-executor.target"));
++  using stored_target_fns_type = const target_fns* __ptrauth(
++      ptrauth_key_process_dependent_data, 1,
++      ptrauth_string_discriminator(
++        "boost.asio.any-executor.target-fns"));
++#else // defined(__PTRAUTH__)
++  typedef const object_fns* stored_object_fns_type;
++  typedef void* stored_target_type;
++  typedef const target_fns* stored_target_fns_type;
++#endif // defined(__PTRAUTH__)
++  stored_object_fns_type object_fns_;
++  stored_target_type target_;
++  stored_target_fns_type target_fns_;
+ };
+ 
+ template <typename Derived, typename Property, typename = void>
+@@ -1832,7 +1872,15 @@ public:
+     return fns;
+   }
+ 
+-  const prop_fns<any_executor>* prop_fns_;
++#if defined(__PTRAUTH__)
++  using stored_prop_fns_type = const prop_fns<any_executor>* __ptrauth(
++      ptrauth_key_process_dependent_data, 1,
++      ptrauth_string_discriminator(
++        "boost.asio.any-executor.property-fns"));
++#else // defined(__PTRAUTH__)
++  typedef const prop_fns<any_executor>* stored_prop_fns_type;
++#endif // defined(__PTRAUTH__)
++  stored_prop_fns_type prop_fns_;
+ };
+ 
+ template <typename... SupportableProperties>

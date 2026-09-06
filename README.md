@@ -287,6 +287,8 @@ coverage. WebTorrent support stays
 disabled to avoid adding its unused protocol and dependency surface. SSL-torrent
 peers are likewise disabled because the application has no certificate-control
 workflow for them.
+The [dependency patch index](Scripts/patches/README.md) documents patch purposes,
+dependencies, and verification when consolidating or updating the series.
 The app bundle also contains `ThirdPartyNotices.txt`; release verification requires
 it to exactly match the reviewed notices in `Packaging/ThirdPartyNotices.txt`.
 

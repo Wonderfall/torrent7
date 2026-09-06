@@ -1,0 +1,3121 @@
+diff --git a/include/libtorrent/aux_/http_tracker_connection.hpp b/include/libtorrent/aux_/http_tracker_connection.hpp
+index a27b3fd6b..3a271cb8d 100644
+--- a/include/libtorrent/aux_/http_tracker_connection.hpp
++++ b/include/libtorrent/aux_/http_tracker_connection.hpp
+@@ -13,10 +13,12 @@ see LICENSE file.
+ 
+ #include <vector>
+ #include <memory>
++#include <cstdint>
+ 
+ #include "libtorrent/config.hpp"
+ #include "libtorrent/peer_id.hpp"
+ #include "libtorrent/error_code.hpp"
++#include "libtorrent/aux_/ip_helpers.hpp"
+ #include "libtorrent/aux_/tracker_manager.hpp" // for tracker_connection
+ 
+ namespace libtorrent {
+@@ -53,17 +55,28 @@ namespace libtorrent::aux {
+ 				tracker_connection::shared_from_this());
+ 		}
+ 
+-		void on_filter(aux::http_connection& c, std::vector<tcp::endpoint>& endpoints);
+-		bool on_filter_hostname(aux::http_connection& c, string_view hostname);
+-		void on_connect(aux::http_connection& c);
+-		void on_response(error_code const& ec, aux::http_parser const& parser
+-			, span<char const> data);
++		void start_request();
++		void on_address_policy_updated();
++		void wait_for_address_policy();
++		void cancel_address_policy_timeout();
++		void on_address_policy_timeout(error_code const& error);
++		void on_filter(std::uint64_t request_generation, aux::http_connection& c
++			, std::vector<tcp::endpoint>& endpoints);
++		bool on_filter_hostname(std::uint64_t request_generation
++			, aux::http_connection& c, string_view hostname);
++		void on_connect(std::uint64_t request_generation, aux::http_connection& c);
++		void on_response(std::uint64_t request_generation, error_code const& ec
++			, aux::http_parser const& parser, span<char const> data);
+ 
+ 		void on_timeout(error_code const&) override {}
+ 
+ 		std::shared_ptr<aux::http_connection> m_tracker_connection;
+ 		address m_tracker_ip;
++		deadline_timer m_address_policy_timer;
+ 		io_context& m_ioc;
++		time_point m_operation_deadline;
++		std::uint64_t m_request_generation = 0;
++		bool m_address_policy_pending = false;
+ 	};
+ 
+ 	TORRENT_EXTRA_EXPORT tracker_response parse_tracker_response(
+diff --git a/include/libtorrent/aux_/ip_helpers.hpp b/include/libtorrent/aux_/ip_helpers.hpp
+index 682141eac..dc326cc9a 100644
+--- a/include/libtorrent/aux_/ip_helpers.hpp
++++ b/include/libtorrent/aux_/ip_helpers.hpp
+@@ -18,6 +18,7 @@ see LICENSE file.
+ #include "libtorrent/span.hpp"
+ 
+ #include <cstdint>
++#include <utility>
+ #include <vector>
+ 
+ namespace libtorrent {
+@@ -34,11 +35,83 @@ namespace aux {
+ 		bool valid = false;
+ 	};
+ 
++	enum class global_address_classification : std::uint8_t
++	{
++		global,
++		non_global,
++		pending,
++		unavailable
++	};
++
+ 	TORRENT_EXTRA_EXPORT bool is_global(address const& a);
+ 	TORRENT_EXTRA_EXPORT bool is_global(address const& a
+ 		, span<nat64_prefix const> prefixes);
++	// IPv4 endpoints do not depend on DNS64 discovery. IPv6 endpoints fail
++	// closed unless the RFC 7050 result is valid, so a network-specific NAT64
++	// prefix cannot disguise a non-global embedded IPv4 destination.
++	TORRENT_EXTRA_EXPORT bool is_global(address const& a
++		, nat64_discovery_result const& discovery);
+ 	TORRENT_EXTRA_EXPORT nat64_discovery_result discover_nat64_prefixes(
+ 		span<address const> addresses);
++
++	// Session-wide RFC 7050 discovery state. IPv4 classification is always
++	// available. IPv6 classification waits for the current network generation
++	// and fails closed if discovery cannot produce a trustworthy result.
++	struct nat64_discovery_state
++	{
++		std::uint64_t start_lookup()
++		{
++			pending = true;
++			return ++generation;
++		}
++
++		bool lookup_completed(std::uint64_t const lookup_generation
++			, nat64_discovery_result result)
++		{
++			if (!pending || lookup_generation != generation) return false;
++			discovery = std::move(result);
++			complete = true;
++			pending = false;
++			return true;
++		}
++
++		bool lookup_timed_out(std::uint64_t const lookup_generation)
++		{
++			if (!pending || lookup_generation != generation) return false;
++			++generation;
++			discovery = {};
++			complete = true;
++			pending = false;
++			return true;
++		}
++
++		void reset()
++		{
++			++generation;
++			discovery = {};
++			complete = false;
++			pending = false;
++		}
++
++		global_address_classification classify(address const& addr) const
++		{
++			if (addr.is_v4())
++				return is_global(addr) ? global_address_classification::global
++					: global_address_classification::non_global;
++			if (!complete) return global_address_classification::pending;
++			if (!discovery.valid) return global_address_classification::unavailable;
++			return is_global(addr, discovery) ? global_address_classification::global
++				: global_address_classification::non_global;
++		}
++
++		bool is_peer_address_global(address const& addr) const
++		{ return classify(addr) == global_address_classification::global; }
++
++		nat64_discovery_result discovery;
++		std::uint64_t generation = 0;
++		bool complete = false;
++		bool pending = false;
++	};
+ 	TORRENT_EXTRA_EXPORT bool is_local(address const& a);
+ 	TORRENT_EXTRA_EXPORT bool is_link_local(address const& addr);
+ 	TORRENT_EXTRA_EXPORT bool is_teredo(address const& addr);
+diff --git a/include/libtorrent/aux_/peer_list.hpp b/include/libtorrent/aux_/peer_list.hpp
+index 5ec0a2fb1..fef1c991d 100644
+--- a/include/libtorrent/aux_/peer_list.hpp
++++ b/include/libtorrent/aux_/peer_list.hpp
+@@ -126,6 +126,7 @@ namespace libtorrent::aux {
+ 			, std::vector<address>& banned);
+ 		void apply_port_filter(port_filter const& filter, torrent_state* state
+ 			, std::vector<tcp::endpoint>& banned);
++		void invalidate_global_address_policy(torrent_state* state);
+ 
+ 		void set_seed(torrent_peer* p, bool s);
+ 		void set_upload_only(torrent_peer* p, bool s);
+diff --git a/include/libtorrent/aux_/session_impl.hpp b/include/libtorrent/aux_/session_impl.hpp
+index 1fb4ad7f4..2985eec07 100644
+--- a/include/libtorrent/aux_/session_impl.hpp
++++ b/include/libtorrent/aux_/session_impl.hpp
+@@ -35,6 +35,7 @@ see LICENSE file.
+ 
+ #include "libtorrent/session.hpp" // for user_load_function_t
+ #include "libtorrent/aux_/ip_voter.hpp"
++#include "libtorrent/aux_/ip_helpers.hpp"
+ #include "libtorrent/entry.hpp"
+ #include "libtorrent/socket.hpp"
+ #include "libtorrent/peer_id.hpp"
+@@ -127,6 +128,12 @@ namespace aux {
+ 		{ return lhs < rhs.get(); }
+ 	};
+ 
++	inline bool should_discover_nat64(bool const outgoing_tcp
++		, bool const outgoing_utp, bool const dht)
++	{
++		return outgoing_tcp || outgoing_utp || dht;
++	}
++
+ 	using listen_socket_flags_t = flags::bitfield_flag<std::uint8_t, struct listen_socket_flags_tag>;
+ 
+ 	struct listen_port_mapping
+@@ -471,6 +478,15 @@ namespace aux {
+ 			void apply_settings_pack_impl(settings_pack const& pack);
+ 			session_settings const& settings() const override { return m_settings; }
+ 			settings_pack get_settings() const;
++			bool global_address_policy_enabled() const;
++			bool ensure_global_address_policy();
++			void update_global_address_policy();
++			void refresh_global_address_policy();
++			void invalidate_peer_address_policy();
++			void on_nat64_name_lookup(error_code const& e
++				, std::vector<address> addresses, std::uint64_t generation);
++			void on_nat64_timeout(error_code const& e
++				, std::uint64_t generation);
+ 
+ #ifndef TORRENT_DISABLE_DHT
+ 			dht::dht_tracker* dht() override { return m_dht.get(); }
+@@ -799,6 +815,8 @@ namespace aux {
+ 			bool on_dht_request(string_view query
+ 				, dht::msg const& request, entry& response) override;
+ 			ip_filter const* get_dht_ip_filter() const override;
++			bool is_dht_address_global(address const& addr) const override;
++			bool is_peer_address_global(address const& addr) const override;
+ 
+ 			void set_external_address(tcp::endpoint const& local_endpoint
+ 				, address const& ip
+@@ -979,6 +997,7 @@ namespace aux {
+ 			peer_class_t m_local_peer_class{0};
+ 
+ 			resolver m_host_resolver;
++			nat64_discovery_state m_nat64_state;
+ 
+ 			tracker_manager m_tracker_manager;
+ 
+@@ -1178,12 +1197,14 @@ namespace aux {
+ 			// port we'll bind the next outgoing socket to
+ 			mutable int m_next_port = 0;
+ 
++			tcp::resolver m_nat64_resolver;
++			deadline_timer m_nat64_timer;
++
+ #ifndef TORRENT_DISABLE_DHT
+ 			std::unique_ptr<dht::dht_storage_interface> m_dht_storage;
+ 			std::shared_ptr<dht::dht_tracker> m_dht;
+ 			dht::dht_storage_constructor_type m_dht_storage_constructor
+ 				= dht::dht_default_storage_constructor;
+-
+ 			// these are used when starting the DHT
+ 			// (and bootstrapping it), and then erased
+ 			std::vector<udp::endpoint> m_dht_router_nodes;
+diff --git a/include/libtorrent/aux_/session_interface.hpp b/include/libtorrent/aux_/session_interface.hpp
+index 7022964ec..0a4c7a66e 100644
+--- a/include/libtorrent/aux_/session_interface.hpp
++++ b/include/libtorrent/aux_/session_interface.hpp
+@@ -200,6 +200,7 @@ namespace libtorrent::aux {
+ 
+ 		virtual void apply_settings_pack(std::shared_ptr<settings_pack> pack) = 0;
+ 		virtual session_settings const& settings() const = 0;
++		virtual bool is_peer_address_global(address const& addr) const = 0;
+ 
+ 		virtual void queue_tracker_request(aux::tracker_request req
+ 			, std::weak_ptr<aux::request_callback> c) = 0;
+diff --git a/include/libtorrent/aux_/torrent.hpp b/include/libtorrent/aux_/torrent.hpp
+index 693efb684..7cc78745d 100644
+--- a/include/libtorrent/aux_/torrent.hpp
++++ b/include/libtorrent/aux_/torrent.hpp
+@@ -461,6 +461,10 @@ namespace libtorrent::aux {
+ 		// find the peer that introduced us to the given endpoint. This is
+ 		// used when trying to holepunch. We need the introducer so that we
+ 		// can send a rendezvous connect message
++		bool allows_peer_exchange() const;
++		bool peer_endpoint_policy_enabled() const { return m_block_non_global_peers; }
++		bool is_peer_address_global(address const& addr) const;
++		void invalidate_peer_address_policy();
+ 		bt_peer_connection* find_introducer(tcp::endpoint const& ep) const;
+ 
+ 		// if we're connected to a peer at ep, return its peer connection
+@@ -1787,8 +1791,7 @@ namespace libtorrent::aux {
+ 		bool m_disable_v1_hashes:1;
+ 		// ----
+ 
+-		// reject non-global tracker, DHT and PEX peer endpoints while an
+-		// application validates metadata obtained from an untrusted source
++		// enforce the application-owned peer source and endpoint policy
+ 		bool m_block_non_global_peers;
+ 
+ 		// the maximum number of uploads for this torrent
+diff --git a/include/libtorrent/aux_/torrent_peer.hpp b/include/libtorrent/aux_/torrent_peer.hpp
+index e69c4e163..7f32c8d12 100644
+--- a/include/libtorrent/aux_/torrent_peer.hpp
++++ b/include/libtorrent/aux_/torrent_peer.hpp
+@@ -27,6 +27,17 @@ namespace libtorrent::aux {
+ 
+ 	struct external_ip;
+ 
++	// Peers learned from remote discovery or persisted state must remain
++	// globally routable. LSD is deliberately excluded because it is the one
++	// source that is allowed to discover peers on the local network.
++	inline bool peer_source_requires_global_address(peer_source_flags_t const source)
++	{
++		return bool(source & peer_info::tracker)
++			|| bool(source & peer_info::dht)
++			|| bool(source & peer_info::pex)
++			|| bool(source & peer_info::resume_data);
++	}
++
+ 	// calculate the priority of a peer based on its address. One of the
+ 	// endpoint should be our own. The priority is symmetric, so it doesn't
+ 	// matter which is which
+diff --git a/include/libtorrent/aux_/tracker_manager.hpp b/include/libtorrent/aux_/tracker_manager.hpp
+index ec30d77cf..3a225fac8 100644
+--- a/include/libtorrent/aux_/tracker_manager.hpp
++++ b/include/libtorrent/aux_/tracker_manager.hpp
+@@ -44,6 +44,7 @@ see LICENSE file.
+ #include "libtorrent/aux_/udp_socket.hpp"
+ #include "libtorrent/aux_/session_settings.hpp"
+ #include "libtorrent/aux_/ssl.hpp"
++#include "libtorrent/aux_/ip_helpers.hpp"
+ #include "libtorrent/tracker_event.hpp" // for event_t enum
+ #include "libtorrent/string_view.hpp"
+ 
+@@ -328,6 +329,7 @@ using tracker_request_flags_t = flags::bitfield_flag<std::uint8_t, struct tracke
+ 			, counters& stats_counters
+ 			, aux::resolver_interface& resolver
+ 			, aux::session_settings const& sett
++			, nat64_discovery_state const& address_policy
+ #if !defined TORRENT_DISABLE_LOGGING || TORRENT_USE_ASSERTS
+ 			, aux::session_logger& ses
+ #endif
+@@ -377,6 +379,8 @@ using tracker_request_flags_t = flags::bitfield_flag<std::uint8_t, struct tracke
+ 
+ 		aux::session_settings const& settings() const { return m_settings; }
+ 		aux::resolver_interface& host_resolver() { return m_host_resolver; }
++		nat64_discovery_state const& address_policy() const { return m_address_policy; }
++		void address_policy_updated();
+ 
+ 		void send_hostname(aux::listen_socket_handle const& sock
+ 			, char const* hostname, int port, span<char const> p
+@@ -405,6 +409,7 @@ using tracker_request_flags_t = flags::bitfield_flag<std::uint8_t, struct tracke
+ 		send_fun_hostname_t m_send_fun_hostname;
+ 		aux::resolver_interface& m_host_resolver;
+ 		aux::session_settings const& m_settings;
++		nat64_discovery_state const& m_address_policy;
+ 		counters& m_stats_counters;
+ 		bool m_abort = false;
+ #if !defined TORRENT_DISABLE_LOGGING || TORRENT_USE_ASSERTS
+diff --git a/include/libtorrent/aux_/udp_tracker_connection.hpp b/include/libtorrent/aux_/udp_tracker_connection.hpp
+index 4b1476845..fc9ce594a 100644
+--- a/include/libtorrent/aux_/udp_tracker_connection.hpp
++++ b/include/libtorrent/aux_/udp_tracker_connection.hpp
+@@ -20,6 +20,7 @@ see LICENSE file.
+ #include <map>
+ 
+ #include "libtorrent/aux_/udp_socket.hpp"
++#include "libtorrent/aux_/ip_helpers.hpp"
+ #include "libtorrent/aux_/tracker_manager.hpp"
+ #include "libtorrent/config.hpp"
+ #include "libtorrent/span.hpp"
+@@ -61,9 +62,13 @@ namespace libtorrent::aux {
+ 
+ 		void update_transaction_id();
+ 
++		void start_request();
++		void on_address_policy_updated();
++		void wait_for_address_policy();
+ 		void name_lookup(error_code const& error
+-			, std::vector<address> const& addresses, int port);
+-		void start_announce();
++			, std::vector<address> const& addresses, int port
++			, std::uint64_t request_generation);
++		void start_announce(std::uint64_t request_generation);
+ 
+ 		bool on_receive(udp::endpoint const& ep, span<char const> buf);
+ 		bool on_receive_hostname(string_view hostname, span<char const> buf);
+@@ -81,6 +86,7 @@ namespace libtorrent::aux {
+ 		void send_udp_connect();
+ 		void send_udp_announce();
+ 		void send_udp_scrape();
++		bool target_address_allowed();
+ 
+ 		void on_timeout(error_code const& ec) override;
+ 
+@@ -91,6 +97,7 @@ namespace libtorrent::aux {
+ 		{
+ 			std::int64_t connection_id;
+ 			time_point expires;
++			std::uint64_t address_policy_generation;
+ 		};
+ 
+ 		static std::map<address, connection_cache_entry> m_connection_cache;
+@@ -99,10 +106,12 @@ namespace libtorrent::aux {
+ 		udp::endpoint m_target;
+ 
+ 		std::uint32_t m_transaction_id;
++		std::uint64_t m_request_generation = 0;
+ 		int m_attempts;
+ 
+ 		action_t m_state;
+ 
++		bool m_address_policy_pending = false;
+ 		bool m_abort;
+ 	};
+ 
+diff --git a/include/libtorrent/kademlia/dht_observer.hpp b/include/libtorrent/kademlia/dht_observer.hpp
+index cae3756f7..173e68e04 100644
+--- a/include/libtorrent/kademlia/dht_observer.hpp
++++ b/include/libtorrent/kademlia/dht_observer.hpp
+@@ -72,6 +72,10 @@ namespace dht {
+ 		// returns the session's IP filter, or nullptr if none is set
+ 		virtual ip_filter const* get_dht_ip_filter() const = 0;
+ 
++		// returns whether an address is globally reachable under the
++		// session's DHT-specific address policy
++		virtual bool is_dht_address_global(address const& addr) const = 0;
++
+ 	protected:
+ 		~dht_observer() = default;
+ 	};
+diff --git a/include/libtorrent/torrent_flags.hpp b/include/libtorrent/torrent_flags.hpp
+index c196f8707..afd9cd0e0 100644
+--- a/include/libtorrent/torrent_flags.hpp
++++ b/include/libtorrent/torrent_flags.hpp
+@@ -301,10 +301,12 @@ namespace torrent_flags {
+ 	// torrents. Cannot be changed after the torrent is added.
+ 	constexpr torrent_flags_t disable_v1_hashes = 25_bit;
+ 
+-	// Reject non-globally-routable peer endpoints learned from trackers, the DHT
+-	// or peer exchange. This is a temporary guard while an application validates
+-	// metadata from an untrusted magnet. The standard resume-data encoder does
+-	// not serialize this application-owned state.
++	// Reject non-globally-routable peer endpoints learned from trackers, the DHT,
++	// peer exchange or resume data, while leaving Local Service Discovery as an
++	// explicit LAN-only path. The policy also prevents private torrents from
++	// replaying resume peers and suppresses non-global PEX and holepunch endpoints.
++	// The standard resume-data encoder does not serialize this application-owned
++	// state.
+ 	constexpr torrent_flags_t block_non_global_peers = 26_bit;
+ 
+ 	// all torrent flags combined. Can conveniently be used when creating masks
+diff --git a/src/bt_peer_connection.cpp b/src/bt_peer_connection.cpp
+index dab91bab0..ef738300f 100644
+--- a/src/bt_peer_connection.cpp
++++ b/src/bt_peer_connection.cpp
+@@ -1569,6 +1569,10 @@ namespace {
+ 
+ 		auto t = associated_torrent().lock();
+ 		if (!t) return;
++		if (!t->allows_peer_exchange()) return;
++		if (t->peer_endpoint_policy_enabled()
++			&& (!t->is_peer_address_global(remote().address())
++				|| !t->is_peer_address_global(ep.address()))) return;
+ 
+ 		switch (msg_type)
+ 		{
+@@ -1707,6 +1711,12 @@ namespace {
+ 	void bt_peer_connection::write_holepunch_msg(hp_message const type
+ 		, tcp::endpoint const& ep, hp_error const error)
+ 	{
++		auto const t = associated_torrent().lock();
++		if (!t || !t->allows_peer_exchange()) return;
++		if (t->peer_endpoint_policy_enabled()
++			&& (!t->is_peer_address_global(remote().address())
++				|| !t->is_peer_address_global(ep.address()))) return;
++
+ 		char buf[35];
+ 		char* ptr = buf + 6;
+ 		aux::write_uint8(type, ptr);
+@@ -2051,7 +2061,11 @@ namespace {
+ 		if (bdecode_node const m = root.dict_find_dict("m"))
+ 		{
+ 			m_upload_only_id = std::uint8_t(m.dict_find_int_value("upload_only", 0));
+-			m_holepunch_id = std::uint8_t(m.dict_find_int_value("ut_holepunch", 0));
++			m_holepunch_id = t->allows_peer_exchange()
++				&& (!t->peer_endpoint_policy_enabled()
++					|| t->is_peer_address_global(remote().address()))
++				? std::uint8_t(m.dict_find_int_value("ut_holepunch", 0))
++				: 0;
+ 			m_dont_have_id = std::uint8_t(m.dict_find_int_value("lt_donthave", 0));
+ 		}
+ 
+@@ -2472,7 +2486,10 @@ namespace {
+ 		handshake["reqq"] = m_settings.get_int(settings_pack::max_allowed_in_request_queue);
+ 
+ 		m["upload_only"] = upload_only_msg;
+-		m["ut_holepunch"] = holepunch_msg;
++		if (t->allows_peer_exchange()
++			&& (!t->peer_endpoint_policy_enabled()
++				|| t->is_peer_address_global(remote().address())))
++			m["ut_holepunch"] = holepunch_msg;
+ #ifndef TORRENT_DISABLE_SHARE_MODE
+ 		if (m_settings.get_bool(settings_pack::support_share_mode))
+ 			m["share_mode"] = share_mode_msg;
+diff --git a/src/http_tracker_connection.cpp b/src/http_tracker_connection.cpp
+index 72684af91..49f80652e 100644
+--- a/src/http_tracker_connection.cpp
++++ b/src/http_tracker_connection.cpp
+@@ -57,11 +57,127 @@ namespace libtorrent::aux {
+ 		, tracker_request req
+ 		, std::weak_ptr<request_callback> c)
+ 		: tracker_connection(man, std::move(req), ios, std::move(c))
++		, m_address_policy_timer(ios)
+ 		, m_ioc(ios)
+ 	{}
+ 
+ 	void http_tracker_connection::start()
+ 	{
++		aux::session_settings const& settings = m_man.settings();
++		int const timeout = tracker_req().event == event_t::stopped
++			? settings.get_int(settings_pack::stop_tracker_timeout)
++			: settings.get_int(settings_pack::tracker_completion_timeout);
++		m_operation_deadline = clock_type::now() + seconds(timeout);
++		if (!settings.get_bool(settings_pack::ssrf_mitigation))
++		{
++			start_request();
++			return;
++		}
++
++		std::string protocol;
++		error_code ec;
++		std::tie(protocol, std::ignore, std::ignore, std::ignore, std::ignore)
++			= parse_url_components(tracker_req().url, ec);
++		if (ec)
++		{
++			fail(ec, operation_t::parse_address);
++			return;
++		}
++
++#if TORRENT_USE_I2P
++		if (is_i2p_url(tracker_req().url))
++		{
++			start_request();
++			return;
++		}
++#endif
++
++		aux::proxy_settings const ps(settings);
++		if (string_equal_no_case(protocol, "http") && ps.proxy_tracker_connections
++			&& (ps.type == settings_pack::http
++				|| ps.type == settings_pack::http_pw))
++		{
++			// A plaintext HTTP proxy resolves the absolute-form request target
++			// independently. The http_connection API cannot pin that target to a
++			// locally vetted address, so reject this configuration rather than
++			// allowing a proxy-side DNS rebinding or private-network request.
++			fail(errors::ssrf_mitigation, operation_t::bittorrent);
++			return;
++		}
++
++		if (m_man.address_policy().complete)
++		{
++			start_request();
++			return;
++		}
++
++		wait_for_address_policy();
++	}
++
++	void http_tracker_connection::wait_for_address_policy()
++	{
++		if (m_address_policy_pending || cancelled()) return;
++
++		++m_request_generation;
++		if (m_tracker_connection)
++		{
++			m_tracker_connection->close(true);
++			m_tracker_connection.reset();
++		}
++		m_address_policy_pending = true;
++		m_address_policy_timer.expires_at(m_operation_deadline);
++		ADD_OUTSTANDING_ASYNC("http_tracker_connection::address_policy_timeout");
++		m_address_policy_timer.async_wait(std::bind(
++			&http_tracker_connection::on_address_policy_timeout
++			, shared_from_this(), std::placeholders::_1));
++	}
++
++	void http_tracker_connection::on_address_policy_updated()
++	{
++		if (cancelled()
++			|| !m_man.settings().get_bool(settings_pack::ssrf_mitigation))
++			return;
++		if (!m_man.address_policy().complete)
++		{
++			wait_for_address_policy();
++			return;
++		}
++		if (!m_address_policy_pending) return;
++		cancel_address_policy_timeout();
++		start_request();
++	}
++
++	void http_tracker_connection::cancel_address_policy_timeout()
++	{
++		if (!m_address_policy_pending) return;
++		m_address_policy_pending = false;
++		m_address_policy_timer.cancel();
++	}
++
++	void http_tracker_connection::on_address_policy_timeout(error_code const& error)
++	{
++		COMPLETE_ASYNC("http_tracker_connection::address_policy_timeout");
++		if (error == boost::asio::error::operation_aborted
++			|| !m_address_policy_pending || cancelled())
++			return;
++
++		m_address_policy_pending = false;
++		tracker_connection::fail(error
++			? error : error_code(errors::timed_out), operation_t::timer);
++		// Release the manager slot if session-wide verification cannot become
++		// ready within this tracker's own operation deadline.
++		close();
++	}
++
++	void http_tracker_connection::start_request()
++	{
++		time_duration const remaining = m_operation_deadline - clock_type::now();
++		if (remaining <= time_duration::zero())
++		{
++			fail(errors::timed_out, operation_t::timer);
++			return;
++		}
++
+ 		std::string url = tracker_req().url;
+ 
+ 		if (tracker_req().kind & tracker_request::scrape_request)
+@@ -211,21 +327,22 @@ namespace libtorrent::aux {
+ 		}
+ 
+ 		using namespace std::placeholders;
++		std::uint64_t const request_generation = ++m_request_generation;
+ 		m_tracker_connection = std::make_shared<aux::http_connection>(m_ioc, m_man.host_resolver()
+-			, std::bind(&http_tracker_connection::on_response, shared_from_this(), _1, _2, _3)
++			, std::bind(&http_tracker_connection::on_response, shared_from_this()
++				, request_generation, _1, _2, _3)
+ 			, settings.get_int(settings_pack::max_http_recv_buffer_size)
+-			, std::bind(&http_tracker_connection::on_connect, shared_from_this(), _1)
+-			, std::bind(&http_tracker_connection::on_filter, shared_from_this(), _1, _2)
+-			, std::bind(&http_tracker_connection::on_filter_hostname, shared_from_this(), _1, _2)
++			, std::bind(&http_tracker_connection::on_connect, shared_from_this()
++				, request_generation, _1)
++			, std::bind(&http_tracker_connection::on_filter, shared_from_this()
++				, request_generation, _1, _2)
++			, std::bind(&http_tracker_connection::on_filter_hostname, shared_from_this()
++				, request_generation, _1, _2)
+ #if TORRENT_USE_SSL
+ 			, tracker_req().ssl_ctx
+ #endif
+ 			);
+ 
+-		int const timeout = tracker_req().event == event_t::stopped
+-			? settings.get_int(settings_pack::stop_tracker_timeout)
+-			: settings.get_int(settings_pack::tracker_completion_timeout);
+-
+ 		// in anonymous mode we omit the user agent to mitigate fingerprinting of
+ 		// the client. Private torrents is an exception because some private
+ 		// trackers may require the user agent
+@@ -248,7 +365,15 @@ namespace libtorrent::aux {
+ 		// are that we're shutting down, and this should be a best-effort
+ 		// attempt. It's not worth stalling shutdown.
+ 		aux::proxy_settings ps(settings);
+-		m_tracker_connection->get(url, seconds(timeout)
++		if (settings.get_bool(settings_pack::ssrf_mitigation))
++		{
++			// Remote DNS and a hostname-form HTTP CONNECT would bypass
++			// on_filter(). Give every proxy only the selected, vetted numeric
++			// endpoint while retaining the original hostname for TLS SNI.
++			ps.proxy_hostnames = false;
++			ps.send_host_in_connect = false;
++		}
++		m_tracker_connection->get(url, remaining
+ 			, ps.proxy_tracker_connections ? &ps : nullptr
+ 			, 5, user_agent, bi
+ 			, (tracker_req().event == event_t::stopped
+@@ -279,9 +404,11 @@ namespace libtorrent::aux {
+ 
+ 	void http_tracker_connection::close()
+ 	{
++		++m_request_generation;
++		cancel_address_policy_timeout();
+ 		if (m_tracker_connection)
+ 		{
+-			m_tracker_connection->close();
++			m_tracker_connection->close(true);
+ 			m_tracker_connection.reset();
+ 		}
+ 		cancel();
+@@ -289,66 +416,64 @@ namespace libtorrent::aux {
+ 	}
+ 
+ 	// endpoints is an in-out parameter
+-	void http_tracker_connection::on_filter(aux::http_connection& c
+-		, std::vector<tcp::endpoint>& endpoints)
++	void http_tracker_connection::on_filter(std::uint64_t const request_generation
++		, aux::http_connection& c, std::vector<tcp::endpoint>& endpoints)
+ 	{
+-		// filter all endpoints we cannot reach from this listen socket, which may
+-		// be all of them, in which case we should not announce this listen socket
+-		// to this tracker
+-		auto const ls = bind_socket();
+-		if (ls.get() != nullptr)
++		if (request_generation != m_request_generation)
+ 		{
+-			endpoints.erase(std::remove_if(endpoints.begin(), endpoints.end()
+-				, [&](tcp::endpoint const& ep) { return !ls.can_route(ep.address()); })
+-				, endpoints.end());
+-		}
+-
+-		if (endpoints.empty())
+-		{
+-			fail(lt::errors::announce_skipped, operation_t::get_interface);
++			endpoints.clear();
++			c.close(true);
+ 			return;
+ 		}
+ 
+ 		aux::session_settings const& settings = m_man.settings();
+ 		bool const ssrf_mitigation = settings.get_bool(settings_pack::ssrf_mitigation);
+-		if (ssrf_mitigation && std::find_if(endpoints.begin(), endpoints.end()
+-			, [](tcp::endpoint const& ep) { return ep.address().is_loopback(); }) != endpoints.end())
++		if (ssrf_mitigation)
+ 		{
+-			// there is at least one loopback address in here. If the request
+-			// path for this tracker is not /announce. filter all loopback
+-			// addresses.
+-			std::string path;
+-
+-			error_code ec;
+-			std::tie(std::ignore, std::ignore, std::ignore, std::ignore, path)
+-				= parse_url_components(c.url(), ec);
+-			if (ec)
+-			{
+-				fail(ec, operation_t::parse_address);
+-				return;
+-			}
+-
+-			// this is mitigation for Server Side request forgery. Any tracker
+-			// announce to localhost need to look like a standard BitTorrent
+-			// announce
+-			if (path.substr(0, 9) != "/announce")
+-			{
+-				for (auto i = endpoints.begin(); i != endpoints.end();)
++			bool blocked_non_global = false;
++			bool verification_pending = false;
++			endpoints.erase(std::remove_if(endpoints.begin(), endpoints.end()
++				, [this, &blocked_non_global, &verification_pending]
++					(tcp::endpoint const& endpoint)
+ 				{
+-					if (i->address().is_loopback())
+-						i = endpoints.erase(i);
+-					else
+-						++i;
+-				}
+-			}
++					auto const classification
++						= m_man.address_policy().classify(endpoint.address());
++					blocked_non_global |= classification
++						== global_address_classification::non_global;
++					verification_pending |= classification
++						== global_address_classification::pending;
++					return classification != global_address_classification::global;
++				}), endpoints.end());
+ 
+ 			if (endpoints.empty())
+ 			{
+-				fail(errors::ssrf_mitigation, operation_t::bittorrent);
++				if (blocked_non_global)
++					fail(errors::ssrf_mitigation, operation_t::bittorrent);
++				else if (verification_pending)
++					wait_for_address_policy();
++				else
++					fail(errors::announce_skipped, operation_t::bittorrent);
+ 				return;
+ 			}
+ 		}
+ 
++		// Apply reachability only after the security classification. Otherwise a
++		// private address from the other family is misreported as an unavailable
++		// interface instead of an SSRF attempt.
++		auto const ls = bind_socket();
++		if (ls.get() != nullptr)
++		{
++			endpoints.erase(std::remove_if(endpoints.begin(), endpoints.end()
++				, [&](tcp::endpoint const& ep) { return !ls.can_route(ep.address()); })
++				, endpoints.end());
++		}
++
++		if (endpoints.empty())
++		{
++			fail(lt::errors::announce_skipped, operation_t::get_interface);
++			return;
++		}
++
+ 		TORRENT_UNUSED(c);
+ 		if (!tracker_req().filter) return;
+ 
+@@ -373,24 +498,61 @@ namespace libtorrent::aux {
+ 	}
+ 
+ 	// returns true if the hostname is allowed
+-	bool http_tracker_connection::on_filter_hostname(aux::http_connection&
++	bool http_tracker_connection::on_filter_hostname(
++		std::uint64_t const request_generation, aux::http_connection& c
+ 		, string_view hostname)
+ 	{
++		if (request_generation != m_request_generation)
++		{
++			c.close(true);
++			return false;
++		}
+ 		aux::session_settings const& settings = m_man.settings();
+ 		if (settings.get_bool(settings_pack::allow_idna)) return true;
+ 		return !is_idna(hostname);
+ 	}
+ 
+-	void http_tracker_connection::on_connect(aux::http_connection& c)
++	void http_tracker_connection::on_connect(std::uint64_t const request_generation
++		, aux::http_connection& c)
+ 	{
++		if (request_generation != m_request_generation)
++		{
++			c.close(true);
++			return;
++		}
+ 		error_code ec;
+ 		tcp::endpoint ep = c.socket().remote_endpoint(ec);
++		if (m_man.settings().get_bool(settings_pack::ssrf_mitigation))
++		{
++			if (ec)
++			{
++				c.close(true);
++				fail(ec, operation_t::getpeername);
++				return;
++			}
++			auto const classification = m_man.address_policy().classify(ep.address());
++			if (classification != global_address_classification::global)
++			{
++				if (classification == global_address_classification::pending)
++					wait_for_address_policy();
++				else
++				{
++					c.close(true);
++					fail(classification == global_address_classification::non_global
++						? error_code(errors::ssrf_mitigation)
++						: error_code(errors::announce_skipped)
++						, operation_t::bittorrent);
++				}
++				return;
++			}
++		}
+ 		m_tracker_ip = ep.address();
+ 	}
+ 
+-	void http_tracker_connection::on_response(error_code const& ec
+-		, aux::http_parser const& parser, span<char const> data)
++	void http_tracker_connection::on_response(std::uint64_t const request_generation
++		, error_code const& ec, aux::http_parser const& parser, span<char const> data)
+ 	{
++		if (request_generation != m_request_generation) return;
+ 		// keep this alive
+ 		std::shared_ptr<http_tracker_connection> me(shared_from_this());
+ 
+diff --git a/src/ip_helpers.cpp b/src/ip_helpers.cpp
+index 7a136540d..a51394515 100644
+--- a/src/ip_helpers.cpp
++++ b/src/ip_helpers.cpp
+@@ -150,6 +150,9 @@ namespace aux {
+ 
+ 		bool is_global_v6(address_v6 const& address)
+ 		{
++			if (address.is_v4_mapped())
++				return is_global_v4(make_address_v4(v4_mapped, address));
++
+ 			auto const bytes = address.to_bytes();
+ 
+ 			// The well-known NAT64 prefix is globally reachable, but the
+@@ -211,6 +214,12 @@ namespace aux {
+ 		return translated || is_global_v6(a.to_v6());
+ 	}
+ 
++	bool is_global(address const& a, nat64_discovery_result const& discovery)
++	{
++		if (a.is_v6() && !discovery.valid) return false;
++		return is_global(a, discovery.prefixes);
++	}
++
+ 	nat64_discovery_result discover_nat64_prefixes(
+ 		span<address const> const addresses)
+ 	{
+diff --git a/src/kademlia/dht_tracker.cpp b/src/kademlia/dht_tracker.cpp
+index 976db28d1..8359ae20a 100644
+--- a/src/kademlia/dht_tracker.cpp
++++ b/src/kademlia/dht_tracker.cpp
+@@ -494,6 +494,13 @@ namespace libtorrent::dht {
+ 		m_counters.inc_stats_counter(counters::recv_ip_overhead_bytes
+ 			, aux::is_v6(ep) ? 48 : 28);
+ 		m_counters.inc_stats_counter(counters::dht_messages_in);
++		if (m_log != nullptr
++			? !m_log->is_dht_address_global(ep.address())
++			: !aux::is_global(ep.address()))
++		{
++			m_counters.inc_stats_counter(counters::dht_messages_in_dropped);
++			return true;
++		}
+ 
+ 		if (m_settings.get_bool(settings_pack::dht_ignore_dark_internet) && aux::is_v4(ep))
+ 		{
+diff --git a/src/kademlia/get_peers.cpp b/src/kademlia/get_peers.cpp
+index dab4e4d64..36521b476 100644
+--- a/src/kademlia/get_peers.cpp
++++ b/src/kademlia/get_peers.cpp
+@@ -19,6 +19,9 @@ see LICENSE file.
+ #include <libtorrent/performance_counters.hpp>
+ #include <libtorrent/aux_/ip_helpers.hpp> // for is_v4
+ 
++#include <algorithm>
++#include <iterator>
++
+ #ifndef TORRENT_DISABLE_LOGGING
+ #include <libtorrent/hex.hpp> // to_hex
+ #endif
+@@ -93,7 +96,16 @@ void get_peers_observer::log_peers(msg const& m, bdecode_node const& r, int cons
+ #endif
+ void get_peers::got_peers(std::vector<tcp::endpoint> const& peers)
+ {
+-	if (m_data_callback) m_data_callback(peers);
++	if (!m_data_callback) return;
++
++	std::vector<tcp::endpoint> filtered_peers;
++	filtered_peers.reserve(peers.size());
++	std::copy_if(peers.begin(), peers.end(), std::back_inserter(filtered_peers)
++		, [this](tcp::endpoint const& peer)
++		{
++			return !filtered(udp::endpoint(peer.address(), peer.port()));
++		});
++	m_data_callback(filtered_peers);
+ }
+ 
+ get_peers::get_peers(
+diff --git a/src/kademlia/node.cpp b/src/kademlia/node.cpp
+index a12e8903d..c760478a6 100644
+--- a/src/kademlia/node.cpp
++++ b/src/kademlia/node.cpp
+@@ -393,6 +393,11 @@ namespace {
+ 
+ void node::add_router_node(udp::endpoint const& router)
+ {
++	if (m_observer != nullptr
++		? !m_observer->is_dht_address_global(router.address())
++		: !aux::is_global(router.address()))
++		return;
++
+ #ifndef TORRENT_DISABLE_LOGGING
+ 	if (m_observer != nullptr && m_observer->should_log(dht_logger::node))
+ 	{
+@@ -406,6 +411,10 @@ void node::add_router_node(udp::endpoint const& router)
+ void node::add_node(udp::endpoint const& node)
+ {
+ 	if (!native_address(node)) return;
++	if (m_observer != nullptr
++		? !m_observer->is_dht_address_global(node.address())
++		: !aux::is_global(node.address()))
++		return;
+ 
+ 	if (m_observer != nullptr && m_settings.get_bool(settings_pack::apply_filter_to_dht))
+ 	{
+diff --git a/src/kademlia/routing_table.cpp b/src/kademlia/routing_table.cpp
+index a882cdefb..66bdaa161 100644
+--- a/src/kademlia/routing_table.cpp
++++ b/src/kademlia/routing_table.cpp
+@@ -34,6 +34,7 @@ see LICENSE file.
+ #include "libtorrent/alert_types.hpp" // for dht_routing_bucket
+ #include "libtorrent/aux_/socket_io.hpp" // for print_endpoint
+ #include "libtorrent/aux_/invariant_check.hpp"
++#include "libtorrent/aux_/ip_helpers.hpp"
+ #include "libtorrent/address.hpp"
+ #include "libtorrent/aux_/array.hpp"
+ #include "libtorrent/ip_filter.hpp"
+@@ -600,6 +601,10 @@ routing_table::add_node_status_t routing_table::add_node_impl(node_entry e)
+ 	// don't add if the address isn't the right type
+ 	if (!native_endpoint(e.ep()))
+ 		return failed_to_add;
++	if (m_log != nullptr
++		? !m_log->is_dht_address_global(e.addr())
++		: !aux::is_global(e.addr()))
++		return failed_to_add;
+ 
+ 	if (m_log != nullptr && m_settings.get_bool(settings_pack::apply_filter_to_dht))
+ 	{
+diff --git a/src/kademlia/sample_infohashes.cpp b/src/kademlia/sample_infohashes.cpp
+index 7c688faf6..dce848f4a 100644
+--- a/src/kademlia/sample_infohashes.cpp
++++ b/src/kademlia/sample_infohashes.cpp
+@@ -73,7 +73,8 @@ void sample_infohashes_observer::reply(msg const& m)
+ 		while (end - ptr >= 20 + protocol_size + 2)
+ 		{
+ 			node_endpoint nep = read_node_endpoint(protocol, ptr);
+-			nodes.emplace_back(nep.id, nep.ep);
++			if (!algorithm()->filtered(nep.ep))
++				nodes.emplace_back(nep.id, nep.ep);
+ 		}
+ 	}
+ 
+diff --git a/src/kademlia/traversal_algorithm.cpp b/src/kademlia/traversal_algorithm.cpp
+index 730aacd3b..28bbeba28 100644
+--- a/src/kademlia/traversal_algorithm.cpp
++++ b/src/kademlia/traversal_algorithm.cpp
+@@ -20,6 +20,7 @@ see LICENSE file.
+ #include <libtorrent/aux_/socket_io.hpp> // for read_*_endpoint
+ #include <libtorrent/alert_types.hpp> // for dht_lookup
+ #include <libtorrent/aux_/time.hpp>
++#include <libtorrent/aux_/ip_helpers.hpp>
+ #include <libtorrent/ip_filter.hpp>
+ 
+ #ifndef TORRENT_DISABLE_LOGGING
+@@ -299,11 +300,15 @@ void traversal_algorithm::traverse(node_id const& id, udp::endpoint const& addr)
+ 
+ bool traversal_algorithm::filtered(udp::endpoint const& addr) const
+ {
+-	if (m_node.observer() == nullptr)
+-		return false;
++	dht_observer const* const observer = m_node.observer();
++	if (observer != nullptr
++		? !observer->is_dht_address_global(addr.address())
++		: !aux::is_global(addr.address()))
++		return true;
++	if (observer == nullptr) return false;
+ 	if (!m_node.settings().get_bool(settings_pack::apply_filter_to_dht))
+ 		return false;
+-	ip_filter const* filter = m_node.observer()->get_dht_ip_filter();
++	ip_filter const* filter = observer->get_dht_ip_filter();
+ 	return filter != nullptr && filter->access(addr.address()) == ip_filter::blocked;
+ }
+ 
+diff --git a/src/peer_list.cpp b/src/peer_list.cpp
+index 303de2eb2..f9ac3b1af 100644
+--- a/src/peer_list.cpp
++++ b/src/peer_list.cpp
+@@ -270,6 +270,42 @@ namespace libtorrent::aux {
+ 		}
+ 	}
+ 
++	void peer_list::invalidate_global_address_policy(torrent_state* state)
++	{
++		TORRENT_ASSERT(is_single_thread());
++		INVARIANT_CHECK;
++
++		for (auto i = m_peers.begin(); i != m_peers.end();)
++		{
++			torrent_peer* const peer = *i;
++			if (!peer->address().is_v6()
++				|| !peer_source_requires_global_address(peer->peer_source())
++				|| peer == m_locked_peer)
++			{
++				++i;
++				continue;
++			}
++
++			int const current = int(i - m_peers.begin());
++			if (peer->connection)
++			{
++				std::size_t const count = m_peers.size();
++				peer->connection->disconnect(errors::ssrf_mitigation
++					, operation_t::bittorrent);
++				if (m_peers.size() < count)
++				{
++					i = m_peers.begin() + current;
++					continue;
++				}
++				TORRENT_ASSERT((*i)->connection == nullptr
++					|| (*i)->connection->peer_info_struct() == nullptr);
++			}
++
++			erase_peer(i, state);
++			i = m_peers.begin() + current;
++		}
++	}
++
+ 	void peer_list::erase_peer(torrent_peer* p, torrent_state* state)
+ 	{
+ 		TORRENT_ASSERT(is_single_thread());
+diff --git a/src/session_impl.cpp b/src/session_impl.cpp
+index 04807a96f..155d8e72d 100644
+--- a/src/session_impl.cpp
++++ b/src/session_impl.cpp
+@@ -163,6 +163,10 @@ namespace boost {
+ 
+ namespace libtorrent::aux {
+ 
++	namespace {
++		constexpr seconds nat64_discovery_timeout{5};
++	}
++
+ #if defined TORRENT_ASIO_DEBUGGING
+ 	std::map<std::string, async_t> _async_ops;
+ 	std::deque<wakeup_t> _wakeups;
+@@ -507,6 +511,7 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
+ 			, m_stats_counters
+ 			, m_host_resolver
+ 			, m_settings
++			, m_nat64_state
+ #if !defined TORRENT_DISABLE_LOGGING || TORRENT_USE_ASSERTS
+ 			, *this
+ #endif
+@@ -521,6 +526,8 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
+ 		, m_last_second_tick(m_created - milliseconds(900))
+ 		, m_last_choke(m_created)
+ 		, m_last_auto_manage(m_created)
++		, m_nat64_resolver(m_io_context)
++		, m_nat64_timer(m_io_context)
+ #ifndef TORRENT_DISABLE_DHT
+ 		, m_dht_announce_timer(m_io_context)
+ #endif
+@@ -1058,6 +1065,9 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
+ 		stop_lsd();
+ 		stop_upnp();
+ 		stop_natpmp();
++		m_nat64_state.reset();
++		m_nat64_resolver.cancel();
++		m_nat64_timer.cancel();
+ #ifndef TORRENT_DISABLE_DHT
+ 		stop_dht();
+ 		m_dht_announce_timer.cancel();
+@@ -2033,6 +2043,7 @@ retry:
+ 		if (ec || m_abort || !m_ip_notifier) return;
+ 		m_ip_notifier->async_wait([this] (error_code const& e)
+ 			{ wrap(&session_impl::on_ip_change, e); });
++		refresh_global_address_policy();
+ 		reopen_network_sockets({});
+ 	}
+ 
+@@ -5703,6 +5714,8 @@ retry:
+ #ifndef TORRENT_DISABLE_DHT
+ 		if (m_settings.get_bool(settings_pack::enable_dht))
+ 		{
++			if (!ensure_global_address_policy()) return;
++
+ 			if (!m_settings.get_str(settings_pack::dht_bootstrap_nodes).empty()
+ 				&& m_dht_router_nodes.empty())
+ 			{
+@@ -5717,10 +5730,123 @@ retry:
+ 			}
+ 		}
+ 		else
++		{
+ 			stop_dht();
++			update_global_address_policy();
++		}
+ #endif
+ 	}
+ 
++	bool session_impl::global_address_policy_enabled() const
++	{
++		bool dht_enabled = false;
++#ifndef TORRENT_DISABLE_DHT
++		dht_enabled = m_settings.get_bool(settings_pack::enable_dht);
++#endif
++		return should_discover_nat64(
++			m_settings.get_bool(settings_pack::enable_outgoing_tcp)
++			, m_settings.get_bool(settings_pack::enable_outgoing_utp)
++			, dht_enabled);
++	}
++
++	bool session_impl::ensure_global_address_policy()
++	{
++		if (!global_address_policy_enabled()) return false;
++		if (m_nat64_state.complete) return true;
++		if (m_nat64_state.pending) return false;
++
++		invalidate_peer_address_policy();
++		std::uint64_t const generation = m_nat64_state.start_lookup();
++		ADD_OUTSTANDING_ASYNC("session_impl::on_nat64_timeout");
++		m_nat64_timer.expires_after(nat64_discovery_timeout);
++		m_nat64_timer.async_wait([this, generation](error_code const& error)
++			{ wrap(&session_impl::on_nat64_timeout, error, generation); });
++		ADD_OUTSTANDING_ASYNC("session_impl::on_nat64_name_lookup");
++		m_nat64_resolver.async_resolve("ipv4only.arpa", "80"
++			, [this, generation](error_code const& error, tcp::resolver::results_type results)
++			{
++				std::vector<address> addresses;
++				addresses.reserve(results.size());
++				for (auto const& result : results)
++					addresses.push_back(result.endpoint().address());
++				wrap(&session_impl::on_nat64_name_lookup
++					, error, std::move(addresses), generation);
++			});
++		return false;
++	}
++
++	void session_impl::invalidate_peer_address_policy()
++	{
++		for (auto const& torrent : m_torrents)
++			torrent->invalidate_peer_address_policy();
++	}
++
++	void session_impl::update_global_address_policy()
++	{
++		if (global_address_policy_enabled())
++		{
++			ensure_global_address_policy();
++			return;
++		}
++
++		m_nat64_state.reset();
++		m_nat64_resolver.cancel();
++		m_nat64_timer.cancel();
++		invalidate_peer_address_policy();
++		m_tracker_manager.address_policy_updated();
++	}
++
++	void session_impl::refresh_global_address_policy()
++	{
++		m_nat64_state.reset();
++		m_nat64_resolver.cancel();
++		m_nat64_timer.cancel();
++		invalidate_peer_address_policy();
++#ifndef TORRENT_DISABLE_DHT
++		if (m_dht) m_dht_state = m_dht->state();
++		m_dht_router_nodes.clear();
++		stop_dht();
++#endif
++		update_global_address_policy();
++		m_tracker_manager.address_policy_updated();
++	}
++
++	void session_impl::on_nat64_name_lookup(error_code const& error
++		, std::vector<address> addresses, std::uint64_t const generation)
++	{
++		COMPLETE_ASYNC("session_impl::on_nat64_name_lookup");
++		nat64_discovery_result discovery = error
++			? nat64_discovery_result{}
++			: discover_nat64_prefixes(addresses);
++		if (!m_nat64_state.lookup_completed(generation, std::move(discovery)))
++			return;
++		m_nat64_timer.cancel();
++		invalidate_peer_address_policy();
++		m_tracker_manager.address_policy_updated();
++
++#ifndef TORRENT_DISABLE_LOGGING
++		if (error || !m_nat64_state.discovery.valid)
++			session_log("NAT64 discovery failed closed for IPv6 endpoints");
++#endif
++		if (!m_abort) update_dht();
++	}
++
++	void session_impl::on_nat64_timeout(error_code const& error
++		, std::uint64_t const generation)
++	{
++		COMPLETE_ASYNC("session_impl::on_nat64_timeout");
++		if (error == boost::asio::error::operation_aborted) return;
++		if (!m_nat64_state.lookup_timed_out(generation)) return;
++
++		m_nat64_resolver.cancel();
++		invalidate_peer_address_policy();
++		m_tracker_manager.address_policy_updated();
++#ifndef TORRENT_DISABLE_LOGGING
++		session_log("NAT64 discovery timed out; continuing with IPv4 only");
++#endif
++		if (!m_abort) update_dht();
++	}
++
+ 	void session_impl::update_dht_bootstrap_nodes()
+ 	{
+ #ifndef TORRENT_DISABLE_DHT
+@@ -6099,9 +6225,14 @@ retry:
+ 	{
+ 		INVARIANT_CHECK;
+ 
+-		stop_dht();
+-
+ 		if (!m_settings.get_bool(settings_pack::enable_dht)) return;
++		if (!ensure_global_address_policy())
++		{
++			stop_dht();
++			return;
++		}
++
++		stop_dht();
+ 
+ 		// postpone starting the DHT if we're still resolving the DHT router
+ 		if (m_outstanding_router_lookups > 0)
+@@ -6309,6 +6440,8 @@ retry:
+ 
+ 		for (auto const& addr : addresses)
+ 		{
++			if (m_nat64_state.complete && !is_dht_address_global(addr))
++				continue;
+ 			udp::endpoint ep(addr, std::uint16_t(port));
+ 			add_dht_node(ep);
+ 		}
+@@ -6342,6 +6475,7 @@ retry:
+ 
+ 		for (auto const& addr : addresses)
+ 		{
++			if (!is_dht_address_global(addr)) continue;
+ 			// router nodes should be added before the DHT is started (and bootstrapped)
+ 			udp::endpoint ep(addr, std::uint16_t(port));
+ 			if (m_dht) m_dht->add_router_node(ep);
+@@ -7342,6 +7476,11 @@ retry:
+ 	}
+ 
+ 	ip_filter const* session_impl::get_dht_ip_filter() const { return m_ip_filter.get(); }
++	bool session_impl::is_dht_address_global(address const& addr) const
++	{ return is_global(addr, m_nat64_state.discovery); }
++
++	bool session_impl::is_peer_address_global(address const& addr) const
++	{ return m_nat64_state.is_peer_address_global(addr); }
+ 
+ 	void session_impl::set_external_address(
+ 		tcp::endpoint const& local_endpoint, address const& ip
+diff --git a/src/settings_pack.cpp b/src/settings_pack.cpp
+index 5a8ced6e8..9fa971549 100644
+--- a/src/settings_pack.cpp
++++ b/src/settings_pack.cpp
+@@ -165,9 +165,9 @@ namespace {
+ 		SET(report_true_downloaded, false, nullptr),
+ 		SET(strict_end_game_mode, true, nullptr),
+ 		DEPRECATED_SET(broadcast_lsd, true, nullptr),
+-		SET(enable_outgoing_utp, true, nullptr),
++		SET(enable_outgoing_utp, true, &session_impl::update_global_address_policy),
+ 		SET(enable_incoming_utp, true, nullptr),
+-		SET(enable_outgoing_tcp, true, nullptr),
++		SET(enable_outgoing_tcp, true, &session_impl::update_global_address_policy),
+ 		SET(enable_incoming_tcp, true, nullptr),
+ 		DEPRECATED_SET(ignore_resume_timestamps, false, nullptr),
+ 		SET(no_recheck_incomplete_resume, false, nullptr),
+diff --git a/src/torrent.cpp b/src/torrent.cpp
+index 8a785f9a1..ab6f8566c 100644
+--- a/src/torrent.cpp
++++ b/src/torrent.cpp
+@@ -2178,9 +2178,33 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 		m_torrent_initialized = true;
+ 	}
+ 
++	bool torrent::allows_peer_exchange() const
++	{
++		return m_enable_pex
++			&& !(m_torrent_file->is_valid() && m_torrent_file->priv());
++	}
++
++	bool torrent::is_peer_address_global(address const& addr) const
++	{
++		return m_ses.is_peer_address_global(addr);
++	}
++
++	void torrent::invalidate_peer_address_policy()
++	{
++		if (!m_block_non_global_peers || !m_peer_list) return;
++
++		torrent_state st = get_peer_list_state();
++		m_peer_list->invalidate_global_address_policy(&st);
++		peers_erased(st.erased);
++		update_want_peers();
++	}
++
+ 	bt_peer_connection* torrent::find_introducer(tcp::endpoint const& ep) const
+ 	{
+ #ifndef TORRENT_DISABLE_EXTENSIONS
++		if (!allows_peer_exchange()) return nullptr;
++		if (m_block_non_global_peers && !is_peer_address_global(ep.address()))
++			return nullptr;
+ 		for (auto* pe : m_connections)
+ 		{
+ 			TORRENT_INCREMENT(m_iterating_connections);
+@@ -7995,6 +8019,16 @@ namespace {
+ 
+ 		if (m_abort) return false;
+ 
++#if TORRENT_USE_I2P
++		if (!peerinfo->is_i2p_addr)
++#endif
++		{
++			if (m_block_non_global_peers
++				&& peer_source_requires_global_address(peerinfo->peer_source())
++				&& !is_peer_address_global(peerinfo->address()))
++				return false;
++		}
++
+ 		peerinfo->last_connected = m_ses.session_time();
+ #if TORRENT_USE_ASSERTS
+ 		if (!settings().get_bool(settings_pack::allow_multiple_connections_per_ip)
+@@ -8425,9 +8459,19 @@ namespace {
+ 		inc_stats_counter(counters::num_total_pieces_added
+ 			, m_torrent_file->num_pieces());
+ 
+-		// disconnect redundant peers
+-		for (auto* p : m_connections)
+-			p->disconnect_if_redundant();
++		// A private swarm may only bootstrap peers from its tracker. Peers learned
++		// while metadata was unavailable have no trustworthy source association,
++		// so discard them and let the private tracker repopulate the peer list.
++		if (m_block_non_global_peers && m_torrent_file->priv())
++		{
++			clear_peers();
++		}
++		else
++		{
++			// disconnect redundant peers
++			for (auto* p : m_connections)
++				p->disconnect_if_redundant();
++		}
+ 
+ 		set_need_save_resume(torrent_handle::if_metadata_changed);
+ 
+@@ -11809,12 +11853,11 @@ namespace {
+ 
+ 		TORRENT_ASSERT(info_hash().has_v2() || !(flags & pex_lt_v2));
+ 
+-		bool const untrusted_discovery_source = bool(source & peer_info::tracker)
+-			|| bool(source & peer_info::dht)
+-			|| bool(source & peer_info::pex);
++		bool const private_resume_peer = bool(source & peer_info::resume_data)
++			&& torrent_file().is_valid() && torrent_file().priv();
+ 		if (m_block_non_global_peers
+-			&& untrusted_discovery_source
+-			&& !is_global(adr.address()))
++			&& peer_source_requires_global_address(source)
++			&& (private_resume_peer || !is_peer_address_global(adr.address())))
+ 		{
+ 			if (alerts().should_post<peer_blocked_alert>())
+ 				alerts().emplace_alert<peer_blocked_alert>(get_handle()
+diff --git a/src/tracker_manager.cpp b/src/tracker_manager.cpp
+index c66db5dfd..95e3ee055 100644
+--- a/src/tracker_manager.cpp
++++ b/src/tracker_manager.cpp
+@@ -183,6 +183,7 @@ namespace libtorrent::aux {
+ 		, counters& stats_counters
+ 		, aux::resolver_interface& resolver
+ 		, aux::session_settings const& sett
++		, nat64_discovery_state const& address_policy
+ #if !defined TORRENT_DISABLE_LOGGING || TORRENT_USE_ASSERTS
+ 		, aux::session_logger& ses
+ #endif
+@@ -191,12 +192,32 @@ namespace libtorrent::aux {
+ 		, m_send_fun_hostname(std::move(send_fun_hostname))
+ 		, m_host_resolver(resolver)
+ 		, m_settings(sett)
++		, m_address_policy(address_policy)
+ 		, m_stats_counters(stats_counters)
+ #if !defined TORRENT_DISABLE_LOGGING || TORRENT_USE_ASSERTS
+ 		, m_ses(ses)
+ #endif
+ 	{}
+ 
++	void tracker_manager::address_policy_updated()
++	{
++		TORRENT_ASSERT(is_single_thread());
++
++		// Keep each connection alive while its readiness callback runs. Starting
++		// a request may post a terminal result, but never leaves an iterator into
++		// the manager containers exposed to that re-entrant lifecycle.
++		auto const http_connections = m_http_conns;
++		std::vector<std::shared_ptr<udp_tracker_connection>> udp_connections;
++		udp_connections.reserve(m_udp_conns.size());
++		for (auto const& connection : m_udp_conns)
++			udp_connections.push_back(connection.second);
++
++		for (auto const& connection : http_connections)
++			connection->on_address_policy_updated();
++		for (auto const& connection : udp_connections)
++			connection->on_address_policy_updated();
++	}
++
+ 	tracker_manager::~tracker_manager()
+ 	{
+ 		abort_all_requests(true);
+diff --git a/src/udp_tracker_connection.cpp b/src/udp_tracker_connection.cpp
+index 922c8940d..6d8f78180 100644
+--- a/src/udp_tracker_connection.cpp
++++ b/src/udp_tracker_connection.cpp
+@@ -55,6 +55,66 @@ namespace libtorrent::aux {
+ 	}
+ 
+ 	void udp_tracker_connection::start()
++	{
++		aux::session_settings const& settings = m_man.settings();
++		set_timeout(tracker_req().event == event_t::stopped
++			? settings.get_int(settings_pack::stop_tracker_timeout)
++			: settings.get_int(settings_pack::tracker_completion_timeout)
++			, settings.get_int(settings_pack::tracker_receive_timeout));
++		if (!settings.get_bool(settings_pack::ssrf_mitigation))
++		{
++			start_request();
++			return;
++		}
++
++		error_code ec;
++		std::tie(std::ignore, std::ignore, std::ignore, std::ignore, std::ignore)
++			= parse_url_components(tracker_req().url, ec);
++		if (ec)
++		{
++			tracker_connection::fail(ec, operation_t::parse_address);
++			return;
++		}
++
++		if (m_man.address_policy().complete)
++		{
++			start_request();
++			return;
++		}
++
++		wait_for_address_policy();
++	}
++
++	void udp_tracker_connection::on_address_policy_updated()
++	{
++		if (cancelled()
++			|| !m_man.settings().get_bool(settings_pack::ssrf_mitigation))
++			return;
++		if (!m_man.address_policy().complete)
++		{
++			wait_for_address_policy();
++			return;
++		}
++		if (!m_address_policy_pending) return;
++		m_address_policy_pending = false;
++		start_request();
++	}
++
++	void udp_tracker_connection::wait_for_address_policy()
++	{
++		if (m_address_policy_pending || cancelled()) return;
++
++		m_address_policy_pending = true;
++		++m_request_generation;
++		update_transaction_id();
++		m_hostname.clear();
++		m_endpoints.clear();
++		m_target = {};
++		m_attempts = 0;
++		m_state = action_t::error;
++	}
++
++	void udp_tracker_connection::start_request()
+ 	{
+ 		// TODO: 2 support authentication here. tracker_req().auth
+ 		std::string hostname;
+@@ -73,16 +133,18 @@ namespace libtorrent::aux {
+ 		}
+ 
+ 		aux::session_settings const& settings = m_man.settings();
++		std::uint64_t const request_generation = ++m_request_generation;
+ 
+ 		int const proxy_type = settings.get_int(settings_pack::proxy_type);
+ 
+-		if (settings.get_bool(settings_pack::proxy_hostnames)
++		if (!settings.get_bool(settings_pack::ssrf_mitigation)
++			&& settings.get_bool(settings_pack::proxy_hostnames)
+ 			&& (proxy_type == settings_pack::socks5
+ 				|| proxy_type == settings_pack::socks5_pw))
+ 		{
+ 			m_hostname = hostname;
+ 			m_target.port(std::uint16_t(port));
+-			start_announce();
++			start_announce(request_generation);
+ 		}
+ 		else
+ 		{
+@@ -95,7 +157,7 @@ namespace libtorrent::aux {
+ 					? aux::resolver_interface::cache_only : aux::resolver_flags{})
+ 					| aux::resolver_interface::abort_on_shutdown
+ 				, std::bind(&udp_tracker_connection::name_lookup
+-					, shared_from_this(), _1, _2, port));
++					, shared_from_this(), _1, _2, port, request_generation));
+ 
+ #ifndef TORRENT_DISABLE_LOGGING
+ 			std::shared_ptr<request_callback> cb = requester();
+@@ -104,10 +166,6 @@ namespace libtorrent::aux {
+ #endif
+ 		}
+ 
+-		set_timeout(tracker_req().event == event_t::stopped
+-			? settings.get_int(settings_pack::stop_tracker_timeout)
+-			: settings.get_int(settings_pack::tracker_completion_timeout)
+-			, settings.get_int(settings_pack::tracker_receive_timeout));
+ 	}
+ 
+ 	void udp_tracker_connection::fail(error_code const& ec, operation_t const op
+@@ -148,7 +206,8 @@ namespace libtorrent::aux {
+ 		}
+ #endif
+ 		post(get_executor(), std::bind(
+-			&udp_tracker_connection::start_announce, shared_from_this()));
++			&udp_tracker_connection::start_announce, shared_from_this()
++			, m_request_generation));
+ 
+ 		aux::session_settings const& settings = m_man.settings();
+ 		set_timeout(tracker_req().event == event_t::stopped
+@@ -158,9 +217,11 @@ namespace libtorrent::aux {
+ 	}
+ 
+ 	void udp_tracker_connection::name_lookup(error_code const& error
+-		, std::vector<address> const& addresses, int port)
++		, std::vector<address> const& addresses, int port
++		, std::uint64_t const request_generation)
+ 	{
+ 		COMPLETE_ASYNC("udp_tracker_connection::name_lookup");
++		if (request_generation != m_request_generation) return;
+ 		if (m_abort) return;
+ 		if (error == boost::asio::error::operation_aborted) return;
+ 		if (error || addresses.empty())
+@@ -192,15 +253,34 @@ namespace libtorrent::aux {
+ 		// filter all endpoints we cannot reach from this listen socket, which may
+ 		// be all of them, in which case we should not announce this listen socket
+ 		// to this tracker
++		bool blocked_non_global = false;
++		bool verification_pending = false;
+ 		for (auto const& addr : addresses)
+ 		{
++			if (m_man.settings().get_bool(settings_pack::ssrf_mitigation))
++			{
++				auto const classification = m_man.address_policy().classify(addr);
++				if (classification != global_address_classification::global)
++				{
++					blocked_non_global |= classification
++						== global_address_classification::non_global;
++					verification_pending |= classification
++						== global_address_classification::pending;
++					continue;
++				}
++			}
+ 			if (!listen_socket.can_route(addr)) continue;
+ 			m_endpoints.emplace_back(addr, std::uint16_t(port));
+ 		}
+ 
+ 		if (m_endpoints.empty())
+ 		{
+-			fail(lt::errors::announce_skipped, operation_t::hostname_lookup);
++			if (blocked_non_global)
++				fail(errors::ssrf_mitigation, operation_t::hostname_lookup);
++			else if (verification_pending)
++				wait_for_address_policy();
++			else
++				fail(lt::errors::announce_skipped, operation_t::hostname_lookup);
+ 			return;
+ 		}
+ 
+@@ -234,18 +314,44 @@ namespace libtorrent::aux {
+ 
+ 		m_target = make_udp(m_endpoints.front());
+ 
+-		start_announce();
++		start_announce(request_generation);
+ 	}
+ 
+-	void udp_tracker_connection::start_announce()
++	bool udp_tracker_connection::target_address_allowed()
+ 	{
++		if (!m_man.settings().get_bool(settings_pack::ssrf_mitigation)) return true;
++
++		auto const classification = m_man.address_policy().classify(m_target.address());
++		if (classification == global_address_classification::global) return true;
++		if (classification == global_address_classification::pending)
++		{
++			wait_for_address_policy();
++			return false;
++		}
++
++		fail(classification == global_address_classification::non_global
++			? error_code(errors::ssrf_mitigation)
++			: error_code(errors::announce_skipped)
++			, operation_t::bittorrent);
++		return false;
++	}
++
++	void udp_tracker_connection::start_announce(
++		std::uint64_t const request_generation)
++	{
++		if (request_generation != m_request_generation) return;
++		if (!target_address_allowed()) return;
++
+ 		std::unique_lock<std::mutex> l(m_cache_mutex);
+ 		auto const cc = m_connection_cache.find(m_target.address());
+ 		if (cc != m_connection_cache.end())
+ 		{
+ 			// we found a cached entry! Now, we can only
+-			// use if if it hasn't expired
+-			if (aux::time_now() < cc->second.expires)
++			// use it if it hasn't expired and belongs to the current
++			// network-policy generation.
++			if (aux::time_now() < cc->second.expires
++				&& cc->second.address_policy_generation
++					== m_man.address_policy().generation)
+ 			{
+ 				if (tracker_req().kind & tracker_request::scrape_request)
+ 					send_udp_scrape();
+@@ -263,6 +369,17 @@ namespace libtorrent::aux {
+ 
+ 	void udp_tracker_connection::on_timeout(error_code const& ec)
+ 	{
++		if (m_address_policy_pending)
++		{
++			m_address_policy_pending = false;
++			tracker_connection::fail(ec
++				? ec : error_code(errors::timed_out), operation_t::timer);
++			// Do not leave the tracker-manager entry waiting for a resolver that
++			// may never invoke its callback.
++			close();
++			return;
++		}
++
+ 		if (ec)
+ 		{
+ 			fail(ec, operation_t::timer);
+@@ -427,6 +544,7 @@ namespace libtorrent::aux {
+ 		connection_cache_entry& cce = m_connection_cache[m_target.address()];
+ 		cce.connection_id = connection_id;
+ 		cce.expires = aux::time_now() + seconds(m_man.settings().get_int(settings_pack::udp_tracker_token_expiry));
++		cce.address_policy_generation = m_man.address_policy().generation;
+ 
+ 		if (!(tracker_req().kind & tracker_request::scrape_request))
+ 			send_udp_announce();
+@@ -448,6 +566,7 @@ namespace libtorrent::aux {
+ #endif
+ 			return;
+ 		}
++		if (!target_address_allowed()) return;
+ 
+ 		std::size_t const connect_packet_size = 16;
+ 		std::array<char, connect_packet_size> buf;
+@@ -506,6 +625,7 @@ namespace libtorrent::aux {
+ 	void udp_tracker_connection::send_udp_scrape()
+ 	{
+ 		if (m_abort) return;
++		if (!target_address_allowed()) return;
+ 
+ 		auto const i = m_connection_cache.find(m_target.address());
+ 		// this isn't really supposed to happen
+@@ -680,6 +800,7 @@ namespace libtorrent::aux {
+ 	void udp_tracker_connection::send_udp_announce()
+ 	{
+ 		if (m_abort) return;
++		if (!target_address_allowed()) return;
+ 
+ 		char buf[800];
+ 		span<char> out = buf;
+diff --git a/src/ut_pex.cpp b/src/ut_pex.cpp
+index dc5ee2001..466dbcb1b 100644
+--- a/src/ut_pex.cpp
++++ b/src/ut_pex.cpp
+@@ -39,7 +39,7 @@ namespace libtorrent { namespace {
+ 		max_peer_entries = 100
+ 	};
+ 
+-	bool send_peer(aux::peer_connection const& p)
++	bool send_peer(aux::torrent const& t, aux::peer_connection const& p)
+ 	{
+ 		// don't send out those peers that we haven't connected to
+ 		// (that have connected to us) and that aren't sharing their
+@@ -49,6 +49,8 @@ namespace libtorrent { namespace {
+ 		if (p.is_connecting()) return false;
+ 		if (p.in_handshake()) return false;
+ 		if (p.type() != connection_type::bittorrent) return false;
++		if (t.peer_endpoint_policy_enabled()
++			&& !t.is_peer_address_global(p.remote().address())) return false;
+ 		return true;
+ 	}
+ 
+@@ -86,7 +88,7 @@ namespace libtorrent { namespace {
+ 		// max_peer_entries limits the packet size
+ 		void tick() override
+ 		{
+-			if (m_torrent.flags() & torrent_flags::disable_pex) return;
++			if (!m_torrent.allows_peer_exchange()) return;
+ 
+ 			time_point const now = aux::time_now();
+ 			if (now - seconds(60) < m_last_msg) return;
+@@ -115,7 +117,7 @@ namespace libtorrent { namespace {
+ 			int num_added = 0;
+ 			for (auto const* peer : m_torrent)
+ 			{
+-				if (!send_peer(*peer)) continue;
++				if (!send_peer(m_torrent, *peer)) continue;
+ 
+ 				tcp::endpoint remote = peer->remote();
+ 				m_old_peers.insert(remote);
+@@ -180,6 +182,8 @@ namespace libtorrent { namespace {
+ 
+ 			for (auto const& i : dropped)
+ 			{
++				if (m_torrent.peer_endpoint_policy_enabled()
++					&& !m_torrent.is_peer_address_global(i.address())) continue;
+ 				if (aux::is_v4(i))
+ 					aux::write_endpoint(i, pld_out);
+ 				else
+@@ -221,6 +225,7 @@ namespace libtorrent { namespace {
+ 
+ 		void add_handshake(entry& h) override
+ 		{
++			if (!m_torrent.allows_peer_exchange()) return;
+ 			entry& messages = h["m"];
+ 			messages[extension_name] = extension_index;
+ 		}
+@@ -243,7 +248,7 @@ namespace libtorrent { namespace {
+ 			if (msg != extension_index) return false;
+ 			if (m_message_index == 0) return false;
+ 
+-			if (m_torrent.flags() & torrent_flags::disable_pex) return true;
++			if (!m_torrent.allows_peer_exchange()) return true;
+ 
+ 			if (length > 500 * 1024)
+ 			{
+@@ -314,6 +319,8 @@ namespace libtorrent { namespace {
+ 				{
+ 					auto const adr = aux::read_v4_endpoint<tcp::endpoint>(in);
+ 					pex_flags_t flags(static_cast<std::uint8_t>(*fin++));
++					if (m_torrent.peer_endpoint_policy_enabled()
++						&& !m_torrent.is_peer_address_global(adr.address())) continue;
+ 
+ 					// this is an internal flag. disregard it from the internet
+ 					flags &= ~pex_lt_v2;
+@@ -367,6 +374,8 @@ namespace libtorrent { namespace {
+ 				{
+ 					auto const adr = aux::read_v6_endpoint<tcp::endpoint>(in);
+ 					pex_flags_t flags(static_cast<std::uint8_t>(*fin++));
++					if (m_torrent.peer_endpoint_policy_enabled()
++						&& !m_torrent.is_peer_address_global(adr.address())) continue;
+ 
+ 					// this is an internal flag. disregard it from the internet
+ 					flags &= ~pex_lt_v2;
+@@ -430,7 +439,7 @@ namespace libtorrent { namespace {
+ 
+ 		void send_ut_peer_diff()
+ 		{
+-			if (m_torrent.flags() & torrent_flags::disable_pex) return;
++			if (!m_torrent.allows_peer_exchange()) return;
+ 
+ 			// if there's no change in our peer set, don't send anything
+ 			if (m_tp.peers_in_msg() == 0) return;
+@@ -476,7 +485,7 @@ namespace libtorrent { namespace {
+ 
+ 		void send_ut_peer_list()
+ 		{
+-			if (m_torrent.flags() & torrent_flags::disable_pex) return;
++			if (!m_torrent.allows_peer_exchange()) return;
+ 
+ 			entry pex;
+ 			// leave the dropped string empty
+@@ -495,7 +504,7 @@ namespace libtorrent { namespace {
+ 			int num_added = 0;
+ 			for (auto const* peer : m_torrent)
+ 			{
+-				if (!send_peer(*peer)) continue;
++				if (!send_peer(m_torrent, *peer)) continue;
+ 
+ 				// don't write too big of a package
+ 				if (num_added >= max_peer_entries) break;
+diff --git a/test/session_mock.hpp b/test/session_mock.hpp
+index ca1a03ce9..f6cf2603f 100644
+--- a/test/session_mock.hpp
++++ b/test/session_mock.hpp
+@@ -11,6 +11,7 @@ see LICENSE file.
+ 
+ #include "libtorrent/config.hpp"
+ #include "libtorrent/aux_/session_interface.hpp"
++#include "libtorrent/aux_/ip_helpers.hpp"
+ #include "libtorrent/aux_/alert_manager.hpp"
+ #include "libtorrent/aux_/resolver.hpp"
+ #include "libtorrent/aux_/session_settings.hpp"
+@@ -113,6 +114,8 @@ struct session_mock : aux::session_interface
+ 
+ 	void apply_settings_pack(std::shared_ptr<settings_pack>) override {}
+ 	aux::session_settings const& settings() const override { return _session_settings; }
++	bool is_peer_address_global(address const& addr) const override
++	{ return aux::is_global(addr); }
+ 
+ 	void queue_tracker_request(aux::tracker_request, std::weak_ptr<aux::request_callback>) override {}
+ 
+diff --git a/test/setup_transfer.cpp b/test/setup_transfer.cpp
+index 4071ebd4d..fd85278cc 100644
+--- a/test/setup_transfer.cpp
++++ b/test/setup_transfer.cpp
+@@ -961,7 +961,8 @@ std::vector<lt::create_file_entry> create_random_files(std::string const& path,
+ add_torrent_params create_torrent(std::ostream* file
+ 	, char const* name, int piece_size
+ 	, int num_pieces, bool add_tracker, lt::create_flags_t const flags
+-	, std::string ssl_certificate, bool const bad_v1_hashes)
++	, std::string ssl_certificate, bool const bad_v1_hashes
++	, bool const private_torrent)
+ {
+ 	// exercise the path when encountering invalid urls
+ 	char const* invalid_tracker_url = "http:";
+@@ -974,6 +975,7 @@ add_torrent_params create_torrent(std::ostream* file
+ 	int total_size = piece_size * num_pieces;
+ 	fs.emplace_back(name, total_size);
+ 	lt::create_torrent t(std::move(fs), piece_size, flags);
++	t.set_priv(private_torrent);
+ 	if (add_tracker)
+ 	{
+ 		// invalid tracker urls won't be included in the generated magnet link
+diff --git a/test/setup_transfer.hpp b/test/setup_transfer.hpp
+index 86ca97ac5..6c9e21164 100644
+--- a/test/setup_transfer.hpp
++++ b/test/setup_transfer.hpp
+@@ -83,7 +83,7 @@ EXPORT std::vector<lt::create_file_entry> create_random_files(std::string const&
+ EXPORT lt::add_torrent_params create_torrent(std::ostream* file = nullptr
+ 	, char const* name = "temporary", int piece_size = 16 * 1024, int num_pieces = 13
+ 	, bool add_tracker = true, lt::create_flags_t flags = {}, std::string ssl_certificate = ""
+-	, bool bad_v1_hashes = false);
++	, bool bad_v1_hashes = false, bool private_torrent = false);
+ 
+ EXPORT std::tuple<lt::torrent_handle
+ 	, lt::torrent_handle
+diff --git a/test/test_dht.cpp b/test/test_dht.cpp
+index 905939465..809cd18eb 100644
+--- a/test/test_dht.cpp
++++ b/test/test_dht.cpp
+@@ -39,6 +39,7 @@ see LICENSE file.
+ #include "libtorrent/kademlia/item.hpp"
+ #include "libtorrent/kademlia/dht_observer.hpp"
+ #include "libtorrent/kademlia/dht_tracker.hpp"
++#include "libtorrent/kademlia/get_peers.hpp"
+ 
+ #include <numeric>
+ #include <cstdarg>
+@@ -559,6 +560,11 @@ struct obs : dht::dht_observer
+ 		, dht::msg const&, entry&) override { return false; }
+ 
+ 	ip_filter const* get_dht_ip_filter() const override { return m_ip_filter; }
++	bool is_dht_address_global(address const& addr) const override
++	{
++		return !m_enforce_global_addresses
++			|| aux::is_global(addr, m_nat64_discovery);
++	}
+ 
+ 	virtual ~obs() = default;
+ 
+@@ -566,8 +572,19 @@ struct obs : dht::dht_observer
+ 	std::vector<std::string> m_log;
+ #endif
+ 	ip_filter const* m_ip_filter = nullptr;
++	aux::nat64_discovery_result m_nat64_discovery;
++	bool m_enforce_global_addresses = false;
+ };
+ 
++void enforce_dht_global_addresses(obs& observer)
++{
++	std::array<address, 1> const answers = {{
++		make_address("2001:4860:abcd:ef01::c000:aa")}};
++	observer.m_nat64_discovery = aux::discover_nat64_prefixes(answers);
++	TEST_CHECK(observer.m_nat64_discovery.valid);
++	observer.m_enforce_global_addresses = true;
++}
++
+ aux::session_settings test_settings()
+ {
+ 	aux::session_settings sett;
+@@ -601,6 +618,16 @@ struct dht_test_setup
+ 	char error_string[200];
+ };
+ 
++struct global_policy_test_algo : dht::traversal_algorithm
++{
++	global_policy_test_algo(node& dht_node, node_id const& target)
++		: traversal_algorithm(dht_node, target)
++	{}
++
++	void done() override { this->dht::traversal_algorithm::done(); }
++	std::vector<observer_ptr> const& results() const { return m_results; }
++};
++
+ dht::key_desc_t const err_desc[] = {
+ 	{"y", bdecode_node::string_t, 1, 0},
+ 	{"e", bdecode_node::list_t, 2, 0}
+@@ -3666,6 +3693,176 @@ TORRENT_TEST(dht_tracker_ip_filter)
+ 	TEST_EQUAL(sent, true);
+ }
+ 
++TORRENT_TEST(dht_global_address_policy)
++{
++	// Incoming DHT UDP packets are rejected before parsing or dispatch.
++	{
++		io_context ios;
++		obs observer;
++		enforce_dht_global_addresses(observer);
++		aux::session_settings const sett = test_settings();
++		counters cnt;
++		auto dht_storage = dht_default_storage_constructor(sett);
++		dht_state state;
++		bool sent = false;
++		dht_tracker::send_fun_t const send = [&sent](aux::listen_socket_handle const&,
++			udp::endpoint const&, span<char const>, error_code&,
++			aux::udp_send_flags_t) { sent = true; };
++		dht_tracker dht(&observer, ios, send, sett, cnt, *dht_storage, std::move(state));
++		auto ls = dummy_listen_socket(udp::endpoint(addr("10.0.0.1"), 6881));
++		aux::listen_socket_handle const handle(ls);
++		dht.new_socket(handle);
++
++		entry e;
++		e["y"] = "q";
++		e["q"] = "ping";
++		e["t"] = "aa";
++		e["a"]["id"] = std::string(20, 'a');
++		std::vector<char> buf;
++		bencode(std::back_inserter(buf), e);
++
++		std::array<udp::endpoint, 3> const blocked_sources = {{
++			udp::endpoint(addr("10.0.0.1"), 4),
++			udp::endpoint(addr("::ffff:10.0.0.1"), 4),
++			udp::endpoint(addr("2001:4860:abcd:ef01::a00:1"), 4),
++		}};
++		for (auto const& source : blocked_sources)
++		{
++			std::int64_t const dropped_before = cnt[counters::dht_messages_in_dropped];
++			dht.incoming_packet(handle, source, {buf.data(), int(buf.size())});
++			TEST_EQUAL(cnt[counters::dht_messages_in_dropped], dropped_before + 1);
++			TEST_EQUAL(sent, false);
++		}
++
++		dht.incoming_packet(handle, udp::endpoint(addr("8.8.8.8"), 4)
++			, {buf.data(), int(buf.size())});
++		TEST_EQUAL(sent, true);
++	}
++
++	// Session/DNS router contacts and direct node additions share the same
++	// policy before they can enter a routing table or trigger a query.
++	{
++		dht_test_setup t(udp::endpoint(rand_v4(), 20));
++		enforce_dht_global_addresses(t.observer);
++		t.dht_node.add_router_node(udp::endpoint(addr("192.168.0.1"), 6881));
++		TEST_CHECK(t.dht_node.m_table.begin() == t.dht_node.m_table.end());
++		t.dht_node.add_router_node(udp::endpoint(addr("8.8.8.8"), 6881));
++		TEST_EQUAL(std::distance(t.dht_node.m_table.begin(), t.dht_node.m_table.end()), 1);
++
++		g_sent_packets.clear();
++		t.dht_node.add_node(udp::endpoint(addr("192.168.0.1"), 6881));
++		TEST_CHECK(g_sent_packets.empty());
++		t.dht_node.add_node(udp::endpoint(addr("8.8.4.4"), 6881));
++		TEST_EQUAL(g_sent_packets.size(), 1);
++	}
++
++	// Persisted bootstrap contacts are filtered before being scheduled.
++	{
++		dht_test_setup t(udp::endpoint(rand_v4(), 20));
++		enforce_dht_global_addresses(t.observer);
++		std::vector<udp::endpoint> const nodes = {
++			udp::endpoint(addr("169.254.1.1"), 6881),
++			udp::endpoint(addr("1.1.1.1"), 6881),
++		};
++		g_sent_packets.clear();
++		t.dht_node.bootstrap(nodes, std::bind(&nop_node));
++		TEST_EQUAL(g_sent_packets.size(), 1);
++		TEST_CHECK(find_packet(nodes[1]) != g_sent_packets.end());
++	}
++
++	// Nodes learned from responses are filtered before traversal and routing.
++	{
++		dht_test_setup t(udp::endpoint(rand_v4(), 20));
++		enforce_dht_global_addresses(t.observer);
++		auto algo = std::make_shared<global_policy_test_algo>(t.dht_node, t.dht_node.nid());
++		algo->traverse(generate_random_id(), udp::endpoint(addr("192.0.2.1"), 6881));
++		TEST_CHECK(algo->results().empty());
++		algo->traverse(generate_random_id(), udp::endpoint(addr("9.9.9.9"), 6881));
++		TEST_EQUAL(algo->results().size(), 1);
++		algo->done();
++	}
++
++	// Peer endpoints returned by get_peers are filtered before the torrent
++	// callback sees them, including mapped and NAT64 representations.
++	{
++		dht_test_setup t(udp::endpoint(rand_v4(), 20));
++		enforce_dht_global_addresses(t.observer);
++		std::vector<tcp::endpoint> accepted;
++		auto lookup = std::make_shared<dht::get_peers>(t.dht_node, generate_random_id()
++			, [&accepted](std::vector<tcp::endpoint> const& peers) { accepted = peers; }
++			, find_data::nodes_callback{}, false);
++		lookup->got_peers({
++			tcp::endpoint(addr("8.8.8.8"), 1),
++			tcp::endpoint(addr("10.0.0.1"), 2),
++			tcp::endpoint(addr("::ffff:10.0.0.1"), 3),
++			tcp::endpoint(addr("2001:4860:abcd:ef01::a00:1"), 4),
++			tcp::endpoint(addr("2001:4860:abcd:ef01::808:808"), 5),
++			tcp::endpoint(addr("2001:db8::1"), 6),
++		});
++		TEST_EQUAL(accepted.size(), 2);
++		TEST_EQUAL(accepted[0], tcp::endpoint(addr("8.8.8.8"), 1));
++		TEST_EQUAL(accepted[1]
++			, tcp::endpoint(addr("2001:4860:abcd:ef01::808:808"), 5));
++	}
++}
++
++TORRENT_TEST(session_nat64_discovery_is_fail_closed_for_peers)
++{
++	TEST_CHECK(!aux::should_discover_nat64(false, false, false));
++	TEST_CHECK(aux::should_discover_nat64(true, false, false));
++	TEST_CHECK(aux::should_discover_nat64(false, true, false));
++	TEST_CHECK(aux::should_discover_nat64(false, false, true));
++
++	aux::nat64_discovery_state state;
++	TEST_CHECK(state.is_peer_address_global(addr("8.8.8.8")));
++	TEST_CHECK(!state.is_peer_address_global(addr("2606:4700:4700::1111")));
++	TEST_CHECK(!state.is_peer_address_global(addr("2001:4860:abcd:ef01::a00:1")));
++	std::uint64_t const timed_out_generation = state.start_lookup();
++	TEST_CHECK(state.pending);
++	TEST_CHECK(!state.is_peer_address_global(addr("2606:4700:4700::1111")));
++	TEST_CHECK(state.lookup_timed_out(timed_out_generation));
++	TEST_CHECK(state.complete);
++	TEST_CHECK(!state.pending);
++	TEST_CHECK(!state.discovery.valid);
++	TEST_CHECK(state.generation != timed_out_generation);
++	TEST_CHECK(aux::is_global(addr("8.8.8.8"), state.discovery));
++	TEST_CHECK(!aux::is_global(addr("2606:4700:4700::1111"), state.discovery));
++	TEST_CHECK(state.is_peer_address_global(addr("8.8.8.8")));
++	TEST_CHECK(!state.is_peer_address_global(addr("2606:4700:4700::1111")));
++
++	aux::nat64_discovery_result late_success;
++	late_success.valid = true;
++	TEST_CHECK(!state.lookup_completed(timed_out_generation, std::move(late_success)));
++	TEST_CHECK(!state.discovery.valid);
++
++	state.reset();
++	std::uint64_t const completed_generation = state.start_lookup();
++	std::vector<address> const answers{
++		addr("2001:4860:abcd:ef01::c000:aa"),
++		addr("2001:4860:abcd:ef01::c000:ab"),
++	};
++	aux::nat64_discovery_result success = aux::discover_nat64_prefixes(answers);
++	TEST_CHECK(success.valid);
++	TEST_CHECK(state.lookup_completed(completed_generation, std::move(success)));
++	TEST_CHECK(state.discovery.valid);
++	TEST_CHECK(state.is_peer_address_global(addr("2606:4700:4700::1111")));
++	TEST_CHECK(!state.is_peer_address_global(addr("2001:4860:abcd:ef01::a00:1")));
++	TEST_CHECK(state.is_peer_address_global(addr("2001:4860:abcd:ef01::808:808")));
++	TEST_CHECK(!state.lookup_timed_out(completed_generation));
++
++	aux::nat64_discovery_state previous_network;
++	std::uint64_t const previous_generation = previous_network.start_lookup();
++	std::vector<address> const previous_answers{
++		addr("64:ff9b::c000:aa"),
++		addr("64:ff9b::c000:ab"),
++	};
++	TEST_CHECK(previous_network.lookup_completed(previous_generation
++		, aux::discover_nat64_prefixes(previous_answers)));
++	address const reclassified = addr("2001:4860:abcd:ef01::a00:1");
++	TEST_CHECK(previous_network.is_peer_address_global(reclassified));
++	TEST_CHECK(!state.is_peer_address_global(reclassified));
++}
++
+ TORRENT_TEST(dht_node_add_node_ip_filter)
+ {
+ 	ip_filter filter;
+diff --git a/test/test_enum_net.cpp b/test/test_enum_net.cpp
+index 0315c8a55..038a63b6d 100644
+--- a/test/test_enum_net.cpp
++++ b/test/test_enum_net.cpp
+@@ -40,13 +40,19 @@ TORRENT_TEST(is_global_addresses)
+ 	TEST_CHECK(is_global(make_address("8.8.8.8")));
+ 	TEST_CHECK(is_global(make_address("192.0.0.9")));
+ 	TEST_CHECK(is_global(make_address("192.31.196.1")));
++	TEST_CHECK(!is_global(make_address("0.0.0.0")));
+ 	TEST_CHECK(!is_global(make_address("0.0.0.1")));
++	TEST_CHECK(!is_global(make_address("10.0.0.1")));
++	TEST_CHECK(!is_global(make_address("169.254.1.1")));
++	TEST_CHECK(!is_global(make_address("172.16.0.1")));
++	TEST_CHECK(!is_global(make_address("192.168.0.1")));
+ 	TEST_CHECK(!is_global(make_address("192.0.0.1")));
+ 	TEST_CHECK(!is_global(make_address("192.0.2.1")));
+ 	TEST_CHECK(!is_global(make_address("192.88.99.2")));
+ 	TEST_CHECK(!is_global(make_address("198.18.0.1")));
+ 	TEST_CHECK(!is_global(make_address("198.51.100.1")));
+ 	TEST_CHECK(!is_global(make_address("203.0.113.1")));
++	TEST_CHECK(!is_global(make_address("239.1.1.1")));
+ 	TEST_CHECK(!is_global(make_address("240.0.0.1")));
+ 
+ 	TEST_CHECK(is_global(make_address("2606:4700:4700::1111")));
+@@ -61,12 +67,19 @@ TORRENT_TEST(is_global_addresses)
+ 	TEST_CHECK(!is_global(make_address("2001:db8::1")));
+ 	TEST_CHECK(!is_global(make_address("2002:808:808::1")));
+ 	TEST_CHECK(!is_global(make_address("3fff::1")));
++	TEST_CHECK(!is_global(make_address("::")));
++	TEST_CHECK(!is_global(make_address("fe80::1")));
++	TEST_CHECK(!is_global(make_address("fd00::1")));
++	TEST_CHECK(!is_global(make_address("ff02::1")));
+ 
+ 	TEST_CHECK(is_global(make_address("64:ff9b::808:808")));
+ 	TEST_CHECK(!is_global(make_address("64:ff9b::7f00:1")));
+ 	TEST_CHECK(!is_global(make_address("64:ff9b::a00:1")));
+ 	TEST_CHECK(!is_global(make_address("64:ff9b::c000:201")));
+ 	TEST_CHECK(!is_global(make_address("64:ff9b:1::808:808")));
++	TEST_CHECK(is_global(make_address("::ffff:8.8.8.8")));
++	TEST_CHECK(!is_global(make_address("::ffff:10.0.0.1")));
++	TEST_CHECK(!is_global(make_address("::ffff:192.0.2.1")));
+ }
+ 
+ TORRENT_TEST(nat64_prefix_discovery)
+@@ -96,9 +109,9 @@ TORRENT_TEST(nat64_prefix_discovery)
+ 		TEST_EQUAL(discovery.prefixes.size(), 1);
+ 		if (discovery.prefixes.empty()) continue;
+ 		TEST_EQUAL(int(discovery.prefixes.front().length), test.length);
+-		TEST_CHECK(!is_global(make_address(test.private_target), discovery.prefixes));
+-		TEST_CHECK(is_global(make_address(test.global_target), discovery.prefixes));
+-		TEST_CHECK(is_global(make_address("2606:4700:4700::1111"), discovery.prefixes));
++		TEST_CHECK(!is_global(make_address(test.private_target), discovery));
++		TEST_CHECK(is_global(make_address(test.global_target), discovery));
++		TEST_CHECK(is_global(make_address("2606:4700:4700::1111"), discovery));
+ 	}
+ }
+ 
+@@ -120,6 +133,9 @@ TORRENT_TEST(nat64_discovery_fails_closed_on_malformed_answers)
+ 		make_address("192.0.0.170"), make_address("8.8.8.8")}};
+ 	discovery = discover_nat64_prefixes(unexpected_v4);
+ 	TEST_CHECK(!discovery.valid);
++	TEST_CHECK(!is_global(make_address("2606:4700:4700::1111"), discovery));
++	TEST_CHECK(is_global(make_address("8.8.8.8"), discovery));
++	TEST_CHECK(!is_global(make_address("10.0.0.1"), discovery));
+ 
+ 	std::array<address, 2> const mixed_v6 = {{
+ 		make_address("2001:4860:c000:aa::"),
+diff --git a/test/test_fast_extension.cpp b/test/test_fast_extension.cpp
+index 0f9107a7d..f5dae02e3 100644
+--- a/test/test_fast_extension.cpp
++++ b/test/test_fast_extension.cpp
+@@ -459,7 +459,7 @@ std::shared_ptr<torrent_info const> setup_peer(tcp::socket& s, io_context& ioc
+ 	, std::shared_ptr<lt::session>& ses, bool incoming = true
+ 	, bool const magnet_link = false, bool const dht = false
+ 	, torrent_flags_t const flags = torrent_flags_t{}
+-	, torrent_handle* th = nullptr)
++	, torrent_handle* th = nullptr, bool const private_torrent = false)
+ {
+ 	std::ofstream out_file;
+ 	std::ofstream* file = nullptr;
+@@ -477,7 +477,8 @@ std::shared_ptr<torrent_info const> setup_peer(tcp::socket& s, io_context& ioc
+ 		if (ec) log("remove(): %s", ec.message().c_str());
+ 	}
+ 
+-	add_torrent_params p = ::create_torrent(file);
++	add_torrent_params p = ::create_torrent(file, "temporary", 16 * 1024, 13
++		, true, {}, "", false, private_torrent);
+ 	out_file.close();
+ 	ih = p.ti->info_hashes();
+ 	auto const ti = p.ti;
+@@ -1177,6 +1178,35 @@ TORRENT_TEST(extension_handshake)
+ #endif
+ }
+ 
++TORRENT_TEST(peer_exchange_and_holepunch_respect_source_policy)
++{
++	auto const check_omitted = [](torrent_flags_t const flags
++		, bool const private_torrent, bool const expect_pex)
++	{
++		info_hash_t ih;
++		std::shared_ptr<lt::session> ses;
++		io_context ios;
++		tcp::socket s(ios);
++		setup_peer(s, ios, ih, ses, true, false, false, flags, nullptr, private_torrent);
++
++		char recv_buffer[1000];
++		do_handshake(s, ih, recv_buffer);
++		send_have_all(s);
++
++		entry extensions;
++		send_extension_handshake(s, extensions);
++		extensions = read_extension_handshake(s, recv_buffer);
++
++		auto const& messages = extensions["m"].dict();
++		TEST_EQUAL(messages.count("ut_holepunch"), 0);
++		TEST_EQUAL(messages.count("ut_pex"), expect_pex ? 1 : 0);
++	};
++
++	check_omitted(torrent_flags::disable_pex, false, false);
++	check_omitted(torrent_flags_t{}, true, false);
++	check_omitted(torrent_flags::block_non_global_peers, false, true);
++}
++
+ #ifndef TORRENT_DISABLE_EXTENSIONS
+ // TEST metadata extension messages and edge cases
+ 
+diff --git a/test/test_http_connection.cpp b/test/test_http_connection.cpp
+index 5b78daf01..b0284c7bd 100644
+--- a/test/test_http_connection.cpp
++++ b/test/test_http_connection.cpp
+@@ -363,3 +363,43 @@ TORRENT_TEST(no_keepalive)
+ {
+ 	run_suite("http", settings_pack::none, 0);
+ }
++
++TORRENT_TEST(endpoint_filter_rechecks_redirect_target)
++{
++	reset_globals();
++	int const port = start_web_server(false, false, true);
++
++#if TORRENT_USE_SSL
++	aux::ssl::context ssl_ctx(aux::ssl::context::sslv23_client);
++#endif
++	int filter_calls = 0;
++	bool blocked_redirect = false;
++	auto filter = [&filter_calls, &blocked_redirect](aux::http_connection&
++		, std::vector<tcp::endpoint>& endpoints)
++	{
++		++filter_calls;
++		if (filter_calls > 1)
++		{
++			blocked_redirect = true;
++			endpoints.clear();
++		}
++	};
++
++	auto connection = std::make_shared<aux::http_connection>(ios, res
++		, &::http_handler_test, 1024 * 1024, &::http_connect_handler_test
++		, std::move(filter), aux::hostname_filter_handler()
++#if TORRENT_USE_SSL
++		, &ssl_ctx
++#endif
++		);
++	connection->get("http://127.0.0.1:" + std::to_string(port) + "/redirect"
++		, seconds(5));
++	ios.restart();
++	ios.run();
++
++	TEST_EQUAL(filter_calls, 2);
++	TEST_CHECK(blocked_redirect);
++	TEST_EQUAL(connect_handler_called, 1);
++	TEST_EQUAL(handler_called, 0);
++	stop_web_server();
++}
+diff --git a/test/test_peer_list.cpp b/test/test_peer_list.cpp
+index d6a226eff..5a7f7ae89 100644
+--- a/test/test_peer_list.cpp
++++ b/test/test_peer_list.cpp
+@@ -480,6 +480,34 @@ TORRENT_TEST(port_filter)
+ 	TEST_EQUAL(con1->was_disconnected(), false);
+ }
+ 
++TORRENT_TEST(invalidate_global_address_policy)
++{
++	torrent_state st = init_state();
++	mock_torrent t(&st);
++	peer_list p(allocator);
++	t.m_p = &p;
++
++	torrent_peer* const active_tracker = p.add_peer(
++		ep("2001:4860::1", 3000), peer_info::tracker, {}, &st);
++	TEST_CHECK(active_tracker);
++	TEST_CHECK(t.connect_to_peer(active_tracker));
++	TEST_CHECK(p.add_peer(ep("2001:4860::2", 3001), peer_info::dht, {}, &st));
++	TEST_CHECK(p.add_peer(ep("fd00::1", 3002), peer_info::lsd, {}, &st));
++	TEST_CHECK(p.add_peer(ep("8.8.8.8", 3003), peer_info::tracker, {}, &st));
++	st.erased.clear();
++	auto const connection = t.m_connections.front();
++
++	p.invalidate_global_address_policy(&st);
++
++	TEST_CHECK(connection->was_disconnected());
++	TEST_CHECK(t.m_connections.empty());
++	TEST_CHECK(!has_peer(p, ep("2001:4860::1", 3000)));
++	TEST_CHECK(!has_peer(p, ep("2001:4860::2", 3001)));
++	TEST_CHECK(has_peer(p, ep("fd00::1", 3002)));
++	TEST_CHECK(has_peer(p, ep("8.8.8.8", 3003)));
++	TEST_EQUAL(st.erased.size(), 2);
++}
++
+ // test banning peers
+ TORRENT_TEST(ban_peers)
+ {
+diff --git a/test/test_torrent.cpp b/test/test_torrent.cpp
+index f45289eb3..40c999c18 100644
+--- a/test/test_torrent.cpp
++++ b/test/test_torrent.cpp
+@@ -304,7 +304,7 @@ TORRENT_TEST(added_peers)
+ 	if (ra) TEST_EQUAL(ra->params.peers.size(), 2);
+ }
+ 
+-TORRENT_TEST(non_global_discovery_peers_are_temporarily_blocked)
++TORRENT_TEST(global_peer_policy_filters_remote_sources)
+ {
+ 	std::vector<lt::create_file_entry> fs;
+ 	fs.emplace_back("test_torrent_dir4/tmp1", 1024);
+@@ -332,17 +332,22 @@ TORRENT_TEST(non_global_discovery_peers_are_temporarily_blocked)
+ 	tcp::endpoint const private_pex{make_address("192.168.1.1"), 48083};
+ 	tcp::endpoint const private_mixed{make_address("172.16.0.1"), 48087};
+ 	tcp::endpoint const private_nat64{make_address("64:ff9b::a00:1"), 48088};
++	tcp::endpoint const private_resume{make_address("169.254.1.1"), 48089};
++	tcp::endpoint const private_lsd{make_address("192.168.1.2"), 48090};
+ 	tcp::endpoint const public_tracker{make_address("8.8.8.8"), 48084};
+-	tcp::endpoint const public_dht{make_address("2606:4700:4700::1111"), 48085};
+-	tcp::endpoint const accepted_private_tracker{make_address("10.0.0.2"), 48086};
++	tcp::endpoint const public_dht{make_address("9.9.9.9"), 48085};
++	tcp::endpoint const public_resume{make_address("1.1.1.1"), 48086};
+ 
+ 	h.connect_peer(private_tracker, peer_info::tracker);
+ 	h.connect_peer(private_dht, peer_info::dht);
+ 	h.connect_peer(private_pex, peer_info::pex);
+ 	h.connect_peer(private_mixed, peer_info::tracker | peer_info::pex);
+ 	h.connect_peer(private_nat64, peer_info::tracker);
++	h.connect_peer(private_resume, peer_info::resume_data);
++	h.connect_peer(private_lsd, peer_info::lsd);
+ 	h.connect_peer(public_tracker, peer_info::tracker);
+ 	h.connect_peer(public_dht, peer_info::dht);
++	h.connect_peer(public_resume, peer_info::resume_data);
+ 	h.save_resume_data();
+ 
+ 	auto const *saved = alert_cast<save_resume_data_alert>(
+@@ -360,29 +365,46 @@ TORRENT_TEST(non_global_discovery_peers_are_temporarily_blocked)
+ 		TEST_CHECK(!contains(private_pex));
+ 		TEST_CHECK(!contains(private_mixed));
+ 		TEST_CHECK(!contains(private_nat64));
++		TEST_CHECK(!contains(private_resume));
++		TEST_CHECK(contains(private_lsd));
+ 		TEST_CHECK(contains(public_tracker));
+ 		TEST_CHECK(contains(public_dht));
++		TEST_CHECK(contains(public_resume));
+ 		TEST_CHECK(bool(saved->params.flags & torrent_flags::block_non_global_peers));
+ 		auto const restored = read_resume_data(write_resume_data_buf(saved->params));
+ 		TEST_CHECK(!bool(restored.flags & torrent_flags::block_non_global_peers));
+ 	}
++}
+ 
+-	h.unset_flags(torrent_flags::block_non_global_peers);
+-	h.connect_peer(accepted_private_tracker, peer_info::tracker);
+-	h.connect_peer(private_pex, peer_info::pex);
++TORRENT_TEST(global_peer_policy_does_not_replay_private_resume_peers)
++{
++	std::vector<lt::create_file_entry> fs;
++	fs.emplace_back("test_private_resume/tmp1", 1024);
++	lt::create_torrent metadata(std::move(fs), 1024);
++	metadata.set_hash(0_piece, sha1_hash::max());
++	metadata.set_priv(true);
++	std::vector<char> const encoded = bencode(metadata.generate());
++	auto info = load_torrent_buffer(encoded).ti;
++
++	settings_pack pack = settings();
++	pack.set_str(settings_pack::listen_interfaces, test_listen_interface());
++	pack.set_int(settings_pack::max_retry_port_bind, 10);
++	lt::session ses(pack);
++
++	add_torrent_params p;
++	p.ti = info;
++	p.save_path = ".";
++	p.flags |= torrent_flags::block_non_global_peers;
++	p.flags |= torrent_flags::paused;
++	p.flags &= ~torrent_flags::auto_managed;
++	p.peers.emplace_back(make_address("8.8.8.8"), 48100);
++	torrent_handle h = ses.add_torrent(std::move(p));
+ 	h.save_resume_data();
+ 
+-	saved = alert_cast<save_resume_data_alert>(
++	auto const* saved = alert_cast<save_resume_data_alert>(
+ 		wait_for_alert(ses, save_resume_data_alert::alert_type));
+ 	TEST_CHECK(saved);
+-	if (saved)
+-	{
+-		TEST_CHECK(std::find(saved->params.peers.begin(), saved->params.peers.end()
+-			, accepted_private_tracker) != saved->params.peers.end());
+-		TEST_CHECK(std::find(saved->params.peers.begin(), saved->params.peers.end()
+-			, private_pex) != saved->params.peers.end());
+-		TEST_CHECK(!bool(saved->params.flags & torrent_flags::block_non_global_peers));
+-	}
++	if (saved) TEST_CHECK(saved->params.peers.empty());
+ }
+ 
+ TORRENT_TEST(mismatching_info_hash)
+diff --git a/test/test_tracker_manager.cpp b/test/test_tracker_manager.cpp
+index b265d65e9..feaefa228 100644
+--- a/test/test_tracker_manager.cpp
++++ b/test/test_tracker_manager.cpp
+@@ -11,8 +11,19 @@ see LICENSE file.
+ #include "test.hpp"
+ #include "libtorrent/aux_/tracker_manager.hpp"
+ #include "libtorrent/aux_/session_interface.hpp"
++#include "libtorrent/aux_/session_impl.hpp"
+ #include "libtorrent/performance_counters.hpp"
+ #include "libtorrent/aux_/resolver.hpp"
++#include "libtorrent/ip_filter.hpp"
++
++#include <boost/asio/read_until.hpp>
++#include <boost/asio/write.hpp>
++
++#include <algorithm>
++#include <atomic>
++#include <map>
++#include <set>
++#include <thread>
+ 
+ using namespace lt;
+ using namespace lt::aux;
+@@ -26,17 +37,36 @@ struct tracker_manager_handler
+ 
+ 	tracker_manager_handler(io_context& ios, aux::session_settings& sett)
+ 		: m_host_resolver(ios)
++		, m_resolver(m_host_resolver)
+ 		, m_tracker_manager(
+ 			std::bind(&tracker_manager_handler::send_fn, this, _1, _2, _3, _4, _5)
+ 			, std::bind(&tracker_manager_handler::send_fn_hostname, this, _1, _2, _3, _4, _5, _6)
+ 			, m_stats_counters
+-			, m_host_resolver
++			, m_resolver
+ 			, sett
++			, m_address_policy
+ #if !defined TORRENT_DISABLE_LOGGING || TORRENT_USE_ASSERTS
+ 			, *this
+ #endif
+ 			)
+-	{}
++	{ complete_address_policy(); }
++
++	tracker_manager_handler(io_context& ios, aux::session_settings& sett
++		, aux::resolver_interface& resolver)
++		: m_host_resolver(ios)
++		, m_resolver(resolver)
++		, m_tracker_manager(
++			std::bind(&tracker_manager_handler::send_fn, this, _1, _2, _3, _4, _5)
++			, std::bind(&tracker_manager_handler::send_fn_hostname, this, _1, _2, _3, _4, _5, _6)
++			, m_stats_counters
++			, m_resolver
++			, sett
++			, m_address_policy
++#if !defined TORRENT_DISABLE_LOGGING || TORRENT_USE_ASSERTS
++			, *this
++#endif
++			)
++	{ complete_address_policy(); }
+ 
+ 	virtual ~tracker_manager_handler() {}
+ 
+@@ -53,7 +83,36 @@ struct tracker_manager_handler
+ 		, span<char const>
+ 		, error_code&
+ 		, aux::udp_send_flags_t const)
+-	{}
++	{ ++hostname_sends; }
++
++	void begin_address_policy()
++	{
++		m_address_policy.reset();
++		m_address_policy.start_lookup();
++		m_tracker_manager.address_policy_updated();
++	}
++
++	void complete_address_policy(std::vector<address> const& answers = {
++		make_address("192.0.0.170"), make_address("192.0.0.171")})
++	{
++		if (!m_address_policy.pending)
++		{
++			m_address_policy.reset();
++			m_address_policy.start_lookup();
++		}
++		auto const generation = m_address_policy.generation;
++		TEST_CHECK(m_address_policy.lookup_completed(generation
++			, discover_nat64_prefixes(answers)));
++		m_tracker_manager.address_policy_updated();
++	}
++
++	void fail_address_policy()
++	{
++		if (!m_address_policy.pending) begin_address_policy();
++		auto const generation = m_address_policy.generation;
++		TEST_CHECK(m_address_policy.lookup_completed(generation, {}));
++		m_tracker_manager.address_policy_updated();
++	}
+ 
+ #ifndef TORRENT_DISABLE_LOGGING
+ 	bool should_log() const override { return false; }
+@@ -61,7 +120,7 @@ struct tracker_manager_handler
+ #endif
+ 
+ #if TORRENT_USE_ASSERTS
+-	bool is_single_thread() const override { return false; }
++	bool is_single_thread() const override { return true; }
+ 	bool has_peer(aux::peer_connection const*) const override { return false; }
+ 	bool any_torrent_has_peer(aux::peer_connection const*) const override { return false; }
+ 	bool is_posting_torrent_updates() const override { return false; }
+@@ -70,7 +129,66 @@ struct tracker_manager_handler
+ 	io_context m_io_context;
+ 	counters m_stats_counters;
+ 	aux::resolver m_host_resolver;
++	aux::resolver_interface& m_resolver;
++	nat64_discovery_state m_address_policy;
+ 	tracker_manager m_tracker_manager;
++	int hostname_sends = 0;
++};
++
++struct scripted_resolver : aux::resolver_interface
++{
++	explicit scripted_resolver(io_context& ios) : m_ios(ios) {}
++
++	void async_resolve(std::string const& host, aux::resolver_flags
++		, callback_t handler) override
++	{
++		lookups.push_back(host);
++		if (stalled.count(host) != 0)
++		{
++			pending.emplace_back(host, std::move(handler));
++			return;
++		}
++		auto const found = results.find(host);
++		if (found == results.end())
++		{
++			post(m_ios, [handler = std::move(handler)]
++			{
++				handler(error_code(boost::asio::error::host_not_found), {});
++			});
++			return;
++		}
++
++		std::vector<address> addresses = found->second;
++		post(m_ios, [handler = std::move(handler), addresses = std::move(addresses)]
++			{ handler(error_code{}, addresses); });
++	}
++
++	void abort() override {}
++	void set_cache_timeout(seconds) override {}
++	void complete_stalled()
++	{
++		auto callbacks = std::move(pending);
++		for (auto& pending_lookup : callbacks)
++		{
++			auto const found = results.find(pending_lookup.first);
++			if (found == results.end())
++			{
++				post(m_ios, [callback = std::move(pending_lookup.second)]
++					{ callback(error_code(boost::asio::error::host_not_found), {}); });
++				continue;
++			}
++			std::vector<address> addresses = found->second;
++			post(m_ios, [callback = std::move(pending_lookup.second)
++				, addresses = std::move(addresses)]
++				{ callback(error_code{}, addresses); });
++		}
++	}
++
++	io_context& m_ios;
++	std::map<std::string, std::vector<address>> results;
++	std::set<std::string> stalled;
++	std::vector<std::pair<std::string, callback_t>> pending;
++	std::vector<std::string> lookups;
+ };
+ 
+ struct ws_request_callback : request_callback
+@@ -89,10 +207,15 @@ struct ws_request_callback : request_callback
+ 		, struct tracker_response const&) override {}
+ 	void tracker_request_error(
+ 		tracker_request const&
+-		, error_code const&
+-		, operation_t
++		, error_code const& ec
++		, operation_t operation
+ 		, const std::string&
+-		, seconds32) override {}
++		, seconds32) override
++	{
++		last_error = ec;
++		last_operation = operation;
++		++error_count;
++	}
+ #if TORRENT_USE_RTC
+ 	void generate_rtc_offers(int
+ 		, std::function<void(error_code const&, std::vector<aux::rtc_offer>)> handler) override
+@@ -106,8 +229,27 @@ struct ws_request_callback : request_callback
+ 	bool should_log() const override { return false; }
+ 	void debug_log(const char*, ...) const noexcept override TORRENT_FORMAT(2,3) {}
+ #endif
++	error_code last_error;
++	operation_t last_operation = operation_t::unknown;
++	int error_count = 0;
+ };
+ 
++std::shared_ptr<aux::listen_socket_t> internet_socket_v4()
++{
++	auto socket = std::make_shared<aux::listen_socket_t>();
++	socket->local_endpoint = tcp::endpoint(address_v4::any(), 6881);
++	return socket;
++}
++
++tracker_request tracker_request_for(std::string url
++	, std::shared_ptr<aux::listen_socket_t> const& socket)
++{
++	tracker_request request;
++	request.url = std::move(url);
++	request.outgoing_socket = aux::listen_socket_handle(socket);
++	return request;
++}
++
+ TORRENT_TEST(empty_and_num_requests)
+ {
+ 	io_context ios;
+@@ -224,3 +366,464 @@ TORRENT_TEST(protocol_dispatch_is_case_insensitive)
+ 	h.m_tracker_manager.abort_all_requests(true);
+ 	ios.run();
+ }
++
++TORRENT_TEST(http_tracker_blocks_non_global_resolved_endpoint)
++{
++	io_context ios;
++	aux::session_settings sett;
++	sett.set_bool(settings_pack::ssrf_mitigation, true);
++	scripted_resolver resolver{ios};
++	resolver.results["ipv4only.arpa"] = {
++		make_address("192.0.0.170"), make_address("192.0.0.171")};
++	// The IPv6 endpoint cannot route through this IPv4 socket, but it must be
++	// classified as SSRF before the address-family reachability check.
++	resolver.results["private.test"] = {make_address("fd00::20")};
++	tracker_manager_handler h{ios, sett, resolver};
++	auto const socket = internet_socket_v4();
++	auto callback = std::make_shared<ws_request_callback>();
++
++	h.m_tracker_manager.queue_request(ios
++		, tracker_request_for("http://private.test:8080/announce", socket)
++		, sett, callback);
++	ios.run();
++
++	TEST_EQUAL(callback->error_count, 1);
++	TEST_EQUAL(callback->last_error, error_code(errors::ssrf_mitigation));
++	TEST_CHECK(callback->last_operation == operation_t::bittorrent);
++}
++
++TORRENT_TEST(http_tracker_mixed_dns_uses_only_global_endpoint)
++{
++	io_context ios;
++	aux::session_settings sett;
++	sett.set_bool(settings_pack::ssrf_mitigation, true);
++	scripted_resolver resolver{ios};
++	resolver.results["ipv4only.arpa"] = {
++		make_address("192.0.0.170"), make_address("192.0.0.171")};
++	resolver.results["mixed.test"] = {
++		make_address("10.0.0.20"), make_address("8.8.8.8")};
++	tracker_manager_handler h{ios, sett, resolver};
++	auto const socket = internet_socket_v4();
++	auto callback = std::make_shared<ws_request_callback>();
++	auto filter = std::make_shared<ip_filter>();
++	filter->add_rule(make_address("8.8.8.8"), make_address("8.8.8.8")
++		, ip_filter::blocked);
++	auto request = tracker_request_for("http://mixed.test:8080/announce", socket);
++	request.filter = std::move(filter);
++
++	h.m_tracker_manager.queue_request(ios, std::move(request), sett, callback);
++	ios.run();
++
++	// The private answer must be removed by the SSRF policy. The remaining
++	// global answer is then removed by the independent user IP filter.
++	TEST_EQUAL(callback->error_count, 1);
++	TEST_EQUAL(callback->last_error, error_code(errors::banned_by_ip_filter));
++}
++
++TORRENT_TEST(plaintext_http_proxy_tracker_fails_closed)
++{
++	io_context ios;
++	aux::session_settings sett;
++	sett.set_bool(settings_pack::ssrf_mitigation, true);
++	sett.set_int(settings_pack::proxy_type, settings_pack::http);
++	sett.set_bool(settings_pack::proxy_tracker_connections, true);
++	tracker_manager_handler h{ios, sett};
++	auto const socket = internet_socket_v4();
++	auto callback = std::make_shared<ws_request_callback>();
++
++	h.m_tracker_manager.queue_request(ios
++		, tracker_request_for("HTTP://8.8.8.8:8080/announce", socket)
++		, sett, callback);
++	ios.run();
++
++	TEST_EQUAL(callback->error_count, 1);
++	TEST_EQUAL(callback->last_error, error_code(errors::ssrf_mitigation));
++}
++
++TORRENT_TEST(udp_tracker_forces_local_dns_and_blocks_non_global_endpoint)
++{
++	io_context ios;
++	aux::session_settings sett;
++	sett.set_bool(settings_pack::ssrf_mitigation, true);
++	sett.set_int(settings_pack::proxy_type, settings_pack::socks5);
++	sett.set_bool(settings_pack::proxy_hostnames, true);
++	sett.set_bool(settings_pack::proxy_tracker_connections, true);
++	scripted_resolver resolver{ios};
++	resolver.results["ipv4only.arpa"] = {
++		make_address("192.0.0.170"), make_address("192.0.0.171")};
++	resolver.results["private.test"] = {make_address("fd00::20")};
++	tracker_manager_handler h{ios, sett, resolver};
++	auto const socket = internet_socket_v4();
++	auto callback = std::make_shared<ws_request_callback>();
++
++	h.m_tracker_manager.queue_request(ios
++		, tracker_request_for("udp://private.test:8080/announce", socket)
++		, sett, callback);
++	ios.run();
++
++	TEST_EQUAL(callback->error_count, 1);
++	TEST_EQUAL(callback->last_error, error_code(errors::ssrf_mitigation));
++	TEST_EQUAL(h.hostname_sends, 0);
++	TEST_CHECK(std::find(resolver.lookups.begin(), resolver.lookups.end()
++		, "private.test") != resolver.lookups.end());
++}
++
++TORRENT_TEST(udp_tracker_mixed_dns_uses_only_global_endpoint)
++{
++	io_context ios;
++	aux::session_settings sett;
++	sett.set_bool(settings_pack::ssrf_mitigation, true);
++	scripted_resolver resolver{ios};
++	resolver.results["ipv4only.arpa"] = {
++		make_address("192.0.0.170"), make_address("192.0.0.171")};
++	resolver.results["mixed.test"] = {
++		make_address("172.16.0.20"), make_address("8.8.4.4")};
++	tracker_manager_handler h{ios, sett, resolver};
++	auto const socket = internet_socket_v4();
++	auto callback = std::make_shared<ws_request_callback>();
++	auto filter = std::make_shared<ip_filter>();
++	filter->add_rule(make_address("8.8.4.4"), make_address("8.8.4.4")
++		, ip_filter::blocked);
++	auto request = tracker_request_for("udp://mixed.test:8080/announce", socket);
++	request.filter = std::move(filter);
++
++	h.m_tracker_manager.queue_request(ios, std::move(request), sett, callback);
++	ios.run();
++
++	TEST_EQUAL(callback->error_count, 1);
++	TEST_EQUAL(callback->last_error, error_code(errors::banned_by_ip_filter));
++}
++
++TORRENT_TEST(http_tracker_blocks_private_network_specific_nat64_endpoint)
++{
++	io_context ios;
++	aux::session_settings sett;
++	sett.set_bool(settings_pack::ssrf_mitigation, true);
++	scripted_resolver resolver{ios};
++	resolver.results["ipv4only.arpa"] = {
++		make_address("2001:4860:c000:aa::")};
++	resolver.results["private-nat64.test"] = {
++		make_address("2001:4860:a00:1::1234")};
++	tracker_manager_handler h{ios, sett, resolver};
++	h.complete_address_policy({make_address("2001:4860:c000:aa::")});
++	auto socket = std::make_shared<aux::listen_socket_t>();
++	socket->local_endpoint = tcp::endpoint(address_v6::any(), 6881);
++	auto callback = std::make_shared<ws_request_callback>();
++
++	h.m_tracker_manager.queue_request(ios
++		, tracker_request_for("http://private-nat64.test:8080/announce", socket)
++		, sett, callback);
++	ios.run();
++
++	TEST_EQUAL(callback->error_count, 1);
++	TEST_EQUAL(callback->last_error, error_code(errors::ssrf_mitigation));
++}
++
++TORRENT_TEST(https_http_proxy_connect_uses_vetted_numeric_endpoint)
++{
++#if TORRENT_USE_SSL
++	io_context ios;
++	tcp::acceptor proxy_acceptor(ios
++		, tcp::endpoint(address_v4::loopback(), 0));
++	tcp::socket proxy_socket(ios);
++	std::string proxy_request;
++	bool received_connect = false;
++	aux::deadline_timer watchdog(ios);
++
++	proxy_acceptor.async_accept(proxy_socket
++		, [&](error_code const& accept_error)
++		{
++			if (accept_error) return;
++			boost::asio::async_read_until(proxy_socket
++				, boost::asio::dynamic_buffer(proxy_request, 4096), "\r\n\r\n"
++				, [&](error_code const& read_error, std::size_t)
++				{
++					if (read_error) return;
++					received_connect = true;
++					watchdog.cancel();
++					auto response = std::make_shared<std::string>(
++						"HTTP/1.1 502 Bad Gateway\r\n"
++						"Content-Length: 0\r\nConnection: close\r\n\r\n");
++					boost::asio::async_write(proxy_socket
++						, boost::asio::buffer(*response)
++						, [&, response](error_code const&, std::size_t)
++						{
++							error_code ignored;
++							proxy_socket.close(ignored);
++						});
++				});
++		});
++
++	watchdog.expires_after(seconds(5));
++	watchdog.async_wait([&](error_code const& error)
++	{
++		if (error) return;
++		error_code ignored;
++		proxy_acceptor.close(ignored);
++		proxy_socket.close(ignored);
++	});
++
++	aux::session_settings sett;
++	sett.set_bool(settings_pack::ssrf_mitigation, true);
++	sett.set_int(settings_pack::tracker_completion_timeout, 3);
++	sett.set_int(settings_pack::proxy_type, settings_pack::http);
++	sett.set_str(settings_pack::proxy_hostname, "127.0.0.1");
++	sett.set_int(settings_pack::proxy_port, proxy_acceptor.local_endpoint().port());
++	sett.set_bool(settings_pack::proxy_tracker_connections, true);
++	sett.set_bool(settings_pack::proxy_send_host_in_connect, true);
++	scripted_resolver resolver{ios};
++	resolver.results["ipv4only.arpa"] = {
++		make_address("192.0.0.170"), make_address("192.0.0.171")};
++	resolver.results["tracker.test"] = {make_address("8.8.8.8")};
++	tracker_manager_handler h{ios, sett, resolver};
++	auto const socket = internet_socket_v4();
++	auto callback = std::make_shared<ws_request_callback>();
++	aux::ssl::context ssl_context(aux::ssl::context::sslv23_client);
++	auto request = tracker_request_for("https://tracker.test:443/announce", socket);
++	request.ssl_ctx = &ssl_context;
++
++	h.m_tracker_manager.queue_request(ios, std::move(request), sett, callback);
++	ios.run();
++
++	TEST_CHECK(received_connect);
++	TEST_CHECK(proxy_request.rfind("CONNECT 8.8.8.8:443 HTTP/1.0\r\n", 0) == 0);
++	TEST_CHECK(proxy_request.find("tracker.test") == std::string::npos);
++	TEST_EQUAL(callback->error_count, 1);
++#else
++	TEST_CHECK(true);
++#endif
++}
++
++TORRENT_TEST(http_tracker_completion_is_single_shot)
++{
++#if TORRENT_USE_SSL
++	io_context ios;
++	tcp::acceptor proxy_acceptor(ios
++		, tcp::endpoint(address_v4::loopback(), 0));
++	tcp::socket proxy_socket(ios);
++	std::string proxy_request;
++	std::atomic<bool> client_blocked{false};
++	std::atomic<bool> terminal_response_sent{false};
++
++	aux::session_settings sett;
++	sett.set_bool(settings_pack::ssrf_mitigation, true);
++	sett.set_int(settings_pack::tracker_completion_timeout, 1);
++	sett.set_int(settings_pack::proxy_type, settings_pack::http);
++	sett.set_str(settings_pack::proxy_hostname, "127.0.0.1");
++	sett.set_int(settings_pack::proxy_port, proxy_acceptor.local_endpoint().port());
++	sett.set_bool(settings_pack::proxy_tracker_connections, true);
++	scripted_resolver resolver{ios};
++	resolver.results["ipv4only.arpa"] = {
++		make_address("192.0.0.170"), make_address("192.0.0.171")};
++	resolver.results["tracker.test"] = {make_address("8.8.8.8")};
++	tracker_manager_handler h{ios, sett, resolver};
++	auto const socket = internet_socket_v4();
++	auto callback = std::make_shared<ws_request_callback>();
++	aux::ssl::context ssl_context(aux::ssl::context::sslv23_client);
++	auto request = tracker_request_for("https://tracker.test:443/announce", socket);
++	request.ssl_ctx = &ssl_context;
++
++	// Hold the client event loop across the request deadline after the proxy has
++	// a terminal response ready. The tracker request must still have exactly one
++	// owner for reporting its outcome.
++	auto const request_deadline = clock_type::now() + seconds(1);
++	std::thread proxy_thread([&]
++	{
++		error_code error;
++		proxy_acceptor.accept(proxy_socket, error);
++		if (error) return;
++		boost::asio::read_until(proxy_socket
++			, boost::asio::dynamic_buffer(proxy_request, 4096), "\r\n\r\n", error);
++		if (error) return;
++
++		post(ios, [&]
++		{
++			client_blocked.store(true, std::memory_order_release);
++			std::this_thread::sleep_until(
++				request_deadline + milliseconds(200));
++		});
++		while (!client_blocked.load(std::memory_order_acquire))
++			std::this_thread::yield();
++
++		std::string const response =
++			"HTTP/1.1 502 Bad Gateway\r\n"
++			"Content-Length: 0\r\nConnection: close\r\n\r\n";
++		boost::asio::write(proxy_socket, boost::asio::buffer(response), error);
++		terminal_response_sent.store(!error, std::memory_order_release);
++		proxy_socket.close(error);
++	});
++
++	h.m_tracker_manager.queue_request(ios, std::move(request), sett, callback);
++	ios.run();
++	proxy_thread.join();
++
++	TEST_CHECK(terminal_response_sent.load(std::memory_order_acquire));
++	TEST_CHECK(std::find(resolver.lookups.begin(), resolver.lookups.end()
++		, "ipv4only.arpa") == resolver.lookups.end());
++	TEST_EQUAL(callback->error_count, 1);
++	TEST_CHECK(h.m_tracker_manager.empty());
++#else
++	TEST_CHECK(true);
++#endif
++}
++
++TORRENT_TEST(trackers_wait_for_session_address_policy)
++{
++	io_context ios;
++	aux::session_settings sett;
++	sett.set_bool(settings_pack::ssrf_mitigation, true);
++	scripted_resolver resolver{ios};
++	resolver.results["private-http.test"] = {make_address("fd00::20")};
++	resolver.results["private-udp.test"] = {make_address("10.0.0.20")};
++	tracker_manager_handler h{ios, sett, resolver};
++	h.begin_address_policy();
++	auto const socket = internet_socket_v4();
++	auto http_callback = std::make_shared<ws_request_callback>();
++	auto udp_callback = std::make_shared<ws_request_callback>();
++
++	h.m_tracker_manager.queue_request(ios
++		, tracker_request_for("http://private-http.test:8080/announce", socket)
++		, sett, http_callback);
++	h.m_tracker_manager.queue_request(ios
++		, tracker_request_for("udp://private-udp.test:8080/announce", socket)
++		, sett, udp_callback);
++
++	ios.poll();
++	TEST_EQUAL(http_callback->error_count, 0);
++	TEST_EQUAL(udp_callback->error_count, 0);
++	TEST_CHECK(std::find(resolver.lookups.begin(), resolver.lookups.end()
++		, "private-http.test") == resolver.lookups.end());
++	TEST_CHECK(std::find(resolver.lookups.begin(), resolver.lookups.end()
++		, "private-udp.test") == resolver.lookups.end());
++	TEST_CHECK(std::find(resolver.lookups.begin(), resolver.lookups.end()
++		, "ipv4only.arpa") == resolver.lookups.end());
++
++	h.complete_address_policy();
++	ios.restart();
++	ios.run();
++
++	TEST_CHECK(h.m_tracker_manager.empty());
++	TEST_EQUAL(http_callback->error_count, 1);
++	TEST_EQUAL(http_callback->last_error, error_code(errors::ssrf_mitigation));
++	TEST_EQUAL(udp_callback->error_count, 1);
++	TEST_EQUAL(udp_callback->last_error, error_code(errors::ssrf_mitigation));
++}
++
++TORRENT_TEST(unavailable_address_verification_is_not_reported_as_ssrf)
++{
++	io_context ios;
++	aux::session_settings sett;
++	sett.set_bool(settings_pack::ssrf_mitigation, true);
++	scripted_resolver resolver{ios};
++	resolver.results["http-v6.test"] = {make_address("2001:4860:4860::8888")};
++	resolver.results["udp-v6.test"] = {make_address("2606:4700:4700::1111")};
++	tracker_manager_handler h{ios, sett, resolver};
++	h.begin_address_policy();
++	auto socket = std::make_shared<aux::listen_socket_t>();
++	socket->local_endpoint = tcp::endpoint(address_v6::any(), 6881);
++	auto http_callback = std::make_shared<ws_request_callback>();
++	auto udp_callback = std::make_shared<ws_request_callback>();
++
++	h.m_tracker_manager.queue_request(ios
++		, tracker_request_for("http://http-v6.test:8080/announce", socket)
++		, sett, http_callback);
++	h.m_tracker_manager.queue_request(ios
++		, tracker_request_for("udp://udp-v6.test:8080/announce", socket)
++		, sett, udp_callback);
++	ios.poll();
++	TEST_EQUAL(http_callback->error_count, 0);
++	TEST_EQUAL(udp_callback->error_count, 0);
++
++	h.fail_address_policy();
++	ios.restart();
++	ios.run();
++
++	TEST_EQUAL(http_callback->error_count, 1);
++	TEST_EQUAL(http_callback->last_error, error_code(errors::announce_skipped));
++	TEST_EQUAL(udp_callback->error_count, 1);
++	TEST_EQUAL(udp_callback->last_error, error_code(errors::announce_skipped));
++}
++
++TORRENT_TEST(trackers_restart_after_address_policy_generation_change)
++{
++	io_context ios;
++	aux::session_settings sett;
++	sett.set_bool(settings_pack::ssrf_mitigation, true);
++	scripted_resolver resolver{ios};
++	resolver.results["private-http.test"] = {make_address("10.0.0.20")};
++	resolver.results["private-udp.test"] = {make_address("172.16.0.20")};
++	resolver.stalled.insert("private-http.test");
++	resolver.stalled.insert("private-udp.test");
++	tracker_manager_handler h{ios, sett, resolver};
++	auto const socket = internet_socket_v4();
++	auto http_callback = std::make_shared<ws_request_callback>();
++	auto udp_callback = std::make_shared<ws_request_callback>();
++
++	h.m_tracker_manager.queue_request(ios
++		, tracker_request_for("http://private-http.test:8080/announce", socket)
++		, sett, http_callback);
++	h.m_tracker_manager.queue_request(ios
++		, tracker_request_for("udp://private-udp.test:8080/announce", socket)
++		, sett, udp_callback);
++	ios.poll();
++
++	TEST_EQUAL(std::count(resolver.lookups.begin(), resolver.lookups.end()
++		, "private-http.test"), 1);
++	TEST_EQUAL(std::count(resolver.lookups.begin(), resolver.lookups.end()
++		, "private-udp.test"), 1);
++
++	// Resetting the session policy must silently retire both in-flight DNS
++	// generations. Their eventual callbacks cannot complete either request.
++	h.begin_address_policy();
++	resolver.stalled.clear();
++	resolver.complete_stalled();
++	ios.restart();
++	ios.poll();
++	TEST_EQUAL(http_callback->error_count, 0);
++	TEST_EQUAL(udp_callback->error_count, 0);
++
++	// Completing the new policy generation restarts DNS from scratch. The
++	// private answers are then rejected for the real reason, exactly once.
++	h.complete_address_policy();
++	ios.restart();
++	ios.run();
++
++	TEST_EQUAL(std::count(resolver.lookups.begin(), resolver.lookups.end()
++		, "private-http.test"), 2);
++	TEST_EQUAL(std::count(resolver.lookups.begin(), resolver.lookups.end()
++		, "private-udp.test"), 2);
++	TEST_EQUAL(http_callback->error_count, 1);
++	TEST_EQUAL(http_callback->last_error, error_code(errors::ssrf_mitigation));
++	TEST_EQUAL(udp_callback->error_count, 1);
++	TEST_EQUAL(udp_callback->last_error, error_code(errors::ssrf_mitigation));
++}
++
++TORRENT_TEST(non_global_answer_takes_precedence_over_unavailable_verification)
++{
++	io_context ios;
++	aux::session_settings sett;
++	sett.set_bool(settings_pack::ssrf_mitigation, true);
++	scripted_resolver resolver{ios};
++	resolver.results["mixed-http.test"] = {
++		make_address("10.0.0.20"), make_address("2001:4860:4860::8888")};
++	resolver.results["mixed-udp.test"] = {
++		make_address("172.16.0.20"), make_address("2606:4700:4700::1111")};
++	tracker_manager_handler h{ios, sett, resolver};
++	h.fail_address_policy();
++	auto const socket = internet_socket_v4();
++	auto http_callback = std::make_shared<ws_request_callback>();
++	auto udp_callback = std::make_shared<ws_request_callback>();
++
++	h.m_tracker_manager.queue_request(ios
++		, tracker_request_for("http://mixed-http.test:8080/announce", socket)
++		, sett, http_callback);
++	h.m_tracker_manager.queue_request(ios
++		, tracker_request_for("udp://mixed-udp.test:8080/announce", socket)
++		, sett, udp_callback);
++	ios.run();
++
++	TEST_EQUAL(http_callback->error_count, 1);
++	TEST_EQUAL(http_callback->last_error, error_code(errors::ssrf_mitigation));
++	TEST_EQUAL(udp_callback->error_count, 1);
++	TEST_EQUAL(udp_callback->last_error, error_code(errors::ssrf_mitigation));
++}
