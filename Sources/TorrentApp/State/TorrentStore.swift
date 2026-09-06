@@ -157,7 +157,7 @@ private final class TorrentStoreQueuedOperationState<Result: Sendable> {
 }
 
 private enum TorrentStoreEngineStartupOutcome: Sendable {
-    case started(any TorrentEngineServicing, TorrentStorageBrokerServer?)
+    case started(any TorrentEngineServicing)
     case failed(String)
     case cancelled
 }
@@ -184,49 +184,32 @@ typealias TorrentStoreEngineFactory = @Sendable (
     _ enablePeerExchangePlugin: Bool
 ) throws -> any TorrentEngineServicing
 
-nonisolated struct TorrentStoreEngineStartup: Sendable {
-    let engine: any TorrentEngineServicing
-    let storageBrokerServer: TorrentStorageBrokerServer?
-}
-
 typealias TorrentStoreEngineStartupFactory = @Sendable (
     _ enablePeerExchangePlugin: Bool,
     _ storageBrokerRegistry: TorrentStorageBrokerRegistry,
     _ connectionRetryMode: TorrentEngineConnectionRetryMode
-) async throws -> TorrentStoreEngineStartup
+) async throws -> any TorrentEngineServicing
 
 nonisolated struct TorrentStoreDependencies: Sendable {
     let startEngine: TorrentStoreEngineStartupFactory
 
     static let live = Self(startEngine: { enablePeerExchangePlugin, registry, retryMode in
         let configuration = try TorrentEngineXPCIdentity.configuration()
-        let brokerServer = try TorrentStorageBrokerServer(
-            registry: registry,
-            engineConfiguration: configuration
+        return try await TorrentXPCClient.connect(
+            enablePeerExchangePlugin: enablePeerExchangePlugin,
+            makeStorageBroker: {
+                try TorrentStorageBrokerServer(
+                    registry: registry,
+                    engineConfiguration: configuration
+                )
+            },
+            retryMode: retryMode
         )
-        do {
-            let engine = try await TorrentXPCClient.connect(
-                enablePeerExchangePlugin: enablePeerExchangePlugin,
-                brokerEndpoint: brokerServer.endpoint,
-                brokerSessionNonce: brokerServer.sessionNonce,
-                retryMode: retryMode
-            )
-            return TorrentStoreEngineStartup(
-                engine: engine,
-                storageBrokerServer: brokerServer
-            )
-        } catch {
-            brokerServer.cancel()
-            throw error
-        }
     })
 
     init(makeEngine: @escaping TorrentStoreEngineFactory) {
         startEngine = { enablePeerExchangePlugin, _, _ in
-            TorrentStoreEngineStartup(
-                engine: try makeEngine(enablePeerExchangePlugin),
-                storageBrokerServer: nil
-            )
+            try makeEngine(enablePeerExchangePlugin)
         }
     }
 
@@ -277,8 +260,6 @@ final class TorrentStore {
     private var storageParents = [
         TorrentStorageParentID: TorrentStorageParentAuthority
     ]()
-    @ObservationIgnored
-    private var storageBrokerServer: TorrentStorageBrokerServer?
     private let dockTileService: TorrentDockTileServicing
     private let completionNotifier: TorrentCompletionNotifier
     private let sleepPreventionService: SleepPreventionServicing
@@ -3553,8 +3534,6 @@ final class TorrentStore {
         let previousStartupTask = engineStartupTask
         previousStartupTask?.cancel()
         let previousEngine = engine
-        let previousBrokerServer = storageBrokerServer
-        storageBrokerServer = nil
         let previousRefreshTask = refreshTask
         let previousWakeRefreshTask = wakeRefreshTask
         let previousActiveRefreshTask = activeRefreshTask
@@ -3577,7 +3556,6 @@ final class TorrentStore {
             switch kind {
             case .initial:
                 await previousEngine.shutdown()
-                previousBrokerServer?.cancel()
                 await previousRefreshTask?.value
                 await previousWakeRefreshTask?.value
                 await previousActiveRefreshTask?.value
@@ -3588,7 +3566,6 @@ final class TorrentStore {
                 await previousEngine.terminateConnection(
                     recoveryDisposition: .replaceController
                 )
-                previousBrokerServer?.cancel()
             }
             guard let self,
                   !Task.isCancelled,
@@ -3605,18 +3582,16 @@ final class TorrentStore {
 
             guard !Task.isCancelled,
                   self.engineLifecycleGeneration == startupGeneration else {
-                if case .started(let staleEngine, let staleBroker) = outcome {
+                if case .started(let staleEngine) = outcome {
                     await staleEngine.shutdown()
-                    staleBroker?.cancel()
                 }
                 return
             }
             self.engineStartupTask = nil
             self.isEngineStarting = false
             switch outcome {
-            case .started(let engine, let brokerServer):
+            case .started(let engine):
                 self.engine = engine
-                self.storageBrokerServer = brokerServer
                 self.libtorrentVersion = engine.libtorrentVersion
                 self.appliedPeerExchangePluginEnabled = enablePeerExchangePlugin
                 self.engineStartupFailed = false
@@ -5095,20 +5070,16 @@ final class TorrentStore {
             return .cancelled
         }
         do {
-            let startup = try await startupFactory(
+            let engine = try await startupFactory(
                 enablePeerExchangePlugin,
                 storageBrokerRegistry,
                 connectionRetryMode
             )
             guard !Task.isCancelled else {
-                await startup.engine.shutdown()
-                startup.storageBrokerServer?.cancel()
+                await engine.shutdown()
                 return .cancelled
             }
-            return .started(
-                startup.engine,
-                startup.storageBrokerServer
-            )
+            return .started(engine)
         } catch {
             guard !Task.isCancelled else {
                 return .cancelled

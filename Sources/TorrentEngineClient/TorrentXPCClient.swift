@@ -5,6 +5,14 @@ import TorrentEngineModel
 import TorrentMetainfo
 import XPC
 
+/// A fresh, single-session broker owned by one command-channel controller.
+/// Cancellation must be idempotent and revoke further broker requests.
+package protocol TorrentEngineStorageBrokerSession: Sendable {
+    var endpoint: XPCEndpoint { get }
+    var sessionNonce: UUID { get }
+    func cancel()
+}
+
 package enum TorrentEngineConnectionRetryMode: Equatable, Sendable {
     case initial
     case replacingTerminatedController
@@ -172,8 +180,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     private let transport: any TorrentEngineIPCTransport
     private let state: TorrentXPCClientState
     private let requestTimeoutOverrides: [TorrentEngineIPCOperation: Duration]
-    private let brokerEndpoint: XPCEndpoint
-    private let brokerSessionNonce: UUID
+    private let storageBroker: any TorrentEngineStorageBrokerSession
     private var connectionDeadline: ContinuousClock.Instant?
     private var engineEpoch: UUID?
     private var nextSequence: UInt64 = 1
@@ -218,54 +225,80 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         state: TorrentXPCClientState,
         requestTimeoutOverrides: [TorrentEngineIPCOperation: Duration],
         connectionDeadline: ContinuousClock.Instant?,
-        brokerEndpoint: XPCEndpoint,
-        brokerSessionNonce: UUID
+        storageBroker: any TorrentEngineStorageBrokerSession
     ) {
         self.controllerID = controllerID
         self.transport = transport
         self.state = state
         self.requestTimeoutOverrides = requestTimeoutOverrides
         self.connectionDeadline = connectionDeadline
-        self.brokerEndpoint = brokerEndpoint
-        self.brokerSessionNonce = brokerSessionNonce
+        self.storageBroker = storageBroker
     }
 
     package static func connect(
         enablePeerExchangePlugin: Bool,
-        brokerEndpoint: XPCEndpoint,
-        brokerSessionNonce: UUID,
+        makeStorageBroker: @Sendable () throws -> any TorrentEngineStorageBrokerSession,
         retryMode: TorrentEngineConnectionRetryMode = .initial
     ) async throws -> TorrentXPCClient {
         let configuration = try TorrentEngineXPCIdentity.configuration()
+        return try await connect(
+            enablePeerExchangePlugin: enablePeerExchangePlugin,
+            makeStorageBroker: makeStorageBroker,
+            retryMode: retryMode
+        ) { controllerID, state, _ in
+            let session = try await TorrentEngineExtensionProcessCoordinator.shared
+                .makeSession(configuration: configuration)
+            return try TorrentEngineXPCTransport(
+                controllerID: controllerID,
+                session: session,
+                configuration: configuration,
+                hintHandler: { state.signal() },
+                cancellationHandler: {
+                    state.cancel(
+                        message: "The isolated torrent engine connection ended safely.",
+                        recoveryDisposition: .replaceController
+                    )
+                }
+            )
+        }
+    }
+
+    /// The transport factory keeps retry and broker ownership identical for
+    /// system sessions and controlled connection-failure tests.
+    static func connect(
+        enablePeerExchangePlugin: Bool,
+        makeStorageBroker: @Sendable () throws -> any TorrentEngineStorageBrokerSession,
+        retryMode: TorrentEngineConnectionRetryMode = .initial,
+        connectionDeadline: ContinuousClock.Instant? = nil,
+        makeTransport: @Sendable (
+            UUID, TorrentXPCClientState, ContinuousClock.Instant
+        ) async throws -> any TorrentEngineIPCTransport
+    ) async throws -> TorrentXPCClient {
         var retryPolicy = TorrentEngineConnectionRetryPolicy(mode: retryMode)
         let clock = ContinuousClock()
         // One connect call owns one wall-clock horizon. This includes the
         // first transport attempt, bootstrap requests, processing,
         // and every retry sleep; a late first busy reply cannot restart it.
-        let recoveryDeadline = clock.now.advanced(
+        let recoveryDeadline = connectionDeadline ?? clock.now.advanced(
             by: TorrentEngineConnectionRetryPolicy.cleanupEpisodeRetryBudget
         )
         while true {
+            try Task.checkCancellation()
             if clock.now >= recoveryDeadline {
                 throw TorrentEngineClientError.recoveryDeadlineExceeded
             }
             do {
                 let controllerID = UUID()
                 let state = TorrentXPCClientState()
-                let session = try await TorrentEngineExtensionProcessCoordinator.shared
-                    .makeSession(configuration: configuration)
-                let transport = try TorrentEngineXPCTransport(
-                    controllerID: controllerID,
-                    session: session,
-                    configuration: configuration,
-                    hintHandler: { state.signal() },
-                    cancellationHandler: {
-                        state.cancel(
-                            message: "The isolated torrent engine connection ended safely.",
-                            recoveryDisposition: .replaceController
-                        )
-                    }
-                )
+                let transport = try await makeTransport(controllerID, state, recoveryDeadline)
+                let storageBroker: any TorrentEngineStorageBrokerSession
+                do {
+                    try Task.checkCancellation()
+                    storageBroker = try makeStorageBroker()
+                } catch {
+                    transport.cancel()
+                    throw error
+                }
                 return try await establishConnection(
                     controllerID: controllerID,
                     transport: transport,
@@ -273,8 +306,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                     enablePeerExchangePlugin: enablePeerExchangePlugin,
                     requestTimeoutOverrides: [:],
                     connectionDeadline: recoveryDeadline,
-                    brokerEndpoint: brokerEndpoint,
-                    brokerSessionNonce: brokerSessionNonce
+                    storageBroker: storageBroker
                 )
             } catch {
                 guard !(error is CancellationError), !Task.isCancelled else {
@@ -305,8 +337,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     /// the production XPC peer requirements used by the primary overload.
     package static func connect(
         enablePeerExchangePlugin: Bool,
-        brokerEndpoint: XPCEndpoint,
-        brokerSessionNonce: UUID,
+        storageBroker: any TorrentEngineStorageBrokerSession,
         transport: any TorrentEngineIPCTransport,
         controllerID: UUID = UUID(),
         requestTimeoutOverrides: [TorrentEngineIPCOperation: Duration] = [:],
@@ -319,8 +350,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             enablePeerExchangePlugin: enablePeerExchangePlugin,
             requestTimeoutOverrides: requestTimeoutOverrides,
             connectionDeadline: connectionDeadline,
-            brokerEndpoint: brokerEndpoint,
-            brokerSessionNonce: brokerSessionNonce
+            storageBroker: storageBroker
         )
     }
 
@@ -331,8 +361,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         enablePeerExchangePlugin: Bool,
         requestTimeoutOverrides: [TorrentEngineIPCOperation: Duration],
         connectionDeadline: ContinuousClock.Instant?,
-        brokerEndpoint: XPCEndpoint,
-        brokerSessionNonce: UUID
+        storageBroker: any TorrentEngineStorageBrokerSession
     ) async throws -> TorrentXPCClient {
         let client = TorrentXPCClient(
             controllerID: controllerID,
@@ -340,8 +369,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             state: state,
             requestTimeoutOverrides: requestTimeoutOverrides,
             connectionDeadline: connectionDeadline,
-            brokerEndpoint: brokerEndpoint,
-            brokerSessionNonce: brokerSessionNonce
+            storageBroker: storageBroker
         )
         do {
             try await client.bootstrap(
@@ -356,6 +384,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                 recoveryDisposition: failure.recoveryDisposition
             )
             transport.cancel()
+            storageBroker.cancel()
             throw error
         }
     }
@@ -723,13 +752,13 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     ) async throws {
         let request = TorrentEngineIPCHandshakeRequest(
             enablePeerExchangePlugin: enablePeerExchangePlugin,
-            brokerSessionNonce: brokerSessionNonce
+            brokerSessionNonce: storageBroker.sessionNonce
         )
         let (response, epoch): (TorrentEngineIPCHandshakeResponse, UUID) =
             try await invokeBeforeHandshake(
                 .handshake,
                 request,
-                brokerEndpoint: brokerEndpoint
+                brokerEndpoint: storageBroker.endpoint
             )
         engineEpoch = epoch
         state.setLibtorrentVersion(response.libtorrentVersion)
@@ -1077,6 +1106,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             recoveryDisposition: recoveryDisposition
         )
         transport.cancel()
+        storageBroker.cancel()
     }
 
     private func responseFailure(from error: any Error) -> TorrentEngineClientError {
@@ -1265,6 +1295,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             recoveryDisposition: .terminal
         )
         transport.cancel()
+        storageBroker.cancel()
     }
 }
 

@@ -1714,8 +1714,7 @@ struct TorrentXPCClientSecurityTests {
     ) async throws -> TorrentXPCClient {
         try await TorrentXPCClient.connect(
             enablePeerExchangePlugin: false,
-            brokerEndpoint: TorrentEngineClientTestStorageBroker.endpoint,
-            brokerSessionNonce: TorrentEngineClientTestStorageBroker.sessionNonce,
+            storageBroker: TorrentEngineClientTestStorageBroker(),
             transport: transport,
             controllerID: UUID()
         )

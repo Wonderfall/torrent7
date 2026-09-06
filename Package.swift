@@ -335,7 +335,9 @@ let package = Package(
         ),
         .executableTarget(
             name: "TorrentEngineXPCIntegrationHost",
-            dependencies: ["TorrentEngineClient", "TorrentEngineIPC", "TorrentEngineModel"],
+            dependencies: [
+                "TorrentAppInfrastructure", "TorrentEngineClient", "TorrentEngineIPC", "TorrentEngineModel"
+            ],
             path: "Tools/XPCIntegrationHost",
             swiftSettings: swiftBaselineSettings + [
                 .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)

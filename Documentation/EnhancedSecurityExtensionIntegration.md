@@ -42,6 +42,10 @@ Powerbox interaction. It verifies the authenticated storage-broker handshake,
 blocked-network startup, and a nonempty local-interface snapshot, reports the
 VPN-classified count, and exercises restart, shutdown, and fresh-session
 reconnect.
+The host uses the production single-session storage broker. Each command
+connection attempt creates a new endpoint and nonce; the accepted client owns
+that broker until controller termination. Failed attempts revoke their broker
+before retrying.
 The runner also kills the exact helper process, requires the client to observe
 the interruption, requires ExtensionFoundation to launch a different PID, and
 verifies a fresh blocked controller and a fresh broker handshake afterward.

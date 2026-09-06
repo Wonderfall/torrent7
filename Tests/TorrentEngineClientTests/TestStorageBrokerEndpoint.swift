@@ -1,10 +1,20 @@
 import Foundation
+import Synchronization
+import TorrentEngineClient
 import XPC
 
-enum TorrentEngineClientTestStorageBroker {
-    static let sessionNonce = UUID()
-    static let listener = XPCListener(options: .inactive) { request in
+final class TorrentEngineClientTestStorageBroker: TorrentEngineStorageBrokerSession {
+    let sessionNonce = UUID()
+    private let cancelled = Mutex(false)
+    private let listener = XPCListener { request in
         request.reject(reason: "The unit-test endpoint is transport-only")
     }
-    static let endpoint = listener.endpoint
+
+    var endpoint: XPCEndpoint { listener.endpoint }
+    var isCancelled: Bool { cancelled.withLock { $0 } }
+
+    func cancel() {
+        cancelled.withLock { $0 = true }
+        listener.cancel()
+    }
 }

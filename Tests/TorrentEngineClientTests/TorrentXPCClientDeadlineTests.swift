@@ -42,8 +42,7 @@ struct TorrentXPCClientDeadlineTests {
         }
         let client = try await TorrentXPCClient.connect(
             enablePeerExchangePlugin: false,
-            brokerEndpoint: TorrentEngineClientTestStorageBroker.endpoint,
-            brokerSessionNonce: TorrentEngineClientTestStorageBroker.sessionNonce,
+            storageBroker: TorrentEngineClientTestStorageBroker(),
             transport: transport,
             requestTimeoutOverrides: [
                 .pause: .seconds(1),
@@ -119,8 +118,7 @@ struct TorrentXPCClientDeadlineTests {
         }
         let client = try await TorrentXPCClient.connect(
             enablePeerExchangePlugin: false,
-            brokerEndpoint: TorrentEngineClientTestStorageBroker.endpoint,
-            brokerSessionNonce: TorrentEngineClientTestStorageBroker.sessionNonce,
+            storageBroker: TorrentEngineClientTestStorageBroker(),
             transport: transport
         )
         let torrentID = "v1:\(String(repeating: "b", count: 40))"
@@ -159,8 +157,7 @@ struct TorrentXPCClientDeadlineTests {
         do {
             _ = try await TorrentXPCClient.connect(
                 enablePeerExchangePlugin: false,
-                brokerEndpoint: TorrentEngineClientTestStorageBroker.endpoint,
-                brokerSessionNonce: TorrentEngineClientTestStorageBroker.sessionNonce,
+                storageBroker: TorrentEngineClientTestStorageBroker(),
                 transport: transport,
                 connectionDeadline: deadline
             )

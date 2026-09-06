@@ -751,7 +751,7 @@ package enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Senda
     }
 }
 
-@safe package final class TorrentStorageBrokerServer: Sendable {
+@safe package final class TorrentStorageBrokerServer: TorrentEngineStorageBrokerSession {
     package let endpoint: XPCEndpoint
     package let sessionNonce: UUID
 

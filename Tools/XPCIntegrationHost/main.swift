@@ -1,62 +1,10 @@
 import AppKit
+import TorrentAppInfrastructure
 import Foundation
 import TorrentEngineClient
 import TorrentEngineIPC
 import TorrentEngineModel
 import XPC
-
-@safe private final class IntegrationStorageBroker: Sendable {
-    static let shared: IntegrationStorageBroker = {
-        do {
-            return try IntegrationStorageBroker()
-        } catch {
-            fatalError("Could not start the integration storage broker: \(error)")
-        }
-    }()
-
-    let endpoint: XPCEndpoint
-    let sessionNonce = UUID()
-    private let listener: XPCListener
-
-    private init() throws {
-        let configuration = try TorrentEngineXPCIdentity.configuration()
-        let nonce = sessionNonce
-        let listener = XPCListener { request in
-            let accepted: (
-                XPCListener.IncomingSessionRequest.Decision,
-                XPCSession
-            ) = request.accept(
-                incomingMessageHandler: { (dictionary: XPCDictionary) in
-                    guard let brokerRequest = try? TorrentStorageBrokerIPCCodec
-                        .decodeRequest(dictionary),
-                          brokerRequest.common.sessionNonce == nonce,
-                          case .handshake = brokerRequest else {
-                        return nil
-                    }
-                    return try? TorrentStorageBrokerIPCCodec.encode(
-                        .success(
-                            requestID: brokerRequest.common.requestID,
-                            metadata: nil,
-                            statistics: [],
-                            fileDescriptor: nil
-                        ),
-                        for: brokerRequest
-                    )
-                }
-            )
-            if configuration.authentication == .sameTeam {
-                accepted.1.setPeerRequirement(
-                    .isFromSameTeam(
-                        andMatchesSigningIdentifier: configuration.serviceIdentifier
-                    )
-                )
-            }
-            return accepted.0
-        }
-        self.listener = listener
-        endpoint = listener.endpoint
-    }
-}
 
 private enum IntegrationFailure: LocalizedError {
     case invalidArguments
@@ -561,10 +509,16 @@ private enum TorrentEngineXPCIntegrationHost {
     private static func connect(
         retryMode: TorrentEngineConnectionRetryMode = .initial
     ) async throws -> TorrentXPCClient {
+        let configuration = try TorrentEngineXPCIdentity.configuration()
+        let registry = TorrentStorageBrokerRegistry()
         let client = try await TorrentXPCClient.connect(
             enablePeerExchangePlugin: false,
-            brokerEndpoint: IntegrationStorageBroker.shared.endpoint,
-            brokerSessionNonce: IntegrationStorageBroker.shared.sessionNonce,
+            makeStorageBroker: {
+                try TorrentStorageBrokerServer(
+                    registry: registry,
+                    engineConfiguration: configuration
+                )
+            },
             retryMode: retryMode
         )
         guard client.libtorrentVersion == "2.1.1.0" else {
