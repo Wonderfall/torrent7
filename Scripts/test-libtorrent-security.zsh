@@ -40,6 +40,7 @@ typeset -ra test_targets=(
     test_tracker
     test_tracker_list
     test_tracker_manager
+    test_web_seed_policy
     test_web_seed_redirect
 )
 typeset restore_configuration=0
@@ -162,6 +163,7 @@ restore_configuration=0
     ./test_http_parser --no-redirect \
         "$source_dir/test/test_http_parser.cpp.http_parser"
     ./test_ip_voter --no-redirect
+    ./test_web_seed_policy --no-redirect
     ./test_web_seed_redirect --no-redirect \
         "$source_dir/test/test_web_seed_redirect.cpp.web_seed_proxy_request_target_uses_vetted_endpoint"
     ./test_web_seed_redirect --no-redirect \

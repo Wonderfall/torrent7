@@ -32,7 +32,7 @@ important relationships, not alternative supported patch subsets.
 | `boringssl-compatibility` | Adapts the TLS integration to BoringSSL. |
 | `boringssl-system-trust` | Uses macOS certificate trust and the constrained BoringSSL client policy. |
 | `outbound-only-dht` | Separates DHT peer discovery from advertising incoming peer reachability. |
-| [global-address-policy](libtorrent-2.1.1-global-address-policy.patch) | One session NAT64 discovery state for DHT, peers, and HTTP/UDP trackers; endpoint admission, generation invalidation, PEX/holepunch policy, and private resume-peer rejection. Builds on base network and outbound DHT changes. |
+| [global-address-policy](libtorrent-2.1.1-global-address-policy.patch) | One session NAT64 discovery state for DHT, peers, web seeds, and HTTP/UDP trackers; endpoint admission, generation invalidation, PEX/holepunch policy, and private resume-peer rejection. Web-seed DNS callbacks carry the session generation, cached endpoints are rechecked before connection, and pending IPv6 never disables a seed. Builds on base network and outbound DHT changes. |
 | `private-tracker-isolation` | Restricts private torrents to their authorized tracker generation; uses the shared peer policy. |
 | `tracker-policy-generation` | Rejects stale public and private tracker callbacks after tracker-list replacement. |
 | `current-dht-fallback` | Evaluates DHT fallback eligibility against current tracker state. |
