@@ -86,6 +86,8 @@ JSON and raw attachments. Requests carry an engine epoch, monotonic sequence,
 and replay identifier. The implementation bounds queue depth, nesting, value
 count, strings, raw torrent bytes, piece-map data, paged datasets, and response
 sizes before allocating or decoding deeply.
+Envelope UUIDs must occupy exactly 36 raw XPC bytes and error messages at most
+4 KiB; these lengths are checked before conversion to Swift strings.
 
 Errors after native mutation begins are treated as commit-ambiguous. The client
 does not retry or report a definite rejection when libtorrent may already have

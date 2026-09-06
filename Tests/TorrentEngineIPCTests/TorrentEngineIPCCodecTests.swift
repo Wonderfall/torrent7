@@ -220,6 +220,112 @@ struct TorrentEngineIPCEnvelopeTests {
         }
     }
 
+    @Test("Every XPC UUID field rejects wrong byte lengths before conversion", arguments: [
+        TorrentEngineIPCField.requestID,
+        TorrentEngineIPCField.controllerID,
+        TorrentEngineIPCField.operationID,
+        TorrentEngineIPCField.expectedEpoch,
+        TorrentEngineIPCField.engineEpoch,
+    ])
+    func UUIDByteBounds(field: String) throws {
+        for byteCount in [0, 35, 37, 1_048_576] {
+            let value = String(repeating: "a", count: byteCount)
+            let expected = TorrentEngineIPCError.invalidUUID(field: field)
+            if field != TorrentEngineIPCField.engineEpoch {
+                var request = try encodedRequest()
+                request[field] = value
+                expectIPCError(expected) {
+                    try TorrentEngineIPCEnvelopeCodec.inspectRequest(request)
+                }
+                expectIPCError(expected) {
+                    try TorrentEngineIPCEnvelopeCodec.decodeRequest(request, maximumPayloadBytes: 64)
+                }
+            }
+            var reply = try TorrentEngineIPCEnvelopeCodec.encode(
+                TorrentEngineIPCReply(header: makeHeader(), engineEpoch: UUID(), status: .success),
+                maximumPayloadBytes: 0
+            )
+            reply[field] = value
+            expectIPCError(expected) {
+                try TorrentEngineIPCEnvelopeCodec.decodeReply(reply, maximumPayloadBytes: 0)
+            }
+        }
+    }
+
+    @Test("Bounded UUID fields preserve lowercase input and optional epochs")
+    func boundedUUIDsPreserveAcceptedText() throws {
+        let id = UUID()
+        var dictionary = try encodedRequest()
+        for field in [TorrentEngineIPCField.requestID, TorrentEngineIPCField.controllerID,
+                      TorrentEngineIPCField.operationID, TorrentEngineIPCField.expectedEpoch] {
+            dictionary[field] = id.uuidString.lowercased()
+        }
+        let request = try TorrentEngineIPCEnvelopeCodec.decodeRequest(dictionary, maximumPayloadBytes: 64)
+        #expect(request.header.requestID == id)
+        #expect(request.header.controllerID == id)
+        #expect(request.header.operationID == id)
+        #expect(request.header.expectedEpoch == id)
+        dictionary.removeValue(forKey: TorrentEngineIPCField.expectedEpoch)
+        #expect(try TorrentEngineIPCEnvelopeCodec.inspectRequest(dictionary).header.expectedEpoch == nil)
+    }
+
+    @Test("Raw XPC error strings enforce UTF-8 byte bounds", arguments: [
+        (0, "a"), (4_096, "a"), (4_097, "a"), (1_048_576, "a"),
+        (2_048, "é"), (2_049, "é"),
+    ])
+    func decodedErrorByteBounds(count: Int, scalar: String) throws {
+        let message = String(repeating: scalar, count: count)
+        var dictionary = try TorrentEngineIPCEnvelopeCodec.encode(
+            TorrentEngineIPCReply(
+                header: makeHeader(), engineEpoch: UUID(), status: .failure, errorMessage: "failure"
+            ),
+            maximumPayloadBytes: 0
+        )
+        dictionary[TorrentEngineIPCField.errorMessage] = message
+        if message.isEmpty {
+            expectIPCError(.errorMessageEmpty) {
+                try TorrentEngineIPCEnvelopeCodec.decodeReply(dictionary, maximumPayloadBytes: 0)
+            }
+        } else if message.utf8.count > TorrentEngineIPCLimits.maximumErrorBytes {
+            expectIPCError(.errorMessageTooLarge(
+                actual: message.utf8.count, maximum: TorrentEngineIPCLimits.maximumErrorBytes
+            )) {
+                try TorrentEngineIPCEnvelopeCodec.decodeReply(dictionary, maximumPayloadBytes: 0)
+            }
+        } else {
+            let reply = try TorrentEngineIPCEnvelopeCodec.decodeReply(dictionary, maximumPayloadBytes: 0)
+            #expect(reply.errorMessage == message)
+        }
+    }
+
+    @Test("Oversized XPC strings are rejected before UTF-8 repair expands their bytes")
+    func rejectsRawStringBeforeConversion() throws {
+        let byteCount = TorrentEngineIPCLimits.maximumErrorBytes + 1
+        let bytes = [CChar](repeating: -1, count: byteCount) + [0]
+        // SAFETY: The initialized array is NUL-terminated and remains borrowed until
+        // xpc_string_create copies its bytes into an owned XPC object.
+        let object = unsafe bytes.withUnsafeBufferPointer { buffer in
+            guard let base = buffer.baseAddress else {
+                preconditionFailure("The terminated fixture must be nonempty")
+            }
+            return unsafe xpc_string_create(base)
+        }
+        var dictionary = try TorrentEngineIPCEnvelopeCodec.encode(
+            TorrentEngineIPCReply(
+                header: makeHeader(), engineEpoch: UUID(), status: .failure, errorMessage: "failure"
+            ),
+            maximumPayloadBytes: 0
+        )
+        dictionary[TorrentEngineIPCField.errorMessage] = object
+        // Swift's XPC conversion replaces each invalid byte with a three-byte U+FFFD.
+        // Reporting the raw size, rather than that expanded size, proves the order.
+        expectIPCError(.errorMessageTooLarge(
+            actual: byteCount, maximum: TorrentEngineIPCLimits.maximumErrorBytes
+        )) {
+            try TorrentEngineIPCEnvelopeCodec.decodeReply(dictionary, maximumPayloadBytes: 0)
+        }
+    }
+
     @Test("Payload bounds are enforced on encode and decode")
     func payloadBounds() throws {
         let request = TorrentEngineIPCRequest(

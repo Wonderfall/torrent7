@@ -267,10 +267,7 @@ package enum TorrentEngineIPCEnvelopeCodec {
         } else {
             failureCode = nil
         }
-        let errorMessage = try optionalString(
-            TorrentEngineIPCField.errorMessage,
-            in: dictionary
-        )
+        let errorMessage = try optionalErrorMessage(in: dictionary)
         try validateReplyError(
             status: status,
             failureCode: failureCode,
@@ -471,7 +468,8 @@ package enum TorrentEngineIPCEnvelopeCodec {
 
     private static func requiredString(
         _ field: String,
-        in dictionary: XPCDictionary
+        in dictionary: XPCDictionary,
+        validateByteCount: (Int) throws -> Void
     ) throws -> String {
         guard dictionary.keys.contains(field) else {
             throw TorrentEngineIPCError.missingField(field)
@@ -480,28 +478,35 @@ package enum TorrentEngineIPCEnvelopeCodec {
         // string until Swift copies it; bounds/alignment: no raw buffer is exposed;
         // synchronization: decoding does not mutate the dictionary; safe alternative:
         // checking an XPC value's concrete type requires the unsafe raw-object subscript.
-        guard unsafe dictionary[field, as: XPC_TYPE_STRING] != nil,
-              let value = dictionary[field, as: String.self] else {
+        guard let object = unsafe dictionary[field, as: XPC_TYPE_STRING] else {
+            throw TorrentEngineIPCError.wrongFieldType(field: field, expected: "string")
+        }
+        try validateByteCount(xpc_string_get_length(object))
+        guard let value = dictionary[field, as: String.self] else {
             throw TorrentEngineIPCError.wrongFieldType(field: field, expected: "string")
         }
         return value
     }
 
-    private static func optionalString(
-        _ field: String,
+    private static func optionalErrorMessage(
         in dictionary: XPCDictionary
     ) throws -> String? {
+        let field = TorrentEngineIPCField.errorMessage
         guard dictionary.keys.contains(field) else {
             return nil
         }
-        return try requiredString(field, in: dictionary)
+        return try requiredString(field, in: dictionary, validateByteCount: validateErrorByteCount)
     }
 
     private static func requiredUUID(
         _ field: String,
         in dictionary: XPCDictionary
     ) throws -> UUID {
-        let value = try requiredString(field, in: dictionary)
+        let value = try requiredString(field, in: dictionary) { byteCount in
+            guard byteCount == 36 else {
+                throw TorrentEngineIPCError.invalidUUID(field: field)
+            }
+        }
         return try parseUUID(value, field: field)
     }
 
@@ -509,10 +514,10 @@ package enum TorrentEngineIPCEnvelopeCodec {
         _ field: String,
         in dictionary: XPCDictionary
     ) throws -> UUID? {
-        guard let value = try optionalString(field, in: dictionary) else {
+        guard dictionary.keys.contains(field) else {
             return nil
         }
-        return try parseUUID(value, field: field)
+        return try requiredUUID(field, in: dictionary)
     }
 
     private static func parseUUID(_ value: String, field: String) throws -> UUID {
@@ -545,16 +550,19 @@ package enum TorrentEngineIPCEnvelopeCodec {
             guard !message.isEmpty else {
                 throw TorrentEngineIPCError.errorMessageEmpty
             }
+            try validateErrorByteCount(message.utf8.count)
             guard !message.contains("\0") else {
                 throw TorrentEngineIPCError.errorMessageContainsNull
             }
-            let byteCount = message.utf8.count
-            guard byteCount <= TorrentEngineIPCLimits.maximumErrorBytes else {
-                throw TorrentEngineIPCError.errorMessageTooLarge(
-                    actual: byteCount,
-                    maximum: TorrentEngineIPCLimits.maximumErrorBytes
-                )
-            }
+        }
+    }
+
+    private static func validateErrorByteCount(_ byteCount: Int) throws {
+        guard byteCount <= TorrentEngineIPCLimits.maximumErrorBytes else {
+            throw TorrentEngineIPCError.errorMessageTooLarge(
+                actual: byteCount,
+                maximum: TorrentEngineIPCLimits.maximumErrorBytes
+            )
         }
     }
 }
