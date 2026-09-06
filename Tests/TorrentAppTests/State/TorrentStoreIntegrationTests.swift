@@ -994,6 +994,68 @@ struct TorrentStoreIntegrationTests {
         }
     }
 
+    @Test(
+        "Failed and cancelled magnet runtime restoration stays paused until retry succeeds",
+        arguments: MagnetRuntimeRestoreFailure.allCases
+    )
+    private func magnetRuntimeRestorationFailsClosed(
+        failure: MagnetRuntimeRestoreFailure
+    ) async throws {
+        try await withKnownTorrentHarness { harness, downloadFolder in
+            let fixture = try magnetPromotionFixture()
+            await configureMetadataReadyMagnet(harness, fixture: fixture)
+            let replacementPolicy = try await harness.engine.sourcePolicy(
+                id: fixture.torrentID
+            )
+            var savedPolicy = replacementPolicy
+            savedPolicy.isDHTEnabled = false
+            savedPolicy.isPeerExchangeEnabled = false
+            savedPolicy.isLocalServiceDiscoveryEnabled = false
+            await harness.engine.setSourcePolicy(savedPolicy)
+            await harness.engine.setAddedTorrentFileSourcePolicy(replacementPolicy)
+            let savedOptions = TorrentOptions(
+                downloadRateLimitKBps: 128,
+                uploadRateLimitKBps: 64,
+                uploadSlotLimit: 6,
+                connectionLimit: 40
+            )
+            await harness.engine.setTorrentOptions(savedOptions)
+            switch failure {
+            case .options:
+                await harness.engine.setTorrentOptionsUpdateError(FakeBookmarkError())
+            case .discovery:
+                await harness.engine.setSourcePolicyUpdateError(FakeBookmarkError())
+            case .cancellation:
+                await harness.engine.setSourcePolicyUpdateError(CancellationError())
+            }
+
+            #expect(harness.store.addMagnet(
+                fixture.magnet,
+                downloadFolder: downloadFolder,
+                setsDownloadFolderAsDefault: false,
+                startsPaused: false
+            ))
+            await harness.store.saveAll()
+
+            let added = try #require(await harness.engine.addedTorrentFiles.first)
+            #expect(added.startsPaused)
+            #expect(await harness.engine.resumedIDs.isEmpty)
+            let journal = try #require(harness.storageClaimJournal)
+            #expect(await journal.allPromotions().first?.state == .outcomeUnknown)
+
+            await harness.engine.setTorrentOptionsUpdateError(nil)
+            await harness.engine.setSourcePolicyUpdateError(nil)
+            await harness.store.refreshNow()
+            await harness.store.saveAll()
+
+            #expect(await harness.engine.addedTorrentFiles.count == 1)
+            #expect(await harness.engine.resumedIDs == [fixture.torrentID])
+            #expect(await harness.engine.resumedSourcePolicies == [savedPolicy])
+            #expect(try await harness.engine.torrentOptions(id: fixture.torrentID) == savedOptions)
+            #expect(await journal.allPromotions().isEmpty)
+        }
+    }
+
     @Test("Magnet conflicts wait without payload access and can download a separate copy")
     func magnetConflictCanDownloadSeparateCopy() async throws {
         try await withKnownTorrentHarness { harness, downloadFolder in
@@ -3424,6 +3486,12 @@ private struct MagnetPromotionFixture {
     let torrentID: String
     let magnet: String
     let exactInfoDictionary: Data
+}
+
+private enum MagnetRuntimeRestoreFailure: CaseIterable, Sendable {
+    case options
+    case discovery
+    case cancellation
 }
 
 private func magnetPromotionFixture() throws -> MagnetPromotionFixture {

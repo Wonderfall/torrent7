@@ -337,6 +337,10 @@ priorities, options, source policy, and validated metadata. The journal records
 awaiting-metadata, metadata-ready, promoting, and outcome-unknown states so a
 crash does not silently refetch or guess the result.
 
+The replacement starts manually paused. Saved transfer limits and discovery
+restrictions are restored before automatic management is enabled; a failed or
+cancelled restoration leaves it paused for a later retry.
+
 After metadata validation and before broker-backed re-add, the helper persists
 the exact info bytes with an explicit staged-metadata marker and the intended
 file priorities. Restore revalidates the metadata through Swift, retains the

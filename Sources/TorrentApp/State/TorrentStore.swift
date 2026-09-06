@@ -2859,7 +2859,9 @@ final class TorrentStore {
                 data: torrentData,
                 folderLease: folderLease,
                 filePriorities: activation.runtime.filePriorities,
-                startsPaused: activation.runtime.wasPaused,
+                // The replacement must not become auto-managed until its
+                // saved limits and discovery policy have been restored.
+                startsPaused: true,
                 queuePriority: activation.runtime.options.queuePriority,
                 enablePeerExchange:
                     activation.runtime.sourcePolicy.isPeerExchangeEnabled,

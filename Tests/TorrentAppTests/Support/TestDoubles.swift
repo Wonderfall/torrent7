@@ -429,6 +429,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private(set) var pauseAppliedDHTValues = [Bool?]()
     private(set) var pauseNetworkBlockedValues = [Bool]()
     private(set) var resumedIDs = [String]()
+    private(set) var resumedSourcePolicies = [TorrentSourcePolicy]()
     private(set) var removedIDs = [String]()
     var removeError: Error?
     var removeOutcome = TorrentRemovalOutcome.removed
@@ -441,6 +442,8 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private(set) var fileBatchRequests = [(id: String, revision: UInt64?)]()
     private(set) var pieceMapBatchRequests = [(id: String, revision: UInt64?)]()
     private(set) var sourcePolicyUpdates = [(id: String, mutation: TorrentSourcePolicyMutation)]()
+    private var sourcePolicyUpdateError: Error?
+    private var addedTorrentFileSourcePolicy: TorrentSourcePolicy?
     private(set) var torrentOptionsUpdates = [(id: String, options: TorrentOptions)]()
     private var torrentOptionsUpdateError: Error?
     private(set) var filePriorityUpdates = [(id: String, fileIndex: Int32, priority: TorrentFilePriority)]()
@@ -521,6 +524,14 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func setSourcePolicy(_ policy: TorrentSourcePolicy) {
         sourcePolicyValue = policy
+    }
+
+    func setSourcePolicyUpdateError(_ error: Error?) {
+        sourcePolicyUpdateError = error
+    }
+
+    func setAddedTorrentFileSourcePolicy(_ policy: TorrentSourcePolicy) {
+        addedTorrentFileSourcePolicy = policy
     }
 
     func setTorrentOptions(_ options: TorrentOptions) {
@@ -869,6 +880,9 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         if let addTorrentFileError {
             throw addTorrentFileError
         }
+        if let addedTorrentFileSourcePolicy {
+            sourcePolicyValue = addedTorrentFileSourcePolicy
+        }
         return nextAddedTorrentFileID
     }
 
@@ -884,6 +898,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func resume(id: String) async throws {
         resumedIDs.append(id)
+        resumedSourcePolicies.append(sourcePolicyValue)
     }
 
     func reannounce(id: String) async throws {}
@@ -1055,6 +1070,9 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func setSourcePolicy(id: String, mutation: TorrentSourcePolicyMutation) async throws {
         sourcePolicyUpdates.append((id, mutation))
+        if let sourcePolicyUpdateError {
+            throw sourcePolicyUpdateError
+        }
         switch mutation {
         case .boolean(let field, let enabled):
             sourcePolicyValue[field] = enabled
