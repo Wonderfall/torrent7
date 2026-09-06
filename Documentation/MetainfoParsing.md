@@ -58,7 +58,8 @@ Validation followed by passing the same bytes to libtorrent is not a cutover.
   and positive peer-local IDs must be unique bytes. Client version text is valid
   UTF-8 and at most 256 bytes. Metadata size, listen port, request queue,
   completion age, external address, and upload-only values have explicit typed
-  bounds.
+  bounds. Completion age `-1` means unknown and becomes an absent typed age;
+  other negative ages are rejected without applying any part of the update.
 - BEP 9 metadata messages consist of one unordered-unique control dictionary followed
   by an uninterpreted binary suffix. Request (`0`) and reject (`2`) messages
   carry no suffix. Data (`1`) requires a positive bounded total size and a block

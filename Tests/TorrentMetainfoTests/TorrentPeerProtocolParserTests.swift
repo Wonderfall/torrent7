@@ -6,10 +6,11 @@ import Testing
 struct TorrentPeerProtocolParserTests {
     private let parser = TorrentPeerProtocolParser()
 
-    @Test("Extension handshake returns bounded typed additive fields")
-    func parsesExtensionHandshake() throws {
+    @Test("Extension handshake preserves fields with known or unknown completion age",
+          arguments: [Int32(-1), 0, 9, .max])
+    func parsesExtensionHandshake(completionAge: Int32) throws {
         var message = Data(
-            "d12:complete_agoi9e1:md11:lt_donthavei7e11:upload_onlyi3e12:ut_holepunchi4e11:ut_metadatai2e6:ut_pexi1ee13:metadata_sizei1234e1:pi6881e4:reqqi250e11:upload_onlyi1e1:v9:Torrent 76:yourip4:".utf8
+            "d12:complete_agoi\(completionAge)e1:md11:lt_donthavei7e11:upload_onlyi3e12:ut_holepunchi4e11:ut_metadatai2e6:ut_pexi1ee13:metadata_sizei1234e1:pi6881e4:reqqi250e11:upload_onlyi1e1:v9:Torrent 76:yourip4:".utf8
         )
         message.append(contentsOf: [203, 0, 113, 8])
         message.append(UInt8(ascii: "e"))
@@ -23,7 +24,7 @@ struct TorrentPeerProtocolParserTests {
         #expect(update.dontHaveID == 7)
         #expect(update.metadataSize == 1_234)
         #expect(update.listenPort == 6_881)
-        #expect(update.lastSeenComplete == 9)
+        #expect(update.lastSeenComplete == (completionAge == -1 ? nil : completionAge))
         #expect(update.requestQueueLimit == 250)
         #expect(update.clientVersionUTF8 == Data("Torrent 7".utf8))
         #expect(update.externalAddress == TorrentPeerAddress(
@@ -32,6 +33,17 @@ struct TorrentPeerProtocolParserTests {
             low: 0xcb00_7108
         ))
         #expect(update.uploadOnly == true)
+    }
+
+    @Test("Only minus one denotes an unknown completion age", arguments: [
+        "i-2e", "i-9223372036854775808e", "i2147483648e", "2:-1",
+    ])
+    func rejectsInvalidCompletionAge(encodedAge: String) {
+        #expect(throws: TorrentPeerProtocolError.invalidField) {
+            _ = try parser.parseExtensionHandshake(
+                Data("d12:complete_ago\(encodedAge)1:md11:ut_metadatai2eee".utf8)
+            )
+        }
     }
 
     @Test("Extension mapping omissions remain absent and zero disables")

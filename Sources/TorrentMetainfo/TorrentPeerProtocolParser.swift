@@ -168,12 +168,14 @@ package struct TorrentPeerProtocolParser: Sendable {
             document: document,
             range: 1...Int64(UInt16.max)
         )
+        // Libtorrent sends -1 when completion history is unknown. Keep the
+        // typed age absent in that case while retaining the rest of the update.
         let lastSeenComplete = try boundedInt32(
             named: "complete_ago",
             in: root,
             document: document,
-            range: 0...Int64(Int32.max)
-        )
+            range: -1...Int64(Int32.max)
+        ).flatMap { $0 == -1 ? nil : $0 }
         let requestQueueValue = try boundedInt32(
             named: "reqq",
             in: root,

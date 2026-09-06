@@ -12,10 +12,10 @@ struct TorrentPeerProtocolBridgeTests {
     // synchronous callback; bounds/alignment: nonempty bytes bind between alignment-1 types
     // and the exact output capacity is supplied; synchronization: locals are unshared;
     // safe alternative: callback behavior must be tested through its C ABI.
-    @Test("Extension handshake callback fills only present typed fields")
-    func importsExtensionHandshake() {
+    @Test("Extension handshake callback fills only present typed fields", arguments: [Int32(-1), 0, 9, .max])
+    func importsExtensionHandshake(completionAge: Int32) {
         var message = Data(
-            "d1:md11:lt_donthavei7e11:upload_onlyi3e12:ut_holepunchi4e11:ut_metadatai2e6:ut_pexi1ee13:metadata_sizei1234e1:pi6881e4:reqqi250e11:upload_onlyi1e1:v9:Torrent 76:yourip4:".utf8
+            "d12:complete_agoi\(completionAge)e1:md11:lt_donthavei7e11:upload_onlyi3e12:ut_holepunchi4e11:ut_metadatai2e6:ut_pexi1ee13:metadata_sizei1234e1:pi6881e4:reqqi250e11:upload_onlyi1e1:v9:Torrent 76:yourip4:".utf8
         )
         message.append(contentsOf: [203, 0, 113, 8])
         message.append(UInt8(ascii: "e"))
@@ -49,6 +49,7 @@ struct TorrentPeerProtocolBridgeTests {
             #expect(result.address_high == 0)
             #expect(result.address_low == 0xcb00_7108)
             #expect(result.upload_only == 1)
+            #expect(result.last_seen_complete == (completionAge == -1 ? 0 : completionAge))
             #expect(result.present_fields == UInt32(
                 TTORRENT_HANDSHAKE_HAS_METADATA_SIZE
                     | TTORRENT_HANDSHAKE_HAS_LISTEN_PORT
@@ -56,6 +57,7 @@ struct TorrentPeerProtocolBridgeTests {
                     | TTORRENT_HANDSHAKE_HAS_CLIENT_VERSION
                     | TTORRENT_HANDSHAKE_HAS_EXTERNAL_ADDRESS
                     | TTORRENT_HANDSHAKE_HAS_UPLOAD_ONLY
+                    | (completionAge == -1 ? 0 : TTORRENT_HANDSHAKE_HAS_LAST_SEEN_COMPLETE)
             ))
             #expect(result.client_version_size == 9)
             #expect(Data(clientVersion.prefix(9)) == Data("Torrent 7".utf8))
