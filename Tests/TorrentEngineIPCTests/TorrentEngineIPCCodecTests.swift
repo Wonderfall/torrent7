@@ -7,6 +7,26 @@ import XPC
 
 private let testJSONLimits = TorrentEngineIPCLimits.maximumJSONLimits
 
+private enum UnknownEnvelopeFields: CaseIterable, Sendable {
+    case oversizedName
+    case excessiveCount
+    case substitutedName
+
+    func insert(into dictionary: inout XPCDictionary) {
+        switch self {
+        case .oversizedName:
+            dictionary[String(repeating: "x", count: 8 * 1_024 * 1_024)] = true
+        case .excessiveCount:
+            for index in 0..<1_000 {
+                dictionary["unknown-\(index)"] = true
+            }
+        case .substitutedName:
+            dictionary.removeValue(forKey: TorrentEngineIPCField.version)
+            dictionary["ambientAuthority"] = true
+        }
+    }
+}
+
 @Suite("Torrent engine IPC envelopes")
 struct TorrentEngineIPCEnvelopeTests {
     @Test("Request and reply envelopes round trip")
@@ -135,11 +155,43 @@ struct TorrentEngineIPCEnvelopeTests {
         var dictionary = try encodedRequest()
         dictionary["ambientAuthority"] = true
 
-        expectIPCError(.unexpectedField("ambientAuthority")) {
+        expectIPCError(.unknownFields) {
             try TorrentEngineIPCEnvelopeCodec.decodeRequest(
                 dictionary,
                 maximumPayloadBytes: 64
             )
+        }
+    }
+
+    @Test("Requests and hints reject hostile field sets before admission",
+          arguments: [TorrentEngineIPCOperation.poll, .changeHint], UnknownEnvelopeFields.allCases)
+    fileprivate func hostileRequestFields(
+        operation: TorrentEngineIPCOperation,
+        fields: UnknownEnvelopeFields
+    ) throws {
+        let header = TorrentEngineIPCHeader(
+            requestID: UUID(), controllerID: UUID(), sequence: 1,
+            operation: operation, operationID: UUID(), expectedEpoch: nil
+        )
+        var dictionary = try TorrentEngineIPCEnvelopeCodec.encode(
+            TorrentEngineIPCRequest(header: header), maximumPayloadBytes: 0
+        )
+        fields.insert(into: &dictionary)
+        expectIPCError(.unknownFields) {
+            try TorrentEngineIPCEnvelopeCodec.inspectRequest(dictionary)
+        }
+    }
+
+    @Test("Replies reject hostile field sets without retaining unknown names",
+          arguments: UnknownEnvelopeFields.allCases)
+    fileprivate func hostileReplyFields(fields: UnknownEnvelopeFields) throws {
+        var dictionary = try TorrentEngineIPCEnvelopeCodec.encode(
+            TorrentEngineIPCReply(header: makeHeader(), engineEpoch: UUID(), status: .success),
+            maximumPayloadBytes: 0
+        )
+        fields.insert(into: &dictionary)
+        expectIPCError(.unknownFields) {
+            try TorrentEngineIPCEnvelopeCodec.decodeReply(dictionary, maximumPayloadBytes: 0)
         }
     }
 
@@ -413,7 +465,7 @@ struct TorrentEngineIPCEnvelopeTests {
             field: TorrentEngineIPCField.attachment
         )
 
-        expectIPCError(.unexpectedField(TorrentEngineIPCField.attachment)) {
+        expectIPCError(.unknownFields) {
             try TorrentEngineIPCEnvelopeCodec.decodeReply(
                 dictionary,
                 maximumPayloadBytes: 0

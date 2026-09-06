@@ -143,8 +143,9 @@ package enum TorrentEngineIPCEnvelopeCodec {
             in: dictionary,
             field: TorrentEngineIPCField.attachment
         )
-        let endpointFieldIsPresent = dictionary.keys.contains(
-            TorrentEngineIPCField.brokerEndpoint
+        let endpointFieldIsPresent = TorrentEngineIPCXPCValues.containsValue(
+            in: dictionary,
+            field: TorrentEngineIPCField.brokerEndpoint
         )
         let brokerEndpoint = dictionary[
             TorrentEngineIPCField.brokerEndpoint,
@@ -163,9 +164,13 @@ package enum TorrentEngineIPCEnvelopeCodec {
         )
         return TorrentEngineIPCRequestMetadata(
             header: header,
-            hasPayload: dictionary.keys.contains(TorrentEngineIPCField.payload),
+            hasPayload: TorrentEngineIPCXPCValues.containsValue(
+                in: dictionary, field: TorrentEngineIPCField.payload
+            ),
             payloadByteCount: payloadByteCount,
-            hasAttachment: dictionary.keys.contains(TorrentEngineIPCField.attachment),
+            hasAttachment: TorrentEngineIPCXPCValues.containsValue(
+                in: dictionary, field: TorrentEngineIPCField.attachment
+            ),
             attachmentByteCount: attachmentByteCount,
             brokerEndpoint: brokerEndpoint,
             totalByteCount: totalByteCount
@@ -434,8 +439,13 @@ package enum TorrentEngineIPCEnvelopeCodec {
         in dictionary: XPCDictionary,
         allowed: Set<String>
     ) throws {
-        if let field = dictionary.keys.filter({ !allowed.contains($0) }).sorted().first {
-            throw TorrentEngineIPCError.unexpectedField(field)
+        // Only look up schema-owned names. Enumerating unknown keys would copy
+        // unbounded peer-controlled strings before the message is admitted.
+        guard dictionary.count <= allowed.count,
+              allowed.count(where: {
+                  TorrentEngineIPCXPCValues.containsValue(in: dictionary, field: $0)
+              }) == dictionary.count else {
+            throw TorrentEngineIPCError.unknownFields
         }
     }
 
@@ -443,7 +453,7 @@ package enum TorrentEngineIPCEnvelopeCodec {
         _ field: String,
         in dictionary: XPCDictionary
     ) throws -> UInt64 {
-        guard dictionary.keys.contains(field) else {
+        guard TorrentEngineIPCXPCValues.containsValue(in: dictionary, field: field) else {
             throw TorrentEngineIPCError.missingField(field)
         }
         // SAFETY: Ownership/lifetime: the immutable dictionary retains the borrowed XPC
@@ -460,7 +470,7 @@ package enum TorrentEngineIPCEnvelopeCodec {
         _ field: String,
         in dictionary: XPCDictionary
     ) throws -> UInt64? {
-        guard dictionary.keys.contains(field) else {
+        guard TorrentEngineIPCXPCValues.containsValue(in: dictionary, field: field) else {
             return nil
         }
         return try requiredUInt64(field, in: dictionary)
@@ -471,7 +481,7 @@ package enum TorrentEngineIPCEnvelopeCodec {
         in dictionary: XPCDictionary,
         validateByteCount: (Int) throws -> Void
     ) throws -> String {
-        guard dictionary.keys.contains(field) else {
+        guard TorrentEngineIPCXPCValues.containsValue(in: dictionary, field: field) else {
             throw TorrentEngineIPCError.missingField(field)
         }
         // SAFETY: Ownership/lifetime: the immutable dictionary retains the checked XPC
@@ -492,7 +502,7 @@ package enum TorrentEngineIPCEnvelopeCodec {
         in dictionary: XPCDictionary
     ) throws -> String? {
         let field = TorrentEngineIPCField.errorMessage
-        guard dictionary.keys.contains(field) else {
+        guard TorrentEngineIPCXPCValues.containsValue(in: dictionary, field: field) else {
             return nil
         }
         return try requiredString(field, in: dictionary, validateByteCount: validateErrorByteCount)
@@ -514,7 +524,7 @@ package enum TorrentEngineIPCEnvelopeCodec {
         _ field: String,
         in dictionary: XPCDictionary
     ) throws -> UUID? {
-        guard dictionary.keys.contains(field) else {
+        guard TorrentEngineIPCXPCValues.containsValue(in: dictionary, field: field) else {
             return nil
         }
         return try requiredUUID(field, in: dictionary)
@@ -568,11 +578,22 @@ package enum TorrentEngineIPCEnvelopeCodec {
 }
 
 package enum TorrentEngineIPCXPCValues {
+    // SAFETY: The immutable dictionary owns the borrowed XPC value throughout
+    // this synchronous lookup. Swift pins the NUL-terminated schema key for the
+    // call; the pointer and value do not escape and no peer-owned key is copied.
+    static func containsValue(in dictionary: XPCDictionary, field: String) -> Bool {
+        dictionary.withUnsafeUnderlyingDictionary { rawDictionary in
+            unsafe field.withCString { pointer in
+                unsafe xpc_dictionary_get_value(rawDictionary, pointer) != nil
+            }
+        }
+    }
+
     package static func payloadByteCount(
         in dictionary: XPCDictionary,
         field: String = TorrentEngineIPCField.payload
     ) throws -> Int {
-        guard dictionary.keys.contains(field) else {
+        guard containsValue(in: dictionary, field: field) else {
             return 0
         }
         // SAFETY: Ownership/lifetime: the dictionary retains the borrowed XPC data object
@@ -617,7 +638,7 @@ package enum TorrentEngineIPCXPCValues {
         field: String = TorrentEngineIPCField.payload
     ) throws -> Data? {
         try TorrentEngineIPCPayloadBounds.validateMaximum(maximumBytes)
-        guard dictionary.keys.contains(field) else {
+        guard containsValue(in: dictionary, field: field) else {
             return nil
         }
         guard let object = unsafe dictionary[field, as: XPC_TYPE_DATA] else {

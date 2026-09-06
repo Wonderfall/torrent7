@@ -1,6 +1,7 @@
 import Foundation
 import TorrentEngineIPC
 import TorrentEngineModel
+import XPC
 
 // SAFETY: Ownership/lifetime: libFuzzer owns the input buffer for the synchronous export
 // call and Data copies it before returning; bounds/alignment: byteCount must describe the
@@ -50,6 +51,47 @@ public func torrentEngineIPCJSONPreflightFuzzOneInput(
             limits: TorrentEngineIPCLimits.maximumJSONLimits
         )
         checkQueueRestoration(data)
+        checkEnvelopeKeys(data)
+    }
+}
+
+private func checkEnvelopeKeys(_ data: Data) {
+    let identifier = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1))
+    let header = TorrentEngineIPCHeader(
+        requestID: identifier, controllerID: identifier, sequence: 1,
+        operation: .changeHint, operationID: identifier, expectedEpoch: nil
+    )
+    do {
+        var request = try TorrentEngineIPCEnvelopeCodec.encode(
+            TorrentEngineIPCRequest(header: header), maximumPayloadBytes: 0
+        )
+        var reply = try TorrentEngineIPCEnvelopeCodec.encode(
+            TorrentEngineIPCReply(header: header, engineEpoch: identifier, status: .success),
+            maximumPayloadBytes: 0
+        )
+        // The prefix keeps even NUL-containing or replacement-decoded names
+        // outside the schema. Vary both name length and dictionary cardinality.
+        let key = "unknown-" + String(decoding: data, as: UTF8.self)
+        request[key] = true
+        reply[key] = true
+        for index in 0..<Int(data.first ?? 0) {
+            request["unknown-\(index)"] = true
+            reply["unknown-\(index)"] = true
+        }
+        do {
+            _ = try TorrentEngineIPCEnvelopeCodec.inspectRequest(request)
+            preconditionFailure("An unknown request field was accepted.")
+        } catch {
+            precondition(error as? TorrentEngineIPCError == .unknownFields)
+        }
+        do {
+            _ = try TorrentEngineIPCEnvelopeCodec.decodeReply(reply, maximumPayloadBytes: 0)
+            preconditionFailure("An unknown reply field was accepted.")
+        } catch {
+            precondition(error as? TorrentEngineIPCError == .unknownFields)
+        }
+    } catch {
+        preconditionFailure("A canonical envelope could not be encoded.")
     }
 }
 

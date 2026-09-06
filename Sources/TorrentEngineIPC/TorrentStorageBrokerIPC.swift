@@ -345,8 +345,8 @@ package enum TorrentStorageBrokerIPCCodec {
             return .failure(requestID: requestID, code: failure, message: message)
         }
         guard status == 0,
-              !containsValue(dictionary, forKey: Field.failure),
-              !containsValue(dictionary, forKey: Field.message) else {
+              !TorrentEngineIPCXPCValues.containsValue(in: dictionary, field: Field.failure),
+              !TorrentEngineIPCXPCValues.containsValue(in: dictionary, field: Field.message) else {
             throw TorrentStorageBrokerIPCError.malformedMessage
         }
         let expectedKeys: Set<String>
@@ -542,7 +542,9 @@ package enum TorrentStorageBrokerIPCCodec {
         _ expected: Set<String>
     ) throws {
         guard dictionary.count == expected.count,
-              expected.allSatisfy({ containsValue(dictionary, forKey: $0) }) else {
+              expected.allSatisfy({
+                  TorrentEngineIPCXPCValues.containsValue(in: dictionary, field: $0)
+              }) else {
             throw TorrentStorageBrokerIPCError.malformedMessage
         }
     }
@@ -595,21 +597,6 @@ package enum TorrentStorageBrokerIPCCodec {
             return nil
         }
         return unsafe String(validatingCString: pointer)
-    }
-
-    // SAFETY: Ownership/lifetime: the dictionary and String remain alive for both nested
-    // synchronous closures; bounds/alignment: withCString supplies a valid NUL-terminated
-    // byte sequence; synchronization: the immutable dictionary is only queried;
-    // safe alternative: XPCDictionary has no safe presence check that distinguishes null.
-    private static func containsValue(
-        _ dictionary: XPCDictionary,
-        forKey key: String
-    ) -> Bool {
-        dictionary.withUnsafeUnderlyingDictionary { rawDictionary in
-            unsafe key.withCString { pointer in
-                unsafe xpc_dictionary_get_value(rawDictionary, pointer) != nil
-            }
-        }
     }
 
     private static func boundedError(_ source: String) -> String {

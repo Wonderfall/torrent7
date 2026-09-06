@@ -316,6 +316,7 @@ package struct TorrentEngineIPCReply: Equatable, Sendable {
 }
 
 package enum TorrentEngineIPCError: Error, Equatable, Sendable {
+    case unknownFields
     case unexpectedField(String)
     case missingField(String)
     case wrongFieldType(field: String, expected: String)
