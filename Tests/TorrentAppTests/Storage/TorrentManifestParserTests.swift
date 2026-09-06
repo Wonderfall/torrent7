@@ -47,6 +47,46 @@ struct TorrentManifestParserTests {
         #expect(rootless.manifest.files[0].pathComponents == ["leaf.bin"])
     }
 
+    @Test("V2 single-file names retain the leaf bytes across equivalent hybrid layouts", arguments: [
+        ("A.bin", "a.bin"),
+        ("\u{e9}.bin", "e\u{301}.bin"),
+        ("e\u{301}.bin", "\u{e9}.bin"),
+    ], [false, true])
+    func singleFileNamesUseLeafBytes(names: (String, String), includesV1: Bool) throws {
+        let (wireName, leafName) = names
+        let info = Self.v2Info(name: wireName, path: leafName, size: 3, includesV1: includesV1)
+        let parsed = try TorrentManifestParser().parse(Self.torrent(info: info))
+        let bare = try TorrentMetainfoParser().parseInfoDictionary(info.encoded())
+
+        #expect(parsed.manifest.contentKind == .singleFile)
+        #expect(Data(parsed.manifest.name.utf8) == Data(leafName.utf8))
+        #expect(Data(parsed.infoCore.effectiveName.utf8) == Data(leafName.utf8))
+        #expect(Data(bare.infoCore.effectiveName.utf8) == Data(leafName.utf8))
+        #expect(parsed.infoCore.wireName.map { Data($0.utf8) } == Data(wireName.utf8))
+        #expect(Data(parsed.manifest.files[0].pathComponents[0].utf8) == Data(leafName.utf8))
+        #expect(parsed.manifest.files.filter(\.isPadding).count == (includesV1 ? 0 : 1))
+        #expect(parsed.rawInfoDictionary == info.encoded())
+        #expect(parsed.infoCore.v2InfoHash == Data(SHA256.hash(data: info.encoded())))
+        #expect(parsed.infoCore.v1InfoHash == (includesV1
+            ? Data(Insecure.SHA1.hash(data: info.encoded())) : nil))
+    }
+
+    @Test("A pure-v2 advisory name may differ from its leaf while hybrid paths must agree")
+    func distinguishesAdvisoryNamesFromHybridPaths() throws {
+        let info = Self.v2Info(name: "Display Name", path: "payload.bin", size: 16_384, includesV1: false)
+        let parsed = try TorrentManifestParser().parse(Self.torrent(info: info))
+        #expect(parsed.infoCore.wireName == "Display Name")
+        #expect(parsed.manifest.name == "payload.bin")
+        #expect(parsed.manifest.contentKind == .singleFile)
+        #expect(parsed.manifest.files[0].pathComponents == ["payload.bin"])
+
+        try expectManifestError(.inconsistentHybridLayout) {
+            _ = try TorrentManifestParser().parse(Self.torrent(info: Self.v2Info(
+                name: "Display Name", path: "payload.bin", size: 16_384, includesV1: true
+            )))
+        }
+    }
+
     @Test("Shared metainfo core retains exact hash-defining ranges")
     func retainsExactCoreRanges() throws {
         let v1Metadata = Self.v1SingleFile(name: "sample.bin", size: 5)

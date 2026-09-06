@@ -8,9 +8,16 @@ import TorrentStorageAuthority
 
 @Suite("Swift swarm metainfo lifecycle", .serialized)
 struct TorrentSwarmMetainfoLifecycleTests {
-    @Test("Layered v2 metadata survives the real Swift callback and native restart")
-    func layeredV2MetadataSurvivesRestart() async throws {
-        let fixture = layeredV2Torrent()
+    @Test("Layered v2 metadata and leaf names survive the real Swift callback and native restart", arguments: [
+        ("layered.bin", "layered.bin", false),
+        ("A.bin", "a.bin", false),
+        ("\u{e9}.bin", "e\u{301}.bin", false),
+        ("Display Name", "payload.bin", false),
+        ("A.bin", "a.bin", true),
+        ("e\u{301}.bin", "\u{e9}.bin", true),
+    ])
+    func layeredV2MetadataSurvivesRestart(wireName: String, leafName: String, includesV1: Bool) async throws {
+        let fixture = layeredV2Torrent(wireName: wireName, leafName: leafName, includesV1: includesV1)
         let stateDirectory = FileManager.default.temporaryDirectory
             .appending(
                 path: "TorrentSwarmMetainfoLifecycleTests-\(UUID().uuidString)",
@@ -41,6 +48,10 @@ struct TorrentSwarmMetainfoLifecycleTests {
         )
 
         #expect(try await engine.torrentMetadata(id: id) == fixture.info)
+        let added = try await engine.snapshots()
+        #expect(added.first.map { Data($0.name.utf8) } == Data(leafName.utf8))
+        let addedFiles = try #require(await engine.fileBatch(id: id, since: nil))
+        #expect(addedFiles.files.map { Data($0.path.utf8) } == [Data(leafName.utf8)])
         try await engine.saveAllChecked()
 
         // Restart discards the native client. Restoring this torrent requires
@@ -48,6 +59,9 @@ struct TorrentSwarmMetainfoLifecycleTests {
         try await engine.restart(enablePeerExchangePlugin: false)
         let restored = try await engine.snapshots()
         #expect(restored.map(\.id) == [id])
+        #expect(restored.first.map { Data($0.name.utf8) } == Data(leafName.utf8))
+        let restoredFiles = try #require(await engine.fileBatch(id: id, since: nil))
+        #expect(restoredFiles.files.map { Data($0.path.utf8) } == [Data(leafName.utf8)])
         #expect(try await engine.torrentMetadata(id: id) == fixture.info)
         try await engine.saveAllChecked()
         try await engine.shutdownSafely()
@@ -78,14 +92,14 @@ private struct LayeredV2TorrentFixture {
     let info: Data
 }
 
-private func layeredV2Torrent() -> LayeredV2TorrentFixture {
+private func layeredV2Torrent(wireName: String, leafName: String, includesV1: Bool) -> LayeredV2TorrentFixture {
     let firstPiece = Data(repeating: 0x11, count: SHA256.byteCount)
     let secondPiece = Data(repeating: 0x22, count: SHA256.byteCount)
     let pieceLayer = firstPiece + secondPiece
     let root = Data(SHA256.hash(data: pieceLayer))
-    let infoValue = SwarmLifecycleBencode.dictionary([
+    var fields: [(Data, SwarmLifecycleBencode)] = [
         swarmLifecycleKey("file tree", .dictionary([
-            swarmLifecycleKey("layered.bin", .dictionary([
+            swarmLifecycleKey(leafName, .dictionary([
                 (Data(), .dictionary([
                     swarmLifecycleKey("length", .integer(32 * 1_024)),
                     swarmLifecycleKey("pieces root", .bytes(root)),
@@ -93,9 +107,14 @@ private func layeredV2Torrent() -> LayeredV2TorrentFixture {
             ]))
         ])),
         swarmLifecycleKey("meta version", .integer(2)),
-        swarmLifecycleKey("name", .string("layered.bin")),
+        swarmLifecycleKey("name", .string(wireName)),
         swarmLifecycleKey("piece length", .integer(16 * 1_024)),
-    ])
+    ]
+    if includesV1 {
+        fields.append(swarmLifecycleKey("length", .integer(32 * 1_024)))
+        fields.append(swarmLifecycleKey("pieces", .bytes(Data(repeating: 0x33, count: 40))))
+    }
+    let infoValue = SwarmLifecycleBencode.dictionary(fields)
     let torrent = SwarmLifecycleBencode.dictionary([
         swarmLifecycleKey("info", infoValue),
         swarmLifecycleKey("piece layers", .dictionary([

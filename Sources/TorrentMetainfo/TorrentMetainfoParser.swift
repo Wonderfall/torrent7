@@ -401,7 +401,15 @@ package struct TorrentMetainfoParser: Sendable {
         }
 
         let name: String
-        if let parsedName {
+        if selected.contentKind == .singleFile {
+            // The selected leaf is authoritative for a single-file destination.
+            // Preserve its exact bytes across the manifest and native import;
+            // the original info.name remains in wireName and the hashed input.
+            guard let leafName = selected.files.first?.pathComponents.first else {
+                throw TorrentManifestError.invalidFilePath
+            }
+            name = leafName
+        } else if let parsedName {
             name = parsedName
         } else if hasV2, let v2Hash {
             name = "Torrent-" + Self.hex(v2Hash.prefix(6))
@@ -1266,11 +1274,6 @@ package struct TorrentMetainfoParser: Sendable {
         let isSingleFile = name != nil
             && realFileCount == 1
             && rawFiles[0].pathComponents.count == 1
-        if isSingleFile, let name,
-           normalizedComponent(name) != normalizedComponent(rawFiles[0].pathComponents[0]) {
-            throw TorrentManifestError.inconsistentHybridLayout
-        }
-
         var files = [UnindexedFile]()
         let doubledFileCount = rawFiles.count.multipliedReportingOverflow(by: 2)
         guard !doubledFileCount.overflow else {

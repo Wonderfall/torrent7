@@ -15,6 +15,10 @@ Validation followed by passing the same bytes to libtorrent is not a cutover.
 - Paths and human-readable fields used by Torrent7 must be valid UTF-8. Unsafe,
   ambiguous, duplicate, case-equivalent, normalization-equivalent, traversing,
   and symlink paths are rejected rather than sanitized.
+- A named v2 single-file layout uses the exact file-tree leaf bytes as its
+  effective filename. The advisory `info.name` and hash-defining bytes remain
+  unchanged. Hybrid paths must still agree under the existing case and Unicode
+  normalization checks; rootless v2 layouts retain their synthetic directory.
 - SSL torrents and mutable-torrent semantics are unsupported. Top-level DHT
   bootstrap nodes are ignored by product policy.
 - V2 piece layers may be wholly absent. When a piece-layer dictionary is

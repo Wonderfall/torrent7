@@ -612,7 +612,8 @@ private enum StorageManifestFuzzer {
         fuzzAssert(!parsed.rawInfoDictionary.isEmpty)
         fuzzAssert(core.infoDictionaryRange.range.upperBound <= metadata.count)
         fuzzAssert(Data(metadata[core.infoDictionaryRange.range]) == parsed.rawInfoDictionary)
-        fuzzAssert(core.effectiveName == manifest.name)
+        fuzzAssert(core.effectiveName.utf8.elementsEqual(manifest.name.utf8))
+        verifySingleFileName(core)
         fuzzAssert(core.pieceLength == manifest.pieceLength)
         fuzzAssert(core.v1InfoHash == manifest.infoHashes.v1)
         fuzzAssert(core.v2InfoHash == manifest.infoHashes.v2)
@@ -731,6 +732,7 @@ private enum SwarmInfoParserFuzzer {
         }
         let core = parsed.infoCore
         fuzzAssert(parsed.bytes == data)
+        verifySingleFileName(core)
         fuzzAssert(Data(parsed.infoDictionary) == data)
         fuzzAssert(core.infoDictionaryRange.range == data.indices)
         fuzzAssert(core.pieceLength > 0)
@@ -802,6 +804,17 @@ private enum SwarmInfoParserFuzzer {
             Darwin.abort()
         }
     }
+}
+
+private func verifySingleFileName(_ core: ValidatedInfoCore) {
+    guard core.contentKind == .singleFile else { return }
+    guard let file = core.files.first,
+          !file.isPadding,
+          file.pathComponents.count == 1,
+          let leafName = file.pathComponents.first else {
+        Darwin.abort()
+    }
+    fuzzAssert(core.effectiveName.utf8.elementsEqual(leafName.utf8))
 }
 
 private func equivalentInfoCore(
