@@ -4,6 +4,32 @@ import System
 import TorrentEngineModel
 import TorrentStorageAuthority
 
+private struct TorrentOwnedFileDescriptor: ~Copyable {
+    private var descriptor: Int32
+
+    init(taking descriptor: Int32) {
+        precondition(descriptor >= 0)
+        self.descriptor = descriptor
+    }
+
+    var rawValue: Int32 {
+        precondition(descriptor >= 0)
+        return descriptor
+    }
+
+    mutating func relinquish() -> Int32 {
+        let result = rawValue
+        descriptor = -1
+        return result
+    }
+
+    deinit {
+        if descriptor >= 0 {
+            _ = Darwin.close(descriptor)
+        }
+    }
+}
+
 package enum TorrentStoragePlanningError: LocalizedError, Equatable, Sendable {
     case unsafeParentDirectory
     case hiddenTopLevelName
@@ -1893,62 +1919,56 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         guard !components.isEmpty else {
             return topLevelDescriptor
         }
-        var current = Darwin.dup(topLevelDescriptor)
-        guard current >= 0 else {
+        let duplicated = Darwin.dup(topLevelDescriptor)
+        guard duplicated >= 0 else {
             throw TorrentStoragePlanningError.reservationFailed
         }
+        var current = TorrentOwnedFileDescriptor(taking: duplicated)
         var traversed = [String]()
-        do {
-            for component in components {
-                traversed.append(component)
-                let status = unsafe component.withCString { pointer in
-                    unsafe Darwin.mkdirat(current, pointer, mode_t(0o700))
-                }
-                if status == 0 {
-                    let next = try openDirectory(named: component, relativeTo: current)
-                    do {
-                        let identity = try validateDirectoryDescriptor(next)
-                        created.append(CreatedObject(
-                            components: [topLevelName] + traversed,
-                            identity: identity,
-                            isDirectory: true
-                        ))
-                        try setOwnershipTag(
-                            key: ownershipKey,
-                            claimID: claimID,
-                            claimGeneration: claimGeneration,
-                            relativePathComponents: [topLevelName] + traversed,
-                            identity: identity,
-                            isDirectory: true,
-                            descriptor: next
-                        )
-                        identities[traversed] = identity
-                    } catch {
-                        _ = Darwin.close(next)
-                        throw error
-                    }
-                    _ = Darwin.close(current)
-                    current = next
-                    continue
-                }
-                guard errno == EEXIST,
-                      let expected = identities[traversed] else {
-                    throw TorrentStoragePlanningError.filesystemObjectChanged
-                }
-                let next = try openDirectory(named: component, relativeTo: current)
-                let actual = try validateDirectoryDescriptor(next)
-                guard actual.refersToSameObject(as: expected) else {
-                    _ = Darwin.close(next)
-                    throw TorrentStoragePlanningError.filesystemObjectChanged
-                }
-                _ = Darwin.close(current)
-                current = next
+        for component in components {
+            traversed.append(component)
+            let status = unsafe component.withCString { pointer in
+                unsafe Darwin.mkdirat(current.rawValue, pointer, mode_t(0o700))
             }
-            return current
-        } catch {
-            _ = Darwin.close(current)
-            throw error
+            if status == 0 {
+                let next = TorrentOwnedFileDescriptor(taking: try openDirectory(
+                    named: component,
+                    relativeTo: current.rawValue
+                ))
+                let identity = try validateDirectoryDescriptor(next.rawValue)
+                created.append(CreatedObject(
+                    components: [topLevelName] + traversed,
+                    identity: identity,
+                    isDirectory: true
+                ))
+                try setOwnershipTag(
+                    key: ownershipKey,
+                    claimID: claimID,
+                    claimGeneration: claimGeneration,
+                    relativePathComponents: [topLevelName] + traversed,
+                    identity: identity,
+                    isDirectory: true,
+                    descriptor: next.rawValue
+                )
+                identities[traversed] = identity
+                current = consume next
+                continue
+            }
+            guard errno == EEXIST,
+                  let expected = identities[traversed] else {
+                throw TorrentStoragePlanningError.filesystemObjectChanged
+            }
+            let next = TorrentOwnedFileDescriptor(taking: try openDirectory(
+                named: component,
+                relativeTo: current.rawValue
+            ))
+            let actual = try validateDirectoryDescriptor(next.rawValue)
+            guard actual.refersToSameObject(as: expected) else {
+                throw TorrentStoragePlanningError.filesystemObjectChanged
+            }
+            current = consume next
         }
+        return current.relinquish()
     }
 
     private func inspectExistingPayload(
@@ -2024,52 +2044,44 @@ package struct TorrentStorageDestinationPlanner: Sendable {
               components.allSatisfy(TorrentPathComponentValidation.isSafe) else {
             throw TorrentStoragePlanningError.existingDataUnsafe
         }
-        var current = Darwin.dup(rootDescriptor)
-        guard current >= 0 else {
+        let duplicated = Darwin.dup(rootDescriptor)
+        guard duplicated >= 0 else {
             throw TorrentStoragePlanningError.existingDataUnavailable
         }
+        var current = TorrentOwnedFileDescriptor(taking: duplicated)
         var traversed = [String]()
-        do {
-            for component in components.dropLast() {
-                traversed.append(component)
-                let next: Int32
-                do {
-                    next = try openDirectory(
-                        named: component,
-                        relativeTo: current
-                    )
-                    let actual = try validateDirectoryDescriptor(next)
-                    if let expected = directoryIdentities[traversed] {
-                        guard actual.refersToSameObject(as: expected) else {
-                            throw TorrentStoragePlanningError.existingDataUnsafe
-                        }
-                    } else {
-                        directoryIdentities[traversed] = actual
+        for component in components.dropLast() {
+            traversed.append(component)
+            do {
+                let next = TorrentOwnedFileDescriptor(taking: try openDirectory(
+                    named: component,
+                    relativeTo: current.rawValue
+                ))
+                let actual = try validateDirectoryDescriptor(next.rawValue)
+                if let expected = directoryIdentities[traversed] {
+                    guard actual.refersToSameObject(as: expected) else {
+                        throw TorrentStoragePlanningError.existingDataUnsafe
                     }
-                } catch {
-                    throw TorrentStoragePlanningError.existingDataUnavailable
+                } else {
+                    directoryIdentities[traversed] = actual
                 }
-                _ = Darwin.close(current)
-                current = next
+                current = consume next
+            } catch {
+                throw TorrentStoragePlanningError.existingDataUnavailable
             }
-            guard let leaf = components.last else {
-                throw TorrentStoragePlanningError.existingDataUnsafe
-            }
-            let payload = try openImportedPayload(
-                named: leaf,
-                relativeTo: current
-            )
-            defer { _ = Darwin.close(payload) }
-            let identity = try validateImportedPayloadDescriptor(
-                payload,
-                maximumSize: maximumSize
-            )
-            _ = Darwin.close(current)
-            return identity
-        } catch {
-            _ = Darwin.close(current)
-            throw error
         }
+        guard let leaf = components.last else {
+            throw TorrentStoragePlanningError.existingDataUnsafe
+        }
+        let payload = try openImportedPayload(
+            named: leaf,
+            relativeTo: current.rawValue
+        )
+        defer { _ = Darwin.close(payload) }
+        return try validateImportedPayloadDescriptor(
+            payload,
+            maximumSize: maximumSize
+        )
     }
 
     private func canonicalDirectoryIdentities(
