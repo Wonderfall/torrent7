@@ -2759,7 +2759,7 @@ final class TorrentStore {
             claimID: UUID(),
             claimOperationNonce: UUID(),
             runtime: TorrentMagnetPromotionRuntimeState(
-                wasPaused: item.paused,
+                wasPaused: item.manuallyPaused,
                 queuePosition: item.queuePosition,
                 options: options,
                 sourcePolicy: sourcePolicy,

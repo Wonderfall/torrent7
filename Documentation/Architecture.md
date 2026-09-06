@@ -340,6 +340,8 @@ crash does not silently refetch or guess the result.
 The replacement starts manually paused. Saved transfer limits and discovery
 restrictions are restored before automatic management is enabled; a failed or
 cancelled restoration leaves it paused for a later retry.
+The saved pause intent distinguishes a user pause from auto-managed queue
+suspension, so waiting magnets remain eligible when a queue slot becomes free.
 
 After metadata validation and before broker-backed re-add, the helper persists
 the exact info bytes with an explicit staged-metadata marker and the intended

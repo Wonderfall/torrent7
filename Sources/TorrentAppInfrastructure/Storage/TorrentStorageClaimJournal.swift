@@ -74,6 +74,7 @@ package enum TorrentMagnetPromotionState: String, Codable, Sendable {
 }
 
 package struct TorrentMagnetPromotionRuntimeState: Codable, Equatable, Sendable {
+    /// User pause intent, excluding temporary auto-managed queue suspension.
     package let wasPaused: Bool
     package let queuePosition: Int32
     package let options: TorrentOptions

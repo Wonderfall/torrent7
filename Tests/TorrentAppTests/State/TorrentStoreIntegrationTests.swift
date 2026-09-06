@@ -1056,6 +1056,41 @@ struct TorrentStoreIntegrationTests {
         }
     }
 
+    @Test(
+        "Magnet promotion distinguishes queue suspension from a manual pause",
+        arguments: [false, true]
+    )
+    func magnetPromotionPreservesPauseIntent(autoManaged: Bool) async throws {
+        try await withKnownTorrentHarness { harness, downloadFolder in
+            let fixture = try magnetPromotionFixture()
+            await configureMetadataReadyMagnet(harness, fixture: fixture)
+            await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+                revision: 2,
+                torrents: [makeTorrent(
+                    id: fixture.torrentID,
+                    queuePosition: 1,
+                    paused: true,
+                    autoManaged: autoManaged,
+                    contentKind: .singleFile,
+                    hasMetadata: true
+                )]
+            ))
+
+            #expect(harness.store.addMagnet(
+                fixture.magnet,
+                downloadFolder: downloadFolder,
+                setsDownloadFolderAsDefault: false
+            ))
+            await harness.store.saveAll()
+
+            let added = try #require(await harness.engine.addedTorrentFiles.first)
+            #expect(added.startsPaused)
+            #expect(await harness.engine.pausedIDs == (autoManaged ? [] : [fixture.torrentID]))
+            #expect(await harness.engine.resumedIDs == (autoManaged ? [fixture.torrentID] : []))
+            #expect(harness.store.lastError == nil)
+        }
+    }
+
     @Test("Magnet conflicts wait without payload access and can download a separate copy")
     func magnetConflictCanDownloadSeparateCopy() async throws {
         try await withKnownTorrentHarness { harness, downloadFolder in
