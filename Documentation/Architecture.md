@@ -81,6 +81,12 @@ session. Identified builds require the expected application and helper signing
 identifiers from the same Team ID. Local ad-hoc integration fixtures use an
 explicit reduced-assurance mode.
 
+Discovery and process launch use shared acquisitions with generation-checked
+handles. Each caller can cancel or reach its deadline independently, and a
+completed shared handle remains available to later callers. One 305-second
+connection deadline covers discovery, launch, the command handshake, and all
+retry attempts.
+
 Command IPC version 13 uses typed, operation-specific envelopes with bounded
 JSON and raw attachments. Requests carry an engine epoch, monotonic sequence,
 and replay identifier. The implementation bounds queue depth, nesting, value

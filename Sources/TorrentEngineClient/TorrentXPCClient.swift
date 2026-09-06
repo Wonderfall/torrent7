@@ -245,9 +245,9 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             enablePeerExchangePlugin: enablePeerExchangePlugin,
             makeStorageBroker: makeStorageBroker,
             retryMode: retryMode
-        ) { controllerID, state, _ in
+        ) { controllerID, state, deadline in
             let session = try await TorrentEngineExtensionProcessCoordinator.shared
-                .makeSession(configuration: configuration)
+                .makeSession(configuration: configuration, deadline: deadline)
             return try TorrentEngineXPCTransport(
                 controllerID: controllerID,
                 session: session,
@@ -294,6 +294,9 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                 let storageBroker: any TorrentEngineStorageBrokerSession
                 do {
                     try Task.checkCancellation()
+                    guard clock.now < recoveryDeadline else {
+                        throw TorrentEngineClientError.recoveryDeadlineExceeded
+                    }
                     storageBroker = try makeStorageBroker()
                 } catch {
                     transport.cancel()

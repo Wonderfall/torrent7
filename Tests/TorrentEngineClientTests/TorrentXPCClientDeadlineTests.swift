@@ -5,8 +5,75 @@ import TorrentEngineIPC
 import TorrentEngineModel
 @testable import TorrentEngineClient
 
+private enum ConnectionAcquisitionEnd: CaseIterable, Sendable {
+    case cancellation
+    case deadline
+}
+
 @Suite("Torrent engine client deadlines")
 struct TorrentXPCClientDeadlineTests {
+    @Test("Connection cancellation and deadlines include framework acquisition",
+          arguments: ConnectionAcquisitionEnd.allCases)
+    fileprivate func connectionEndsDuringAcquisition(end: ConnectionAcquisitionEnd) async throws {
+        let clock = ExtensionAcquisitionTestClock()
+        let acquisition = TorrentEngineExtensionAcquisition<
+            QueueDeadlineTransport, ExtensionAcquisitionTestClock
+        >(clock: clock)
+        let blocker = QueueDeadlineBlocker()
+        let brokerCount = Mutex(0)
+        let transport = QueueDeadlineTransport { request in
+            throw QueueDeadlineTestError.unexpectedOperation(request.header.operation)
+        }
+        let connection = Task {
+            try await TorrentXPCClient.connect(
+                enablePeerExchangePlugin: false,
+                makeStorageBroker: {
+                    brokerCount.withLock { $0 += 1 }
+                    return TorrentEngineClientTestStorageBroker()
+                },
+                connectionDeadline: clock.now.advanced(by: .seconds(10)),
+                makeTransport: { _, _, deadline in
+                    let lease = try await acquisition.acquire(
+                        identityID: "expected", deadline: deadline
+                    ) { _ in
+                        await blocker.block()
+                        return transport
+                    }
+                    return try await acquisition.perform(lease: lease, deadline: deadline) { $0 }
+                }
+            )
+        }
+        await blocker.waitUntilBlocked()
+        await clock.waitUntilSleeping(1)
+        switch end {
+        case .cancellation:
+            connection.cancel()
+            await #expect(throws: CancellationError.self) { try await connection.value }
+        case .deadline:
+            clock.advance(by: .seconds(10))
+            clock.resumeDueSleepers()
+            do {
+                _ = try await connection.value
+                Issue.record("Connection establishment outlived its deadline")
+            } catch {
+                guard case .recoveryDeadlineExceeded = error as? TorrentEngineClientError else {
+                    Issue.record("Unexpected connection error: \(error)")
+                    await blocker.release()
+                    return
+                }
+            }
+        }
+        #expect(brokerCount.withLock { $0 } == 0)
+        #expect(clock.pendingSleepCount == 0)
+        // Release the shared framework operation only after the caller exits.
+        await blocker.release()
+        let lease = try await acquisition.acquire(identityID: "expected") { _ in
+            Issue.record("The shared acquisition should still be retained")
+            return transport
+        }
+        #expect(try await acquisition.perform(lease: lease) { $0 === transport })
+    }
+
     @Test("A queued request expires without consuming a sequence or ending the controller")
     func queuedDeadlineIncludesSlotWait() async throws {
         let epoch = UUID()

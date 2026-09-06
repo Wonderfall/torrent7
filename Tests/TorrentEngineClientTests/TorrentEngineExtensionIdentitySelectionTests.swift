@@ -1,3 +1,5 @@
+import Foundation
+import Synchronization
 import Testing
 @testable import TorrentEngineClient
 
@@ -10,17 +12,22 @@ private actor ProcessLaunchProbe {
         UInt64: CheckedContinuation<Int, any Error>
     ] = [:]
     private var startedGenerations: [UInt64] = []
+    private var startObservers: [UInt64: [CheckedContinuation<Void, Never>]] = [:]
 
     func launch(generation: UInt64) async throws -> Int {
         startedGenerations.append(generation)
         return try await withCheckedThrowingContinuation { continuation in
             continuations[generation] = continuation
+            for observer in startObservers.removeValue(forKey: generation) ?? [] {
+                observer.resume()
+            }
         }
     }
 
     func waitUntilStarted(generation: UInt64) async {
-        while continuations[generation] == nil {
-            await Task.yield()
+        guard !startedGenerations.contains(generation) else { return }
+        await withCheckedContinuation { continuation in
+            startObservers[generation, default: []].append(continuation)
         }
     }
 
@@ -120,7 +127,7 @@ struct TorrentEngineExtensionIdentitySelectionTests {
 struct TorrentEngineProcessSingleFlightTests {
     @Test("Concurrent acquisitions share one process launch")
     func coalescesConcurrentAcquisitions() async throws {
-        let processStore = TorrentEngineProcessSingleFlight<Int>()
+        let processStore = TorrentEngineExtensionAcquisition<Int, ContinuousClock>(clock: ContinuousClock())
         let probe = ProcessLaunchProbe()
         let first = acquisition(processStore: processStore, probe: probe)
         await probe.waitUntilStarted(generation: 1)
@@ -143,7 +150,7 @@ struct TorrentEngineProcessSingleFlightTests {
 
     @Test("An interrupted launch cannot replace a newer retained process")
     func rejectsStaleLaunchCompletion() async throws {
-        let processStore = TorrentEngineProcessSingleFlight<Int>()
+        let processStore = TorrentEngineExtensionAcquisition<Int, ContinuousClock>(clock: ContinuousClock())
         let probe = ProcessLaunchProbe()
         let stale = acquisition(processStore: processStore, probe: probe)
         await probe.waitUntilStarted(generation: 1)
@@ -164,7 +171,7 @@ struct TorrentEngineProcessSingleFlightTests {
             _ = try await stale.value
             Issue.record("An interrupted process launch was unexpectedly published")
         } catch {
-            #expect(error as? TorrentEngineProcessLaunchError == .invalidated)
+            #expect(error as? TorrentEngineExtensionAcquisitionError == .invalidated)
         }
 
         await processStore.invalidate(generation: 1)
@@ -178,7 +185,7 @@ struct TorrentEngineProcessSingleFlightTests {
 
     @Test("A shared launch failure permits exactly one later retry")
     func retriesAfterSharedLaunchFailure() async throws {
-        let processStore = TorrentEngineProcessSingleFlight<Int>()
+        let processStore = TorrentEngineExtensionAcquisition<Int, ContinuousClock>(clock: ContinuousClock())
         let probe = ProcessLaunchProbe()
         let first = acquisition(processStore: processStore, probe: probe)
         await probe.waitUntilStarted(generation: 1)
@@ -208,7 +215,7 @@ struct TorrentEngineProcessSingleFlightTests {
 
     @Test("A superseded lease cannot use a newer process handle")
     func rejectsSupersededLease() async throws {
-        let processStore = TorrentEngineProcessSingleFlight<Int>()
+        let processStore = TorrentEngineExtensionAcquisition<Int, ContinuousClock>(clock: ContinuousClock())
         let probe = ProcessLaunchProbe()
         let initial = acquisition(processStore: processStore, probe: probe)
         await probe.waitUntilStarted(generation: 1)
@@ -225,7 +232,7 @@ struct TorrentEngineProcessSingleFlightTests {
             _ = try await processStore.perform(lease: staleLease) { $0 }
             Issue.record("A superseded process lease unexpectedly remained usable")
         } catch {
-            #expect(error as? TorrentEngineProcessLaunchError == .invalidated)
+            #expect(error as? TorrentEngineExtensionAcquisitionError == .invalidated)
         }
         let replacementHandle = try await processStore.perform(
             lease: replacementLease
@@ -235,22 +242,23 @@ struct TorrentEngineProcessSingleFlightTests {
 
     @Test("A canceled waiter does not consume the shared process")
     func canceledWaiterStopsBeforeHandleUse() async throws {
-        let processStore = TorrentEngineProcessSingleFlight<Int>()
+        let processStore = TorrentEngineExtensionAcquisition<Int, ContinuousClock>(clock: ContinuousClock())
         let probe = ProcessLaunchProbe()
         let retained = acquisition(processStore: processStore, probe: probe)
         await probe.waitUntilStarted(generation: 1)
         let canceled = acquisition(processStore: processStore, probe: probe)
         await waitForPendingAcquisitions(2, processStore: processStore)
         canceled.cancel()
-        await probe.succeed(generation: 1, handle: 41)
-
-        let retainedLease = try await retained.value
+        // Cancellation must finish while framework launch is still held.
         do {
             _ = try await canceled.value
             Issue.record("A canceled process waiter unexpectedly returned a lease")
         } catch {
             #expect(error is CancellationError)
         }
+        #expect(await processStore.pendingAcquisitionCount == 1)
+        await probe.succeed(generation: 1, handle: 41)
+        let retainedLease = try await retained.value
         let launchCount = await probe.launchCount
         #expect(launchCount == 1)
         let retainedHandle = try await processStore.perform(
@@ -259,21 +267,151 @@ struct TorrentEngineProcessSingleFlightTests {
         #expect(retainedHandle == 41)
     }
 
-    private func acquisition(
-        processStore: TorrentEngineProcessSingleFlight<Int>,
-        probe: ProcessLaunchProbe
-    ) -> Task<TorrentEngineProcessSingleFlight<Int>.Lease, any Error> {
+    @Test("A shared launch survives the cancellation of all current waiters")
+    func launchOutlivesCanceledWaiters() async throws {
+        let store = TorrentEngineExtensionAcquisition<Int, ContinuousClock>(clock: ContinuousClock())
+        let probe = ProcessLaunchProbe()
+        let canceled = acquisition(processStore: store, probe: probe)
+        await probe.waitUntilStarted(generation: 1)
+        canceled.cancel()
+        await #expect(throws: CancellationError.self) { try await canceled.value }
+        #expect(await store.pendingAcquisitionCount == 0)
+
+        let later = acquisition(processStore: store, probe: probe)
+        await waitForPendingAcquisitions(1, processStore: store)
+        #expect(await probe.launchCount == 1)
+        await probe.succeed(generation: 1, handle: 42)
+        let lease = try await later.value
+        #expect(try await store.perform(lease: lease) { $0 } == 42)
+    }
+
+    @Test("Waiter deadlines expire independently without canceling shared acquisition")
+    func independentWaiterDeadlines() async throws {
+        let clock = ExtensionAcquisitionTestClock()
+        let store = TorrentEngineExtensionAcquisition<Int, ExtensionAcquisitionTestClock>(clock: clock)
+        let probe = ProcessLaunchProbe()
+        let first = acquisition(
+            processStore: store, probe: probe, deadline: clock.now.advanced(by: .seconds(10))
+        )
+        await probe.waitUntilStarted(generation: 1)
+        let second = acquisition(
+            processStore: store, probe: probe, deadline: clock.now.advanced(by: .seconds(20))
+        )
+        await clock.waitUntilSleeping(2)
+        clock.advance(by: .seconds(10))
+        clock.resumeDueSleepers()
+        await expectRecoveryDeadline(first)
+        #expect(await store.pendingAcquisitionCount == 1)
+        #expect(await probe.launchCount == 1)
+        await probe.succeed(generation: 1, handle: 42)
+        let lease = try await second.value
+        #expect(try await store.perform(lease: lease) { $0 } == 42)
+        #expect(clock.pendingSleepCount == 0)
+    }
+
+    @Test("Late launch completion cannot beat an overdue timer that has not run")
+    func lateLaunchCannotExtendDeadline() async throws {
+        let clock = ExtensionAcquisitionTestClock()
+        let store = TorrentEngineExtensionAcquisition<Int, ExtensionAcquisitionTestClock>(clock: clock)
+        let probe = ProcessLaunchProbe()
+        let expired = acquisition(
+            processStore: store, probe: probe, deadline: clock.now.advanced(by: .seconds(10))
+        )
+        await probe.waitUntilStarted(generation: 1)
+        await clock.waitUntilSleeping(1)
+        clock.advance(by: .seconds(10))
+        await probe.succeed(generation: 1, handle: 42)
+        await expectRecoveryDeadline(expired)
+        #expect(clock.pendingSleepCount == 0)
+
+        let lease = try await store.acquire(identityID: "expected") { _ in
+            Issue.record("The completed shared handle should have been retained")
+            return -1
+        }
+        #expect(try await store.perform(lease: lease) { $0 } == 42)
+    }
+
+    @Test("An expired acquisition does not start framework work")
+    func expiredCallerDoesNotLaunch() async {
+        let clock = ExtensionAcquisitionTestClock()
+        let store = TorrentEngineExtensionAcquisition<Int, ExtensionAcquisitionTestClock>(clock: clock)
+        let probe = ProcessLaunchProbe()
+        let expired = acquisition(processStore: store, probe: probe, deadline: clock.now)
+        await expectRecoveryDeadline(expired)
+        #expect(await probe.launchCount == 0)
+        #expect(await store.pendingAcquisitionCount == 0)
+        #expect(clock.pendingSleepCount == 0)
+    }
+
+    @Test("Cancellation, deadline and launch completion resume a waiter exactly once")
+    func terminalAcquisitionRace() async throws {
+        for _ in 0..<32 {
+            let clock = ExtensionAcquisitionTestClock()
+            let store = TorrentEngineExtensionAcquisition<Int, ExtensionAcquisitionTestClock>(clock: clock)
+            let probe = ProcessLaunchProbe()
+            let request = acquisition(
+                processStore: store, probe: probe, deadline: clock.now.advanced(by: .seconds(10))
+            )
+            await probe.waitUntilStarted(generation: 1)
+            await clock.waitUntilSleeping(1)
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { request.cancel() }
+                group.addTask {
+                    clock.advance(by: .seconds(10))
+                    clock.resumeDueSleepers()
+                }
+                group.addTask { await probe.succeed(generation: 1, handle: 42) }
+            }
+            do {
+                let lease = try await request.value
+                #expect(lease.generation == 1)
+            } catch is CancellationError {
+                // Cancellation is a valid winner.
+            } catch {
+                guard case .recoveryDeadlineExceeded = error as? TorrentEngineClientError else {
+                    Issue.record("Unexpected acquisition error: \(error)")
+                    return
+                }
+            }
+            let lease = try await store.acquire(identityID: "expected") { _ in
+                Issue.record("A waiter outcome must not cancel the shared launch")
+                return -1
+            }
+            #expect(try await store.perform(lease: lease) { $0 } == 42)
+            #expect(clock.pendingSleepCount == 0)
+        }
+    }
+
+    private func expectRecoveryDeadline<C: Clock>(
+        _ request: Task<TorrentEngineExtensionAcquisition<Int, C>.Lease, any Error>
+    ) async where C.Duration == Duration {
+        do {
+            _ = try await request.value
+            Issue.record("An expired acquisition unexpectedly succeeded")
+        } catch {
+            guard case .recoveryDeadlineExceeded = error as? TorrentEngineClientError else {
+                Issue.record("Expected the recovery deadline, received \(error)")
+                return
+            }
+        }
+    }
+
+    private func acquisition<C: Clock>(
+        processStore: TorrentEngineExtensionAcquisition<Int, C>,
+        probe: ProcessLaunchProbe,
+        deadline: C.Instant? = nil
+    ) -> Task<TorrentEngineExtensionAcquisition<Int, C>.Lease, any Error> where C.Duration == Duration {
         Task {
-            try await processStore.acquire(identityID: "expected") { generation in
+            try await processStore.acquire(identityID: "expected", deadline: deadline) { generation in
                 try await probe.launch(generation: generation)
             }
         }
     }
 
-    private func waitForPendingAcquisitions(
+    private func waitForPendingAcquisitions<C: Clock>(
         _ expectedCount: Int,
-        processStore: TorrentEngineProcessSingleFlight<Int>
-    ) async {
+        processStore: TorrentEngineExtensionAcquisition<Int, C>
+    ) async where C.Duration == Duration {
         while await processStore.pendingAcquisitionCount < expectedCount {
             await Task.yield()
         }
