@@ -40,7 +40,7 @@ index dddda3de10112eb03fe3470f29292e94dae4600c..c8e81fcb33b8c22627412e4736c060fb
  #endif
 -
 diff --git a/include/libtorrent/aux_/torrent.hpp b/include/libtorrent/aux_/torrent.hpp
-index 7cc78745d12fe4c1c5669bb1a8da56c90f2754c2..72e4df7b438ff1e1cea47e01d30b263987395b45 100644
+index 73a3b538d678df950569016cc810cf0459ac89ff..4436d995a33617a9374c8b94a0f4954f7ff6d8c1 100644
 --- a/include/libtorrent/aux_/torrent.hpp
 +++ b/include/libtorrent/aux_/torrent.hpp
 @@ -111,6 +111,86 @@ namespace libtorrent::aux {
@@ -130,7 +130,7 @@ index 7cc78745d12fe4c1c5669bb1a8da56c90f2754c2..72e4df7b438ff1e1cea47e01d30b2639
  #ifndef TORRENT_DISABLE_STREAMING
  	struct time_critical_piece
  	{
-@@ -889,13 +969,17 @@ namespace libtorrent::aux {
+@@ -879,13 +959,17 @@ namespace libtorrent::aux {
  		// (updating, next_announce, min_announce) and posts the
  		// tracker_announce_alert. Does not touch any tier-selection state;
  		// callers that have one (announce_with_tracker) update it themselves.
@@ -149,7 +149,7 @@ index 7cc78745d12fe4c1c5669bb1a8da56c90f2754c2..72e4df7b438ff1e1cea47e01d30b2639
  
  #ifndef TORRENT_DISABLE_DHT
  		void dht_announce();
-@@ -1052,7 +1136,9 @@ namespace libtorrent::aux {
+@@ -1044,7 +1128,9 @@ namespace libtorrent::aux {
  		void completed();
  
  #if TORRENT_USE_I2P
@@ -160,7 +160,7 @@ index 7cc78745d12fe4c1c5669bb1a8da56c90f2754c2..72e4df7b438ff1e1cea47e01d30b2639
  		void add_i2p_peer(sha256_hash const& dest, peer_source_flags_t source);
  		bool is_i2p() const { return m_i2p; }
  
-@@ -1072,7 +1158,9 @@ namespace libtorrent::aux {
+@@ -1064,7 +1150,9 @@ namespace libtorrent::aux {
  		void on_peer_name_lookup(error_code const&
  			, std::vector<address> const&
  			, int port
@@ -171,7 +171,7 @@ index 7cc78745d12fe4c1c5669bb1a8da56c90f2754c2..72e4df7b438ff1e1cea47e01d30b2639
  
  		// this is the asio callback that is called when a name
  		// lookup for a WEB SEED is completed.
-@@ -1525,6 +1613,7 @@ namespace libtorrent::aux {
+@@ -1510,6 +1598,7 @@ namespace libtorrent::aux {
  		aux::suggest_piece m_suggest_pieces;
  
  		aux::tracker_list m_trackers;
@@ -180,10 +180,10 @@ index 7cc78745d12fe4c1c5669bb1a8da56c90f2754c2..72e4df7b438ff1e1cea47e01d30b2639
  #ifndef TORRENT_DISABLE_STREAMING
  		// this list is sorted by time_critical_piece::deadline
 diff --git a/include/libtorrent/aux_/tracker_manager.hpp b/include/libtorrent/aux_/tracker_manager.hpp
-index ec30d77cf8316e40780837c4dc8d4f218754287e..de21ee519cd9cf70047f8c2e5763909ff3503ee3 100644
+index 3a225fac893a78a38c029856da1aaa94879d61b3..e810ac07f6b0f818feecc4266ce95a245cdc1512 100644
 --- a/include/libtorrent/aux_/tracker_manager.hpp
 +++ b/include/libtorrent/aux_/tracker_manager.hpp
-@@ -107,6 +107,9 @@ using tracker_request_flags_t = flags::bitfield_flag<std::uint8_t, struct tracke
+@@ -108,6 +108,9 @@ using tracker_request_flags_t = flags::bitfield_flag<std::uint8_t, struct tracke
  		tracker_request_flags_t kind = {};
  
  		std::uint32_t key = 0;
@@ -214,10 +214,10 @@ index 7ed2ef7537a8aac0f3cf918fb192db985412176d..d0dbb1b7310f379d33275cd27bff4ba7
  	}
  
 diff --git a/src/torrent.cpp b/src/torrent.cpp
-index 210d1b07b9d152a925c9bc676c3687ea29e16935..43e99ab0bac73fdd6e9bbc72cb1d1413ac286898 100644
+index ca0ebd47f233fefe293ba34fb4aaa1c6bed58b8a..204e6b45af9a72f7fc28258e45829099f4a1b1a0 100644
 --- a/src/torrent.cpp
 +++ b/src/torrent.cpp
-@@ -3384,7 +3384,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -3392,7 +3392,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  						continue;
  					}
  
@@ -227,7 +227,7 @@ index 210d1b07b9d152a925c9bc676c3687ea29e16935..43e99ab0bac73fdd6e9bbc72cb1d1413
  
  					state.sent_announce = true;
  					if (a.is_working()
-@@ -3490,7 +3491,65 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -3498,7 +3499,65 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  		return req;
  	}
  
@@ -294,7 +294,7 @@ index 210d1b07b9d152a925c9bc676c3687ea29e16935..43e99ab0bac73fdd6e9bbc72cb1d1413
  		aux::announce_endpoint& aep,
  		aux::announce_infohash& a,
  		protocol_version const ih,
-@@ -3509,6 +3568,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -3517,6 +3576,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  			}
  		}
  
@@ -303,7 +303,7 @@ index 210d1b07b9d152a925c9bc676c3687ea29e16935..43e99ab0bac73fdd6e9bbc72cb1d1413
  		req.triggered_manually = a.triggered_manually;
  		a.triggered_manually = false;
  
-@@ -3559,7 +3620,7 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -3567,7 +3628,7 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  			m_ses.queue_tracker_request(req, shared_from_this());
  		}
  
@@ -312,7 +312,7 @@ index 210d1b07b9d152a925c9bc676c3687ea29e16935..43e99ab0bac73fdd6e9bbc72cb1d1413
  		a.next_announce = now;
  		a.min_announce = now;
  
-@@ -3568,6 +3629,7 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -3576,6 +3637,7 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  			m_ses.alerts().emplace_alert<tracker_announce_alert>(
  				get_handle(), aep.local_endpoint, req.url, ih, req.event);
  		}
@@ -320,7 +320,7 @@ index 210d1b07b9d152a925c9bc676c3687ea29e16935..43e99ab0bac73fdd6e9bbc72cb1d1413
  	}
  
  	// unlike announce_with_tracker(), this only considers a single,
-@@ -3807,6 +3869,16 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -3815,6 +3877,16 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  
  		INVARIANT_CHECK;
  		TORRENT_ASSERT(!(r.kind & tracker_request::scrape_request));
@@ -337,7 +337,7 @@ index 210d1b07b9d152a925c9bc676c3687ea29e16935..43e99ab0bac73fdd6e9bbc72cb1d1413
  
  		// if the tracker told us what our external IP address is, record it with
  		// out external IP counter (and pass along the IP of the tracker to know
-@@ -3831,6 +3903,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -3839,6 +3911,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  			if (aep)
  			{
  				auto& a = aep->info_hashes[v];
@@ -346,7 +346,7 @@ index 210d1b07b9d152a925c9bc676c3687ea29e16935..43e99ab0bac73fdd6e9bbc72cb1d1413
  
  				local_endpoint = aep->local_endpoint;
  				if (resp.incomplete >= 0) a.scrape_incomplete = resp.incomplete;
-@@ -3849,7 +3923,6 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -3857,7 +3931,6 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  				ae->verified = true;
  				a.next_announce = now + resp.interval;
  				a.min_announce = now + resp.min_interval;
@@ -354,7 +354,7 @@ index 210d1b07b9d152a925c9bc676c3687ea29e16935..43e99ab0bac73fdd6e9bbc72cb1d1413
  				a.fails = 0;
  				a.last_error.clear();
  				a.message = !resp.warning_message.empty() ? resp.warning_message : std::string();
-@@ -3910,8 +3983,13 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -3918,8 +3991,13 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  				{
  					ADD_OUTSTANDING_ASYNC("torrent::on_i2p_resolve");
  					r.i2pconn->async_name_lookup(i.hostname.c_str()
@@ -370,7 +370,7 @@ index 210d1b07b9d152a925c9bc676c3687ea29e16935..43e99ab0bac73fdd6e9bbc72cb1d1413
  				}
  				else
  				{
-@@ -3930,7 +4008,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -3938,7 +4016,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  			{
  				ADD_OUTSTANDING_ASYNC("torrent::on_peer_name_lookup");
  				m_ses.get_resolver().async_resolve(i.hostname, aux::resolver_interface::abort_on_shutdown
@@ -380,7 +380,7 @@ index 210d1b07b9d152a925c9bc676c3687ea29e16935..43e99ab0bac73fdd6e9bbc72cb1d1413
  			}
  		}
  
-@@ -4255,7 +4334,9 @@ namespace {
+@@ -4263,7 +4342,9 @@ namespace {
  			{ self->torrent::on_i2p_resolve(ec, d, source); });
  	}
  
@@ -391,7 +391,7 @@ index 210d1b07b9d152a925c9bc676c3687ea29e16935..43e99ab0bac73fdd6e9bbc72cb1d1413
  	{
  		TORRENT_ASSERT(is_single_thread());
  
-@@ -4267,6 +4348,9 @@ namespace {
+@@ -4275,6 +4356,9 @@ namespace {
  			debug_log("i2p_resolve error: %s", ec.message().c_str());
  #endif
  		if (ec || m_abort || m_ses.is_aborted()) return;
@@ -401,7 +401,7 @@ index 210d1b07b9d152a925c9bc676c3687ea29e16935..43e99ab0bac73fdd6e9bbc72cb1d1413
  
  		need_peer_list();
  		torrent_state st = get_peer_list_state();
-@@ -4281,7 +4365,8 @@ namespace {
+@@ -4289,7 +4373,8 @@ namespace {
  
  	void torrent::on_peer_name_lookup(error_code const& e
  		, std::vector<address> const& host_list, int const port
@@ -411,7 +411,7 @@ index 210d1b07b9d152a925c9bc676c3687ea29e16935..43e99ab0bac73fdd6e9bbc72cb1d1413
  	{
  		TORRENT_ASSERT(is_single_thread());
  
-@@ -4295,6 +4380,8 @@ namespace {
+@@ -4303,6 +4388,8 @@ namespace {
  #endif
  
  		if (e || m_abort || host_list.empty() || m_ses.is_aborted()) return;
@@ -420,7 +420,7 @@ index 210d1b07b9d152a925c9bc676c3687ea29e16935..43e99ab0bac73fdd6e9bbc72cb1d1413
  
  		// TODO: add one peer per IP the hostname resolves to
  		tcp::endpoint host(host_list.front(), std::uint16_t(port));
-@@ -6292,7 +6379,19 @@ namespace {
+@@ -6300,7 +6387,19 @@ namespace {
  
  	void torrent::replace_trackers(std::vector<lt::announce_entry> const& urls)
  	{
@@ -440,7 +440,7 @@ index 210d1b07b9d152a925c9bc676c3687ea29e16935..43e99ab0bac73fdd6e9bbc72cb1d1413
  
  		if (settings().get_bool(settings_pack::prefer_udp_trackers))
  			m_trackers.prioritize_udp_trackers();
-@@ -8462,10 +8561,9 @@ namespace {
+@@ -8439,10 +8538,9 @@ namespace {
  		// A private swarm may only bootstrap peers from its tracker. Peers learned
  		// while metadata was unavailable have no trustworthy source association,
  		// so discard them and let the private tracker repopulate the peer list.
@@ -452,7 +452,7 @@ index 210d1b07b9d152a925c9bc676c3687ea29e16935..43e99ab0bac73fdd6e9bbc72cb1d1413
  		else
  		{
  			// disconnect redundant peers
-@@ -12881,6 +12979,18 @@ namespace {
+@@ -12858,6 +12956,18 @@ namespace {
  		TORRENT_ASSERT(is_single_thread());
  
  		INVARIANT_CHECK;
@@ -471,7 +471,7 @@ index 210d1b07b9d152a925c9bc676c3687ea29e16935..43e99ab0bac73fdd6e9bbc72cb1d1413
  
  // some older versions of clang had a bug where it would fire this warning here
  #ifdef __clang__
-@@ -12961,6 +13071,14 @@ namespace {
+@@ -12938,6 +13048,14 @@ namespace {
  						return true;
  					}))
  				{
@@ -486,6 +486,129 @@ index 210d1b07b9d152a925c9bc676c3687ea29e16935..43e99ab0bac73fdd6e9bbc72cb1d1413
  					m_trackers.deprioritize_tracker(ae);
  				}
  			}
+diff --git a/test/test_private_tracker_lifecycle.cpp b/test/test_private_tracker_lifecycle.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..3e3249327a0c26fd91c525c6cc5c69195c257fd9
+--- /dev/null
++++ b/test/test_private_tracker_lifecycle.cpp
+@@ -0,0 +1,117 @@
++#include "web_seed_policy_test.hpp"
++#include "libtorrent/aux_/session_impl.hpp"
++#include "libtorrent/create_torrent.hpp"
++#include "libtorrent/load_torrent.hpp"
++#include "libtorrent/bencode.hpp"
++#include "libtorrent/aux_/peer.hpp"
++
++using namespace libtorrent;
++
++namespace {
++struct tracker_session final : session_mock
++{
++	explicit tracker_session(io_context& io) : session_mock(io)
++	{
++		listen->local_endpoint = ep("192.0.2.2", 6881);
++		_session_settings.set_int(settings_pack::torrent_connect_boost, 0);
++		_session_settings.set_int(settings_pack::connections_limit, 0);
++	}
++	void for_each_listen_socket(std::function<void(aux::listen_socket_handle const&)> f) const override
++	{ f(aux::listen_socket_handle(listen)); }
++	void queue_tracker_request(aux::tracker_request req, std::weak_ptr<aux::request_callback> callback) override
++	{ requests.push_back({std::move(req), std::move(callback)}); }
++	void set_external_address(tcp::endpoint const&, address const& ip, aux::ip_source_t, address const&) override
++	{ external_votes.push_back(ip); }
++	aux::resolver_interface& get_resolver() override { return dns; }
++	aux::vector<aux::torrent*>& torrent_list(aux::torrent_list_index_t index) override
++	{ return lists[index]; }
++	struct request { aux::tracker_request value; std::weak_ptr<aux::request_callback> callback; };
++	std::vector<request> requests;
++	web_seed_test::resolver dns;
++	std::vector<address> external_votes;
++	std::shared_ptr<aux::listen_socket_t> listen = std::make_shared<aux::listen_socket_t>();
++	aux::array<aux::vector<aux::torrent*>, num_torrent_lists, aux::torrent_list_index_t> lists;
++};
++
++struct fixture
++{
++	fixture() : ses(io)
++	{
++		lt::create_torrent metadata(std::vector<create_file_entry>{{"payload", 16384}}, 16384, lt::create_torrent::v1_only);
++		metadata.set_hash(piece_index_t{0}, sha1_hash::max());
++		metadata.set_priv(true);
++		auto params = load_torrent_buffer(bencode(metadata.generate()));
++		TEST_CHECK(params.ti && params.ti->priv());
++		params.trackers = {"https://tracker-a.test/announce", "https://tracker-b.test/announce"};
++		params.tracker_tiers = {0, 1};
++		params.save_path = ".";
++		params.flags &= ~(torrent_flags::paused | torrent_flags::auto_managed);
++		target = std::make_shared<aux::torrent>(ses, false, std::move(params));
++	}
++	~fixture() { target->abort(); ses.dns.abort(); io.poll(); }
++	io_context io;
++	tracker_session ses;
++	std::shared_ptr<aux::torrent> target;
++};
++
++void reply(tracker_session::request const& request, aux::tracker_response const& response)
++{
++	auto const callback = request.callback.lock();
++	TEST_CHECK(callback);
++	if (callback) callback->tracker_response(request.value, make_address("8.8.4.4"), {}, response);
++}
++}
++
++TORRENT_TEST(private_tracker_failover_discards_late_response_and_peer_dns)
++{
++	fixture f;
++	f.target->announce_with_tracker();
++	TEST_EQUAL(f.ses.requests.size(), 1);
++	if (f.ses.requests.empty()) return;
++	auto const first = f.ses.requests.front();
++	TEST_EQUAL(first.value.url, "https://tracker-a.test/announce");
++	aux::tracker_response a;
++	a.peers4.push_back({make_address_v4("8.8.8.8").to_bytes(), 49000});
++	a.peers.push_back({"delayed-peer.test", {}, 49001});
++	a.external_ip = make_address("1.2.3.4");
++	reply(first, a);
++	TEST_EQUAL(f.target->num_known_peers(), 1);
++	TEST_EQUAL(f.ses.dns.requests.size(), 1);
++	f.target->force_tracker_request_url(aux::time_now() - seconds(1), first.value.url
++		, torrent_handle::ignore_min_interval | torrent_handle::high_priority);
++	TEST_EQUAL(f.ses.requests.size(), 2);
++	if (f.ses.requests.size() != 2) return;
++	auto const retry = f.ses.requests.back();
++	// A real timeout drives tracker deprioritization, authorization of B, and
++	// peer cleanup through the production torrent callback and announce path.
++	f.target->tracker_request_error(retry.value, boost::asio::error::timed_out
++		, operation_t::sock_read, "controlled timeout", seconds32(0));
++	TEST_EQUAL(f.ses.requests.size(), 3);
++	if (f.ses.requests.size() != 3) return;
++	auto const next = f.ses.requests.back();
++	TEST_EQUAL(next.value.url, "https://tracker-b.test/announce");
++	TEST_CHECK(next.value.private_tracker_generation != retry.value.private_tracker_generation);
++	TEST_EQUAL(next.value.tracker_generation, retry.value.tracker_generation);
++	TEST_EQUAL(f.target->num_known_peers(), 0);
++
++	f.ses.dns.complete({make_address("9.9.9.9")});
++	reply(retry, a);
++	f.target->tracker_request_error(retry.value, boost::asio::error::timed_out
++		, operation_t::sock_read, "late timeout", seconds32(0));
++	TEST_EQUAL(f.target->num_known_peers(), 0);
++	TEST_EQUAL(f.ses.external_votes.size(), 1);
++	TEST_EQUAL(f.ses.requests.size(), 3);
++	TEST_CHECK(f.ses.dns.requests.empty());
++
++	aux::tracker_response b;
++	b.peers4.push_back({make_address_v4("1.1.1.1").to_bytes(), 49002});
++	b.external_ip = make_address("5.6.7.8");
++	reply(next, b);
++	TEST_EQUAL(f.target->num_known_peers(), 1);
++	TEST_EQUAL(f.ses.external_votes.size(), 2);
++	TEST_EQUAL(f.ses.external_votes.back(), b.external_ip);
++	reply(retry, a);
++	TEST_EQUAL(f.target->num_known_peers(), 1);
++	TEST_CHECK(f.ses.dns.requests.empty());
++	TEST_EQUAL(f.ses.external_votes.size(), 2);
++}
 diff --git a/test/test_torrent.cpp b/test/test_torrent.cpp
 index 40c999c180cd9e27893ec682377301a8dd936d65..3120ee8c8de389277cc542dc62c747f8532eee21 100644
 --- a/test/test_torrent.cpp

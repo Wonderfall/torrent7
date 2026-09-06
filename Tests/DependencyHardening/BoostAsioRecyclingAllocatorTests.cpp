@@ -7,6 +7,8 @@
 
 #include <cstddef>
 #include <cstdio>
+#include <cstdint>
+#include <memory>
 
 #if !defined(_MALLOC_TYPE_ENABLED) || !_MALLOC_TYPE_ENABLED
 # error "This test requires typed memory operations"
@@ -46,6 +48,58 @@ struct cancellation_handler_two
     *called = context != nullptr;
   }
 };
+
+struct handler_construction_failure {};
+
+struct handler_lifetime
+{
+  int constructed = 0;
+  int destroyed = 0;
+  int called = 0;
+};
+
+struct alignas(64) aligned_handler
+{
+  handler_lifetime& lifetime;
+
+  explicit aligned_handler(handler_lifetime& state, bool fail)
+    : lifetime(state)
+  {
+    if (fail) throw handler_construction_failure{};
+    ++lifetime.constructed;
+  }
+  ~aligned_handler() { ++lifetime.destroyed; }
+  void operator()(boost::asio::cancellation_type_t) const { ++lifetime.called; }
+};
+
+[[nodiscard]] bool verify_handler_failure_and_alignment()
+{
+  handler_lifetime lifetime;
+  {
+    boost::asio::cancellation_signal signal;
+    auto& first = signal.slot().emplace<aligned_handler>(lifetime, false);
+    if (reinterpret_cast<std::uintptr_t>(std::addressof(first)) % alignof(aligned_handler) != 0)
+      return false;
+    try
+    {
+      signal.slot().emplace<aligned_handler>(lifetime, true);
+      return false;
+    }
+    catch (handler_construction_failure const&) {}
+    if (signal.slot().has_handler() || lifetime.constructed != 1 || lifetime.destroyed != 1)
+      return false;
+    signal.emit(boost::asio::cancellation_type::terminal);
+    if (lifetime.called != 0) return false;
+
+    // Reuse after the failed construction must preserve alignment and the
+    // concrete descriptor; the failed object must never receive destruction.
+    auto& recovered = signal.slot().emplace<aligned_handler>(lifetime, false);
+    if (reinterpret_cast<std::uintptr_t>(std::addressof(recovered)) % alignof(aligned_handler) != 0)
+      return false;
+    signal.emit(boost::asio::cancellation_type::terminal);
+  }
+  return lifetime.constructed == 2 && lifetime.destroyed == 2 && lifetime.called == 1;
+}
 
 static_assert(sizeof(pointer_rich_operation) == sizeof(pointer_rich_peer));
 static_assert(alignof(pointer_rich_operation) == alignof(pointer_rich_peer));
@@ -148,6 +202,12 @@ int main()
       thread_context_probe::top_of_thread_call_stack(),
       static_cast<void*>(recovered_operation), sizeof(pointer_rich_operation),
       operation_type);
+
+  if (!verify_handler_failure_and_alignment())
+  {
+    std::fputs("Asio handler construction failure or alignment invariant failed\n", stderr);
+    return 1;
+  }
 
   bool cancellation_called = false;
   boost::asio::cancellation_signal signal;

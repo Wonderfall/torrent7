@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 63f903ca9..0c637c814 100644
+index 63f903ca9ec00c45a7156f42b2b9e1fca5eb41ba..0c637c81473c58f6f22a15c0feb749895a395a10 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -740,6 +740,7 @@ target_optional_compile_definitions(torrent-rasterbar PUBLIC FEATURE NAME deprec
@@ -49,7 +49,7 @@ index 63f903ca9..0c637c814 100644
  			$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/deps/asio-gnutls/include>
              $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 diff --git a/include/libtorrent/aux_/ssl.hpp b/include/libtorrent/aux_/ssl.hpp
-index cb30e4391..e17d7b14a 100644
+index cb30e43916b825bad6ffced28fab4c0f6ebe64a8..e17d7b14a8baf1c628e45f83868f08694477ea4e 100644
 --- a/include/libtorrent/aux_/ssl.hpp
 +++ b/include/libtorrent/aux_/ssl.hpp
 @@ -57,6 +57,7 @@ see LICENSE file.
@@ -147,7 +147,7 @@ index cb30e4391..e17d7b14a 100644
  } // libtorrent::aux:ssl
  
 diff --git a/src/session_impl.cpp b/src/session_impl.cpp
-index 242524293..04807a96f 100644
+index 242524293728346c28fcfca510bb9349d236ec93..04807a96f88a324db713c21505bb34d3da916ff2 100644
 --- a/src/session_impl.cpp
 +++ b/src/session_impl.cpp
 @@ -488,7 +488,8 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
@@ -207,7 +207,7 @@ index 242524293..04807a96f 100644
  
  	void session_impl::pop_alerts(std::vector<alert*>* alerts)
 diff --git a/src/socket_type.cpp b/src/socket_type.cpp
-index afdacf1c0..d8e47ff5c 100644
+index afdacf1c0c6862a05a6819d2e200b9e0abdac9d9..d8e47ff5cdbc648e43214cf6ab4470ceaba91d82 100644
 --- a/src/socket_type.cpp
 +++ b/src/socket_type.cpp
 @@ -152,21 +152,32 @@ namespace aux {
@@ -257,7 +257,7 @@ index afdacf1c0..d8e47ff5c 100644
  			ssl::set_host_name(visitor.ssl_, hostname, ec);
  #else
 diff --git a/src/ssl.cpp b/src/ssl.cpp
-index 1fd23762c..929a3c3ec 100644
+index 1fd23762c0fb0a6855e5b0322dd24505213ed1d7..929a3c3ec4fcbf44795c675d3bd4b9ad4efaafc1 100644
 --- a/src/ssl.cpp
 +++ b/src/ssl.cpp
 @@ -11,19 +11,283 @@ see LICENSE file.
@@ -663,7 +663,7 @@ index 1fd23762c..929a3c3ec 100644
  	struct lifecycle
  	{
 diff --git a/src/upnp.cpp b/src/upnp.cpp
-index 834809d59..7ccbe66b2 100644
+index 834809d595c150f9c6b06dd7f7ed25f116a44252..7ccbe66b277df09f4b71205251286a4ce0bc7c69 100644
 --- a/src/upnp.cpp
 +++ b/src/upnp.cpp
 @@ -112,14 +112,11 @@ upnp::upnp(io_context& ios,
@@ -683,8 +683,112 @@ index 834809d59..7ccbe66b2 100644
  }
  
  void upnp::start()
+diff --git a/test/setup_transfer.cpp b/test/setup_transfer.cpp
+index 4071ebd4d61841a13970ea584d326279aa4d6ea3..382caa45d7f6b42b951841586d7b46c3ce04fe6d 100644
+--- a/test/setup_transfer.cpp
++++ b/test/setup_transfer.cpp
+@@ -1238,12 +1238,15 @@ pid_type web_server_pid = 0;
+ }
+ 
+ int start_web_server(
+-	bool ssl, bool chunked_encoding, bool keepalive, int min_interval, bool expect_host_header)
++	bool ssl, bool chunked_encoding, bool keepalive, int min_interval, bool expect_host_header
++	, char const* certificate_file)
+ {
+ 	int const port = find_available_port();
+ 	char expected_host[200] = {};
+ 	if (expect_host_header)
+ 		std::snprintf(expected_host, sizeof(expected_host), "127.0.0.1:%d", port);
++	else
++		std::snprintf(expected_host, sizeof(expected_host), "-");
+ 
+ 	std::vector<std::string> python_exes = get_python();
+ 
+@@ -1252,14 +1255,14 @@ int start_web_server(
+ 		char buf[300];
+ 		std::snprintf(buf,
+ 			sizeof(buf),
+-			"%s .." SEPARATOR "web_server.py %d %d %d %d %d %s",
++			"%s .." SEPARATOR "web_server.py %d %d %d %d %d %s %s",
+ 			python_exe.c_str(),
+ 			port,
+ 			chunked_encoding,
+ 			ssl,
+ 			keepalive,
+ 			min_interval,
+-			expected_host);
++			expected_host, certificate_file);
+ 
+ 		std::printf("%s starting web_server on port %d...\n", time_now_string().c_str(), port);
+ 
+diff --git a/test/setup_transfer.hpp b/test/setup_transfer.hpp
+index 86ca97ac5d34a0d034a819c30655f97ca35a3579..dc3eb00bf80dbcb821ccf7aa1a6266d9f8900b7a 100644
+--- a/test/setup_transfer.hpp
++++ b/test/setup_transfer.hpp
+@@ -102,7 +102,7 @@ EXPORT int start_web_server(bool ssl = false,
+ 	bool chunked = false,
+ 	bool keepalive = true,
+ 	int min_interval = 30,
+-	bool expect_host_header = false);
++	bool expect_host_header = false, char const* certificate_file = "../ssl/server.pem");
+ 
+ EXPORT void stop_web_server();
+ 
+diff --git a/test/ssl/trusted-loopback.md b/test/ssl/trusted-loopback.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..cf804ed896e0b4e3500a651971189528f1811b56
+--- /dev/null
++++ b/test/ssl/trusted-loopback.md
+@@ -0,0 +1,10 @@
++These test-only P-256/SHA-256 credentials serve `localhost` and `127.0.0.1`.
++The leaf expires in September 2027; the test pins verification to 7 September
++2026. Its private key is deliberately public. The root is supplied only to each
++individual SecTrust object in test_system_trust.cpp. It is never installed into
++a system or user keychain and is never available to the production verifier.
++
++Regenerate a root and a serverAuth leaf with digitalSignature key usage,
++CA:FALSE, and DNS:localhost/IP:127.0.0.1 subject alternative names. Export the
++root as DER, concatenate the leaf key and certificate as PEM, and update the
++fixed verification date to fall inside both certificates' validity periods.
+diff --git a/test/ssl/trusted-loopback.pem b/test/ssl/trusted-loopback.pem
+new file mode 100644
+index 0000000000000000000000000000000000000000..b822d8b54c3b92b6433217f875f3f1d35e29b752
+--- /dev/null
++++ b/test/ssl/trusted-loopback.pem
+@@ -0,0 +1,16 @@
++-----BEGIN EC PRIVATE KEY-----
++MHcCAQEEIIn2q4i04S88BvyTu84Vjjt4ycQDnNIfVmyO/AKjvXfnoAoGCCqGSM49
++AwEHoUQDQgAE9o+A1aBcfOIv3PTo9AkcoRTqLBd6Yc66hRtlCP6QaPsxHepGgpGJ
++K3ucK3fO2Jk/9pMK6PizR09Eld94HORdgA==
++-----END EC PRIVATE KEY-----
++-----BEGIN CERTIFICATE-----
++MIIBfTCCASKgAwIBAgIBATAKBggqhkjOPQQDAjAoMSYwJAYDVQQDDB1Ub3JyZW50
++NyByZWdyZXNzaW9uIHRlc3Qgcm9vdDAeFw0yNjA5MDYxNDE1MjVaFw0yNzA5MDYx
++NDE1MjVaMBQxEjAQBgNVBAMMCWxvY2FsaG9zdDBZMBMGByqGSM49AgEGCCqGSM49
++AwEHA0IABPaPgNWgXHziL9z06PQJHKEU6iwXemHOuoUbZQj+kGj7MR3qRoKRiSt7
++nCt3ztiZP/aTCuj4s0dPRJXfeBzkXYCjUTBPMAwGA1UdEwEB/wQCMAAwDgYDVR0P
++AQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMBMBoGA1UdEQQTMBGCCWxvY2Fs
++aG9zdIcEfwAAATAKBggqhkjOPQQDAgNJADBGAiEAunbZ1WyI8PocVxdYzUEtYA8o
+++VNvworeygH5yh9jU6gCIQCRulp0kfROTVrXTdONSlXNHwjfnZrJ+ggx+ToyWMkB
++2w==
++-----END CERTIFICATE-----
+diff --git a/test/ssl/trusted-root.der b/test/ssl/trusted-root.der
+new file mode 100644
+index 0000000000000000000000000000000000000000..d7e5679374096fcbd471fb24d841fb746019307e
+GIT binary patch
+literal 323
+zcmXqLVzf7Ce8$Ad@MX#}zr#0<95CQw<IrmJIA_bk%w(WpsAizT#vIDR%p)6;UsRNu
+zS7NSEl$u_YT3no&pQligT3n(~l%HQ>AScdiWM*J#U}k7yXli5{CC+OM;u=G_B$yOw
+zAk4-Nb^#M3)G5r2?95IKEMojMbv!4yzwN%1ysP5vTO*-wXZS=W?A)<xm!V#uqWq8C
+zg9V#EIe9F;VjK7Lo#1i38Aa80VbAZlI;>X+OnnughwL?G4+aBQCIyAhy)9W$ou9Yx
+z9b=bd@Q_$jQ1UDBwwL`o?>)|K0khUJDKhLXIlo)``Q-`ym1aK|@OGLjY@GODpM%c1
+NEyhKTyx*cf006LNa$o=e
+
+literal 0
+HcmV?d00001
+
 diff --git a/test/test_http_connection.cpp b/test/test_http_connection.cpp
-index 540b81252..b0284c7bd 100644
+index 177c855f04317adf92130cd74b15d38be18c237a..5b78daf011456c241cd645262ce064d461ffca3f 100644
 --- a/test/test_http_connection.cpp
 +++ b/test/test_http_connection.cpp
 @@ -22,8 +22,15 @@ see LICENSE file.
@@ -702,7 +806,7 @@ index 540b81252..b0284c7bd 100644
 +#include <vector>
  
  using namespace lt;
-
+ 
 @@ -90,7 +97,9 @@ void reset_globals()
  
  void run_test(std::string const& url, int size, int status, int connected
@@ -839,8 +943,114 @@ index 540b81252..b0284c7bd 100644
  #endif // TORRENT_USE_SSL
  
  TORRENT_TEST(http_proxy) { run_suite("http", settings_pack::http); }
+diff --git a/test/test_system_trust.cpp b/test/test_system_trust.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..4bf8d5a334d71d7d8a06deea6350b9f630b287ef
+--- /dev/null
++++ b/test/test_system_trust.cpp
+@@ -0,0 +1,100 @@
++#include <Security/Security.h>
++
++// Compile the real verifier into this test executable. The sole substituted
++// platform call adds a root to this SecTrust object only, then invokes Apple's
++// real evaluation. Production has no trust override; no keychain is modified.
++static Boolean evaluate_fixture_trust(SecTrustRef trust, CFErrorRef* error);
++#define SecTrustEvaluateWithError evaluate_fixture_trust
++#include "../src/ssl.cpp"
++#undef SecTrustEvaluateWithError
++
++#include "test.hpp"
++#include "setup_transfer.hpp"
++#include "libtorrent/aux_/http_connection.hpp"
++#include "libtorrent/aux_/resolver_interface.hpp"
++#include <array>
++#include <fstream>
++#include <boost/asio/post.hpp>
++
++using namespace libtorrent;
++
++static Boolean evaluate_fixture_trust(SecTrustRef trust, CFErrorRef* error)
++{
++	using aux::ssl::cf_handle;
++	std::array<UInt8, 2048> bytes{};
++	std::ifstream file("../ssl/trusted-root.der", std::ios::binary);
++	file.read(reinterpret_cast<char*>(bytes.data()), bytes.size());
++	if (!file.eof() || file.gcount() <= 0) return false;
++	cf_handle<CFDataRef> const data(CFDataCreate(kCFAllocatorDefault, bytes.data(), file.gcount()));
++	if (!data) return false;
++	cf_handle<SecCertificateRef> const root(SecCertificateCreateWithData(kCFAllocatorDefault, data.get()));
++	if (!root) return false;
++	cf_handle<CFMutableArrayRef> const anchors(CFArrayCreateMutable(kCFAllocatorDefault, 1, &kCFTypeArrayCallBacks));
++	if (!anchors) return false;
++	CFArrayAppendValue(anchors.get(), root.get());
++	// Fixed within the fixture's validity period, independent of the CI clock.
++	cf_handle<CFDateRef> const date(CFDateCreate(kCFAllocatorDefault, 810483325));
++	if (!date || SecTrustSetAnchorCertificates(trust, anchors.get()) != errSecSuccess
++		|| SecTrustSetAnchorCertificatesOnly(trust, true) != errSecSuccess
++		|| SecTrustSetVerifyDate(trust, date.get()) != errSecSuccess) return false;
++	return SecTrustEvaluateWithError(trust, error);
++}
++
++namespace {
++struct loopback_resolver final : aux::resolver_interface
++{
++	explicit loopback_resolver(io_context& io) : m_io(io) {}
++	void async_resolve(std::string const&, aux::resolver_flags, callback_t callback) override
++	{
++		boost::asio::post(m_io, [callback = std::move(callback)] {
++			callback({}, {make_address("127.0.0.1")});
++		});
++	}
++	void set_cache_timeout(seconds) override {}
++	void abort() override {}
++	io_context& m_io;
++};
++
++struct server
++{
++	server() : port(start_web_server(true, false, true, 30, false, "../ssl/trusted-loopback.pem")) {}
++	~server() { stop_web_server(); }
++	int port;
++};
++
++void request(int const port, std::string const& host, std::string const& path
++	, error_code const expected_error, int const expected_status, std::string const& expected_body)
++{
++	io_context io;
++	loopback_resolver resolver(io);
++	auto context = aux::ssl::make_client_context(aux::ssl::client_context_authentication::system_trust);
++	int completions = 0;
++	int connections = 0;
++	auto connection = std::make_shared<aux::http_connection>(io, resolver
++		, [&](error_code const& error, aux::http_parser const& parser, span<char const> body, aux::http_connection&) {
++			++completions;
++			TEST_EQUAL(error, expected_error);
++			TEST_EQUAL(parser.status_code(), expected_status);
++			TEST_EQUAL(std::string(body.begin(), body.end()), expected_body);
++		}, 4096, [&](aux::http_connection&) { ++connections; }
++		, aux::http_filter_handler{}, aux::hostname_filter_handler{}, &context);
++	connection->get("https://" + host + ":" + std::to_string(port) + path, seconds(5));
++	io.run();
++	TEST_EQUAL(completions, 1);
++	TEST_EQUAL(connections, expected_status < 0 ? 0 : 1);
++}
++}
++
++TORRENT_TEST(system_trust_authenticated_transfer_and_redirect)
++{
++	std::string const payload = "authenticated payload";
++	std::ofstream("test_file") << payload;
++	server const tls;
++	request(tls.port, "localhost", "/test_file", {}, 200, payload);
++	request(tls.port, "wrong-host.test", "/test_file"
++		, error_code(static_cast<int>(ERR_PACK(ERR_LIB_SSL, SSL_R_CERTIFICATE_VERIFY_FAILED)), aux::ssl::error::get_ssl_category()), -1, "");
++	// A successful handshake and authenticated 301 must still reject downgrade
++	// before opening a second connection or delivering any plaintext payload.
++	request(tls.port, "localhost", "/redirect_downgrade"
++		, errors::unsupported_url_protocol, 301, "");
++}
 diff --git a/test/test_web_seed_redirect.cpp b/test/test_web_seed_redirect.cpp
-index 337c3666d..a4a44da33 100644
+index 337c3666d67f6373a4c0e608a2d07b96f46d3e03..a4a44da3310bcc1358d386d54fe456dd56f19b45 100644
 --- a/test/test_web_seed_redirect.cpp
 +++ b/test/test_web_seed_redirect.cpp
 @@ -79,7 +79,8 @@ TORRENT_TEST(web_seed_proxy_request_uses_vetted_endpoint)
@@ -895,3 +1105,24 @@ index 337c3666d..a4a44da33 100644
  
  TORRENT_TEST(web_seed_ssrf_blocks_non_global_endpoint)
  {
+diff --git a/test/web_server.py b/test/web_server.py
+index 936d57b839f1861229b109152074833ebf73d894..00685d60abb00bb3a4687ee17c3c3f166afd594e 100644
+--- a/test/web_server.py
++++ b/test/web_server.py
+@@ -274,14 +274,14 @@ if __name__ == '__main__':
+     use_ssl = sys.argv[3] != '0'
+     keepalive = sys.argv[4] != '0'
+     min_interval = sys.argv[5]
+-    expected_host = sys.argv[6] if len(sys.argv) > 6 else ''
++    expected_host = sys.argv[6] if len(sys.argv) > 6 and sys.argv[6] != '-' else ''
+     print('python version: %s' % sys.version_info.__str__())
+ 
+     http_handler.protocol_version = 'HTTP/1.1'
+     httpd = http_server_with_timeout(('0.0.0.0', port), http_handler)
+     if use_ssl:
+         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+-        ctx.load_cert_chain("../ssl/server.pem")
++        ctx.load_cert_chain(sys.argv[7] if len(sys.argv) > 7 else "../ssl/server.pem")
+         httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+ 
+     while True:

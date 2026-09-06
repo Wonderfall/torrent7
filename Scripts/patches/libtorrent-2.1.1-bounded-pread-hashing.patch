@@ -37,15 +37,16 @@ index 3057cf673bfe9f0d09366d77e03e16cf75393555..56503064ffb8148ab5e08051d96996f0
  
  		int const read_len = v1 ? piece_size : piece_size2;
 diff --git a/test/test_disk_io.cpp b/test/test_disk_io.cpp
-index 8d95c37a8cf8a819005cbcc04cd520af207cc528..94ca1a7841b563233bf1cc96b1a9b0b6613dcf2b 100644
+index 8d95c37a8cf8a819005cbcc04cd520af207cc528..eb8b6d70acdc488a8da68f1a3374085ccd1eb13c 100644
 --- a/test/test_disk_io.cpp
 +++ b/test/test_disk_io.cpp
-@@ -833,6 +833,111 @@ static void clear_during_flush_suite(lt::disk_io_constructor_type disk_io)
+@@ -833,6 +833,140 @@ static void clear_during_flush_suite(lt::disk_io_constructor_type disk_io)
  
  #endif // TORRENT_SIMULATE_SLOW_WRITE
  
 +static std::int64_t pread_hash_read_operations(
-+	int const checking_blocks, int const hashing_threads, int const aio_threads)
++	int const checking_blocks, int const hashing_threads, int const aio_threads
++	, disk_test_mode_t const mode, bool const pad_file)
 +{
 +	lt::io_context ios;
 +	lt::counters cnt;
@@ -57,27 +58,43 @@ index 8d95c37a8cf8a819005cbcc04cd520af207cc528..94ca1a7841b563233bf1cc96b1a9b0b6
 +		lt::pread_disk_io_constructor(ios, sett, cnt);
 +
 +	int constexpr piece_size = 4 * lt::default_block_size;
++	bool const v1 = bool(mode & test_mode::v1);
++	bool const v2 = bool(mode & test_mode::v2);
++	int const data_size = pad_file ? 2 * lt::default_block_size + 113 : piece_size;
++	int const write_size = v1 ? piece_size : data_size;
 +	lt::file_storage fs;
 +	fs.set_piece_length(piece_size);
 +	std::string const suffix = std::to_string(checking_blocks) + "-"
-+		+ std::to_string(hashing_threads) + "-" + std::to_string(aio_threads);
-+	fs.add_file("checking_memory_torrent_" + suffix + "/file-0", piece_size, {});
++		+ std::to_string(hashing_threads) + "-" + std::to_string(aio_threads)
++		+ "-" + (v1 ? "v1" : "") + (v2 ? "v2" : "") + (pad_file ? "-pad" : "");
++	fs.add_file("checking_memory_torrent_" + suffix + "/file-0", data_size, {});
++	if (pad_file) fs.add_file("checking_memory_torrent_" + suffix + "/pad"
++		, piece_size - data_size, lt::file_storage::flag_pad_file);
 +	fs.set_num_pieces(1);
 +	std::string const save_path = "checking_memory_store_" + suffix;
 +	lt::storage_holder storage = add_test_torrent(
-+		*disk_thread, fs, save_path.c_str(), true, false);
++		*disk_thread, fs, save_path.c_str(), v1, v2);
 +
-+	std::vector<char> const buffer = generate_piece(lt::piece_index_t{0}, piece_size);
++	std::vector<char> buffer = generate_piece(lt::piece_index_t{0}, piece_size);
++	std::fill(buffer.begin() + data_size, buffer.end(), 0);
 +	lt::hasher expected_hasher;
 +	expected_hasher.update({buffer.data(), piece_size});
 +	lt::sha1_hash const expected_hash = expected_hasher.final();
 +
++	std::vector<lt::sha256_hash> expected_blocks;
++	if (v2) for (int offset = 0; offset < data_size; offset += lt::default_block_size)
++	{
++		int const size = std::min(lt::default_block_size, data_size - offset);
++		expected_blocks.push_back(lt::hasher256(lt::span<char const>{buffer.data() + offset, size}).final());
++	}
++	std::vector<lt::sha256_hash> block_hashes(expected_blocks.size());
++	auto const hash_flags = v1 ? lt::disk_interface::v1_hash : lt::disk_job_flags_t{};
 +	int writes_done = 0;
 +	int initial_hashes_done = 0;
-+	for (int offset = 0; offset < piece_size; offset += lt::default_block_size)
++	for (int offset = 0; offset < write_size; offset += lt::default_block_size)
 +	{
 +		disk_thread->async_write(storage,
-+			lt::peer_request{lt::piece_index_t{0}, offset, lt::default_block_size},
++			lt::peer_request{lt::piece_index_t{0}, offset, std::min(lt::default_block_size, write_size - offset)},
 +			buffer.data() + offset,
 +			std::shared_ptr<lt::disk_observer>(),
 +			[&writes_done](lt::storage_error const& error) {
@@ -88,12 +105,13 @@ index 8d95c37a8cf8a819005cbcc04cd520af207cc528..94ca1a7841b563233bf1cc96b1a9b0b6
 +	}
 +	disk_thread->async_hash(storage,
 +		lt::piece_index_t{0},
-+		lt::span<lt::sha256_hash>{},
-+		lt::disk_interface::v1_hash | lt::disk_interface::flush_piece,
-+		[&initial_hashes_done, expected_hash](lt::piece_index_t,
++		block_hashes,
++		hash_flags | lt::disk_interface::flush_piece,
++		[&initial_hashes_done, expected_hash, v1, &block_hashes, &expected_blocks](lt::piece_index_t,
 +			lt::sha1_hash const& hash, lt::storage_error const& error) {
 +			TEST_CHECK(!error.ec);
-+			TEST_CHECK(hash == expected_hash);
++			if (v1) TEST_CHECK(hash == expected_hash);
++			TEST_CHECK(block_hashes == expected_blocks);
 +			++initial_hashes_done;
 +		});
 +	disk_thread->submit_jobs();
@@ -110,7 +128,7 @@ index 8d95c37a8cf8a819005cbcc04cd520af207cc528..94ca1a7841b563233bf1cc96b1a9b0b6
 +			}
 +		}
 +	};
-+	drive([&] { return writes_done < 4 || initial_hashes_done < 1; },
++	drive([&] { return writes_done < (write_size + lt::default_block_size - 1) / lt::default_block_size || initial_hashes_done < 1; },
 +		"timeout preparing checking-memory hash test");
 +
 +	int clears_done = 0;
@@ -119,16 +137,18 @@ index 8d95c37a8cf8a819005cbcc04cd520af207cc528..94ca1a7841b563233bf1cc96b1a9b0b6
 +	disk_thread->submit_jobs();
 +	drive([&] { return clears_done < 1; }, "timeout clearing checking-memory hash cache");
 +
++	std::fill(block_hashes.begin(), block_hashes.end(), lt::sha256_hash{});
 +	std::int64_t const reads_before = cnt[lt::counters::num_read_ops];
 +	int hashes_done = 0;
 +	disk_thread->async_hash(storage,
 +		lt::piece_index_t{0},
-+		lt::span<lt::sha256_hash>{},
-+		lt::disk_interface::v1_hash,
-+		[&hashes_done, expected_hash](lt::piece_index_t,
++		block_hashes,
++		hash_flags,
++		[&hashes_done, expected_hash, v1, &block_hashes, &expected_blocks](lt::piece_index_t,
 +			lt::sha1_hash const& hash, lt::storage_error const& error) {
 +			TEST_CHECK(!error.ec);
-+			TEST_CHECK(hash == expected_hash);
++			if (v1) TEST_CHECK(hash == expected_hash);
++			TEST_CHECK(block_hashes == expected_blocks);
 +			++hashes_done;
 +		});
 +	disk_thread->submit_jobs();
@@ -141,12 +161,21 @@ index 8d95c37a8cf8a819005cbcc04cd520af207cc528..94ca1a7841b563233bf1cc96b1a9b0b6
 +
 +TORRENT_TEST(pread_hash_respects_checking_memory_budget)
 +{
-+	// A four-block piece exceeds a two-block budget and uses bounded block reads.
-+	TEST_EQUAL(pread_hash_read_operations(2, 1, 1), 4);
-+	// The whole-piece fast path remains available when the piece fits the budget.
-+	TEST_EQUAL(pread_hash_read_operations(4, 1, 1), 1);
-+	// With no dedicated hash threads, the generic disk pool shares the budget.
-+	TEST_EQUAL(pread_hash_read_operations(4, 0, 2), 4);
++	for (auto const mode : {test_mode::v1, test_mode::v2, test_mode::v1 | test_mode::v2})
++	{
++		for (bool const pad : {false, true})
++		{
++			// The fallback hashes v1 and v2 independently. A pad boundary midway
++			// through block 3 must zero-fill v1 while hashing only real bytes in v2.
++			int const reads = ((mode & test_mode::v1) ? 4 : 0)
++				+ ((mode & test_mode::v2) ? (pad ? 3 : 4) : 0);
++			TEST_EQUAL(pread_hash_read_operations(2, 1, 1, mode, pad), reads);
++			// The whole-piece fast path serves both hashes in one read.
++			TEST_EQUAL(pread_hash_read_operations(4, 1, 1, mode, pad), 1);
++			// With no hash threads, the generic pool shares the memory budget.
++			TEST_EQUAL(pread_hash_read_operations(4, 0, 2, mode, pad), reads);
++		}
++	}
 +}
 +
  // Exercises dispatching a deferred clear_piece from inside the cache flush.

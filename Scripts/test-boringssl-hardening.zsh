@@ -80,6 +80,13 @@ typeset -ar linker_flags=(
 "$cxx" "${compiler_flags[@]}" "${sanitizer_flags[@]}" \
     "$test_source" "${linker_flags[@]}" \
     -o "$temporary_directory/boringssl-hardening-tests"
+
+# The CTR-DRBG state layout must match the shipped no-assembly library.
+"$cxx" "${compiler_flags[@]}" "${sanitizer_flags[@]}" \
+    -DOPENSSL_NO_ASM -DOPENSSL_SMALL \
+    "$root_dir/Tests/DependencyHardening/BoringSSLCryptoVectorTests.cpp" \
+    "${linker_flags[@]}" -o "$temporary_directory/boringssl-crypto-vector-tests"
+"$temporary_directory/boringssl-crypto-vector-tests" "$source_dir"
 "$temporary_directory/boringssl-hardening-tests"
 
 "$cxx" "${compiler_flags[@]}" -S -emit-llvm "$test_source" \

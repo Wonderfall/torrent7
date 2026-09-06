@@ -15,6 +15,8 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <algorithm>
+#include <span>
 #include <vector>
 
 namespace {
@@ -130,6 +132,34 @@ __attribute__((noinline)) void replay_context_bytes(
   return true;
 }
 
+[[nodiscard]] bool verify_resize_boundaries()
+{
+  constexpr std::size_t initial_size = 64;
+  constexpr std::size_t shrunk_size = 17;
+  std::unique_ptr<std::uint8_t, decltype(&OPENSSL_free)> memory(
+      static_cast<std::uint8_t*>(OPENSSL_malloc(initial_size)), &OPENSSL_free);
+  if (!memory) return false;
+  std::span<std::uint8_t> const original(memory.get(), initial_size);
+  std::ranges::fill(original, 0xa5);
+  auto* const shrunk = static_cast<std::uint8_t*>(OPENSSL_realloc(memory.get(), shrunk_size));
+  if (shrunk == nullptr) return false;
+  // A successful realloc consumes the old allocation; transfer the new owner.
+  static_cast<void>(memory.release());
+  memory.reset(shrunk);
+  std::span<std::uint8_t const> const bytes(memory.get(), shrunk_size);
+  if (!is_aligned(memory.get()) || !std::ranges::all_of(bytes, [](auto byte) { return byte == 0xa5; }))
+    return false;
+  auto* const failed = OPENSSL_realloc(memory.get(), std::numeric_limits<std::size_t>::max());
+  if (failed != nullptr) {
+    static_cast<void>(memory.release());
+    OPENSSL_free(failed);
+    return false;
+  }
+  ERR_clear_error();
+  // Failed growth must leave the original allocation owned, readable, and freeable.
+  return std::ranges::all_of(bytes, [](auto byte) { return byte == 0xa5; });
+}
+
 [[nodiscard]] bool verify_digest_move()
 {
   bssl::UniquePtr<EVP_MD_CTX> source(EVP_MD_CTX_new());
@@ -240,7 +270,7 @@ int main()
   bssl::Delete(typed_a);
   bssl::Delete(typed_b);
 
-  if (!verify_allocation_semantics()) {
+  if (!verify_allocation_semantics() || !verify_resize_boundaries()) {
     std::fputs("BoringSSL allocation semantics failed\n", stderr);
     return 1;
   }

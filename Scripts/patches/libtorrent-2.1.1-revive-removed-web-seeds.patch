@@ -1,8 +1,8 @@
 diff --git a/src/torrent.cpp b/src/torrent.cpp
+index da53ab6b5eca46ee51dfbeec096a5c3c4a270d45..1714ae552635182bdb15e0fe46aef5087d5ad3b4 100644
 --- a/src/torrent.cpp
 +++ b/src/torrent.cpp
-@@ -10323,6 +10323,16 @@ namespace libtorrent {
- 		// don't add duplicates
+@@ -10522,6 +10522,16 @@ namespace {
  		auto const it = std::find(m_web_seeds.begin(), m_web_seeds.end(), ent);
  		if (it != m_web_seeds.end())
  		{
@@ -19,3 +19,102 @@ diff --git a/src/torrent.cpp b/src/torrent.cpp
  			// if we're adding a web seed (as non-ephemeral) and we have an
  			// ephemeral web seed already, promote it to non-ephemeral
  			if (it->ephemeral && !ent.ephemeral)
+diff --git a/test/test_web_seed_lifecycle.cpp b/test/test_web_seed_lifecycle.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..a95ee6cf0e011d361ed95127a8eef2c45c3b72c7
+--- /dev/null
++++ b/test/test_web_seed_lifecycle.cpp
+@@ -0,0 +1,80 @@
++#include "web_seed_policy_test.hpp"
++
++using namespace libtorrent;
++using web_seed_test::fixture;
++
++namespace {
++void check_saved(aux::torrent const& target, bool const visible)
++{
++	add_torrent_params saved;
++	target.write_resume_data({}, saved);
++	TEST_EQUAL(saved.url_seeds.size(), visible ? 1 : 0);
++	TEST_EQUAL(target.web_seeds().size(), visible ? 1 : 0);
++	if (visible) TEST_EQUAL(saved.url_seeds.front(), "http://web-seed.test/payload");
++}
++}
++
++TORRENT_TEST(readd_web_seed_during_dns_success_and_failure)
++{
++	for (bool const failure : {false, true})
++	{
++		fixture f;
++		f.resolve();
++		auto* const original = &f.seed();
++		f.target->remove_web_seed(original->url);
++		TEST_CHECK(original->removed);
++		check_saved(*f.target, false);
++		auto* const revived = f.target->add_web_seed("http://web-seed.test/payload");
++		TEST_CHECK(revived == original);
++		TEST_CHECK(!revived->removed);
++		TEST_CHECK(revived->resolving);
++		check_saved(*f.target, true);
++		if (failure) f.ses.dns.complete({}, boost::asio::error::host_not_found);
++		else f.ses.dns.complete({make_address("8.8.8.8")});
++		TEST_CHECK(!revived->resolving);
++		TEST_CHECK(!revived->removed);
++		TEST_CHECK(!revived->disabled);
++		TEST_EQUAL(revived->endpoints.size(), failure ? 0 : 1);
++		check_saved(*f.target, true);
++	}
++}
++
++TORRENT_TEST(remove_web_seed_during_dns_erases_after_completion)
++{
++	for (bool const failure : {false, true})
++	{
++		fixture f;
++		f.resolve();
++		f.target->remove_web_seed("http://web-seed.test/payload");
++		check_saved(*f.target, false);
++		if (failure) f.ses.dns.complete({}, boost::asio::error::host_not_found);
++		else f.ses.dns.complete({make_address("8.8.8.8")});
++		TEST_CHECK(f.ses.dns.requests.empty());
++		check_saved(*f.target, false);
++		// A subsequent add must create one live seed and start fresh DNS.
++		f.target->add_web_seed("http://web-seed.test/payload");
++		f.resolve();
++		TEST_EQUAL(f.ses.dns.requests.size(), 1);
++		f.ses.dns.complete({make_address("8.8.4.4")});
++		TEST_EQUAL(f.seed().endpoints.front(), ep("8.8.4.4", 80));
++		check_saved(*f.target, true);
++	}
++}
++
++TORRENT_TEST(abort_with_pending_web_seed_dns_releases_torrent)
++{
++	for (bool const removed : {false, true})
++	{
++		fixture f;
++		f.resolve();
++		if (removed) f.target->remove_web_seed("http://web-seed.test/payload");
++		std::weak_ptr<aux::torrent> const lifetime = f.target;
++		f.target->abort();
++		f.target.reset();
++		TEST_CHECK(!lifetime.expired()); // The queued callback owns the torrent.
++		f.ses.dns.abort();
++		f.io.poll();
++		TEST_CHECK(f.ses.dns.requests.empty());
++		TEST_CHECK(lifetime.expired());
++	}
++}
+diff --git a/test/web_seed_policy_test.hpp b/test/web_seed_policy_test.hpp
+index 081f67578c8b2c1c15330e490d850d563069ad05..5f32cef5f4eba0a387c1a4acbea063186531590d 100644
+--- a/test/web_seed_policy_test.hpp
++++ b/test/web_seed_policy_test.hpp
+@@ -72,7 +72,7 @@ struct fixture
+ 	}
+ 	~fixture()
+ 	{
+-		target->abort();
++		if (target) target->abort();
+ 		ses.dns.abort();
+ 		io.poll();
+ 	}

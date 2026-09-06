@@ -91,3 +91,14 @@ policy, trackers, storage, TLS, allocation, and the PAC replay/code-generation
 checks, including the consolidated patches' existing tests. Use the relevant
 sanitizer, parser-fuzz, and [Swift](../test-swift.zsh) checks when the imported
 surfaces or implementations change, as required by the root `AGENTS.md`.
+
+The dependency suite also replays all 140 pinned AES-GCM and 300 CTR-DRBG known
+answers, checks allocator failure and alignment boundaries, and exercises v1,
+v2, and hybrid hashing across pad-file boundaries under both worker-pool
+configurations. Controlled callbacks cover web-seed remove/re-add, teardown,
+and private-tracker failover, including stale peer DNS and tracker replies.
+Authenticated TLS transfer, wrong-hostname rejection, and HTTPS downgrade
+rejection run against a fixture root scoped to each test SecTrust object. The
+TLS test compiles the actual verifier with one platform-call substitution; it
+uses Apple's real trust evaluation and never modifies a keychain or exposes a
+production trust override.
