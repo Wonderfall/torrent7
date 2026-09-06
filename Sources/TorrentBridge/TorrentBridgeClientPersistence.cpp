@@ -265,7 +265,7 @@ TombstoneEntriesResult TTorrentClient::scan_removal_tombstone_entries_locked(
             kMaxRemovalTombstoneBytes
         );
         if (!buffer) {
-            return std::unexpected(tombstone_read_error(buffer.error()));
+            return std::unexpected(std::string(tombstone_read_error(buffer.error())));
         }
 
         TombstonePayloadResult payload = tombstone_payload_from_bytes(*buffer);

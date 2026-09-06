@@ -154,6 +154,9 @@ TTorrentClient::TTorrentClient(
     }
     load_resume_data();
     {
+        // Preserve client-before-resume acquisition order and libc++'s single-lock
+        // thread-safety annotations; a multi-mutex scoped_lock does neither.
+        // NOLINTNEXTLINE(modernize-use-scoped-lock)
         std::scoped_lock guard(lock);
         std::scoped_lock io_guard(resume_io_lock);
         source_policy_reconciled = handle_by_native_token.empty();
@@ -317,6 +320,9 @@ int32_t TTorrentClient::drain_presentation_metadata(
         *available_out = bridge_bool(false);
     }
     try {
+        // Preserve client-before-resume acquisition order and libc++'s single-lock
+        // thread-safety annotations; a multi-mutex scoped_lock does neither.
+        // NOLINTNEXTLINE(modernize-use-scoped-lock)
         std::scoped_lock guard(lock);
         std::scoped_lock io_guard(resume_io_lock);
         std::size_t pending_count = 0;

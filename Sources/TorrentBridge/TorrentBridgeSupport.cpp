@@ -840,7 +840,7 @@ TombstonePayloadResult tombstone_payload_from_bytes(std::vector<char> const &buf
     return payload;
 }
 
-std::string tombstone_read_error(FileReadFailure failure)
+std::string_view tombstone_read_error(FileReadFailure failure) noexcept
 {
     switch (failure) {
     case FileReadFailure::unreadable:

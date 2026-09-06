@@ -1471,7 +1471,7 @@ ResumeIDListResult normalized_resume_ids(std::vector<std::string> const &ids);
 
 TombstonePayloadResult tombstone_payload_from_bytes(std::vector<char> const &buffer);
 
-std::string tombstone_read_error(FileReadFailure failure);
+std::string_view tombstone_read_error(FileReadFailure failure) noexcept;
 
 std::string tombstone_payload(std::vector<std::string> const &ids);
 
