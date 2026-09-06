@@ -255,34 +255,10 @@ index 7022964ecb5ef1eb5cd8465e3e834ddf89dd7767..6dc05be645eeb40443f1ca6666e54028
  		virtual void queue_tracker_request(aux::tracker_request req
  			, std::weak_ptr<aux::request_callback> c) = 0;
 diff --git a/include/libtorrent/aux_/torrent.hpp b/include/libtorrent/aux_/torrent.hpp
-index 693efb684e232a52f6601e05af3594a7ec5c7c33..73a3b538d678df950569016cc810cf0459ac89ff 100644
+index 55daf61078998f2973241c754ef9e91445101436..73a3b538d678df950569016cc810cf0459ac89ff 100644
 --- a/include/libtorrent/aux_/torrent.hpp
 +++ b/include/libtorrent/aux_/torrent.hpp
-@@ -151,13 +151,6 @@ namespace libtorrent::aux {
- 		// these are its IP addresses
- 		std::vector<tcp::endpoint> endpoints;
- 
--		// RFC 7050 prefixes learned before accepting an untrusted IPv6
--		// endpoint. Completion and validity are distinct so a failed or
--		// malformed discovery can fail closed without affecting IPv4.
--		std::vector<nat64_prefix> nat64_prefixes;
--		bool nat64_discovery_complete = false;
--		bool nat64_discovery_valid = false;
--
- 		// this is the peer_info field used for the
- 		// connection, just to count hash failures
- 		// it's also used to hold the peer_connection
-@@ -227,9 +220,6 @@ namespace libtorrent::aux {
- 			web_seed_entry::operator=(std::move(rhs));
- 			retry = std::move(rhs.retry);
- 			endpoints = std::move(rhs.endpoints);
--			nat64_prefixes = std::move(rhs.nat64_prefixes);
--			nat64_discovery_complete = rhs.nat64_discovery_complete;
--			nat64_discovery_valid = rhs.nat64_discovery_valid;
- 			peer_info = std::move(rhs.peer_info);
- 			supports_keepalive = std::move(rhs.supports_keepalive);
- 			resolving = std::move(rhs.resolving);
-@@ -461,6 +451,10 @@ namespace libtorrent::aux {
+@@ -451,6 +451,10 @@ namespace libtorrent::aux {
  		// find the peer that introduced us to the given endpoint. This is
  		// used when trying to holepunch. We need the introducer so that we
  		// can send a rendezvous connect message
@@ -293,7 +269,7 @@ index 693efb684e232a52f6601e05af3594a7ec5c7c33..73a3b538d678df950569016cc810cf04
  		bt_peer_connection* find_introducer(tcp::endpoint const& ep) const;
  
  		// if we're connected to a peer at ep, return its peer connection
-@@ -951,6 +945,8 @@ namespace libtorrent::aux {
+@@ -941,6 +945,8 @@ namespace libtorrent::aux {
  
  	private:
  
@@ -302,23 +278,16 @@ index 693efb684e232a52f6601e05af3594a7ec5c7c33..73a3b538d678df950569016cc810cf04
  		// called when we learn that we have a piece
  		// only once per piece
  		void we_have(piece_index_t index, bool loading_resume = false);
-@@ -1075,14 +1071,7 @@ namespace libtorrent::aux {
+@@ -1065,7 +1071,7 @@ namespace libtorrent::aux {
  		void on_name_lookup(error_code const&
  			, std::vector<address> const&
  			, int port
--			, std::list<web_seed_t>::iterator);
--
--		void on_nat64_name_lookup(error_code const&
--			, std::vector<address> const&
--			, error_code target_error
--			, std::vector<address> target_addresses
--			, int port
 -			, std::list<web_seed_t>::iterator);
 +			, std::list<web_seed_t>::iterator, std::uint64_t generation);
  
  		void connect_web_seed(std::list<web_seed_t>::iterator web, tcp::endpoint a);
  
-@@ -1090,7 +1079,7 @@ namespace libtorrent::aux {
+@@ -1073,7 +1079,7 @@ namespace libtorrent::aux {
  		// lookup for a proxy for a web seed is completed.
  		void on_proxy_name_lookup(error_code const& e
  			, std::vector<address> const& addrs
@@ -327,7 +296,7 @@ index 693efb684e232a52f6601e05af3594a7ec5c7c33..73a3b538d678df950569016cc810cf04
  
  		// re-evaluates whether this torrent should be considered inactive or not
  		void on_inactivity_tick(error_code const& ec);
-@@ -1787,8 +1776,7 @@ namespace libtorrent::aux {
+@@ -1770,8 +1776,7 @@ namespace libtorrent::aux {
  		bool m_disable_v1_hashes:1;
  		// ----
  
@@ -1375,25 +1344,10 @@ index 5a8ced6e836f5f1d1d185216958a119ef560d598..9fa9715493630b93ae7717028a22fcf5
  		DEPRECATED_SET(ignore_resume_timestamps, false, nullptr),
  		SET(no_recheck_incomplete_resume, false, nullptr),
 diff --git a/src/torrent.cpp b/src/torrent.cpp
-index 8a785f9a13426cae9f9db5d7fcff93073afad3ba..ca0ebd47f233fefe293ba34fb4aaa1c6bed58b8a 100644
+index 20d5287ecb7cd1484589c2ec9e1d83293d0118b3..ca0ebd47f233fefe293ba34fb4aaa1c6bed58b8a 100644
 --- a/src/torrent.cpp
 +++ b/src/torrent.cpp
-@@ -137,14 +137,6 @@ bool is_downloading_state(int const st)
- 	}
- }
- 
--bool is_global_web_seed_endpoint(address const& endpoint, web_seed_t const& web)
--{
--	if (endpoint.is_v6()
--		&& (!web.nat64_discovery_complete || !web.nat64_discovery_valid))
--		return false;
--	return is_global(endpoint, web.nat64_prefixes);
--}
--
- // convert file priorities into piece priorities
- aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
- 	file_storage const& fs
-@@ -2178,9 +2170,49 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -2170,9 +2170,49 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  		m_torrent_initialized = true;
  	}
  
@@ -1443,7 +1397,7 @@ index 8a785f9a13426cae9f9db5d7fcff93073afad3ba..ca0ebd47f233fefe293ba34fb4aaa1c6
  		for (auto* pe : m_connections)
  		{
  			TORRENT_INCREMENT(m_iterating_connections);
-@@ -6820,15 +6852,23 @@ namespace {
+@@ -6812,15 +6852,23 @@ namespace {
  			return;
  		}
  
@@ -1469,7 +1423,7 @@ index 8a785f9a13426cae9f9db5d7fcff93073afad3ba..ca0ebd47f233fefe293ba34fb4aaa1c6
  		if ((ps.type == settings_pack::http
  			|| ps.type == settings_pack::http_pw)
  			&& ps.proxy_peer_connections)
-@@ -6842,8 +6882,8 @@ namespace {
+@@ -6834,8 +6882,8 @@ namespace {
  			// use proxy
  			web->resolving = true;
  			m_ses.get_resolver().async_resolve(ps.hostname, aux::resolver_interface::abort_on_shutdown
@@ -1480,13 +1434,8 @@ index 8a785f9a13426cae9f9db5d7fcff93073afad3ba..ca0ebd47f233fefe293ba34fb4aaa1c6
  		}
  		else if (!enforce_endpoint_policy
  			&& ps.proxy_hostnames
-@@ -6861,21 +6901,19 @@ namespace {
- 
- 			auto self = shared_from_this();
+@@ -6855,16 +6903,17 @@ namespace {
  			web->resolving = true;
--			web->nat64_prefixes.clear();
--			web->nat64_discovery_complete = false;
--			web->nat64_discovery_valid = false;
  
  			m_ses.get_resolver().async_resolve(hostname, aux::resolver_interface::abort_on_shutdown
 -				, [self, web, port](error_code const& e, std::vector<address> const& addrs)
@@ -1506,7 +1455,7 @@ index 8a785f9a13426cae9f9db5d7fcff93073afad3ba..ca0ebd47f233fefe293ba34fb4aaa1c6
  	{
  		TORRENT_ASSERT(is_single_thread());
  
-@@ -6900,6 +6938,7 @@ namespace {
+@@ -6889,6 +6938,7 @@ namespace {
  
  		if (m_abort) return;
  		if (m_ses.is_aborted()) return;
@@ -1514,13 +1463,9 @@ index 8a785f9a13426cae9f9db5d7fcff93073afad3ba..ca0ebd47f233fefe293ba34fb4aaa1c6
  
  		if (e || addrs.empty())
  		{
-@@ -6949,13 +6988,10 @@ namespace {
- 
+@@ -6939,9 +6989,9 @@ namespace {
  		auto self = shared_from_this();
  		web->resolving = true;
--		web->nat64_prefixes.clear();
--		web->nat64_discovery_complete = false;
--		web->nat64_discovery_valid = false;
  		m_ses.get_resolver().async_resolve(hostname, aux::resolver_interface::abort_on_shutdown
 -			, [self, web, port](error_code const& err, std::vector<address> const& addr)
 +			, [self, web, port, generation](error_code const& err, std::vector<address> const& addr)
@@ -1530,7 +1475,7 @@ index 8a785f9a13426cae9f9db5d7fcff93073afad3ba..ca0ebd47f233fefe293ba34fb4aaa1c6
  			});
  	}
  	catch (...) { handle_exception(); }
-@@ -6963,7 +6999,8 @@ namespace {
+@@ -6949,7 +6999,8 @@ namespace {
  	void torrent::on_name_lookup(error_code const& e
  		, std::vector<address> const& addrs
  		, int const port
@@ -1540,38 +1485,16 @@ index 8a785f9a13426cae9f9db5d7fcff93073afad3ba..ca0ebd47f233fefe293ba34fb4aaa1c6
  	{
  		TORRENT_ASSERT(is_single_thread());
  
-@@ -6991,28 +7028,9 @@ namespace {
- 
+@@ -6978,6 +7029,8 @@ namespace {
  		bool const block_non_global = web->no_local_ips
  			|| settings().get_bool(settings_pack::ssrf_mitigation);
--		bool const has_ipv6 = std::any_of(addrs.begin(), addrs.end()
--			, [](address const& addr) { return addr.is_v6(); });
--		if (!e && block_non_global && has_ipv6
--			&& !web->nat64_discovery_complete)
--		{
--			// Hold every target address until the shared, cached RFC 7050
--			// discovery completes. IPv4-only results avoid this DNS lookup.
--			auto self = shared_from_this();
--			m_ses.get_resolver().async_resolve("ipv4only.arpa"
--				, aux::resolver_interface::abort_on_shutdown
--				, [self, web, target_error = e, target_addresses = addrs, port]
--					(error_code const& discovery_error
--						, std::vector<address> const& discovery_addresses)
--				{
--					self->wrap(&torrent::on_nat64_name_lookup, discovery_error
--						, discovery_addresses, target_error, target_addresses
--						, port, web);
--				});
--			return;
--		}
--
  		web->resolving = false;
 +		if (m_ses.is_aborted()
 +			|| generation != m_ses.global_address_policy().generation) return;
  
  		if (e || addrs.empty())
  		{
-@@ -7033,12 +7051,19 @@ namespace {
+@@ -6998,12 +7051,19 @@ namespace {
  		}
  
  		bool blocked_non_global = false;
@@ -1581,7 +1504,7 @@ index 8a785f9a13426cae9f9db5d7fcff93073afad3ba..ca0ebd47f233fefe293ba34fb4aaa1c6
  			// Untrusted web-seed metadata must never turn the client into an HTTP
  			// transport to a non-global address. Apply this after resolution so
  			// hostnames and literals receive the same policy.
--			if (block_non_global && !is_global_web_seed_endpoint(addr, *web))
+-			if (block_non_global && !is_global(addr))
 +			auto const classification = m_ses.global_address_policy().classify(addr);
 +			if (block_non_global && classification == global_address_classification::unavailable)
 +			{
@@ -1592,7 +1515,7 @@ index 8a785f9a13426cae9f9db5d7fcff93073afad3ba..ca0ebd47f233fefe293ba34fb4aaa1c6
  			{
  				blocked_non_global = true;
  				if (m_ses.alerts().should_post<peer_blocked_alert>())
-@@ -7059,6 +7084,12 @@ namespace {
+@@ -7024,6 +7084,12 @@ namespace {
  
  		if (web->endpoints.empty())
  		{
@@ -1605,59 +1528,21 @@ index 8a785f9a13426cae9f9db5d7fcff93073afad3ba..ca0ebd47f233fefe293ba34fb4aaa1c6
  			if (m_ses.alerts().should_post<url_seed_alert>())
  			{
  				m_ses.alerts().emplace_alert<url_seed_alert>(get_handle(), web->url
-@@ -7076,45 +7107,7 @@ namespace {
+@@ -7041,7 +7107,7 @@ namespace {
  			|| m_ses.num_connections() >= settings().get_int(settings_pack::connections_limit))
  			return;
  
 -		connect_web_seed(web, web->endpoints.front());
--	}
--	catch (...) { handle_exception(); }
--
--	void torrent::on_nat64_name_lookup(error_code const& e
--		, std::vector<address> const& addrs
--		, error_code target_error
--		, std::vector<address> target_addresses
--		, int const port
--		, std::list<web_seed_t>::iterator web) try
--	{
--		TORRENT_ASSERT(is_single_thread());
--		TORRENT_ASSERT(web->resolving);
--
--		if (web->removed)
--		{
--			web->resolving = false;
--			remove_web_seed_iter(web);
--			return;
--		}
--		if (m_abort || m_ses.is_aborted())
--		{
--			web->resolving = false;
--			return;
--		}
--
--		nat64_discovery_result discovery;
--		if (!e) discovery = discover_nat64_prefixes(addrs);
--		web->nat64_prefixes = std::move(discovery.prefixes);
--		web->nat64_discovery_complete = true;
--		web->nat64_discovery_valid = !e && discovery.valid;
--
--#ifndef TORRENT_DISABLE_LOGGING
--		if (!web->nat64_discovery_valid && should_log())
--			debug_log("NAT64 prefix discovery failed closed for IPv6 web seed: %s"
--				, web->url.c_str());
--#endif
--
--		on_name_lookup(target_error, target_addresses, port, web);
 +		connect_to_url_seed(web);
  	}
  	catch (...) { handle_exception(); }
  
-@@ -7196,8 +7189,16 @@ namespace {
+@@ -7123,8 +7189,16 @@ namespace {
  		// resolved and filtered endpoint instead of asking the proxy to resolve it.
  		bool const enforce_endpoint_policy = web->no_local_ips
  			|| settings().get_bool(settings_pack::ssrf_mitigation);
 -		if (enforce_endpoint_policy
--			&& !is_global_web_seed_endpoint(a.address(), *web))
+-			&& !is_global(a.address()))
 +		auto const classification = m_ses.global_address_policy().classify(a.address());
 +		if (enforce_endpoint_policy && classification == global_address_classification::pending)
 +			return;
@@ -1671,7 +1556,7 @@ index 8a785f9a13426cae9f9db5d7fcff93073afad3ba..ca0ebd47f233fefe293ba34fb4aaa1c6
  		{
  #ifndef TORRENT_DISABLE_LOGGING
  			if (should_log())
-@@ -7995,6 +7996,16 @@ namespace {
+@@ -7922,6 +7996,16 @@ namespace {
  
  		if (m_abort) return false;
  
@@ -1688,7 +1573,7 @@ index 8a785f9a13426cae9f9db5d7fcff93073afad3ba..ca0ebd47f233fefe293ba34fb4aaa1c6
  		peerinfo->last_connected = m_ses.session_time();
  #if TORRENT_USE_ASSERTS
  		if (!settings().get_bool(settings_pack::allow_multiple_connections_per_ip)
-@@ -8425,9 +8436,19 @@ namespace {
+@@ -8352,9 +8436,19 @@ namespace {
  		inc_stats_counter(counters::num_total_pieces_added
  			, m_torrent_file->num_pieces());
  
@@ -1711,7 +1596,7 @@ index 8a785f9a13426cae9f9db5d7fcff93073afad3ba..ca0ebd47f233fefe293ba34fb4aaa1c6
  
  		set_need_save_resume(torrent_handle::if_metadata_changed);
  
-@@ -11809,12 +11830,11 @@ namespace {
+@@ -11736,12 +11830,11 @@ namespace {
  
  		TORRENT_ASSERT(info_hash().has_v2() || !(flags & pex_lt_v2));
  
@@ -2198,7 +2083,7 @@ index ca1a03ce9d61ec0a0f59dea205af6da308959ce0..eb350a67b15b258a20187892a1fe936a
  	aux::torrent_peer_allocator _torrent_peer_allocator;
  	port_filter _port_filter;
 diff --git a/test/setup_transfer.cpp b/test/setup_transfer.cpp
-index 4071ebd4d61841a13970ea584d326279aa4d6ea3..fd85278cc709935b9053c8aaab3113c264babc0e 100644
+index 382caa45d7f6b42b951841586d7b46c3ce04fe6d..aae47aa7f3e68f7362aec11c227710854fdfabe9 100644
 --- a/test/setup_transfer.cpp
 +++ b/test/setup_transfer.cpp
 @@ -961,7 +961,8 @@ std::vector<lt::create_file_entry> create_random_files(std::string const& path,
@@ -2220,7 +2105,7 @@ index 4071ebd4d61841a13970ea584d326279aa4d6ea3..fd85278cc709935b9053c8aaab3113c2
  	{
  		// invalid tracker urls won't be included in the generated magnet link
 diff --git a/test/setup_transfer.hpp b/test/setup_transfer.hpp
-index 86ca97ac5d34a0d034a819c30655f97ca35a3579..6c9e21164a0324a9541bc4061f6f2f276fd1fbda 100644
+index dc3eb00bf80dbcb821ccf7aa1a6266d9f8900b7a..369a20c0d5d1a71cba54180e96a386df2b1a4909 100644
 --- a/test/setup_transfer.hpp
 +++ b/test/setup_transfer.hpp
 @@ -83,7 +83,7 @@ EXPORT std::vector<lt::create_file_entry> create_random_files(std::string const&

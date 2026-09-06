@@ -19,7 +19,7 @@ important relationships, not alternative supported patch subsets.
 
 | Patch | Purpose and dependencies |
 | --- | --- |
-| `xcode-26` | Required Xcode build adjustments. |
+| `packet-flexible-array` | Replaces the UDP packet buffer’s fake one-byte tail with a true flexible array under strict bounds hardening. |
 | `network-security` | Base network endpoint, redirect, peer admission, and transport hardening. |
 | `storage-confinement` | Confined filesystem operations and storage safety. |
 | `file-provider` | Pathless payload descriptors, building on storage confinement; rejects unsupported storage backends and provider-to-path fallback. |
@@ -47,7 +47,7 @@ important relationships, not alternative supported patch subsets.
 
 The shared address-policy patch includes the former tracker-endpoint, DHT-global,
 peer-source, session-NAT64, and tracker-session-NAT64 changes. Its session state is
-introduced in its final shared location, without separate tracker or DHT discovery
+introduced in its final shared location, without separate tracker, DHT, or web-seed discovery
 implementations that would immediately be replaced.
 
 ## Boost and BoringSSL

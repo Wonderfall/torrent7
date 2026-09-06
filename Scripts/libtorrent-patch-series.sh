@@ -6,7 +6,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 readonly LIBTORRENT_COMMIT="56ae8caba38bf154ffc210403cb23f91d0ecaa49"
 readonly -a LIBTORRENT_PATCHES=(
-    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-xcode-26.patch"
+    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-packet-flexible-array.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-network-security.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-storage-confinement.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.1-file-provider.patch"
