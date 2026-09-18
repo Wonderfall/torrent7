@@ -747,18 +747,14 @@ struct TorrentList: View {
                     Text("No Labels")
                 } else {
                     ForEach(labels) { label in
-                        Button {
+                        TorrentSelectionMenuToggle(
+                            title: label.name,
+                            selectedCount: actionSummary.labeledTorrentCount(for: label.id),
+                            totalCount: actionSummary.count
+                        ) {
                             selectionState.ids = actionIDs
                             selectionFocusID = row.id
                             toggleLabel(label.id, actionIDs)
-                        } label: {
-                            Label(
-                                label.name,
-                                systemImage: labelMenuImage(
-                                    for: label.id,
-                                    summary: actionSummary
-                                )
-                            )
                         }
                     }
                 }
@@ -766,22 +762,10 @@ struct TorrentList: View {
 
             Divider()
 
-            Menu("Priority") {
-                ForEach(TorrentQueuePriority.allCases) { priority in
-                    Button {
-                        selectionState.ids = actionIDs
-                        selectionFocusID = row.id
-                        setQueuePriority(actionIDs, priority)
-                    } label: {
-                        Label(
-                            priority.title,
-                            systemImage: priorityMenuImage(
-                                for: priority,
-                                summary: actionSummary
-                            )
-                        )
-                    }
-                }
+            TorrentPriorityMenu(selection: actionSummary.commonQueuePriority) { priority in
+                selectionState.ids = actionIDs
+                selectionFocusID = row.id
+                setQueuePriority(actionIDs, priority)
             }
 
             Menu("Move in Queue") {
@@ -847,27 +831,6 @@ struct TorrentList: View {
             )
         }
         return currentSelectionSummary
-    }
-
-    private func priorityMenuImage(
-        for priority: TorrentQueuePriority,
-        summary: TorrentListSelectionSummary
-    ) -> String {
-        summary.commonQueuePriority == priority
-            ? "checkmark"
-            : "circle"
-    }
-
-    private func labelMenuImage(
-        for labelID: TorrentLabel.ID,
-        summary: TorrentListSelectionSummary
-    ) -> String {
-        let labeledCount =
-            summary.labeledTorrentCount(for: labelID)
-        if labeledCount == summary.count, summary.count > 0 {
-            return "checkmark"
-        }
-        return labeledCount > 0 ? "minus" : "circle"
     }
 
 }

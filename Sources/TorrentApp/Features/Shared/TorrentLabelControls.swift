@@ -15,11 +15,16 @@ struct TorrentLabelSelectionRow: View {
                     Text("No Labels")
                 } else {
                     ForEach(labels) { label in
-                        Button {
-                            toggle(label)
-                        } label: {
-                            Label(label.name, systemImage: selectedLabelIDs.contains(label.id) ? "checkmark" : "circle")
-                        }
+                        Toggle(label.name, isOn: Binding(
+                            get: { selectedLabelIDs.contains(label.id) },
+                            set: { selected in
+                                if selected {
+                                    selectedLabelIDs.insert(label.id)
+                                } else {
+                                    selectedLabelIDs.remove(label.id)
+                                }
+                            }
+                        ))
                     }
 
                     Divider()
@@ -63,13 +68,6 @@ struct TorrentLabelSelectionRow: View {
         }
     }
 
-    private func toggle(_ label: TorrentLabel) {
-        if selectedLabelIDs.contains(label.id) {
-            selectedLabelIDs.remove(label.id)
-        } else {
-            selectedLabelIDs.insert(label.id)
-        }
-    }
 }
 
 struct TorrentLabelPillStrip: View {
