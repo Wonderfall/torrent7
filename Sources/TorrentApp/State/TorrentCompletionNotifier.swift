@@ -43,10 +43,10 @@ final class TorrentCompletionNotifier {
         let playsSound: Bool
     }
 
-    private let history: TorrentCompletionHistoryStoring
+    private let history: any TorrentCompletionHistoryStoring
     private let notificationService: any TorrentNotificationServicing
-    private let dockTileService: TorrentDockTileServicing
-    private let activationProvider: ApplicationActivationProviding
+    private let dockTileService: any TorrentDockTileServicing
+    private let activationProvider: any ApplicationActivationProviding
     private var baselineRefreshesRemaining = 2
     private var observationGeneration: UInt64 = 0
     private var configuration = Configuration(settings: TorrentSettings())
@@ -60,10 +60,10 @@ final class TorrentCompletionNotifier {
     private var badgeTaskID: UUID?
 
     init(
-        history: TorrentCompletionHistoryStoring = TorrentCompletionHistoryStore(),
+        history: any TorrentCompletionHistoryStoring = TorrentCompletionHistoryStore(),
         notificationService: any TorrentNotificationServicing = TorrentNotificationService(),
-        dockTileService: TorrentDockTileServicing,
-        activationProvider: ApplicationActivationProviding = SharedApplicationActivationProvider()
+        dockTileService: any TorrentDockTileServicing,
+        activationProvider: any ApplicationActivationProviding = SharedApplicationActivationProvider()
     ) {
         self.history = history
         self.notificationService = notificationService

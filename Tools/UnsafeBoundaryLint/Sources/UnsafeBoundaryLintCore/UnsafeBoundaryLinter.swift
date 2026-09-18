@@ -422,7 +422,7 @@ private func unsafeKeywordRequiresDeclarationProof(_ boundary: Syntax) -> Bool {
             return false
         }
 
-        if syntax.isProtocol(DeclSyntaxProtocol.self) {
+        if syntax.isProtocol((any DeclSyntaxProtocol).self) {
             return true
         }
         current = syntax.parent
@@ -451,7 +451,7 @@ private func enclosingDeclarationPosition(for boundary: Syntax) -> Int? {
     var current: Syntax? = boundary
 
     while let syntax = current {
-        if syntax.isProtocol(DeclSyntaxProtocol.self) {
+        if syntax.isProtocol((any DeclSyntaxProtocol).self) {
             return syntax.positionAfterSkippingLeadingTrivia.utf8Offset
         }
         current = syntax.parent
@@ -506,7 +506,7 @@ private func hasDeclarationProof(for boundary: Syntax) -> Bool {
     var current: Syntax? = boundary
 
     while let syntax = current {
-        if syntax.isProtocol(DeclSyntaxProtocol.self) {
+        if syntax.isProtocol((any DeclSyntaxProtocol).self) {
             return hasSafetyMarker(
                 inLeadingTriviaOf: syntax.firstToken(viewMode: .sourceAccurate)
             )

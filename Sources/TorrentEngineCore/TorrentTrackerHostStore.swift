@@ -1,4 +1,4 @@
-import TorrentEngineModel
+package import TorrentEngineModel
 
 @safe package struct TorrentTrackerHostStore: Sendable {
     package private(set) var revision: UInt64 = 0

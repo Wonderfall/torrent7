@@ -78,6 +78,7 @@ cxx_flags=(
     -fsanitize-address-use-after-scope
     -Wall
     -Wextra
+    -Wconditional-uninitialized
     -Wformat
     -Wformat-security
     -Werror=format-security

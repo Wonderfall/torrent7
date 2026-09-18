@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import TorrentEngineModel
 
 nonisolated struct TorrentDefaultApplicationContext: Sendable {
     let bundleURL: URL

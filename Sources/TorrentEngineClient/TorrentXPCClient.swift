@@ -1,9 +1,9 @@
-import Foundation
+package import Foundation
 import Synchronization
-import TorrentEngineIPC
-import TorrentEngineModel
+package import TorrentEngineIPC
+package import TorrentEngineModel
 import TorrentMetainfo
-import XPC
+package import XPC
 
 /// A fresh, single-session broker owned by one command-channel controller.
 /// Cancellation must be idempotent and revoke further broker requests.

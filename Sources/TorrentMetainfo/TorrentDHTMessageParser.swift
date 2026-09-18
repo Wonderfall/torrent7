@@ -1,4 +1,4 @@
-import Foundation
+package import Foundation
 
 package enum TorrentDHTMessageError: Error, Equatable, Sendable {
     case emptyMessage

@@ -54,6 +54,10 @@ sources=(
     -strict-concurrency=complete \
     -enable-upcoming-feature InferIsolatedConformances \
     -enable-upcoming-feature NonisolatedNonsendingByDefault \
+    -enable-upcoming-feature MemberImportVisibility \
+    -enable-upcoming-feature InternalImportsByDefault \
+    -enable-upcoming-feature ExistentialAny \
+    -enable-upcoming-feature ImmutableWeakCaptures \
     -default-isolation nonisolated \
     -warn-soft-deprecated \
     -strict-memory-safety \

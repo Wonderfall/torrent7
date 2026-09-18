@@ -1,5 +1,5 @@
-import Foundation
-import XPC
+package import Foundation
+package import XPC
 
 package enum TorrentStorageBrokerProtocol {
     package static let version: UInt64 = 1

@@ -1,4 +1,4 @@
-import Foundation
+package import Foundation
 
 package enum TorrentSortOrder: String, Codable, CaseIterable, Identifiable, Sendable {
     private static let defaultsKey = "TorrentSortOrder"

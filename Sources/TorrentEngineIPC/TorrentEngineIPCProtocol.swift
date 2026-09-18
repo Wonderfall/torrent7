@@ -1,6 +1,6 @@
-import Foundation
+package import Foundation
 import TorrentEngineModel
-import XPC
+package import XPC
 
 package enum TorrentEngineIPCProtocol {
     package static let version: UInt64 = 13

@@ -1,7 +1,8 @@
+import Foundation
 import Testing
+@testable import TorrentApp
 import TorrentAppInfrastructure
 import TorrentEngineModel
-@testable import TorrentApp
 
 @Suite("Torrent label store")
 struct TorrentLabelStoreTests {

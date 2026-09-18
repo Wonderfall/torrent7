@@ -1,9 +1,9 @@
 import Foundation
 import Testing
+@testable import TorrentEngineIPC
 import TorrentEngineModel
 import TorrentMetainfo
 import XPC
-@testable import TorrentEngineIPC
 
 private let testJSONLimits = TorrentEngineIPCLimits.maximumJSONLimits
 
@@ -1016,7 +1016,7 @@ struct TorrentEngineIPCJSONTests {
     private struct RejectIfDecoded: Decodable, Sendable {
         private struct UnexpectedDecode: Error {}
 
-        init(from decoder: Decoder) throws {
+        init(from decoder: any Decoder) throws {
             _ = decoder
             Issue.record("JSONDecoder ran before the preflight rejected the payload")
             throw UnexpectedDecode()

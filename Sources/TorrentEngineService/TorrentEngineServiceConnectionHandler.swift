@@ -1,6 +1,6 @@
 import Darwin
-import ExtensionFoundation
-import Foundation
+package import ExtensionFoundation
+package import Foundation
 import Synchronization
 import TorrentEngineIPC
 import XPC

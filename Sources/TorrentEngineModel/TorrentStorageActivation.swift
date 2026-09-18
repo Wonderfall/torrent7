@@ -1,4 +1,4 @@
-import Foundation
+package import Foundation
 
 package enum TorrentStorageActivationError: LocalizedError, Sendable {
     case invalidGeneration

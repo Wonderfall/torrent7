@@ -1,4 +1,4 @@
-import Foundation
+package import Foundation
 import Synchronization
 
 private final class TorrentEngineServiceScopeValidity: Sendable {

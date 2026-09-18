@@ -1,5 +1,5 @@
-import Foundation
-import TorrentEngineModel
+package import Foundation
+package import TorrentEngineModel
 
 package struct TorrentCompletionClaim: Sendable {
     package let id: UUID

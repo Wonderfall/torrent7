@@ -914,7 +914,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
     }
 
     private func recoverAfterAddFailure(
-        _ error: Error,
+        _ error: any Error,
         nativeAddCommitted: Bool,
         containmentReason: String
     ) async {

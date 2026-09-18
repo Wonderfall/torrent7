@@ -1,5 +1,5 @@
 import Foundation
-import TorrentEngineModel
+package import TorrentEngineModel
 
 package struct TorrentPreferencesSnapshot: Sendable {
     package let settings: Result<TorrentSettings, TorrentSettingsLoadError>

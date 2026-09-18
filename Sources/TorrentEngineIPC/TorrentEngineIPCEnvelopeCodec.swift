@@ -1,5 +1,5 @@
-import Foundation
-import XPC
+package import Foundation
+package import XPC
 
 package enum TorrentEngineIPCField {
     package static let version = "version"

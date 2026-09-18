@@ -1,4 +1,4 @@
-import Foundation
+package import Foundation
 
 package struct TorrentEngineIPCJSONLimits: Equatable, Sendable {
     package let maximumNestingDepth: Int

@@ -1,7 +1,7 @@
-import Foundation
+package import Foundation
 import TorrentEngineModel
-import TorrentMetainfo
-import TorrentStorageAuthority
+package import TorrentMetainfo
+package import TorrentStorageAuthority
 
 package enum TorrentMagnetEnvelopeError: LocalizedError, Equatable, Sendable {
     case promotedMetadataTooLarge

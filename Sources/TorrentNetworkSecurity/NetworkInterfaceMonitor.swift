@@ -1,9 +1,9 @@
 import CryptoKit
+import Darwin
 import Foundation
 import Network
-import Darwin
 import SystemConfiguration
-import TorrentEngineModel
+package import TorrentEngineModel
 
 private func interfaceIdentityDigest(
     _ identity: String,

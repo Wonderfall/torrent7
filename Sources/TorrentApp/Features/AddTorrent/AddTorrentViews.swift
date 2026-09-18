@@ -873,7 +873,7 @@ struct AddTorrentConfirmationView: View {
         fileSelectionGeneration += 1
     }
 
-    private func handleDownloadFolderImport(_ result: Result<[URL], Error>) {
+    private func handleDownloadFolderImport(_ result: Result<[URL], any Error>) {
         guard case .success(let urls) = result, let url = urls.first else {
             return
         }

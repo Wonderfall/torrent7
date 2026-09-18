@@ -1,5 +1,5 @@
 import Foundation
-import TorrentEngineModel
+package import TorrentEngineModel
 
 package enum TorrentNetworkBindingBlockReason: String, Codable, Error, Sendable {
     case controllerRequested

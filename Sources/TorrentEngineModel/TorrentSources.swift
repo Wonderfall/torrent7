@@ -1,4 +1,4 @@
-import Foundation
+package import Foundation
 
 package struct TorrentTrackerItem: Codable, Identifiable, Hashable, Sendable {
     package let url: String

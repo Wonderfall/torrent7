@@ -1,5 +1,5 @@
-import Foundation
-import TorrentMetainfo
+package import Foundation
+package import TorrentMetainfo
 
 /// Adapts the shared, authority-free metainfo result into the storage model.
 /// All hostile-byte parsing remains in `TorrentMetainfoParser` so the app and

@@ -1,5 +1,5 @@
 import Darwin
-import TorrentBridge
+public import TorrentBridge
 
 private let swarmMetainfoContext = TorrentSwarmMetainfoParserBridgeContext()
 private let peerProtocolContext = TorrentPeerProtocolBridgeContext()

@@ -1,4 +1,4 @@
-import TorrentEngineModel
+package import TorrentEngineModel
 
 @safe package struct TorrentDetailStore: Sendable {
     package static let maximumEntryCount = 256

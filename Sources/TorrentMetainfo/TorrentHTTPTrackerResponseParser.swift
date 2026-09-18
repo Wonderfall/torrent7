@@ -1,4 +1,4 @@
-import Foundation
+package import Foundation
 
 package enum TorrentHTTPTrackerResponseError: Error, Equatable, Sendable {
     case emptyResponse
@@ -568,7 +568,7 @@ package struct TorrentHTTPTrackerResponseParser: Sendable {
         return TorrentPeerAddress(family: .ipv6, high: high, low: low)
     }
 
-    private func scanError(_ error: Error) -> TorrentHTTPTrackerResponseError {
+    private func scanError(_ error: any Error) -> TorrentHTTPTrackerResponseError {
         guard let error = error as? BencodeScanError else {
             return .malformedBencoding
         }

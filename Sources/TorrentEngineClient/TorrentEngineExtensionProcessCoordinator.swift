@@ -1,7 +1,7 @@
-import ExtensionFoundation
+package import ExtensionFoundation
 import Foundation
 import TorrentEngineIPC
-import XPC
+package import XPC
 
 extension AppExtensionPoint {
     @Definition

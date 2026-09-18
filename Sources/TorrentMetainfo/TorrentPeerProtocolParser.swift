@@ -1,4 +1,4 @@
-import Foundation
+package import Foundation
 
 package enum TorrentPeerProtocolError: Error, Equatable, Sendable {
     case emptyMessage
@@ -650,7 +650,7 @@ package struct TorrentPeerProtocolParser: Sendable {
         return result.partialValue
     }
 
-    private func scanError(_ error: Error) -> TorrentPeerProtocolError {
+    private func scanError(_ error: any Error) -> TorrentPeerProtocolError {
         guard let error = error as? BencodeScanError else {
             return .malformedBencoding
         }

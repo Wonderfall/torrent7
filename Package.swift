@@ -27,6 +27,7 @@ let libcppHardeningMode = enableDiagnostics ? "_LIBCPP_HARDENING_MODE_DEBUG" : "
 let bridgeWarnings: [CXXSetting] = [
     .enableWarning("all"),
     .enableWarning("extra"),
+    .enableWarning("conditional-uninitialized"),
     .enableWarning("conversion"),
     .enableWarning("implicit-fallthrough"),
     .enableWarning("shadow"),
@@ -206,7 +207,11 @@ let bridgeLinkerHardeningFlags = [
 let swiftBaselineSettings: [SwiftSetting] = [
     .swiftLanguageMode(.v6),
     .treatAllWarnings(as: .error),
-    .strictMemorySafety()
+    .strictMemorySafety(),
+    .enableUpcomingFeature("MemberImportVisibility"),
+    .enableUpcomingFeature("InternalImportsByDefault"),
+    .enableUpcomingFeature("ExistentialAny"),
+    .enableUpcomingFeature("ImmutableWeakCaptures")
 ]
 let appSwiftStrictnessFlags = [
     "-strict-concurrency=complete",
@@ -471,7 +476,9 @@ let package = Package(
                 "TorrentApp",
                 "TorrentAppInfrastructure",
                 "TorrentBridge",
+                "TorrentEngineClient",
                 "TorrentEngineCore",
+                "TorrentEngineIPC",
                 "TorrentEngineModel",
                 "TorrentMetainfo",
                 "TorrentStorageAuthority"
@@ -496,14 +503,14 @@ let package = Package(
         ),
         .testTarget(
             name: "TorrentEngineClientTests",
-            dependencies: ["TorrentEngineClient", "TorrentEngineIPC"],
+            dependencies: ["TorrentEngineClient", "TorrentEngineIPC", "TorrentEngineModel"],
             swiftSettings: swiftBaselineSettings + [
                 .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
             ] + nonisolatedConcurrencySwiftSettings
         ),
         .testTarget(
             name: "TorrentEngineServiceTests",
-            dependencies: ["TorrentEngineService", "TorrentEngineIPC"],
+            dependencies: ["TorrentEngineService", "TorrentEngineIPC", "TorrentNetworkSecurity"],
             swiftSettings: swiftBaselineSettings + [
                 .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
             ] + nonisolatedConcurrencySwiftSettings

@@ -1,6 +1,7 @@
+import Foundation
 import Testing
-import TorrentEngineModel
 @testable import TorrentApp
+import TorrentEngineModel
 
 @Suite("Torrent sorting")
 struct TorrentSortingTests {

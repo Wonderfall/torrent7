@@ -1,4 +1,4 @@
-import Foundation
+package import Foundation
 
 package enum TorrentDefaultsDomain: Sendable {
     case standard

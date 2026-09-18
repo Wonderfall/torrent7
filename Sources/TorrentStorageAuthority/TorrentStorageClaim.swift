@@ -1,8 +1,8 @@
-import Darwin
 import CryptoKit
-import Foundation
+import Darwin
+package import Foundation
 import TorrentEngineModel
-import TorrentMetainfo
+package import TorrentMetainfo
 
 package enum TorrentStorageContentKind: String, Codable, Sendable {
     case singleFile

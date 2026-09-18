@@ -1,9 +1,9 @@
 import Darwin
-import Foundation
+package import Foundation
 import Synchronization
 import TorrentEngineCore
-import TorrentEngineIPC
-import XPC
+package import TorrentEngineIPC
+package import XPC
 
 package enum TorrentStorageBrokerClientError: LocalizedError, Sendable {
     case connectionFailed

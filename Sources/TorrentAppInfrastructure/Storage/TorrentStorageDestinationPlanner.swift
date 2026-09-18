@@ -1,8 +1,8 @@
 import Darwin
-import Foundation
+package import Foundation
 import System
 import TorrentEngineModel
-import TorrentStorageAuthority
+package import TorrentStorageAuthority
 
 private struct TorrentOwnedFileDescriptor: ~Copyable {
     private var descriptor: Int32

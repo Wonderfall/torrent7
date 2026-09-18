@@ -1,6 +1,6 @@
 import Darwin
 import Foundation
-import TorrentBridge
+package import TorrentBridge
 import TorrentEngineModel
 import TorrentMetainfo
 

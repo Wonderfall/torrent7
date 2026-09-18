@@ -1,5 +1,5 @@
-import Foundation
-import TorrentEngineModel
+package import Foundation
+package import TorrentEngineModel
 
 package enum ValidatedMetainfoKind: UInt8, Equatable, Sendable {
     case v1

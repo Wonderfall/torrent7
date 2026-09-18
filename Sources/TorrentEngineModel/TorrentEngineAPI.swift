@@ -1,4 +1,4 @@
-import Foundation
+package import Foundation
 
 package enum TorrentEngineError: LocalizedError, Sendable {
     case failedToCreateClient

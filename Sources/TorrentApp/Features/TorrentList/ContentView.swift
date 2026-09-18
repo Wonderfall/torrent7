@@ -543,7 +543,7 @@ struct ContentView: View {
         )
     }
 
-    private func handleFileImport(_ result: Result<[URL], Error>) {
+    private func handleFileImport(_ result: Result<[URL], any Error>) {
         guard case .success(let urls) = result else {
             return
         }

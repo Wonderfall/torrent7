@@ -1,4 +1,4 @@
-import TorrentEngineModel
+package import TorrentEngineModel
 
 package struct TorrentCompletionCandidate: Sendable {
     package let id: TorrentItem.ID

@@ -260,11 +260,11 @@ final class TorrentStore {
     private var storageParents = [
         TorrentStorageParentID: TorrentStorageParentAuthority
     ]()
-    private let dockTileService: TorrentDockTileServicing
+    private let dockTileService: any TorrentDockTileServicing
     private let completionNotifier: TorrentCompletionNotifier
-    private let sleepPreventionService: SleepPreventionServicing
-    private let downloadFolderAccessStore: DownloadFolderAccessStoring
-    private let fileLocationService: TorrentFileLocationServicing
+    private let sleepPreventionService: any SleepPreventionServicing
+    private let downloadFolderAccessStore: any DownloadFolderAccessStoring
+    private let fileLocationService: any TorrentFileLocationServicing
     private let preferencesStore: TorrentPreferencesStore
     private let labelPersistenceStore: any TorrentLabelPersisting
     private var refreshTask: Task<Void, Never>?
@@ -416,11 +416,11 @@ final class TorrentStore {
         sortDirection: TorrentSortDirection = .ascending,
         downloadFolder: URL? = nil,
         engine: any TorrentEngineServicing,
-        dockTileService: TorrentDockTileServicing,
+        dockTileService: any TorrentDockTileServicing,
         completionNotifier: TorrentCompletionNotifier,
-        sleepPreventionService: SleepPreventionServicing,
-        downloadFolderAccessStore: DownloadFolderAccessStoring,
-        fileLocationService: TorrentFileLocationServicing,
+        sleepPreventionService: any SleepPreventionServicing,
+        downloadFolderAccessStore: any DownloadFolderAccessStoring,
+        fileLocationService: any TorrentFileLocationServicing,
         defaultsDomain: TorrentDefaultsDomain = .standard,
         storageClaimJournal: TorrentStorageClaimJournal? = nil,
         initialLabels: [TorrentLabel] = [],
@@ -974,7 +974,7 @@ final class TorrentStore {
     func chooseDownloadFolder(
         _ url: URL,
         reportsGlobalError: Bool = true
-    ) async -> Result<Void, Error> {
+    ) async -> Result<Void, any Error> {
         do {
             try await performQueuedStoreOperation { store in
                 try await store.setDownloadFolder(url)
@@ -995,7 +995,7 @@ final class TorrentStore {
 
     func validateDownloadFolderSelection(
         _ url: URL
-    ) async -> Result<Void, Error> {
+    ) async -> Result<Void, any Error> {
         do {
             try await downloadFolderAccessStore.validateSelection(url)
             return .success(())
@@ -5048,7 +5048,7 @@ final class TorrentStore {
             ?? ""
     }
 
-    private nonisolated static func engineStartupErrorMessage(_ error: Error) -> String {
+    private nonisolated static func engineStartupErrorMessage(_ error: any Error) -> String {
         let message = error.localizedDescription
         return message.isEmpty ? "Unknown startup error." : message
     }

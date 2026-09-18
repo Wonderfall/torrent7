@@ -1,4 +1,5 @@
-import Foundation
+package import Foundation
+import TorrentEngineModel
 
 package struct PreparedDownloadFolder: Sendable {
     package let path: String
@@ -6,7 +7,7 @@ package struct PreparedDownloadFolder: Sendable {
     package let lease: DownloadFolderAccessLease
     package let bookmarkData: Data?
 
-    package init(access: DownloadFolderAccessing, defaultURL: URL?, bookmarkData: Data?) {
+    package init(access: any DownloadFolderAccessing, defaultURL: URL?, bookmarkData: Data?) {
         path = access.url.torrentFilePath
         self.defaultURL = defaultURL
         lease = DownloadFolderAccessLease(access: access)
@@ -15,13 +16,13 @@ package struct PreparedDownloadFolder: Sendable {
 }
 
 package final class DownloadFolderAccessLease: Sendable {
-    fileprivate let access: DownloadFolderAccessing
+    fileprivate let access: any DownloadFolderAccessing
 
     package var url: URL {
         access.url
     }
 
-    package init(access: DownloadFolderAccessing) {
+    package init(access: any DownloadFolderAccessing) {
         self.access = access
     }
 }
@@ -36,14 +37,14 @@ package struct DownloadFolderAccessSnapshot: Sendable {
 
     package init(
         revision: UInt64 = 0,
-        defaultAccess: DownloadFolderAccessing?,
-        additionalAccesses: [DownloadFolderAccessing]
+        defaultAccess: (any DownloadFolderAccessing)?,
+        additionalAccesses: [any DownloadFolderAccessing]
     ) {
         var paths = [String]()
         var leases = [DownloadFolderAccessLease]()
         var seenPaths = Set<String>()
 
-        func append(_ access: DownloadFolderAccessing) {
+        func append(_ access: any DownloadFolderAccessing) {
             let path = access.url.torrentFilePath
             guard paths.count < Self.maximumPathCount,
                   seenPaths.insert(path).inserted else {
@@ -121,9 +122,9 @@ package protocol DownloadFolderAccessStoring: Actor {
 package actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
     private let defaultsDomain: TorrentDefaultsDomain
     private var cachedDefaults: UserDefaults?
-    private let accessProvider: DownloadFolderAccessProviding
-    private var defaultAccess: DownloadFolderAccessing?
-    private var additionalAccesses = [String: DownloadFolderAccessing]()
+    private let accessProvider: any DownloadFolderAccessProviding
+    private var defaultAccess: (any DownloadFolderAccessing)?
+    private var additionalAccesses = [String: any DownloadFolderAccessing]()
     private var didRestoreAdditionalAccesses = false
     private var didRestoreDefaultAccess = false
     private var discardedInvalidDefault = false
@@ -131,7 +132,7 @@ package actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
 
     package init(
         domain: TorrentDefaultsDomain = .standard,
-        accessProvider: DownloadFolderAccessProviding = SecurityScopedFolderAccessProvider()
+        accessProvider: any DownloadFolderAccessProviding = SecurityScopedFolderAccessProvider()
     ) {
         defaultsDomain = domain
         self.accessProvider = accessProvider
@@ -361,7 +362,7 @@ package actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
         let key = Self.accessKey(
             URL(filePath: path, directoryHint: .isDirectory)
         )
-        let access: DownloadFolderAccessing?
+        let access: (any DownloadFolderAccessing)?
         if let defaultAccess, Self.accessKey(defaultAccess.url) == key {
             access = defaultAccess
         } else {
@@ -440,7 +441,7 @@ package actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
     }
 
     private func validateProjectedDefault(
-        _ projectedDefaultAccess: DownloadFolderAccessing,
+        _ projectedDefaultAccess: any DownloadFolderAccessing,
         retaining paths: Set<String>
     ) throws {
         let projectedDefaultKey = Self.accessKey(projectedDefaultAccess.url)
@@ -465,8 +466,8 @@ package actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
     }
 
     private func validateAccessCount(
-        defaultAccess: DownloadFolderAccessing?,
-        additionalAccesses: [String: DownloadFolderAccessing]
+        defaultAccess: (any DownloadFolderAccessing)?,
+        additionalAccesses: [String: any DownloadFolderAccessing]
     ) throws {
         var paths = Set(additionalAccesses.values.map(\.url.torrentFilePath))
         if let defaultAccess {
@@ -478,7 +479,7 @@ package actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
     }
 
     private func preserveAdditionalAccessIfNeeded(
-        _ access: DownloadFolderAccessing?,
+        _ access: (any DownloadFolderAccessing)?,
         url: URL?,
         retaining paths: Set<String>
     ) {
@@ -503,15 +504,15 @@ package actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
 
     private static func restoreAdditionalDownloadFoldersFromDefaults(
         defaults: UserDefaults,
-        accessProvider: DownloadFolderAccessProviding
-    ) -> [String: DownloadFolderAccessing] {
+        accessProvider: any DownloadFolderAccessProviding
+    ) -> [String: any DownloadFolderAccessing] {
         guard let bookmarks = defaults.dictionary(
             forKey: TorrentBookmarkKeys.additionalDownloadFolders
         ) as? [String: Data] else {
             return [:]
         }
 
-        var accesses = [String: DownloadFolderAccessing]()
+        var accesses = [String: any DownloadFolderAccessing]()
         var restoredBookmarks = [String: Data]()
         for key in bookmarks.keys.sorted() {
             guard accesses.count
@@ -569,7 +570,7 @@ package actor DownloadFolderAccessStore: DownloadFolderAccessStoring {
     }
 
     private func saveAdditionalDownloadFolderBookmark(
-        for access: DownloadFolderAccessing
+        for access: any DownloadFolderAccessing
     ) throws {
         try saveAdditionalDownloadFolderBookmark(
             access.bookmarkData(),

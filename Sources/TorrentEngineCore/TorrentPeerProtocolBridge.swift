@@ -1,6 +1,6 @@
 import Darwin
 import Foundation
-import TorrentBridge
+package import TorrentBridge
 import TorrentMetainfo
 
 /// Lifetime anchor for the synchronous peer-message parser installed into

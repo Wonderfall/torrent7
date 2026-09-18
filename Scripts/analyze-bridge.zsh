@@ -236,6 +236,7 @@ typeset -a compiler_args=(
     -fexceptions
     -Wall
     -Wextra
+    -Wconditional-uninitialized
     -Wconversion
     -Wimplicit-fallthrough
     -Wshadow

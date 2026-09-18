@@ -1,10 +1,11 @@
 import CryptoKit
 import Foundation
 import Testing
+@testable import TorrentApp
+import TorrentAppInfrastructure
 import TorrentEngineModel
 import TorrentMetainfo
 import TorrentStorageAuthority
-@testable import TorrentApp
 
 @Suite("Torrent storage manifest parser")
 struct TorrentManifestParserTests {

@@ -1,5 +1,5 @@
 import CryptoKit
-import Foundation
+package import Foundation
 import TorrentEngineModel
 
 package enum TorrentManifestError: LocalizedError, Equatable, Sendable {

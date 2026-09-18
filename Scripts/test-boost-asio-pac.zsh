@@ -51,6 +51,7 @@ typeset -ar compiler_flags=(
     -O2
     -Wall
     -Wextra
+    -Wconditional-uninitialized
     -Wpedantic
     -Werror
     -fstack-protector-strong

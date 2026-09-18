@@ -151,6 +151,7 @@ for target in "${targets[@]}"; do
         -fno-sanitize-recover=undefined \
         -Wall \
         -Wextra \
+        -Wconditional-uninitialized \
         -Wconversion \
         -Werror \
         "$harness" \

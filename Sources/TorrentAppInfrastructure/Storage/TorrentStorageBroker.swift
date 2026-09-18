@@ -1,11 +1,11 @@
 import Darwin
-import Foundation
+package import Foundation
 import Synchronization
-import TorrentEngineClient
-import TorrentEngineIPC
+package import TorrentEngineClient
+package import TorrentEngineIPC
 import TorrentEngineModel
-import TorrentStorageAuthority
-import XPC
+package import TorrentStorageAuthority
+package import XPC
 
 package enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Sendable {
     case invalidClaim

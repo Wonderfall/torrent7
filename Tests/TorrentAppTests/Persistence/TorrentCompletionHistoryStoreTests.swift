@@ -1,6 +1,7 @@
+import Foundation
 import Testing
-import TorrentAppInfrastructure
 @testable import TorrentApp
+import TorrentAppInfrastructure
 
 @Suite("Torrent completion history")
 struct TorrentCompletionHistoryStoreTests {

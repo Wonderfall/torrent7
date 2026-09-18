@@ -1,5 +1,5 @@
-import Foundation
-import TorrentEngineModel
+package import Foundation
+package import TorrentEngineModel
 
 private struct TorrentLabelStorage: Codable {
     var labels: [TorrentLabel]

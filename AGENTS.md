@@ -39,8 +39,10 @@ and third-party dependencies are out of scope.
   workaround.
 - Use Swift 6 language mode, complete concurrency checking, Strict Memory
   Safety, and warnings as errors in every first-party Swift target.
-- Enable `InferIsolatedConformances` and
-  `NonisolatedNonsendingByDefault` in every Swift target.
+- Enable `InferIsolatedConformances`, `NonisolatedNonsendingByDefault`,
+  `MemberImportVisibility`, `InternalImportsByDefault`, `ExistentialAny`, and
+  `ImmutableWeakCaptures` in every first-party Swift target. Give imports only
+  the access level required by declarations that expose their types.
 - UI and application-composition targets default to `MainActor`.
   Infrastructure, model, parser, service, IPC, interop, tool, and test targets
   default to `nonisolated`.

@@ -1,10 +1,10 @@
 import Foundation
 import Synchronization
 import Testing
+@testable import TorrentEngineClient
 import TorrentEngineIPC
 import TorrentEngineModel
 import XPC
-@testable import TorrentEngineClient
 
 @Suite("Isolated engine client security")
 struct TorrentXPCClientSecurityTests {

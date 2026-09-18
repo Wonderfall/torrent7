@@ -1,9 +1,10 @@
 import Foundation
 import Synchronization
 import Testing
-import XPC
 @testable import TorrentEngineIPC
 @testable import TorrentEngineService
+import TorrentNetworkSecurity
+import XPC
 
 @Suite("Torrent engine extension security state", .serialized)
 struct TorrentEngineServiceSecurityStateTests {

@@ -1,6 +1,6 @@
-import Foundation
+package import Foundation
 import Synchronization
-import TorrentEngineIPC
+package import TorrentEngineIPC
 import XPC
 
 package enum TorrentEngineClientError: LocalizedError, Sendable {

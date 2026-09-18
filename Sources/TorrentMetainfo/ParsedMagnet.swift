@@ -1,5 +1,5 @@
-import Foundation
-import TorrentEngineModel
+package import Foundation
+package import TorrentEngineModel
 
 package enum ParsedMagnetError: LocalizedError, Equatable, Sendable {
     case invalidURI

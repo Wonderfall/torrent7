@@ -1,8 +1,9 @@
 import Foundation
 import Synchronization
 import Testing
-import TorrentAppInfrastructure
 @testable import TorrentApp
+import TorrentAppInfrastructure
+import TorrentEngineModel
 
 @MainActor
 @Suite("Download folder access store")
@@ -391,7 +392,7 @@ private func zeroPaddedIndex(_ index: Int) -> String {
     return String(repeating: "0", count: max(0, 5 - digits.count)) + digits
 }
 
-private func isTooManyAuthorizedDownloadFolders(_ error: Error) -> Bool {
+private func isTooManyAuthorizedDownloadFolders(_ error: any Error) -> Bool {
     guard let storeError = error as? TorrentStoreError else {
         return false
     }
@@ -421,7 +422,7 @@ private final class WeakDownloadFolderAccessTracker: Sendable {
 private struct TrackingDownloadFolderAccessProvider: DownloadFolderAccessProviding {
     let tracker: WeakDownloadFolderAccessTracker
 
-    func createAccess(url: URL, savesBookmark: Bool, defaults: UserDefaults) throws -> DownloadFolderAccessing {
+    func createAccess(url: URL, savesBookmark: Bool, defaults: UserDefaults) throws -> any DownloadFolderAccessing {
         let access = FakeDownloadFolderAccess(url: url)
         tracker.access = access
         if savesBookmark {
@@ -430,14 +431,14 @@ private struct TrackingDownloadFolderAccessProvider: DownloadFolderAccessProvidi
         return access
     }
 
-    func restoreDefault(defaults: UserDefaults) throws -> DownloadFolderAccessing? {
+    func restoreDefault(defaults: UserDefaults) throws -> (any DownloadFolderAccessing)? {
         guard let bookmark = defaults.data(forKey: SecurityScopedFolder.defaultsKey) else {
             return nil
         }
         return try restore(from: bookmark)
     }
 
-    func restore(from bookmark: Data) throws -> DownloadFolderAccessing {
+    func restore(from bookmark: Data) throws -> any DownloadFolderAccessing {
         guard let path = String(data: bookmark, encoding: .utf8), !path.isEmpty else {
             throw FakeBookmarkError()
         }

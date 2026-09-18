@@ -1,8 +1,8 @@
 import Foundation
 import Synchronization
+@testable import TorrentApp
 import TorrentAppInfrastructure
 import TorrentEngineModel
-@testable import TorrentApp
 
 actor RecordingCompletionHistoryStore: TorrentCompletionHistoryStoring {
     private(set) var completedIDs: Set<TorrentItem.ID>
@@ -128,11 +128,11 @@ final class RecordingSleepPreventionService: SleepPreventionServicing {
 actor RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
     var defaultURL: URL?
     private(set) var accessRevision: UInt64 = 0
-    var restoreDefaultResult: Result<URL?, Error> = .success(nil)
-    var validateSelectionResult: Result<Void, Error> = .success(())
-    var setDefaultResult: Result<URL, Error>?
-    var prepareForAddResult: Result<PreparedDownloadFolder, Error>?
-    var leaseResult: Result<DownloadFolderAccessLease, Error>?
+    var restoreDefaultResult: Result<URL?, any Error> = .success(nil)
+    var validateSelectionResult: Result<Void, any Error> = .success(())
+    var setDefaultResult: Result<URL, any Error>?
+    var prepareForAddResult: Result<PreparedDownloadFolder, any Error>?
+    var leaseResult: Result<DownloadFolderAccessLease, any Error>?
     private(set) var clearedDefaultCount = 0
     private(set) var clearDefaultCalls = [Set<String>]()
     private(set) var setDefaultCalls = [(url: URL, retainedPaths: Set<String>)]()
@@ -142,12 +142,12 @@ actor RecordingDownloadFolderAccessStore: DownloadFolderAccessStoring {
     private(set) var pruneCalls = [Set<String>]()
     private(set) var bootstrapCount = 0
 
-    func setRestoreDefaultResult(_ result: Result<URL?, Error>) {
+    func setRestoreDefaultResult(_ result: Result<URL?, any Error>) {
         restoreDefaultResult = result
     }
 
     func setPrepareForAddResult(
-        _ result: Result<PreparedDownloadFolder, Error>?
+        _ result: Result<PreparedDownloadFolder, any Error>?
     ) {
         prepareForAddResult = result
     }
@@ -364,7 +364,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private var snapshotBatchSuspensionCount = 0
     private var snapshotBatchContinuations = [CheckedContinuation<Void, Never>]()
     private var snapshotFailureDisposition: TorrentEngineRecoveryDisposition?
-    private var nextPollError: Error?
+    private var nextPollError: (any Error)?
     var dirtyMask: UInt32 = 0
     var networkStatusValue = TorrentNetworkStatus(
         listenPort: 0,
@@ -379,9 +379,9 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     var networkInterfaceSnapshotValue: TorrentNetworkInterfaceSnapshot?
     var alertErrors = [String]()
     var nextAddedMagnetID = "alpha"
-    var addMagnetError: Error?
+    var addMagnetError: (any Error)?
     var nextAddedTorrentFileID = "alpha"
-    var addTorrentFileError: Error?
+    var addTorrentFileError: (any Error)?
     private(set) var restartCount = 0
     private(set) var restartPeerExchangePluginValues = [Bool]()
     private var restartSuspensionCount = 0
@@ -389,14 +389,14 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private(set) var blockNetworkCount = 0
     private var nextNetworkBlockDisposition = TorrentNetworkBlockDisposition.engineRemainsAvailable
     private var nextNetworkBlockRecoveryDisposition = TorrentEngineRecoveryDisposition.replaceController
-    private var nextNetworkBlockError: Error?
+    private var nextNetworkBlockError: (any Error)?
     private var blockNetworkSuspensionCount = 0
     private var blockNetworkContinuations = [CheckedContinuation<Void, Never>]()
     private var applySettingsSuspensionCount = 0
     private var applySettingsContinuations = [CheckedContinuation<Void, Never>]()
     private(set) var currentNetworkBlocked = false
     private(set) var saveAllCount = 0
-    private var nextSaveAllError: Error?
+    private var nextSaveAllError: (any Error)?
     private(set) var shutdownCount = 0
     private(set) var appliedSettings = [(
         settings: TorrentSettings,
@@ -432,7 +432,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private(set) var resumedSourcePolicies = [TorrentSourcePolicy]()
     private(set) var resumedQueuePositions = [TorrentQueuePosition?]()
     private(set) var removedIDs = [String]()
-    var removeError: Error?
+    var removeError: (any Error)?
     var removeOutcome = TorrentRemovalOutcome.removed
     var becomesUnavailableOnRemove = false
     private var removeSuspensionCount = 0
@@ -443,14 +443,14 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private(set) var fileBatchRequests = [(id: String, revision: UInt64?)]()
     private(set) var pieceMapBatchRequests = [(id: String, revision: UInt64?)]()
     private(set) var sourcePolicyUpdates = [(id: String, mutation: TorrentSourcePolicyMutation)]()
-    private var sourcePolicyUpdateError: Error?
+    private var sourcePolicyUpdateError: (any Error)?
     private var addedTorrentFileSourcePolicy: TorrentSourcePolicy?
     private(set) var torrentOptionsUpdates = [(id: String, options: TorrentOptions)]()
-    private var torrentOptionsUpdateError: Error?
+    private var torrentOptionsUpdateError: (any Error)?
     private(set) var filePriorityUpdates = [(id: String, fileIndex: Int32, priority: TorrentFilePriority)]()
     private(set) var queueMoves = [(id: String, move: TorrentQueueMove)]()
     private(set) var restoredQueuePositions = [(id: String, position: TorrentQueuePosition)]()
-    private var restoreQueuePositionError: Error?
+    private var restoreQueuePositionError: (any Error)?
     var sourcePolicyValue = TorrentSourcePolicy(
         isDHTEnabled: true,
         isPeerExchangeEnabled: true,
@@ -529,7 +529,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         sourcePolicyValue = policy
     }
 
-    func setSourcePolicyUpdateError(_ error: Error?) {
+    func setSourcePolicyUpdateError(_ error: (any Error)?) {
         sourcePolicyUpdateError = error
     }
 
@@ -541,11 +541,11 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         torrentOptionsValue = options
     }
 
-    func setTorrentOptionsUpdateError(_ error: Error?) {
+    func setTorrentOptionsUpdateError(_ error: (any Error)?) {
         torrentOptionsUpdateError = error
     }
 
-    func setRestoreQueuePositionError(_ error: Error?) {
+    func setRestoreQueuePositionError(_ error: (any Error)?) {
         restoreQueuePositionError = error
     }
 
@@ -629,11 +629,11 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         snapshotFailureDisposition = recoveryDisposition
     }
 
-    func setNextPollError(_ error: Error?) {
+    func setNextPollError(_ error: (any Error)?) {
         nextPollError = error
     }
 
-    func setNextSaveAllError(_ error: Error?) {
+    func setNextSaveAllError(_ error: (any Error)?) {
         nextSaveAllError = error
     }
 
@@ -641,7 +641,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         recovery.withLock { $0 = disposition }
     }
 
-    func setRemoveError(_ error: Error?) {
+    func setRemoveError(_ error: (any Error)?) {
         removeError = error
     }
 
@@ -694,7 +694,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         nextNetworkBlockRecoveryDisposition = recoveryDisposition
     }
 
-    func setNextNetworkBlockError(_ error: Error?) {
+    func setNextNetworkBlockError(_ error: (any Error)?) {
         nextNetworkBlockError = error
     }
 
@@ -752,7 +752,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         nextAddedMagnetID = id
     }
 
-    func setAddMagnetError(_ error: Error?) {
+    func setAddMagnetError(_ error: (any Error)?) {
         addMagnetError = error
     }
 
@@ -760,7 +760,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         nextAddedTorrentFileID = id
     }
 
-    func setAddTorrentFileError(_ error: Error?) {
+    func setAddTorrentFileError(_ error: (any Error)?) {
         addTorrentFileError = error
     }
 
@@ -1208,7 +1208,7 @@ final class FakeDownloadFolderAccess: DownloadFolderAccessing {
 struct FakeDownloadFolderAccessProvider: DownloadFolderAccessProviding {
     var rejectedBookmarkData = Set<Data>()
 
-    func createAccess(url: URL, savesBookmark: Bool, defaults: UserDefaults) throws -> DownloadFolderAccessing {
+    func createAccess(url: URL, savesBookmark: Bool, defaults: UserDefaults) throws -> any DownloadFolderAccessing {
         let access = FakeDownloadFolderAccess(url: url)
         if savesBookmark {
             defaults.set(try access.bookmarkData(), forKey: SecurityScopedFolder.defaultsKey)
@@ -1216,14 +1216,14 @@ struct FakeDownloadFolderAccessProvider: DownloadFolderAccessProviding {
         return access
     }
 
-    func restoreDefault(defaults: UserDefaults) throws -> DownloadFolderAccessing? {
+    func restoreDefault(defaults: UserDefaults) throws -> (any DownloadFolderAccessing)? {
         guard let bookmark = defaults.data(forKey: SecurityScopedFolder.defaultsKey) else {
             return nil
         }
         return try restore(from: bookmark)
     }
 
-    func restore(from bookmark: Data) throws -> DownloadFolderAccessing {
+    func restore(from bookmark: Data) throws -> any DownloadFolderAccessing {
         if rejectedBookmarkData.contains(bookmark) {
             throw FakeBookmarkError()
         }

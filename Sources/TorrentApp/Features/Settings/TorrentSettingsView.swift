@@ -1163,7 +1163,7 @@ struct TorrentSettingsView: View {
         }
     }
 
-    private func handleDownloadFolderImport(_ result: Result<[URL], Error>) {
+    private func handleDownloadFolderImport(_ result: Result<[URL], any Error>) {
         switch result {
         case .success(let urls):
             guard let url = urls.first else {

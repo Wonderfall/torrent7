@@ -1,4 +1,4 @@
-import TorrentEngineModel
+package import TorrentEngineModel
 
 @safe package struct TorrentSnapshotStore: Sendable {
     private struct Presentation: Equatable, Sendable {

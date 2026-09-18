@@ -1,4 +1,5 @@
-import Foundation
+package import Foundation
+import TorrentEngineModel
 
 package protocol DownloadFolderAccessing: AnyObject, Sendable {
     var url: URL { get }
@@ -6,22 +7,22 @@ package protocol DownloadFolderAccessing: AnyObject, Sendable {
 }
 
 package protocol DownloadFolderAccessProviding: Sendable {
-    func createAccess(url: URL, savesBookmark: Bool, defaults: UserDefaults) throws -> DownloadFolderAccessing
-    func restoreDefault(defaults: UserDefaults) throws -> DownloadFolderAccessing?
-    func restore(from bookmark: Data) throws -> DownloadFolderAccessing
+    func createAccess(url: URL, savesBookmark: Bool, defaults: UserDefaults) throws -> any DownloadFolderAccessing
+    func restoreDefault(defaults: UserDefaults) throws -> (any DownloadFolderAccessing)?
+    func restore(from bookmark: Data) throws -> any DownloadFolderAccessing
     func clearDefaultBookmark(defaults: UserDefaults)
 }
 
 package struct SecurityScopedFolderAccessProvider: DownloadFolderAccessProviding {
-    package func createAccess(url: URL, savesBookmark: Bool, defaults: UserDefaults) throws -> DownloadFolderAccessing {
+    package func createAccess(url: URL, savesBookmark: Bool, defaults: UserDefaults) throws -> any DownloadFolderAccessing {
         try SecurityScopedFolder(url: url, savesBookmark: savesBookmark, defaults: defaults)
     }
 
-    package func restoreDefault(defaults: UserDefaults) throws -> DownloadFolderAccessing? {
+    package func restoreDefault(defaults: UserDefaults) throws -> (any DownloadFolderAccessing)? {
         try SecurityScopedFolder.restore(defaults: defaults)
     }
 
-    package func restore(from bookmark: Data) throws -> DownloadFolderAccessing {
+    package func restore(from bookmark: Data) throws -> any DownloadFolderAccessing {
         try SecurityScopedFolder.restore(from: bookmark)
     }
 

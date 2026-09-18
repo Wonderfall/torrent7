@@ -1,6 +1,7 @@
 import Testing
-import TorrentAppInfrastructure
 @testable import TorrentApp
+import TorrentAppInfrastructure
+import TorrentEngineModel
 
 @Suite("Torrent sidebar scope")
 struct TorrentSidebarScopeTests {

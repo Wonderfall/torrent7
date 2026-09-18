@@ -1,6 +1,6 @@
-import Foundation
-import TorrentEngineModel
-import TorrentMetainfo
+package import Foundation
+package import TorrentEngineModel
+package import TorrentMetainfo
 
 package struct TorrentEngineIPCEmpty: Codable, Equatable, Sendable {
     package init() {}

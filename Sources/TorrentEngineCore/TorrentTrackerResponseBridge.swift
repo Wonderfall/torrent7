@@ -1,6 +1,6 @@
 import Darwin
 import Foundation
-import TorrentBridge
+package import TorrentBridge
 import TorrentMetainfo
 
 /// Lifetime anchor for synchronous tracker-body parsing on libtorrent's

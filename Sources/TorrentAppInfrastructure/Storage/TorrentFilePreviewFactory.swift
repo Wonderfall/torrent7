@@ -1,5 +1,6 @@
-import Foundation
-import TorrentEngineModel
+package import Foundation
+package import TorrentEngineModel
+import TorrentMetainfo
 import TorrentStorageAuthority
 
 package extension ParsedTorrentManifest {

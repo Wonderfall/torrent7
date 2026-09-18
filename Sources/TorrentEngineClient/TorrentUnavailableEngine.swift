@@ -1,5 +1,5 @@
-import Foundation
-import TorrentEngineModel
+package import Foundation
+package import TorrentEngineModel
 
 /// A transport-neutral placeholder used while the isolated service is starting
 /// or after startup failed. It intentionally has no native-code dependency.

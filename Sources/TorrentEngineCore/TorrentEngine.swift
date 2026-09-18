@@ -1,8 +1,8 @@
-import Foundation
-import Synchronization
+package import Foundation
+package import Synchronization
 import TorrentBridge
-import TorrentEngineModel
-import TorrentMetainfo
+package import TorrentEngineModel
+package import TorrentMetainfo
 
 private func stringFromBridgeBuffer(_ buffer: [CChar]) -> String {
     let bytes = buffer.prefix { $0 != 0 }.map(UInt8.init(bitPattern:))

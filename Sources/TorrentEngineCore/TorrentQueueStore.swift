@@ -1,4 +1,4 @@
-import TorrentEngineModel
+package import TorrentEngineModel
 
 @safe package struct TorrentQueueStore: Sendable {
     package enum Reconciliation: Equatable, Sendable {

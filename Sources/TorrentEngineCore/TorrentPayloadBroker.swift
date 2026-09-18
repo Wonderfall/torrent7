@@ -1,5 +1,5 @@
 import Darwin
-import Foundation
+package import Foundation
 import TorrentBridge
 
 package struct TorrentPayloadBrokerCallError: Error, Sendable {

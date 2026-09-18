@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import Testing
 import TorrentBridge
+import TorrentEngineModel
 
 // SAFETY: Ownership/lifetime: this contract stub only tests pointer presence and never owns
 // or dereferences it; bounds/alignment: no memory is accessed; synchronization: the stub is

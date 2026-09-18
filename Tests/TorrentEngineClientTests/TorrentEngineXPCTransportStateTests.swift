@@ -1,8 +1,8 @@
 import Foundation
 import Synchronization
 import Testing
-import TorrentEngineIPC
 @testable import TorrentEngineClient
+import TorrentEngineIPC
 
 @Suite("XPC transport reply state")
 struct TorrentEngineXPCTransportStateTests {

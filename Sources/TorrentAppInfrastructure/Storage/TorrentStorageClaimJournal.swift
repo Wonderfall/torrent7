@@ -1,10 +1,10 @@
-import Darwin
 import CryptoKit
-import Foundation
+import Darwin
+package import Foundation
 import System
-import TorrentEngineModel
+package import TorrentEngineModel
 import TorrentMetainfo
-import TorrentStorageAuthority
+package import TorrentStorageAuthority
 
 package enum TorrentStorageJournalError: LocalizedError, Equatable, Sendable {
     case unavailable

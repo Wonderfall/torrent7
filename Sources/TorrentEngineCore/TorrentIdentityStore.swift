@@ -1,5 +1,5 @@
 import Foundation
-import TorrentEngineModel
+package import TorrentEngineModel
 
 @safe package struct TorrentIdentityStore: Sendable {
     package struct NativeSnapshot: Sendable {
