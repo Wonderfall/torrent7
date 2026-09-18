@@ -1,6 +1,7 @@
 import Darwin
 package import Foundation
 import Synchronization
+import System
 package import TorrentEngineClient
 package import TorrentEngineIPC
 import TorrentEngineModel
@@ -344,12 +345,8 @@ package enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Senda
         guard let expectedIdentity = resolved.expectedIdentity else {
             throw TorrentStorageBrokerRegistryError.fileUnavailable
         }
-        var metadata = stat()
-        // SAFETY: Ownership/lifetime: the opened descriptor remains owned by the caller and
-        // `metadata` lives through fstat; bounds/alignment: Swift supplies exact aligned stat
-        // storage; synchronization: validation completes before the descriptor is published;
-        // safe alternative: fstat authenticates the opened object without a pathname race.
-        guard unsafe Darwin.fstat(descriptor, &metadata) == 0 else {
+        guard let metadata = try? FileDescriptor(rawValue: descriptor)
+            .stat(retryOnInterrupt: false).rawValue else {
             throw TorrentStorageBrokerRegistryError.filesystemObjectChanged
         }
         let actualIdentity = TorrentFilesystemIdentity(

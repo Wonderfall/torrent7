@@ -976,11 +976,9 @@ package actor TorrentStorageClaimJournal {
         shouldUnlink = false
     }
 
-    // SAFETY: Ownership/lifetime: the filename pins its C string for openat, the opened
-    // descriptor is deferred-closed, and local stat storage spans fstat; bounds/alignment:
-    // the C string is NUL-terminated and `stat` is exact aligned storage; synchronization:
-    // the journal actor serializes reads/writes; safe alternative: openat plus fstat verifies
-    // the no-follow object itself and avoids Foundation pathname races.
+    // SAFETY: The filename pins its NUL-terminated bytes during openat. O_NOFOLLOW
+    // rejects symlinks, the actor serializes journal access, and the returned descriptor
+    // is deferred-closed after metadata validation and the bounded read.
     private static func load(
         from directoryDescriptor: Int32
     ) throws -> Snapshot {
@@ -1000,8 +998,8 @@ package actor TorrentStorageClaimJournal {
         defer {
             _ = Darwin.close(descriptor)
         }
-        var metadata = stat()
-        guard unsafe Darwin.fstat(descriptor, &metadata) == 0,
+        guard let metadata = try? FileDescriptor(rawValue: descriptor)
+                  .stat(retryOnInterrupt: false).rawValue,
               (metadata.st_mode & S_IFMT) == S_IFREG,
               metadata.st_uid == geteuid(),
               metadata.st_nlink == 1,

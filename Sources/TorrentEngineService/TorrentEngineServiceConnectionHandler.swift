@@ -2,6 +2,7 @@ import Darwin
 package import ExtensionFoundation
 package import Foundation
 import Synchronization
+import System
 import TorrentEngineIPC
 import XPC
 
@@ -365,25 +366,10 @@ package enum TorrentEngineExtensionConfiguration {
         }
 
         let canonical = requested.resolvingSymlinksInPath().standardizedFileURL
-        var requestedMetadata = stat()
-        var canonicalMetadata = stat()
-        let requestedStatus: Int32
-        let canonicalStatus: Int32
-        // SAFETY: Ownership/lifetime: each String owns its temporary C string and each
-        // `stat` value lives through its synchronous lstat; bounds/alignment: Swift supplies
-        // NUL-terminated strings and correctly aligned `stat` storage; synchronization:
-        // startup exclusively initializes this directory; safe alternative: lstat identity
-        // comparison is required to reject a symlink/rename race in path-only Foundation APIs.
-        do {
-            requestedStatus = requested.path(percentEncoded: false).withCString {
-                unsafe Darwin.lstat($0, &requestedMetadata)
-            }
-            canonicalStatus = canonical.path(percentEncoded: false).withCString {
-                unsafe Darwin.lstat($0, &canonicalMetadata)
-            }
-        }
-        guard requestedStatus == 0,
-              canonicalStatus == 0,
+        guard let requestedMetadata = try? FilePath(requested.path(percentEncoded: false))
+                  .stat(followTargetSymlink: false, retryOnInterrupt: false).rawValue,
+              let canonicalMetadata = try? FilePath(canonical.path(percentEncoded: false))
+                  .stat(followTargetSymlink: false, retryOnInterrupt: false).rawValue,
               (requestedMetadata.st_mode & S_IFMT) == S_IFDIR,
               (canonicalMetadata.st_mode & S_IFMT) == S_IFDIR,
               requestedMetadata.st_dev == canonicalMetadata.st_dev,

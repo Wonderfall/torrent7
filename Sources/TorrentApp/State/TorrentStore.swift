@@ -5305,13 +5305,7 @@ final class TorrentStore {
     }
 
     private nonisolated static func validatedTorrentFileSize(descriptor: FileDescriptor) throws -> Int {
-        var metadata = stat()
-        // SAFETY: Ownership/lifetime: the caller keeps the descriptor open for this
-        // synchronous call and `metadata` lives through it; bounds/alignment: Darwin
-        // receives a correctly aligned `stat` value of its exact size; synchronization:
-        // the descriptor is immutable here; safe alternative: fstat is needed to validate
-        // the already-open no-follow descriptor without a path-based race.
-        guard unsafe Darwin.fstat(descriptor.rawValue, &metadata) == 0 else {
+        guard let metadata = try? descriptor.stat(retryOnInterrupt: false).rawValue else {
             throw TorrentStoreError.unreadableTorrentFile
         }
         guard (metadata.st_mode & S_IFMT) == S_IFREG else {

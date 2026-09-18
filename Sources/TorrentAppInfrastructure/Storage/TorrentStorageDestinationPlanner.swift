@@ -79,11 +79,6 @@ package final class TorrentStorageParentAuthority: Sendable {
 
     private let accessLifetime: DownloadFolderAccessLease
 
-    // SAFETY: Ownership/lifetime: the security lease outlives the stored descriptor,
-    // temporary C strings live through lstat, and local stat values live through calls;
-    // bounds/alignment: withCString is NUL-terminated and stat storage is exact/aligned;
-    // synchronization: immutable authority is published only after validation;
-    // safe alternative: fstat/lstat identity comparison is needed to reject path races.
     package init(lease: DownloadFolderAccessLease) throws {
         let path = lease.url.standardizedFileURL
             .resolvingSymlinksInPath()
@@ -106,14 +101,10 @@ package final class TorrentStorageParentAuthority: Sendable {
             throw TorrentStoragePlanningError.invalidParentAuthority
         }
 
-        var descriptorMetadata = stat()
-        var pathMetadata = stat()
-        let descriptorStatus = unsafe Darwin.fstat(opened.rawValue, &descriptorMetadata)
-        let pathStatus = path.withCString { pointer in
-            unsafe Darwin.lstat(pointer, &pathMetadata)
-        }
-        guard descriptorStatus == 0,
-              pathStatus == 0,
+        guard let descriptorMetadata = try? opened.stat(retryOnInterrupt: false).rawValue,
+              let pathMetadata = try? FilePath(path).stat(
+                  followTargetSymlink: false, retryOnInterrupt: false
+              ).rawValue,
               (descriptorMetadata.st_mode & S_IFMT) == S_IFDIR,
               (pathMetadata.st_mode & S_IFMT) == S_IFDIR,
               descriptorMetadata.st_dev == pathMetadata.st_dev,
@@ -134,12 +125,8 @@ package final class TorrentStorageParentAuthority: Sendable {
     }
 
     package func validate() throws {
-        var metadata = stat()
-        // SAFETY: Ownership/lifetime: this authority owns the open descriptor and local stat
-        // storage spans fstat; bounds/alignment: Swift supplies exact aligned stat storage;
-        // synchronization: immutable descriptor identity is only read; safe alternative:
-        // fstat must validate the open directory authority without re-resolving a path.
-        guard unsafe Darwin.fstat(descriptor, &metadata) == 0,
+        guard let metadata = try? FileDescriptor(rawValue: descriptor)
+                  .stat(retryOnInterrupt: false).rawValue,
               (metadata.st_mode & S_IFMT) == S_IFDIR,
               Self.identity(metadata).refersToSameObject(as: identity) else {
             throw TorrentStoragePlanningError.invalidParentAuthority
@@ -224,11 +211,6 @@ package struct TorrentStorageDestinationPlanner: Sendable {
 
     package init() {}
 
-    // SAFETY: Ownership/lifetime: candidate Strings pin their C strings per synchronous
-    // fstatat and the parent owns its descriptor; bounds/alignment: validated candidates
-    // are NUL-terminated and stat storage is exact/aligned; synchronization: no filesystem
-    // state is cached as authority; safe alternative: descriptor-relative fstatat with
-    // AT_SYMLINK_NOFOLLOW is needed for race-resistant collision inspection.
     package func planTopLevelName(
         for logicalManifest: TorrentLogicalManifest,
         in parent: TorrentStorageParentAuthority
@@ -243,19 +225,15 @@ package struct TorrentStorageDestinationPlanner: Sendable {
                 attempt: attempt,
                 isDirectory: logicalManifest.contentKind == .directory
             )
-            var metadata = stat()
-            let status = candidate.withCString { pointer in
-                unsafe Darwin.fstatat(
-                    parent.descriptor,
-                    pointer,
-                    &metadata,
-                    AT_SYMLINK_NOFOLLOW
+            do {
+                _ = try FilePath(candidate).stat(
+                    relativeTo: FileDescriptor(rawValue: parent.descriptor),
+                    flags: [.symlinkNoFollow],
+                    retryOnInterrupt: false
                 )
-            }
-            if status != 0, errno == ENOENT {
+            } catch Errno.noSuchFileOrDirectory {
                 return candidate
-            }
-            guard status == 0 else {
+            } catch {
                 throw TorrentStoragePlanningError.reservationFailed
             }
         }
@@ -1509,11 +1487,9 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         )
     }
 
-    // SAFETY: Ownership/lifetime: the caller keeps both descriptors open, the name pins its
-    // C bytes per call, and local stat storage spans each syscall; bounds/alignment: the name
-    // is validated/NUL-terminated and stat values are exact/aligned; synchronization: pinned
-    // descriptor and path identities are compared immediately before unlink; safe alternative:
-    // fstat/fstatat/unlinkat are required to bind deletion to the captured object.
+    // SAFETY: The caller keeps both descriptors open. The validated name pins its
+    // NUL-terminated bytes during unlinkat, which removes the entry relative to the
+    // quarantine directory after its identity is compared with the captured descriptor.
     private func unlinkCapturedObject(
         named name: String,
         in directoryDescriptor: Int32,
@@ -1521,23 +1497,18 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         expectedIdentity: TorrentFilesystemIdentity,
         isDirectory: Bool
     ) throws -> CapturedUnlinkResult {
-        var descriptorMetadata = stat()
-        var pathMetadata = stat()
-        let descriptorStatus = unsafe Darwin.fstat(descriptor, &descriptorMetadata)
-        let pathStatus = name.withCString { pointer in
-            unsafe Darwin.fstatat(
-                directoryDescriptor,
-                pointer,
-                &pathMetadata,
-                AT_SYMLINK_NOFOLLOW
-            )
+        guard let descriptorMetadata = try? FileDescriptor(rawValue: descriptor)
+                  .stat(retryOnInterrupt: false).rawValue,
+              let pathMetadata = try? FilePath(name).stat(
+                  relativeTo: FileDescriptor(rawValue: directoryDescriptor),
+                  flags: [.symlinkNoFollow], retryOnInterrupt: false
+              ).rawValue else {
+            throw TorrentStoragePlanningError.deletionNotProvable
         }
         let descriptorIdentity = identity(descriptorMetadata)
         let pathIdentity = identity(pathMetadata)
         let expectedType = isDirectory ? S_IFDIR : S_IFREG
-        guard descriptorStatus == 0,
-              pathStatus == 0,
-              (pathMetadata.st_mode & S_IFMT) == expectedType,
+        guard (pathMetadata.st_mode & S_IFMT) == expectedType,
               descriptorIdentity.refersToSameObject(as: expectedIdentity),
               pathIdentity.refersToSameObject(as: expectedIdentity) else {
             throw TorrentStoragePlanningError.deletionNotProvable
@@ -1615,53 +1586,36 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         }
     }
 
-    // SAFETY: Ownership/lifetime: the String and local stat storage live through fstatat;
-    // bounds/alignment: the validated name is NUL-terminated and stat storage exact/aligned;
-    // synchronization: this is an immediate descriptor-relative observation; safe alternative:
-    // fstatat with AT_SYMLINK_NOFOLLOW avoids following or re-resolving a path.
     private func objectExists(
         named name: String,
         in directoryDescriptor: Int32
     ) throws -> Bool {
-        var metadata = stat()
-        let status = name.withCString { pointer in
-            unsafe Darwin.fstatat(
-                directoryDescriptor,
-                pointer,
-                &metadata,
-                AT_SYMLINK_NOFOLLOW
+        do {
+            _ = try FilePath(name).stat(
+                relativeTo: FileDescriptor(rawValue: directoryDescriptor),
+                flags: [.symlinkNoFollow], retryOnInterrupt: false
             )
-        }
-        if status == 0 {
             return true
-        }
-        guard errno == ENOENT else {
+        } catch Errno.noSuchFileOrDirectory {
+            return false
+        } catch {
             throw TorrentStoragePlanningError.deletionNotProvable
         }
-        return false
     }
 
-    // SAFETY: Ownership/lifetime: the String and stat storage live through each call and
-    // the successful descriptor is returned to its owner; bounds/alignment: the validated
-    // name is NUL-terminated and stat storage exact/aligned; synchronization: type is checked
-    // immediately before no-follow open; safe alternative: fstatat/openat bind access to
-    // directory authority and reject symlink traversal.
+    // SAFETY: The validated name pins its NUL-terminated bytes during openat. The
+    // directory descriptor remains open and O_NOFOLLOW rejects symlinks. The returned
+    // descriptor transfers to the caller, which validates identity and closes it.
     private func openCapturedObject(
         named name: String,
         in directoryDescriptor: Int32,
         isDirectory: Bool
     ) throws -> Int32 {
-        var metadata = stat()
-        let status = name.withCString { pointer in
-            unsafe Darwin.fstatat(
-                directoryDescriptor,
-                pointer,
-                &metadata,
-                AT_SYMLINK_NOFOLLOW
-            )
-        }
         let expectedType = isDirectory ? S_IFDIR : S_IFREG
-        guard status == 0,
+        guard let metadata = try? FilePath(name).stat(
+                  relativeTo: FileDescriptor(rawValue: directoryDescriptor),
+                  flags: [.symlinkNoFollow], retryOnInterrupt: false
+              ).rawValue,
               (metadata.st_mode & S_IFMT) == expectedType else {
             throw TorrentStoragePlanningError.deletionNotProvable
         }
@@ -2130,13 +2084,9 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         _ descriptor: Int32,
         maximumSize: Int64
     ) throws -> TorrentFilesystemIdentity {
-        var metadata = stat()
-        // SAFETY: Ownership/lifetime: the caller owns the open descriptor and local stat storage
-        // spans fstat; bounds/alignment: Swift supplies exact aligned stat storage;
-        // synchronization: validation happens before the imported descriptor is accepted;
-        // safe alternative: fstat authenticates the open object without re-resolving a path.
         guard maximumSize >= 0,
-              unsafe Darwin.fstat(descriptor, &metadata) == 0,
+              let metadata = try? FileDescriptor(rawValue: descriptor)
+                  .stat(retryOnInterrupt: false).rawValue,
               (metadata.st_mode & S_IFMT) == S_IFREG,
               metadata.st_uid == geteuid(),
               metadata.st_nlink == 1,
@@ -2166,12 +2116,8 @@ package struct TorrentStorageDestinationPlanner: Sendable {
     }
 
     private func validateDirectoryDescriptor(_ descriptor: Int32) throws -> TorrentFilesystemIdentity {
-        var metadata = stat()
-        // SAFETY: Ownership/lifetime: the caller keeps the descriptor open and local stat storage
-        // spans fstat; bounds/alignment: Swift supplies exact aligned stat storage;
-        // synchronization: validation precedes use/publication; safe alternative: fstat verifies
-        // the opened directory itself without a pathname race.
-        guard unsafe Darwin.fstat(descriptor, &metadata) == 0,
+        guard let metadata = try? FileDescriptor(rawValue: descriptor)
+                  .stat(retryOnInterrupt: false).rawValue,
               (metadata.st_mode & S_IFMT) == S_IFDIR,
               metadata.st_uid == geteuid() else {
             throw TorrentStoragePlanningError.unsupportedFilesystemObject
@@ -2183,12 +2129,8 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         _ descriptor: Int32,
         writable: Bool
     ) throws -> TorrentFilesystemIdentity {
-        var metadata = stat()
-        // SAFETY: Ownership/lifetime: the caller keeps the descriptor open and local stat storage
-        // spans fstat; bounds/alignment: Swift supplies exact aligned stat storage;
-        // synchronization: validation precedes use/publication; safe alternative: fstat verifies
-        // the opened regular file itself without a pathname race.
-        guard unsafe Darwin.fstat(descriptor, &metadata) == 0,
+        guard let metadata = try? FileDescriptor(rawValue: descriptor)
+                  .stat(retryOnInterrupt: false).rawValue,
               (metadata.st_mode & S_IFMT) == S_IFREG,
               metadata.st_uid == geteuid(),
               !writable || metadata.st_nlink == 1 else {

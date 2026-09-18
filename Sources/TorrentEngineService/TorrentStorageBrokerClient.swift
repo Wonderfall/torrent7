@@ -1,6 +1,7 @@
 import Darwin
 package import Foundation
 import Synchronization
+import System
 import TorrentEngineCore
 package import TorrentEngineIPC
 package import XPC
@@ -414,14 +415,9 @@ package enum TorrentStorageBrokerClientError: LocalizedError, Sendable {
         metadata expected: TorrentStorageBrokerFileMetadata,
         requestedAccess: TorrentStorageBrokerAccess
     ) throws {
-        var actual = stat()
         let flags = Darwin.fcntl(descriptor, F_GETFL)
-        // SAFETY: Ownership/lifetime: the reply owns an open descriptor for this
-        // synchronous validation and `actual` lives through fstat; bounds/alignment:
-        // `actual` is exact, aligned `stat` storage; synchronization: validation precedes
-        // publishing the descriptor; safe alternative: fstat is required to authenticate
-        // the received descriptor itself instead of a race-prone pathname.
-        guard unsafe Darwin.fstat(descriptor, &actual) == 0,
+        guard let actual = try? FileDescriptor(rawValue: descriptor)
+                  .stat(retryOnInterrupt: false).rawValue,
               flags >= 0,
               (actual.st_mode & S_IFMT) == S_IFREG,
               actual.st_size == expected.size,
