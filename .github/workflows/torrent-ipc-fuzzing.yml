@@ -36,7 +36,7 @@ permissions: {}
 
 env:
   BASE_BRANCH: ${{ github.event.repository.default_branch }}
-  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+  DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
 
 concurrency:
   group: torrent-storage-fuzzing-${{ github.event_name == 'schedule' && 'schedule' || github.event.pull_request.number || github.ref }}
@@ -46,7 +46,7 @@ jobs:
   fuzz:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: Fuzz
-    runs-on: macos-26
+    runs-on: xcode-27
     permissions: {}
     timeout-minutes: 40
     steps:

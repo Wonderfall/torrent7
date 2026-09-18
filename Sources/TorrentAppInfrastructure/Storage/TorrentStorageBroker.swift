@@ -304,7 +304,7 @@ package enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Senda
         }
         do {
             for component in components.dropLast() {
-                let next = unsafe component.withCString { pointer in
+                let next = component.withCString { pointer in
                     unsafe Darwin.openat(
                         current,
                         pointer,
@@ -322,7 +322,7 @@ package enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Senda
             }
             let flags = (access == .readWrite ? O_RDWR : O_RDONLY)
                 | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
-            let result = unsafe leaf.withCString { pointer in
+            let result = leaf.withCString { pointer in
                 unsafe Darwin.openat(current, pointer, flags)
             }
             guard result >= 0 else {
@@ -411,8 +411,8 @@ package enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Senda
         // byte alignment is sufficient, and the result must equal that capacity; synchronization:
         // the descriptor is only observed during validation; safe alternative: descriptor-based
         // extended attributes have no memory-safe Swift API and avoid a path substitution race.
-        let count = unsafe tag.withUnsafeMutableBytes { bytes in
-            unsafe TorrentStorageDestinationPlanner.ownershipAttribute.withCString { name in
+        let count = tag.withUnsafeMutableBytes { bytes in
+            TorrentStorageDestinationPlanner.ownershipAttribute.withCString { name in
                 unsafe Darwin.fgetxattr(
                     descriptor,
                     name,

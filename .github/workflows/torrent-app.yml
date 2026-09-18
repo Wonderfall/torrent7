@@ -73,8 +73,8 @@ on:
 permissions: {}
 
 env:
-  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
-  XCODE_CACHE_KEY: xcode-26.6-17F113
+  DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
+  XCODE_CACHE_KEY: xcode-27.0-27A266a
 
 concurrency:
   group: torrent-app-${{ github.event.pull_request.number || github.ref }}
@@ -84,7 +84,7 @@ jobs:
   test-and-build:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: Test, build, and verify
-    runs-on: macos-26
+    runs-on: xcode-27
     permissions: {}
     timeout-minutes: 45
     steps:
@@ -114,7 +114,7 @@ jobs:
         shell: zsh {0}
         run: |
           set -euo pipefail
-          swift test \
+          /usr/bin/xcrun swift test \
             --package-path Tools/UnsafeBoundaryLint \
             --scratch-path .build/unsafe-boundary-lint \
             --only-use-versions-from-resolved-file

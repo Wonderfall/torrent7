@@ -314,7 +314,7 @@ struct TorrentBridgeMappingTests {
 // synchronization: test setup is single-threaded; safe alternative: imported fixed C
 // character arrays have no mutable Swift collection API.
 private func writeCString<T>(_ string: String, to tuple: inout T) {
-    unsafe withUnsafeMutableBytes(of: &tuple) { bytes in
+    withUnsafeMutableBytes(of: &tuple) { bytes in
         for index in bytes.indices {
             unsafe bytes[index] = 0
         }

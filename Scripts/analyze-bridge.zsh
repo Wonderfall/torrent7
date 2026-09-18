@@ -8,6 +8,7 @@ fail() {
 }
 
 typeset -r root_dir=${0:A:h:h}
+"$root_dir/Scripts/verify-xcode.zsh"
 typeset -r homebrew_prefix=${HOMEBREW_PREFIX:-/opt/homebrew}
 typeset -r deps_prefix=${DEPS_PREFIX:-$root_dir/.build/deps/arm64e/prefix}
 typeset -r boost_prefix=${BOOST_PREFIX:-$deps_prefix}
@@ -226,7 +227,7 @@ typeset -r checks_csv=${(j:,:)checks}
 typeset -a bridge_sources=("$root_dir"/Sources/TorrentBridge/*.cpp(N))
 typeset -a compiler_args=(
     -std=c++23
-    -target arm64e-apple-macosx26.0
+    -target arm64e-apple-macosx27.0
     -isysroot "$sdk_path"
     -I "$root_dir/Sources/TorrentBridge/include"
     -isystem "$deps_prefix/include"

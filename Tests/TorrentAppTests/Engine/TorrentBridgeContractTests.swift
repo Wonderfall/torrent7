@@ -551,9 +551,9 @@ struct TorrentBridgeContractTests {
         try withTemporaryDirectory { stateDirectory in
             var errorBuffer = BridgeErrorBuffer()
             let maybeClient = unsafe errorBuffer.withMutableBuffer { buffer in
-                var error: MutableSpan<CChar>? = buffer.mutableSpan
-                defer { error = nil }
-                return unsafe stateDirectory.torrentFilePath.withCString { path in
+                var error: MutableSpan<CChar> = buffer.mutableSpan
+                defer { error = .init() }
+                return stateDirectory.torrentFilePath.withCString { path in
                     unsafe TorrentClientCreateWithError(
                         path,
                         1,
@@ -588,9 +588,9 @@ struct TorrentBridgeContractTests {
         try withTemporaryDirectory { stateDirectory in
             var errorBuffer = BridgeErrorBuffer()
             let maybeClient = unsafe errorBuffer.withMutableBuffer { buffer in
-                var error: MutableSpan<CChar>? = buffer.mutableSpan
-                defer { error = nil }
-                return unsafe stateDirectory.torrentFilePath.withCString { path in
+                var error: MutableSpan<CChar> = buffer.mutableSpan
+                defer { error = .init() }
+                return stateDirectory.torrentFilePath.withCString { path in
                     unsafe TorrentClientCreateWithError(
                         path,
                         1,
@@ -623,9 +623,9 @@ struct TorrentBridgeContractTests {
         try withTemporaryDirectory { stateDirectory in
             var errorBuffer = BridgeErrorBuffer()
             let maybeClient = unsafe errorBuffer.withMutableBuffer { buffer in
-                var error: MutableSpan<CChar>? = buffer.mutableSpan
-                defer { error = nil }
-                return unsafe stateDirectory.torrentFilePath.withCString { path in
+                var error: MutableSpan<CChar> = buffer.mutableSpan
+                defer { error = .init() }
+                return stateDirectory.torrentFilePath.withCString { path in
                     unsafe TorrentClientCreateWithError(
                         path,
                         1,
@@ -658,9 +658,9 @@ struct TorrentBridgeContractTests {
         try withTemporaryDirectory { stateDirectory in
             var errorBuffer = BridgeErrorBuffer()
             let maybeClient = unsafe errorBuffer.withMutableBuffer { buffer in
-                var error: MutableSpan<CChar>? = buffer.mutableSpan
-                defer { error = nil }
-                return unsafe stateDirectory.torrentFilePath.withCString { path in
+                var error: MutableSpan<CChar> = buffer.mutableSpan
+                defer { error = .init() }
+                return stateDirectory.torrentFilePath.withCString { path in
                     unsafe TorrentClientCreateWithError(
                         path,
                         1,
@@ -690,7 +690,7 @@ struct TorrentBridgeContractTests {
     // unshared; safe alternative: null-behavior and raw ABI bounds require direct C calls.
     @Test("Null client query APIs zero outputs")
     func nullClientQueryAPIsZeroOutputs() {
-        var eventSpan: MutableSpan<TTorrentEvent>?
+        var eventSpan: MutableSpan<TTorrentEvent> = .init()
         var eventCount: Int32 = -1
         var eventsAvailable: UInt8 = 1
         let copiedEvents = unsafe TorrentClientDrainEvents(
@@ -703,7 +703,7 @@ struct TorrentBridgeContractTests {
         #expect(eventCount == 0)
         #expect(eventsAvailable == 0)
 
-        var presentationSpan: MutableSpan<TTorrentPresentationMetadata>?
+        var presentationSpan: MutableSpan<TTorrentPresentationMetadata> = .init()
         var presentationCount: Int32 = -1
         var presentationAvailable: UInt8 = 1
         let copiedPresentation = unsafe TorrentClientDrainPresentationMetadata(
@@ -741,14 +741,14 @@ struct TorrentBridgeContractTests {
         #expect(healthResult.health.total_alert_worker_failures == 0)
         #expect(healthResult.health.consecutive_alert_worker_failures == 0)
         #expect(healthResult.health.alert_worker_degraded == 0)
-        let firstHealthErrorByte = unsafe withUnsafeBytes(of: healthResult.health.last_alert_worker_error) { bytes in
+        let firstHealthErrorByte = withUnsafeBytes(of: healthResult.health.last_alert_worker_error) { bytes in
             unsafe bytes[0]
         }
         #expect(firstHealthErrorByte == 0)
 
         var requiredSourcePolicyCount: Int32 = -1
         var sourcePolicyAvailable: UInt8 = 1
-        var sourcePolicySpan: MutableSpan<TTorrentSourcePolicyState>?
+        var sourcePolicySpan: MutableSpan<TTorrentSourcePolicyState> = .init()
         let copiedSourcePolicies = unsafe TorrentClientCopySourcePolicyStateBatch(
             nil,
             &sourcePolicySpan,
@@ -762,8 +762,8 @@ struct TorrentBridgeContractTests {
         var errorBuffer = BridgeErrorBuffer()
         errorBuffer.writeSentinel()
         let appliedSourcePolicy = errorBuffer.withMutableBuffer { buffer in
-            let applicationSpan: Span<TTorrentSourcePolicyApplication>? = nil
-            var errorSpan: MutableSpan<CChar>? = buffer.mutableSpan
+            let applicationSpan: Span<TTorrentSourcePolicyApplication> = .init()
+            var errorSpan: MutableSpan<CChar> = buffer.mutableSpan
             return TorrentClientApplySourcePolicyState(
                 nil,
                 applicationSpan,
@@ -793,7 +793,7 @@ struct TorrentBridgeContractTests {
         requiredCount = -1
         var available: UInt8 = 1
         var pieces = Array<UInt8>(repeating: 1, count: 4)
-        let copiedPieceMap = unsafe pieces.withUnsafeMutableBufferPointer { buffer in
+        let copiedPieceMap = pieces.withUnsafeMutableBufferPointer { buffer in
             unsafe TorrentClientCopyPieceMap(
                 nil,
                 0,
@@ -829,7 +829,7 @@ struct TorrentBridgeContractTests {
     @Test("Imports bounded bridge buffers as lifetime-scoped Swift spans")
     func importsBoundedBuffersAsSwiftSpans() {
         var snapshotStorage = [TTorrentSnapshot()]
-        var snapshots: MutableSpan<TTorrentSnapshot>? = snapshotStorage.mutableSpan
+        var snapshots: MutableSpan<TTorrentSnapshot> = snapshotStorage.mutableSpan
         var requiredCount: Int32 = -1
         var available: UInt8 = 1
 
@@ -845,11 +845,11 @@ struct TorrentBridgeContractTests {
         #expect(available == 0)
 
         var errorStorage = [CChar](repeating: 0, count: 128)
-        var error: MutableSpan<CChar>? = errorStorage.mutableSpan
+        var error: MutableSpan<CChar> = errorStorage.mutableSpan
 
         let settings = TTorrentSessionSettings()
         let interfaceStorage = "utun4".utf8.map { CChar(bitPattern: $0) }
-        let interface: Span<CChar>? = interfaceStorage.span
+        let interface: Span<CChar> = interfaceStorage.span
         let settingsResult = TorrentClientApplySettings(
             nil,
             settings,
@@ -870,23 +870,23 @@ struct TorrentBridgeContractTests {
         var nativeToken = UInt64.max
         var addedIDStorage = Array<CChar>(repeating: 1, count: Int(TTORRENT_ID_CAPACITY))
         var errorStorage = Array<CChar>(repeating: 0, count: 1_024)
-        var addedID: MutableSpan<CChar>? = addedIDStorage.mutableSpan
-        var error: MutableSpan<CChar>? = errorStorage.mutableSpan
+        var addedID: MutableSpan<CChar> = addedIDStorage.mutableSpan
+        var error: MutableSpan<CChar> = errorStorage.mutableSpan
         let addResult = unsafe TorrentClientAddParsedMagnet(
             nil,
             TTorrentMagnetImport(),
-            nil,
-            nil,
-            nil,
-            nil,
+            .init(),
+            .init(),
+            .init(),
+            .init(),
             TTorrentAddOptions(),
             &addedID,
             &nativeToken,
             &addOutcome,
             &error
         )
-        addedID = nil
-        error = nil
+        addedID = .init()
+        error = .init()
 
         #expect(addResult == 1)
         #expect(bridgeString(errorStorage) == "Missing torrent client, native token, or add outcome output.")
@@ -972,10 +972,10 @@ private struct BridgeErrorBuffer {
 private func invalidCreateResult(path: String?) -> (didCreate: Bool, error: String) {
     var errorBuffer = BridgeErrorBuffer()
     let didCreate = errorBuffer.withMutableBuffer { buffer -> Bool in
-        var error: MutableSpan<CChar>? = buffer.mutableSpan
-        defer { error = nil }
+        var error: MutableSpan<CChar> = buffer.mutableSpan
+        defer { error = .init() }
         if let path {
-            let client = unsafe path.withCString { statePath in
+            let client = path.withCString { statePath in
                 unsafe TorrentClientCreateWithError(
                     statePath,
                     1,
@@ -1065,9 +1065,9 @@ private func emptyClientSmokeResult(statePath: String) -> EmptyClientSmokeResult
     var result = EmptyClientSmokeResult()
     var creationErrorBuffer = BridgeErrorBuffer()
     let maybeClient = unsafe creationErrorBuffer.withMutableBuffer { buffer in
-        var error: MutableSpan<CChar>? = buffer.mutableSpan
-        defer { error = nil }
-        return unsafe statePath.withCString { statePathPointer in
+        var error: MutableSpan<CChar> = buffer.mutableSpan
+        defer { error = .init() }
+        return statePath.withCString { statePathPointer in
             unsafe TorrentClientCreateWithError(
                 statePathPointer,
                 1,

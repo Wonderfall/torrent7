@@ -8,6 +8,7 @@ fail() {
 }
 
 typeset -r root_dir=${0:A:h:h}
+"$root_dir/Scripts/verify-xcode.zsh"
 typeset -r target_arch=${TARGET_ARCH:-arm64e}
 typeset -r sanitizer_profile=${SANITIZER_PROFILE:-}
 case $sanitizer_profile in

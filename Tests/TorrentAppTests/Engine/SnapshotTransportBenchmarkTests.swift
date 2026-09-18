@@ -114,19 +114,18 @@ struct SnapshotTransportBenchmarkTests {
         #expect(checksum > 0)
 
         let footprintJSON = incrementalFootprintBytes.map { String($0) } ?? "null"
-        print(
-            "SNAPSHOT_TRANSPORT_SWIFT {"
-                + "\"count\":\(maximumCount),"
-                + "\"snapshot_stride\":\(MemoryLayout<TTorrentSnapshot>.stride),"
-                + "\"samples\":\(sampleCount),"
-                + "\"incremental_footprint_bytes\":\(footprintJSON),"
-                + "\"allocation_copy\":\(allocationAndCopy.json),"
-                + "\"mapping\":\(mapping.json),"
-                + "\"date_sort\":\(dateSort.json),"
-                + "\"name_sort\":\(nameSort.json),"
-                + "\"end_to_end_date_sort\":\(endToEndDateSort.json)"
-                + "}"
-        )
+        let fields = [
+            "\"count\":\(maximumCount)",
+            "\"snapshot_stride\":\(MemoryLayout<TTorrentSnapshot>.stride)",
+            "\"samples\":\(sampleCount)",
+            "\"incremental_footprint_bytes\":\(footprintJSON)",
+            "\"allocation_copy\":\(allocationAndCopy.json)",
+            "\"mapping\":\(mapping.json)",
+            "\"date_sort\":\(dateSort.json)",
+            "\"name_sort\":\(nameSort.json)",
+            "\"end_to_end_date_sort\":\(endToEndDateSort.json)"
+        ]
+        print("SNAPSHOT_TRANSPORT_SWIFT {\(fields.joined(separator: ","))}")
     }
 }
 
@@ -215,7 +214,7 @@ private func indexedMaximumLengthASCII(label: String, index: Int, capacity: Int)
 // synchronization: benchmark setup is single-threaded; safe alternative: imported fixed C
 // character arrays have no mutable Swift collection API.
 private func writeBenchmarkCString<T>(_ string: String, to tuple: inout T) {
-    unsafe withUnsafeMutableBytes(of: &tuple) { bytes in
+    withUnsafeMutableBytes(of: &tuple) { bytes in
         for index in bytes.indices {
             unsafe bytes[index] = 0
         }
@@ -232,8 +231,8 @@ private func writeBenchmarkCString<T>(_ string: String, to tuple: inout T) {
 private func copySnapshots(_ snapshots: [TTorrentSnapshot]) -> [TTorrentSnapshot] {
     var copied = Array(repeating: TTorrentSnapshot(), count: snapshots.count)
     let byteCount = snapshots.count * MemoryLayout<TTorrentSnapshot>.stride
-    unsafe snapshots.withUnsafeBufferPointer { source in
-        unsafe copied.withUnsafeMutableBufferPointer { destination in
+    snapshots.withUnsafeBufferPointer { source in
+        copied.withUnsafeMutableBufferPointer { destination in
             guard let sourceAddress = source.baseAddress,
                   let destinationAddress = destination.baseAddress else {
                 return
@@ -271,7 +270,7 @@ private func physicalFootprintBytes() -> UInt64? {
     var informationCount = mach_msg_type_number_t(
         MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size
     )
-    let result = unsafe withUnsafeMutablePointer(to: &information) { pointer in
+    let result = withUnsafeMutablePointer(to: &information) { pointer in
         unsafe pointer.withMemoryRebound(to: integer_t.self, capacity: Int(informationCount)) { rebound in
             unsafe task_info(
                 mach_task_self_,

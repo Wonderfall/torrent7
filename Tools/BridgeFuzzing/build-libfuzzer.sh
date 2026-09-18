@@ -3,11 +3,12 @@ set -euo pipefail
 
 TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$TOOLS_DIR/../.." && pwd)"
+"$ROOT_DIR/Scripts/verify-xcode.zsh"
 
 BUILD_DIR="${BUILD_DIR:-$TOOLS_DIR/libfuzzer-build}"
 DEPS_ROOT="${LIBFUZZER_DEPS_ROOT:-$TOOLS_DIR/deps/arm64-libfuzzer}"
 PARSER_SWIFT_BUILD_DIR="${PARSER_SWIFT_BUILD_DIR:-$TOOLS_DIR/swift-build}"
-PARSER_SWIFT_BIN_DIR="${PARSER_SWIFT_BIN_DIR:-$PARSER_SWIFT_BUILD_DIR/arm64-apple-macosx/debug}"
+PARSER_SWIFT_BIN_DIR="${PARSER_SWIFT_BIN_DIR:-$(/usr/bin/xcrun swift build --package-path "$ROOT_DIR" --scratch-path "$PARSER_SWIFT_BUILD_DIR" --arch arm64 --configuration debug --show-bin-path)}"
 if [[ -n "${LIBFUZZER_DEPS_PREFIX:-}" \
     && "${LIBFUZZER_DEPS_PREFIX:-}" != "$DEPS_ROOT/prefix" ]]; then
     echo "LIBFUZZER_DEPS_PREFIX must be the prefix child of LIBFUZZER_DEPS_ROOT" >&2
@@ -27,7 +28,7 @@ if [[ -z "$FUZZER_RUNTIME" && -n "$LLVM_PREFIX" ]]; then
     )"
 fi
 SDK_PATH="${SDK_PATH:-$(xcrun --sdk macosx --show-sdk-path)}"
-TARGET_TRIPLE="${TARGET_TRIPLE:-arm64-apple-macosx26.0}"
+TARGET_TRIPLE="${TARGET_TRIPLE:-arm64-apple-macosx27.0}"
 
 all_targets=(
     bridge_magnet
@@ -67,7 +68,7 @@ done < <(find "$ROOT_DIR/Sources/TorrentBridge" -maxdepth 1 -type f -name '*.cpp
 cxx_flags=(
     -target "$TARGET_TRIPLE"
     -isysroot "$SDK_PATH"
-    -mmacosx-version-min=26.0
+    -mmacosx-version-min=27.0
     -std=c++23
     -O1
     -g

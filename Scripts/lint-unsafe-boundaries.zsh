@@ -3,6 +3,7 @@ emulate -L zsh
 setopt err_exit no_unset pipe_fail
 
 typeset -r root_dir=${0:A:h:h}
+"$root_dir/Scripts/verify-xcode.zsh"
 typeset -r package_dir="$root_dir/Tools/UnsafeBoundaryLint"
 typeset -r scratch_path=${UNSAFE_BOUNDARY_LINT_SCRATCH_PATH:-"$root_dir/.build/unsafe-boundary-lint"}
 typeset -r configuration=${CONFIGURATION:-debug}
@@ -25,7 +26,7 @@ done < <(
     exit 1
 }
 
-swift run \
+/usr/bin/xcrun swift run \
     --package-path "$package_dir" \
     --scratch-path "$scratch_path" \
     --configuration "$configuration" \

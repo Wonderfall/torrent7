@@ -8,8 +8,9 @@ fail() {
 }
 
 typeset -r ROOT_DIR=${0:A:h:h}
+"$ROOT_DIR/Scripts/verify-xcode.zsh"
 typeset -r TARGET_ARCH=${TARGET_ARCH:-arm64e}
-typeset -r MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-26.0}
+typeset -r MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-27.0}
 typeset -r TARGET_TRIPLE="${TARGET_ARCH}-apple-macosx${MACOSX_DEPLOYMENT_TARGET}"
 typeset -r SDK_PATH=$(/usr/bin/xcrun --sdk macosx --show-sdk-path)
 typeset -r APPLE_CC=$(/usr/bin/xcrun --find clang)
@@ -128,8 +129,10 @@ typeset -a TEMPORARY_FILES=()
 # Type-discriminated C function pointers and RTTI typeinfo vtable pointers
 # need targeted use; enabling them globally breaks APIs such as pthread_once
 # and dynamic_cast on Apple's arm64e runtime.
-typeset -r PTRAUTH_DRIVER_C_FLAGS="-fptrauth-returns -fptrauth-calls -fptrauth-indirect-gotos -fptrauth-auth-traps -fptrauth-intrinsics"
-typeset -r PTRAUTH_CC1_C_FLAGS="-fptrauth-block-descriptor-pointers -fptrauth-init-fini -fptrauth-init-fini-address-discrimination"
+typeset -r PTRAUTH_DRIVER_C_FLAGS="-fptrauth-calls -fptrauth-indirect-gotos -fptrauth-auth-traps -fptrauth-intrinsics"
+# Apple Clang 21 rejects the driver spelling of -fptrauth-returns on link-only
+# invocations. Forward it to the compiler so CMake links retain identical PAC codegen.
+typeset -r PTRAUTH_CC1_C_FLAGS="-Xclang -fptrauth-returns -fptrauth-block-descriptor-pointers -fptrauth-init-fini -fptrauth-init-fini-address-discrimination"
 typeset -r PTRAUTH_C_FLAGS="$PTRAUTH_DRIVER_C_FLAGS $PTRAUTH_CC1_C_FLAGS"
 typeset -r PTRAUTH_CXX_FLAGS="-fptrauth-vtable-pointer-address-discrimination -fptrauth-vtable-pointer-type-discrimination"
 typeset -r TYPED_ALLOCATOR_C_FLAGS="-ftyped-memory-operations-experimental"

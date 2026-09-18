@@ -651,7 +651,7 @@ struct TorrentStorageAuthorityTests {
                 size: 8
             )
             let payload = fixture.downloads.appending(path: "replace.bin")
-            let claimedDescriptor = unsafe payload.path().withCString { pointer in
+            let claimedDescriptor = payload.path().withCString { pointer in
                 unsafe Darwin.open(
                     pointer,
                     O_RDONLY | O_CLOEXEC | O_NOFOLLOW
@@ -1001,7 +1001,7 @@ struct TorrentStorageAuthorityTests {
             let original = Data("seed".utf8)
             try original.write(to: payload)
             do {
-                let descriptor = unsafe payload.path().withCString { path in
+                let descriptor = payload.path().withCString { path in
                     unsafe Darwin.open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
                 }
                 try #require(descriptor >= 0)
@@ -1011,7 +1011,7 @@ struct TorrentStorageAuthorityTests {
                     count: TorrentStorageOwnershipTag.tagByteCount
                 )
                 let status = unsafe staleTag.withUnsafeBytes { bytes in
-                    unsafe TorrentStorageDestinationPlanner.ownershipAttribute.withCString { name in
+                    TorrentStorageDestinationPlanner.ownershipAttribute.withCString { name in
                         unsafe Darwin.fsetxattr(
                             descriptor,
                             name,
@@ -1445,7 +1445,7 @@ struct TorrentStorageAuthorityTests {
                 )
             }
 
-            let traversal = unsafe "../sibling.bin".withCString { name in
+            let traversal = "../sibling.bin".withCString { name in
                 unsafe Darwin.openat(
                     opened.descriptor,
                     name,
@@ -1458,16 +1458,16 @@ struct TorrentStorageAuthorityTests {
             #expect(traversal == -1)
 
             #expect(Darwin.fchdir(opened.descriptor) == -1)
-            let mkdirStatus = unsafe "child".withCString { name in
+            let mkdirStatus = "child".withCString { name in
                 unsafe Darwin.mkdirat(opened.descriptor, name, 0o700)
             }
             #expect(mkdirStatus == -1)
-            let unlinkStatus = unsafe "../sibling.bin".withCString { name in
+            let unlinkStatus = "../sibling.bin".withCString { name in
                 unsafe Darwin.unlinkat(opened.descriptor, name, 0)
             }
             #expect(unlinkStatus == -1)
-            let renameStatus = unsafe "payload.bin".withCString { source in
-                unsafe "renamed.bin".withCString { destination in
+            let renameStatus = "payload.bin".withCString { source in
+                "renamed.bin".withCString { destination in
                     unsafe Darwin.renameat(
                         opened.descriptor,
                         source,
@@ -1477,8 +1477,8 @@ struct TorrentStorageAuthorityTests {
                 }
             }
             #expect(renameStatus == -1)
-            let linkStatus = unsafe "payload.bin".withCString { source in
-                unsafe "linked.bin".withCString { destination in
+            let linkStatus = "payload.bin".withCString { source in
+                "linked.bin".withCString { destination in
                     unsafe Darwin.linkat(
                         opened.descriptor,
                         source,
@@ -1640,7 +1640,7 @@ struct TorrentStorageAuthorityTests {
                 manifest.physicalFileIdentities.first ?? nil
             )
             var metadata = stat()
-            let statStatus = unsafe payload.path().withCString { pointer in
+            let statStatus = payload.path().withCString { pointer in
                 unsafe Darwin.lstat(pointer, &metadata)
             }
             #expect(statStatus == 0)
@@ -1749,7 +1749,7 @@ struct TorrentStorageAuthorityTests {
                 at: payload,
                 to: fixture.downloads.appending(path: "original.bin")
             )
-            let fifoStatus = unsafe payload.path().withCString { pointer in
+            let fifoStatus = payload.path().withCString { pointer in
                 unsafe Darwin.mkfifo(pointer, 0o600)
             }
             #expect(fifoStatus == 0)
@@ -1779,7 +1779,7 @@ struct TorrentStorageAuthorityTests {
             ) == .success
             var releaseDescriptor: Int32 = -1
             if !completedWithoutWriter {
-                releaseDescriptor = unsafe payload.path().withCString { pointer in
+                releaseDescriptor = payload.path().withCString { pointer in
                     unsafe Darwin.open(pointer, O_RDWR | O_NONBLOCK | O_CLOEXEC)
                 }
                 _ = finished.wait(timeout: .now() + .seconds(1))
@@ -2324,7 +2324,7 @@ struct TorrentStorageAuthorityTests {
     private func ownershipTag(on descriptor: Int32) -> Data? {
         var tag = Data(count: TorrentStorageOwnershipTag.tagByteCount)
         let count = unsafe tag.withUnsafeMutableBytes { bytes in
-            unsafe TorrentStorageDestinationPlanner.ownershipAttribute.withCString { name in
+            TorrentStorageDestinationPlanner.ownershipAttribute.withCString { name in
                 unsafe Darwin.fgetxattr(
                     descriptor,
                     name,

@@ -375,10 +375,10 @@ package enum TorrentEngineExtensionConfiguration {
         // startup exclusively initializes this directory; safe alternative: lstat identity
         // comparison is required to reject a symlink/rename race in path-only Foundation APIs.
         do {
-            requestedStatus = unsafe requested.path(percentEncoded: false).withCString {
+            requestedStatus = requested.path(percentEncoded: false).withCString {
                 unsafe Darwin.lstat($0, &requestedMetadata)
             }
-            canonicalStatus = unsafe canonical.path(percentEncoded: false).withCString {
+            canonicalStatus = canonical.path(percentEncoded: false).withCString {
                 unsafe Darwin.lstat($0, &canonicalMetadata)
             }
         }

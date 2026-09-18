@@ -1,4 +1,4 @@
-// swift-tools-version: 6.3
+// swift-tools-version: 6.4
 
 import PackageDescription
 
@@ -14,7 +14,7 @@ let swiftSettings: [SwiftSetting] = [
 let package = Package(
     name: "UnsafeBoundaryLint",
     platforms: [
-        .macOS(.v26)
+        .macOS(.v27)
     ],
     products: [
         .executable(
@@ -25,7 +25,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/swiftlang/swift-syntax.git",
-            exact: "603.0.2"
+            exact: "604.0.0"
         )
     ],
     targets: [

@@ -46,8 +46,8 @@ struct TorrentDHTMessageBridgeTests {
             )
             var result = TTorrentDHTMessageResult()
             let status = unsafe body.withUnsafeBytes { rawBody in
-                unsafe nodes.withUnsafeMutableBufferPointer { nodeBuffer in
-                    unsafe peers.withUnsafeMutableBufferPointer { peerBuffer in
+                nodes.withUnsafeMutableBufferPointer { nodeBuffer in
+                    peers.withUnsafeMutableBufferPointer { peerBuffer in
                         unsafe torrentDHTMessageParseCallback(
                             context,
                             rawBody.bindMemory(to: CChar.self).baseAddress!,

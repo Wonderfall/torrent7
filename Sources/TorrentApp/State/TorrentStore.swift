@@ -3822,9 +3822,7 @@ final class TorrentStore {
         let mutationID = UUID()
         let state = TorrentStoreQueuedOperationState<Void>()
         try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation(
-                isolation: MainActor.shared
-            ) { continuation in
+            try await withCheckedThrowingContinuation { continuation in
                 state.install(continuation)
                 guard !Task.isCancelled else {
                     state.cancel()
@@ -4373,9 +4371,7 @@ final class TorrentStore {
         let operationID = UUID()
         let state = TorrentStoreQueuedOperationState<Result>()
         return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation(
-                isolation: MainActor.shared
-            ) { continuation in
+            try await withCheckedThrowingContinuation { continuation in
                 state.install(continuation)
                 guard !Task.isCancelled else {
                     state.cancel()
@@ -4414,9 +4410,7 @@ final class TorrentStore {
         let operationID = UUID()
         let state = TorrentStoreQueuedOperationState<Result>()
         return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation(
-                isolation: MainActor.shared
-            ) { continuation in
+            try await withCheckedThrowingContinuation { continuation in
                 state.install(continuation)
                 guard !Task.isCancelled else {
                     state.cancel()

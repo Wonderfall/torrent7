@@ -3,6 +3,7 @@ emulate -L zsh
 setopt err_exit no_unset pipe_fail
 
 typeset -r root_dir=${0:A:h:h}
+"$root_dir/Scripts/verify-xcode.zsh"
 typeset -r configuration=${CONFIGURATION:-debug}
 typeset -r sanitizer_profile=${SANITIZER_PROFILE:-}
 case $sanitizer_profile in
@@ -23,7 +24,7 @@ export TORRENT7_NATIVE_DEPS_BUILD_ID=$("$root_dir/Scripts/native-deps-build-id.z
 typeset -a swift_build_args=(
     --scratch-path "$scratch_path"
     --configuration "$configuration"
-    --triple arm64e-apple-macosx26.0
+    --arch arm64e
     --explicit-target-dependency-import-check error
 )
 case $sanitizer_profile in
@@ -36,7 +37,7 @@ typeset -ra fuzz_support_products=(
     TorrentStorageFuzzSupport
 )
 for product in "${fuzz_support_products[@]}"; do
-    swift build "${swift_build_args[@]}" --product "$product"
+    /usr/bin/xcrun swift build "${swift_build_args[@]}" --product "$product"
 done
 
 verify_exported_symbols() {
@@ -56,7 +57,7 @@ verify_exported_symbols() {
     done
 }
 
-typeset -r fuzz_support_dir="$scratch_path/arm64e-apple-macosx/$configuration"
+typeset -r fuzz_support_dir=$(/usr/bin/xcrun swift build "${swift_build_args[@]}" --show-bin-path)
 verify_exported_symbols \
     "$fuzz_support_dir/libTorrentEngineIPCFuzzSupport.dylib" \
     TorrentEngineIPCJSONPreflightFuzzOneInput \
@@ -71,4 +72,4 @@ verify_exported_symbols \
     TorrentStorageManifestFuzzOneInput \
     TorrentSwarmInfoParserFuzzOneInput
 
-swift test "${swift_build_args[@]}" "$@"
+/usr/bin/xcrun swift test "${swift_build_args[@]}" "$@"

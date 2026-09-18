@@ -244,13 +244,13 @@ package func torrentDHTMessageParseCallback(
             output.flags |= UInt32(TTORRENT_DHT_FLAG_WANT_IPV6)
         }
 
-        unsafe nodeRecords.withUnsafeBufferPointer { source in
+        nodeRecords.withUnsafeBufferPointer { source in
             guard let baseAddress = source.baseAddress else {
                 return
             }
             unsafe nodesOut.update(from: baseAddress, count: source.count)
         }
-        unsafe peerRecords.withUnsafeBufferPointer { source in
+        peerRecords.withUnsafeBufferPointer { source in
             guard let baseAddress = source.baseAddress else {
                 return
             }

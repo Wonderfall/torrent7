@@ -17,23 +17,12 @@
 #define TORRENT_BRIDGE_NONNULL _Nonnull
 #define TORRENT_BRIDGE_NULLABLE _Nullable
 
-#if __has_include(<lifetimebound.h>)
 #include <lifetimebound.h>
 #define TORRENT_BRIDGE_NOESCAPE __noescape
-#elif __has_attribute(noescape)
-#define TORRENT_BRIDGE_NOESCAPE __attribute__((noescape))
-#else
-#define TORRENT_BRIDGE_NOESCAPE
-#endif
 
-#if __has_include(<ptrcheck.h>)
 #include <ptrcheck.h>
 #define TORRENT_BRIDGE_COUNTED_BY(count) __counted_by(count)
 #define TORRENT_BRIDGE_NULL_TERMINATED __null_terminated
-#else
-#define TORRENT_BRIDGE_COUNTED_BY(count)
-#define TORRENT_BRIDGE_NULL_TERMINATED
-#endif
 #endif
 
 #ifdef __cplusplus
@@ -1003,6 +992,11 @@ typedef struct TTorrentStorageActivation {
     uint8_t preserved_torrent_id[34];
 } TTorrentStorageActivation;
 
+// Swift Build prelinks the C++ target into one relocatable object. Only the
+// public C entry points must survive that link as externally visible symbols;
+// implementation symbols retain the target's hidden visibility.
+#pragma GCC visibility push(default)
+
 const char * TORRENT_BRIDGE_NONNULL TORRENT_BRIDGE_NULL_TERMINATED TorrentBridgeLibtorrentVersion(void)
     TORRENT_BRIDGE_NOEXCEPT;
 
@@ -1385,6 +1379,8 @@ int32_t TorrentClientTakeAlertError(
     char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
+
+#pragma GCC visibility pop
 
 #ifdef __cplusplus
 }

@@ -174,7 +174,7 @@ package func torrentHTTPTrackerResponseParseCallback(
             output.address_family = address.family.rawValue
         }
 
-        unsafe records.withUnsafeBufferPointer { source in
+        records.withUnsafeBufferPointer { source in
             guard let baseAddress = source.baseAddress else {
                 return
             }

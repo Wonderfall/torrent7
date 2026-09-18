@@ -407,7 +407,7 @@ package final class NetworkInterfaceMonitor: NetworkInterfaceMonitoring, @unchec
     // synchronization: if_nametoindex is a read-only system query; safe alternative:
     // Darwin exposes no String-taking interface-index API.
     private static func interfaceIndex(for name: String) -> UInt32 {
-        unsafe name.withCString { pointer in
+        name.withCString { pointer in
             unsafe if_nametoindex(pointer)
         }
     }

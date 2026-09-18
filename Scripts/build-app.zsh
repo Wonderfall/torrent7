@@ -3,6 +3,7 @@ emulate -L zsh
 setopt err_exit no_unset pipe_fail
 
 typeset -r root_dir=${0:A:h:h}
+"$root_dir/Scripts/verify-xcode.zsh"
 typeset -r sanitizer_profile=${SANITIZER_PROFILE:-}
 case $sanitizer_profile in
     ""|address|thread) ;;
@@ -147,21 +148,24 @@ export TORRENT7_NATIVE_DEPS_BUILD_ID=$("$root_dir/Scripts/native-deps-build-id.z
 
 typeset -a swift_build_args=(
     --configuration "$configuration"
-    --triple arm64e-apple-macosx26.0
+    --arch arm64e
 )
 case $sanitizer_profile in
     address) swift_build_args+=(--sanitize address --sanitize undefined) ;;
     thread) swift_build_args+=(--sanitize thread --sanitize undefined) ;;
 esac
 
-/usr/bin/swift build \
+/usr/bin/xcrun swift build \
     --scratch-path "$swift_build_dir" \
     "${swift_build_args[@]}" \
     --product Torrent7
-/usr/bin/swift build \
+/usr/bin/xcrun swift build \
     --scratch-path "$swift_build_dir" \
     "${swift_build_args[@]}" \
     --product "$engine_extension_product"
+
+typeset -r bin_dir=$(/usr/bin/xcrun swift build --scratch-path "$swift_build_dir" "${swift_build_args[@]}" --show-bin-path)
+typeset -r bridge_object_dir="$swift_build_dir/out/Intermediates.noindex/Torrent7.build/${(C)configuration}/TorrentBridge-t.build/Objects-normal/arm64e"
 
 rm -rf -- "$app_dir"
 mkdir -p -- \
@@ -170,9 +174,9 @@ mkdir -p -- \
     "$engine_extension_macos_dir" \
     "$extensions_dir"
 
-cp "$swift_build_dir/arm64e-apple-macosx/$configuration/Torrent7" "$executable"
+cp "$bin_dir/Torrent7" "$executable"
 cp \
-    "$swift_build_dir/arm64e-apple-macosx/$configuration/$engine_extension_product" \
+    "$bin_dir/$engine_extension_product" \
     "$engine_extension_executable"
 cp "$app_info_plist" "$contents_dir/Info.plist"
 cp "$engine_extension_info_plist" "$engine_extension_contents_dir/Info.plist"
@@ -212,7 +216,7 @@ rm -f -- "$app_icon_info_plist"
 /usr/bin/xcrun actool \
     --compile "$resources_dir" \
     --platform macosx \
-    --minimum-deployment-target 26.0 \
+    --minimum-deployment-target 27.0 \
     --app-icon AppIcon \
     --output-partial-info-plist "$app_icon_info_plist" \
     "$app_icon"
@@ -252,14 +256,14 @@ if [[ $sign_identity != "-" ]]; then
 fi
 
 if [[ $signing_mode == "distribution" ]]; then
-    TORRENT7_BRIDGE_OBJECT_DIR="$swift_build_dir/arm64e-apple-macosx/$configuration/TorrentBridge.build" \
+    TORRENT7_BRIDGE_OBJECT_DIR="$bridge_object_dir" \
         "$root_dir/Scripts/verify-app.zsh" \
         --mode distribution \
         --notarization pending \
         --team-id "$expected_team_id" \
         "$app_dir"
 else
-    TORRENT7_BRIDGE_OBJECT_DIR="$swift_build_dir/arm64e-apple-macosx/$configuration/TorrentBridge.build" \
+    TORRENT7_BRIDGE_OBJECT_DIR="$bridge_object_dir" \
         "$root_dir/Scripts/verify-app.zsh" --mode development "$app_dir"
 fi
 

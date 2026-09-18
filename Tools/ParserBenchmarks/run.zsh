@@ -3,6 +3,7 @@ emulate -L zsh
 setopt err_exit no_unset pipe_fail
 
 typeset -r root_dir=${0:A:h:h:h}
+"$root_dir/Scripts/verify-xcode.zsh"
 typeset -r scratch_path=${PARSER_BENCHMARK_SCRATCH_PATH:-"$root_dir/.build/parser-benchmarks"}
 typeset -r fixtures_dir="$scratch_path/fixtures"
 typeset -r results_dir="$scratch_path/results"
@@ -22,12 +23,12 @@ export TORRENT7_NATIVE_DEPS_BUILD_ID=$("$root_dir/Scripts/native-deps-build-id.z
 typeset -a build_args=(
     --scratch-path "$scratch_path"
     --configuration release
-    --triple arm64e-apple-macosx26.0
+    --arch arm64e
 )
 
-swift build "${build_args[@]}" --product SwiftParserBenchmark
-swift build "${build_args[@]}" --product LibtorrentParserBenchmark
-typeset -r bin_dir=$(swift build "${build_args[@]}" --show-bin-path)
+/usr/bin/xcrun swift build "${build_args[@]}" --product SwiftParserBenchmark
+/usr/bin/xcrun swift build "${build_args[@]}" --product LibtorrentParserBenchmark
+typeset -r bin_dir=$(/usr/bin/xcrun swift build "${build_args[@]}" --show-bin-path)
 typeset -r swift_benchmark="$bin_dir/SwiftParserBenchmark"
 typeset -r native_benchmark="$bin_dir/LibtorrentParserBenchmark"
 

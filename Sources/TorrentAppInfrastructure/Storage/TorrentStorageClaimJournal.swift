@@ -935,7 +935,7 @@ package actor TorrentStorageClaimJournal {
             throw TorrentStorageJournalError.capacityExceeded
         }
         let temporaryName = ".StorageClaims.\(UUID().uuidString).tmp"
-        let descriptor = unsafe temporaryName.withCString { pointer in
+        let descriptor = temporaryName.withCString { pointer in
             unsafe Darwin.openat(
                 directoryDescriptor,
                 pointer,
@@ -950,7 +950,7 @@ package actor TorrentStorageClaimJournal {
         defer {
             _ = Darwin.close(descriptor)
             if shouldUnlink {
-                _ = unsafe temporaryName.withCString { pointer in
+                _ = temporaryName.withCString { pointer in
                     unsafe Darwin.unlinkat(directoryDescriptor, pointer, 0)
                 }
             }
@@ -959,8 +959,8 @@ package actor TorrentStorageClaimJournal {
         guard Darwin.fsync(descriptor) == 0 else {
             throw TorrentStorageJournalError.unavailable
         }
-        let renamed = unsafe temporaryName.withCString { source in
-            unsafe Self.filename.withCString { destination in
+        let renamed = temporaryName.withCString { source in
+            Self.filename.withCString { destination in
                 unsafe Darwin.renameat(
                     directoryDescriptor,
                     source,
@@ -984,7 +984,7 @@ package actor TorrentStorageClaimJournal {
     private static func load(
         from directoryDescriptor: Int32
     ) throws -> Snapshot {
-        let descriptor = unsafe filename.withCString { pointer in
+        let descriptor = filename.withCString { pointer in
             unsafe Darwin.openat(
                 directoryDescriptor,
                 pointer,

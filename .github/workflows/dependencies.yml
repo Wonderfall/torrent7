@@ -41,7 +41,7 @@ on:
 permissions: {}
 
 env:
-  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+  DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
 
 concurrency:
   group: dependencies-${{ github.event.pull_request.number || github.ref }}
@@ -51,7 +51,7 @@ jobs:
   check-dependencies:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: Check pinned dependencies
-    runs-on: macos-26
+    runs-on: xcode-27
     permissions: {}
     timeout-minutes: 20
     steps:

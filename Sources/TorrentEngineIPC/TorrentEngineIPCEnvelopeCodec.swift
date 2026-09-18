@@ -583,7 +583,7 @@ package enum TorrentEngineIPCXPCValues {
     // call; the pointer and value do not escape and no peer-owned key is copied.
     static func containsValue(in dictionary: XPCDictionary, field: String) -> Bool {
         dictionary.withUnsafeUnderlyingDictionary { rawDictionary in
-            unsafe field.withCString { pointer in
+            field.withCString { pointer in
                 unsafe xpc_dictionary_get_value(rawDictionary, pointer) != nil
             }
         }

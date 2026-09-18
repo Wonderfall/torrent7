@@ -233,14 +233,16 @@ struct IntegerFieldRow: View {
                 HStack(spacing: 8) {
                     if validationMessage == nil {
                         TextField("", value: clampedValue, format: .number.grouping(.never))
-                            .textFieldStyle(.roundedBorder)
+                            .textFieldStyle(.bordered)
+                            .textInputBorderShape(.roundedRectangle)
                             .controlSize(.regular)
                             .frame(width: 96)
                             .accessibilityLabel(title)
                             .accessibilityHint(accessibilityHint)
                     } else {
                         TextField("", text: validatedText)
-                            .textFieldStyle(.roundedBorder)
+                            .textFieldStyle(.bordered)
+                            .textInputBorderShape(.roundedRectangle)
                             .controlSize(.regular)
                             .frame(width: 96)
                             .focused($isEditingText)

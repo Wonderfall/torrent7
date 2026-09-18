@@ -240,6 +240,12 @@ verify_distribution_signature() {
 verify_mach_o_load_commands() {
     local -r binary=$1
     local -r expected_sanitizer=$2
+    /usr/bin/xcrun vtool -show-build "$binary" | /usr/bin/awk '
+        $1 == "platform" && $2 == "MACOS" { platform++ }
+        $1 == "minos" && $2 == "27.0" { minimum++ }
+        $1 == "sdk" && $2 == "27.0" { sdk++ }
+        END { exit !(platform == 1 && minimum == 1 && sdk == 1) }
+    ' || fail "Expected a macOS 27.0 deployment target and SDK in $binary"
     local expected_runtime=
     case $expected_sanitizer in
         none)
@@ -477,8 +483,10 @@ fi
     "$installed_extension_point" \
     "$expected_extension_point_identifier:EXRequiresEnhancedSecurity") == "true" ]] \
     || fail "Engine extension point does not require Enhanced Security"
-[[ $(info_plist_value "$engine_extension_info_plist" LSMinimumSystemVersion) == "26.0" ]] \
-    || fail "Engine extension minimum system version is not 26.0"
+[[ $(info_plist_value "$engine_extension_info_plist" LSMinimumSystemVersion) == "27.0" ]] \
+    || fail "Engine extension minimum system version is not 27.0"
+[[ $(info_plist_value "$info_plist" LSMinimumSystemVersion) == "27.0" ]] \
+    || fail "App minimum system version is not 27.0"
 [[ $(info_plist_boolean_value "$engine_extension_info_plist" LSFileQuarantineEnabled) \
     == "true" ]] || fail "Engine extension LSFileQuarantineEnabled is not true"
 [[ $(info_plist_value "$engine_extension_info_plist" CFBundleVersion) \

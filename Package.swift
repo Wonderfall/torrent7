@@ -1,4 +1,4 @@
-// swift-tools-version: 6.3
+// swift-tools-version: 6.4
 
 import PackageDescription
 
@@ -147,8 +147,15 @@ case "thread":
 default:
     bridgeSanitizerFlags = trapOnlyUBSanFlags
 }
+// Swift Build supplies a configuration-dependent default. Replace it explicitly
+// so the bridge and its prebuilt dependencies always use the same hardening ABI.
+let bridgeLibcppHardeningFlags = [
+    "-U_LIBCPP_HARDENING_MODE",
+    "-D_LIBCPP_HARDENING_MODE=\(libcppHardeningMode)"
+]
 let bridgeCompilerFlags = bridgeSystemIncludeFlags
     + bridgeLanguageAndRuntimeFlags
+    + bridgeLibcppHardeningFlags
     + bridgeFortifyFlags
     + bridgeCompilerHardeningFlags
     + bridgeVisibilityFlags
@@ -162,7 +169,6 @@ let bridgeTestCompilerFlags = [
 ] + bridgeCompilerFlags
 
 let bridgeDefines: [CXXSetting] = [
-    .define("_LIBCPP_HARDENING_MODE", to: libcppHardeningMode),
     .define(
         "TORRENT7_NATIVE_DEPS_BUILD_ID",
         to: "\"torrent7-native-deps:\(nativeDepsBuildID)\""
@@ -210,18 +216,6 @@ let appSwiftPointerAuthenticationFlags = [
     "-swift-ptrauth-mode",
     "NewAndAuth"
 ]
-let bridgeSafeInteropSwiftSettings: [SwiftSetting] = [
-    // Limit the experimental Clang flag to Swift's importer. Applying it to the
-    // C++ target also activates unrelated SDK bounds contracts in Boost.Asio.
-    .enableExperimentalFeature("SafeInteropWrappers"),
-    .unsafeFlags(["-Xcc", "-fexperimental-bounds-safety-attributes"])
-]
-// Swift 6.3 IRGen crashes when lifetime-dependent imported wrappers are emitted
-// under whole-module optimization in affected multi-file targets. Keep normal
-// -O per-file optimization until the compiler can emit these modules under WMO.
-let bridgeSafeInteropWholeModuleWorkaround: [SwiftSetting] = [
-    .unsafeFlags(["-no-whole-module-optimization"], .when(configuration: .release))
-]
 let engineExtensionSwiftFlags = appSwiftStrictnessFlags
     + appSwiftPointerAuthenticationFlags
     + ["-application-extension"]
@@ -257,7 +251,7 @@ default:
 let package = Package(
     name: "Torrent7",
     platforms: [
-        .macOS(.v26)
+        .macOS(.v27)
     ],
     products: [
         .executable(name: "Torrent7", targets: ["TorrentApp"]),
@@ -350,8 +344,6 @@ let package = Package(
             swiftSettings: swiftBaselineSettings + [
                 .unsafeFlags(engineExtensionSwiftFlags)
             ] + nonisolatedConcurrencySwiftSettings
-                + bridgeSafeInteropSwiftSettings
-                + bridgeSafeInteropWholeModuleWorkaround
         ),
         .executableTarget(
             name: "SwiftParserBenchmark",
@@ -388,8 +380,6 @@ let package = Package(
             swiftSettings: swiftBaselineSettings + [
                 .unsafeFlags(engineExtensionSwiftFlags)
             ] + nonisolatedConcurrencySwiftSettings
-                + bridgeSafeInteropSwiftSettings
-                + bridgeSafeInteropWholeModuleWorkaround
         ),
         .target(
             name: "TorrentEngineService",
@@ -489,8 +479,6 @@ let package = Package(
             swiftSettings: swiftBaselineSettings + [
                 .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
             ] + nonisolatedConcurrencySwiftSettings
-                + bridgeSafeInteropSwiftSettings
-                + bridgeSafeInteropWholeModuleWorkaround
         ),
         .testTarget(
             name: "TorrentMetainfoTests",

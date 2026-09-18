@@ -356,7 +356,7 @@ struct TorrentEngineIPCEnvelopeTests {
         let bytes = [CChar](repeating: -1, count: byteCount) + [0]
         // SAFETY: The initialized array is NUL-terminated and remains borrowed until
         // xpc_string_create copies its bytes into an owned XPC object.
-        let object = unsafe bytes.withUnsafeBufferPointer { buffer in
+        let object = bytes.withUnsafeBufferPointer { buffer in
             guard let base = buffer.baseAddress else {
                 preconditionFailure("The terminated fixture must be nonempty")
             }

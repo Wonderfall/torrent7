@@ -17,7 +17,8 @@ struct AddMagnetView: View {
                 .font(.title2.weight(.semibold))
 
             TextField("magnet:?", text: $magnetURI, axis: .vertical)
-                .textFieldStyle(.roundedBorder)
+                .textFieldStyle(.bordered)
+                .textInputBorderShape(.roundedRectangle)
                 .lineLimit(4...8)
                 .frame(minWidth: 520)
                 .accessibilityLabel("Magnet link")

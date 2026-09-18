@@ -24,7 +24,7 @@ struct TorrentPeerProtocolBridgeTests {
             var clientVersion = [UInt8](repeating: 0xcc, count: Int(TTORRENT_MAX_PEER_CLIENT_VERSION_BYTES))
             var result = TTorrentExtensionHandshakeResult()
             let status = unsafe message.withUnsafeBytes { rawMessage in
-                unsafe clientVersion.withUnsafeMutableBufferPointer { versionBuffer in
+                clientVersion.withUnsafeMutableBufferPointer { versionBuffer in
                     unsafe torrentExtensionHandshakeParseCallback(
                         context,
                         rawMessage.bindMemory(to: CChar.self).baseAddress!,
@@ -118,7 +118,7 @@ struct TorrentPeerProtocolBridgeTests {
             )
             var result = TTorrentPeerExchangeResult()
             let status = unsafe message.withUnsafeBytes { rawMessage in
-                unsafe records.withUnsafeMutableBufferPointer { recordBuffer in
+                records.withUnsafeMutableBufferPointer { recordBuffer in
                     unsafe torrentPeerExchangeParseCallback(
                         context,
                         rawMessage.bindMemory(to: CChar.self).baseAddress!,

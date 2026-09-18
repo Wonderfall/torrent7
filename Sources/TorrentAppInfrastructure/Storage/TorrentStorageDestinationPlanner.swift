@@ -109,7 +109,7 @@ package final class TorrentStorageParentAuthority: Sendable {
         var descriptorMetadata = stat()
         var pathMetadata = stat()
         let descriptorStatus = unsafe Darwin.fstat(opened.rawValue, &descriptorMetadata)
-        let pathStatus = unsafe path.withCString { pointer in
+        let pathStatus = path.withCString { pointer in
             unsafe Darwin.lstat(pointer, &pathMetadata)
         }
         guard descriptorStatus == 0,
@@ -244,7 +244,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
                 isDirectory: logicalManifest.contentKind == .directory
             )
             var metadata = stat()
-            let status = unsafe candidate.withCString { pointer in
+            let status = candidate.withCString { pointer in
                 unsafe Darwin.fstatat(
                     parent.descriptor,
                     pointer,
@@ -504,7 +504,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         let flags = (claim.manifest.contentKind == .directory
             ? O_RDONLY | O_DIRECTORY
             : O_RDONLY) | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
-        let descriptor = unsafe name.withCString { pointer in
+        let descriptor = name.withCString { pointer in
             unsafe Darwin.openat(parent.descriptor, pointer, flags)
         }
         guard descriptor >= 0 else {
@@ -575,7 +575,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
             guard let leaf = components.last else {
                 return rootURL
             }
-            let descriptor = unsafe leaf.withCString { pointer in
+            let descriptor = leaf.withCString { pointer in
                 unsafe Darwin.openat(
                     containingDirectory,
                     pointer,
@@ -927,14 +927,14 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         identifier: UUID
     ) throws -> DeletionQuarantine {
         let name = deletionQuarantineName(identifier)
-        let status = unsafe name.withCString { pointer in
+        let status = name.withCString { pointer in
             unsafe Darwin.mkdirat(parentDescriptor, pointer, mode_t(0o700))
         }
         guard status == 0 else {
             throw TorrentStoragePlanningError.deletionNotProvable
         }
 
-        let descriptor = unsafe name.withCString { pointer in
+        let descriptor = name.withCString { pointer in
             unsafe Darwin.openat(
                 parentDescriptor,
                 pointer,
@@ -942,7 +942,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
             )
         }
         guard descriptor >= 0 else {
-            _ = unsafe name.withCString { pointer in
+            _ = name.withCString { pointer in
                 unsafe Darwin.unlinkat(
                     parentDescriptor,
                     pointer,
@@ -956,7 +956,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
             quarantineIdentity = try validateDirectoryDescriptor(descriptor)
         } catch {
             _ = Darwin.close(descriptor)
-            _ = unsafe name.withCString { pointer in
+            _ = name.withCString { pointer in
                 unsafe Darwin.unlinkat(
                     parentDescriptor,
                     pointer,
@@ -966,7 +966,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
             throw error
         }
         let entriesName = "entries"
-        let entriesStatus = unsafe entriesName.withCString { pointer in
+        let entriesStatus = entriesName.withCString { pointer in
             unsafe Darwin.mkdirat(descriptor, pointer, mode_t(0o700))
         }
         guard entriesStatus == 0 else {
@@ -980,7 +980,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
             _ = Darwin.close(descriptor)
             throw TorrentStoragePlanningError.deletionNotProvable
         }
-        let entriesDescriptor = unsafe entriesName.withCString { pointer in
+        let entriesDescriptor = entriesName.withCString { pointer in
             unsafe Darwin.openat(
                 descriptor,
                 pointer,
@@ -1038,7 +1038,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         if let entriesDescriptor {
             _ = Darwin.close(entriesDescriptor)
         }
-        _ = unsafe "entries".withCString { pointer in
+        _ = "entries".withCString { pointer in
             unsafe Darwin.unlinkat(descriptor, pointer, AT_REMOVEDIR)
         }
         _ = try? unlinkCapturedObject(
@@ -1445,7 +1445,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
                     })?.identity else {
                     throw TorrentStoragePlanningError.deletionNotProvable
                 }
-                let next = unsafe component.withCString { pointer in
+                let next = component.withCString { pointer in
                     unsafe Darwin.openat(
                         current,
                         pointer,
@@ -1524,7 +1524,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         var descriptorMetadata = stat()
         var pathMetadata = stat()
         let descriptorStatus = unsafe Darwin.fstat(descriptor, &descriptorMetadata)
-        let pathStatus = unsafe name.withCString { pointer in
+        let pathStatus = name.withCString { pointer in
             unsafe Darwin.fstatat(
                 directoryDescriptor,
                 pointer,
@@ -1542,7 +1542,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
               pathIdentity.refersToSameObject(as: expectedIdentity) else {
             throw TorrentStoragePlanningError.deletionNotProvable
         }
-        let status = unsafe name.withCString { pointer in
+        let status = name.withCString { pointer in
             unsafe Darwin.unlinkat(
                 directoryDescriptor,
                 pointer,
@@ -1569,8 +1569,8 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         as captureName: String,
         in quarantineDescriptor: Int32
     ) throws -> Bool {
-        let status = unsafe sourceName.withCString { source in
-            unsafe captureName.withCString { destination in
+        let status = sourceName.withCString { source in
+            captureName.withCString { destination in
                 unsafe Darwin.renameatx_np(
                     sourceDirectory,
                     source,
@@ -1599,8 +1599,8 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         as destinationName: String,
         in destinationDirectory: Int32
     ) throws {
-        let status = unsafe captureName.withCString { source in
-            unsafe destinationName.withCString { destination in
+        let status = captureName.withCString { source in
+            destinationName.withCString { destination in
                 unsafe Darwin.renameatx_np(
                     quarantineDescriptor,
                     source,
@@ -1624,7 +1624,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         in directoryDescriptor: Int32
     ) throws -> Bool {
         var metadata = stat()
-        let status = unsafe name.withCString { pointer in
+        let status = name.withCString { pointer in
             unsafe Darwin.fstatat(
                 directoryDescriptor,
                 pointer,
@@ -1652,7 +1652,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         isDirectory: Bool
     ) throws -> Int32 {
         var metadata = stat()
-        let status = unsafe name.withCString { pointer in
+        let status = name.withCString { pointer in
             unsafe Darwin.fstatat(
                 directoryDescriptor,
                 pointer,
@@ -1667,7 +1667,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         }
         let flags = (isDirectory ? O_RDONLY | O_DIRECTORY : O_RDONLY)
             | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
-        let descriptor = unsafe name.withCString { pointer in
+        let descriptor = name.withCString { pointer in
             unsafe Darwin.openat(directoryDescriptor, pointer, flags)
         }
         guard descriptor >= 0 else {
@@ -1706,7 +1706,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         for attempt in 1...attempts {
             let candidate = selectedName
                 ?? collisionName(preferredName, attempt: attempt, isDirectory: false)
-            let descriptor = unsafe candidate.withCString { pointer in
+            let descriptor = candidate.withCString { pointer in
                 unsafe Darwin.openat(
                     parentDescriptor,
                     pointer,
@@ -1767,7 +1767,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         for attempt in 1...attempts {
             let candidate = selectedName
                 ?? collisionName(preferredName, attempt: attempt, isDirectory: true)
-            let status = unsafe candidate.withCString { pointer in
+            let status = candidate.withCString { pointer in
                 unsafe Darwin.mkdirat(parentDescriptor, pointer, mode_t(0o700))
             }
             if status != 0 {
@@ -1858,7 +1858,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
                     _ = Darwin.close(containingDescriptor)
                 }
             }
-            let fileDescriptor = unsafe leaf.withCString { pointer in
+            let fileDescriptor = leaf.withCString { pointer in
                 unsafe Darwin.openat(
                     containingDescriptor,
                     pointer,
@@ -1927,7 +1927,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         var traversed = [String]()
         for component in components {
             traversed.append(component)
-            let status = unsafe component.withCString { pointer in
+            let status = component.withCString { pointer in
                 unsafe Darwin.mkdirat(current.rawValue, pointer, mode_t(0o700))
             }
             if status == 0 {
@@ -2113,7 +2113,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         named name: String,
         relativeTo descriptor: Int32
     ) throws -> Int32 {
-        let opened = unsafe name.withCString { pointer in
+        let opened = name.withCString { pointer in
             unsafe Darwin.openat(
                 descriptor,
                 pointer,
@@ -2152,7 +2152,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
     // NUL-terminated; synchronization: callers validate identity before publishing access;
     // safe alternative: openat with O_NOFOLLOW preserves trusted directory authority.
     private func openDirectory(named name: String, relativeTo descriptor: Int32) throws -> Int32 {
-        let opened = unsafe name.withCString { pointer in
+        let opened = name.withCString { pointer in
             unsafe Darwin.openat(
                 descriptor,
                 pointer,
@@ -2232,7 +2232,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         // reserved while its tag is installed; safe alternative: descriptor-based xattrs have no
         // safe Swift API and avoid path substitution.
         let status = unsafe tag.withUnsafeBytes { bytes in
-            unsafe Self.ownershipAttribute.withCString { name in
+            Self.ownershipAttribute.withCString { name in
                 unsafe Darwin.fsetxattr(
                     descriptor,
                     name,
@@ -2264,7 +2264,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         // reads the open descriptor; safe alternative: descriptor-based xattrs have no safe Swift
         // API and avoid path substitution.
         let result = unsafe tag.withUnsafeMutableBytes { bytes in
-            unsafe Self.ownershipAttribute.withCString { name in
+            Self.ownershipAttribute.withCString { name in
                 unsafe Darwin.fgetxattr(
                     descriptor,
                     name,
@@ -2365,7 +2365,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
                     )
                 }
             }
-            let status = unsafe captureName.withCString { pointer in
+            let status = captureName.withCString { pointer in
                 unsafe Darwin.unlinkat(
                     quarantine.descriptor,
                     pointer,
@@ -2408,7 +2408,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
                 _ = Darwin.close(containingDirectory)
             }
         }
-        let descriptor = unsafe leaf.withCString { pointer in
+        let descriptor = leaf.withCString { pointer in
             unsafe Darwin.openat(
                 containingDirectory,
                 pointer,
@@ -2435,7 +2435,7 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         guard actual.refersToSameObject(as: object.identity) else {
             throw TorrentStoragePlanningError.deletionNotProvable
         }
-        let status = unsafe leaf.withCString { pointer in
+        let status = leaf.withCString { pointer in
             unsafe Darwin.unlinkat(
                 containingDirectory,
                 pointer,

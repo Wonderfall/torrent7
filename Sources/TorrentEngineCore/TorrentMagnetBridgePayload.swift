@@ -21,7 +21,7 @@ struct TorrentMagnetBridgePayload: Sendable {
             // synchronous copy; bounds/alignment: validated v1 hashes are exactly the
             // imported 20-byte field size; synchronization: both values are local;
             // safe alternative: the imported fixed C array has no mutable Swift collection API.
-            _ = unsafe withUnsafeMutableBytes(of: &header.v1_info_hash) { destination in
+            withUnsafeMutableBytes(of: &header.v1_info_hash) { destination in
                 _ = unsafe v1InfoHash.copyBytes(to: destination)
             }
         }
@@ -31,7 +31,7 @@ struct TorrentMagnetBridgePayload: Sendable {
             // synchronous copy; bounds/alignment: validated v2 hashes are exactly the
             // imported 32-byte field size; synchronization: both values are local;
             // safe alternative: the imported fixed C array has no mutable Swift collection API.
-            _ = unsafe withUnsafeMutableBytes(of: &header.v2_info_hash) { destination in
+            withUnsafeMutableBytes(of: &header.v2_info_hash) { destination in
                 _ = unsafe v2InfoHash.copyBytes(to: destination)
             }
         }

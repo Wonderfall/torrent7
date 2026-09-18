@@ -3,6 +3,7 @@ set -euo pipefail
 
 TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_DIR="$(cd "$TOOLS_DIR/../.." && pwd -P)"
+"$ROOT_DIR/Scripts/verify-xcode.zsh"
 
 DEFAULT_DEPS_PARENT="$TOOLS_DIR/deps"
 DEFAULT_DEPS_ROOT="$TOOLS_DIR/deps/arm64-libfuzzer"
@@ -28,7 +29,7 @@ CXX="${CXX:-$(xcrun --find clang++)}"
 AR="${AR:-$(xcrun --find ar)}"
 RANLIB="${RANLIB:-$(xcrun --find ranlib)}"
 SDK_PATH="${SDK_PATH:-$(xcrun --sdk macosx --show-sdk-path)}"
-TARGET_TRIPLE="${TARGET_TRIPLE:-arm64-apple-macosx26.0}"
+TARGET_TRIPLE="${TARGET_TRIPLE:-arm64-apple-macosx27.0}"
 JOBS="${JOBS:-$(sysctl -n hw.ncpu)}"
 BORINGSSL_SANITIZERS="${BORINGSSL_SANITIZERS:-address}"
 LIBTORRENT_SANITIZERS="${LIBTORRENT_SANITIZERS:-fuzzer-no-link,address,undefined,local-bounds}"
@@ -228,7 +229,7 @@ rm -f "$stamp_file"
 base_flags=(
     -target "$TARGET_TRIPLE"
     -isysroot "$SDK_PATH"
-    -mmacosx-version-min=26.0
+    -mmacosx-version-min=27.0
     -O1
     -g
     -fno-omit-frame-pointer
@@ -304,7 +305,7 @@ build_boringssl() {
         -DCMAKE_RANLIB="$RANLIB" \
         -DCMAKE_OSX_ARCHITECTURES=arm64 \
         -DCMAKE_OSX_SYSROOT="$SDK_PATH" \
-        -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0 \
+        -DCMAKE_OSX_DEPLOYMENT_TARGET=27.0 \
         -DCMAKE_C_COMPILER_TARGET="$TARGET_TRIPLE" \
         -DCMAKE_CXX_COMPILER_TARGET="$TARGET_TRIPLE" \
         -DCMAKE_C_FLAGS="${boringssl_flags[*]}" \
@@ -360,7 +361,7 @@ build_libtorrent() {
         -DCMAKE_RANLIB="$RANLIB" \
         -DCMAKE_OSX_ARCHITECTURES=arm64 \
         -DCMAKE_OSX_SYSROOT="$SDK_PATH" \
-        -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0 \
+        -DCMAKE_OSX_DEPLOYMENT_TARGET=27.0 \
         -DCMAKE_C_COMPILER_TARGET="$TARGET_TRIPLE" \
         -DCMAKE_CXX_COMPILER_TARGET="$TARGET_TRIPLE" \
         -DCMAKE_CXX_STANDARD=23 \

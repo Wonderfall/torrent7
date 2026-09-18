@@ -330,19 +330,10 @@ private struct AddedTorrentIdentity: Sendable {
             allowPreMetadataDHT: allowPreMetadataDHT
         )
         let added = try unsafe throwingBridgeAdd(capacity: Int(TTORRENT_ID_CAPACITY)) { outputBuffer, nativeToken, addOutcome, errorBuffer in
-            let blob: Span<UInt8>? = bridgePayload.blob.isEmpty
-                ? nil
-                : bridgePayload.blob.span
-            let trackers: Span<TTorrentMagnetTracker>? = bridgePayload.trackers.isEmpty
-                ? nil
-                : bridgePayload.trackers.span
-            let webSeeds: Span<TTorrentByteRange>? = bridgePayload.webSeeds.isEmpty
-                ? nil
-                : bridgePayload.webSeeds.span
-            let fileSelections: Span<TTorrentFileSelectionRange>? =
-                bridgePayload.fileSelections.isEmpty
-                    ? nil
-                    : bridgePayload.fileSelections.span
+            let blob: Span<UInt8> = bridgePayload.blob.span
+            let trackers: Span<TTorrentMagnetTracker> = bridgePayload.trackers.span
+            let webSeeds: Span<TTorrentByteRange> = bridgePayload.webSeeds.span
+            let fileSelections: Span<TTorrentFileSelectionRange> = bridgePayload.fileSelections.span
             return unsafe TorrentClientAddParsedMagnet(
                 client,
                 bridgePayload.header,
@@ -423,8 +414,8 @@ private struct AddedTorrentIdentity: Sendable {
         let added: AddedTorrentIdentity
         if let priorityEntries {
             added = try unsafe throwingBridgeAdd(capacity: Int(TTORRENT_ID_CAPACITY)) { outputBuffer, nativeToken, addOutcome, errorBuffer in
-                let capsuleBytes: Span<UInt8>? = capsule.bytes.span
-                let priorities: Span<TTorrentFilePriorityEntry>? = priorityEntries.span
+                let capsuleBytes: Span<UInt8> = capsule.bytes.span
+                let priorities: Span<TTorrentFilePriorityEntry> = priorityEntries.span
                 return unsafe TorrentClientAddMetainfoCapsuleWithPriorities(
                     client,
                     capsuleBytes,
@@ -439,7 +430,7 @@ private struct AddedTorrentIdentity: Sendable {
             }
         } else {
             added = try unsafe throwingBridgeAdd(capacity: Int(TTORRENT_ID_CAPACITY)) { outputBuffer, nativeToken, addOutcome, errorBuffer in
-                let capsuleBytes: Span<UInt8>? = capsule.bytes.span
+                let capsuleBytes: Span<UInt8> = capsule.bytes.span
                 return unsafe TorrentClientAddMetainfoCapsule(
                     client,
                     capsuleBytes,
@@ -674,9 +665,7 @@ private struct AddedTorrentIdentity: Sendable {
             let networkInterfaceBytes = settings.libtorrentRequiredNetworkInterfaceName.utf8.map {
                 CChar(bitPattern: $0)
             }
-            let networkInterface: Span<CChar>? = networkInterfaceBytes.isEmpty
-                ? nil
-                : networkInterfaceBytes.span
+            let networkInterface: Span<CChar> = networkInterfaceBytes.span
             var bridgeSettings = TTorrentSessionSettings()
             bridgeSettings.download_rate_limit = settings.libtorrentDownloadRateLimit
             bridgeSettings.upload_rate_limit = settings.libtorrentUploadRateLimit
@@ -791,9 +780,9 @@ private struct AddedTorrentIdentity: Sendable {
         }
 
         var errorBuffer = Array<CChar>(repeating: 0, count: 1024)
-        var errorSpan: MutableSpan<CChar>? = errorBuffer.mutableSpan
+        var errorSpan: MutableSpan<CChar> = errorBuffer.mutableSpan
         let didCopyError = unsafe TorrentClientTakeAlertError(pointer, &errorSpan) != 0
-        errorSpan = nil
+        errorSpan = .init()
         guard didCopyError else {
             return nil
         }
@@ -815,7 +804,7 @@ private struct AddedTorrentIdentity: Sendable {
 
         var requiredCount: Int32 = 0
         var available: UInt8 = 0
-        var eventSpan: MutableSpan<TTorrentEvent>?
+        var eventSpan: MutableSpan<TTorrentEvent> = .init()
         _ = unsafe TorrentClientDrainEvents(
             pointer,
             &eventSpan,
@@ -1242,7 +1231,7 @@ private struct AddedTorrentIdentity: Sendable {
 
         var requiredCount: Int32 = 0
         var available: UInt8 = 0
-        var trackerSpan: MutableSpan<TTorrentTrackerSnapshot>?
+        var trackerSpan: MutableSpan<TTorrentTrackerSnapshot> = .init()
         _ = unsafe TorrentClientCopyTrackerBatch(
             pointer,
             nativeToken,
@@ -1315,7 +1304,7 @@ private struct AddedTorrentIdentity: Sendable {
 
         var requiredCount: Int32 = 0
         var available: UInt8 = 0
-        var hostSpan: MutableSpan<TTorrentTrackerHostSnapshot>?
+        var hostSpan: MutableSpan<TTorrentTrackerHostSnapshot> = .init()
         _ = unsafe TorrentClientCopyTrackerHostBatch(
             pointer,
             &hostSpan,
@@ -1415,7 +1404,7 @@ private struct AddedTorrentIdentity: Sendable {
 
         var requiredCount: Int32 = 0
         var available: UInt8 = 0
-        var webSeedSpan: MutableSpan<TTorrentWebSeedSnapshot>?
+        var webSeedSpan: MutableSpan<TTorrentWebSeedSnapshot> = .init()
         _ = unsafe TorrentClientCopyWebSeedBatch(
             pointer,
             nativeToken,
@@ -1535,7 +1524,7 @@ private struct AddedTorrentIdentity: Sendable {
 
         var requiredCount: Int32 = 0
         var available: UInt8 = 0
-        var fileSpan: MutableSpan<TTorrentFileSnapshot>?
+        var fileSpan: MutableSpan<TTorrentFileSnapshot> = .init()
         _ = unsafe TorrentClientCopyFileBatch(
             pointer,
             nativeToken,
@@ -1611,7 +1600,7 @@ private struct AddedTorrentIdentity: Sendable {
 
         var requiredCount: Int32 = 0
         var available: UInt8 = 0
-        var pieceSpan: MutableSpan<UInt8>?
+        var pieceSpan: MutableSpan<UInt8> = .init()
         _ = unsafe TorrentClientCopyPieceMap(
             pointer,
             nativeToken,
@@ -1689,7 +1678,7 @@ private struct AddedTorrentIdentity: Sendable {
 
         var requiredCount: Int32 = 0
         var available: UInt8 = 0
-        var metadataSpan: MutableSpan<UInt8>?
+        var metadataSpan: MutableSpan<UInt8> = .init()
         _ = unsafe TorrentClientCopyTorrentMetadata(
             pointer,
             nativeToken,
@@ -1868,9 +1857,7 @@ private struct AddedTorrentIdentity: Sendable {
             try nativeQueuePlacement(placement)
         }
         try throwingBridgeCall { errorBuffer in
-            let placementSpan: Span<TTorrentQueuePlacement>? = placements.isEmpty
-                ? nil
-                : placements.span
+            let placementSpan: Span<TTorrentQueuePlacement> = placements.span
             return unsafe TorrentClientApplyQueueState(
                 client,
                 placementSpan,
@@ -1891,9 +1878,7 @@ private struct AddedTorrentIdentity: Sendable {
             try nativeSourcePolicyApplication(application)
         }
         try throwingBridgeCall { errorBuffer in
-            let applicationSpan: Span<TTorrentSourcePolicyApplication>? = applications.isEmpty
-                ? nil
-                : applications.span
+            let applicationSpan: Span<TTorrentSourcePolicyApplication> = applications.span
             return unsafe TorrentClientApplySourcePolicyState(
                 client,
                 applicationSpan,
@@ -1911,7 +1896,7 @@ private struct AddedTorrentIdentity: Sendable {
     ) throws -> [TorrentSourcePolicyStore.NativeState] {
         var requiredCount: Int32 = 0
         var available: UInt8 = 0
-        var stateSpan: MutableSpan<TTorrentSourcePolicyState>?
+        var stateSpan: MutableSpan<TTorrentSourcePolicyState> = .init()
         _ = unsafe TorrentClientCopySourcePolicyStateBatch(
             client,
             &stateSpan,
@@ -1983,7 +1968,7 @@ private struct AddedTorrentIdentity: Sendable {
     ) throws -> [TorrentIdentityStore.NativeSnapshot] {
         var requiredCount: Int32 = 0
         var available: UInt8 = 0
-        var snapshotSpan: MutableSpan<TTorrentSnapshot>?
+        var snapshotSpan: MutableSpan<TTorrentSnapshot> = .init()
         _ = unsafe TorrentClientCopySnapshotBatch(
             client,
             &snapshotSpan,
@@ -2056,7 +2041,7 @@ private struct AddedTorrentIdentity: Sendable {
     ) throws -> [TTorrentPresentationMetadata] {
         var requiredCount: Int32 = 0
         var available: UInt8 = 0
-        var metadataSpan: MutableSpan<TTorrentPresentationMetadata>?
+        var metadataSpan: MutableSpan<TTorrentPresentationMetadata> = .init()
         _ = unsafe TorrentClientDrainPresentationMetadata(
             client,
             &metadataSpan,
@@ -2221,7 +2206,7 @@ private struct AddedTorrentIdentity: Sendable {
     ) throws -> [String] {
         var requiredCount: Int32 = 0
         var available: UInt8 = 0
-        var idSpan: MutableSpan<TTorrentResumeID>?
+        var idSpan: MutableSpan<TTorrentResumeID> = .init()
         _ = unsafe TorrentClientCopyResumeIDs(
             client,
             nativeToken,
@@ -2281,8 +2266,8 @@ private struct AddedTorrentIdentity: Sendable {
             count: Int(TTORRENT_REMOVAL_TOMBSTONE_FILENAME_CAPACITY)
         )
         try throwingBridgeCall { errorBuffer in
-            let idSpan: Span<TTorrentResumeID>? = rows.span
-            var filenameSpan: MutableSpan<CChar>? = filenameBuffer.mutableSpan
+            let idSpan: Span<TTorrentResumeID> = rows.span
+            var filenameSpan: MutableSpan<CChar> = filenameBuffer.mutableSpan
             return unsafe TorrentClientPersistRemovalTombstone(
                 client,
                 idSpan,
@@ -2309,7 +2294,7 @@ private struct AddedTorrentIdentity: Sendable {
     ) throws {
         let rows = try nativeResumeIDs(resumeIDs)
         try throwingBridgeCall { errorBuffer in
-            let idSpan: Span<TTorrentResumeID>? = rows.span
+            let idSpan: Span<TTorrentResumeID> = rows.span
             return unsafe TorrentClientRemoveResumeData(
                 client,
                 idSpan,
@@ -2327,7 +2312,7 @@ private struct AddedTorrentIdentity: Sendable {
         filename: String
     ) throws {
         try throwingBridgeCall { errorBuffer in
-            unsafe filename.withCString { filenamePointer in
+            filename.withCString { filenamePointer in
                 unsafe TorrentClientClearRemovalTombstone(
                     client,
                     filenamePointer,
@@ -2353,7 +2338,7 @@ private struct AddedTorrentIdentity: Sendable {
                 throw TorrentEngineError.bridgeError("A resume identifier is invalid.")
             }
             var row = TTorrentResumeID()
-            unsafe withUnsafeMutableBytes(of: &row.value) { destination in
+            withUnsafeMutableBytes(of: &row.value) { destination in
                 for index in bytes.indices {
                     unsafe destination[index] = bytes[index]
                 }
@@ -2469,8 +2454,8 @@ private struct AddedTorrentIdentity: Sendable {
         unsafe dhtMessageCallbacks.parse_message = torrentDHTMessageParseCallback
 
         var errorBuffer = Array<CChar>(repeating: 0, count: 1_024)
-        var errorSpan: MutableSpan<CChar>? = errorBuffer.mutableSpan
-        let created = unsafe path.withCString { pointer in
+        var errorSpan: MutableSpan<CChar> = errorBuffer.mutableSpan
+        let created = path.withCString { pointer in
             unsafe TorrentClientCreateWithError(
                 pointer,
                 enablePeerExchangePlugin.bridgeFlag,
@@ -2482,7 +2467,7 @@ private struct AddedTorrentIdentity: Sendable {
                 &errorSpan
             )
         }
-        errorSpan = nil
+        errorSpan = .init()
         guard let created = unsafe created else {
             let message = stringFromBridgeBuffer(errorBuffer)
             throw TorrentEngineError.bridgeError(message.isEmpty ? "Unknown startup error." : message)
@@ -2534,12 +2519,12 @@ private struct AddedTorrentIdentity: Sendable {
     }
 
     private func throwingBridgeCall(
-        _ body: (inout MutableSpan<CChar>?) -> Int32
+        _ body: (inout MutableSpan<CChar>) -> Int32
     ) throws {
         var errorBuffer = Array<CChar>(repeating: 0, count: 1024)
-        var errorSpan: MutableSpan<CChar>? = errorBuffer.mutableSpan
+        var errorSpan: MutableSpan<CChar> = errorBuffer.mutableSpan
         let result = body(&errorSpan)
-        errorSpan = nil
+        errorSpan = .init()
         if result != 0 {
             let message = stringFromBridgeBuffer(errorBuffer)
             throw TorrentEngineError.bridgeError(message)
@@ -2554,21 +2539,21 @@ private struct AddedTorrentIdentity: Sendable {
     private func throwingBridgeAdd(
         capacity: Int,
         _ body: (
-            inout MutableSpan<CChar>?,
+            inout MutableSpan<CChar>,
             UnsafeMutablePointer<UInt64>,
             UnsafeMutablePointer<Int32>,
-            inout MutableSpan<CChar>?
+            inout MutableSpan<CChar>
         ) -> Int32
     ) throws -> AddedTorrentIdentity {
         var outputBuffer = Array<CChar>(repeating: 0, count: capacity)
         var errorBuffer = Array<CChar>(repeating: 0, count: 1_024)
         var addOutcome = Int32(TTORRENT_ADD_REJECTED)
         var nativeToken: UInt64 = 0
-        var outputSpan: MutableSpan<CChar>? = outputBuffer.mutableSpan
-        var errorSpan: MutableSpan<CChar>? = errorBuffer.mutableSpan
+        var outputSpan: MutableSpan<CChar> = outputBuffer.mutableSpan
+        var errorSpan: MutableSpan<CChar> = errorBuffer.mutableSpan
         let result = unsafe body(&outputSpan, &nativeToken, &addOutcome, &errorSpan)
-        outputSpan = nil
-        errorSpan = nil
+        outputSpan = .init()
+        errorSpan = .init()
         let errorMessage = stringFromBridgeBuffer(errorBuffer)
 
         guard result == 0 else {
@@ -2631,7 +2616,7 @@ private struct AddedTorrentIdentity: Sendable {
         )
         options.allow_pre_metadata_dht = allowPreMetadataDHT.bridgeFlag
         let canonicalIDBytes = Data(canonicalID.utf8)
-        _ = unsafe withUnsafeMutableBytes(of: &options.canonical_id) { destination in
+        withUnsafeMutableBytes(of: &options.canonical_id) { destination in
             _ = unsafe canonicalIDBytes.copyBytes(to: destination)
         }
         return options
@@ -2648,17 +2633,17 @@ private struct AddedTorrentIdentity: Sendable {
         var native = TTorrentStorageActivation()
         native.claim_generation = activation.generation
         var uuid = activation.claimID.uuid
-        _ = unsafe withUnsafeMutableBytes(of: &native.claim_id) { destination in
-            unsafe withUnsafeBytes(of: &uuid) { source in
+        withUnsafeMutableBytes(of: &native.claim_id) { destination in
+            withUnsafeBytes(of: &uuid) { source in
                 unsafe destination.copyBytes(from: source)
             }
         }
-        _ = unsafe withUnsafeMutableBytes(of: &native.source_manifest_digest) { destination in
+        withUnsafeMutableBytes(of: &native.source_manifest_digest) { destination in
             _ = unsafe activation.sourceManifestDigest.copyBytes(to: destination)
         }
         if let preservedTorrentID = activation.preservedTorrentID {
             let preservedIDBytes = Data(preservedTorrentID.utf8)
-            _ = unsafe withUnsafeMutableBytes(of: &native.preserved_torrent_id) { destination in
+            withUnsafeMutableBytes(of: &native.preserved_torrent_id) { destination in
                 _ = unsafe preservedIDBytes.copyBytes(to: destination)
             }
         }
@@ -2761,9 +2746,9 @@ private struct AddedTorrentIdentity: Sendable {
 
     private static func withMutableBridgeSpan<Element>(
         _ storage: inout [Element],
-        _ body: (inout MutableSpan<Element>?) -> Int32
+        _ body: (inout MutableSpan<Element>) -> Int32
     ) -> Int32 {
-        var span: MutableSpan<Element>? = storage.mutableSpan
+        var span: MutableSpan<Element> = storage.mutableSpan
         return body(&span)
     }
 

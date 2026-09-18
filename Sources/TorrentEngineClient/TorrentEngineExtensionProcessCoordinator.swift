@@ -1,8 +1,4 @@
-// SAFETY: Ownership/lifetime: ExtensionFoundation objects remain strongly owned by
-// their Swift wrappers; bounds/alignment: no raw buffers are imported; synchronization:
-// Monitor and AppExtensionProcess access is isolated to dedicated actors; safe alternative:
-// the SDK module lacks strict concurrency and strict-memory-safety annotations.
-@preconcurrency @unsafe import ExtensionFoundation
+import ExtensionFoundation
 import Foundation
 import TorrentEngineIPC
 import XPC

@@ -3,6 +3,7 @@ emulate -L zsh
 setopt err_exit no_unset pipe_fail
 
 typeset -r root_dir=${0:A:h:h}
+"$root_dir/Scripts/verify-xcode.zsh"
 typeset -r configuration=${CONFIGURATION:-debug}
 typeset -r sanitizer_profile=${SANITIZER_PROFILE:-}
 case $sanitizer_profile in
@@ -25,13 +26,13 @@ export TORRENT7_NATIVE_DEPS_BUILD_ID=$("$root_dir/Scripts/native-deps-build-id.z
 typeset -a swift_run_args=(
     --scratch-path "$scratch_path"
     --configuration "$configuration"
-    --triple arm64e-apple-macosx26.0
+    --arch arm64e
 )
 case $sanitizer_profile in
     address) swift_run_args+=(--sanitize address --sanitize undefined) ;;
     thread) swift_run_args+=(--sanitize thread --sanitize undefined) ;;
 esac
 
-swift run "${swift_run_args[@]}" TorrentBridgeTests "$@"
-"$root_dir/Scripts/verify-bridge-pac.zsh" \
-    "$scratch_path/arm64e-apple-macosx/$configuration/TorrentBridgeTests"
+/usr/bin/xcrun swift run "${swift_run_args[@]}" TorrentBridgeTests "$@"
+typeset -r bin_dir=$(/usr/bin/xcrun swift build "${swift_run_args[@]}" --show-bin-path)
+"$root_dir/Scripts/verify-bridge-pac.zsh" "$bin_dir/TorrentBridgeTests"

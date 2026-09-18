@@ -3,10 +3,10 @@ set -euo pipefail
 
 TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$TOOLS_DIR/../.." && pwd)"
+"$ROOT_DIR/Scripts/verify-xcode.zsh"
 SWIFT_BUILD_DIR="${PARSER_SWIFT_BUILD_DIR:-$TOOLS_DIR/swift-build}"
-SWIFT_BIN_DIR="${PARSER_SWIFT_BIN_DIR:-$SWIFT_BUILD_DIR/arm64-apple-macosx/debug}"
 SDK_PATH="${SDK_PATH:-$(xcrun --sdk macosx --show-sdk-path)}"
-TARGET_TRIPLE="${TARGET_TRIPLE:-arm64-apple-macosx26.0}"
+TARGET_TRIPLE="${TARGET_TRIPLE:-arm64-apple-macosx27.0}"
 SWIFT="${SWIFT:-$(xcrun --find swift)}"
 SWIFTC="${SWIFTC:-$(xcrun --find swiftc)}"
 PACKAGE_IDENTITY="$(basename "$ROOT_DIR" | tr '[:upper:]' '[:lower:]' | tr '-' '_')"
@@ -15,11 +15,13 @@ swift_build_flags=(
     --package-path "$ROOT_DIR"
     --scratch-path "$SWIFT_BUILD_DIR"
     --disable-build-manifest-caching
-    --triple "$TARGET_TRIPLE"
+    --arch "${TARGET_TRIPLE%%-*}"
     --configuration debug
     --sanitize address
     -Xswiftc -sanitize-coverage=edge,indirect-calls,inline-8bit-counters,pc-table
 )
+
+SWIFT_BIN_DIR="${PARSER_SWIFT_BIN_DIR:-$(/usr/bin/xcrun swift build "${swift_build_flags[@]}" --show-bin-path)}"
 
 "$SWIFT" build \
     "${swift_build_flags[@]}" \
@@ -59,9 +61,7 @@ sources=(
     -g \
     -sanitize=address \
     -sanitize-coverage=edge,indirect-calls,inline-8bit-counters,pc-table \
-    -enable-experimental-feature SafeInteropWrappers \
-    -Xcc -fexperimental-bounds-safety-attributes \
-    -I "$SWIFT_BIN_DIR/Modules" \
+    -I "$SWIFT_BIN_DIR" \
     -I "$TOOLS_DIR/SwiftSupport/TorrentBridgeModule" \
     -L "$SWIFT_BIN_DIR" \
     -lTorrentStorageFuzzSupport \

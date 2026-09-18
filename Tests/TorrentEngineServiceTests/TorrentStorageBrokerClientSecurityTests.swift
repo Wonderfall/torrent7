@@ -39,7 +39,7 @@ struct TorrentStorageBrokerClientSecurityTests {
     // one of the producer or waiter, both of which close it before continuing.
     @Test("Blocking completion and timeout transfer each descriptor to exactly one owner")
     func blockingDescriptorOwnershipRace() async throws {
-        let original = unsafe "/dev/null".withCString {
+        let original = "/dev/null".withCString {
             unsafe Darwin.open($0, O_RDONLY | O_CLOEXEC)
         }
         try #require(original >= 0)
@@ -468,7 +468,7 @@ private enum BrokerDescriptorScenario: Equatable, Sendable {
             default:
                 O_RDONLY | O_NOFOLLOW | O_CLOEXEC
             }
-            let descriptor = unsafe path.withCString { pointer in
+            let descriptor = path.withCString { pointer in
                 unsafe Darwin.open(pointer, flags)
             }
             guard descriptor >= 0 else {

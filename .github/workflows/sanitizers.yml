@@ -35,8 +35,8 @@ on:
 permissions: {}
 
 env:
-  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
-  XCODE_CACHE_KEY: xcode-26.6-17F113
+  DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
+  XCODE_CACHE_KEY: xcode-27.0-27A266a
 
 concurrency:
   group: sanitizers-${{ github.event.pull_request.number || github.ref }}
@@ -46,7 +46,7 @@ jobs:
   test:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: ${{ matrix.name }}
-    runs-on: macos-26
+    runs-on: xcode-27
     permissions: {}
     timeout-minutes: 90
     strategy:

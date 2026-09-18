@@ -289,7 +289,7 @@ private enum StorageBrokerIPCFuzzer {
     // descriptor state; safe alternative: the XPC descriptor codec requires a raw Int32 file
     // descriptor, which Foundation does not expose as a transfer-safe value.
     private static func openNullDescriptor() -> Int32 {
-        unsafe "/dev/null".withCString { path in
+        "/dev/null".withCString { path in
             unsafe Darwin.open(path, O_RDONLY | O_CLOEXEC)
         }
     }

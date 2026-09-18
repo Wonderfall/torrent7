@@ -8,8 +8,9 @@ fail() {
 }
 
 typeset -r root_dir=${0:A:h:h}
+"$root_dir/Scripts/verify-xcode.zsh"
 typeset -r target_arch=${TARGET_ARCH:-arm64e}
-typeset -r deployment_target=${MACOSX_DEPLOYMENT_TARGET:-26.0}
+typeset -r deployment_target=${MACOSX_DEPLOYMENT_TARGET:-27.0}
 typeset -r target_triple="$target_arch-apple-macosx$deployment_target"
 typeset -r deps_profile=${SANITIZER_PROFILE:+$target_arch-$SANITIZER_PROFILE}
 typeset -r resolved_profile=${deps_profile:-$target_arch}

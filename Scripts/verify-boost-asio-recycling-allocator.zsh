@@ -20,7 +20,7 @@ typeset temporary_directory
 temporary_directory=$(/usr/bin/mktemp -d)
 trap '/bin/rm -rf -- "$temporary_directory"' EXIT INT TERM
 
-"$lipo" "$input" -verify_arch arm64e \
+[[ $("$lipo" -archs "$input") == arm64e ]] \
     || fail "Boost.Asio recycler verification requires arm64e code: $input"
 
 # With typed-memory operations, the aligned-allocation descriptor is passed in

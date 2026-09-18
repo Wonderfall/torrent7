@@ -68,7 +68,7 @@ package func torrentSwarmMetainfoParseCallback(
               let outputSize = Int32(exactly: capsule.count) else {
             return EOVERFLOW
         }
-        return unsafe capsule.withUnsafeBytes { source in
+        return capsule.withUnsafeBytes { source in
             guard let sourceAddress = source.baseAddress else {
                 return EINVAL
             }

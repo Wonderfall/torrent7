@@ -175,7 +175,8 @@ struct TorrentLabelEditorView: View {
                 .font(.title2.weight(.semibold))
 
             TextField("Label name", text: boundedName)
-                .textFieldStyle(.roundedBorder)
+                .textFieldStyle(.bordered)
+                .textInputBorderShape(.roundedRectangle)
                 .frame(minWidth: 320)
                 .onSubmit(saveTrimmedName)
 

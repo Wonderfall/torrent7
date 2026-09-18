@@ -204,7 +204,7 @@ package func torrentPeerExchangeParseCallback(
             record.flags = contact.flags
             records.append(record)
         }
-        unsafe records.withUnsafeBufferPointer { source in
+        records.withUnsafeBufferPointer { source in
             guard let baseAddress = source.baseAddress else {
                 return
             }

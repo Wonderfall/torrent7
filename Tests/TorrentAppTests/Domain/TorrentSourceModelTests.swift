@@ -198,6 +198,7 @@ struct TorrentSourceModelTests {
     }
 
     @Test("Web seed activity summarizes active connections")
+    @MainActor
     func webSeedActivitySummarizesActiveConnections() {
         #expect(TorrentWebSeedActivity.empty.summaryText == nil)
         #expect(TorrentWebSeedActivity(activeCount: 1, downloadRate: 0, totalDownload: 0).summaryText == "1 active")
@@ -235,6 +236,7 @@ struct TorrentSourceModelTests {
     }
 
     @Test("File item display and status reflect path progress and priority")
+    @MainActor
     func fileItemDisplayAndStatusReflectPathProgressAndPriority() {
         let waiting = file(path: "folder/video.mkv")
         let downloading = file(path: "video.mkv", downloaded: 1, progress: 0.5)

@@ -92,8 +92,8 @@ private func benchmarkBatch(
     }
 
     unsafe message.withUnsafeBytes { rawMessage in
-        unsafe nodes.withUnsafeMutableBufferPointer { nodeBuffer in
-            unsafe peers.withUnsafeMutableBufferPointer { peerBuffer in
+        nodes.withUnsafeMutableBufferPointer { nodeBuffer in
+            peers.withUnsafeMutableBufferPointer { peerBuffer in
                 guard let body = unsafe rawMessage.bindMemory(to: CChar.self).baseAddress,
                       let nodeOutput = nodeBuffer.baseAddress,
                       let peerOutput = peerBuffer.baseAddress else {
@@ -267,16 +267,15 @@ do {
     precondition(denseResult.checksum > 0)
     precondition(maximumWorkResult.checksum > 0)
 
-    print(
-        "DHT_MESSAGE_CALLBACK {"
-            + "\"iterations_per_sample\":\(iterationCount),"
-            + "\"samples\":\(sampleCount),"
-            + "\"dense_node_count\":\(dense.nodeCount),"
-            + "\"maximum_work_value_count\":500,"
-            + "\"retained_allocation_bytes\":\(retainedAllocationJSON),"
-            + "\"small_query\":\(smallResult.json),"
-            + "\"dense_response\":\(denseResult.json),"
-            + "\"maximum_work_response\":\(maximumWorkResult.json)"
-            + "}"
-    )
+    let fields = [
+        "\"iterations_per_sample\":\(iterationCount)",
+        "\"samples\":\(sampleCount)",
+        "\"dense_node_count\":\(dense.nodeCount)",
+        "\"maximum_work_value_count\":500",
+        "\"retained_allocation_bytes\":\(retainedAllocationJSON)",
+        "\"small_query\":\(smallResult.json)",
+        "\"dense_response\":\(denseResult.json)",
+        "\"maximum_work_response\":\(maximumWorkResult.json)"
+    ]
+    print("DHT_MESSAGE_CALLBACK {\(fields.joined(separator: ","))}")
 }

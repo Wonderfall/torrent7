@@ -42,7 +42,7 @@ struct TorrentTrackerResponseBridgeTests {
             )
             var result = TTorrentHTTPTrackerResponseResult()
             let status = unsafe body.withUnsafeBytes { rawBody in
-                unsafe records.withUnsafeMutableBufferPointer { recordBuffer in
+                records.withUnsafeMutableBufferPointer { recordBuffer in
                     unsafe torrentHTTPTrackerResponseParseCallback(
                         context,
                         rawBody.bindMemory(to: CChar.self).baseAddress!,

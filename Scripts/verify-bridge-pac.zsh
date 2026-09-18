@@ -14,7 +14,9 @@ typeset temporary_directory
 
 temporary_directory=$(/usr/bin/mktemp -d)
 trap 'rm -rf -- "$temporary_directory"' EXIT INT TERM
-/usr/bin/xcrun lipo "$test_binary" -verify_arch arm64e \
+# Check the named architecture: lipo -verify_arch rejects arm64e executables
+# carrying Swift Build's versioned arm64e ABI capability bits in Xcode 27.
+[[ $(/usr/bin/xcrun lipo -archs "$test_binary") == arm64e ]] \
     || fail "Bridge PAC verification requires an arm64e test executable"
 /usr/bin/xcrun otool -tvV "$test_binary" >"$temporary_directory/disassembly.txt"
 

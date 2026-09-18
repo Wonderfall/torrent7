@@ -3,6 +3,7 @@ emulate -L zsh
 setopt err_exit no_unset pipe_fail
 
 typeset -r root_dir=${0:A:h:h}
+"$root_dir/Scripts/verify-xcode.zsh"
 typeset -r build_dir="$root_dir/.build"
 typeset -r sanitizer_profile=${SANITIZER_PROFILE:-}
 typeset torrent_count=${ENHANCED_SECURITY_TORRENT_COUNT:-512}
@@ -339,14 +340,16 @@ export TORRENT7_NATIVE_DEPS_BUILD_ID=$("$root_dir/Scripts/native-deps-build-id.z
 typeset -a swift_build_args=(
     --scratch-path "$swift_build_dir"
     --configuration "$configuration"
-    --triple arm64e-apple-macosx26.0
+    --arch arm64e
 )
 case $sanitizer_profile in
     address) swift_build_args+=(--sanitize address --sanitize undefined) ;;
     thread) swift_build_args+=(--sanitize thread --sanitize undefined) ;;
 esac
-/usr/bin/swift build "${swift_build_args[@]}" --product TorrentEngineXPCIntegrationHost
-/usr/bin/swift build "${swift_build_args[@]}" --product TorrentEngineIntegrationExtension
+/usr/bin/xcrun swift build "${swift_build_args[@]}" --product TorrentEngineXPCIntegrationHost
+/usr/bin/xcrun swift build "${swift_build_args[@]}" --product TorrentEngineIntegrationExtension
+
+typeset -r bin_dir=$(/usr/bin/xcrun swift build "${swift_build_args[@]}" --show-bin-path)
 
 if [[ -x "$launch_services_register" && -d "$host_app" ]]; then
     "$launch_services_register" -u "$host_app" >/dev/null 2>&1 || true
@@ -357,10 +360,10 @@ fi
     "${engine_executable:h}" \
     "${extension_point:h}"
 /bin/cp \
-    "$swift_build_dir/arm64e-apple-macosx/$configuration/TorrentEngineXPCIntegrationHost" \
+    "$bin_dir/TorrentEngineXPCIntegrationHost" \
     "$host_executable"
 /bin/cp \
-    "$swift_build_dir/arm64e-apple-macosx/$configuration/TorrentEngineIntegrationExtension" \
+    "$bin_dir/TorrentEngineIntegrationExtension" \
     "$engine_executable"
 verify_sanitizer_runtime "$host_executable"
 verify_sanitizer_runtime "$engine_executable"

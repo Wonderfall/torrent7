@@ -281,7 +281,7 @@ extension String {
         // copied; bounds/alignment: iteration stays within the tuple byte view and stops
         // at its first NUL; synchronization: the local value is not shared; safe alternative:
         // imported fixed-size C character arrays have no collection-based Swift representation.
-        let bytes: [UInt8] = unsafe withUnsafeBytes(of: &tuple) { buffer in
+        let bytes: [UInt8] = withUnsafeBytes(of: &tuple) { buffer in
             unsafe Array(buffer.prefix(buffer.firstIndex(of: 0) ?? buffer.count))
         }
         self = String(decoding: bytes, as: UTF8.self)
