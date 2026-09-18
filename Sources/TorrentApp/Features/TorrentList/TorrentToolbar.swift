@@ -16,39 +16,33 @@ struct TorrentToolbar: ToolbarContent {
     let openSettings: () -> Void
 
     var body: some ToolbarContent {
-        ToolbarItem {
-            ControlGroup {
-                toolbarButton("Add Torrent", systemImage: "doc.badge.plus", action: addTorrent)
-                toolbarButton("Add Magnet", systemImage: "link.badge.plus", action: addMagnet)
-                toolbarButton("Settings", systemImage: "gearshape", action: openSettings)
-            }
+        ToolbarItemGroup {
+            toolbarButton("Add Torrent", systemImage: "doc.badge.plus", action: addTorrent)
+            toolbarButton("Add Magnet", systemImage: "link.badge.plus", action: addMagnet)
+            toolbarButton("Settings", systemImage: "gearshape", action: openSettings)
         }
 
         ToolbarSpacer(.fixed)
 
         ToolbarItem {
-            ControlGroup {
-                sortMenu
-            }
+            sortMenu
         }
 
         ToolbarSpacer(.fixed)
 
-        ToolbarItem {
-            ControlGroup {
-                toolbarButton("Torrent Info", systemImage: "info.circle", action: showInfo)
-                    .disabled(!commandState.snapshot.hasSingleSelectedTorrent)
-                toolbarButton("Torrent Options", systemImage: "slider.horizontal.3", action: showOptions)
-                    .disabled(!commandState.snapshot.hasSingleSelectedTorrent)
-                toolbarButton("Reveal in Finder", systemImage: "folder", action: revealInFinder)
-                    .disabled(!commandState.snapshot.hasSelectedTorrents)
-                toolbarButton("Pause", systemImage: "pause.fill", action: pause)
-                    .disabled(!commandState.snapshot.canPauseSelectedTorrents)
-                toolbarButton("Resume", systemImage: "play.fill", action: resume)
-                    .disabled(!commandState.snapshot.canResumeSelectedTorrents)
-                toolbarButton("Remove", systemImage: "trash", role: .destructive, action: remove)
-                    .disabled(!commandState.snapshot.hasSelectedTorrents)
-            }
+        ToolbarItemGroup {
+            toolbarButton("Torrent Info", systemImage: "info.circle", action: showInfo)
+                .disabled(!commandState.snapshot.hasSingleSelectedTorrent)
+            toolbarButton("Torrent Options", systemImage: "slider.horizontal.3", action: showOptions)
+                .disabled(!commandState.snapshot.hasSingleSelectedTorrent)
+            toolbarButton("Reveal in Finder", systemImage: "folder", action: revealInFinder)
+                .disabled(!commandState.snapshot.hasSelectedTorrents)
+            toolbarButton("Pause", systemImage: "pause.fill", action: pause)
+                .disabled(!commandState.snapshot.canPauseSelectedTorrents)
+            toolbarButton("Resume", systemImage: "play.fill", action: resume)
+                .disabled(!commandState.snapshot.canResumeSelectedTorrents)
+            toolbarButton("Remove", systemImage: "trash", role: .destructive, action: remove)
+                .disabled(!commandState.snapshot.hasSelectedTorrents)
         }
     }
 
