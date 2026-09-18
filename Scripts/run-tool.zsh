@@ -8,7 +8,7 @@ typeset -r root_dir=${0:A:h:h}
 typeset -r tool=$1
 shift
 case $tool in
-    compare-entitlements|verify-enhanced-security-metadata|check-dependencies) ;;
+    compare-entitlements|verify-enhanced-security-metadata|check-dependencies|write-native-sbom) ;;
     *) print -ru2 -- "Unknown repository tool: $tool"; exit 2 ;;
 esac
 typeset -r scratch_path=${REPOSITORY_TOOLS_SCRATCH_PATH:-$root_dir/.build/repository-tools}

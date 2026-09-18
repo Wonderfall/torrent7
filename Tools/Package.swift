@@ -21,7 +21,8 @@ let package = Package(
     products: [
         .executable(name: "compare-entitlements", targets: ["CompareEntitlements"]),
         .executable(name: "verify-enhanced-security-metadata", targets: ["VerifyEnhancedSecurityMetadata"]),
-        .executable(name: "check-dependencies", targets: ["DependencyCheck"])
+        .executable(name: "check-dependencies", targets: ["DependencyCheck"]),
+        .executable(name: "write-native-sbom", targets: ["WriteNativeSBOM"])
     ],
     dependencies: [
         .package(url: "https://github.com/swiftlang/swift-subprocess.git", exact: "1.0.0")
@@ -45,6 +46,10 @@ let package = Package(
         .executableTarget(
             name: "DependencyCheck", dependencies: ["ProcessRunner"],
             path: "DependencyCheck", swiftSettings: strictSettings
+        ),
+        .executableTarget(
+            name: "WriteNativeSBOM", dependencies: ["ReleasePolicy"],
+            path: "WriteNativeSBOM", swiftSettings: strictSettings
         ),
         .testTarget(
             name: "ReleasePolicyTests", dependencies: ["ReleasePolicy"],

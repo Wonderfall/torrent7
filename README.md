@@ -376,8 +376,23 @@ notarization result, a valid stapled ticket, and successful `spctl` assessment.
 Its final output is:
 
 ```text
-.build/Release/Torrent 7.zip
+.build/Release/<notarization-submission-id>/
+  Torrent 7.zip
+  Evidence/Symbols.zip
+  Evidence/SBOM/{Torrent7,TorrentEngineExtension,native}.cdx.json
+  Evidence/{symbol-uuids,native-build-id,toolchain}.txt
+  notarization.plist
+  SHA256SUMS
 ```
+
+The directory is published atomically after verification, preserving earlier
+releases. Keep `Evidence/Symbols.zip` privately for crash symbolication: both
+dSYMs must match the UUIDs of the shipped executables. Symbols are separate
+from the app download. SwiftPM records each product's dependency graph; the
+native inventory adds the pinned Boost, BoringSSL, and libtorrent sources,
+patch series, and archive hashes. These inventories describe dependencies,
+not vulnerability scan results. See [release and UI diagnostics](Documentation/ReleaseDiagnostics.md)
+for verification details and toolchain limitations.
 
 To re-verify an already notarized app:
 

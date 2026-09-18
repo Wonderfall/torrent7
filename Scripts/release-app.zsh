@@ -7,7 +7,6 @@ typeset -r sign_identity=${SIGN_IDENTITY:-}
 typeset -r expected_team_id=${EXPECTED_TEAM_ID:-}
 typeset -r notarytool_profile=${NOTARYTOOL_PROFILE:-}
 typeset -r release_dir="$root_dir/.build/Release"
-typeset -r release_archive="$release_dir/Torrent 7.zip"
 typeset -r default_source_cache_dir="$root_dir/.build/deps/source-cache"
 
 fail() {
@@ -58,11 +57,13 @@ publish_dir=$(/usr/bin/mktemp -d "$release_dir/.publish.XXXXXXXX")
 typeset -r publish_dir
 typeset -r submission_archive="$temporary_dir/Torrent 7.zip"
 typeset -r notarization_result="$temporary_dir/notarization.plist"
+typeset -r evidence_dir="$publish_dir/Evidence"
 typeset -r publish_archive="$publish_dir/Torrent 7.zip"
 typeset -r release_deps_dir="$temporary_dir/deps"
 typeset -r release_deps_prefix="$release_deps_dir/prefix"
 typeset -r private_source_cache_dir="$temporary_dir/source-cache"
 typeset -r swift_build_dir="$temporary_dir/swift"
+typeset -r sbom_output_dir="$temporary_dir/sbom"
 typeset -r app_output_dir="$temporary_dir/App"
 typeset -r app_dir="$app_output_dir/Torrent 7.app"
 /bin/mkdir -m 700 -- "$private_source_cache_dir"
@@ -86,13 +87,18 @@ typeset -a build_environment=(
     "SOURCE_CACHE_DIR=$private_source_cache_dir"
     "SOURCE_CACHE_SEED_DIR=$shared_source_cache_dir"
     "SWIFT_BUILD_DIR=$swift_build_dir"
+    "SBOM_OUTPUT_DIR=$sbom_output_dir"
     "APP_OUTPUT_DIR=$app_output_dir"
     "SIGN_IDENTITY=$sign_identity"
     "EXPECTED_TEAM_ID=$expected_team_id"
 )
 
-/bin/rm -f -- "$release_archive"
 /usr/bin/env -i "${build_environment[@]}" "$root_dir/Scripts/build-app.zsh"
+
+typeset -r bin_dir=$(/usr/bin/env -i "${build_environment[@]}" /usr/bin/xcrun swift build \
+    --scratch-path "$swift_build_dir" --configuration release --arch arm64e --show-bin-path)
+"$root_dir/Scripts/archive-release-evidence.zsh" \
+    "$app_dir" "$bin_dir" "$release_deps_prefix" "$sbom_output_dir" "$evidence_dir"
 
 /usr/bin/ditto -c -k --keepParent --sequesterRsrc "$app_dir" "$submission_archive"
 /usr/bin/xcrun notarytool submit "$submission_archive" \
@@ -124,6 +130,19 @@ typeset -r notarization_status=$(/usr/bin/plutil -extract status raw -o - "$nota
 
 /usr/bin/ditto -c -k --keepParent --sequesterRsrc "$app_dir" "$publish_archive"
 [[ -s $publish_archive ]] || fail "Release archive is empty"
-/bin/mv -fh -- "$publish_archive" "$release_archive"
+typeset -r notarization_id=$(/usr/bin/plutil -extract id raw -o - "$notarization_result")
+print -r -- "$notarization_id" | /usr/bin/grep -Eiq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' \
+    || fail "Unexpected notarization submission ID"
+typeset -r release_output="$release_dir/$notarization_id"
+[[ ! -e $release_output ]] || fail "Release output already exists: $release_output"
+/bin/cp -- "$notarization_result" "$publish_dir/notarization.plist"
+(
+    cd -- "$publish_dir"
+    /usr/bin/shasum -a 256 -- "Torrent 7.zip" Evidence/Symbols.zip \
+        Evidence/SBOM/*.json Evidence/symbol-uuids.txt Evidence/native-build-id.txt \
+        Evidence/toolchain.txt notarization.plist > SHA256SUMS
+)
+# Publish the app, symbols, inventories, and their checksums as one directory.
+/bin/mv -h -- "$publish_dir" "$release_output"
 
-print -r -- "$release_archive"
+print -r -- "$release_output"

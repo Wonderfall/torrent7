@@ -23,6 +23,11 @@ if (( enable_diagnostics )); then
     default_swift_build_dir="$build_dir/swift-app-$sanitizer_profile"
 fi
 typeset -r swift_build_dir=${SWIFT_BUILD_DIR:-$default_swift_build_dir}
+typeset -r sbom_output_dir=${SBOM_OUTPUT_DIR:-}
+[[ -z $sbom_output_dir || $sbom_output_dir == /* ]] || {
+    print -ru2 -- "SBOM_OUTPUT_DIR must be an absolute path"
+    exit 2
+}
 typeset app_output_dir=${APP_OUTPUT_DIR:-$build_dir/App}
 typeset app_bundle_name="Torrent 7"
 typeset app_bundle_id=app.torrent7
@@ -155,14 +160,16 @@ case $sanitizer_profile in
     thread) swift_build_args+=(--sanitize thread --sanitize undefined) ;;
 esac
 
-/usr/bin/xcrun swift build \
-    --scratch-path "$swift_build_dir" \
-    "${swift_build_args[@]}" \
-    --product Torrent7
-/usr/bin/xcrun swift build \
-    --scratch-path "$swift_build_dir" \
-    "${swift_build_args[@]}" \
-    --product "$engine_extension_product"
+for product in Torrent7 "$engine_extension_product"; do
+    typeset -a sbom_args=()
+    if [[ -n $sbom_output_dir ]]; then
+        sbom_args=(--sbom-spec cyclonedx --sbom-output-dir "$sbom_output_dir/$product")
+    fi
+    /usr/bin/xcrun swift build \
+        --scratch-path "$swift_build_dir" \
+        "${swift_build_args[@]}" "${sbom_args[@]}" \
+        --product "$product"
+done
 
 typeset -r bin_dir=$(/usr/bin/xcrun swift build --scratch-path "$swift_build_dir" "${swift_build_args[@]}" --show-bin-path)
 typeset -r bridge_object_dir="$swift_build_dir/out/Intermediates.noindex/Torrent7.build/${(C)configuration}/TorrentBridge-t.build/Objects-normal/arm64e"
