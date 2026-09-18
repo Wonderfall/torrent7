@@ -146,40 +146,30 @@ struct TorrentSettingsView: View {
                 settingsError = error.localizedDescription
             }
         }
-        .alert("Settings Error", isPresented: settingsErrorBinding) {
-            Button("OK") {
-                settingsError = nil
-            }
-        } message: {
-            Text(settingsError ?? "")
+        .alert("Settings Error", item: $settingsError) { _ in
+            Button("OK") { settingsError = nil }
+        } message: { error in
+            Text(error)
         }
-        .alert(requireNetworkInterfaceConfirmationTitle, isPresented: requireNetworkInterfaceConfirmationBinding) {
-            Button("Cancel", role: .cancel) {
+        .alert(requireNetworkInterfaceConfirmationTitle, item: $pendingRequireNetworkInterface) { enabled in
+            Button("Cancel", role: .cancel) { pendingRequireNetworkInterface = nil }
+            Button(enabled ? "Bind" : "Stop Binding") {
+                store.setRequireNetworkInterface(enabled)
                 pendingRequireNetworkInterface = nil
             }
-            Button(requireNetworkInterfaceConfirmationAction) {
-                if let pendingRequireNetworkInterface {
-                    store.setRequireNetworkInterface(pendingRequireNetworkInterface)
-                }
-                pendingRequireNetworkInterface = nil
-            }
-        } message: {
-            Text(requireNetworkInterfaceConfirmationMessage)
+        } message: { enabled in
+            Text(requireNetworkInterfaceConfirmationMessage(enabled: enabled))
         }
-        .alert(peerExchangePluginConfirmationTitle, isPresented: peerExchangePluginConfirmationBinding) {
-            Button("Cancel", role: .cancel) {
+        .alert(peerExchangePluginConfirmationTitle, item: $pendingPeerExchangePlugin) { enabled in
+            Button("Cancel", role: .cancel) { pendingPeerExchangePlugin = nil }
+            Button(enabled ? "Enable" : "Disable") {
+                var settings = state.settings
+                settings.enablePeerExchangePlugin = enabled
+                store.updateSettings(settings)
                 pendingPeerExchangePlugin = nil
             }
-            Button(peerExchangePluginConfirmationAction) {
-                if let pendingPeerExchangePlugin {
-                    var settings = state.settings
-                    settings.enablePeerExchangePlugin = pendingPeerExchangePlugin
-                    store.updateSettings(settings)
-                }
-                pendingPeerExchangePlugin = nil
-            }
-        } message: {
-            Text(peerExchangePluginConfirmationMessage)
+        } message: { enabled in
+            Text(peerExchangePluginConfirmationMessage(enabled: enabled))
         }
     }
 
@@ -1091,51 +1081,23 @@ struct TorrentSettingsView: View {
         }
     }
 
-    private var requireNetworkInterfaceConfirmationBinding: Binding<Bool> {
-        Binding {
-            pendingRequireNetworkInterface != nil
-        } set: { isPresented in
-            if !isPresented {
-                pendingRequireNetworkInterface = nil
-            }
-        }
-    }
-
     private var requireNetworkInterfaceConfirmationTitle: String {
         pendingRequireNetworkInterface == true ? "Bind torrent connections to selected interface?" : "Stop binding torrent connections?"
     }
 
-    private var requireNetworkInterfaceConfirmationAction: String {
-        pendingRequireNetworkInterface == true ? "Bind" : "Stop Binding"
-    }
-
-    private var requireNetworkInterfaceConfirmationMessage: String {
-        if pendingRequireNetworkInterface == true {
+    private func requireNetworkInterfaceConfirmationMessage(enabled: Bool) -> String {
+        if enabled {
             return "Torrent sockets will bind to the selected interface. Existing peer connections are closed while the binding is applied, and transfers pause whenever that interface is unavailable. Hostname lookup still uses macOS system DNS."
         }
         return "Existing peer connections are closed while the binding is removed, then transfers use the system network route again."
-    }
-
-    private var peerExchangePluginConfirmationBinding: Binding<Bool> {
-        Binding {
-            pendingPeerExchangePlugin != nil
-        } set: { isPresented in
-            if !isPresented {
-                pendingPeerExchangePlugin = nil
-            }
-        }
     }
 
     private var peerExchangePluginConfirmationTitle: String {
         pendingPeerExchangePlugin == true ? "Enable Peer Exchange?" : "Disable Peer Exchange?"
     }
 
-    private var peerExchangePluginConfirmationAction: String {
-        pendingPeerExchangePlugin == true ? "Enable" : "Disable"
-    }
-
-    private var peerExchangePluginConfirmationMessage: String {
-        if pendingPeerExchangePlugin == true {
+    private func peerExchangePluginConfirmationMessage(enabled: Bool) -> String {
+        if enabled {
             return "This loads libtorrent's Peer Exchange extension. Applying this restarts the libtorrent session."
         }
         return "This unloads libtorrent's Peer Exchange extension and disables PEX for all torrents. Applying this restarts the libtorrent session."
@@ -1151,16 +1113,6 @@ struct TorrentSettingsView: View {
 
     private var downloadFolderText: String {
         state.downloadFolder?.torrentFilePath ?? "Not set"
-    }
-
-    private var settingsErrorBinding: Binding<Bool> {
-        Binding {
-            settingsError != nil
-        } set: { isPresented in
-            if !isPresented {
-                settingsError = nil
-            }
-        }
     }
 
     private func handleDownloadFolderImport(_ result: Result<[URL], any Error>) {

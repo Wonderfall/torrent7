@@ -301,31 +301,28 @@ struct ContentView: View {
         }
         .fileDialogMessage(fileDialogMessage)
         .fileDialogConfirmationLabel(fileDialogConfirmationLabel)
-        .alert("Torrent Error", isPresented: errorBinding) {
+        .alert("Torrent Error", item: errorBinding) { _ in
             Button("OK") {
                 store.dismissLastError()
             }
-        } message: {
-            Text(store.lastError ?? "")
+        } message: { error in
+            Text(error)
         }
-        .confirmationDialog(removalConfirmationTitle, isPresented: removalConfirmationBinding) {
-            Button(removeTorrentButtonTitle, role: .destructive) {
-                guard let removalConfirmationRequest else {
-                    return
-                }
-                store.removeTorrents(ids: removalConfirmationRequest.ids, deleteFiles: false)
-                self.removalConfirmationRequest = nil
+        .confirmationDialog(
+            removalConfirmationRequest?.title ?? "Remove Torrents?",
+            item: $removalConfirmationRequest
+        ) { request in
+            Button(request.keepDataButtonTitle, role: .destructive) {
+                store.removeTorrents(ids: request.ids, deleteFiles: false)
+                removalConfirmationRequest = nil
             }
-            Button(removeTorrentAndDataButtonTitle, role: .destructive) {
-                guard let removalConfirmationRequest else {
-                    return
-                }
-                store.removeTorrents(ids: removalConfirmationRequest.ids, deleteFiles: true)
-                self.removalConfirmationRequest = nil
+            Button(request.deleteDataButtonTitle, role: .destructive) {
+                store.removeTorrents(ids: request.ids, deleteFiles: true)
+                removalConfirmationRequest = nil
             }
             Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(removalConfirmationMessage)
+        } message: { request in
+            Text(request.message)
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active {
@@ -365,11 +362,11 @@ struct ContentView: View {
         }
     }
 
-    private var errorBinding: Binding<Bool> {
+    private var errorBinding: Binding<String?> {
         Binding {
-            store.lastError != nil
-        } set: { isPresented in
-            if !isPresented {
+            store.lastError
+        } set: { value in
+            if value == nil {
                 store.dismissLastError()
             }
         }
@@ -403,21 +400,6 @@ struct ContentView: View {
         case .downloadFolder, .magnetDestination:
             Text("Use Folder")
         }
-    }
-
-    private var removalConfirmationBinding: Binding<Bool> {
-        Binding {
-            removalConfirmationRequest != nil
-        } set: { isPresented in
-            if !isPresented {
-                removalConfirmationRequest = nil
-            }
-        }
-    }
-
-    private var removalConfirmationTitle: String {
-        let count = removalConfirmationRequest?.count ?? 0
-        return count == 1 ? "Remove Torrent?" : "Remove \(count) Torrents?"
     }
 
     private var browserFilterRequestID: TorrentBrowserFilterRequestID {
@@ -459,33 +441,6 @@ struct ContentView: View {
                 - reservedFileCount
                 - pendingMagnetIntakeRequests.count
         )
-    }
-
-    private var removeTorrentButtonTitle: String {
-        removalConfirmationRequest?.count == 1
-            ? "Remove Torrent, Keep Data"
-            : "Remove Torrents, Keep Data"
-    }
-
-    private var removeTorrentAndDataButtonTitle: String {
-        removalConfirmationRequest?.count == 1
-            ? "Remove Torrent and Delete Data Permanently"
-            : "Remove Torrents and Delete Data Permanently"
-    }
-
-    private var removalConfirmationMessage: String {
-        guard let removalConfirmationRequest else {
-            return ""
-        }
-        if removalConfirmationRequest.count == 1,
-           let path = removalConfirmationRequest.singleTorrentDownloadPath {
-            return "Choose whether to keep the downloaded data at \(path). If removed, it will be deleted permanently."
-        }
-        if removalConfirmationRequest.count == 1 {
-            return "Choose whether to keep the downloaded data. Data without a verified app-owned storage claim will be preserved."
-        }
-
-        return "Choose whether to keep the downloaded data for \(removalConfirmationRequest.count) torrents. If removed, it will be deleted permanently."
     }
 
     private func configureCommandActions() {
@@ -776,6 +731,34 @@ nonisolated private struct TorrentRemovalConfirmationRequest: Sendable {
     let ids: Set<TorrentItem.ID>
     let count: Int
     let singleTorrentDownloadPath: String?
+
+    var title: String {
+        count == 1 ? "Remove Torrent?" : "Remove \(count) Torrents?"
+    }
+
+    var keepDataButtonTitle: String {
+        count == 1
+            ? "Remove Torrent, Keep Data"
+            : "Remove Torrents, Keep Data"
+    }
+
+    var deleteDataButtonTitle: String {
+        count == 1
+            ? "Remove Torrent and Delete Data Permanently"
+            : "Remove Torrents and Delete Data Permanently"
+    }
+
+    var message: String {
+        if count == 1,
+           let path = singleTorrentDownloadPath {
+            return "Choose whether to keep the downloaded data at \(path). If removed, it will be deleted permanently."
+        }
+        if count == 1 {
+            return "Choose whether to keep the downloaded data. Data without a verified app-owned storage claim will be preserved."
+        }
+
+        return "Choose whether to keep the downloaded data for \(count) torrents. If removed, it will be deleted permanently."
+    }
 
     @concurrent
     static func prepare(
