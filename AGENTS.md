@@ -9,7 +9,7 @@ principle.
 
 - Make changes carefully with security hardening in mind.
 - Do not add unnecessary features or useless/redundant code.
-- We always target the latest software/system, e.g. macOS 26 on Apple Silicon,
+- We always target the latest software/system, e.g. macOS 27 on Apple Silicon,
   latest tools.
 - Do not preserve backward compatibility; ignore older platforms, toolchains and APIs.
 - Compatibility and migrations for persisted user data must be considered case by case
@@ -25,7 +25,7 @@ principle.
 
 Exceptions to the following rules must be narrow, documented, and tested.
 
-## Swift 6.3 and SwiftUI
+## Swift 6.4 and SwiftUI
 
 These rules apply to all first-party Swift targets, including product source,
 tests, tools, benchmarks, and fuzz support. Package manifests, generated source,
@@ -157,10 +157,9 @@ and third-party dependencies are out of scope.
   and convert it to an explicit status or result.
 - Use supported `@c` or `@c @implementation` exports. Do not add underscored
   interoperability attributes such as `@_cdecl` or `@_silgen_name`.
-- Keep experimental safe-interoperability features confined to bridge-facing
-  targets and the specific tests, fuzz targets, or benchmarks that exercise
-  those signatures. Pin the toolchain, and compile and exercise the imported
-  safe signatures in CI.
+- Use Swift 6.4's standard safe-interoperability parameter imports. Do not
+  enable experimental return-lifetime imports unless the bridge needs them.
+  Pin the toolchain, and compile and exercise the imported safe signatures in CI.
 - Minimize unsafe code and replace repeated unsafe patterns with a reviewed
   safe wrapper.
 - Every explicit unsafe proof scope requires a nearby `SAFETY:` explanation.

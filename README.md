@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <strong>Requires macOS 26 on Apple silicon.</strong>
+  <strong>Requires macOS 27 on Apple silicon.</strong>
 </p>
 
 <p align="center">
@@ -29,7 +29,7 @@
 
 ## Purpose
 
-Torrent 7 is a minimal macOS 26 torrent client built with SwiftUI and
+Torrent 7 is a minimal macOS 27 torrent client built with SwiftUI and
 libtorrent-rasterbar 2.x. It ships the torrent engine as an application-scoped
 Enhanced Security helper extension so the GUI does not load libtorrent or the
 C++ bridge. It targets Apple silicon as an arm64e app and leans
@@ -296,9 +296,12 @@ it to exactly match the reviewed notices in `Packaging/ThirdPartyNotices.txt`.
 
 Requirements:
 
-- macOS 26 on Apple silicon
-- Xcode 26.6 (build 17F113)
+- macOS 27 on Apple silicon
+- Xcode 27.0 (build 27A266a), including Swift 6.4 and the macOS 27.0 SDK
 - Homebrew build tools
+
+The [toolchain notes](Documentation/Toolchain.md) record the Swift 6.4 adoption,
+retired experimental flags, and retained hardening requirements.
 
 Install build tools:
 

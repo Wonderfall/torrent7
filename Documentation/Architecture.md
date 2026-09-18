@@ -512,8 +512,9 @@ per-torrent synchronous Swift callback. Swift parses the bare info dictionary
 and returns an `INFO_DICTIONARY` capsule; C++ imports it before releasing the
 callback-owned allocation on every path. A rejected hash-valid dictionary is
 latched as invalid, and there is no native bdecode fallback. The boundary uses
-Swift 6.3 safe-interop annotations and does not depend on a Swift 6.4 language
-feature.
+Swift 6.4's standard safe-interop parameter imports. Annotated pointer/count
+pairs become nonoptional `Span` and `MutableSpan` values; an empty span carries
+the zero-capacity query contract without an optional-buffer branch.
 
 Incoming extension handshakes, metadata-control messages, and peer-exchange
 dictionaries likewise terminate in a bounded synchronous Swift parser. Fixed

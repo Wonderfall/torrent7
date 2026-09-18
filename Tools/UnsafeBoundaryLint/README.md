@@ -2,7 +2,7 @@
 
 This package implements the repository policy that explicit Swift ownership
 and concurrency escape hatches require a nearby `SAFETY:` explanation. It
-parses Swift with the SwiftSyntax version pinned for the repository's Swift 6.3
+parses Swift with the SwiftSyntax version pinned for the repository's Swift 6.4
 toolchain, so spellings in comments and string literals are not treated as
 code.
 
