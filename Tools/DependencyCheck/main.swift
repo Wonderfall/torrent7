@@ -1,6 +1,5 @@
-#!/usr/bin/env swift
-
 import Foundation
+import ProcessRunner
 import System
 
 private extension URL {
@@ -39,12 +38,6 @@ struct Release {
     let publishedAt: Date
 }
 
-struct ProcessResult {
-    let stdout: String
-    let stderr: String
-    let status: Int32
-}
-
 struct GitHubCommit: Decodable {
     struct Metadata: Decodable {
         struct Identity: Decodable {
@@ -74,8 +67,7 @@ struct GitilesLog: Decodable {
     let next: String?
 }
 
-@MainActor
-final class DependencyChecker {
+actor DependencyChecker {
     private let buildDepsPath: URL
     private let libtorrentPatchSeriesPath: URL
     private let summaryPath: URL?
@@ -90,9 +82,7 @@ final class DependencyChecker {
     private var failures: [String] = []
 
     init() throws {
-        let scriptPath = URL(filePath: CommandLine.arguments[0])
-        let scriptDirectory = scriptPath.deletingLastPathComponent()
-        let root = try Self.findRoot(startingAt: scriptDirectory)
+        let root = try Self.findRoot(startingAt: URL(filePath: ProcessInfo.processInfo.environment["TORRENT7_REPOSITORY_ROOT"] ?? FileManager.default.currentDirectoryPath))
 
         self.buildDepsPath = root.appending(path: "Scripts/build-deps.zsh")
         self.libtorrentPatchSeriesPath = root.appending(path: "Scripts/libtorrent-patch-series.sh")
@@ -146,7 +136,7 @@ final class DependencyChecker {
                 path = arguments[valueIndex]
                 index += 2
             case "--help", "-h":
-                print("Usage: check-dependencies.swift [--summary PATH]")
+                print("Usage: check-dependencies [--summary PATH]")
                 Foundation.exit(0)
             default:
                 throw CheckFailure.message("Unknown argument: \(argument)")
@@ -187,18 +177,24 @@ final class DependencyChecker {
         do {
             try await checkLibtorrent()
         } catch {
+            try Task.checkCancellation()
+            if error is CancellationError { throw error }
             recordFailure("libtorrent check error: \(error)")
         }
 
         do {
             try await checkBoringSSL()
         } catch {
+            try Task.checkCancellation()
+            if error is CancellationError { throw error }
             recordFailure("BoringSSL check error: \(error)")
         }
 
         do {
             try await checkBoost()
         } catch {
+            try Task.checkCancellation()
+            if error is CancellationError { throw error }
             recordFailure("Boost check error: \(error)")
         }
 
@@ -219,19 +215,19 @@ final class DependencyChecker {
         }
     }
 
-    private static let isoDateFormatter: ISO8601DateFormatter = {
+    private static var isoDateFormatter: ISO8601DateFormatter {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter
-    }()
+    }
 
-    private static let fallbackISODateFormatter: ISO8601DateFormatter = {
+    private var fallbackISODateFormatter: ISO8601DateFormatter {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
         return formatter
-    }()
+    }
 
-    private static let boostDateFormatter: DateFormatter = {
+    private let boostDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
@@ -239,7 +235,7 @@ final class DependencyChecker {
         return formatter
     }()
 
-    private static let gitilesDateFormatter: DateFormatter = {
+    private let gitilesDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
@@ -293,7 +289,7 @@ final class DependencyChecker {
             lines.append("Update the pins from a trusted checkout, rebuild and verify dependencies, then rerun:")
             lines.append("")
             lines.append("```sh")
-            lines.append("Tools/DependencyCheck/check-dependencies.swift")
+            lines.append("Scripts/run-tool.zsh check-dependencies")
             lines.append("Scripts/build-deps.zsh")
             lines.append("```")
             lines.append("")
@@ -503,61 +499,22 @@ final class DependencyChecker {
     }
 
     private func parseISODate(_ value: String) throws -> Date {
-        if let date = Self.isoDateFormatter.date(from: value) ?? Self.fallbackISODateFormatter.date(from: value) {
+        if let date = Self.isoDateFormatter.date(from: value) ?? fallbackISODateFormatter.date(from: value) {
             return date
         }
         throw CheckFailure.message("Could not parse ISO-8601 date: \(value)")
     }
 
     private func parseGitilesDate(_ value: String) throws -> Date {
-        if let date = Self.gitilesDateFormatter.date(from: value) {
+        if let date = gitilesDateFormatter.date(from: value) {
             return date
         }
         throw CheckFailure.message("Could not parse Gitiles date: \(value)")
     }
 
-    private func executablePath(_ name: String) -> String? {
-        if name.contains("/") {
-            return FileManager.default.isExecutableFile(atPath: name) ? name : nil
-        }
-
-        for directory in ProcessInfo.processInfo.environment["PATH", default: ""].split(separator: ":") {
-            let candidate = "\(directory)/\(name)"
-            if FileManager.default.isExecutableFile(atPath: candidate) {
-                return candidate
-            }
-        }
-
-        return nil
-    }
-
-    private func runProcess(_ executable: String, _ arguments: [String]) throws -> ProcessResult {
-        guard let path = executablePath(executable) else {
-            throw CheckFailure.message("Missing executable: \(executable)")
-        }
-
-        let process = Process()
-        process.executableURL = URL(filePath: path)
-        process.arguments = arguments
-
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        try process.run()
-        process.waitUntilExit()
-
-        let stdoutData = try stdoutPipe.fileHandleForReading.readToEnd() ?? Data()
-        let stderrData = try stderrPipe.fileHandleForReading.readToEnd() ?? Data()
-        let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-        let stderr = String(data: stderrData, encoding: .utf8) ?? ""
-        return ProcessResult(stdout: stdout, stderr: stderr, status: process.terminationStatus)
-    }
-
     private func checkLibtorrent() async throws {
         let pinnedTag = try buildDepDefault("LIBTORRENT_TAG")
-        let commitResult = try runProcess(libtorrentPatchSeriesPath.fileSystemPath, ["commit"])
+        let commitResult = try await ProcessRunner.run(libtorrentPatchSeriesPath.fileSystemPath, arguments: ["commit"])
         let pinnedCommit = commitResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         guard commitResult.status == 0,
               pinnedCommit.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil
@@ -593,7 +550,7 @@ final class DependencyChecker {
         })
         checkLatestVersion(name: "libtorrent", pinnedVersion: String(pinnedTag.dropFirst()), observed: observed, eligible: eligible)
 
-        let result = try runProcess("git", [
+        let result = try await ProcessRunner.run("git", arguments: [
             "ls-remote",
             "--tags",
             "https://github.com/arvidn/libtorrent.git",
@@ -635,7 +592,7 @@ final class DependencyChecker {
             throw CheckFailure.message("BoringSSL commit and tree pins must be full lowercase SHA-1 values")
         }
 
-        let remoteResult = try runProcess("git", ["ls-remote", pinnedRepository, "HEAD"])
+        let remoteResult = try await ProcessRunner.run("git", arguments: ["ls-remote", pinnedRepository, "HEAD"])
         let remoteHead = remoteResult.stdout.split(whereSeparator: \.isWhitespace).first.map(String.init)
         guard remoteResult.status == 0, let remoteHead else {
             throw CheckFailure.message(
@@ -824,7 +781,7 @@ final class DependencyChecker {
             in: downloadPage,
             options: [.dotMatchesLineSeparators]
         )?[1],
-            let publishedAt = Self.boostDateFormatter.date(from: dateText)
+            let publishedAt = boostDateFormatter.date(from: dateText)
         else {
             throw CheckFailure.message("Could not parse Boost \(latestVersion) public release date")
         }
@@ -851,6 +808,6 @@ do {
     let checker = try DependencyChecker()
     try await checker.run()
 } catch {
-    fputs("[error] \(error)\n", stderr)
+    try? FileHandle.standardError.write(contentsOf: Data("[error] \(error)\n".utf8))
     Foundation.exit(1)
 }

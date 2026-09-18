@@ -18,9 +18,8 @@ on:
       - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/lint-unsafe-boundaries.zsh"
       - "Scripts/native-deps-build-id.zsh"
-      - "Scripts/**/*.swift"
-      - "Scripts/compare-entitlements.swift"
-      - "Scripts/verify-enhanced-security-metadata.swift"
+      - "Scripts/run-tool.zsh"
+      - "Scripts/test-tools.zsh"
       - "Scripts/patches/**"
       - "Scripts/release-app.zsh"
       - "Scripts/test-enhanced-security-extension.zsh"
@@ -53,9 +52,8 @@ on:
       - "Scripts/libtorrent-patch-series.sh"
       - "Scripts/lint-unsafe-boundaries.zsh"
       - "Scripts/native-deps-build-id.zsh"
-      - "Scripts/**/*.swift"
-      - "Scripts/compare-entitlements.swift"
-      - "Scripts/verify-enhanced-security-metadata.swift"
+      - "Scripts/run-tool.zsh"
+      - "Scripts/test-tools.zsh"
       - "Scripts/patches/**"
       - "Scripts/release-app.zsh"
       - "Scripts/test-enhanced-security-extension.zsh"
@@ -144,17 +142,15 @@ jobs:
           set -euo pipefail
           zsh -n Scripts/build-app.zsh Scripts/release-app.zsh \
             Scripts/test-enhanced-security-extension.zsh Scripts/verify-app.zsh \
-            Scripts/verify-parser-reachability.zsh
-          xcrun swiftc -typecheck Scripts/compare-entitlements.swift
-          xcrun swiftc -typecheck Scripts/verify-enhanced-security-metadata.swift
-          xcrun swift Scripts/compare-entitlements.swift \
+            Scripts/verify-parser-reachability.zsh Scripts/run-tool.zsh Scripts/test-tools.zsh
+          Scripts/run-tool.zsh compare-entitlements \
             Packaging/Torrent7.entitlements \
             Packaging/Torrent7.entitlements
           unexpected_entitlements=$(mktemp)
           trap 'rm -f -- "$unexpected_entitlements"' EXIT
           cp Packaging/Torrent7.entitlements "$unexpected_entitlements"
           /usr/libexec/PlistBuddy -c "Add :unexpected bool true" "$unexpected_entitlements"
-          if xcrun swift Scripts/compare-entitlements.swift \
+          if Scripts/run-tool.zsh compare-entitlements \
             Packaging/Torrent7.entitlements \
             "$unexpected_entitlements"; then
             print -ru2 -- "Entitlement allowlist accepted an unexpected key"

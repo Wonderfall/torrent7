@@ -375,7 +375,7 @@ verify_sanitizer_runtime "$engine_executable"
     "$engine_contents/Info.plist" \
     "$extension_point" \
     >/dev/null
-/usr/bin/xcrun swift "$root_dir/Scripts/verify-enhanced-security-metadata.swift" \
+"$root_dir/Scripts/run-tool.zsh" verify-enhanced-security-metadata \
     "$extension_point" \
     "$engine_contents/Info.plist" \
     "$extension_point_identifier"

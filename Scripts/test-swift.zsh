@@ -16,6 +16,7 @@ typeset -r scratch_path=${SWIFT_TEST_SCRATCH_PATH:-"$root_dir/.build/swift-test-
 cd -- "$root_dir"
 
 "$root_dir/Scripts/lint-unsafe-boundaries.zsh"
+"$root_dir/Scripts/test-tools.zsh"
 
 export CC="${CC:-$(xcrun --find clang)}"
 export CXX="${CXX:-$(xcrun --find clang++)}"

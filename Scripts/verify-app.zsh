@@ -436,7 +436,7 @@ done < <(/usr/bin/find "$extension_points_dir" -mindepth 1 -maxdepth 1 -print0)
     >/dev/null
 /usr/bin/cmp -s "$expected_extension_point" "$installed_extension_point" \
     || fail "Installed extension-point metadata differs from its reviewed packaging source"
-/usr/bin/xcrun swift "$root_dir/Scripts/verify-enhanced-security-metadata.swift" \
+"$root_dir/Scripts/run-tool.zsh" verify-enhanced-security-metadata \
     "$installed_extension_point" \
     "$engine_extension_info_plist" \
     "$expected_extension_point_identifier"
@@ -544,11 +544,11 @@ fi
     >"$engine_entitlements_output" 2>/dev/null
 /usr/bin/plutil -lint "$app_entitlements_output" >/dev/null
 /usr/bin/plutil -lint "$engine_entitlements_output" >/dev/null
-/usr/bin/xcrun swift "$root_dir/Scripts/compare-entitlements.swift" \
+"$root_dir/Scripts/run-tool.zsh" compare-entitlements \
     "$expected_app_entitlements" \
     "$app_entitlements_output" \
     || fail "App entitlements do not exactly match Packaging/Torrent7.entitlements"
-/usr/bin/xcrun swift "$root_dir/Scripts/compare-entitlements.swift" \
+"$root_dir/Scripts/run-tool.zsh" compare-entitlements \
     "$expected_engine_entitlements" \
     "$engine_entitlements_output" \
     || fail "Engine entitlements do not exactly match Packaging/Torrent7Engine.entitlements"

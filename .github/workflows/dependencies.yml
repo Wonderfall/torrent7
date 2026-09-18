@@ -18,6 +18,9 @@ on:
       - "Scripts/verify-xcode.zsh"
       - "Scripts/patches/**"
       - "Tools/DependencyCheck/**"
+      - "Tools/Package.*"
+      - "Tools/ProcessRunner/**"
+      - "Scripts/run-tool.zsh"
   pull_request:
     types:
       - opened
@@ -36,6 +39,9 @@ on:
       - "Scripts/verify-xcode.zsh"
       - "Scripts/patches/**"
       - "Tools/DependencyCheck/**"
+      - "Tools/Package.*"
+      - "Tools/ProcessRunner/**"
+      - "Scripts/run-tool.zsh"
   workflow_dispatch:
 
 permissions: {}
@@ -90,7 +96,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           print -r -- "::add-mask::$GITHUB_TOKEN"
-          Tools/DependencyCheck/check-dependencies.swift --summary artifacts/dependency-check.md
+          Scripts/run-tool.zsh check-dependencies --summary artifacts/dependency-check.md
 
       - name: Publish check summary
         if: always()
