@@ -22,8 +22,12 @@ on:
       - "Scripts/test-tools.zsh"
       - "Scripts/patches/**"
       - "Scripts/release-app.zsh"
+      - "Scripts/archive-release-evidence.zsh"
+      - "Scripts/test-release-evidence.zsh"
+      - "Scripts/test-ui.zsh"
       - "Scripts/test-enhanced-security-extension.zsh"
       - "Scripts/test-swift.zsh"
+      - "Scripts/test-lifecycle.zsh"
       - "Scripts/verify-app.zsh"
       - "Scripts/verify-boost-asio-recycling-allocator.zsh"
       - "Scripts/verify-libtorrent-boringssl-tls.zsh"
@@ -56,8 +60,12 @@ on:
       - "Scripts/test-tools.zsh"
       - "Scripts/patches/**"
       - "Scripts/release-app.zsh"
+      - "Scripts/archive-release-evidence.zsh"
+      - "Scripts/test-release-evidence.zsh"
+      - "Scripts/test-ui.zsh"
       - "Scripts/test-enhanced-security-extension.zsh"
       - "Scripts/test-swift.zsh"
+      - "Scripts/test-lifecycle.zsh"
       - "Scripts/verify-app.zsh"
       - "Scripts/verify-boost-asio-recycling-allocator.zsh"
       - "Scripts/verify-libtorrent-boringssl-tls.zsh"
@@ -163,11 +171,28 @@ jobs:
           set -euo pipefail
           Scripts/test-swift.zsh
 
+      - name: Repeat concurrency lifecycle tests
+        shell: zsh {0}
+        run: Scripts/test-lifecycle.zsh --skip-build
+
       - name: Build app
         shell: zsh {0}
         run: |
           set -euo pipefail
-          SKIP_BUILD_DEPS=1 Scripts/build-app.zsh
+          release_sbom_dir=$(mktemp -d "$PWD/.build/release-sboms.XXXXXXXX")
+          print -r -- "RELEASE_SBOM_DIR=$release_sbom_dir" >> "$GITHUB_ENV"
+          SKIP_BUILD_DEPS=1 SBOM_OUTPUT_DIR="$release_sbom_dir" Scripts/build-app.zsh
+
+      - name: Verify release symbols and dependency inventories
+        shell: zsh {0}
+        run: |
+          Scripts/test-release-evidence.zsh ".build/App/Torrent 7.app" \
+            "$(xcrun swift build --configuration release --arch arm64e --show-bin-path)" \
+            .build/deps/arm64e/prefix "$RELEASE_SBOM_DIR"
+
+      - name: Compile UI and VoiceOver diagnostics
+        shell: zsh {0}
+        run: Scripts/test-ui.zsh --build-only
 
       - name: Verify app bundle
         shell: zsh {0}

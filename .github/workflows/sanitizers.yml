@@ -13,7 +13,7 @@ on:
       - "Sources/**"
       - "Tests/**"
       - "ThirdParty/doctest/**"
-      - "Tools/XPCIntegrationHost/**"
+      - "Tools/**"
   pull_request:
     types:
       - opened
@@ -29,7 +29,7 @@ on:
       - "Sources/**"
       - "Tests/**"
       - "ThirdParty/doctest/**"
-      - "Tools/XPCIntegrationHost/**"
+      - "Tools/**"
   workflow_dispatch:
 
 permissions: {}
@@ -142,6 +142,10 @@ jobs:
         run: |
           set -euo pipefail
           SKIP_BUILD_DEPS=1 Scripts/test-swift.zsh
+
+      - name: Repeat concurrency lifecycle tests under sanitizer
+        shell: zsh {0}
+        run: Scripts/test-lifecycle.zsh --skip-build
 
       - name: Build and verify sanitizer app
         shell: zsh {0}
