@@ -4713,11 +4713,9 @@ extern "C" int32_t TorrentClientApplySettings(
         if (client == nullptr) {
             return bridge_error(1, "Missing torrent client.");
         }
-        bool const has_network_interface = required_network_interface != nullptr;
-        bool const has_network_interface_bytes = required_network_interface_size != 0;
         if (required_network_interface_size < 0
             || required_network_interface_size > TTORRENT_MAX_NETWORK_INTERFACE_BYTES
-            || has_network_interface != has_network_interface_bytes) {
+            || (required_network_interface_size > 0 && required_network_interface == nullptr)) {
             return bridge_error(1, "Invalid required network interface buffer.");
         }
 

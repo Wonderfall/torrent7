@@ -3434,7 +3434,7 @@ TEST_CASE("settings interface input enforces explicit buffer bounds")
         &client,
         settings,
         interface_name,
-        0,
+        -1,
         error.data(),
         static_cast<int32_t>(error.size())
     ) == 1);
@@ -3452,6 +3452,8 @@ TEST_CASE("settings interface input enforces explicit buffer bounds")
     CHECK(bridge_tests::string_from_c_buffer(error)
         == "Invalid required network interface buffer.");
 
+    CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.requested_network_blocked));
+
     REQUIRE(apply_settings(
         &client,
         settings,
@@ -3461,6 +3463,49 @@ TEST_CASE("settings interface input enforces explicit buffer bounds")
     ) == 0);
     lt::settings_pack const applied = client.session.get_settings();
     CHECK(applied.get_str(lt::settings_pack::outgoing_interfaces) == interface_name);
+}
+
+TEST_CASE("zero-length interface buffers clear binding regardless of pointer presence")
+{
+    for (bool const nonnull_empty : {false, true}) {
+        for (bool const network_blocked : {false, true}) {
+            CAPTURE(nonnull_empty);
+            CAPTURE(network_blocked);
+            bridge_tests::TemporaryDirectory temporary_directory;
+            TTorrentClient client((temporary_directory.path() / "State").string());
+            client.set_session_shutdown_asynchronous(false);
+
+            TTorrentSessionSettings settings = unblocked_session_settings();
+            std::array<char, 512> error{};
+            char const interface_name[] = "127.0.0.1";
+            REQUIRE(apply_settings(
+                &client,
+                settings,
+                error.data(),
+                static_cast<int32_t>(error.size()),
+                interface_name
+            ) == 0);
+            REQUIRE(client.session.get_settings().get_str(lt::settings_pack::outgoing_interfaces)
+                == interface_name);
+
+            settings.network_blocked = bridge_bool(network_blocked);
+            REQUIRE(TorrentClientApplySettings(
+                &client,
+                settings,
+                nonnull_empty ? interface_name : nullptr,
+                0,
+                error.data(),
+                static_cast<int32_t>(error.size())
+            ) == 0);
+            CHECK(bridge_tests::string_from_c_buffer(error).empty());
+            lt::settings_pack const applied = client.session.get_settings();
+            CHECK(applied.get_str(lt::settings_pack::outgoing_interfaces).empty());
+            CHECK(applied.get_str(lt::settings_pack::listen_interfaces)
+                == (network_blocked ? "" : "0.0.0.0:0,[::]:0"));
+            CHECK(BRIDGE_WITH_CLIENT_LOCK(client, client.requested_network_blocked) == network_blocked);
+            CHECK(client.session.is_paused() == network_blocked);
+        }
+    }
 }
 
 TEST_CASE("settings reject invalid DHT discovery policy")

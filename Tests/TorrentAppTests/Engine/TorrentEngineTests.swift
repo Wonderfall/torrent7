@@ -574,6 +574,42 @@ struct TorrentEngineTests {
         #expect(snapshots.map(\.1) == [true, false])
     }
 
+    @Test("Disabling interface binding applies an empty Swift span", arguments: [false, true])
+    func disablingInterfaceBindingAppliesEmptySpan(networkBlocked: Bool) async throws {
+        let stateDirectory = try temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let engine = try TorrentEngine(
+            stateDirectory: stateDirectory,
+            enablePeerExchangePlugin: false,
+            payloadBroker: TestPayloadBroker()
+        )
+        defer {
+            await #expect(throws: Never.self) {
+                try await engine.shutdownSafely()
+            }
+        }
+
+        var settings = TorrentSettings()
+        settings.enableDHTNetwork = false
+        settings.useDHTByDefault = false
+        settings.requireNetworkInterface = true
+        settings.requiredNetworkInterfaceName = "lo0"
+        try await engine.applySettings(settings, networkBinding: TorrentNetworkBinding(
+            interfaceName: "lo0",
+            interfaceFingerprint: "loopback-fixture",
+            vpnServiceID: nil,
+            networkBlocked: false
+        ))
+        #expect(await engine.networkStatus().networkBlocked == false)
+
+        // The saved selection remains present while disabling binding sends no interface bytes.
+        settings.requireNetworkInterface = false
+        try await engine.applySettings(settings, networkBinding: .unbound(networkBlocked: networkBlocked))
+
+        #expect(engine.isAvailable)
+        #expect(await engine.networkStatus().networkBlocked == networkBlocked)
+    }
+
     @Test("Startup failure engine reports unavailable and empty read models")
     func startupFailureEngineReportsUnavailableAndEmptyReadModels() async throws {
         let engine = TorrentEngine(startupFailureMessage: "boom")

@@ -1330,6 +1330,10 @@ int32_t TorrentClientClearRemovalTombstone(
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
+// The interface is a counted byte range, without a NUL terminator. A zero count
+// means no required interface, whether the pointer is null or nonnull; no bytes
+// are read in that case. A positive count requires nonnull storage and must not
+// exceed TTORRENT_MAX_NETWORK_INTERFACE_BYTES.
 int32_t TorrentClientApplySettings(
     TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
     TTorrentSessionSettings requested,
