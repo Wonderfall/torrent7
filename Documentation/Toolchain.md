@@ -2,7 +2,7 @@
 
 The project requires macOS 27 on Apple silicon and Xcode 27.0 (27A266a),
 including the macOS 27.0 SDK and Apple Swift 6.4
-(`swiftlang-6.4.0.34.1`). Both packages require Swift tools 6.4. Build, test,
+(`swiftlang-6.4.0.34.1`). All three packages require Swift tools 6.4. Build, test,
 analysis, benchmark, and fuzz entry points run `Scripts/verify-xcode.zsh`;
 the packaged GUI and extensions require macOS 27.0. Bundle verification checks
 both the property lists and Mach-O deployment/SDK versions.
@@ -43,6 +43,28 @@ and [installed tool versions](https://github.com/actions/runner-images/releases/
 - ExtensionFoundation can be imported normally. The process wrapper still
   needs its narrowly documented `@unchecked Sendable` conformance because
   `AppExtensionProcess` itself does not conform to `Sendable` in this SDK.
+- The XPC transport now has a compiler-checked `Sendable` conformance;
+  `XPCSession` supports it. Reply slots own noncopyable `Continuation` values
+  under a mutex and consume them once, resuming outside the lock. Early replies,
+  cancellation, deadlines, duplicate replies, and descriptor cleanup retain
+  their existing ownership contracts.
+- Polling uses asynchronous `defer` and `withTaskCancellationShield` for
+  mandatory dataset cleanup. Cleanup completes before recovery and before
+  releasing the polling slot. Each close retains its independent deadline;
+  fatal protocol failures still stop sending requests to the peer.
+- Filesystem metadata uses System's descriptor and descriptor-relative `Stat`
+  APIs. Path observations explicitly reject symlink following, errors retain
+  their existing fail-closed mapping, and interrupted calls remain failures.
+  Raw metadata fields are read only to preserve existing identity/size checks
+  and persisted encodings; descriptor ownership is unchanged.
+- SwiftUI alerts and confirmation dialogs use optional item bindings. Actions
+  receive the presented value, including a pending `false` setting, and model
+  dismissal callbacks and destructive action roles are preserved.
+- Release-policy verifiers and the dependency monitor are compiled SwiftPM
+  products under `Tools/Package.swift`; none runs as an unchecked Swift script.
+  Typed, bounded plist decoding and pinned Swift Subprocess replace dynamically
+  typed comparisons and wait-before-drain process handling. See [developer
+  tools](../Tools/README.md) for entry points and lifecycle limits.
 
 See [Swift 6.4's release announcement](https://www.swift.org/blog/swift-6.4-released/)
 and [Xcode 27's release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-27-release-notes).
@@ -58,6 +80,12 @@ added where they would only rewrite working abstractions.
   explicit upcoming features: the installed compiler reports that they become
   defaults in Swift 7 language mode. Swift 6, complete concurrency checking,
   strict memory safety, and warnings as errors remain enabled.
+- `MemberImportVisibility`, `InternalImportsByDefault`, `ExistentialAny`, and
+  `ImmutableWeakCaptures` are enabled for every first-party Swift target,
+  including tests and tools. Imports explicitly expose only the access needed
+  by their signatures. These compiler checks do not replace independent
+  manifest dependency validation. Native builds and static analysis also
+  enable `-Wconditional-uninitialized`.
 - Safe return-value imports using `__lifetimebound` remain experimental in
   Xcode 27. The bridge does not use them, so their flag is absent.
 - Apple Clang 21 still exposes typed C allocation rewriting as
@@ -95,9 +123,13 @@ Validated on macOS 27.0 (26A428), Xcode 27.0 (27A266a), and Swift 6.4:
 - `Scripts/build-app.zsh`: release GUI and Enhanced Security extension built
   and passed bundle, deployment target, signing, PAC, typed-allocation, and
   parser-reachability verification.
-- `Scripts/test-swift.zsh`: 605 tests passed in each of debug, release, ASan,
-  and TSan configurations. The unsafe-boundary linter also passed; its separate
-  test package passed all 33 tests against SwiftSyntax 604.0.0.
+- `Scripts/test-swift.zsh`: 605 application tests passed in each of debug,
+  release, ASan, and TSan configurations. The repository tool package passed
+  14 tests in all four configurations, covering exact/bounded policy parsing,
+  concurrent pipe draining, process groups, exit status, signals, cancellation,
+  deadlines, output bounds, encoding, and child reaping. The unsafe-boundary
+  linter also passed; its separate test package passed all 33 tests against
+  SwiftSyntax 604.0.0.
 - `Scripts/analyze-bridge.zsh`, followed by `Scripts/test-bridge.zsh`: static
   analysis passed; all 192 native tests and 6,481 assertions passed in each of
   normal, ASan, and TSan profiles, including PAC code-generation verification.
@@ -105,13 +137,11 @@ Validated on macOS 27.0 (26A428), Xcode 27.0 (27A266a), and Swift 6.4:
   hardening checks passed against rebuilt Xcode 27 dependencies.
 - Bridge and IPC fuzz smoke suites: all 15 targets completed 1,000 executions
   each with ASan enabled.
-- `Scripts/benchmark-dht-message-parser.zsh`: the release benchmark built and
-  completed with whole-module optimization enabled.
 - `Scripts/test-enhanced-security-extension.zsh` in automated mode: packaged
   launch, forced helper exit, replacement, restart, and reconnect passed.
-  An initial run under concurrent build load exceeded the shell's replacement
-  observation deadline; the same test passed after build load subsided, with
-  no timeout or production-policy change.
+- A GUI smoke check exercised settings confirmations carrying both `false`
+  and `true`. Escape and Cancel dismissed the alerts while preserving the
+  saved network-binding and Peer Exchange policies.
 
 First-party builds and tests emitted no compiler warnings. Shell syntax,
 packaging property lists, and whitespace checks passed. An explicit macOS 26
