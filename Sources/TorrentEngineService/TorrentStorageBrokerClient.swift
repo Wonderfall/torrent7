@@ -73,77 +73,77 @@ package enum TorrentStorageBrokerClientError: LocalizedError, Sendable {
 }
 
 @safe final class TorrentStorageBrokerPendingReply: Sendable {
-    private struct State: Sendable {
+    private struct State: ~Copyable, Sendable {
         var isFinished = false
-        var continuation: CheckedContinuation<TorrentStorageBrokerReply, any Error>?
+        var continuation: Continuation<TorrentStorageBrokerReply, any Error>?
         var earlyResult: Result<TorrentStorageBrokerReply, any Error>?
         var timeoutTask: Task<Void, Never>?
+    }
+
+    private struct Completion: ~Copyable, Sendable {
+        let continuation: Continuation<TorrentStorageBrokerReply, any Error>?
+        let timeoutTask: Task<Void, Never>?
+        let result: Result<TorrentStorageBrokerReply, any Error>
+
+        consuming func resume() {
+            timeoutTask?.cancel()
+            if let continuation = consume continuation {
+                continuation.resume(with: result)
+            }
+        }
     }
 
     private let state = Mutex(State())
 
     func wait() async throws -> TorrentStorageBrokerReply {
-        try await withCheckedThrowingContinuation { continuation in
-            let earlyResult: Result<TorrentStorageBrokerReply, any Error>? =
-                state.withLock { state in
-                if let result = state.earlyResult {
-                    state.earlyResult = nil
-                    return result
+        try await withContinuation(of: TorrentStorageBrokerReply.self, throwing: (any Error).self) { continuation in
+            // Move ownership through the lock's borrowing closure exactly once,
+            // either into the waiting slot or into the immediate completion.
+            var incoming: Continuation<TorrentStorageBrokerReply, any Error>? = consume continuation
+            let completed = state.withLock { state -> Completion? in
+                if let result = state.earlyResult.take() {
+                    return Completion(continuation: incoming.take(), timeoutTask: nil, result: result)
                 }
-                guard !state.isFinished,
-                      state.continuation == nil else {
-                    return .failure(TorrentStorageBrokerClientError.invalidReply)
+                guard !state.isFinished, state.continuation == nil else {
+                    return Completion(
+                        continuation: incoming.take(),
+                        timeoutTask: nil,
+                        result: .failure(TorrentStorageBrokerClientError.invalidReply)
+                    )
                 }
-                state.continuation = continuation
+                state.continuation = incoming.take()
                 return nil
             }
-            if let earlyResult {
-                continuation.resume(with: earlyResult)
+            if let completed = consume completed {
+                completed.resume()
             }
         }
     }
 
     func installTimeoutTask(_ task: Task<Void, Never>) {
         let shouldCancel = state.withLock { state in
-            guard !state.isFinished,
-                  state.timeoutTask == nil else {
-                return true
-            }
+            guard !state.isFinished, state.timeoutTask == nil else { return true }
             state.timeoutTask = task
             return false
         }
-        if shouldCancel {
-            task.cancel()
-        }
+        if shouldCancel { task.cancel() }
     }
 
     @discardableResult
     func finish(_ result: Result<TorrentStorageBrokerReply, any Error>) -> Bool {
-        let completion: (
-            continuation: CheckedContinuation<TorrentStorageBrokerReply, any Error>?,
-            timeoutTask: Task<Void, Never>?,
-            didStore: Bool
-        ) = state.withLock { state in
-            guard !state.isFinished else {
-                return (nil, nil, false)
-            }
+        let completion = state.withLock { state -> Completion? in
+            guard !state.isFinished else { return nil }
             state.isFinished = true
-            if let continuation = state.continuation {
-                state.continuation = nil
-                let timeoutTask = state.timeoutTask
-                state.timeoutTask = nil
-                return (continuation, timeoutTask, false)
-            }
-            state.earlyResult = result
-            let timeoutTask = state.timeoutTask
-            state.timeoutTask = nil
-            return (nil, timeoutTask, true)
+            let continuation = state.continuation.take()
+            if continuation == nil { state.earlyResult = result }
+            return Completion(
+                continuation: consume continuation,
+                timeoutTask: state.timeoutTask.take(),
+                result: result
+            )
         }
-        completion.timeoutTask?.cancel()
-        guard let continuation = completion.continuation else {
-            return completion.didStore
-        }
-        continuation.resume(with: result)
+        guard let completion = consume completion else { return false }
+        completion.resume()
         return true
     }
 }

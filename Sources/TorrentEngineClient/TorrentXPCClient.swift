@@ -597,60 +597,72 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             releasePollPipelineSlot()
         }
 
-        var ownedDatasetIDs = [UUID]()
+        let result: Result<TorrentEnginePollResult, any Error> = await Result {
+            var ownedDatasetIDs = [UUID]()
+            defer {
+                // Finish bounded cleanup before the outer scope handles recovery
+                // or releases the polling slot to another caller.
+                await closeDatasetsForMandatoryPollCleanup(ownedDatasetIDs)
+            }
+            do {
+                let response = try await pollWire(
+                    since: revision,
+                    sortedBy: sortOrder,
+                    direction: direction,
+                    includeTrackerHosts: includeTrackerHosts
+                )
+                ownedDatasetIDs = [
+                    response.snapshotDataset?.id,
+                    response.trackerHostDataset?.id,
+                ].compactMap { $0 }
+                var snapshotBatch: TorrentSnapshotBatch?
+                var trackerHostBatch: TorrentTrackerHostBatch?
+                if let descriptor = response.snapshotDataset {
+                    let torrents: [TorrentItem] = try await loadDatasetContents(descriptor)
+                    try await closeDataset(descriptor.id)
+                    ownedDatasetIDs.removeAll { $0 == descriptor.id }
+                    snapshotBatch = TorrentSnapshotBatch(
+                        revision: descriptor.revision,
+                        torrents: torrents
+                    )
+                }
+                if let descriptor = response.trackerHostDataset {
+                    let hosts: [TorrentTrackerHostItem] = try await loadDatasetContents(descriptor)
+                    try await closeDataset(descriptor.id)
+                    ownedDatasetIDs.removeAll { $0 == descriptor.id }
+                    trackerHostBatch = TorrentTrackerHostBatch(
+                        revision: descriptor.revision,
+                        hosts: hosts
+                    )
+                }
+                return TorrentEnginePollResult(
+                    dirtyMask: response.dirtyMask,
+                    alertErrors: response.alertErrors,
+                    networkStatus: response.networkStatus,
+                    bridgeHealth: response.bridgeHealth,
+                    snapshotBatch: snapshotBatch,
+                    trackerHostBatch: trackerHostBatch,
+                    networkInterfaceSnapshot: response.networkInterfaceSnapshot
+                )
+            } catch {
+                if !(error is CancellationError), responseFailure(from: error).isFatalTransportError {
+                    // A malformed peer must receive no further requests. Its
+                    // connection teardown owns the remaining service datasets.
+                    ownedDatasetIDs.removeAll()
+                }
+                throw error
+            }
+        }
         do {
-            let response = try await pollWire(
-                since: revision,
-                sortedBy: sortOrder,
-                direction: direction,
-                includeTrackerHosts: includeTrackerHosts
-            )
-            ownedDatasetIDs = [
-                response.snapshotDataset?.id,
-                response.trackerHostDataset?.id,
-            ].compactMap { $0 }
-            var snapshotBatch: TorrentSnapshotBatch?
-            var trackerHostBatch: TorrentTrackerHostBatch?
-            if let descriptor = response.snapshotDataset {
-                let torrents: [TorrentItem] = try await loadDatasetContents(descriptor)
-                try await closeDataset(descriptor.id)
-                ownedDatasetIDs.removeAll { $0 == descriptor.id }
-                snapshotBatch = TorrentSnapshotBatch(
-                    revision: descriptor.revision,
-                    torrents: torrents
-                )
-            }
-            if let descriptor = response.trackerHostDataset {
-                let hosts: [TorrentTrackerHostItem] = try await loadDatasetContents(descriptor)
-                try await closeDataset(descriptor.id)
-                ownedDatasetIDs.removeAll { $0 == descriptor.id }
-                trackerHostBatch = TorrentTrackerHostBatch(
-                    revision: descriptor.revision,
-                    hosts: hosts
-                )
-            }
-            return TorrentEnginePollResult(
-                dirtyMask: response.dirtyMask,
-                alertErrors: response.alertErrors,
-                networkStatus: response.networkStatus,
-                bridgeHealth: response.bridgeHealth,
-                snapshotBatch: snapshotBatch,
-                trackerHostBatch: trackerHostBatch,
-                networkInterfaceSnapshot: response.networkInterfaceSnapshot
-            )
+            return try result.get()
         } catch is CancellationError {
-            await closeDatasetsForMandatoryPollCleanup(ownedDatasetIDs)
             throw CancellationError()
         } catch {
             let failure = responseFailure(from: error)
             if failure.isFatalTransportError {
-                // Do not continue using a connection after malformed or
-                // otherwise untrusted helper data. Disconnect cleanup owns
-                // any remaining service-side datasets in this case.
                 terminalize(failure)
                 throw failure
             }
-            await closeDatasetsForMandatoryPollCleanup(ownedDatasetIDs)
             throw pollFailure(from: failure)
         }
     }
@@ -854,10 +866,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         guard !ids.isEmpty else {
             return
         }
-        let cleanupSucceeded = await Task.detached { [weak self, ids] in
-            guard let self else {
-                return false
-            }
+        let cleanupSucceeded = await withTaskCancellationShield {
             var succeeded = true
             for id in ids {
                 do {
@@ -867,7 +876,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                 }
             }
             return succeeded
-        }.value
+        }
         guard cleanupSucceeded else {
             // A failed close leaves the helper's dataset budget uncertain.
             // Replacing the controller invokes disconnect cleanup before a

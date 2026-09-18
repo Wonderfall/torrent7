@@ -82,23 +82,17 @@ package protocol TorrentEngineIPCTransport: Sendable {
     func cancel()
 }
 
-// SAFETY: Ownership/lifetime: the transport strongly owns its activated session until all
-// registered replies are finished or cancelled; bounds/alignment: this conformance exposes no
-// raw memory and all XPC payload bounds are validated by the envelope codec; synchronization:
-// ReplyCoordinator and PendingReply serialize mutable state, while XPCSession supports its
-// documented concurrent send/cancel callbacks; safe alternative: XPCSession does not declare
-// Sendable, so a checked conformance cannot express the framework's concurrency contract.
-@safe package final class TorrentEngineXPCTransport: TorrentEngineIPCTransport, @unchecked Sendable {
+@safe package final class TorrentEngineXPCTransport: TorrentEngineIPCTransport {
     @safe package final class PendingReply: Sendable {
-        private struct State: Sendable {
-            var continuation: CheckedContinuation<TorrentEngineIPCReply, any Error>?
+        private struct State: ~Copyable, Sendable {
+            var continuation: Continuation<TorrentEngineIPCReply, any Error>?
             var timeoutTask: Task<Void, Never>?
         }
 
         private let state: Mutex<State>
 
-        package init(_ continuation: CheckedContinuation<TorrentEngineIPCReply, any Error>) {
-            state = Mutex(State(continuation: continuation))
+        package init(_ continuation: consuming Continuation<TorrentEngineIPCReply, any Error>) {
+            state = Mutex(State(continuation: consume continuation))
         }
 
         package func installTimeoutTask(_ task: Task<Void, Never>) {
@@ -114,23 +108,27 @@ package protocol TorrentEngineIPCTransport: Sendable {
             }
         }
 
+        private struct Completion: ~Copyable, Sendable {
+            let continuation: Continuation<TorrentEngineIPCReply, any Error>
+            let timeoutTask: Task<Void, Never>?
+
+            consuming func resume(with result: Result<TorrentEngineIPCReply, any Error>) {
+                timeoutTask?.cancel()
+                continuation.resume(with: result)
+            }
+        }
+
         @discardableResult
         package func finish(_ result: Result<TorrentEngineIPCReply, any Error>) -> Bool {
-            let completion = state.withLock { state
-                -> (CheckedContinuation<TorrentEngineIPCReply, any Error>, Task<Void, Never>?)? in
-                guard let continuation = state.continuation else {
-                    return nil
-                }
-                state.continuation = nil
-                let timeoutTask = state.timeoutTask
-                state.timeoutTask = nil
-                return (continuation, timeoutTask)
+            let completion = state.withLock { state -> Completion? in
+                guard let continuation = state.continuation.take() else { return nil }
+                return Completion(
+                    continuation: consume continuation,
+                    timeoutTask: state.timeoutTask.take()
+                )
             }
-            guard let (continuation, timeoutTask) = completion else {
-                return false
-            }
-            timeoutTask?.cancel()
-            continuation.resume(with: result)
+            guard let completion = consume completion else { return false }
+            completion.resume(with: result)
             return true
         }
     }
@@ -296,9 +294,8 @@ package protocol TorrentEngineIPCTransport: Sendable {
             throw TorrentEngineClientError.requestExpiredBeforeSubmission
         }
 
-        return try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<TorrentEngineIPCReply, any Error>) in
-            let pendingReply = PendingReply(continuation)
+        return try await withContinuation(of: TorrentEngineIPCReply.self, throwing: (any Error).self) { continuation in
+            let pendingReply = PendingReply(consume continuation)
             guard replies.register(pendingReply) else {
                 pendingReply.finish(.failure(TorrentEngineClientError.connectionCancelled))
                 return

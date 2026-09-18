@@ -91,9 +91,9 @@ struct TorrentXPCClientSecurityTests {
             bufferingPolicy: .bufferingNewest(1)
         )
         let waiting = Task<TorrentEngineIPCReply, any Error> {
-            try await withCheckedThrowingContinuation { continuation in
+            try await withContinuation(of: TorrentEngineIPCReply.self, throwing: (any Error).self) { continuation in
                 stream.continuation.yield(
-                    TorrentEngineXPCTransport.PendingReply(continuation)
+                    TorrentEngineXPCTransport.PendingReply(consume continuation)
                 )
                 stream.continuation.finish()
             }
@@ -109,9 +109,9 @@ struct TorrentXPCClientSecurityTests {
             bufferingPolicy: .bufferingNewest(1)
         )
         let timingOut = Task<TorrentEngineIPCReply, any Error> {
-            try await withCheckedThrowingContinuation { continuation in
+            try await withContinuation(of: TorrentEngineIPCReply.self, throwing: (any Error).self) { continuation in
                 timeoutStream.continuation.yield(
-                    TorrentEngineXPCTransport.PendingReply(continuation)
+                    TorrentEngineXPCTransport.PendingReply(consume continuation)
                 )
                 timeoutStream.continuation.finish()
             }
