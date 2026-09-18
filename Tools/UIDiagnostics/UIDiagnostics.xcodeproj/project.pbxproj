@@ -1,0 +1,33 @@
+// !$*UTF8*$!
+{
+    archiveVersion = 1;
+    classes = {};
+    objectVersion = 77;
+    objects = {
+        A00000000000000000000001 = {isa = PBXProject; attributes = {LastUpgradeCheck = 2700; TargetAttributes = {A00000000000000000000010 = {CreatedOnToolsVersion = 27.0;}; A00000000000000000000020 = {CreatedOnToolsVersion = 27.0; TestTargetID = A00000000000000000000010;};};}; buildConfigurationList = A00000000000000000000002; compatibilityVersion = "Xcode 16.0"; developmentRegion = en; knownRegions = (en, Base); mainGroup = A00000000000000000000003; productRefGroup = A00000000000000000000004; projectDirPath = ""; projectRoot = ""; targets = (A00000000000000000000010, A00000000000000000000020);};
+        A00000000000000000000002 = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000005); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug;};
+        A00000000000000000000003 = {isa = PBXGroup; children = (A00000000000000000000006, A00000000000000000000007, A00000000000000000000008, A00000000000000000000009, A00000000000000000000004); sourceTree = "<group>";};
+        A00000000000000000000004 = {isa = PBXGroup; children = (A00000000000000000000014, A00000000000000000000024); name = Products; sourceTree = "<group>";};
+        A00000000000000000000005 = {isa = XCBuildConfiguration; baseConfigurationReference = A00000000000000000000006; buildSettings = {}; name = Debug;};
+        A00000000000000000000006 = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Strict.xcconfig; sourceTree = "<group>";};
+        A00000000000000000000007 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Fixture/SelectionDiagnosticsApp.swift; sourceTree = "<group>";};
+        A00000000000000000000008 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UITests/SelectionAccessibilityTests.swift; sourceTree = "<group>";};
+        A00000000000000000000009 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../../Sources/TorrentApp/Features/Shared/TorrentSelectionMenuToggle.swift; sourceTree = "<group>";};
+        A00000000000000000000010 = {isa = PBXNativeTarget; buildConfigurationList = A00000000000000000000011; buildPhases = (A00000000000000000000012); buildRules = (); dependencies = (); name = TorrentUIDiagnostics; productName = TorrentUIDiagnostics; productReference = A00000000000000000000014; productType = "com.apple.product-type.application";};
+        A00000000000000000000011 = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000013); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug;};
+        A00000000000000000000012 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000015, A00000000000000000000016); runOnlyForDeploymentPostprocessing = 0;};
+        A00000000000000000000013 = {isa = XCBuildConfiguration; buildSettings = {PRODUCT_BUNDLE_IDENTIFIER = app.torrent7.uidiagnostics; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";}; name = Debug;};
+        A00000000000000000000014 = {isa = PBXFileReference; explicitFileType = wrapper.application; path = TorrentUIDiagnostics.app; sourceTree = BUILT_PRODUCTS_DIR;};
+        A00000000000000000000015 = {isa = PBXBuildFile; fileRef = A00000000000000000000007;};
+        A00000000000000000000016 = {isa = PBXBuildFile; fileRef = A00000000000000000000009;};
+        A00000000000000000000020 = {isa = PBXNativeTarget; buildConfigurationList = A00000000000000000000021; buildPhases = (A00000000000000000000022); buildRules = (); dependencies = (A00000000000000000000027); name = SelectionAccessibilityTests; productName = SelectionAccessibilityTests; productReference = A00000000000000000000024; productType = "com.apple.product-type.bundle.ui-testing";};
+        A00000000000000000000021 = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000023); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug;};
+        A00000000000000000000022 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000025); runOnlyForDeploymentPostprocessing = 0;};
+        A00000000000000000000023 = {isa = XCBuildConfiguration; buildSettings = {ENABLE_HARDENED_RUNTIME = NO; PRODUCT_BUNDLE_IDENTIFIER = app.torrent7.uidiagnostics.tests; PRODUCT_NAME = "$(TARGET_NAME)"; TEST_TARGET_NAME = TorrentUIDiagnostics;}; name = Debug;};
+        A00000000000000000000024 = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = SelectionAccessibilityTests.xctest; sourceTree = BUILT_PRODUCTS_DIR;};
+        A00000000000000000000025 = {isa = PBXBuildFile; fileRef = A00000000000000000000008;};
+        A00000000000000000000026 = {isa = PBXContainerItemProxy; containerPortal = A00000000000000000000001; proxyType = 1; remoteGlobalIDString = A00000000000000000000010; remoteInfo = TorrentUIDiagnostics;};
+        A00000000000000000000027 = {isa = PBXTargetDependency; target = A00000000000000000000010; targetProxy = A00000000000000000000026;};
+    };
+    rootObject = A00000000000000000000001;
+}

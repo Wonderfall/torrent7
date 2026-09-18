@@ -32,11 +32,17 @@ entry point:
 Scripts/run-tool.zsh check-dependencies --summary .build/dependency-check.md
 Scripts/run-tool.zsh compare-entitlements expected.plist actual.plist
 Scripts/run-tool.zsh verify-enhanced-security-metadata point.plist info.plist identifier
+Scripts/run-tool.zsh write-native-sbom DEPS_PREFIX OUTPUT_JSON NATIVE_BUILD_ID
 Scripts/test-tools.zsh
 ```
 
 `Scripts/test-swift.zsh` includes these tool tests. `CONFIGURATION=release`
 and `SANITIZER_PROFILE=address|thread` also apply to the tool test script.
+`WriteNativeSBOM/` records the exact native dependency provenance from a verified
+release prefix and refuses a mismatched native build ID. `UIDiagnostics/` hosts
+the production menu control in isolation for XCTest and macOS 27 VoiceOver
+automation. See [release and UI diagnostics](../Documentation/ReleaseDiagnostics.md)
+for entry points, the symbol archive, and Instruments recording.
 The policy verifiers bound input reads and compare typed plist values exactly,
 including Boolean versus numeric distinctions. `ProcessRunner/` uses pinned
 Swift Subprocess 1.0 to drain both output streams concurrently, bound each

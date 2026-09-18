@@ -1,0 +1,15 @@
+MACOSX_DEPLOYMENT_TARGET = 27.0
+SDKROOT = macosx
+ARCHS = arm64e
+ONLY_ACTIVE_ARCH = NO
+SWIFT_VERSION = 6.0
+SWIFT_STRICT_CONCURRENCY = complete
+SWIFT_TREAT_WARNINGS_AS_ERRORS = YES
+SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated
+OTHER_SWIFT_FLAGS = $(inherited) -strict-memory-safety -enable-upcoming-feature InferIsolatedConformances -enable-upcoming-feature NonisolatedNonsendingByDefault -enable-upcoming-feature MemberImportVisibility -enable-upcoming-feature InternalImportsByDefault -enable-upcoming-feature ExistentialAny -enable-upcoming-feature ImmutableWeakCaptures
+CODE_SIGN_IDENTITY = -
+CODE_SIGN_STYLE = Manual
+GENERATE_INFOPLIST_FILE = YES
+ENABLE_HARDENED_RUNTIME = YES
+SWIFT_OPTIMIZATION_LEVEL = -Onone
+ALWAYS_SEARCH_USER_PATHS = NO
