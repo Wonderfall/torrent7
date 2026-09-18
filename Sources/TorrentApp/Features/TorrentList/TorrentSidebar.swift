@@ -2,7 +2,6 @@ import SwiftUI
 import TorrentAppInfrastructure
 
 struct TorrentSidebar: View {
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     let sidebarState: TorrentSidebarState
     @Binding var selectedSelection: TorrentSidebarSelection
     let createLabel: (String) -> TorrentLabel?
@@ -69,7 +68,6 @@ struct TorrentSidebar: View {
             }
         }
         .listStyle(.sidebar)
-        .reducedTransparencySidebarBackground(enabled: reduceTransparency)
         .navigationTitle("Torrents")
         .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 240)
         .onAppear {
@@ -218,19 +216,6 @@ struct TorrentSidebar: View {
             }
         case .scope, .unlabeled, .noTrackers:
             break
-        }
-    }
-}
-
-private extension View {
-    @ViewBuilder
-    func reducedTransparencySidebarBackground(enabled: Bool) -> some View {
-        if enabled {
-            self
-                .scrollContentBackground(.hidden)
-                .background(.bar)
-        } else {
-            self
         }
     }
 }
