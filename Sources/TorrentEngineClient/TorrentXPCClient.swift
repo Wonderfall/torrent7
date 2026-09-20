@@ -186,18 +186,22 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     private var nextSequence: UInt64 = 1
     private var latestNetworkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot?
     private var requestIsInFlight = false
-    private struct RequestWaiter {
+    private struct RequestWaiter: ~Copyable {
         let id: UUID
         let deadlineTask: Task<Void, Never>
-        let continuation: CheckedContinuation<RequestSlotAcquisition, Never>
+        let continuation: Continuation<RequestSlotAcquisition, Never>
     }
-    private var requestWaiters = [RequestWaiter]()
-    private struct PollPipelineWaiter {
+    private var requestWaiters = UniqueArray<RequestWaiter>()
+    private struct PollPipelineWaiter: ~Copyable {
         let id: UUID
-        let continuation: CheckedContinuation<PollPipelineSlotAcquisition, Never>
+        let continuation: Continuation<PollPipelineSlotAcquisition, Never>
     }
     private var pollPipelineIsInFlight = false
-    private var pollPipelineWaiters = [PollPipelineWaiter]()
+    private var pollPipelineWaiters = UniqueArray<PollPipelineWaiter>()
+
+    package var pendingRequestAcquisitionCount: Int {
+        requestWaiters.count
+    }
 
     package var pendingPollPipelineAcquisitionCount: Int {
         pollPipelineWaiters.count
@@ -1102,15 +1106,15 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         message: String,
         recoveryDisposition: TorrentEngineRecoveryDisposition
     ) {
-        let waiters = requestWaiters
-        requestWaiters.removeAll(keepingCapacity: false)
-        for waiter in waiters {
+        // Remove queue ownership before resuming. Terminal waiters all receive
+        // the same result, so draining from the tail avoids shifting entries.
+        var waiters = exchange(&requestWaiters, with: .init())
+        while let waiter = waiters.popLast() {
             waiter.deadlineTask.cancel()
             waiter.continuation.resume(returning: .unavailable)
         }
-        let pollWaiters = pollPipelineWaiters
-        pollPipelineWaiters.removeAll(keepingCapacity: false)
-        for waiter in pollWaiters {
+        var pollWaiters = exchange(&pollPipelineWaiters, with: .init())
+        while let waiter = pollWaiters.popLast() {
             waiter.continuation.resume(returning: .unavailable)
         }
         state.cancel(
@@ -1153,8 +1157,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
 
         let waiterID = UUID()
         let acquisition = await withTaskCancellationHandler {
-            await withCheckedContinuation {
-                (continuation: CheckedContinuation<RequestSlotAcquisition, Never>) in
+            await withContinuation(of: RequestSlotAcquisition.self) { continuation in
                 guard !Task.isCancelled, state.isAvailable else {
                     continuation.resume(returning: .unavailable)
                     return
@@ -1174,7 +1177,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                 requestWaiters.append(RequestWaiter(
                     id: waiterID,
                     deadlineTask: deadlineTask,
-                    continuation: continuation
+                    continuation: consume continuation
                 ))
             }
         } onCancel: { [self] in
@@ -1203,7 +1206,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     }
 
     private func cancelRequestWaiter(_ id: UUID) {
-        guard let index = requestWaiters.firstIndex(where: { $0.id == id }) else {
+        guard let index = requestWaiters.indices.first(where: { requestWaiters[$0].id == id }) else {
             return
         }
         let waiter = requestWaiters.remove(at: index)
@@ -1212,7 +1215,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     }
 
     private func expireRequestWaiter(_ id: UUID) {
-        guard let index = requestWaiters.firstIndex(where: { $0.id == id }) else {
+        guard let index = requestWaiters.indices.first(where: { requestWaiters[$0].id == id }) else {
             return
         }
         let waiter = requestWaiters.remove(at: index)
@@ -1225,7 +1228,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             requestIsInFlight = false
             return
         }
-        let waiter = requestWaiters.removeFirst()
+        let waiter = requestWaiters.remove(at: 0)
         waiter.deadlineTask.cancel()
         waiter.continuation.resume(returning: .acquired)
     }
@@ -1252,15 +1255,14 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
 
         let waiterID = UUID()
         let acquisition = await withTaskCancellationHandler {
-            await withCheckedContinuation {
-                (continuation: CheckedContinuation<PollPipelineSlotAcquisition, Never>) in
+            await withContinuation(of: PollPipelineSlotAcquisition.self) { continuation in
                 guard !Task.isCancelled, state.isAvailable else {
                     continuation.resume(returning: .unavailable)
                     return
                 }
                 pollPipelineWaiters.append(PollPipelineWaiter(
                     id: waiterID,
-                    continuation: continuation
+                    continuation: consume continuation
                 ))
             }
         } onCancel: { [self] in
@@ -1284,7 +1286,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
     }
 
     private func cancelPollPipelineWaiter(_ id: UUID) {
-        guard let index = pollPipelineWaiters.firstIndex(where: { $0.id == id }) else {
+        guard let index = pollPipelineWaiters.indices.first(where: { pollPipelineWaiters[$0].id == id }) else {
             return
         }
         let waiter = pollPipelineWaiters.remove(at: index)
@@ -1297,7 +1299,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
             pollPipelineIsInFlight = false
             return
         }
-        let waiter = pollPipelineWaiters.removeFirst()
+        let waiter = pollPipelineWaiters.remove(at: 0)
         waiter.continuation.resume(returning: .acquired)
     }
 

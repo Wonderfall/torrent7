@@ -574,11 +574,12 @@ struct TorrentXPCClientSecurityTests {
         ])
     }
 
-    @Test("Cancelling a queued poll releases its pipeline waiter")
-    func cancelledQueuedPollReleasesPipelineWaiter() async throws {
+    @Test("Cancelling any queued poll preserves FIFO order for its neighbors", arguments: 0..<3)
+    func cancelledQueuedPollReleasesPipelineWaiter(cancelledIndex: Int) async throws {
         let epoch = epoch
         let firstPollBlocker = AsyncRequestBlocker()
         let pollCount = Mutex(0)
+        let revisions = Mutex<[UInt64?]>([])
         let transport = ScriptedTorrentEngineTransport { request in
             switch request.header.operation {
             case .handshake:
@@ -590,6 +591,14 @@ struct TorrentXPCClientSecurityTests {
                     epoch: epoch
                 )
             case .poll:
+                let payload = try #require(request.payload)
+                let poll = try TorrentEngineIPCJSONCodec.decode(
+                    TorrentEngineIPCPollRequest.self,
+                    from: payload,
+                    maximumBytes: request.header.operation.maximumRequestPayloadBytes,
+                    limits: request.header.operation.requestJSONLimits
+                )
+                revisions.withLock { $0.append(poll.snapshotRevision) }
                 let index = pollCount.withLock { count in
                     defer { count += 1 }
                     return count
@@ -620,40 +629,113 @@ struct TorrentXPCClientSecurityTests {
         let client = try await makeClient(transport: transport)
         let first = Task {
             try await client.poll(
-                since: nil,
+                since: 0,
                 sortedBy: .name,
                 direction: .ascending,
                 includeTrackerHosts: false
             )
         }
         await firstPollBlocker.waitUntilBlocked()
-        let cancelled = Task {
-            try await client.poll(
-                since: nil,
-                sortedBy: .name,
-                direction: .ascending,
-                includeTrackerHosts: false
-            )
+        var queued = [Task<TorrentEnginePollResult, any Error>]()
+        for index in 0..<3 {
+            queued.append(await client.enqueueForTest { client in
+                try await client.poll(
+                    since: UInt64(index + 1),
+                    sortedBy: .name,
+                    direction: .ascending,
+                    includeTrackerHosts: false
+                )
+            })
         }
-        await waitForPendingPolls(1, client: client)
+        #expect(await client.pendingPollPipelineAcquisitionCount == 3)
 
-        cancelled.cancel()
-        await waitForPendingPolls(0, client: client)
+        queued[cancelledIndex].cancel()
         await #expect(throws: CancellationError.self) {
-            try await cancelled.value
+            try await queued[cancelledIndex].value
         }
+        #expect(await client.pendingPollPipelineAcquisitionCount == 2)
 
         await firstPollBlocker.release()
         _ = try await first.value
+        for (index, task) in queued.enumerated() where index != cancelledIndex {
+            _ = try await task.value
+        }
         _ = try await client.poll(
-            since: nil,
+            since: 4,
             sortedBy: .name,
             direction: .ascending,
             includeTrackerHosts: false
         )
 
+        var expectedRevisions: [UInt64?] = [0, 1, 2, 3, 4]
+        expectedRevisions.remove(at: cancelledIndex + 1)
+        #expect(revisions.withLock { $0 } == expectedRevisions)
         #expect(client.isAvailable)
-        #expect(transport.operations == [.handshake, .poll, .poll])
+        #expect(await client.pendingPollPipelineAcquisitionCount == 0)
+        #expect(transport.operations == [.handshake, .poll, .poll, .poll, .poll])
+        #expect(transport.maximumConcurrentSends == 1)
+    }
+
+    @Test("Termination drains every request and poll waiter", arguments: QueuedWaiterTermination.allCases)
+    fileprivate func terminationDrainsWaitingQueues(termination: QueuedWaiterTermination) async throws {
+        let epoch = epoch
+        let blocker = AsyncRequestBlocker()
+        let transport = ScriptedTorrentEngineTransport { request in
+            switch request.header.operation {
+            case .handshake:
+                return try successReply(
+                    TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.0"),
+                    for: request,
+                    epoch: epoch
+                )
+            case .poll:
+                await blocker.block()
+                throw TorrentEngineClientError.invalidReply
+            default:
+                Issue.record("A queued operation reached the terminated transport")
+                throw TorrentEngineClientError.invalidReply
+            }
+        }
+        let client = try await makeClient(transport: transport)
+        let active = Task {
+            try await client.poll(since: nil, sortedBy: .name, direction: .ascending, includeTrackerHosts: false)
+        }
+        await blocker.waitUntilBlocked()
+        var requests = [Task<Void, any Error>]()
+        var polls = [Task<TorrentEnginePollResult, any Error>]()
+        for _ in 0..<3 {
+            requests.append(await client.enqueueForTest { client in
+                try await client.pause(id: torrentID)
+            })
+            polls.append(await client.enqueueForTest { client in
+                try await client.poll(since: nil, sortedBy: .name, direction: .ascending, includeTrackerHosts: false)
+            })
+        }
+        #expect(await client.pendingRequestAcquisitionCount == 3)
+        #expect(await client.pendingPollPipelineAcquisitionCount == 3)
+
+        switch termination {
+        case .disconnect:
+            await client.terminateConnection(recoveryDisposition: .terminal)
+        case .invalidReply:
+            await blocker.release()
+        }
+        for task in requests {
+            await #expect(throws: TorrentEngineClientError.self) { try await task.value }
+        }
+        for task in polls {
+            await #expect(throws: TorrentEngineClientError.self) { try await task.value }
+        }
+        #expect(await client.pendingRequestAcquisitionCount == 0)
+        #expect(await client.pendingPollPipelineAcquisitionCount == 0)
+        #expect(!client.isAvailable)
+
+        // A late in-flight completion and repeated teardown must not resume
+        // continuations that the first termination already consumed.
+        await blocker.release()
+        await #expect(throws: TorrentEngineClientError.self) { try await active.value }
+        await client.terminateConnection(recoveryDisposition: .terminal)
+        #expect(transport.operations == [.handshake, .poll])
     }
 
     @Test("Fatal dataset replies terminate and wake queued polls")
@@ -1454,8 +1536,8 @@ struct TorrentXPCClientSecurityTests {
         #expect(transport.maximumConcurrentSends == 1)
     }
 
-    @Test("Cancelling a queued call does not terminate the controller")
-    func queuedCancellationIsLocal() async throws {
+    @Test("Cancelling any queued request preserves its neighbors and sequence", arguments: 0..<3)
+    func queuedCancellationIsLocal(cancelledIndex: Int) async throws {
         let blocker = AsyncRequestBlocker()
         let epoch = epoch
         let transport = ScriptedTorrentEngineTransport { request in
@@ -1483,25 +1565,35 @@ struct TorrentXPCClientSecurityTests {
             try await client.pause(id: torrentID)
         }
         await blocker.waitUntilBlocked()
-        let queued = Task {
-            try await client.resume(id: torrentID)
-        }
-        try await Task.sleep(for: .milliseconds(50))
-        queued.cancel()
+        let queued = [
+            await client.enqueueForTest { try await $0.resume(id: torrentID) },
+            await client.enqueueForTest { try await $0.reannounce(id: torrentID) },
+            await client.enqueueForTest { try await $0.pause(id: torrentID) },
+        ]
+        #expect(await client.pendingRequestAcquisitionCount == 3)
+        queued[cancelledIndex].cancel()
 
         await #expect(throws: CancellationError.self) {
-            try await queued.value
+            try await queued[cancelledIndex].value
         }
+        #expect(await client.pendingRequestAcquisitionCount == 2)
         #expect(transport.operations == [.handshake, .pause])
 
         await blocker.release()
         try await inFlight.value
+        for (index, task) in queued.enumerated() where index != cancelledIndex {
+            try await task.value
+        }
         try await client.reannounce(id: torrentID)
 
+        var expectedQueuedOperations: [TorrentEngineIPCOperation] = [.resume, .reannounce, .pause]
+        expectedQueuedOperations.remove(at: cancelledIndex)
         #expect(client.isAvailable)
         #expect(!transport.isCancelled)
-        #expect(transport.operations == [.handshake, .pause, .reannounce])
-        #expect(transport.sequences == [1, 2, 3])
+        #expect(await client.pendingRequestAcquisitionCount == 0)
+        #expect(transport.operations == [.handshake, .pause] + expectedQueuedOperations + [.reannounce])
+        #expect(transport.sequences == [1, 2, 3, 4, 5])
+        #expect(transport.maximumConcurrentSends == 1)
     }
 
     @Test("An in-flight request delivers its drained result after observer cancellation")
@@ -1787,6 +1879,22 @@ struct TorrentXPCClientSecurityTests {
 enum InvalidReplyKind: CaseIterable, Sendable {
     case missingPayload
     case malformedPayload
+}
+
+private enum QueuedWaiterTermination: CaseIterable, Sendable {
+    case disconnect
+    case invalidReply
+}
+
+private extension TorrentXPCClient {
+    func enqueueForTest<Value: Sendable>(
+        _ operation: @escaping @Sendable (isolated TorrentXPCClient) async throws -> Value
+    ) -> Task<Value, any Error> {
+        // Start on the client's actor and run through queue admission before
+        // returning. The test retains and awaits the task; no scheduling sleep
+        // or polling is needed to establish the waiter's position in the FIFO.
+        Task.immediate { try await operation(self) }
+    }
 }
 
 @safe private final class ScriptedTorrentEngineTransport: TorrentEngineIPCTransport, Sendable {

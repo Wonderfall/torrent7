@@ -12,11 +12,18 @@ SANITIZER_PROFILE=thread Scripts/test-lifecycle.zsh
 ```
 
 The script repeats the reply-state, absolute-deadline, and shared-process
-acquisition suites 25 times using Swift Testing's `--maximum-repetitions 25
---repeat-until fail`. It stops repeating a failing test and propagates the
-failure; it does not retry until success. CI runs this after the complete Swift
-suite in normal, ASan, and TSan jobs. `--skip-build` reuses the preceding Swift
-test build; lint, repository tools, and fuzz-support checks still run.
+acquisition suites plus the IPC wait-queue tests 25 times using Swift Testing's
+`--maximum-repetitions 25 --repeat-until fail`. It stops repeating a failing test
+and propagates the failure; it does not retry until success. CI runs this after
+the complete Swift suite in normal, ASan, and TSan jobs. `--skip-build` reuses the
+preceding Swift test build; lint, repository tools, and fuzz-support checks still
+run.
+
+The wait-queue tests cancel the first, middle, and last queued request or poll,
+verify FIFO order and wire sequences for the remaining callers, and drain both
+queues on disconnect or an invalid reply. Late completion and repeated teardown
+must not resume a consumed continuation. Tests start queued operations immediately
+on the client's actor, so admission order needs no sleeps or polling.
 
 ## Release evidence
 
@@ -138,6 +145,14 @@ it cannot establish transfer-load performance.
   of transfer throughput or a full application accessibility audit.
 
 Developer ID signing and Apple notarization were not run for this change.
+
+## Wait-queue verification on 2026-09-20
+
+- The complete Swift checks passed: 610 application/infrastructure tests and
+  18 repository-tool tests.
+- All 20 selected lifecycle tests passed 25 repetitions in normal, ASan, TSan,
+  and optimized release builds, including the parameterized wait-queue cases.
+  Compiler and sanitizer checks reported no diagnostics.
 
 Sources: [SwiftPM SBOM documentation](https://github.com/swiftlang/swift-package-manager/blob/main/Sources/PackageManagerDocs/Documentation.docc/GeneratingSBOMs.md),
 [CycloneDX 1.7 schema](https://cyclonedx.org/schema/bom-1.7.schema.json),

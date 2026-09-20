@@ -48,6 +48,10 @@ and [installed tool versions](https://github.com/actions/runner-images/releases/
   under a mutex and consume them once, resuming outside the lock. Early replies,
   cancellation, deadlines, duplicate replies, and descriptor cleanup retain
   their existing ownership contracts.
+- Request-slot and poll-pipeline queues store noncopyable waiter records in
+  `UniqueArray`. Cancellation, deadlines, FIFO handoff, and terminal draining
+  remove each waiter before consuming its continuation. Queued cancellation
+  consumes no wire sequence and leaves neighboring waiters in order.
 - Polling uses asynchronous `defer` and `withTaskCancellationShield` for
   mandatory dataset cleanup. Cleanup completes before recovery and before
   releasing the polling slot. Each close retains its independent deadline;
