@@ -317,7 +317,7 @@ static_assert(
 );
 static_assert(kMaxTorrentIdentityTokenCount > static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 64U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 65U);
 static_assert(
     TORRENT_ABI_VERSION > 1,
     "Deprecated libtorrent ABIs can parse add_torrent_params.url as a raw magnet."
@@ -476,6 +476,7 @@ static_assert(sizeof(TTorrentFileSelectionRange) == 8U);
 static_assert(alignof(TTorrentFileSelectionRange) == 4U);
 static_assert(sizeof(TTorrentSessionSettings) == 48U);
 static_assert(offsetof(TTorrentSessionSettings, dht_discovery_policy) == 46U);
+static_assert(offsetof(TTorrentSessionSettings, dht_privacy_lookups) == 47U);
 static_assert(alignof(TTorrentSessionSettings) == 4U);
 static_assert(sizeof(TTorrentNetworkStatus) == 656U);
 static_assert(alignof(TTorrentNetworkStatus) == 4U);

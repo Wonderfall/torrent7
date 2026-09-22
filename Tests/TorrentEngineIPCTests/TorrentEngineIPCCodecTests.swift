@@ -539,7 +539,7 @@ struct TorrentEngineIPCEnvelopeTests {
 
     @Test("Stable dataset and hint operation numbers")
     func stableOperationNumbers() {
-        #expect(TorrentEngineIPCProtocol.version == 13)
+        #expect(TorrentEngineIPCProtocol.version == 14)
         #expect(TorrentEngineIPCOperation(rawValue: 7) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 10) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 11) == nil)
@@ -1057,6 +1057,64 @@ struct TorrentEngineIPCJSONTests {
             maximumBytes: 4_096,
             limits: testJSONLimits
         ) == value)
+    }
+
+    @Test("Settings IPC preserves independent privacy choices", arguments: [false, true], [false, true])
+    func settingsPrivacyRoundTrip(anonymousMode: Bool, dhtPrivacyLookups: Bool) throws {
+        var settings = TorrentSettings()
+        settings.anonymousMode = anonymousMode
+        settings.dhtPrivacyLookups = dhtPrivacyLookups
+        settings.requireNetworkInterface = true
+        settings.showOnlyVPNInterfaces = true
+        settings.requiredNetworkInterfaceName = "utun4"
+        let value = TorrentEngineIPCApplySettingsRequest(
+            settings: settings,
+            networkBinding: .unbound(networkBlocked: true)
+        )
+        let operation = TorrentEngineIPCOperation.applySettings
+        let data = try TorrentEngineIPCJSONCodec.encode(
+            value,
+            maximumBytes: operation.maximumRequestPayloadBytes,
+            limits: operation.requestJSONLimits
+        )
+
+        #expect(try TorrentEngineIPCJSONCodec.decode(
+            TorrentEngineIPCApplySettingsRequest.self,
+            from: data,
+            maximumBytes: operation.maximumRequestPayloadBytes,
+            limits: operation.requestJSONLimits
+        ) == value)
+    }
+
+    @Test("Settings IPC rejects malformed DHT privacy choices", arguments: [
+        "null", "0", "1", #""true""#, "{}"
+    ])
+    func malformedDHTPrivacyChoicesAreRejected(replacement: String) throws {
+        let operation = TorrentEngineIPCOperation.applySettings
+        let data = try TorrentEngineIPCJSONCodec.encode(
+            TorrentEngineIPCApplySettingsRequest(
+                settings: TorrentSettings(),
+                networkBinding: .unbound(networkBlocked: true)
+            ),
+            maximumBytes: operation.maximumRequestPayloadBytes,
+            limits: operation.requestJSONLimits
+        )
+        let encoded = String(decoding: data, as: UTF8.self)
+        let field = #""dhtPrivacyLookups":true"#
+        try #require(encoded.contains(field))
+        let malformed = Data(encoded.replacingOccurrences(
+            of: field,
+            with: #""dhtPrivacyLookups":"# + replacement
+        ).utf8)
+
+        expectIPCError(.jsonDecodingFailed) {
+            try TorrentEngineIPCJSONCodec.decode(
+                TorrentEngineIPCApplySettingsRequest.self,
+                from: malformed,
+                maximumBytes: operation.maximumRequestPayloadBytes,
+                limits: operation.requestJSONLimits
+            )
+        }
     }
 
     @Test("Add responses use a JSON container instead of a scalar root")

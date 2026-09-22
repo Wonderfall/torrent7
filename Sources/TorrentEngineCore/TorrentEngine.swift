@@ -678,11 +678,12 @@ private struct AddedTorrentIdentity: Sendable {
             bridgeSettings.accept_incoming_connections = settings.acceptIncomingConnections.bridgeFlag
             bridgeSettings.enable_port_forwarding = settings.effectiveUsePortForwarding.bridgeFlag
             bridgeSettings.enable_dht = settings.enableDHTNetwork.bridgeFlag
+            bridgeSettings.dht_privacy_lookups = settings.dhtPrivacyLookups.bridgeFlag
             bridgeSettings.dht_read_only = settings.reduceDHTContribution.bridgeFlag
             bridgeSettings.dht_discovery_policy = UInt8(settings.dhtDiscoveryPolicy.rawValue)
             bridgeSettings.enable_lsd = settings.effectiveEnableLocalServiceDiscovery.bridgeFlag
             bridgeSettings.encryption_policy = settings.libtorrentEncryptionPolicy
-            bridgeSettings.anonymous_mode = settings.effectiveAnonymousMode.bridgeFlag
+            bridgeSettings.anonymous_mode = settings.anonymousMode.bridgeFlag
             bridgeSettings.network_blocked = networkBlocked.bridgeFlag
             return unsafe TorrentClientApplySettings(
                 client,

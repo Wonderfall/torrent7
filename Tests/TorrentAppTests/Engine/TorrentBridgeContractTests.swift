@@ -263,7 +263,7 @@ private func bridgeString(_ buffer: [CChar]) -> String {
 struct TorrentBridgeContractTests {
     @Test("Pins bridge ABI version, limits, states, and native event kinds")
     func pinsBridgeConstants() {
-        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 64)
+        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 65)
         #expect(UInt32(TTORRENT_MAGNET_IMPORT_SCHEMA_VERSION) == 1)
         #expect(UInt32(TTORRENT_METAINFO_CAPSULE_MAGIC) == 0x494d_3754)
         #expect(UInt16(TTORRENT_METAINFO_CAPSULE_SCHEMA_VERSION) == 1)
@@ -462,6 +462,7 @@ struct TorrentBridgeContractTests {
         #expect(MemoryLayout<TTorrentSessionSettings>.size == 48)
         #expect(MemoryLayout<TTorrentSessionSettings>.alignment == 4)
         #expect(MemoryLayout<TTorrentSessionSettings>.offset(of: \.dht_discovery_policy) == 46)
+        #expect(MemoryLayout<TTorrentSessionSettings>.offset(of: \.dht_privacy_lookups) == 47)
         #expect(MemoryLayout<TTorrentNetworkStatus>.size == 656)
         #expect(MemoryLayout<TTorrentNetworkStatus>.alignment == 4)
         #expect(MemoryLayout<TTorrentNetworkStatus>.offset(of: \.dht_routing_nodes) == 648)

@@ -16,6 +16,7 @@ struct TorrentSettingsView: View {
     @State private var isShowingDHTNetworkInfo = false
     @State private var isShowingDHTEligibilityInfo = false
     @State private var isShowingDHTDiscoveryPolicyInfo = false
+    @State private var isShowingDHTPrivacyLookupsInfo = false
     @State private var isShowingDHTContributionInfo = false
     @State private var isShowingPeerExchangeInfo = false
     @State private var isShowingLocalServiceDiscoveryInfo = false
@@ -392,6 +393,7 @@ struct TorrentSettingsView: View {
             dhtNetworkRow
             dhtEligibilityRow
             dhtDiscoveryPolicyRow
+            dhtPrivacyLookupsRow
             dhtContributionRow
             dhtDiagnosticsRow
         }
@@ -603,6 +605,50 @@ struct TorrentSettingsView: View {
         .disabled(!state.settings.enableDHTNetwork)
         .help(state.settings.enableDHTNetwork
               ? "Choose whether DHT runs with trackers or only after every usable tracker fails."
+              : "Enable the DHT network first.")
+    }
+
+    private var dhtPrivacyLookupsRow: some View {
+        HStack {
+            HStack(spacing: 5) {
+                disabledAwareLabel(
+                    "DHT privacy lookups",
+                    isDisabled: !state.settings.enableDHTNetwork
+                )
+
+                Button {
+                    isShowingDHTPrivacyLookupsInfo = true
+                } label: {
+                    Image(systemName: "info.circle")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("About DHT privacy lookups")
+                .accessibilityLabel("About DHT privacy lookups")
+                .popover(isPresented: $isShowingDHTPrivacyLookupsInfo) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("DHT privacy lookups")
+                            .font(.headline)
+
+                        Text("Reduces the information exposed during DHT lookups, but can slow down peer discovery.")
+
+                        Text("It does not hide your IP address or make DHT anonymous.")
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(16)
+                    .frame(width: 340, alignment: .leading)
+                }
+            }
+
+            Spacer()
+
+            Toggle("", isOn: setting(\.dhtPrivacyLookups))
+                .labelsHidden()
+                .disabled(!state.settings.enableDHTNetwork)
+                .accessibilityLabel("DHT privacy lookups")
+        }
+        .help(state.settings.enableDHTNetwork
+              ? "Reduce the information exposed during DHT lookups; peer discovery may be slower."
               : "Enable the DHT network first.")
     }
 
@@ -881,7 +927,7 @@ struct TorrentSettingsView: View {
                         Text("Use VPN interfaces only")
                             .font(.headline)
 
-                        Text("Transfers pause unless a VPN-backed interface is selected and available. This enforces reduced client identifiability and disables UPnP/NAT-PMP and local peer discovery.")
+                        Text("Transfers pause unless a VPN-backed interface is selected and available. This disables UPnP/NAT-PMP and local peer discovery.")
 
                         Text("It only constrains this app. Use your VPN kill switch or firewall for system-wide leak protection.")
                             .foregroundStyle(.secondary)
@@ -932,20 +978,11 @@ struct TorrentSettingsView: View {
 
             Spacer()
 
-            Toggle(
-                "",
-                isOn: enforcedOnToggle(
-                    isEnforced: state.settings.showOnlyVPNInterfaces,
-                    keyPath: \.anonymousMode
-                )
-            )
+            Toggle("", isOn: setting(\.anonymousMode))
                 .labelsHidden()
-                .disabled(state.settings.showOnlyVPNInterfaces)
                 .accessibilityLabel("Reduce client identifiability")
         }
-        .help(state.settings.showOnlyVPNInterfaces
-              ? "Enforced while using VPN interfaces only."
-              : "Reduce client and version details sent by libtorrent.")
+        .help("Reduce client and version details sent by libtorrent.")
     }
 
     private func setting<Value>(_ keyPath: WritableKeyPath<TorrentSettings, Value>) -> Binding<Value> {
@@ -966,22 +1003,6 @@ struct TorrentSettingsView: View {
             isUnavailable ? false : state.settings[keyPath: keyPath]
         } set: { value in
             guard !isUnavailable else {
-                return
-            }
-            var settings = state.settings
-            settings[keyPath: keyPath] = value
-            store.updateSettings(settings)
-        }
-    }
-
-    private func enforcedOnToggle(
-        isEnforced: Bool,
-        keyPath: WritableKeyPath<TorrentSettings, Bool>
-    ) -> Binding<Bool> {
-        Binding {
-            isEnforced ? true : state.settings[keyPath: keyPath]
-        } set: { value in
-            guard !isEnforced else {
                 return
             }
             var settings = state.settings

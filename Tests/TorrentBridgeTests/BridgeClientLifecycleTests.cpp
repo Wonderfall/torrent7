@@ -223,6 +223,7 @@ private:
     settings.active_seeds = 5;
     settings.active_limit = 500;
     settings.dht_discovery_policy = TTORRENT_DHT_DISCOVERY_ALONGSIDE_TRACKERS;
+    settings.dht_privacy_lookups = bridge_bool(true);
     return settings;
 }
 
@@ -3979,6 +3980,7 @@ TEST_CASE("privacy-sensitive tracker and DHT settings are explicit")
     TTorrentSessionSettings settings{};
     settings.network_blocked = bridge_bool(false);
     settings.enable_dht = bridge_bool(true);
+    settings.dht_privacy_lookups = bridge_bool(true);
     settings.anonymous_mode = bridge_bool(false);
     settings.active_downloads = 3;
     settings.active_seeds = 5;
@@ -4011,53 +4013,87 @@ TEST_CASE("privacy-sensitive tracker and DHT settings are explicit")
     }));
 }
 
-TEST_CASE("DHT privacy lookups follow effective DHT availability")
+TEST_CASE("DHT privacy lookups honor explicit choices and effective DHT availability")
 {
     bridge_tests::TemporaryDirectory temporary_directory;
     TTorrentClient client((temporary_directory.path() / "State").string());
     client.set_session_shutdown_asynchronous(false);
 
-    TTorrentSessionSettings settings{};
-    settings.network_blocked = bridge_bool(false);
-    settings.enable_dht = bridge_bool(true);
-    settings.anonymous_mode = bridge_bool(false);
-    settings.active_downloads = 3;
-    settings.active_seeds = 5;
-    settings.active_limit = 500;
+    TTorrentSessionSettings settings = unblocked_session_settings();
     char error[512]{};
 
-    REQUIRE(apply_settings(
-        &client,
-        settings,
-        error,
-        static_cast<int32_t>(sizeof(error))
-    ) == 0);
-    CHECK(eventually([&] {
-        return client.session.get_settings().get_bool(lt::settings_pack::dht_privacy_lookups);
-    }));
+    for (bool const anonymous_mode : {false, true}) {
+        for (bool const privacy_lookups : {false, true}) {
+            CAPTURE(anonymous_mode);
+            CAPTURE(privacy_lookups);
+            settings.anonymous_mode = bridge_bool(anonymous_mode);
+            settings.dht_privacy_lookups = bridge_bool(privacy_lookups);
+            // Restore availability after disabling DHT and after blocking the
+            // network, exercising both transitions without changing the choice.
+            for (auto const &[enable_dht, network_blocked] : std::array{
+                    std::pair{true, false},
+                    std::pair{false, false},
+                    std::pair{true, false},
+                    std::pair{true, true},
+                    std::pair{false, true},
+                    std::pair{true, false},
+                }) {
+                CAPTURE(enable_dht);
+                CAPTURE(network_blocked);
+                settings.enable_dht = bridge_bool(enable_dht);
+                settings.network_blocked = bridge_bool(network_blocked);
+                REQUIRE(apply_settings(
+                    &client,
+                    settings,
+                    error,
+                    static_cast<int32_t>(sizeof(error))
+                ) == 0);
+                lt::settings_pack const current = client.session.get_settings();
+                CHECK(current.get_bool(lt::settings_pack::anonymous_mode) == anonymous_mode);
+                CHECK(current.get_bool(lt::settings_pack::enable_dht) == (enable_dht && !network_blocked));
+                CHECK(current.get_bool(lt::settings_pack::dht_privacy_lookups)
+                    == (privacy_lookups && enable_dht && !network_blocked));
+            }
+        }
+    }
+}
 
+TEST_CASE("invalid DHT privacy lookup flags reject settings before mutation")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    TTorrentClient client((temporary_directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+
+    TTorrentSessionSettings settings = unblocked_session_settings();
     settings.enable_dht = bridge_bool(false);
+    settings.anonymous_mode = bridge_bool(true);
+    char error[512]{};
     REQUIRE(apply_settings(
         &client,
         settings,
         error,
         static_cast<int32_t>(sizeof(error))
     ) == 0);
-    CHECK(eventually([&] {
-        return !client.session.get_settings().get_bool(lt::settings_pack::dht_privacy_lookups);
-    }));
 
-    settings.enable_dht = bridge_bool(true);
-    settings.network_blocked = bridge_bool(true);
-    REQUIRE(apply_settings(
-        &client,
-        settings,
-        error,
-        static_cast<int32_t>(sizeof(error))
-    ) == 0);
-    CHECK(eventually([&] {
-        return !client.session.get_settings().get_bool(lt::settings_pack::dht_privacy_lookups);
-    }));
+    for (std::uint8_t const invalid : {std::uint8_t{2}, std::uint8_t{255}}) {
+        CAPTURE(invalid);
+        settings.dht_privacy_lookups = invalid;
+        settings.enable_dht = bridge_bool(true);
+        settings.anonymous_mode = bridge_bool(false);
+        settings.download_rate_limit = 12345;
+        CHECK(apply_settings(
+            &client,
+            settings,
+            error,
+            static_cast<int32_t>(sizeof(error))
+        ) == 1);
+        CHECK(std::string(error) == "Invalid DHT privacy lookup setting.");
+        lt::settings_pack const current = client.session.get_settings();
+        CHECK_FALSE(current.get_bool(lt::settings_pack::enable_dht));
+        CHECK_FALSE(current.get_bool(lt::settings_pack::dht_privacy_lookups));
+        CHECK(current.get_bool(lt::settings_pack::anonymous_mode));
+        CHECK(current.get_int(lt::settings_pack::download_rate_limit) == 0);
+    }
 }
 
 TEST_CASE("network diagnostics report native DHT status and routing nodes")

@@ -4730,6 +4730,10 @@ extern "C" int32_t TorrentClientApplySettings(
         bool const accept_incoming_connections = bridge_bool(requested.accept_incoming_connections);
         bool const enable_port_forwarding = bridge_bool(requested.enable_port_forwarding);
         bool const enable_dht = bridge_bool(requested.enable_dht);
+        if (requested.dht_privacy_lookups > 1U) {
+            return bridge_error(1, "Invalid DHT privacy lookup setting.");
+        }
+        bool const dht_privacy_lookups = bridge_bool(requested.dht_privacy_lookups);
         bool const dht_read_only = bridge_bool(requested.dht_read_only);
         if (!is_valid_dht_discovery_policy(requested.dht_discovery_policy)) {
             return bridge_error(1, "Invalid DHT discovery policy.");
@@ -4802,7 +4806,7 @@ extern "C" int32_t TorrentClientApplySettings(
         settings.set_bool(lt::settings_pack::enable_outgoing_utp, !network_blocked);
         settings.set_bool(lt::settings_pack::enable_incoming_utp, !network_blocked && accept_incoming_connections);
         settings.set_bool(lt::settings_pack::anonymous_mode, anonymous_mode);
-        settings.set_bool(lt::settings_pack::dht_privacy_lookups, !network_blocked && enable_dht);
+        settings.set_bool(lt::settings_pack::dht_privacy_lookups, !network_blocked && enable_dht && dht_privacy_lookups);
         settings.set_bool(lt::settings_pack::announce_to_all_trackers, false);
         settings.set_bool(lt::settings_pack::announce_to_all_tiers, false);
         settings.set_bool(lt::settings_pack::prefer_udp_trackers, false);
@@ -4834,7 +4838,7 @@ extern "C" int32_t TorrentClientApplySettings(
                 .enable_incoming_tcp = !network_blocked && accept_incoming_connections,
                 .enable_outgoing_utp = !network_blocked,
                 .enable_incoming_utp = !network_blocked && accept_incoming_connections,
-                .dht_privacy_lookups = !network_blocked && enable_dht,
+                .dht_privacy_lookups = !network_blocked && enable_dht && dht_privacy_lookups,
                 .dht_read_only = dht_read_only,
                 .use_dht_as_fallback = use_dht_as_fallback,
                 .session_paused = expected_session_paused,

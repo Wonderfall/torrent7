@@ -192,7 +192,7 @@ inline constexpr uint32_t TTORRENT_DHT_FLAG_IMPLIED_PORT = 1U << 4U;
 inline constexpr uint32_t TTORRENT_DHT_FLAG_WANT_SPECIFIED = 1U << 5U;
 inline constexpr uint32_t TTORRENT_DHT_FLAG_WANT_IPV4 = 1U << 6U;
 inline constexpr uint32_t TTORRENT_DHT_FLAG_WANT_IPV6 = 1U << 7U;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 64;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 65;
 namespace torrent_bridge::internal {
 struct TTorrentClient;
 }
@@ -366,7 +366,7 @@ enum {
     TTORRENT_DHT_FLAG_WANT_SPECIFIED = 1U << 5U,
     TTORRENT_DHT_FLAG_WANT_IPV4 = 1U << 6U,
     TTORRENT_DHT_FLAG_WANT_IPV6 = 1U << 7U,
-    TTORRENT_BRIDGE_ABI_VERSION = 64
+    TTORRENT_BRIDGE_ABI_VERSION = 65
 };
 #endif
 
@@ -552,6 +552,8 @@ typedef struct TTorrentSessionSettings {
     uint8_t anonymous_mode;
     uint8_t network_blocked;
     uint8_t dht_discovery_policy;
+    // Must be 0 or 1. Effective only while DHT and networking are enabled.
+    uint8_t dht_privacy_lookups;
 } TTorrentSessionSettings;
 
 typedef struct TTorrentNetworkStatus {

@@ -2837,7 +2837,6 @@ struct TorrentStoreIntegrationTests {
         #expect(harness.store.settings.anonymousMode == false)
         #expect(harness.store.settings.effectiveUsePortForwarding == false)
         #expect(harness.store.settings.effectiveEnableLocalServiceDiscovery == false)
-        #expect(harness.store.settings.effectiveAnonymousMode == true)
 
         harness.store.setShowOnlyVPNInterfaces(false)
 
@@ -2846,7 +2845,35 @@ struct TorrentStoreIntegrationTests {
         #expect(harness.store.settings.anonymousMode == false)
         #expect(harness.store.settings.effectiveUsePortForwarding == true)
         #expect(harness.store.settings.effectiveEnableLocalServiceDiscovery == true)
-        #expect(harness.store.settings.effectiveAnonymousMode == false)
+    }
+
+    @Test("VPN-only mode applies explicit privacy choices", arguments: [false, true])
+    func vpnOnlyModeAppliesExplicitPrivacyChoices(enabled: Bool) async throws {
+        var settings = TorrentSettings()
+        settings.requireNetworkInterface = true
+        settings.showOnlyVPNInterfaces = true
+        settings.requiredNetworkInterfaceName = "utun4"
+        let interface = NetworkInterfaceOption(
+            name: "utun4",
+            displayName: "VPN",
+            fingerprint: "vpn",
+            vpnServiceID: "vpn-service",
+            vpnServiceName: "VPN",
+            isLikelyVPN: true
+        )
+        let harness = makeStoreHarness(settings: settings, networkInterfaces: [interface])
+        await harness.store.saveAll()
+
+        settings.anonymousMode = enabled
+        settings.dhtPrivacyLookups = !enabled
+        harness.store.updateSettings(settings)
+        await harness.store.saveAll()
+
+        let applied = try #require(await harness.engine.appliedSettings.last)
+        #expect(applied.settings.showOnlyVPNInterfaces == true)
+        #expect(applied.settings.anonymousMode == enabled)
+        #expect(applied.settings.dhtPrivacyLookups == !enabled)
+        #expect(applied.networkBlocked == false)
     }
 
     @Test("User operation queue applies bounded backpressure")

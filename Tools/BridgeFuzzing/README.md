@@ -33,7 +33,8 @@ tooling self-contained.
 - `bridge_session_api`: runs short mutated operation sequences across add,
   preview, file priorities, settings, snapshots, detail batches, torrent
   options, queue movement, piece maps, wake/change, pause/resume/remove, save,
-  network, health, payload-broker lifecycle, and alert APIs.
+  network, health, payload-broker lifecycle, and alert APIs. Settings seeds cover
+  independent anonymous-mode and DHT privacy choices and invalid privacy flags.
 - `bridge_payload_broker`: drives the production native payload-provider
   adapter with valid and hostile callback tables, regular files in both access
   modes, directories, pipes, device files, closed descriptors, descriptors

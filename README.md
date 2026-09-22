@@ -217,7 +217,10 @@ Torrent 7 treats hardening as part of the product, not a release afterthought.
   is the only local-peer discovery path. Outbound-only sessions still use DHT peer
   discovery without advertising an unreachable peer endpoint. Eligible public
   torrents query DHT alongside trackers by default; an optional fallback policy
-  waits until every usable tracker endpoint has failed or timed out.
+  waits until every usable tracker endpoint has failed or timed out. Reduce client
+  identifiability and DHT privacy lookups are independent settings, including in
+  VPN-only mode. DHT privacy lookups can be changed under Settings → Discovery;
+  disabling the DHT network preserves that preference.
 
 Torrent 7 can bind libtorrent connections to a selected interface and can use VPN
 interfaces only, but hostname lookup still uses macOS system DNS. This is app-level

@@ -106,6 +106,7 @@ package struct TorrentSettings: Codable, Equatable, Sendable {
     package var enableDHTNetwork = true
     package var useDHTByDefault = true
     package var dhtDiscoveryPolicy = TorrentDHTDiscoveryPolicy.alongsideTrackers
+    package var dhtPrivacyLookups = true
     package var reduceDHTContribution = false
     package var enablePeerExchangePlugin = false
     package var usePeerExchangeByDefault = false
@@ -185,10 +186,6 @@ package struct TorrentSettings: Codable, Equatable, Sendable {
 
     package var effectiveUsePeerExchangeByDefault: Bool {
         enablePeerExchangePlugin && usePeerExchangeByDefault
-    }
-
-    package var effectiveAnonymousMode: Bool {
-        showOnlyVPNInterfaces || anonymousMode
     }
 
     package var libtorrentRequiredNetworkInterfaceName: String {

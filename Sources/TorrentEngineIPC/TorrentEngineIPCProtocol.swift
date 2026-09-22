@@ -3,7 +3,7 @@ import TorrentEngineModel
 package import XPC
 
 package enum TorrentEngineIPCProtocol {
-    package static let version: UInt64 = 13
+    package static let version: UInt64 = 14
 }
 
 package enum TorrentEngineIPCLimits {

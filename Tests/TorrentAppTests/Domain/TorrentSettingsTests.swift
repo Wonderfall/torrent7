@@ -176,7 +176,6 @@ struct TorrentSettingsTests {
         #expect(clamped.effectiveUsePortForwarding == false)
         #expect(clamped.effectiveEnableLocalServiceDiscovery == false)
         #expect(clamped.effectiveUseLocalServiceDiscoveryByDefault == false)
-        #expect(clamped.effectiveAnonymousMode == true)
         #expect(clamped.libtorrentRequiredNetworkInterfaceName == "utun4")
     }
 
@@ -185,7 +184,31 @@ struct TorrentSettingsTests {
         let settings = TorrentSettings()
 
         #expect(settings.anonymousMode == true)
-        #expect(settings.effectiveAnonymousMode == true)
+    }
+
+    @Test("Privacy preferences stay independent of VPN-only mode", arguments: [false, true])
+    func privacyPreferencesAreIndependentOfVPNOnlyMode(enabled: Bool) throws {
+        try withIsolatedDefaults { defaults in
+            var settings = TorrentSettings()
+            settings.requireNetworkInterface = true
+            settings.showOnlyVPNInterfaces = true
+            settings.requiredNetworkInterfaceName = "utun4"
+            settings.anonymousMode = enabled
+            settings.dhtPrivacyLookups = enabled
+            settings.enableDHTNetwork = false
+
+            settings.save(defaults: defaults)
+            let loaded = try TorrentSettings.load(defaults: defaults)
+
+            #expect(loaded == settings)
+            #expect(loaded.anonymousMode == enabled)
+            #expect(loaded.dhtPrivacyLookups == enabled)
+        }
+    }
+
+    @Test("DHT privacy lookups are enabled by default")
+    func dhtPrivacyLookupsAreEnabledByDefault() {
+        #expect(TorrentSettings().dhtPrivacyLookups == true)
     }
 
     @Test("Local Service Discovery is fully off by default")
@@ -326,7 +349,6 @@ struct TorrentSettingsTests {
         #expect(settings.httpsTrackerPolicy == .require)
         #expect(settings.httpsWebSeedPolicy == .require)
         #expect(settings.anonymousMode == false)
-        #expect(settings.effectiveAnonymousMode == false)
 
         settings.usePeerExchangeByDefault = true
         #expect(settings.effectiveUsePeerExchangeByDefault == false)

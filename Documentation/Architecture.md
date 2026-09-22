@@ -61,8 +61,15 @@ Only an absent settings record uses first-launch defaults. An existing record
 must contain every field in the current format, with valid types and canonical
 values. Missing or null fields, obsolete partial records, inconsistent VPN
 policy, and other corruption require explicit recovery; loading never repairs
-or overwrites them. Current records written by the app remain valid without
-migration.
+or overwrites them. The current format requires the explicit `dhtPrivacyLookups`
+Boolean; records predating that setting also require recovery. There is no
+automatic settings migration.
+
+Anonymous mode and DHT privacy lookups are independent, enabled-by-default
+preferences. VPN-only mode constrains interface selection and disables local
+discovery and port forwarding; it does not override either privacy preference.
+The bridge applies DHT privacy lookups only when both DHT and networking are
+enabled, while Swift retains the saved choice across those availability changes.
 
 During settings loading or recovery, every engine settings application keeps
 networking blocked, including after engine replacement. Ordinary settings edits
@@ -87,7 +94,7 @@ completed shared handle remains available to later callers. One 305-second
 connection deadline covers discovery, launch, the command handshake, and all
 retry attempts.
 
-Command IPC version 13 uses typed, operation-specific envelopes with bounded
+Command IPC version 14 uses typed, operation-specific envelopes with bounded
 JSON and raw attachments. Requests carry an engine epoch, monotonic sequence,
 and replay identifier. The implementation bounds queue depth, nesting, value
 count, strings, raw torrent bytes, piece-map data, paged datasets, and response
