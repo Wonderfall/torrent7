@@ -522,6 +522,7 @@ void TTorrentClient::load_resume_data()
 
     std::uint64_t unclaimed_resume_count = 0U;
     std::uint64_t duplicate_identity_resume_count = 0U;
+    std::uint64_t invalid_https_policy_resume_count = 0U;
     std::size_t restore_add_attempt_count = 0U;
     auto const record_unclaimed_resume = [&unclaimed_resume_count] {
         if (unclaimed_resume_count != std::numeric_limits<std::uint64_t>::max()) {
@@ -607,6 +608,15 @@ void TTorrentClient::load_resume_data()
         if (canonical_id.empty()) {
             remove_resume_file_locked(name);
             sync_resume_directory_quietly();
+            continue;
+        }
+        auto const persisted_https_policy = https_source_policy_from_resume_data(*buffer);
+        if (!persisted_https_policy) {
+            if (invalid_https_policy_resume_count != std::numeric_limits<std::uint64_t>::max()) {
+                ++invalid_https_policy_resume_count;
+            }
+            // Do not activate storage, publish an identity, or rewrite a policy
+            // whose meaning cannot be established. Recovery must be explicit.
             continue;
         }
         {
@@ -718,10 +728,8 @@ void TTorrentClient::load_resume_data()
             sync_resume_directory_quietly();
             continue;
         }
-        HTTPSPolicy const persisted_https_tracker_policy =
-            https_tracker_policy_from_resume_data(*buffer);
-        HTTPSPolicy const persisted_https_web_seed_policy =
-            https_web_seed_policy_from_resume_data(*buffer);
+        HTTPSPolicy const persisted_https_tracker_policy = persisted_https_policy->trackers;
+        HTTPSPolicy const persisted_https_web_seed_policy = persisted_https_policy->web_seeds;
         int32_t const queue_priority =
             queue_priority_from_resume_data(*buffer);
         int32_t const queue_rank =
@@ -882,6 +890,14 @@ void TTorrentClient::load_resume_data()
             "Skipped restoring " + std::to_string(duplicate_identity_resume_count)
             + " saved resume " + noun
             + " because its canonical Swift identity was duplicated. Resume data was preserved."
+        )));
+    }
+    if (invalid_https_policy_resume_count != 0U) {
+        std::string const noun = invalid_https_policy_resume_count == 1U ? "torrent" : "torrents";
+        static_cast<void>(publish_changes_locked(queue_alert_error(
+            "Skipped restoring " + std::to_string(invalid_https_policy_resume_count) + " saved " + noun
+            + " because the saved HTTPS policy was invalid. Resume data was preserved."
+              " Explicit recovery is required; re-add the affected torrents with reviewed HTTPS policies."
         )));
     }
 }

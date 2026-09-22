@@ -27,7 +27,9 @@ tooling self-contained.
   commit under coverage guidance on both sides of the ABI.
 - `bridge_resume_startup`: creates a temporary state directory with mutated
   `.fastresume` bytes, then exercises blocking and bounded asynchronous client
-  destruction.
+  destruction. Valid seeds use the nonzero v1 hash matching the fixture filename
+  so mutation reaches policy restoration. The corpus includes full-width policy
+  overflow, wrong types, duplicates and retired encodings that require recovery.
 - `bridge_session_api`: runs short mutated operation sequences across add,
   preview, file priorities, settings, snapshots, detail batches, torrent
   options, queue movement, piece maps, wake/change, pause/resume/remove, save,

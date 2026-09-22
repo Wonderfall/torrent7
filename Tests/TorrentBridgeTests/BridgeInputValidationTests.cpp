@@ -4217,24 +4217,131 @@ TEST_CASE("resume encoding uses captured source policy snapshot")
     std::vector<char> const encoded = encoded_resume_data(params, snapshot);
 
     CHECK(canonical_id_from_resume_data(encoded) == "t:0123456789abcdef0123456789abcdef");
-    CHECK(https_tracker_policy_from_resume_data(encoded) == HTTPSPolicy::original);
-    CHECK(https_web_seed_policy_from_resume_data(encoded) == HTTPSPolicy::require);
+    auto const https_policy = https_source_policy_from_resume_data(encoded);
+    REQUIRE(https_policy);
+    CHECK(https_policy->trackers == HTTPSPolicy::original);
+    CHECK(https_policy->web_seeds == HTTPSPolicy::require);
     CHECK(disable_dht_from_resume_data(encoded));
     CHECK(app_disabled_dht_from_resume_data(encoded));
     CHECK(disable_lsd_from_resume_data(encoded));
     CHECK(app_disabled_lsd_from_resume_data(encoded));
 }
 
-TEST_CASE("legacy HTTPS resume booleans migrate to explicit policies")
+TEST_CASE("resume HTTPS policies accept exact enum values and omitted Inherit")
 {
-    lt::entry legacy;
-    legacy.dict().insert_or_assign(std::string(kAllowNonHTTPSTrackersResumeKey), lt::entry(1));
-    legacy.dict().insert_or_assign(std::string(kRequireHTTPSWebSeedsResumeKey), lt::entry(1));
-    std::vector<char> encoded;
-    lt::bencode(std::back_inserter(encoded), legacy);
+    for (HTTPSPolicy const trackers : {HTTPSPolicy::inherit, HTTPSPolicy::original, HTTPSPolicy::prefer, HTTPSPolicy::require}) {
+        for (HTTPSPolicy const web_seeds : {HTTPSPolicy::inherit, HTTPSPolicy::original, HTTPSPolicy::require}) {
+            CAPTURE(trackers);
+            CAPTURE(web_seeds);
+            TorrentIdentity identity;
+            identity.canonical_id = bridge_tests::canonical_id('a');
+            identity.https_tracker_policy = trackers;
+            identity.https_web_seed_policy = web_seeds;
+            auto const encoded = encoded_resume_data(bridge_tests::add_params_with_hashes(), &identity);
+            auto const decoded = https_source_policy_from_resume_data(encoded);
+            REQUIRE(decoded);
+            CHECK(decoded->trackers == trackers);
+            CHECK(decoded->web_seeds == web_seeds);
+        }
+    }
+    std::string explicit_inherit = "d";
+    append_bencoded_string(explicit_inherit, kHTTPSTrackerPolicyResumeKey);
+    explicit_inherit += "i0e";
+    append_bencoded_string(explicit_inherit, kHTTPSWebSeedPolicyResumeKey);
+    explicit_inherit += "i0ee";
+    auto const decoded = https_source_policy_from_resume_data(
+        std::vector<char>(explicit_inherit.begin(), explicit_inherit.end())
+    );
+    REQUIRE(decoded);
+    CHECK(decoded->trackers == HTTPSPolicy::inherit);
+    CHECK(decoded->web_seeds == HTTPSPolicy::inherit);
+}
 
-    CHECK(https_tracker_policy_from_resume_data(encoded) == HTTPSPolicy::original);
-    CHECK(https_web_seed_policy_from_resume_data(encoded) == HTTPSPolicy::require);
+TEST_CASE("resume HTTPS policies reject full-width invalid integers and wrong field types")
+{
+    for (std::string_view const key : {kHTTPSTrackerPolicyResumeKey, kHTTPSWebSeedPolicyResumeKey}) {
+        for (std::string_view const value : {
+            "i-1e", "i4e", "i255e", "i256e", "i2147483648e",
+            "i4294967296e", "i4294967297e", "i4294967298e", "i4294967299e",
+            "i-4294967295e", "i9223372036854775807e", "i-9223372036854775808e",
+            "i9223372036854775808e", "i-9223372036854775809e",
+            "i00e", "i01e", "i-0e", "i+1e", "i 1e", "i1 e",
+            "0:", "1:3", "le", "de", "li3ee", "d1:ai3ee"
+        }) {
+            CAPTURE(key);
+            CAPTURE(value);
+            std::string encoded = "d";
+            append_bencoded_string(encoded, key);
+            encoded.append(value);
+            encoded += 'e';
+            CHECK_FALSE(https_source_policy_from_resume_data(std::vector<char>(encoded.begin(), encoded.end())));
+        }
+    }
+    std::string web_seed_prefer = "d";
+    append_bencoded_string(web_seed_prefer, kHTTPSWebSeedPolicyResumeKey);
+    web_seed_prefer += "i2ee";
+    CHECK_FALSE(https_source_policy_from_resume_data(std::vector<char>(web_seed_prefer.begin(), web_seed_prefer.end())));
+    for (std::string_view const malformed : {"", "d", "le", "i3e", "1:x"}) {
+        CHECK_FALSE(https_source_policy_from_resume_data(std::vector<char>(malformed.begin(), malformed.end())));
+    }
+}
+
+TEST_CASE("resume HTTPS policy decoding bounds record size")
+{
+    std::vector<char> encoded(static_cast<std::size_t>(kMaxResumeFileBytes) + 1U, 'x');
+    auto const oversized = https_source_policy_from_resume_data(encoded);
+    REQUIRE_FALSE(oversized);
+    CHECK(oversized.error() == "Resume data exceeds the size limit.");
+    encoded.pop_back();
+    auto const at_limit = https_source_policy_from_resume_data(encoded);
+    REQUIRE_FALSE(at_limit);
+    CHECK(at_limit.error() == "Resume data is not a valid dictionary.");
+}
+
+TEST_CASE("resume HTTPS policies reject duplicate fields and retired encodings")
+{
+    for (std::string_view const key : {kHTTPSTrackerPolicyResumeKey, kHTTPSWebSeedPolicyResumeKey}) {
+        for (std::string_view const second_value : {"i0e", "i1e", "1:3"}) {
+            std::string encoded = "d";
+            append_bencoded_string(encoded, key);
+            encoded += "i0e";
+            append_bencoded_string(encoded, key);
+            encoded.append(second_value);
+            encoded += 'e';
+            CHECK_FALSE(https_source_policy_from_resume_data(std::vector<char>(encoded.begin(), encoded.end())));
+        }
+    }
+    for (std::string_view const key : {
+        kAllowNonHTTPSTrackersResumeKey, kRequireHTTPSTrackersResumeKey,
+        kAllowNonHTTPSWebSeedsResumeKey, kRequireHTTPSWebSeedsResumeKey
+    }) {
+        for (bool const has_current_fields : {false, true}) {
+            lt::entry record;
+            record.dict().insert_or_assign(std::string(key), lt::entry(0));
+            if (has_current_fields) {
+                record.dict().insert_or_assign(std::string(kHTTPSTrackerPolicyResumeKey), lt::entry(3));
+                record.dict().insert_or_assign(std::string(kHTTPSWebSeedPolicyResumeKey), lt::entry(3));
+            }
+            std::vector<char> encoded;
+            lt::bencode(std::back_inserter(encoded), record);
+            CHECK_FALSE(https_source_policy_from_resume_data(encoded));
+        }
+    }
+}
+
+TEST_CASE("resume queue integers cannot wrap into valid priorities or ranks")
+{
+    for (std::string_view const value : {"i4294967297e", "i9223372036854775808e", "i-9223372036854775808e"}) {
+        std::string encoded = "d";
+        append_bencoded_string(encoded, kQueuePriorityResumeKey);
+        encoded.append(value);
+        append_bencoded_string(encoded, kQueueRankResumeKey);
+        encoded.append(value);
+        encoded += 'e';
+        std::vector<char> const buffer(encoded.begin(), encoded.end());
+        CHECK(queue_priority_from_resume_data(buffer) == TTORRENT_QUEUE_PRIORITY_NORMAL);
+        CHECK(queue_rank_from_resume_data(buffer) == kUnsetQueueRank);
+    }
 }
 
 TEST_CASE("resume encoding records explicit pre-metadata DHT consent only for a pending validation")

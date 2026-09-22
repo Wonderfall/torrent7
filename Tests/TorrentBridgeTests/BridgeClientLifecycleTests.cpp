@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <future>
 #include <initializer_list>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -1231,6 +1232,111 @@ TEST_CASE("resume restoration preserves entries missing storage claim authority 
     CHECK_FALSE(client.take_alert_error(std::span{error}));
     std::vector<std::uint8_t> const events = drained_event_kinds(client);
     CHECK(contains_event(events, TTORRENT_EVENT_ERRORS_AVAILABLE));
+}
+
+TEST_CASE("resume HTTPS policy corruption requires explicit recovery and preserves the saved records")
+{
+    bridge_tests::TemporaryDirectory temporary_directory;
+    fs::path const state_directory = temporary_directory.path() / "State";
+    std::array<fs::path, 3> const paths{
+        write_valid_resume_entry(state_directory, temporary_directory.path().string(), 41U, 'b'),
+        write_valid_resume_entry(state_directory, temporary_directory.path().string(), 42U, 'c'),
+        write_valid_resume_entry(state_directory, temporary_directory.path().string(), 43U, 'd')
+    };
+    std::array<std::vector<char>, 3> corrupted;
+    for (std::size_t index = 0U; index < paths.size(); ++index) {
+        FileReadResult const original = read_file(paths[index], kMaxResumeFileBytes);
+        REQUIRE(original);
+        lt::error_code error;
+        lt::bdecode_node const decoded = lt::bdecode(lt::span<char const>(*original), error);
+        REQUIRE_FALSE(error);
+        lt::entry record(decoded);
+        record.dict().insert_or_assign(std::string(kHTTPSTrackerPolicyResumeKey), lt::entry(3));
+        record.dict().insert_or_assign(std::string(kHTTPSWebSeedPolicyResumeKey), lt::entry(3));
+        if (index == 0U) {
+            record.dict().insert_or_assign(std::string(kHTTPSTrackerPolicyResumeKey), lt::entry(std::int64_t{4'294'967'297}));
+        } else if (index == 1U) {
+            record.dict().insert_or_assign(std::string(kHTTPSWebSeedPolicyResumeKey), lt::entry("3"));
+        } else {
+            record.dict().insert_or_assign(
+                std::string(kHTTPSTrackerPolicyResumeKey),
+                lt::entry(std::numeric_limits<std::int64_t>::min())
+            );
+        }
+        lt::bencode(std::back_inserter(corrupted[index]), record);
+        REQUIRE(write_owner_only_file_checked(paths[index], std::string_view(corrupted[index].data(), corrupted[index].size())));
+    }
+    write_valid_magnet_resume_entry(state_directory / "ResumeData", temporary_directory.path().string(), 12345U);
+    auto parser = std::make_shared<TestOnlyResumeInfoParser>();
+    for (int restart = 0; restart < 2; ++restart) {
+        CAPTURE(restart);
+        {
+            TTorrentClient client(state_directory.string(), false, nullptr, parser);
+            client.set_session_shutdown_asynchronous(false);
+            client.stop_alert_worker();
+            CHECK(client.session.get_torrents().size() == 1U);
+            CHECK(client.session.is_paused());
+            CHECK(parser->invocation_count() == 0U);
+            std::array<char, 512> error{};
+            REQUIRE(client.take_alert_error(error));
+            CHECK(std::string(error.data())
+                == "Skipped restoring 3 saved torrents because the saved HTTPS policy was invalid. Resume data was preserved."
+                   " Explicit recovery is required; re-add the affected torrents with reviewed HTTPS policies.");
+            CHECK_FALSE(client.take_alert_error(error));
+            CHECK(contains_event(drained_event_kinds(client), TTORRENT_EVENT_ERRORS_AVAILABLE));
+        }
+        for (std::size_t index = 0U; index < paths.size(); ++index) {
+            FileReadResult const preserved = read_file(paths[index], kMaxResumeFileBytes);
+            REQUIRE(preserved);
+            CHECK(*preserved == corrupted[index]);
+        }
+    }
+
+    std::string const recovered_id = paths.front().stem().string();
+    {
+        TTorrentClient client(state_directory.string(), false, nullptr, parser);
+        client.set_session_shutdown_asynchronous(false);
+        client.stop_alert_worker();
+        TTorrentAddOptions options = default_add_options();
+        options.starts_paused = bridge_bool(true);
+        options.https_tracker_policy = TTORRENT_HTTPS_POLICY_REQUIRE;
+        options.https_web_seed_policy = TTORRENT_HTTPS_POLICY_REQUIRE;
+        options.effective_https_tracker_policy = TTORRENT_HTTPS_POLICY_REQUIRE;
+        options.effective_https_web_seed_policy = TTORRENT_HTTPS_POLICY_REQUIRE;
+        std::array<char, TTORRENT_ID_CAPACITY> added_id{};
+        std::array<char, 512> error{};
+        int32_t outcome = TTORRENT_ADD_REJECTED;
+        std::string const magnet = "magnet:?xt=urn:btih:" + recovered_id.substr(3U);
+        REQUIRE(TorrentClientAddMagnet(
+            &client, magnet.c_str(), options,
+            added_id.data(), static_cast<int32_t>(added_id.size()), &outcome,
+            error.data(), static_cast<int32_t>(error.size())
+        ) == 0);
+        REQUIRE(outcome == TTORRENT_ADD_COMMITTED);
+        FileReadResult const recovered = read_file(paths.front(), kMaxResumeFileBytes);
+        REQUIRE(recovered);
+        auto const policy = https_source_policy_from_resume_data(*recovered);
+        REQUIRE(policy);
+        CHECK(policy->trackers == HTTPSPolicy::require);
+        CHECK(policy->web_seeds == HTTPSPolicy::require);
+    }
+    TTorrentClient recovered(state_directory.string(), false, nullptr, parser);
+    recovered.set_session_shutdown_asynchronous(false);
+    recovered.stop_alert_worker();
+    CHECK(recovered.session.get_torrents().size() == 2U);
+    lt::torrent_handle const handle = mapped_torrent_handle(recovered, recovered_id);
+    TorrentIdentity const *identity = identity_from_handle(handle);
+    REQUIRE(identity != nullptr);
+    CHECK(identity->https_tracker_policy == HTTPSPolicy::require);
+    CHECK(identity->https_web_seed_policy == HTTPSPolicy::require);
+    for (std::size_t index = 1U; index < paths.size(); ++index) {
+        FileReadResult const still_invalid = read_file(paths[index], kMaxResumeFileBytes);
+        REQUIRE(still_invalid);
+        CHECK(*still_invalid == corrupted[index]);
+    }
+    std::array<char, 512> error{};
+    REQUIRE(recovered.take_alert_error(error));
+    CHECK(std::string(error.data()).starts_with("Skipped restoring 2 saved torrents because the saved HTTPS policy was invalid."));
 }
 
 TEST_CASE("resume restoration preserves pre-broker metadata-less entries without activating them")

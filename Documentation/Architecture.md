@@ -430,6 +430,16 @@ activation. The pinned libtorrent resume reader rejects the retired nested
 representation, so a legacy or injected resume record cannot re-enter the
 native metainfo semantic parser.
 
+Persisted HTTPS overrides require canonical integer tokens and exact enum
+membership before narrowing. Conversion checks the original token with
+`std::from_chars`; libtorrent's integer-value helper can return zero on overflow.
+An omitted field is the current writer's encoding of Inherit; a present wrong type, unknown value, duplicate key, or retired boolean
+encoding is not. Such records are preserved byte for byte and skipped before
+metadata parsing or storage activation. One aggregate error requests explicit
+recovery. Re-adding the torrent with reviewed HTTPS policies replaces the bad
+record through the ordinary durable add path; restart never repairs or defaults
+a malformed policy.
+
 Resume state and removal tombstones remain in the helper's private container.
 The claim journal and security-scoped bookmarks remain in the GUI container.
 

@@ -55,7 +55,9 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
     fs::path const resume_dir = state_dir / "ResumeData";
     fs::create_directories(resume_dir);
 
-    fs::path const resume_file = resume_dir / "v1:0000000000000000000000000000000000000000.fastresume";
+    // Match the valid corpus records: an all-zero hash cannot pass restore
+    // identity validation and would leave application-policy decoding untested.
+    fs::path const resume_file = resume_dir / "v1:1111111111111111111111111111111111111111.fastresume";
     auto const *begin = reinterpret_cast<char const *>(data);
     bridge_fuzz::write_file(resume_file, std::span<char const>{begin, size});
 

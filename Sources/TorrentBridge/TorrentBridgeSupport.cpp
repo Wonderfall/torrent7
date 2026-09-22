@@ -1,5 +1,7 @@
 #include "TorrentBridgeInternal.hpp"
 
+#include <charconv>
+
 #include <libtorrent/extensions.hpp>
 #include <libtorrent/extensions/smart_ban.hpp>
 #include <libtorrent/extensions/ut_metadata.hpp>
@@ -1230,6 +1232,30 @@ bool resume_data_bool(std::vector<char> const &buffer, std::string_view key_name
     return root.dict_find_int_value(key, 0) != 0;
 }
 
+[[nodiscard]] std::optional<std::int64_t> resume_integer_value(lt::bdecode_node const &value) noexcept
+{
+    if (value.type() != lt::bdecode_node::int_t) {
+        return std::nullopt;
+    }
+    // int_value() returns zero when libtorrent's conversion overflows. Decode
+    // the complete bounded token instead; its storage stays owned by the caller.
+    lt::span<char const> const encoded = value.data_section();
+    if (encoded.size() < 3 || encoded.front() != 'i' || encoded.back() != 'e') {
+        return std::nullopt;
+    }
+    lt::span<char const> const digits = encoded.subspan(1, encoded.size() - 2);
+    if ((digits.front() == '0' && digits.size() != 1)
+        || (digits.front() == '-' && (digits.size() == 1 || digits.subspan(1).front() == '0'))) {
+        return std::nullopt;
+    }
+    std::int64_t integer = 0;
+    auto const result = std::from_chars(digits.begin(), digits.end(), integer);
+    if (result.ec != std::errc{} || result.ptr != digits.end()) {
+        return std::nullopt;
+    }
+    return integer;
+}
+
 int32_t resume_data_int(std::vector<char> const &buffer, std::string_view key_name, int32_t default_value)
 {
     lt::error_code error;
@@ -1242,7 +1268,8 @@ int32_t resume_data_int(std::vector<char> const &buffer, std::string_view key_na
     }
 
     lt::string_view const key(key_name.data(), key_name.size());
-    return static_cast<int32_t>(root.dict_find_int_value(key, default_value));
+    auto const stored = resume_integer_value(root.dict_find(key));
+    return stored && std::in_range<int32_t>(*stored) ? static_cast<int32_t>(*stored) : default_value;
 }
 
 } // namespace
@@ -1280,34 +1307,54 @@ bool allow_pre_metadata_dht_from_resume_data(std::vector<char> const &buffer)
     return resume_data_bool(buffer, kAllowPreMetadataDHTResumeKey);
 }
 
-HTTPSPolicy https_tracker_policy_from_resume_data(std::vector<char> const &buffer)
+std::expected<HTTPSSourcePolicy, std::string> https_source_policy_from_resume_data(
+    std::vector<char> const &buffer
+)
 {
-    int32_t const stored = resume_data_int(buffer, kHTTPSTrackerPolicyResumeKey, -1);
-    if (is_valid_https_tracker_policy(stored, true)) {
-        return https_policy_from_value(stored);
+    if (buffer.size() > kMaxResumeFileBytes) {
+        return std::unexpected("Resume data exceeds the size limit.");
     }
-    if (resume_data_bool(buffer, kRequireHTTPSTrackersResumeKey)) {
-        return HTTPSPolicy::require;
+    lt::error_code error;
+    lt::bdecode_node const root = lt::bdecode(lt::span<char const>(buffer), error);
+    if (error || root.type() != lt::bdecode_node::dict_t) {
+        return std::unexpected("Resume data is not a valid dictionary.");
     }
-    if (resume_data_bool(buffer, kAllowNonHTTPSTrackersResumeKey)) {
-        return HTTPSPolicy::original;
+    if (root.dict_find(kRequireHTTPSTrackersResumeKey)
+        || root.dict_find(kAllowNonHTTPSTrackersResumeKey)
+        || root.dict_find(kRequireHTTPSWebSeedsResumeKey)
+        || root.dict_find(kAllowNonHTTPSWebSeedsResumeKey)) {
+        return std::unexpected("Resume data contains a retired HTTPS policy encoding.");
     }
-    return HTTPSPolicy::inherit;
-}
 
-HTTPSPolicy https_web_seed_policy_from_resume_data(std::vector<char> const &buffer)
-{
-    int32_t const stored = resume_data_int(buffer, kHTTPSWebSeedPolicyResumeKey, -1);
-    if (is_valid_https_web_seed_policy(stored, true)) {
-        return https_policy_from_value(stored);
+    auto const decode_policy = [&root](std::string_view const key, auto const valid_policy)
+        -> std::expected<HTTPSPolicy, std::string> {
+        std::optional<HTTPSPolicy> decoded;
+        for (int index = 0; index < root.dict_size(); ++index) {
+            auto const [field, value] = root.dict_at(index);
+            if (field != key) {
+                continue;
+            }
+            auto const stored = resume_integer_value(value);
+            if (decoded || !stored || !valid_policy(*stored, true)) {
+                return std::unexpected("Resume data has an invalid or duplicate HTTPS policy: " + std::string(key));
+            }
+            // Validate the original 64-bit integer before converting to the
+            // enum's byte representation. Wrapped values must never gain authority.
+            decoded = static_cast<HTTPSPolicy>(*stored);
+        }
+        // The current writer omits Inherit. Absence is valid; a malformed
+        // present value is never equivalent to that omission.
+        return decoded.value_or(HTTPSPolicy::inherit);
+    };
+    auto const trackers = decode_policy(kHTTPSTrackerPolicyResumeKey, is_valid_https_tracker_policy);
+    if (!trackers) {
+        return std::unexpected(trackers.error());
     }
-    if (resume_data_bool(buffer, kRequireHTTPSWebSeedsResumeKey)) {
-        return HTTPSPolicy::require;
+    auto const web_seeds = decode_policy(kHTTPSWebSeedPolicyResumeKey, is_valid_https_web_seed_policy);
+    if (!web_seeds) {
+        return std::unexpected(web_seeds.error());
     }
-    if (resume_data_bool(buffer, kAllowNonHTTPSWebSeedsResumeKey)) {
-        return HTTPSPolicy::original;
-    }
-    return HTTPSPolicy::inherit;
+    return HTTPSSourcePolicy{.trackers = *trackers, .web_seeds = *web_seeds};
 }
 
 bool enable_dht_from_resume_data(std::vector<char> const &buffer)

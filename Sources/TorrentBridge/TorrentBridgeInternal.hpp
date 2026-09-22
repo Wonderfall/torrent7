@@ -140,7 +140,7 @@ constexpr std::string_view kStagedMetadataResumeKey = "torrent-app-staged-metada
 constexpr std::string_view kAllowPreMetadataDHTResumeKey = "torrent-app-allow-pre-metadata-dht";
 constexpr std::string_view kHTTPSTrackerPolicyResumeKey = "torrent-app-https-tracker-policy";
 constexpr std::string_view kHTTPSWebSeedPolicyResumeKey = "torrent-app-https-web-seed-policy";
-// Read-only migration keys written by releases before explicit HTTPS policies.
+// Retired encodings are rejected rather than silently changing security policy.
 constexpr std::string_view kAllowNonHTTPSTrackersResumeKey = "torrent-app-allow-non-https-trackers";
 constexpr std::string_view kAllowNonHTTPSWebSeedsResumeKey = "torrent-app-allow-non-https-web-seeds";
 constexpr std::string_view kRequireHTTPSTrackersResumeKey = "torrent-app-require-https-trackers";
@@ -220,7 +220,7 @@ constexpr HTTPSSourcePolicyScope changed_https_policy_scope(
     return HTTPSSourcePolicyScope::none;
 }
 
-constexpr bool is_valid_https_tracker_policy(int32_t const value, bool const allow_inherit) noexcept
+constexpr bool is_valid_https_tracker_policy(std::int64_t const value, bool const allow_inherit) noexcept
 {
     switch (value) {
     case TTORRENT_HTTPS_POLICY_INHERIT:
@@ -234,7 +234,7 @@ constexpr bool is_valid_https_tracker_policy(int32_t const value, bool const all
     }
 }
 
-constexpr bool is_valid_https_web_seed_policy(int32_t const value, bool const allow_inherit) noexcept
+constexpr bool is_valid_https_web_seed_policy(std::int64_t const value, bool const allow_inherit) noexcept
 {
     switch (value) {
     case TTORRENT_HTTPS_POLICY_INHERIT:
@@ -1551,9 +1551,9 @@ int32_t add_torrent_params_for_testing(
 
 void sanitize_resume_endpoint_hints(lt::add_torrent_params &params) noexcept;
 
-HTTPSPolicy https_tracker_policy_from_resume_data(std::vector<char> const &buffer);
-
-HTTPSPolicy https_web_seed_policy_from_resume_data(std::vector<char> const &buffer);
+[[nodiscard]] std::expected<HTTPSSourcePolicy, std::string> https_source_policy_from_resume_data(
+    std::vector<char> const &buffer
+);
 
 bool enable_dht_from_resume_data(std::vector<char> const &buffer);
 
