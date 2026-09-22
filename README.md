@@ -327,6 +327,13 @@ The output is:
 .build/App/Torrent 7.app
 ```
 
+Release packaging removes debug and local symbols with `strip -S -x` before
+signing. The unstripped SwiftBuild products and matching dSYMs remain outside
+the app. Debug and sanitizer builds retain their symbols. The hardening audit
+uses the unstripped products; verification checks every code/data section and
+compares the final executable against the expected packaging output after
+normalizing code-signature metadata in temporary copies.
+
 By default the app is ad-hoc signed for local development. This default does not
 require a signing identity or Apple Developer credentials, and both bundles are
 explicitly marked for reduced-assurance development XPC peer authentication.
@@ -343,7 +350,10 @@ canonical GUI and engine allowlists. It also checks the embedded helper identity
 the exact application-scoped Enhanced Security metadata, matching signature
 mode and Team IDs, quarantine policy, hardened runtime flags, the exact
 two-executable code inventory, and an allowlist of Mach-O load paths. Missing,
-changed, or unexpected authority fails verification.
+changed, or unexpected authority fails verification. The default verification
+uses `.build/out/Products/Release`. Pass `--configuration debug` for a debug
+build and `--build-products /path/to/Products/Release` for custom build output;
+the verifier requires the matching original executables and release dSYMs.
 
 Use a shared dependency source cache if desired:
 
@@ -379,6 +389,7 @@ Its final output is:
 .build/Release/<notarization-submission-id>/
   Torrent 7.zip
   Evidence/Symbols.zip
+  Evidence/UnstrippedBinaries.zip
   Evidence/SBOM/{Torrent7,TorrentEngineExtension,native}.cdx.json
   Evidence/{symbol-uuids,native-build-id,toolchain}.txt
   notarization.plist
@@ -387,18 +398,23 @@ Its final output is:
 
 The directory is published atomically after verification, preserving earlier
 releases. Keep `Evidence/Symbols.zip` privately for crash symbolication: both
-dSYMs must match the UUIDs of the shipped executables. Symbols are separate
-from the app download. SwiftPM records each product's dependency graph; the
-native inventory adds the pinned Boost, BoringSSL, and libtorrent sources,
-patch series, and archive hashes. These inventories describe dependencies,
+dSYMs must match the UUIDs of the shipped executables. Keep
+`Evidence/UnstrippedBinaries.zip` with it for repeatable code audits. Neither
+archive belongs in the app download. SwiftPM records each product's dependency
+graph; the native inventory adds the pinned Boost, BoringSSL, and libtorrent
+sources, patch series, and archive hashes. These inventories describe dependencies,
 not vulnerability scan results. See [release and UI diagnostics](Documentation/ReleaseDiagnostics.md)
 for verification details and toolchain limitations.
 
-To re-verify an already notarized app:
+To re-verify an already notarized app, use its original products directory (or
+restore its unstripped executables and `.dSYM` bundles side by side from the
+private archives), alongside the matching native dependency prefix set through
+`DEPS_PREFIX`:
 
 ```sh
 EXPECTED_TEAM_ID="ABCDE12345" \
-Scripts/verify-app.zsh --mode distribution
+Scripts/verify-app.zsh --mode distribution --build-products /path/to/matching/products \
+  "/path/to/Torrent 7.app"
 ```
 
 ## Diagnostics and Tests

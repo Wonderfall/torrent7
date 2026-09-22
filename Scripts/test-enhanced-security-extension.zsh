@@ -359,10 +359,10 @@ fi
     "${host_executable:h}" \
     "${engine_executable:h}" \
     "${extension_point:h}"
-/bin/cp \
+"$root_dir/Scripts/package-executable.zsh" prepare "$configuration" "${sanitizer_profile:-none}" \
     "$bin_dir/TorrentEngineXPCIntegrationHost" \
     "$host_executable"
-/bin/cp \
+"$root_dir/Scripts/package-executable.zsh" prepare "$configuration" "${sanitizer_profile:-none}" \
     "$bin_dir/TorrentEngineIntegrationExtension" \
     "$engine_executable"
 verify_sanitizer_runtime "$host_executable"
@@ -396,6 +396,10 @@ verify_sanitizer_runtime "$engine_executable"
     "$host_app"
 /usr/bin/codesign --verify --strict --verbose=2 "$engine_extension"
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$host_app"
+"$root_dir/Scripts/package-executable.zsh" verify "$configuration" "${sanitizer_profile:-none}" \
+    "$bin_dir/TorrentEngineXPCIntegrationHost" "$host_executable"
+"$root_dir/Scripts/package-executable.zsh" verify "$configuration" "${sanitizer_profile:-none}" \
+    "$bin_dir/TorrentEngineIntegrationExtension" "$engine_executable"
 [[ -x "$launch_services_register" ]] \
     || fail "Could not locate the LaunchServices registration tool"
 "$launch_services_register" -f -R -trusted "$host_app" >/dev/null

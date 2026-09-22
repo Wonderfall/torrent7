@@ -29,6 +29,9 @@ on:
       - "Scripts/test-swift.zsh"
       - "Scripts/test-lifecycle.zsh"
       - "Scripts/verify-app.zsh"
+      - "Scripts/verify-app-code.zsh"
+      - "Scripts/package-executable.zsh"
+      - "Scripts/test-executable-packaging.zsh"
       - "Scripts/verify-boost-asio-recycling-allocator.zsh"
       - "Scripts/verify-libtorrent-boringssl-tls.zsh"
       - "Scripts/verify-parser-reachability.zsh"
@@ -67,6 +70,9 @@ on:
       - "Scripts/test-swift.zsh"
       - "Scripts/test-lifecycle.zsh"
       - "Scripts/verify-app.zsh"
+      - "Scripts/verify-app-code.zsh"
+      - "Scripts/package-executable.zsh"
+      - "Scripts/test-executable-packaging.zsh"
       - "Scripts/verify-boost-asio-recycling-allocator.zsh"
       - "Scripts/verify-libtorrent-boringssl-tls.zsh"
       - "Scripts/verify-parser-reachability.zsh"
@@ -148,9 +154,13 @@ jobs:
         shell: zsh {0}
         run: |
           set -euo pipefail
-          zsh -n Scripts/build-app.zsh Scripts/release-app.zsh \
+          for script in Scripts/build-app.zsh Scripts/release-app.zsh \
             Scripts/test-enhanced-security-extension.zsh Scripts/verify-app.zsh \
-            Scripts/verify-parser-reachability.zsh Scripts/run-tool.zsh Scripts/test-tools.zsh
+            Scripts/verify-app-code.zsh Scripts/package-executable.zsh Scripts/test-executable-packaging.zsh \
+            Scripts/archive-release-evidence.zsh Scripts/test-release-evidence.zsh \
+            Scripts/verify-parser-reachability.zsh Scripts/run-tool.zsh Scripts/test-tools.zsh; do
+            zsh -n "$script"
+          done
           Scripts/run-tool.zsh compare-entitlements \
             Packaging/Torrent7.entitlements \
             Packaging/Torrent7.entitlements
@@ -182,6 +192,12 @@ jobs:
           release_sbom_dir=$(mktemp -d "$PWD/.build/release-sboms.XXXXXXXX")
           print -r -- "RELEASE_SBOM_DIR=$release_sbom_dir" >> "$GITHUB_ENV"
           SKIP_BUILD_DEPS=1 SBOM_OUTPUT_DIR="$release_sbom_dir" Scripts/build-app.zsh
+
+      - name: Verify executable packaging and rejection cases
+        shell: zsh {0}
+        run: |
+          Scripts/test-executable-packaging.zsh \
+            "$(xcrun swift build --configuration release --arch arm64e --show-bin-path)"
 
       - name: Verify release symbols and dependency inventories
         shell: zsh {0}

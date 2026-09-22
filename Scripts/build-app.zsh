@@ -17,6 +17,10 @@ if (( enable_diagnostics )) && (( ${+CONFIGURATION} == 0 )); then
 else
     configuration=${CONFIGURATION:-release}
 fi
+[[ $configuration == debug || $configuration == release ]] || {
+    print -ru2 -- "CONFIGURATION must be debug or release"
+    exit 2
+}
 typeset -r build_dir="$root_dir/.build"
 typeset default_swift_build_dir=$build_dir
 if (( enable_diagnostics )); then
@@ -174,6 +178,10 @@ done
 typeset -r bin_dir=$(/usr/bin/xcrun swift build --scratch-path "$swift_build_dir" "${swift_build_args[@]}" --show-bin-path)
 typeset -r bridge_object_dir="$swift_build_dir/out/Intermediates.noindex/Torrent7.build/${(C)configuration}/TorrentBridge-t.build/Objects-normal/arm64e"
 
+TORRENT7_BRIDGE_OBJECT_DIR="$bridge_object_dir" \
+    "$root_dir/Scripts/verify-app-code.zsh" \
+    "$bin_dir/Torrent7" "$bin_dir/$engine_extension_product" "${sanitizer_profile:-none}"
+
 rm -rf -- "$app_dir"
 mkdir -p -- \
     "$macos_dir" \
@@ -181,8 +189,9 @@ mkdir -p -- \
     "$engine_extension_macos_dir" \
     "$extensions_dir"
 
-cp "$bin_dir/Torrent7" "$executable"
-cp \
+"$root_dir/Scripts/package-executable.zsh" prepare "$configuration" "${sanitizer_profile:-none}" \
+    "$bin_dir/Torrent7" "$executable"
+"$root_dir/Scripts/package-executable.zsh" prepare "$configuration" "${sanitizer_profile:-none}" \
     "$bin_dir/$engine_extension_product" \
     "$engine_extension_executable"
 cp "$app_info_plist" "$contents_dir/Info.plist"
@@ -268,10 +277,12 @@ if [[ $signing_mode == "distribution" ]]; then
         --mode distribution \
         --notarization pending \
         --team-id "$expected_team_id" \
+        --configuration "$configuration" --build-products "$bin_dir" \
         "$app_dir"
 else
     TORRENT7_BRIDGE_OBJECT_DIR="$bridge_object_dir" \
-        "$root_dir/Scripts/verify-app.zsh" --mode development "$app_dir"
+        "$root_dir/Scripts/verify-app.zsh" --mode development \
+        --configuration "$configuration" --build-products "$bin_dir" "$app_dir"
 fi
 
 echo "$app_dir"

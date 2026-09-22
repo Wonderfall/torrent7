@@ -11,7 +11,7 @@ typeset -r app_dir=${1:A} bin_dir=${2:A} deps_prefix=${3:A} sbom_dir=${4:A} outp
 /bin/mkdir -m 700 -- "$output_dir"
 typeset complete=0
 trap '(( complete )) || /bin/rm -rf -- "$output_dir"' EXIT
-/bin/mkdir -- "$output_dir/Symbols" "$output_dir/SBOM"
+/bin/mkdir -- "$output_dir/Symbols" "$output_dir/UnstrippedBinaries" "$output_dir/SBOM"
 
 typeset -a products=(Torrent7 TorrentEngineExtension)
 typeset -a executables=(
@@ -29,7 +29,9 @@ for (( index = 1; index <= ${#products}; index++ )); do
     print -r -- "$binary_uuid" | /usr/bin/grep -Eq '^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12} \(arm64e\)$' \
         || fail "Unexpected executable UUID or architecture: $product"
     [[ $binary_uuid == "$symbols_uuid" ]] || fail "dSYM UUID does not match the shipped executable: $product"
+    "$root_dir/Scripts/package-executable.zsh" verify release none "$bin_dir/$product" "$binary"
     /usr/bin/ditto "$symbols" "$output_dir/Symbols/$product.dSYM"
+    /bin/cp -- "$bin_dir/$product" "$output_dir/UnstrippedBinaries/$product"
     print -r -- "$product $binary_uuid" >> "$output_dir/symbol-uuids.txt"
 
     typeset -a sboms=("$sbom_dir/$product/"*.json(N))
@@ -52,5 +54,6 @@ print -r -- "$native_build_id" > "$output_dir/native-build-id.txt"
     /usr/bin/xcrun --sdk macosx --show-sdk-version
 } > "$output_dir/toolchain.txt"
 /usr/bin/ditto -c -k --keepParent --sequesterRsrc "$output_dir/Symbols" "$output_dir/Symbols.zip"
-/bin/rm -rf -- "$output_dir/Symbols"
+/usr/bin/ditto -c -k --keepParent --sequesterRsrc "$output_dir/UnstrippedBinaries" "$output_dir/UnstrippedBinaries.zip"
+/bin/rm -rf -- "$output_dir/Symbols" "$output_dir/UnstrippedBinaries"
 complete=1

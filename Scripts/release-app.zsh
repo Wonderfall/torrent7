@@ -126,6 +126,7 @@ typeset -r notarization_status=$(/usr/bin/plutil -extract status raw -o - "$nota
     "$root_dir/Scripts/verify-app.zsh" \
     --mode distribution \
     --team-id "$expected_team_id" \
+    --configuration release --build-products "$bin_dir" \
     "$app_dir"
 
 /usr/bin/ditto -c -k --keepParent --sequesterRsrc "$app_dir" "$publish_archive"
@@ -138,7 +139,7 @@ typeset -r release_output="$release_dir/$notarization_id"
 /bin/cp -- "$notarization_result" "$publish_dir/notarization.plist"
 (
     cd -- "$publish_dir"
-    /usr/bin/shasum -a 256 -- "Torrent 7.zip" Evidence/Symbols.zip \
+    /usr/bin/shasum -a 256 -- "Torrent 7.zip" Evidence/Symbols.zip Evidence/UnstrippedBinaries.zip \
         Evidence/SBOM/*.json Evidence/symbol-uuids.txt Evidence/native-build-id.txt \
         Evidence/toolchain.txt notarization.plist > SHA256SUMS
 )

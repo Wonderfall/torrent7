@@ -29,9 +29,36 @@ on the client's actor, so admission order needs no sleeps or polling.
 
 `Scripts/release-app.zsh` builds in a private prefix and publishes a new
 directory named by Apple's notarization submission ID. The app ZIP, matching
-symbol ZIP, product and native SBOMs, toolchain versions, notarization result,
-and SHA-256 checksums are published together. Previous releases are preserved.
+symbol and unstripped-binary ZIPs, product and native SBOMs, toolchain versions,
+notarization result, and SHA-256 checksums are published together. Previous
+releases are preserved.
 No release is published if either executable lacks a matching arm64e dSYM.
+
+Release executables use `strip -S -x` on packaging copies, before signing. Debug
+and sanitizer builds retain debug and local symbols, including optimized
+sanitizer builds. `verify-app-code.zsh` runs the symbol-dependent parser, TLS,
+allocation and instruction-hardening checks on complete linker output before
+packaging. Final bundle verification repeats that audit against the retained
+originals; it never treats missing stripped symbols as proof that code is absent.
+
+`package-executable.zsh` checks the dSYM UUID, compares every Mach-O section's
+layout and raw bytes before/after stripping using Apple's `otool`, and requires
+byte equality between the final payload and the expected output after removing
+code signatures and re-signing temporary copies identically. This normalizes
+signature-dependent `__LINKEDIT` allocation sizes without stripping anything
+from the payload being verified. This also covers exports, fixups and load
+commands. Final signatures, entitlements and allowed dynamic loads are verified
+separately. UUID equality alone is not sufficient evidence of unchanged code.
+The private unstripped archive is checked against the shipped payload before
+archival and included in release checksums. No runtime hardening or Swift/ObjC
+reflection metadata is removed.
+
+`Scripts/test-executable-packaging.zsh RELEASE_BIN_DIR` exercises signing,
+configuration/sanitizer policies, rejection of modified instruction/data bytes
+with unchanged UUIDs and new signatures, wrong products, missing/mismatched
+dSYMs, stripped audit inputs and linked outputs. CI runs this against the actual
+release products. The automated Enhanced Security extension fixture uses the
+same packaging path, so its lifecycle test exercises stripped release binaries.
 
 SwiftPM generates a CycloneDX 1.7 SBOM during each product build, so the selected
 product and build graph determine the inventory. It cannot see the native
@@ -47,13 +74,16 @@ The native inventory recomputes the same native build ID embedded in the engine
 and checks the stamps' cross-dependency identities. The archive helper is used
 after `build-app.zsh` has verified the bundle and its native build identity.
 Missing, duplicate, excessive, malformed, or incomplete stamp fields fail closed.
-The evidence integration check also rejects missing and mismatched dSYMs and
-checks that a rejected archive leaves no partially published evidence.
+The evidence integration check also rejects missing and mismatched dSYMs, wrong
+product inventories and unstripped payloads. It checks that rejected archives
+leave no partially published evidence and that archived originals are unchanged.
 
 For a local release build without signing/notarizing a distribution release:
 
 ```sh
 SKIP_BUILD_DEPS=1 SBOM_OUTPUT_DIR="$PWD/.build/release-sboms" Scripts/build-app.zsh
+Scripts/test-executable-packaging.zsh \
+  "$(xcrun swift build --configuration release --arch arm64e --show-bin-path)"
 Scripts/test-release-evidence.zsh ".build/App/Torrent 7.app" \
   "$(xcrun swift build --configuration release --arch arm64e --show-bin-path)" \
   .build/deps/arm64e/prefix .build/release-sboms
@@ -61,9 +91,9 @@ Scripts/test-release-evidence.zsh ".build/App/Torrent 7.app" \
 
 Use a fresh SBOM output directory for each build. The archive helper deliberately
 rejects multiple SBOMs for a product rather than guessing which one belongs to
-the release. Keep the symbol archive privately alongside its matching release;
-the app download does not contain it. Swift 6.4 no longer embeds binary Swift
-modules in dSYMs. These archives support crash symbolication, not reconstruction
+the release. Keep the symbol and unstripped-binary archives privately alongside
+their matching release; the app download does not contain them. Swift 6.4 no
+longer embeds binary Swift modules in dSYMs. These archives support crash symbolication, not reconstruction
 of an entire LLDB expression-evaluation environment.
 
 **Xcode 27 packaging limitation:** the installed SwiftPM prints
@@ -153,6 +183,22 @@ Developer ID signing and Apple notarization were not run for this change.
 - All 20 selected lifecycle tests passed 25 repetitions in normal, ASan, TSan,
   and optimized release builds, including the parameterized wait-queue cases.
   Compiler and sanitizer checks reported no diagnostics.
+
+## Executable packaging verification on 2026-09-22
+
+- The optimized app built and passed code, signature, entitlement and bundle
+  checks. The signed bundle measured 16,824,763 logical bytes (16.82 MB), versus
+  29,266,203 bytes before symbol stripping.
+- Packaging tests passed for every debug/release and sanitizer policy. Re-signed
+  code/data mutations with matching UUIDs, wrong products, mismatched/missing
+  dSYMs, stripped audit inputs and linked outputs were rejected. Real ASan and
+  TSan debug executables also retained their complete symbol tables after signing.
+- Release evidence round-tripped the original binaries exactly. Invalid symbols,
+  inventories and unstripped payloads failed without partially published evidence.
+- The automated Enhanced Security extension test passed with stripped host and
+  helper executables, including forced exit, restart, shutdown and reconnect.
+- The existing SwiftPM SBOM-schema warning described above remains. Developer ID
+  signing and Apple notarization were not run for this change.
 
 Sources: [SwiftPM SBOM documentation](https://github.com/swiftlang/swift-package-manager/blob/main/Sources/PackageManagerDocs/Documentation.docc/GeneratingSBOMs.md),
 [CycloneDX 1.7 schema](https://cyclonedx.org/schema/bom-1.7.schema.json),

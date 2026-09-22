@@ -12,6 +12,11 @@ typeset -r archive="$root_dir/Scripts/archive-release-evidence.zsh"
 "$archive" "$app_dir" "$bin_dir" "$deps_prefix" "$sbom_dir" "$temporary_dir/valid"
 [[ -s "$temporary_dir/valid/Symbols.zip" && -s "$temporary_dir/valid/SBOM/native.cdx.json" ]]
 /usr/bin/unzip -tq "$temporary_dir/valid/Symbols.zip"
+/usr/bin/unzip -tq "$temporary_dir/valid/UnstrippedBinaries.zip"
+/usr/bin/ditto -x -k "$temporary_dir/valid/UnstrippedBinaries.zip" "$temporary_dir/restored"
+for product in Torrent7 TorrentEngineExtension; do
+    /usr/bin/cmp "$bin_dir/$product" "$temporary_dir/restored/UnstrippedBinaries/$product"
+done
 
 /bin/mkdir -- "$temporary_dir/missing" "$temporary_dir/mismatched"
 /usr/bin/ditto "$bin_dir/TorrentEngineExtension.dSYM" "$temporary_dir/mismatched/Torrent7.dSYM"
@@ -38,4 +43,13 @@ if "$archive" "$app_dir" "$bin_dir" "$deps_prefix" "$temporary_dir/wrong-sbom" \
 fi
 [[ ! -e "$temporary_dir/rejected" ]]
 /usr/bin/grep -q 'SBOM does not describe the expected product' "$temporary_dir/rejection.log"
-print -r -- 'Release evidence: matching symbols archived; missing and mismatched symbols rejected.'
+/usr/bin/ditto "$app_dir" "$temporary_dir/unstripped.app"
+/bin/cp "$bin_dir/Torrent7" "$temporary_dir/unstripped.app/Contents/MacOS/Torrent 7"
+if "$archive" "$temporary_dir/unstripped.app" "$bin_dir" "$deps_prefix" "$sbom_dir" \
+    "$temporary_dir/rejected" > "$temporary_dir/rejection.log" 2>&1; then
+    print -ru2 -- 'Accepted an unstripped release payload'
+    exit 1
+fi
+[[ ! -e "$temporary_dir/rejected" ]]
+/usr/bin/grep -q 'symbol policy' "$temporary_dir/rejection.log"
+print -r -- 'Release evidence: matching symbols and original binaries archived; missing/mismatched symbols, wrong SBOMs and unstripped payloads rejected without partial output.'
