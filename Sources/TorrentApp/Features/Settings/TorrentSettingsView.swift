@@ -612,7 +612,7 @@ struct TorrentSettingsView: View {
         HStack {
             HStack(spacing: 5) {
                 disabledAwareLabel(
-                    "DHT privacy lookups",
+                    "Use DHT privacy lookups",
                     isDisabled: !state.settings.enableDHTNetwork
                 )
 
@@ -645,7 +645,7 @@ struct TorrentSettingsView: View {
             Toggle("", isOn: setting(\.dhtPrivacyLookups))
                 .labelsHidden()
                 .disabled(!state.settings.enableDHTNetwork)
-                .accessibilityLabel("DHT privacy lookups")
+                .accessibilityLabel("Use DHT privacy lookups")
         }
         .help(state.settings.enableDHTNetwork
               ? "Reduce the information exposed during DHT lookups; peer discovery may be slower."
