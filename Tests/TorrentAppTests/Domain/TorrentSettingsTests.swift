@@ -74,7 +74,7 @@ struct TorrentSettingsTests {
                 } else {
                     mutated.remove(at: fieldIndex)
                 }
-                let data = Data("{\(mutated.joined(separator: ","))}".utf8)
+                let data = Data("{\"schemaVersion\":1,\"settings\":{\(mutated.joined(separator: ","))}}".utf8)
                 defaults.set(data, forKey: "TorrentSettings")
                 #expect(throws: TorrentSettingsLoadError.invalidStoredSettings) {
                     try TorrentSettings.load(defaults: defaults)
@@ -94,7 +94,7 @@ struct TorrentSettingsTests {
             var invalidInterface = TorrentSettings()
             invalidInterface.requiredNetworkInterfaceName = String(repeating: "x", count: 65)
             for settings in [inconsistentVPN, invalidPort, invalidInterface] {
-                let data = try JSONEncoder().encode(settings)
+                let data = try versionedSettingsData(settings)
                 defaults.set(data, forKey: "TorrentSettings")
                 #expect(throws: TorrentSettingsLoadError.invalidStoredSettings) {
                     try TorrentSettings.load(defaults: defaults)
@@ -117,6 +117,109 @@ struct TorrentSettingsTests {
 
             let loaded = try TorrentSettings.load(defaults: defaults)
             #expect(loaded == settings)
+        }
+    }
+
+    @Test("New saves declare schema version one without changing the settings IPC shape")
+    func savesVersionedSettings() throws {
+        struct Record: Decodable {
+            let schemaVersion: UInt32
+            let settings: TorrentSettings
+        }
+        try withIsolatedDefaults { defaults in
+            var settings = TorrentSettings()
+            settings.requireNetworkInterface = true
+            settings.showOnlyVPNInterfaces = true
+            settings.requiredNetworkInterfaceName = "utun4"
+            settings.httpsTrackerPolicy = .require
+            settings.dhtPrivacyLookups = false
+            settings.save(defaults: defaults)
+
+            let data = try #require(defaults.data(forKey: "TorrentSettings"))
+            let record = try JSONDecoder().decode(Record.self, from: data)
+            #expect(record.schemaVersion == 1)
+            #expect(record.settings == settings)
+            #expect(data.count < TorrentSettingsRecord.maximumEncodedBytes)
+            #expect(try TorrentSettings.load(defaults: defaults) == settings)
+            #expect(defaults.data(forKey: "TorrentSettings") == data)
+
+            let ipcData = try JSONEncoder().encode(settings)
+            #expect(!String(decoding: ipcData, as: UTF8.self).contains("schemaVersion"))
+            #expect(try JSONDecoder().decode(TorrentSettings.self, from: ipcData) == settings)
+        }
+    }
+
+    @Test("Missing, malformed, and unsupported schema versions preserve the record", arguments: [
+        Optional<String>.none, "null", "true", #""1""#, "1.5", "0", "2", "-1",
+        "4294967297", "18446744073709551617", "{}", "[]"
+    ])
+    func rejectsInvalidSchemaVersions(_ version: String?) throws {
+        try withIsolatedDefaults { defaults in
+            let payload = String(decoding: try JSONEncoder().encode(TorrentSettings()), as: UTF8.self)
+            let prefix = version.map { "\"schemaVersion\":\($0)," } ?? ""
+            let data = Data("{\(prefix)\"settings\":\(payload)}".utf8)
+            defaults.set(data, forKey: "TorrentSettings")
+
+            #expect(throws: TorrentSettingsLoadError.invalidStoredSettings) {
+                try TorrentSettings.load(defaults: defaults)
+            }
+            #expect(defaults.data(forKey: "TorrentSettings") == data)
+        }
+    }
+
+    @Test("Version one requires a settings object", arguments: [
+        Optional<String>.none, "null", "true", "1", #""settings""#, "[]", "{}"
+    ])
+    func rejectsInvalidSettingsPayload(_ payload: String?) throws {
+        try withIsolatedDefaults { defaults in
+            let suffix = payload.map { ",\"settings\":\($0)" } ?? ""
+            let data = Data("{\"schemaVersion\":1\(suffix)}".utf8)
+            defaults.set(data, forKey: "TorrentSettings")
+
+            #expect(throws: TorrentSettingsLoadError.invalidStoredSettings) {
+                try TorrentSettings.load(defaults: defaults)
+            }
+            #expect(defaults.data(forKey: "TorrentSettings") == data)
+        }
+    }
+
+    @Test("Unversioned formats require recovery without automatic migration", arguments: [false, true])
+    func rejectsUnversionedSettings(includesDHTPrivacy: Bool) throws {
+        try withIsolatedDefaults { defaults in
+            var settings = TorrentSettings()
+            settings.requireNetworkInterface = true
+            settings.showOnlyVPNInterfaces = true
+            settings.requiredNetworkInterfaceName = "utun4"
+            let encoded = String(decoding: try JSONEncoder().encode(settings), as: UTF8.self)
+            // This fixture contains only scalar values, with no commas in strings.
+            let fields = encoded.dropFirst().dropLast().split(separator: ",")
+                .filter { includesDHTPrivacy || !$0.hasPrefix(#""dhtPrivacyLookups":"#) }
+            let data = Data("{\(fields.joined(separator: ","))}".utf8)
+            defaults.set(data, forKey: "TorrentSettings")
+
+            #expect(throws: TorrentSettingsLoadError.invalidStoredSettings) {
+                try TorrentSettings.load(defaults: defaults)
+            }
+            #expect(defaults.data(forKey: "TorrentSettings") == data)
+        }
+    }
+
+    @Test("Stored settings enforce their byte limit before decoding")
+    func enforcesStoredSettingsByteLimit() throws {
+        try withIsolatedDefaults { defaults in
+            let encoded = try versionedSettingsData(TorrentSettings())
+            let padding = TorrentSettingsRecord.maximumEncodedBytes - encoded.count
+            try #require(padding > 0)
+            var data = encoded + Data(repeating: 0x20, count: padding)
+            defaults.set(data, forKey: "TorrentSettings")
+            #expect(try TorrentSettings.load(defaults: defaults) == TorrentSettings())
+
+            data.append(0x20)
+            defaults.set(data, forKey: "TorrentSettings")
+            #expect(throws: TorrentSettingsLoadError.invalidStoredSettings) {
+                try TorrentSettings.load(defaults: defaults)
+            }
+            #expect(defaults.data(forKey: "TorrentSettings") == data)
         }
     }
 

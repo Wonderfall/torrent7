@@ -57,13 +57,21 @@ parallel compatibility path.
 
 ## Saved settings and network authorization
 
-Only an absent settings record uses first-launch defaults. An existing record
-must contain every field in the current format, with valid types and canonical
-values. Missing or null fields, obsolete partial records, inconsistent VPN
-policy, and other corruption require explicit recovery; loading never repairs
-or overwrites them. The current format requires the explicit `dhtPrivacyLookups`
-Boolean; records predating that setting also require recovery. There is no
-automatic settings migration.
+Only an absent settings record uses first-launch defaults. Saved settings use a
+JSON envelope with `schemaVersion: 1` and a `settings` object, bounded to 16 KiB
+before decoding. The storage schema version is independent of the app version
+and IPC protocol; settings sent over IPC retain their existing shape.
+
+The decoder checks the declared version before reading the settings payload.
+Every settings field must be present, correctly typed, and canonical. Missing
+or null fields, inconsistent VPN policy, unsupported versions, and unversioned
+records require explicit recovery; loading never repairs or overwrites them.
+There is no migration or transition from either previous unversioned format.
+New saves and explicit defaults restoration write version 1. Changes to the
+stored structure or meaning increment the schema version. Any future migration
+must be explicitly approved, narrow, documented, and tested, and validate the
+complete result before replacing the saved record. UI wording changes do not
+change the storage schema.
 
 Anonymous mode and DHT privacy lookups are independent, enabled-by-default
 preferences. VPN-only mode constrains interface selection and disables local

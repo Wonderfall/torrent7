@@ -192,30 +192,27 @@ package struct TorrentSettings: Codable, Equatable, Sendable {
         requireNetworkInterface ? requiredNetworkInterfaceName.trimmingCharacters(in: .whitespacesAndNewlines) : ""
     }
 
-    /// Only an absent record means first launch. Existing records must be complete
-    /// and canonical; filling missing fields or clamping corruption can relax policy.
+    /// Only an absent record means first launch. Existing records must declare a
+    /// supported schema and contain complete, canonical settings.
     package static func load(
         defaults: UserDefaults = .standard
     ) throws(TorrentSettingsLoadError) -> TorrentSettings {
         guard let storedValue = defaults.object(forKey: defaultsKey) else {
             return TorrentSettings()
         }
-        guard let data = storedValue as? Data else {
+        guard let data = storedValue as? Data,
+              data.count <= TorrentSettingsRecord.maximumEncodedBytes else {
             throw .invalidStoredSettings
         }
         do {
-            let settings = try JSONDecoder().decode(TorrentSettings.self, from: data)
-            guard settings == settings.clamped() else {
-                throw TorrentSettingsLoadError.invalidStoredSettings
-            }
-            return settings
+            return try JSONDecoder().decode(TorrentSettingsRecord.self, from: data).settings
         } catch {
             throw .invalidStoredSettings
         }
     }
 
     package func save(defaults: UserDefaults = .standard) {
-        guard let data = try? JSONEncoder().encode(clamped()) else {
+        guard let data = try? JSONEncoder().encode(TorrentSettingsRecord(settings: self)) else {
             return
         }
         defaults.set(data, forKey: Self.defaultsKey)

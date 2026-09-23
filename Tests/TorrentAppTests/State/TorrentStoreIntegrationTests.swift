@@ -104,6 +104,45 @@ struct TorrentStoreIntegrationTests {
         }
     }
 
+    @Test("Unversioned and future settings stay blocked until explicit recovery", arguments: [false, true])
+    func unsupportedSettingsSchemasRequireRecovery(futureVersion: Bool) async throws {
+        try await withIsolatedDefaults { defaults, suiteName in
+            var settings = TorrentSettings()
+            settings.requireNetworkInterface = true
+            settings.showOnlyVPNInterfaces = true
+            settings.requiredNetworkInterfaceName = "utun4"
+            let data: Data
+            if futureVersion {
+                let encoded = String(decoding: try versionedSettingsData(settings), as: UTF8.self)
+                let version = #""schemaVersion":1"#
+                try #require(encoded.contains(version))
+                data = Data(encoded.replacingOccurrences(of: version, with: #""schemaVersion":2"#).utf8)
+            } else {
+                data = try JSONEncoder().encode(settings)
+            }
+            defaults.set(data, forKey: "TorrentSettings")
+            let engine = FakeTorrentEngine()
+            let harness = makeStoreHarness(
+                defaultsDomain: .suite(suiteName),
+                engineStartupFactory: { _ in engine }
+            )
+            harness.store.start()
+            await harness.store.saveAll()
+
+            #expect(harness.store.settingsState.availability == .recoveryRequired)
+            try #require(await !engine.appliedSettings.isEmpty)
+            #expect(await engine.appliedSettings.allSatisfy(\.networkBlocked))
+            #expect(defaults.data(forKey: "TorrentSettings") == data)
+
+            harness.store.restoreDefaultSettings()
+            await harness.store.saveAll()
+
+            #expect(harness.store.settingsState.availability == .available)
+            #expect(try TorrentSettings.load(defaults: defaults) == TorrentSettings())
+            #expect(await engine.appliedSettings.last?.networkBlocked == false)
+        }
+    }
+
     @Test("Edits before bootstrap completes cannot overwrite saved VPN policy")
     func editsDuringBootstrapCannotReplaceVPNSettings() async throws {
         try await withIsolatedDefaults { defaults, suiteName in

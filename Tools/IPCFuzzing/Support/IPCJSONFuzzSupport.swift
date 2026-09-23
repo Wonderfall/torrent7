@@ -52,6 +52,23 @@ public func torrentEngineIPCJSONPreflightFuzzOneInput(
         )
         checkQueueRestoration(data)
         checkEnvelopeKeys(data)
+        checkSettingsRecord(data)
+    }
+}
+
+private func checkSettingsRecord(_ data: Data) {
+    guard data.count <= TorrentSettingsRecord.maximumEncodedBytes,
+          let record = try? JSONDecoder().decode(TorrentSettingsRecord.self, from: data) else {
+        return
+    }
+    precondition(record.settings == record.settings.clamped())
+    do {
+        let encoded = try JSONEncoder().encode(TorrentSettingsRecord(settings: record.settings))
+        precondition(encoded.count <= TorrentSettingsRecord.maximumEncodedBytes)
+        let decoded = try JSONDecoder().decode(TorrentSettingsRecord.self, from: encoded)
+        precondition(decoded.settings == record.settings)
+    } catch {
+        preconditionFailure("An accepted settings record did not round trip.")
     }
 }
 

@@ -24,6 +24,8 @@ Scripts/verify-xcode.zsh
   production bounded JSON allocation preflight. It also checks typed queue
   restoration decoding, position bounds, canonical round trips, and rejection
   of hostile command-envelope key names and field counts before admission.
+  Versioned settings records exercise schema validation, canonical values, and
+  round trips within the persisted record's byte limit.
 - `magnet_parser` feeds arbitrary UTF-8 and replacement-decoded text to the
   shared Swift magnet parser and checks typed Codable round trips and canonical
   file selections.
