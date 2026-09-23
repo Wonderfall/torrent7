@@ -235,7 +235,7 @@ index faedd53..934eb61 100644
  #if defined(OPENSSL_WINDOWS)
    SecureZeroMemory(ptr, len);
 diff --git a/crypto/mem_internal.h b/crypto/mem_internal.h
-index d58b7f3..c403a21 100644
+index 59927e1..4023885 100644
 --- a/crypto/mem_internal.h
 +++ b/crypto/mem_internal.h
 @@ -53,7 +53,7 @@ BSSL_NAMESPACE_BEGIN

@@ -1,8 +1,8 @@
 diff --git a/crypto/bio/internal.h b/crypto/bio/internal.h
-index ed00e25..055f0a9 100644
+index 5b4425d..f1deac2 100644
 --- a/crypto/bio/internal.h
 +++ b/crypto/bio/internal.h
-@@ -58,7 +58,10 @@ class Bio : public bio_st, public RefCounted<Bio> {
+@@ -57,7 +57,10 @@ class Bio : public bio_st, public RefCounted<Bio> {
   public:
    explicit Bio(const BIO_METHOD *m);
  
@@ -15,7 +15,7 @@ index ed00e25..055f0a9 100644
  
    // TODO(crbug.com/412269080): `init` and `shutdown` could be bitfields, or
 diff --git a/crypto/evp/internal.h b/crypto/evp/internal.h
-index 6692c58..b69980f 100644
+index 2c83190..69dcc29 100644
 --- a/crypto/evp/internal.h
 +++ b/crypto/evp/internal.h
 @@ -144,12 +144,17 @@ class EvpPkey : public evp_pkey_st, public RefCounted<EvpPkey> {
@@ -81,7 +81,7 @@ index 4614065..3964b8f 100644
    // one. It may only be read if synchronized with a read from `num_funcs`.
    ExDataFuncs *next;
 diff --git a/crypto/fipsmodule/aes/gcm.cc.inc b/crypto/fipsmodule/aes/gcm.cc.inc
-index 0e6f771..7d7a00a 100644
+index 732a76c..c6942f5 100644
 --- a/crypto/fipsmodule/aes/gcm.cc.inc
 +++ b/crypto/fipsmodule/aes/gcm.cc.inc
 @@ -263,18 +263,28 @@ void bssl::CRYPTO_gcm128_init_aes_key(GCM128_KEY *gcm_key, const uint8_t *key,
@@ -112,7 +112,7 @@ index 0e6f771..7d7a00a 100644
  
 -#if !defined(OPENSSL_NO_ASM)
  #if defined(OPENSSL_X86_64)
-   if (gcm_key->ghash == gcm_ghash_vpclmulqdq_avx512 &&
+   if (gcm_key->ghash == gcm_ghash_vpclmulqdq_avx512 && is_hwaes &&
        CRYPTO_is_VAES_capable()) {
 @@ -338,7 +348,11 @@ void bssl::CRYPTO_gcm128_init_ctx(const GCM128_KEY *key, GCM128_CONTEXT *ctx,
      ctr = CRYPTO_load_u32_be(ctx->Yi + 12);
@@ -219,10 +219,10 @@ index a7c6317..28f1e71 100644
  }
  
 diff --git a/crypto/fipsmodule/ec/internal.h b/crypto/fipsmodule/ec/internal.h
-index 2261f20..10d8abe 100644
+index 1c92f30..6f3828f 100644
 --- a/crypto/fipsmodule/ec/internal.h
 +++ b/crypto/fipsmodule/ec/internal.h
-@@ -553,7 +553,7 @@ struct ec_point_st {
+@@ -596,7 +596,7 @@ struct ec_point_st {
  } /* EC_POINT */;
  
  struct ec_group_st {
@@ -370,7 +370,7 @@ index 4e132fb..b939325 100644
  
    unsigned i;
 diff --git a/include/openssl/aead.h b/include/openssl/aead.h
-index 6b8ad57..3ed34b6 100644
+index 339e34a..0d00c16 100644
 --- a/include/openssl/aead.h
 +++ b/include/openssl/aead.h
 @@ -227,7 +227,7 @@ union evp_aead_ctx_st_state {
@@ -383,7 +383,7 @@ index 6b8ad57..3ed34b6 100644
    // tag_len may contain the actual length of the authentication tag if it is
    // known at initialization time.
 diff --git a/include/openssl/base.h b/include/openssl/base.h
-index fec3237..6588177 100644
+index 83cc91b..13520e6 100644
 --- a/include/openssl/base.h
 +++ b/include/openssl/base.h
 @@ -34,6 +34,19 @@
@@ -407,7 +407,7 @@ index fec3237..6588177 100644
  // setting up include paths do not accidentally pick up the system
  // opensslconf.h.
 diff --git a/include/openssl/digest.h b/include/openssl/digest.h
-index d9f46d6..89ea4e6 100644
+index 8a81bc1..4f64b0f 100644
 --- a/include/openssl/digest.h
 +++ b/include/openssl/digest.h
 @@ -359,15 +359,17 @@ struct env_md_ctx_st {
@@ -432,10 +432,10 @@ index d9f46d6..89ea4e6 100644
  
  
 diff --git a/ssl/internal.h b/ssl/internal.h
-index 96f6d3d..8f60720 100644
+index 39c132d..d9ab21e 100644
 --- a/ssl/internal.h
 +++ b/ssl/internal.h
-@@ -562,6 +562,9 @@ class SSLAEADContext {
+@@ -595,6 +595,9 @@ class SSLAEADContext {
    bool GetIV(const uint8_t **out_iv, size_t *out_iv_len) const;
  
   private:
@@ -445,7 +445,7 @@ index 96f6d3d..8f60720 100644
    // GetAdditionalData returns the additional data, writing into `storage` if
    // necessary.
    Span<const uint8_t> GetAdditionalData(uint8_t storage[13], uint8_t type,
-@@ -569,7 +572,7 @@ class SSLAEADContext {
+@@ -602,7 +605,7 @@ class SSLAEADContext {
                                          uint64_t seqnum, size_t plaintext_len,
                                          Span<const uint8_t> header);
  
@@ -454,7 +454,7 @@ index 96f6d3d..8f60720 100644
    ScopedEVP_AEAD_CTX ctx_;
    // fixed_nonce_ contains any bytes of the nonce that are fixed for all
    // records.
-@@ -1997,8 +2000,11 @@ struct SSL_HANDSHAKE {
+@@ -2034,8 +2037,11 @@ struct SSL_HANDSHAKE {
    // will be initialized.
    UniquePtr<ECHConfig> selected_ech_config;
  
@@ -467,7 +467,7 @@ index 96f6d3d..8f60720 100644
  
    // key_block is the record-layer key block for TLS 1.2 and earlier.
    Array<uint8_t> key_block;
-@@ -2572,7 +2578,10 @@ struct CERT {
+@@ -2632,7 +2638,10 @@ struct CERT {
  
    // x509_method contains pointers to functions that might deal with `X509`
    // compatibility, or might be a no-op, depending on the application.
@@ -479,7 +479,7 @@ index 96f6d3d..8f60720 100644
  
    // x509_chain may contain a parsed copy of `chain[1..]` from the legacy
    // credential. This is only used as a cache in order to implement “get0”
-@@ -3397,6 +3406,11 @@ struct ALPSConfig {
+@@ -3457,6 +3466,11 @@ struct ALPSConfig {
  //
  // See SSL_shed_handshake_config() for more about the conditions under which
  // configuration can be shed.
@@ -491,7 +491,7 @@ index 96f6d3d..8f60720 100644
  struct SSL_CONFIG {
    static constexpr bool kAllowUniquePtr = true;
  
-@@ -3429,8 +3443,7 @@ struct SSL_CONFIG {
+@@ -3492,8 +3506,7 @@ struct SSL_CONFIG {
                           X509_STORE_CTX *ctx) =
        nullptr;  // fail if callback returns 0
  
@@ -501,7 +501,7 @@ index 96f6d3d..8f60720 100644
    // Server-only: psk_identity_hint is the identity hint to send in
    // PSK-based key exchanges.
    UniquePtr<char> psk_identity_hint;
-@@ -3940,8 +3953,13 @@ class SSLContext : public ssl_ctx_st, public RefCounted<SSLContext> {
+@@ -3994,8 +4007,13 @@ class SSLContext : public ssl_ctx_st, public RefCounted<SSLContext> {
    SSLContext(const SSLContext &) = delete;
    SSLContext &operator=(const SSLContext &) = delete;
  
@@ -517,7 +517,7 @@ index 96f6d3d..8f60720 100644
  
    // lock is used to protect various operations on this object.
    mutable Mutex lock;
-@@ -4009,8 +4027,7 @@ class SSLContext : public ssl_ctx_st, public RefCounted<SSLContext> {
+@@ -4064,8 +4082,7 @@ class SSLContext : public ssl_ctx_st, public RefCounted<SSLContext> {
    int (*app_verify_callback)(X509_STORE_CTX *store_ctx, void *arg) = nullptr;
    void *app_verify_arg = nullptr;
  
@@ -527,7 +527,7 @@ index 96f6d3d..8f60720 100644
  
    // Default password callback.
    pem_password_cb *default_passwd_callback = nullptr;
-@@ -4275,9 +4292,15 @@ class SSLImpl : public ssl_st {
+@@ -4321,9 +4338,15 @@ class SSLImpl : public ssl_st {
    SSLImpl &operator=(const SSLImpl &) = delete;
    ~SSLImpl();
  
@@ -544,7 +544,7 @@ index 96f6d3d..8f60720 100644
  
    // config is a container for handshake configuration.  Accesses to this field
    // should check for nullptr, since configuration may be shed after the
-@@ -4296,7 +4319,7 @@ class SSLImpl : public ssl_st {
+@@ -4342,7 +4365,7 @@ class SSLImpl : public ssl_st {
    // do_handshake runs the handshake. On completion, it returns `ssl_hs_ok`.
    // Otherwise, it returns a value corresponding to what operation is needed to
    // progress.
@@ -553,7 +553,7 @@ index 96f6d3d..8f60720 100644
  
    SSL3_STATE *s3 = nullptr;   // TLS variables
    DTLS1_STATE *d1 = nullptr;  // DTLS variables
-@@ -4393,7 +4416,10 @@ struct ssl_session_st : public bssl::RefCounted<ssl_session_st> {
+@@ -4439,7 +4462,10 @@ struct ssl_session_st : public bssl::RefCounted<ssl_session_st> {
    // certificate. This must be null if `peer_raw_public_key` is non-null.
    bssl::UniquePtr<STACK_OF(CRYPTO_BUFFER)> certs;
  
@@ -565,7 +565,7 @@ index 96f6d3d..8f60720 100644
  
    // x509_peer is the peer's certificate. This must be null if
    // `peer_raw_public_key` is non-null.
-@@ -4429,8 +4455,11 @@ struct ssl_session_st : public bssl::RefCounted<ssl_session_st> {
+@@ -4475,8 +4501,11 @@ struct ssl_session_st : public bssl::RefCounted<ssl_session_st> {
    // epoch.
    uint64_t time = 0;
  

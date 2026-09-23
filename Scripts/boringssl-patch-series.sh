@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-readonly BORINGSSL_COMMIT="b0760837957bf86bd2014d258a948ee76f43c83f"
+readonly BORINGSSL_COMMIT="62fb8ab5bd611e4a9fbc54151adb951af1d45c72"
 readonly -a BORINGSSL_PATCHES=(
     "$ROOT_DIR/Scripts/patches/boringssl-active-pointer-hardening.patch"
     "$ROOT_DIR/Scripts/patches/boringssl-typed-allocation.patch"

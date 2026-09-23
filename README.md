@@ -263,7 +263,7 @@ The production app builds pinned dependencies into local static artifacts:
 | Dependency | Version | Use |
 | --- | --- | --- |
 | libtorrent-rasterbar | 2.1.1 | Torrent engine |
-| BoringSSL | `b0760837957bf86bd2014d258a948ee76f43c83f` | TLS support for libtorrent |
+| BoringSSL | `62fb8ab5bd611e4a9fbc54151adb951af1d45c72` | TLS support for libtorrent |
 | Boost | 1.92.0 headers | Header-only Boost pieces used by libtorrent |
 
 Homebrew supplies build tools only; it is not a runtime dependency source for the

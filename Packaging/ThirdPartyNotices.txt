@@ -6,7 +6,7 @@ third-party software:
 
 - libtorrent-rasterbar 2.1.1
 - Boost 1.92.0
-- BoringSSL (commit b0760837957bf86bd2014d258a948ee76f43c83f)
+- BoringSSL (commit 62fb8ab5bd611e4a9fbc54151adb951af1d45c72)
 
 The corresponding license notices follow.
 
