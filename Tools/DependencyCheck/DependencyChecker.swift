@@ -25,6 +25,15 @@ struct GitHubRelease: Decodable {
     let prerelease: Bool
     let draft: Bool
 
+    var stableBoostVersion: String? {
+        guard !draft, !prerelease,
+              tagName.range(of: #"^boost-[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9]+)?$"#,
+                            options: .regularExpression) != nil else {
+            return nil
+        }
+        return String(tagName.dropFirst("boost-".count))
+    }
+
     enum CodingKeys: String, CodingKey {
         case tagName = "tag_name"
         case publishedAt = "published_at"
@@ -36,19 +45,6 @@ struct GitHubRelease: Decodable {
 struct Release {
     let version: String
     let publishedAt: Date
-}
-
-struct GitHubCommit: Decodable {
-    struct Metadata: Decodable {
-        struct Identity: Decodable {
-            let date: String
-        }
-
-        let committer: Identity
-    }
-
-    let sha: String
-    let commit: Metadata
 }
 
 struct GitilesCommit: Decodable {
@@ -63,8 +59,35 @@ struct GitilesCommit: Decodable {
 }
 
 struct GitilesLog: Decodable {
+    static let pageSize = 100
+
     let log: [GitilesCommit]
     let next: String?
+
+    func validate(startingAt head: String) throws {
+        guard !log.isEmpty, log.count <= Self.pageSize else {
+            throw CheckFailure.message("BoringSSL history page is empty or oversized")
+        }
+        var expectedCommit: String? = head
+        var seen: Set<String> = []
+        for commit in log {
+            guard commit.commit == expectedCommit,
+                  seen.insert(commit.commit).inserted,
+                  commit.commit.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil else {
+                throw CheckFailure.message("BoringSSL history is not a continuous first-parent chain")
+            }
+            expectedCommit = commit.parents.first
+            if let expectedCommit {
+                guard !seen.contains(expectedCommit),
+                      expectedCommit.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil else {
+                    throw CheckFailure.message("BoringSSL history contains an invalid parent commit")
+                }
+            }
+        }
+        guard next == expectedCommit else {
+            throw CheckFailure.message("BoringSSL history pagination does not match its parent chain")
+        }
+    }
 }
 
 actor DependencyChecker {
@@ -227,14 +250,6 @@ actor DependencyChecker {
         return formatter
     }
 
-    private let boostDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "MMMM d, yyyy"
-        return formatter
-    }()
-
     private let gitilesDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -348,14 +363,6 @@ actor DependencyChecker {
         return data
     }
 
-    private func fetchText(from urlString: String) async throws -> String {
-        let data = try await fetchData(from: urlString)
-        guard let text = String(data: data, encoding: .utf8) else {
-            throw CheckFailure.message("Response is not UTF-8: \(urlString)")
-        }
-        return text
-    }
-
     private func fetchJSON<T: Decodable>(_ type: T.Type, from urlString: String) async throws -> T {
         let data = try await fetchData(from: urlString)
         return try JSONDecoder().decode(type, from: data)
@@ -450,51 +457,6 @@ actor DependencyChecker {
             recordFailure("\(name) is behind: pinned \(pinnedVersion), latest eligible \(eligible.version) published \(dateString(eligible.publishedAt))")
         } else {
             ok("\(name) pin \(pinnedVersion) is current under the \(cooldownDays)-day cooldown")
-        }
-    }
-
-    private func parseHTMLText(_ value: String) throws -> String {
-        let withoutTags = try replacing(pattern: #"<[^>]+>"#, in: value, with: " ")
-        return withoutTags
-            .replacingOccurrences(of: "&nbsp;", with: " ")
-            .replacingOccurrences(of: "&amp;", with: "&")
-            .split(whereSeparator: \.isWhitespace)
-            .joined(separator: " ")
-    }
-
-    private func replacing(pattern: String, in value: String, with replacement: String) throws -> String {
-        let regex = try NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators])
-        let range = NSRange(value.startIndex..<value.endIndex, in: value)
-        return regex.stringByReplacingMatches(in: value, range: range, withTemplate: replacement)
-    }
-
-    private func firstMatch(pattern: String, in value: String, options: NSRegularExpression.Options = []) throws -> [String]? {
-        let regex = try NSRegularExpression(pattern: pattern, options: options)
-        let range = NSRange(value.startIndex..<value.endIndex, in: value)
-
-        guard let match = regex.firstMatch(in: value, range: range) else {
-            return nil
-        }
-
-        return (0..<match.numberOfRanges).map { index in
-            guard let matchRange = Range(match.range(at: index), in: value) else {
-                return ""
-            }
-            return String(value[matchRange])
-        }
-    }
-
-    private func matches(pattern: String, in value: String, options: NSRegularExpression.Options = []) throws -> [[String]] {
-        let regex = try NSRegularExpression(pattern: pattern, options: options)
-        let range = NSRange(value.startIndex..<value.endIndex, in: value)
-
-        return regex.matches(in: value, range: range).map { match in
-            (0..<match.numberOfRanges).map { index in
-                guard let matchRange = Range(match.range(at: index), in: value) else {
-                    return ""
-                }
-                return String(value[matchRange])
-            }
         }
     }
 
@@ -594,7 +556,8 @@ actor DependencyChecker {
 
         let remoteResult = try await ProcessRunner.run("git", arguments: ["ls-remote", pinnedRepository, "HEAD"])
         let remoteHead = remoteResult.stdout.split(whereSeparator: \.isWhitespace).first.map(String.init)
-        guard remoteResult.status == 0, let remoteHead else {
+        guard remoteResult.status == 0, let remoteHead,
+              remoteHead.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil else {
             throw CheckFailure.message(
                 "Could not resolve BoringSSL HEAD: "
                     + remoteResult.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -614,16 +577,21 @@ actor DependencyChecker {
             )
         }
 
+        // Read the same authoritative repository we build from. A fresh pin may
+        // not have reached the GitHub mirror yet.
         var history: [(sha: String, date: Date)] = []
-        for page in 1...20 {
-            let commits = try await fetchJSON(
-                [GitHubCommit].self,
-                from: "https://api.github.com/repos/google/boringssl/commits?per_page=100&page=\(page)"
+        var pageHead = remoteHead
+        for _ in 0..<20 {
+            let page = try await fetchGitilesJSON(
+                GitilesLog.self,
+                from: "https://boringssl.googlesource.com/boringssl/+log/"
+                    + "\(pageHead)?format=JSON&n=\(GitilesLog.pageSize)"
             )
-            for commit in commits {
+            try page.validate(startingAt: pageHead)
+            for commit in page.log {
                 history.append((
-                    sha: commit.sha,
-                    date: try parseISODate(commit.commit.committer.date)
+                    sha: commit.commit,
+                    date: try parseGitilesDate(commit.committer.time)
                 ))
             }
 
@@ -631,40 +599,14 @@ actor DependencyChecker {
             let hasEligibleCommit = history.contains {
                 isEligible($0.date, cooldownDays: boringSSLCooldownDays)
             }
-            if commits.count < 100 || (hasPinnedCommit && hasEligibleCommit) {
-                break
-            }
+            if hasPinnedCommit && hasEligibleCommit { break }
+            guard let next = page.next else { break }
+            pageHead = next
         }
-
-        guard let observed = history.first else {
+        guard let officialHeadDate = history.first?.date else {
             throw CheckFailure.message("BoringSSL upstream history is empty")
         }
-        let officialHeadDate: Date
-        if observed.sha == remoteHead {
-            officialHeadDate = observed.date
-            ok("BoringSSL official repository and GitHub mirror agree on HEAD \(remoteHead)")
-        } else {
-            let lag = try await verifiedBoringSSLMirrorLag(
-                officialHead: remoteHead,
-                mirrorHead: observed.sha
-            )
-            officialHeadDate = lag.officialHeadDate
-            if let eligibleMissingCommit = lag.commits.first(where: {
-                isEligible($0.date, cooldownDays: boringSSLCooldownDays)
-            }) {
-                recordFailure(
-                    "BoringSSL GitHub mirror trails official HEAD by \(lag.commits.count) "
-                        + "verified commit(s), including cooldown-eligible commit "
-                        + "\(eligibleMissingCommit.sha) from "
-                        + dateString(eligibleMissingCommit.date)
-                )
-            } else {
-                info(
-                    "BoringSSL GitHub mirror trails official HEAD by \(lag.commits.count) "
-                        + "verified first-parent commit(s); all are still cooling down"
-                )
-            }
-        }
+        ok("BoringSSL history verified against the official repository")
 
         guard let pinnedIndex = history.firstIndex(where: { $0.sha == pinnedCommit }) else {
             recordFailure("BoringSSL pinned commit is not in the recent upstream history")
@@ -705,55 +647,6 @@ actor DependencyChecker {
         }
     }
 
-    private func verifiedBoringSSLMirrorLag(
-        officialHead: String,
-        mirrorHead: String
-    ) async throws -> (commits: [(sha: String, date: Date)], officialHeadDate: Date) {
-        let shaPattern = #"^[0-9a-f]{40}$"#
-        guard officialHead.range(of: shaPattern, options: .regularExpression) != nil,
-              mirrorHead.range(of: shaPattern, options: .regularExpression) != nil else {
-            throw CheckFailure.message("BoringSSL mirror heads must be full lowercase SHA-1 values")
-        }
-
-        let maximumLagCommitCount = 1_000
-        let log = try await fetchGitilesJSON(
-            GitilesLog.self,
-            from: "https://boringssl.googlesource.com/boringssl/+log/"
-                + "\(mirrorHead)..\(officialHead)?format=JSON&n=\(maximumLagCommitCount + 1)"
-        )
-        guard log.next == nil,
-              !log.log.isEmpty,
-              log.log.count <= maximumLagCommitCount,
-              log.log.first?.commit == officialHead else {
-            throw CheckFailure.message(
-                "Could not bound BoringSSL mirror lag to \(maximumLagCommitCount) commits"
-            )
-        }
-
-        var expectedCommit = officialHead
-        var commits: [(sha: String, date: Date)] = []
-        commits.reserveCapacity(log.log.count)
-        for commit in log.log {
-            guard commit.commit == expectedCommit,
-                  let firstParent = commit.parents.first else {
-                throw CheckFailure.message(
-                    "BoringSSL GitHub mirror does not follow official first-parent history"
-                )
-            }
-            commits.append((
-                sha: commit.commit,
-                date: try parseGitilesDate(commit.committer.time)
-            ))
-            expectedCommit = firstParent
-        }
-        guard expectedCommit == mirrorHead, let officialHeadDate = commits.first?.date else {
-            throw CheckFailure.message(
-                "BoringSSL GitHub mirror diverges from official first-parent history"
-            )
-        }
-        return (commits: commits, officialHeadDate: officialHeadDate)
-    }
-
     private func boostArchiveBasename(version: String) -> String {
         "boost_\(version.replacingOccurrences(of: ".", with: "_"))"
     }
@@ -766,32 +659,25 @@ actor DependencyChecker {
     private func checkBoost() async throws {
         let pinnedVersion = try buildDepDefault("BOOST_VERSION")
         let pinnedSHA256 = try buildDepDefault("BOOST_SHA256")
-        let downloadPage = try await fetchText(from: "https://www.boost.org/users/download/")
-
-        let latestVersion = try firstMatch(pattern: #"Newest Release.*?\((\d+\.\d+\.\d+)\)"#, in: downloadPage, options: [.dotMatchesLineSeparators])?[1]
-            ?? firstMatch(pattern: #"Latest \((\d+\.\d+\.\d+)\)"#, in: downloadPage)?[1]
-        guard let latestVersion else {
-            throw CheckFailure.message("Could not parse latest Boost release from download page")
+        let releases = try await fetchJSON(
+            [GitHubRelease].self,
+            from: "https://api.github.com/repos/boostorg/boost/releases?per_page=100"
+        )
+        let stable = try releases.compactMap { release -> Release? in
+            guard let version = release.stableBoostVersion else { return nil }
+            return Release(version: version, publishedAt: try parseISODate(release.publishedAt))
         }
+        guard !stable.isEmpty else {
+            throw CheckFailure.message("Could not find any stable Boost releases")
+        }
+        checkLatestVersion(
+            name: "Boost",
+            pinnedVersion: pinnedVersion,
+            observed: maxByVersion(stable),
+            eligible: maxByVersion(stable.filter { isEligible($0.publishedAt, cooldownDays: cooldownDays) })
+        )
 
         let pinnedMetadata = try await boostArchiveMetadata(version: pinnedVersion)
-
-        guard let dateText = try firstMatch(
-            pattern: #"<span[^>]*font-bold[^>]*>\s*([A-Za-z]+ \d{1,2}, \d{4})\s*</span>"#,
-            in: downloadPage,
-            options: [.dotMatchesLineSeparators]
-        )?[1],
-            let publishedAt = boostDateFormatter.date(from: dateText)
-        else {
-            throw CheckFailure.message("Could not parse Boost \(latestVersion) public release date")
-        }
-
-        let observed = Release(version: latestVersion, publishedAt: publishedAt)
-        let eligible = isEligible(publishedAt, cooldownDays: cooldownDays)
-            ? observed
-            : nil
-        checkLatestVersion(name: "Boost", pinnedVersion: pinnedVersion, observed: observed, eligible: eligible)
-
         guard let upstreamSHA256 = pinnedMetadata["sha256"]?.lowercased() else {
             throw CheckFailure.message("Could not parse Boost \(pinnedVersion) SHA-256 metadata")
         }
@@ -804,10 +690,15 @@ actor DependencyChecker {
     }
 }
 
-do {
-    let checker = try DependencyChecker()
-    try await checker.run()
-} catch {
-    try? FileHandle.standardError.write(contentsOf: Data("[error] \(error)\n".utf8))
-    Foundation.exit(1)
+@main
+struct DependencyCheckCommand {
+    static func main() async {
+        do {
+            let checker = try DependencyChecker()
+            try await checker.run()
+        } catch {
+            try? FileHandle.standardError.write(contentsOf: Data("[error] \(error)\n".utf8))
+            Foundation.exit(1)
+        }
+    }
 }

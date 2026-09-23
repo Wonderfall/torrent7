@@ -18,9 +18,11 @@ on:
       - "Scripts/verify-xcode.zsh"
       - "Scripts/patches/**"
       - "Tools/DependencyCheck/**"
+      - "Tools/Tests/DependencyCheckTests/**"
       - "Tools/Package.*"
       - "Tools/ProcessRunner/**"
       - "Scripts/run-tool.zsh"
+      - "Scripts/test-tools.zsh"
   pull_request:
     types:
       - opened
@@ -39,9 +41,11 @@ on:
       - "Scripts/verify-xcode.zsh"
       - "Scripts/patches/**"
       - "Tools/DependencyCheck/**"
+      - "Tools/Tests/DependencyCheckTests/**"
       - "Tools/Package.*"
       - "Tools/ProcessRunner/**"
       - "Scripts/run-tool.zsh"
+      - "Scripts/test-tools.zsh"
   workflow_dispatch:
 
 permissions: {}
@@ -85,6 +89,10 @@ jobs:
       - name: Verify Xcode toolchain
         shell: zsh {0}
         run: Scripts/verify-xcode.zsh
+
+      - name: Test dependency checker
+        shell: zsh {0}
+        run: Scripts/test-tools.zsh --filter DependencyCheckTests
 
       - name: Check pinned dependencies
         shell: zsh {0}

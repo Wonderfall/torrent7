@@ -58,6 +58,10 @@ let package = Package(
         .testTarget(
             name: "ProcessRunnerTests", dependencies: ["ProcessRunner"],
             path: "Tests/ProcessRunnerTests", swiftSettings: strictSettings
+        ),
+        .testTarget(
+            name: "DependencyCheckTests", dependencies: ["DependencyCheck"],
+            path: "Tests/DependencyCheckTests", swiftSettings: strictSettings
         )
     ]
 )
