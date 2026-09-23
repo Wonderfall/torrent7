@@ -41,27 +41,29 @@ struct TorrentSettingsView: View {
                 ProgressView("Loading settings…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .recoveryRequired:
-                ContentUnavailableView(
-                    "Settings Could Not Be Loaded",
-                    systemImage: "exclamationmark.shield",
-                    description: Text("Torrent networking is blocked. Restore all defaults to replace the unreadable settings.")
-                )
+                ContentUnavailableView {
+                    Label("Settings Could Not Be Loaded", systemImage: "exclamationmark.shield")
+                } description: {
+                    Text("Torrent networking is blocked. Restore all defaults to replace the unreadable settings.")
+                } actions: {
+                    restoreDefaultsButton
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .available:
                 settingsTabs
-            }
 
-            Divider()
+                Divider()
 
-            HStack {
-                Spacer()
+                HStack {
+                    Spacer()
 
-                Button("Restore All Defaults...") {
-                    isConfirmingRestoreDefaults = true
+                    restoreDefaultsButton
                 }
-                .disabled(state.availability == .loading)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
         }
         .frame(width: 500, height: 600)
         .confirmationDialog("Restore all settings to defaults?", isPresented: $isConfirmingRestoreDefaults) {
@@ -171,6 +173,12 @@ struct TorrentSettingsView: View {
             }
         } message: { enabled in
             Text(peerExchangePluginConfirmationMessage(enabled: enabled))
+        }
+    }
+
+    private var restoreDefaultsButton: some View {
+        Button("Restore All Defaults…") {
+            isConfirmingRestoreDefaults = true
         }
     }
 
