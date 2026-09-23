@@ -337,10 +337,12 @@ if [[ ${SKIP_BUILD_DEPS:-0} != "1" ]]; then
 fi
 export TORRENT7_NATIVE_DEPS_BUILD_ID=$("$root_dir/Scripts/native-deps-build-id.zsh")
 
+# Match app packaging: relocated products must not retain build-tree rpaths.
 typeset -a swift_build_args=(
     --scratch-path "$swift_build_dir"
     --configuration "$configuration"
     --arch arm64e
+    --disable-local-rpath
 )
 case $sanitizer_profile in
     address) swift_build_args+=(--sanitize address --sanitize undefined) ;;

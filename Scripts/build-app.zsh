@@ -155,13 +155,24 @@ if [[ "${SKIP_BUILD_DEPS:-0}" != "1" ]]; then
 fi
 export TORRENT7_NATIVE_DEPS_BUILD_ID=$("$root_dir/Scripts/native-deps-build-id.zsh")
 
+# Packaged products must not search the build tree for dynamic libraries.
 typeset -a swift_build_args=(
     --configuration "$configuration"
     --arch arm64e
+    --disable-local-rpath
 )
+# Swift Build separates instrumented objects from the normal object directory.
+# Keep the bridge object audit on the same variant as the packaged products.
+typeset bridge_object_variant=normal
 case $sanitizer_profile in
-    address) swift_build_args+=(--sanitize address --sanitize undefined) ;;
-    thread) swift_build_args+=(--sanitize thread --sanitize undefined) ;;
+    address)
+        swift_build_args+=(--sanitize address --sanitize undefined)
+        bridge_object_variant=normal-asan-ubsan
+        ;;
+    thread)
+        swift_build_args+=(--sanitize thread --sanitize undefined)
+        bridge_object_variant=normal-tsan-ubsan
+        ;;
 esac
 
 for product in Torrent7 "$engine_extension_product"; do
@@ -176,7 +187,7 @@ for product in Torrent7 "$engine_extension_product"; do
 done
 
 typeset -r bin_dir=$(/usr/bin/xcrun swift build --scratch-path "$swift_build_dir" "${swift_build_args[@]}" --show-bin-path)
-typeset -r bridge_object_dir="$swift_build_dir/out/Intermediates.noindex/Torrent7.build/${(C)configuration}/TorrentBridge-t.build/Objects-normal/arm64e"
+typeset -r bridge_object_dir="$swift_build_dir/out/Intermediates.noindex/Torrent7.build/${(C)configuration}/TorrentBridge-t.build/Objects-$bridge_object_variant/arm64e"
 
 TORRENT7_BRIDGE_OBJECT_DIR="$bridge_object_dir" \
     "$root_dir/Scripts/verify-app-code.zsh" \
