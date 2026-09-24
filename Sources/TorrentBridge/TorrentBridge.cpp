@@ -3326,7 +3326,7 @@ extern "C" int32_t TorrentClientAddParsedMagnet(
                 return bridge_error(3, "Removal marker could not be cleared: " + cleared_tombstones.error());
             }
         }
-        publisher.add(client->observe_torrent_handle(handle));
+        publisher.add(client->observe_torrent_handle(handle) | client->mark_tracker_hosts_changed());
         client->request_snapshot_update_locked();
         copy_string_dynamic(added_id_buffer, identity->canonical_id);
         *native_token_out = identity->token->value;
@@ -3644,7 +3644,7 @@ int32_t add_torrent_with_loader(
                 return bridge_error(2, "Removal marker could not be cleared: " + cleared_tombstones.error());
             }
         }
-        publisher.add(client->observe_torrent_handle(handle));
+        publisher.add(client->observe_torrent_handle(handle) | client->mark_tracker_hosts_changed());
         client->request_snapshot_update_locked();
         copy_string_dynamic(added_id_buffer, identity->canonical_id);
         *native_token_out = identity->token->value;

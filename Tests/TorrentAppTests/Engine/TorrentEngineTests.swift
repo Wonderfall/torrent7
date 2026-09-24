@@ -698,6 +698,85 @@ struct TorrentEngineTests {
         #expect(unchanged.trackerHostBatch?.hosts.isEmpty == true)
     }
 
+    enum TrackerHostAddSource: CaseIterable, Sendable {
+        case magnet
+        case torrentFile
+    }
+
+    @Test(
+        "Adding torrents refreshes tracker hosts during ordinary polling without counting web seeds",
+        arguments: TrackerHostAddSource.allCases, [true, false]
+    )
+    func addingTorrentsRefreshesTrackerHosts(
+        source: TrackerHostAddSource,
+        includesTrackers: Bool
+    ) async throws {
+        let stateDirectory = try temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let engine = try TorrentEngine(
+            stateDirectory: stateDirectory,
+            enablePeerExchangePlugin: false,
+            payloadBroker: TestPayloadBroker()
+        )
+        defer {
+            await #expect(throws: Never.self) {
+                try await engine.shutdownSafely()
+            }
+        }
+        let initial = try await engine.poll(
+            since: nil,
+            sortedBy: .name,
+            direction: .ascending,
+            includeTrackerHosts: true
+        )
+        #expect(initial.trackerHostBatch?.hosts.isEmpty == true)
+
+        let hosts = includesTrackers ? ["tracker-a.example.invalid", "tracker-b.example.invalid"] : []
+        let trackerURLs = hosts.map { "https://\($0)/announce" }
+        let webSeed = "https://downloads.example.invalid/sample.bin"
+        let id: TorrentItem.ID
+        switch source {
+        case .magnet:
+            let trackerQuery = trackerURLs.map { "&tr=\($0)" }.joined()
+            let magnet = try ParsedMagnet.parse(
+                "magnet:?xt=urn:btih:\(String(repeating: "6", count: 40))\(trackerQuery)&ws=\(webSeed)"
+            )
+            id = try await engine.addMagnet(magnet, startsPaused: true, enablePeerExchange: false)
+        case .torrentFile:
+            let trackerList = trackerURLs.map { "l\($0.utf8.count):\($0)e" }.joined()
+            var data = Data("d13:announce-listl\(trackerList)e4:info".utf8)
+            data.append(Data("d6:lengthi4e4:name10:sample.bin12:piece lengthi16384e6:pieces20:".utf8))
+            data.append(Data(repeating: 0, count: 20))
+            data.append(Data("e8:url-listl\(webSeed.utf8.count):\(webSeed)ee".utf8))
+            let manifest = try TorrentManifestParser().parse(data).manifest
+            let activation = try TorrentStorageActivation(
+                claimID: UUID(),
+                generation: 1,
+                sourceManifestDigest: manifest.sourceManifestDigest
+            )
+            id = try await engine.addTorrentFile(
+                data: data,
+                activation: activation,
+                startsPaused: true,
+                enablePeerExchange: false
+            )
+        }
+
+        // After the initial read, the sidebar relies on native change notifications.
+        let polled = try await engine.poll(
+            since: initial.snapshotBatch?.revision,
+            sortedBy: .name,
+            direction: .ascending,
+            includeTrackerHosts: false
+        )
+        #expect(polled.snapshotBatch?.torrents.map(\.id) == [id])
+        #expect(TorrentEngineDirtySet(rawValue: polled.dirtyMask).contains(.trackerHosts))
+        let batch = try #require(polled.trackerHostBatch)
+        #expect(batch.hosts == hosts.map { TorrentTrackerHostItem(torrentID: id, host: $0) })
+        let webSeeds = try #require(await engine.webSeedBatch(id: id, since: nil))
+        #expect(webSeeds.webSeeds.map(\.url) == [webSeed])
+    }
+
     @Test("Missing torrent detail reads are unavailable")
     func missingTorrentDetailReadsAreUnavailable() async throws {
         let stateDirectory = try temporaryStateDirectory()
