@@ -88,7 +88,7 @@ restore_configuration=0
 
 (
     cd -- "$build_dir/test"
-    python3 -B test_web_server.py
+    python3 -B test_server_startup.py
     ./test_heterogeneous_queue --no-redirect
     ./test_hash_picker --no-redirect
     ./test_merge_block_requests --no-redirect

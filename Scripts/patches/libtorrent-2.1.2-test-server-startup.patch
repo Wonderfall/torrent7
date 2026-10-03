@@ -1,27 +1,107 @@
-diff --git a/test/test_web_server.py b/test/test_web_server.py
+diff --git a/test/http_proxy.py b/test/http_proxy.py
+index 3b53841dc16010c3505187017d111b72de778a1b..a7b6dbe82166145113deeee0ca900917a3209b86 100755
+--- a/test/http_proxy.py
++++ b/test/http_proxy.py
+@@ -548,6 +548,12 @@ class _ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+ 
+     daemon_threads = True
+ 
++    def server_bind(self):
++        # HTTPServer resolves the host name here, which can stall the readiness
++        # report on CI. This fixture only needs the numeric address and port.
++        socketserver.TCPServer.server_bind(self)
++        self.server_name, self.server_port = self.server_address[:2]
++
+ 
+ class Main:
+ 
+@@ -555,7 +561,7 @@ class Main:
+         self.parser = argparse.ArgumentParser("Simple HTTP proxy")
+         self.parser.add_argument("--basic-auth")
+         self.parser.add_argument("--timeout", type=int, default=30)
+-        self.parser.add_argument("--bind-host", default="localhost")
++        self.parser.add_argument("--bind-host", default="127.0.0.1")
+ 
+         self.args = None
+         self.server = None
+diff --git a/test/socks.py b/test/socks.py
+index 00db276cc93b1fc016c66a197731b0939b4ba3e5..a8d891823b3454bab3796c41a83d6314899d435d 100755
+--- a/test/socks.py
++++ b/test/socks.py
+@@ -306,7 +306,7 @@ if __name__ == '__main__':
+             sys.exit(1)
+         i += 1
+ 
+-    server = MyTCPServer(('localhost', 0), SocksHandler)
++    server = MyTCPServer(('127.0.0.1', 0), SocksHandler)
+     server.timeout = 190
+     listen_port = server.server_address[1]
+     debug(f'Listening on port {listen_port}...')
+diff --git a/test/test_server_startup.py b/test/test_server_startup.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..7bc67bab79bde18098a965c82c45469d8328b351
+index 0000000000000000000000000000000000000000..c6e3631a028790b02c773003893360d384cfb08c
 --- /dev/null
-+++ b/test/test_web_server.py
-@@ -0,0 +1,22 @@
++++ b/test/test_server_startup.py
+@@ -0,0 +1,63 @@
++import io
++from pathlib import Path
++import runpy
 +import socket
++import socketserver
++import sys
 +import unittest
++from contextlib import ExitStack, redirect_stdout
 +from unittest.mock import patch
 +
-+from web_server import http_handler, http_server_with_timeout
++
++class StartupComplete(Exception):
++    pass
 +
 +
-+class WebServerStartupTests(unittest.TestCase):
-+    def test_bind_without_hostname_resolution(self):
-+        with patch.object(socket, 'getfqdn', side_effect=AssertionError(
-+                'fixture startup must not depend on DNS')) as getfqdn:
-+            with http_server_with_timeout(('0.0.0.0', 0), http_handler) as server:
-+                self.assertEqual(server.server_name, '0.0.0.0')
-+                self.assertEqual(server.server_port, server.server_address[1])
-+                self.assertGreater(server.server_port, 0)
-+                with socket.create_connection(('127.0.0.1', server.server_port), timeout=1):
-+                    pass
-+            getfqdn.assert_not_called()
++class ServerStartupTests(unittest.TestCase):
++    def check_startup(self, script, args, expected_host):
++        output = io.StringIO()
++        original_bind = socket.socket.bind
++
++        def bind_numeric(sock, address):
++            # socket.bind resolves hostnames in C, outside the Python DNS APIs.
++            socket.inet_pton(sock.family, address[0])
++            return original_bind(sock, address)
++
++        def check_ready(server):
++            # Stop at the request loop after exercising the real entry point,
++            # bind, listen, and readiness report. Always close the listener.
++            with server:
++                host, port = server.server_address
++                self.assertEqual(host, expected_host)
++                self.assertGreater(port, 0)
++                self.assertIn(f'LISTENING_PORT {port}', output.getvalue().splitlines())
++                with socket.socket() as client:
++                    client.settimeout(1)
++                    client.connect(('127.0.0.1', port))
++            raise StartupComplete
++
++        with ExitStack() as stack:
++            stack.enter_context(redirect_stdout(output))
++            stack.enter_context(patch.object(sys, 'argv', [script, *args]))
++            stack.enter_context(patch.object(socket.socket, 'bind', bind_numeric))
++            for name in ('getfqdn', 'getaddrinfo', 'gethostbyaddr',
++                         'gethostbyname', 'gethostbyname_ex'):
++                stack.enter_context(patch.object(socket, name, side_effect=AssertionError(
++                    f'fixture startup must not call socket.{name}')))
++            for name in ('handle_request', 'serve_forever'):
++                stack.enter_context(patch.object(socketserver.BaseServer, name, check_ready))
++            with self.assertRaises(StartupComplete):
++                runpy.run_path(str(Path(__file__).with_name(script)), run_name='__main__')
++
++    def test_web_server(self):
++        self.check_startup('web_server.py', ['0', '0', '1', '0'], '0.0.0.0')
++
++    def test_http_proxy(self):
++        self.check_startup('http_proxy.py', [], '127.0.0.1')
++
++    def test_socks_proxy(self):
++        self.check_startup('socks.py', [], '127.0.0.1')
 +
 +
 +if __name__ == '__main__':

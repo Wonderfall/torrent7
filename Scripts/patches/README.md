@@ -44,7 +44,7 @@ important relationships, not alternative supported patch subsets.
 | `external-http-tracker-parser` | External typed tracker-body parsing; retains the shared address and TLS policies. |
 | `external-dht-message-parser` | External typed DHT message parsing; retains outbound, address, and late-response policies. |
 | `fail-closed-interface-binding` | Makes failed device binding terminal for peer, listener, and HTTP sockets. |
-| `test-server-startup` | Removes hostname resolution from the Python web fixture's bind path so DNS cannot delay its readiness report. The security suite verifies binding and accepting connections with hostname resolution forbidden. |
+| `test-server-startup` | Removes reverse lookups from the Python web and HTTP proxy fixtures and binds both HTTP and SOCKS proxies to numeric loopback. The security suite exercises all three entry points with hostname resolution forbidden, verifying their readiness reports and listening sockets. |
 
 The shared address-policy patch includes the former tracker-endpoint, DHT-global,
 peer-source, session-NAT64, and tracker-session-NAT64 changes. Its session state is
