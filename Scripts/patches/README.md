@@ -2,7 +2,7 @@
 
 The ordered manifests are authoritative:
 
-- [libtorrent](../libtorrent-patch-series.sh): 25 patches against the pinned commit.
+- [libtorrent](../libtorrent-patch-series.sh): 26 patches against the pinned commit.
 - [Boost](../boost-patch-series.sh): 4 patches against the pinned source archive.
 - [BoringSSL](../boringssl-patch-series.sh): 2 patches against the pinned commit.
 
@@ -44,6 +44,7 @@ important relationships, not alternative supported patch subsets.
 | `external-http-tracker-parser` | External typed tracker-body parsing; retains the shared address and TLS policies. |
 | `external-dht-message-parser` | External typed DHT message parsing; retains outbound, address, and late-response policies. |
 | `fail-closed-interface-binding` | Makes failed device binding terminal for peer, listener, and HTTP sockets. |
+| `test-server-startup` | Removes hostname resolution from the Python web fixture's bind path so DNS cannot delay its readiness report. The security suite verifies binding and accepting connections with hostname resolution forbidden. |
 
 The shared address-policy patch includes the former tracker-endpoint, DHT-global,
 peer-source, session-NAT64, and tracker-session-NAT64 changes. Its session state is
@@ -53,7 +54,7 @@ implementations that would immediately be replaced.
 ### 2.1.2 rebase
 
 The series targets upstream tag `v2.1.2`, commit
-`6da363d2994f17c0b3c0450d124cf73a31a73847`. All 25 patches remain necessary;
+`6da363d2994f17c0b3c0450d124cf73a31a73847`. All 25 pre-existing patches remain necessary;
 upstream does not replace their application-specific boundaries or hardening.
 The rebase preserves upstream's hashing, piece-picker generation, Merkle-tree,
 file-priority, and resume-bitfield fixes. The substantive adaptations are:
