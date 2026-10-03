@@ -1,7 +1,7 @@
 # Parser microbenchmarks
 
 This suite compares the bounded Swift parsers with a native baseline built
-against Torrent 7's pinned libtorrent 2.1.1. It is a diagnostic benchmark, not
+against Torrent 7's pinned libtorrent 2.1.2. It is a diagnostic benchmark, not
 a production latency benchmark. The runner does enforce deliberately broad
 absolute Swift p99 regression tripwires from `p99-budgets.tsv`; native/Swift
 ratios are reported only as context and never gate the run.

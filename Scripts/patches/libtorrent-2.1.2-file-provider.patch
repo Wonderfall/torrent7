@@ -174,7 +174,7 @@ index 7f25b264e689d37d743e42e9ed1ba935edbf6cc7..dc7622a01c7fc75306cd2f1234a7fe68
  		void set_dirty(file_index_t i);
  
 diff --git a/include/libtorrent/aux_/storage_utils.hpp b/include/libtorrent/aux_/storage_utils.hpp
-index e081bec79bbf984e3b7759d331a2b20710ca23ce..35546e02082891adfadcba01563a3ba2cf80f0ba 100644
+index 87b5a88abafe2b3cd0d18a3a2cbefcbb75f662f8..cda972263a662f8d12dcb30910ec7ba370afbd79 100644
 --- a/include/libtorrent/aux_/storage_utils.hpp
 +++ b/include/libtorrent/aux_/storage_utils.hpp
 @@ -14,6 +14,7 @@ see LICENSE file.
@@ -185,7 +185,7 @@ index e081bec79bbf984e3b7759d331a2b20710ca23ce..35546e02082891adfadcba01563a3ba2
  
  #include "libtorrent/config.hpp"
  #include "libtorrent/fwd.hpp"
-@@ -50,7 +51,8 @@ namespace libtorrent::aux {
+@@ -63,7 +64,8 @@ namespace libtorrent::aux {
  		, aux::vector<download_priority_t, file_index_t> const& file_priority
  		, stat_cache& stat
  		, std::string const& save_path
@@ -195,7 +195,7 @@ index e081bec79bbf984e3b7759d331a2b20710ca23ce..35546e02082891adfadcba01563a3ba2
  
  	// given the save_path, stat all files on file_storage until one exists. If a
  	// file exists, return true, otherwise return false.
-@@ -58,7 +60,8 @@ namespace libtorrent::aux {
+@@ -71,7 +73,8 @@ namespace libtorrent::aux {
  		filenames const& fs
  		, std::string const& save_path
  		, stat_cache& cache
@@ -205,7 +205,7 @@ index e081bec79bbf984e3b7759d331a2b20710ca23ce..35546e02082891adfadcba01563a3ba2
  
  	TORRENT_EXTRA_EXPORT int read_zeroes(span<char> bufs);
  
-@@ -72,7 +75,8 @@ namespace libtorrent::aux {
+@@ -85,7 +88,8 @@ namespace libtorrent::aux {
  		, std::function<void(file_index_t, storage_error&)> create_file
  		, std::function<void(std::string const&, std::string const&, storage_error&)> create_link
  		, std::function<void(file_index_t, std::int64_t)> oversized_file
@@ -364,7 +364,7 @@ index 9e99d69c20f66d048147c736b312fc96eed6f152..d434947b79f1ba2d14b46e554b808c6a
  		{
  			return FileEntry(file_key, p, file_path, m, fn.file_size(file_index)
 diff --git a/src/mmap_storage.cpp b/src/mmap_storage.cpp
-index 837a6af5b06df92963960b728b9d0faecec6b580..93b4569a4454acd1cfe4bb597d121094202eddc2 100644
+index 483f6e3568f085e75d77585e716a55d815b219f7..aeb03280c3b6636dff415cbee5ea3d63bb3e553d 100644
 --- a/src/mmap_storage.cpp
 +++ b/src/mmap_storage.cpp
 @@ -42,6 +42,7 @@ see LICENSE file.
@@ -386,7 +386,7 @@ index 837a6af5b06df92963960b728b9d0faecec6b580..93b4569a4454acd1cfe4bb597d121094
  	TORRENT_ASSERT(m_v1 || m_v2);
  
 diff --git a/src/posix_storage.cpp b/src/posix_storage.cpp
-index da633486ce7480b93d9c2161e3eb81b8233218a3..bcdf7da009e894da346de9c6ff25fd7095ad5f1d 100644
+index 0e422e31bbcabeccc3664a72ac03fdb66445ec59..2ae35403c4700a10c93864000d0fa2ecb7ba2280 100644
 --- a/src/posix_storage.cpp
 +++ b/src/posix_storage.cpp
 @@ -19,6 +19,7 @@ see LICENSE file.
@@ -411,7 +411,7 @@ index da633486ce7480b93d9c2161e3eb81b8233218a3..bcdf7da009e894da346de9c6ff25fd70
  	filenames posix_storage::names() const
  	{
 diff --git a/src/pread_storage.cpp b/src/pread_storage.cpp
-index 6edd914f1193830c2df82198189467e3974feffa..1e44644868108a73e81b3c15fce3449627c34cc3 100644
+index f6363969c7118412e35abe044e6218e3cad3573f..8631927dd0defb4553b1087cdff72755f9f80f5f 100644
 --- a/src/pread_storage.cpp
 +++ b/src/pread_storage.cpp
 @@ -26,6 +26,7 @@ see LICENSE file.
@@ -422,7 +422,7 @@ index 6edd914f1193830c2df82198189467e3974feffa..1e44644868108a73e81b3c15fce34496
  #include "libtorrent/disk_buffer_holder.hpp"
  #include "libtorrent/aux_/stat_cache.hpp"
  #include "libtorrent/aux_/readwrite.hpp"
-@@ -47,6 +48,7 @@ namespace libtorrent::aux {
+@@ -48,6 +49,7 @@ namespace libtorrent::aux {
  		, m_save_path(complete(params.path))
  		, m_part_file_dir(params.part_file_dir)
  		, m_part_file_name("." + to_hex(params.info_hash) + ".parts")
@@ -430,7 +430,7 @@ index 6edd914f1193830c2df82198189467e3974feffa..1e44644868108a73e81b3c15fce34496
  		, m_pool(pool)
  		, m_allocate_files(params.mode == storage_mode_allocate)
  		, m_v1(params.v1)
-@@ -173,8 +175,18 @@ namespace libtorrent::aux {
+@@ -181,8 +183,18 @@ namespace libtorrent::aux {
  				// this is not implemented yet.
  				// so we just don't use a partfile for this file
  
@@ -451,7 +451,7 @@ index 6edd914f1193830c2df82198189467e3974feffa..1e44644868108a73e81b3c15fce34496
  				if (ec.ec)
  				{
  					ec.file(i);
-@@ -222,6 +234,17 @@ namespace libtorrent::aux {
+@@ -229,6 +241,17 @@ namespace libtorrent::aux {
  	status_t pread_storage::initialize(settings_interface const& sett, storage_error& ec)
  	{
  		m_stat_cache.reserve(files().num_files());
@@ -469,7 +469,7 @@ index 6edd914f1193830c2df82198189467e3974feffa..1e44644868108a73e81b3c15fce34496
  
  #ifdef TORRENT_WINDOWS
  		// don't do full file allocations on network drives
-@@ -248,7 +271,8 @@ namespace libtorrent::aux {
+@@ -255,7 +278,8 @@ namespace libtorrent::aux {
  				continue;
  
  			error_code err;
@@ -479,7 +479,7 @@ index 6edd914f1193830c2df82198189467e3974feffa..1e44644868108a73e81b3c15fce34496
  			if (!err && size > 0)
  			{
  				use_partfile(i, false);
-@@ -284,7 +308,8 @@ namespace libtorrent::aux {
+@@ -291,7 +315,8 @@ namespace libtorrent::aux {
  				if (e.ec) e.operation = operation_t::symlink;
  			}
  			, [&ret](file_index_t, std::int64_t) { ret = ret | disk_status::oversized_file; }
@@ -489,7 +489,7 @@ index 6edd914f1193830c2df82198189467e3974feffa..1e44644868108a73e81b3c15fce34496
  
  		// close files that were opened in write mode
  		m_pool.release(storage_index());
-@@ -295,7 +320,7 @@ namespace libtorrent::aux {
+@@ -302,7 +327,7 @@ namespace libtorrent::aux {
  	{
  		m_stat_cache.reserve(files().num_files());
  
@@ -498,10 +498,11 @@ index 6edd914f1193830c2df82198189467e3974feffa..1e44644868108a73e81b3c15fce34496
  			return true;
  
  		if (ec) return false;
-@@ -321,6 +346,13 @@ namespace libtorrent::aux {
- 		, storage_error& ec)
+@@ -329,6 +354,14 @@ namespace libtorrent::aux {
  	{
- 		if (index < file_index_t(0) || index >= files().end_file()) return;
+ 		TORRENT_ASSERT(index >= file_index_t(0));
+ 		TORRENT_ASSERT(index < files().end_file());
++		if (index < file_index_t(0) || index >= files().end_file()) return;
 +		if (m_file_provider)
 +		{
 +			ec.ec = make_error_code(boost::system::errc::operation_not_supported);
@@ -509,10 +510,10 @@ index 6edd914f1193830c2df82198189467e3974feffa..1e44644868108a73e81b3c15fce34496
 +			ec.operation = operation_t::file_rename;
 +			return;
 +		}
- 		if (m_renamed_files.file_absolute_path(files(), index)
- 			|| is_complete(new_filename))
- 		{
-@@ -429,10 +461,17 @@ namespace libtorrent::aux {
+ 		m_pool.release(storage_index(), index);
+ 		aux::rename_file(files(), m_renamed_files, index, new_filename, m_save_path, ec);
+ 	}
+@@ -362,10 +395,17 @@ namespace libtorrent::aux {
  			m_part_file_dir.empty() ? m_save_path : combine_path(m_save_path, m_part_file_dir)
  			, m_part_file_name);
  
@@ -531,7 +532,7 @@ index 6edd914f1193830c2df82198189467e3974feffa..1e44644868108a73e81b3c15fce34496
  			, ec);
  	}
  
-@@ -441,13 +480,19 @@ namespace libtorrent::aux {
+@@ -374,13 +414,19 @@ namespace libtorrent::aux {
  		, storage_error& ec)
  	{
  		return aux::verify_resume_data(rd, links, names()
@@ -552,7 +553,7 @@ index 6edd914f1193830c2df82198189467e3974feffa..1e44644868108a73e81b3c15fce34496
  
  		status_t ret{};
  		auto move_partfile = [&](std::string const& new_save_path, error_code& e)
-@@ -858,6 +903,7 @@ namespace libtorrent::aux {
+@@ -791,6 +837,7 @@ namespace libtorrent::aux {
  #if TORRENT_HAVE_MAP_VIEW_OF_FILE
  				, &dummy
  #endif
@@ -648,7 +649,7 @@ index 77a0fc241b243dc18f1ee0689868722639255ecc..79b836a2c183cc69a77b76e308934c09
  
  	void stat_cache::reserve(int num_files)
 diff --git a/src/storage_utils.cpp b/src/storage_utils.cpp
-index 2ba9d7765a1f96a1bbeeea8baa03c50bad680fbb..28ffe1779390209bdd24ad13b8ef994f43b9e902 100644
+index 417fd8c73e5dad367921120d59d81a605c00e10c..90523d2e7aeba016dcff5dced4ffccabf8a1fa84 100644
 --- a/src/storage_utils.cpp
 +++ b/src/storage_utils.cpp
 @@ -18,6 +18,7 @@ see LICENSE file.
@@ -659,7 +660,7 @@ index 2ba9d7765a1f96a1bbeeea8baa03c50bad680fbb..28ffe1779390209bdd24ad13b8ef994f
  #include "libtorrent/add_torrent_params.hpp"
  #include "libtorrent/torrent_status.hpp"
  #include "libtorrent/error_code.hpp"
-@@ -304,10 +305,11 @@ namespace libtorrent { namespace aux {
+@@ -416,10 +417,11 @@ namespace libtorrent { namespace aux {
  namespace {
  
  std::int64_t get_filesize(stat_cache& stat, file_index_t const file_index
@@ -673,7 +674,7 @@ index 2ba9d7765a1f96a1bbeeea8baa03c50bad680fbb..28ffe1779390209bdd24ad13b8ef994f
  
  	if (size >= 0) return size;
  	if (error != boost::system::errc::no_such_file_or_directory)
-@@ -333,8 +335,15 @@ std::int64_t get_filesize(stat_cache& stat, file_index_t const file_index
+@@ -445,8 +447,15 @@ std::int64_t get_filesize(stat_cache& stat, file_index_t const file_index
  		, aux::vector<download_priority_t, file_index_t> const& file_priority
  		, stat_cache& stat
  		, std::string const& save_path
@@ -690,7 +691,7 @@ index 2ba9d7765a1f96a1bbeeea8baa03c50bad680fbb..28ffe1779390209bdd24ad13b8ef994f
  #ifdef TORRENT_DISABLE_MUTABLE_TORRENTS
  		TORRENT_UNUSED(links);
  #else
-@@ -413,7 +422,7 @@ std::int64_t get_filesize(stat_cache& stat, file_index_t const file_index
+@@ -525,7 +534,7 @@ std::int64_t get_filesize(stat_cache& stat, file_index_t const file_index
  					continue;
  
  				std::int64_t const size = get_filesize(stat, file_index, fs
@@ -699,7 +700,7 @@ index 2ba9d7765a1f96a1bbeeea8baa03c50bad680fbb..28ffe1779390209bdd24ad13b8ef994f
  				if (size < 0) return false;
  
  				if (size < fs.file_size(file_index))
-@@ -465,7 +474,7 @@ std::int64_t get_filesize(stat_cache& stat, file_index_t const file_index
+@@ -577,7 +586,7 @@ std::int64_t get_filesize(stat_cache& stat, file_index_t const file_index
  
  			if (!has_completed_resume_piece) continue;
  
@@ -708,7 +709,7 @@ index 2ba9d7765a1f96a1bbeeea8baa03c50bad680fbb..28ffe1779390209bdd24ad13b8ef994f
  		}
  		return true;
  	}
-@@ -474,12 +483,14 @@ std::int64_t get_filesize(stat_cache& stat, file_index_t const file_index
+@@ -586,12 +595,14 @@ std::int64_t get_filesize(stat_cache& stat, file_index_t const file_index
  		filenames const& fs
  		, std::string const& save_path
  		, stat_cache& cache
@@ -725,7 +726,7 @@ index 2ba9d7765a1f96a1bbeeea8baa03c50bad680fbb..28ffe1779390209bdd24ad13b8ef994f
  
  			if (sz < 0)
  			{
-@@ -521,7 +532,8 @@ std::int64_t get_filesize(stat_cache& stat, file_index_t const file_index
+@@ -633,7 +644,8 @@ std::int64_t get_filesize(stat_cache& stat, file_index_t const file_index
  		, std::function<void(file_index_t, storage_error&)> create_file
  		, std::function<void(std::string const&, std::string const&, storage_error&)> create_link
  		, std::function<void(file_index_t, std::int64_t)> oversized_file
@@ -735,7 +736,7 @@ index 2ba9d7765a1f96a1bbeeea8baa03c50bad680fbb..28ffe1779390209bdd24ad13b8ef994f
  	{
  		// create zero-sized files
  		for (auto const file_index : fs.file_range())
-@@ -538,7 +550,7 @@ std::int64_t get_filesize(stat_cache& stat, file_index_t const file_index
+@@ -650,7 +662,7 @@ std::int64_t get_filesize(stat_cache& stat, file_index_t const file_index
  
  			// this is just to see if the file exists
  			error_code err;
@@ -745,10 +746,10 @@ index 2ba9d7765a1f96a1bbeeea8baa03c50bad680fbb..28ffe1779390209bdd24ad13b8ef994f
  			if (err && err != boost::system::errc::no_such_file_or_directory)
  			{
 diff --git a/src/torrent.cpp b/src/torrent.cpp
-index 0e5909bfc35277a4dcab9f57f4d5ab9e415362ad..bde9188fbadba5f3703a7cdbd5dcbb4058f435b0 100644
+index 4854995bb1884905300f8800eed21e953da817cd..fb60c0cd50612959e96d61982f23e18bf15d6f10 100644
 --- a/src/torrent.cpp
 +++ b/src/torrent.cpp
-@@ -1913,7 +1913,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -1925,7 +1925,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  			m_file_priority,
  			m_info_hash.get_best(),
  			m_torrent_file->v1() && !m_disable_v1_hashes,
@@ -759,7 +760,7 @@ index 0e5909bfc35277a4dcab9f57f4d5ab9e415362ad..bde9188fbadba5f3703a7cdbd5dcbb40
  
  		// the shared_from_this() will create an intentional
 diff --git a/test/test_storage.cpp b/test/test_storage.cpp
-index d976702b9a1dd6a6de4cd6bae6e251a117a5f69f..c699498a07142e45123b26ed520afc0d7fb13dc1 100644
+index c7521cd5c95899786ceaeeb0adc144ec393be275..06eb8ad0298e5bb4aa3e68863bbe9039d055edc4 100644
 --- a/test/test_storage.cpp
 +++ b/test/test_storage.cpp
 @@ -35,6 +35,7 @@ see LICENSE file.
@@ -770,20 +771,17 @@ index d976702b9a1dd6a6de4cd6bae6e251a117a5f69f..c699498a07142e45123b26ed520afc0d
  #include "libtorrent/aux_/random.hpp"
  #include "libtorrent/mmap_disk_io.hpp"
  #include "libtorrent/posix_disk_io.hpp"
-@@ -48,6 +49,12 @@ see LICENSE file.
- #include <fstream>
+@@ -50,7 +51,9 @@ see LICENSE file.
  #include <iostream>
  
-+#if defined __APPLE__ && defined __MACH__
+ #ifndef TORRENT_WINDOWS
 +#include <fcntl.h>
-+#include <sys/stat.h>
+ #include <sys/stat.h>
 +#include <unistd.h>
-+#endif
-+
- using namespace std::placeholders;
- using namespace lt;
+ #endif
  
-@@ -333,6 +340,216 @@ std::vector<char> new_piece(std::size_t const size)
+ using namespace std::placeholders;
+@@ -338,6 +341,216 @@ std::vector<char> new_piece(std::size_t const size)
  }
  
  #if defined __APPLE__ && defined __MACH__
@@ -1000,7 +998,7 @@ index d976702b9a1dd6a6de4cd6bae6e251a117a5f69f..c699498a07142e45123b26ed520afc0d
  template <typename StorageType>
  void test_confined_hard_link_write(char const* const name)
  {
-@@ -989,6 +1206,16 @@ TORRENT_TEST(confined_hard_link_write_pread)
+@@ -1152,6 +1365,16 @@ TORRENT_TEST(confined_hard_link_write_pread)
  	test_confined_hard_link_write<pread_storage>("pread");
  }
  

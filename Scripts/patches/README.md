@@ -13,7 +13,7 @@ does not introduce temporary state machines that later patches replace.
 
 ## Libtorrent
 
-Names below omit the `libtorrent-2.1.1-` prefix and `.patch` suffix and follow
+Names below omit the `libtorrent-2.1.2-` prefix and `.patch` suffix and follow
 application order. Apply the complete series; the dependency notes identify
 important relationships, not alternative supported patch subsets.
 
@@ -27,19 +27,19 @@ important relationships, not alternative supported patch subsets.
 | `listen-socket-id` | Defines listen-socket ID allocation in one translation unit. |
 | `session-settings-lock` | Uses one scoped lock for settings copy assignment. |
 | `disabled-streaming-fields` | Keeps disabled streaming configuration internally consistent. |
-| [typed-allocation](libtorrent-2.1.1-typed-allocation.patch) | Typed pool and disk allocation, tracker pools, container allocation, and remaining temporary buffers. |
+| [typed-allocation](libtorrent-2.1.2-typed-allocation.patch) | Typed pool and disk allocation, tracker pools, container allocation, and remaining temporary buffers. |
 | `indirect-operation-pac` | Authenticates native indirect-operation callbacks. |
 | `boringssl-compatibility` | Adapts the TLS integration to BoringSSL. |
 | `boringssl-system-trust` | Uses macOS certificate trust and the constrained BoringSSL client policy. |
 | `outbound-only-dht` | Separates DHT peer discovery from advertising incoming peer reachability. |
-| [global-address-policy](libtorrent-2.1.1-global-address-policy.patch) | One session NAT64 discovery state for DHT, peers, web seeds, and HTTP/UDP trackers; endpoint admission, generation invalidation, PEX/holepunch policy, and private resume-peer rejection. Web-seed DNS callbacks carry the session generation, cached endpoints are rechecked before connection, and pending IPv6 never disables a seed. Builds on base network and outbound DHT changes. |
+| [global-address-policy](libtorrent-2.1.2-global-address-policy.patch) | One session NAT64 discovery state for DHT, peers, web seeds, and HTTP/UDP trackers; endpoint admission, generation invalidation, PEX/holepunch policy, and private resume-peer rejection. Web-seed DNS callbacks carry the session generation, cached endpoints are rechecked before connection, and pending IPv6 never disables a seed. Builds on base network and outbound DHT changes. |
 | `private-tracker-isolation` | Restricts private torrents to their authorized tracker generation; uses the shared peer policy. |
 | `tracker-policy-generation` | Rejects stale public and private tracker callbacks after tracker-list replacement. |
 | `current-dht-fallback` | Evaluates DHT fallback eligibility against current tracker state. |
 | `dht-disable-late-response` | Discards outstanding DHT responses after the torrent disables DHT. |
 | `revive-removed-web-seeds` | Re-enables a removed web seed when it is added again. |
 | `disable-embedded-magnet-uri` | Rejects metainfo that would fall back to an embedded magnet URI. |
-| [external-metainfo-import](libtorrent-2.1.1-external-metainfo-import.patch) | Imports preparsed metadata, requires the external swarm metadata parser, and rejects native resume-metainfo parsing. Retains the parser independently of add parameters. |
+| [external-metainfo-import](libtorrent-2.1.2-external-metainfo-import.patch) | Imports preparsed metadata, requires the external swarm metadata parser, and rejects native resume-metainfo parsing. Retains the parser independently of add parameters. |
 | `external-peer-message-parser` | External typed BEP 10/9/11 parsing; builds on peer policy and metainfo import. |
 | `external-http-tracker-parser` | External typed tracker-body parsing; retains the shared address and TLS policies. |
 | `external-dht-message-parser` | External typed DHT message parsing; retains outbound, address, and late-response policies. |
@@ -49,6 +49,34 @@ The shared address-policy patch includes the former tracker-endpoint, DHT-global
 peer-source, session-NAT64, and tracker-session-NAT64 changes. Its session state is
 introduced in its final shared location, without separate tracker, DHT, or web-seed discovery
 implementations that would immediately be replaced.
+
+### 2.1.2 rebase
+
+The series targets upstream tag `v2.1.2`, commit
+`6da363d2994f17c0b3c0450d124cf73a31a73847`. All 25 patches remain necessary;
+upstream does not replace their application-specific boundaries or hardening.
+The rebase preserves upstream's hashing, piece-picker generation, Merkle-tree,
+file-priority, and resume-bitfield fixes. The substantive adaptations are:
+
+- `storage-confinement` now hardens upstream's shared `aux::rename_file`
+  helper instead of duplicating rename logic in the pread and mmap backends.
+  Relative-path confinement and symlink rejection also cover the posix caller.
+  The regression checks existing and missing sources, escaping paths, source
+  and destination symlinks, destination preservation, and successful renames.
+  `file-provider` still rejects renaming broker-owned payloads before that helper.
+- `network-security` retains upstream's proxy-hostname handling while requiring
+  local endpoint validation whenever the address policy applies. Both SOCKS and
+  HTTP proxy paths retain that requirement; the controlled stale-proxy test now
+  explicitly enables remote DNS. Tracker patches preserve upstream's proxy DNS
+  privacy guard while carrying the private and public tracker generations.
+- `external-metainfo-import` retains the `piece_limit` parameter now used by
+  upstream's resume-bitfield bounds checks. Nested native metainfo stays rejected.
+- `boringssl-system-trust` passes its fixture certificate through upstream's new
+  test-server startup protocol, which reports the OS-selected port over stdout.
+
+The dependency security suite also runs upstream's hash-picker, piece-picker,
+Merkle, request-merging, and resume-bitfield overflow regressions against the
+complete patched build.
 
 ## Boost and BoringSSL
 

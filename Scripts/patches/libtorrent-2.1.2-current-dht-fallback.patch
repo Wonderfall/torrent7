@@ -1,8 +1,8 @@
 diff --git a/include/libtorrent/aux_/torrent.hpp b/include/libtorrent/aux_/torrent.hpp
-index d64a415b0..c5fc87b93 100644
+index afdb21fe7158b2dbc14c8117862aef7f377d480a..8f0f3160f80b89e36a2aa5d85b36fcc13f1eb664 100644
 --- a/include/libtorrent/aux_/torrent.hpp
 +++ b/include/libtorrent/aux_/torrent.hpp
-@@ -985,6 +985,7 @@ namespace libtorrent::aux {
+@@ -987,6 +987,7 @@ namespace libtorrent::aux {
  
  #ifndef TORRENT_DISABLE_DHT
  		void dht_announce();
@@ -11,7 +11,7 @@ index d64a415b0..c5fc87b93 100644
  
  #if TORRENT_ABI_VERSION == 1
 diff --git a/include/libtorrent/aux_/tracker_list.hpp b/include/libtorrent/aux_/tracker_list.hpp
-index abbd0b1fa..29ffa5704 100644
+index abbd0b1fa5df01abdcf295332e2e936698b0dc42..29ffa5704a999037c3aae88999f63210dfd5283d 100644
 --- a/include/libtorrent/aux_/tracker_list.hpp
 +++ b/include/libtorrent/aux_/tracker_list.hpp
 @@ -70,7 +70,8 @@ struct TORRENT_EXTRA_EXPORT tracker_list
@@ -25,7 +25,7 @@ index abbd0b1fa..29ffa5704 100644
  	// TODO: make these iterators const
  	iterator begin() { return m_trackers.begin(); }
 diff --git a/include/libtorrent/settings_pack.hpp b/include/libtorrent/settings_pack.hpp
-index 8d2c4ecf0..0d8023cee 100644
+index d134ff4c5432f632c56373f849378587a23ce293..cbfc832fb9a3198338fc1cbf680bdaf61c4031af 100644
 --- a/include/libtorrent/settings_pack.hpp
 +++ b/include/libtorrent/settings_pack.hpp
 @@ -442,10 +442,11 @@ namespace aux {
@@ -45,10 +45,10 @@ index 8d2c4ecf0..0d8023cee 100644
  
  			// ``upnp_ignore_nonrouters`` indicates whether or not the UPnP
 diff --git a/src/session_impl.cpp b/src/session_impl.cpp
-index 155d8e72d..f197bcc6d 100644
+index 76f71eae22c70134b906cd0768c93a2d60610fd6..1a2c94dd4c3ff0227219332cff2ec504c8facf7d 100644
 --- a/src/session_impl.cpp
 +++ b/src/session_impl.cpp
-@@ -1600,6 +1600,10 @@ namespace {
+@@ -1602,6 +1602,10 @@ namespace {
  			|| setting_changed<bool>(pack, m_settings, settings_pack::enable_outgoing_utp)
  		;
  
@@ -59,7 +59,7 @@ index 155d8e72d..f197bcc6d 100644
  #ifndef TORRENT_DISABLE_LOGGING
  		session_log("applying settings pack, reopen_listen_port=%s"
  			, reopen_listen_port ? "true" : "false");
-@@ -1631,6 +1635,16 @@ namespace {
+@@ -1633,6 +1637,16 @@ namespace {
  			for (auto const& t : m_torrents)
  				t->update_want_peers();
  		}
@@ -76,7 +76,7 @@ index 155d8e72d..f197bcc6d 100644
  	}
  
  	std::shared_ptr<listen_socket_t> session_impl::setup_listener(
-@@ -6294,9 +6308,19 @@ retry:
+@@ -6296,9 +6310,19 @@ retry:
  		m_dht_nodes.clear();
  		m_dht_nodes.shrink_to_fit();
  
@@ -98,10 +98,10 @@ index 155d8e72d..f197bcc6d 100644
  				m_alerts.emplace_alert<dht_bootstrap_alert>();
  		};
 diff --git a/src/torrent.cpp b/src/torrent.cpp
-index 6fda25376..cd6b67ba2 100644
+index a7b32ff31f4651776aa5063b19ddb33a4d6ce655..1ea9af540f2ce605c30b252a80ba7f244d84efcd 100644
 --- a/src/torrent.cpp
 +++ b/src/torrent.cpp
-@@ -774,7 +774,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -769,7 +769,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  		if (m_trackers.empty()) return true;
  		if (!settings().get_bool(settings_pack::use_dht_as_fallback)) return true;
  
@@ -111,7 +111,7 @@ index 6fda25376..cd6b67ba2 100644
  	}
  
  #endif
-@@ -1021,8 +1022,14 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -1016,8 +1017,14 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  		if (mask & torrent_flags::disable_dht)
  		{
  			bool const new_value = !bool(flags & torrent_flags::disable_dht);
@@ -126,7 +126,7 @@ index 6fda25376..cd6b67ba2 100644
  		}
  		if (mask & torrent_flags::disable_lsd)
  		{
-@@ -2990,9 +2997,11 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -3052,9 +3059,11 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  					debug_log("DHT: private torrent, no DHT announce");
  
  				if (settings().get_bool(settings_pack::use_dht_as_fallback)
@@ -140,7 +140,7 @@ index 6fda25376..cd6b67ba2 100644
  				}
  			}
  #endif
-@@ -3042,6 +3051,12 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -3104,6 +3113,12 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  		});
  	}
  
@@ -153,7 +153,7 @@ index 6fda25376..cd6b67ba2 100644
  	void torrent::on_dht_announce_response_disp(std::weak_ptr<torrent> const t
  		, protocol_version const v, std::vector<tcp::endpoint> const& peers)
  	{
-@@ -6428,6 +6443,11 @@ namespace {
+@@ -6541,6 +6556,11 @@ namespace {
  			m_trackers.prioritize_udp_trackers();
  
  		if (m_announcing && !m_trackers.empty()) announce_with_tracker();
@@ -165,7 +165,7 @@ index 6fda25376..cd6b67ba2 100644
  
  		set_need_save_resume(torrent_handle::if_metadata_changed);
  	}
-@@ -13053,6 +13073,13 @@ namespace {
+@@ -13185,6 +13205,13 @@ namespace {
  				, ec.message().c_str(), operation_name(op), msg.c_str());
  		}
  #endif
@@ -179,7 +179,7 @@ index 6fda25376..cd6b67ba2 100644
  		if (!(r.kind & tracker_request::scrape_request))
  		{
  			// announce request
-@@ -13071,6 +13098,7 @@ namespace {
+@@ -13203,6 +13230,7 @@ namespace {
  					local_endpoint = aep->local_endpoint;
  					a.failed(settings().get_int(settings_pack::tracker_backoff)
  						, retry_interval);
@@ -187,7 +187,7 @@ index 6fda25376..cd6b67ba2 100644
  					a.last_error = ec;
  					a.message = msg;
  					fails = a.fails;
-@@ -13157,6 +13185,14 @@ namespace {
+@@ -13289,6 +13317,14 @@ namespace {
  					, local_endpoint, hash_version, r.url, ec);
  			}
  		}
@@ -203,7 +203,7 @@ index 6fda25376..cd6b67ba2 100644
  		// We may have changed state into checking by now, in which case we
  		// shouldn't keep trying to announce
 diff --git a/src/tracker_list.cpp b/src/tracker_list.cpp
-index 863f54b0e..1bda0e45c 100644
+index 863f54b0edd09cacf41c84a222433f37a6fa7efb..1bda0e45cbeea92d4182ad012bb7e0305aa8e8b1 100644
 --- a/src/tracker_list.cpp
 +++ b/src/tracker_list.cpp
 @@ -250,10 +250,36 @@ aux::announce_entry* tracker_list::first()
@@ -247,7 +247,7 @@ index 863f54b0e..1bda0e45c 100644
  
  #if TORRENT_USE_INVARIANT_CHECKS
 diff --git a/test/test_tracker_list.cpp b/test/test_tracker_list.cpp
-index 77d8a9e19..f000963f1 100644
+index 77d8a9e1975bbebedfbac57032ee35ef37ae06cd..f000963f1a0e8cb48ec7b95cdc4d6c4738d0eee9 100644
 --- a/test/test_tracker_list.cpp
 +++ b/test/test_tracker_list.cpp
 @@ -13,6 +13,8 @@ see LICENSE file.

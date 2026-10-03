@@ -136,7 +136,7 @@ private final class BrokerConsumingTransport: TorrentEngineIPCTransport {
                 throw TorrentEngineClientError.connectionFailed
             }
             payload = try TorrentEngineIPCJSONCodec.encode(
-                TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.1.0"),
+                TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.2.0"),
                 maximumBytes: request.header.operation.maximumReplyPayloadBytes,
                 limits: request.header.operation.replyJSONLimits
             )

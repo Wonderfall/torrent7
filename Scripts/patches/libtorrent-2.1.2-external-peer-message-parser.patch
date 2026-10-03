@@ -1,5 +1,5 @@
 diff --git a/include/libtorrent/add_torrent_params.hpp b/include/libtorrent/add_torrent_params.hpp
-index af9396a50..bc8e557e3 100644
+index af9396a50a0ef7c4d9bbb04200b1329b4f46f057..bc8e557e31d8676dc950c442efc1e0b850d1a07f 100644
 --- a/include/libtorrent/add_torrent_params.hpp
 +++ b/include/libtorrent/add_torrent_params.hpp
 @@ -166,6 +166,11 @@ TORRENT_VERSION_NAMESPACE_3
@@ -16,7 +16,7 @@ index af9396a50..bc8e557e3 100644
  		// download directory. i.e. ``part_file_dir`` is a relative directory.
 diff --git a/include/libtorrent/aux_/peer_message_parser.hpp b/include/libtorrent/aux_/peer_message_parser.hpp
 new file mode 100644
-index 000000000..6e2819f91
+index 0000000000000000000000000000000000000000..6e2819f91e8b2d29cabfa5baf652696f8e34f619
 --- /dev/null
 +++ b/include/libtorrent/aux_/peer_message_parser.hpp
 @@ -0,0 +1,103 @@
@@ -124,10 +124,10 @@ index 000000000..6e2819f91
 +
 +#endif // TORRENT_PEER_MESSAGE_PARSER_HPP
 diff --git a/include/libtorrent/aux_/torrent.hpp b/include/libtorrent/aux_/torrent.hpp
-index 7ac7e822b..9da204969 100644
+index 53263cabb172366d1cd4300933d51915effd2a9d..c62ec1c0718cc5678bee20e44805226eda203f67 100644
 --- a/include/libtorrent/aux_/torrent.hpp
 +++ b/include/libtorrent/aux_/torrent.hpp
-@@ -543,6 +543,8 @@ namespace libtorrent::aux {
+@@ -533,6 +533,8 @@ namespace libtorrent::aux {
  		// can send a rendezvous connect message
  		bool allows_peer_exchange() const;
  		bool peer_endpoint_policy_enabled() const { return m_block_non_global_peers; }
@@ -136,7 +136,7 @@ index 7ac7e822b..9da204969 100644
  		bool is_peer_address_global(address const& addr) const;
  		void invalidate_peer_address_policy();
  		bt_peer_connection* find_introducer(tcp::endpoint const& ep) const;
-@@ -1680,6 +1682,7 @@ namespace libtorrent::aux {
+@@ -1682,6 +1684,7 @@ namespace libtorrent::aux {
  		// discarded after startup, while swarm metadata can arrive at any time.
  		std::shared_ptr<swarm_metadata_parser> m_swarm_metadata_parser;
  		bool m_swarm_metadata_rejected = false;
@@ -145,7 +145,7 @@ index 7ac7e822b..9da204969 100644
  		// if the torrent is started without metadata, it may
  		// still be given a name until the metadata is received
 diff --git a/include/libtorrent/extensions.hpp b/include/libtorrent/extensions.hpp
-index 36e7c0f54..4ad6cec82 100644
+index 36e7c0f54144761ac829d390684c45b03a5ce547..4ad6cec82adf6ed9d8144c7c14408fec9c22a35a 100644
 --- a/include/libtorrent/extensions.hpp
 +++ b/include/libtorrent/extensions.hpp
 @@ -402,6 +402,11 @@ TORRENT_VERSION_NAMESPACE_3_END
@@ -161,7 +161,7 @@ index 36e7c0f54..4ad6cec82 100644
  		// indicates that the plugin has handled the message.
  		// it will break the plugin chain traversing and not let
 diff --git a/include/libtorrent/fwd.hpp b/include/libtorrent/fwd.hpp
-index e9e1c902c..fa62fbd2d 100644
+index e9e1c902c457357bc996e64c0bc1658015097e48..fa62fbd2de8d819570b33541ff2a3a8931120760 100644
 --- a/include/libtorrent/fwd.hpp
 +++ b/include/libtorrent/fwd.hpp
 @@ -17,6 +17,8 @@ see LICENSE file.
@@ -174,7 +174,7 @@ index e9e1c902c..fa62fbd2d 100644
  struct swarm_metadata_parser;
  }
 diff --git a/src/bt_peer_connection.cpp b/src/bt_peer_connection.cpp
-index ef738300f..9e51bc9bd 100644
+index 902bc4f9dcdd72ae2c51fad6048623abd8e8c869..e1d8a3e080b57ed6cc00afa36634b095588ef645 100644
 --- a/src/bt_peer_connection.cpp
 +++ b/src/bt_peer_connection.cpp
 @@ -49,6 +49,7 @@ see LICENSE file.
@@ -185,7 +185,7 @@ index ef738300f..9e51bc9bd 100644
  #include "libtorrent/aux_/string_util.hpp" // for search
  #include "libtorrent/aux_/generate_peer_id.hpp"
  
-@@ -2020,16 +2021,17 @@ namespace {
+@@ -2022,16 +2023,17 @@ namespace {
  		span<char const> recv_buffer = m_recv_buffer.get();
  
  		error_code ec;
@@ -208,7 +208,7 @@ index ef738300f..9e51bc9bd 100644
  			}
  #endif
  			return;
-@@ -2039,96 +2041,57 @@ namespace {
+@@ -2041,96 +2043,57 @@ namespace {
  		if (should_log(peer_log_alert::incoming_message))
  		{
  			peer_log(peer_log_alert::incoming_message, peer_log_alert::extended_handshake
@@ -329,10 +329,10 @@ index ef738300f..9e51bc9bd 100644
  
  		// if we're finished and this peer is uploading only
 diff --git a/src/torrent.cpp b/src/torrent.cpp
-index 18f0d48fe..59edc6108 100644
+index 580a5050fdeba44efb02ab4b53ece1fe9dae9765..be7073a14b9a46ac57bda41c7984a926b2a9ceab 100644
 --- a/src/torrent.cpp
 +++ b/src/torrent.cpp
-@@ -467,6 +467,7 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -462,6 +462,7 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  		{
  			m_swarm_metadata_parser = std::move(p.swarm_metadata_parser);
  		}
@@ -341,7 +341,7 @@ index 18f0d48fe..59edc6108 100644
  		// TODO: 3 we could probably get away with just saving a few fields here
  		m_add_torrent_params = std::make_unique<add_torrent_params>(std::move(p));
 diff --git a/src/ut_metadata.cpp b/src/ut_metadata.cpp
-index 8deb3d53c..46821686b 100644
+index 8deb3d53cc4c9bda450960953aaa5c777af89001..46821686b80c71d8c3f543eaa2a7694dd50aeb96 100644
 --- a/src/ut_metadata.cpp
 +++ b/src/ut_metadata.cpp
 @@ -31,6 +31,7 @@ see LICENSE file.
@@ -473,7 +473,7 @@ index 8deb3d53c..46821686b 100644
  
  			m_pc.stats_counters().inc_stats_counter(counters::num_incoming_metadata);
 diff --git a/src/ut_pex.cpp b/src/ut_pex.cpp
-index 466dbcb1b..126d42df5 100644
+index 466dbcb1b512554a4083ec4be4c3367fff6e16e7..126d42df5b505c6cfb3e1bb9e885671c472dfc96 100644
 --- a/src/ut_pex.cpp
 +++ b/src/ut_pex.cpp
 @@ -26,6 +26,7 @@ see LICENSE file.

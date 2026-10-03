@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 0c637c81473c58f6f22a15c0feb749895a395a10..86e3d82cb4cd988b6ffa7c57ad5daeb1d9ed97f9 100644
+index c7a2d0345f10a587781eedfe017c57859547e423..147e9d3cf0e0a2d05d5146bb49e0b9c9989bfbcd 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -114,6 +114,7 @@ set(libtorrent_kademlia_include_files
@@ -59,7 +59,7 @@ index 0000000000000000000000000000000000000000..b43196c11f344814dac530d3add4bbc3
 +
 +#endif // TORRENT_DHT_MESSAGE_PARSER_HPP
 diff --git a/include/libtorrent/aux_/session_impl.hpp b/include/libtorrent/aux_/session_impl.hpp
-index 2985eec077ae9e8620b801f8dbc41862c12e7dfa..776a7e867c5aacc6a08660870536b088fd11bd9c 100644
+index 2c3e7b8932c8e1e20268c1ed377d15263c5af8c4..369358e65674396ce280faaea6304a795892fdb0 100644
 --- a/include/libtorrent/aux_/session_impl.hpp
 +++ b/include/libtorrent/aux_/session_impl.hpp
 @@ -506,6 +506,7 @@ namespace aux {
@@ -70,7 +70,7 @@ index 2985eec077ae9e8620b801f8dbc41862c12e7dfa..776a7e867c5aacc6a08660870536b088
  			void start_dht();
  			void stop_dht();
  			bool has_dht() const override;
-@@ -1205,6 +1206,7 @@ namespace aux {
+@@ -1207,6 +1208,7 @@ namespace aux {
  			std::shared_ptr<dht::dht_tracker> m_dht;
  			dht::dht_storage_constructor_type m_dht_storage_constructor
  				= dht::dht_default_storage_constructor;
@@ -1472,10 +1472,10 @@ index 837ea360d0ce3978ade6753fd1057733da907622..9fc770ef73b2af66337ed733772f1086
  
  		if (!params.ip_filter.empty())
 diff --git a/src/session_impl.cpp b/src/session_impl.cpp
-index f197bcc6d3dfe5183a760888c4353ecb4c0fee40..c0d5ee092fa688265123427918b54432ac58d1dc 100644
+index 1a2c94dd4c3ff0227219332cff2ec504c8facf7d..381b5883f25460b4aaa459f90c06a9b0187e1167 100644
 --- a/src/session_impl.cpp
 +++ b/src/session_impl.cpp
-@@ -6285,7 +6285,8 @@ retry:
+@@ -6287,7 +6287,8 @@ retry:
  			, m_settings
  			, m_stats_counters
  			, *m_dht_storage
@@ -1485,7 +1485,7 @@ index f197bcc6d3dfe5183a760888c4353ecb4c0fee40..c0d5ee092fa688265123427918b54432
  
  		for (auto& s : m_listen_sockets)
  		{
-@@ -6420,6 +6421,11 @@ retry:
+@@ -6422,6 +6423,11 @@ retry:
  		m_dht_storage_constructor = std::move(sc);
  	}
  
@@ -1497,7 +1497,7 @@ index f197bcc6d3dfe5183a760888c4353ecb4c0fee40..c0d5ee092fa688265123427918b54432
  #if TORRENT_ABI_VERSION == 1
  	entry session_impl::dht_state() const
  	{
-@@ -6587,10 +6593,9 @@ retry:
+@@ -6589,10 +6595,9 @@ retry:
  
  		void on_direct_response(aux::alert_manager& alerts, client_data_t userdata, dht::msg const& msg)
  		{
@@ -1511,7 +1511,7 @@ index f197bcc6d3dfe5183a760888c4353ecb4c0fee40..c0d5ee092fa688265123427918b54432
  		}
  
  	} // anonymous namespace
-@@ -7484,18 +7489,11 @@ retry:
+@@ -7486,18 +7491,11 @@ retry:
  	bool session_impl::on_dht_request(string_view query
  		, dht::msg const& request, entry& response)
  	{

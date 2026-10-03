@@ -1,4 +1,5 @@
 diff --git a/src/load_torrent.cpp b/src/load_torrent.cpp
+index 69a8718f8dbd713f36f00ce0bec2251a8d3e779e..96b7d3608c68aac3f85c56ba90b72cd922902db5 100644
 --- a/src/load_torrent.cpp
 +++ b/src/load_torrent.cpp
 @@ -7,6 +7,8 @@ You may use, distribute and modify this code under the terms of the BSD license,

@@ -1,5 +1,5 @@
 diff --git a/include/libtorrent/add_torrent_params.hpp b/include/libtorrent/add_torrent_params.hpp
-index 7537299e9..af9396a50 100644
+index 7537299e9dd230e928060c56ebb5cbd6a693e7b8..af9396a50a0ef7c4d9bbb04200b1329b4f46f057 100644
 --- a/include/libtorrent/add_torrent_params.hpp
 +++ b/include/libtorrent/add_torrent_params.hpp
 @@ -161,6 +161,11 @@ TORRENT_VERSION_NAMESPACE_3
@@ -16,7 +16,7 @@ index 7537299e9..af9396a50 100644
  		// download directory. i.e. ``part_file_dir`` is a relative directory.
 diff --git a/include/libtorrent/aux_/preparsed_metainfo.hpp b/include/libtorrent/aux_/preparsed_metainfo.hpp
 new file mode 100644
-index 000000000..fdc54730d
+index 0000000000000000000000000000000000000000..fdc54730dd8aa71708e000ca4fcdcf25a75405b9
 --- /dev/null
 +++ b/include/libtorrent/aux_/preparsed_metainfo.hpp
 @@ -0,0 +1,57 @@
@@ -79,7 +79,7 @@ index 000000000..fdc54730d
 +#endif // TORRENT_AUX_PREPARSED_METAINFO_HPP_INCLUDED
 diff --git a/include/libtorrent/aux_/swarm_metadata_parser.hpp b/include/libtorrent/aux_/swarm_metadata_parser.hpp
 new file mode 100644
-index 000000000..631184a39
+index 0000000000000000000000000000000000000000..631184a3963d087ab42390bd8ccd6d2a2d46ca34
 --- /dev/null
 +++ b/include/libtorrent/aux_/swarm_metadata_parser.hpp
 @@ -0,0 +1,35 @@
@@ -119,10 +119,10 @@ index 000000000..631184a39
 +
 +#endif // TORRENT_SWARM_METADATA_PARSER_HPP
 diff --git a/include/libtorrent/aux_/torrent.hpp b/include/libtorrent/aux_/torrent.hpp
-index 548e3fbf4..7ac7e822b 100644
+index 8cc5b716a8ae740446658e77407a10fe6e2efcab..53263cabb172366d1cd4300933d51915effd2a9d 100644
 --- a/include/libtorrent/aux_/torrent.hpp
 +++ b/include/libtorrent/aux_/torrent.hpp
-@@ -1676,6 +1676,11 @@ namespace libtorrent::aux {
+@@ -1678,6 +1678,11 @@ namespace libtorrent::aux {
  		// cycle, and not in the constructor. So we need to save it here
  		std::unique_ptr<add_torrent_params> m_add_torrent_params;
  
@@ -135,7 +135,7 @@ index 548e3fbf4..7ac7e822b 100644
  		// still be given a name until the metadata is received
  		// once the metadata is received this field will no
 diff --git a/include/libtorrent/fwd.hpp b/include/libtorrent/fwd.hpp
-index 480a24057..e9e1c902c 100644
+index 480a240579dba9c387a5712d1b4177631de4bcb6..e9e1c902c457357bc996e64c0bc1658015097e48 100644
 --- a/include/libtorrent/fwd.hpp
 +++ b/include/libtorrent/fwd.hpp
 @@ -18,6 +18,7 @@ namespace libtorrent {
@@ -147,7 +147,7 @@ index 480a24057..e9e1c902c 100644
  
  // include/libtorrent/add_torrent_params.hpp
 diff --git a/include/libtorrent/torrent_info.hpp b/include/libtorrent/torrent_info.hpp
-index 8843179a2..61a18f966 100644
+index 8843179a2248f833f1433dd15f8ac8de6a2dd026..61a18f9663157d9ec83dfcd59b32f5ff42c823d2 100644
 --- a/include/libtorrent/torrent_info.hpp
 +++ b/include/libtorrent/torrent_info.hpp
 @@ -47,6 +47,9 @@ namespace libtorrent {
@@ -171,19 +171,10 @@ index 8843179a2..61a18f966 100644
  			bdecode_node const& info, error_code& ec, load_torrent_limits const& cfg
  		);
 diff --git a/src/read_resume_data.cpp b/src/read_resume_data.cpp
-index 0739ff349..358b140ae 100644
+index d2f92d44db741a6c27473668b89780eea77daf49..5043f247d3a6de66b6d3a1091d4d9541c6aea867 100644
 --- a/src/read_resume_data.cpp
 +++ b/src/read_resume_data.cpp
-@@ -45,7 +45,7 @@ namespace {
- } // anonyous namespace
- 
- 	add_torrent_params read_resume_data(bdecode_node const& rd, error_code& ec
--		, int const piece_limit)
-+		, int const)
- 	{
- 		add_torrent_params ret;
- 		if (rd.type() != bdecode_node::dict_t)
-@@ -98,44 +98,14 @@ namespace {
+@@ -118,44 +118,14 @@ namespace {
  		ret.created_by = rd.dict_find_string_value("created by", "");
  		ret.comment = rd.dict_find_string_value("comment", "");
  
@@ -236,7 +227,7 @@ index 0739ff349..358b140ae 100644
  
  #if TORRENT_ABI_VERSION < 3
 diff --git a/src/torrent.cpp b/src/torrent.cpp
-index 2bb6380de..18f0d48fe 100644
+index 2fb7651a85ececd8147137258bad9c5e47ed202c..580a5050fdeba44efb02ab4b53ece1fe9dae9765 100644
 --- a/src/torrent.cpp
 +++ b/src/torrent.cpp
 @@ -61,7 +61,6 @@ see LICENSE file.
@@ -256,7 +247,7 @@ index 2bb6380de..18f0d48fe 100644
  #include "libtorrent/aux_/file_progress.hpp"
  #include "libtorrent/aux_/has_block.hpp"
  #include "libtorrent/aux_/alert_manager.hpp"
-@@ -464,6 +463,10 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -459,6 +458,10 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  			inc_stats_counter(counters::num_total_pieces_added
  				, m_torrent_file->num_pieces());
  		}
@@ -267,7 +258,7 @@ index 2bb6380de..18f0d48fe 100644
  
  		// TODO: 3 we could probably get away with just saving a few fields here
  		m_add_torrent_params = std::make_unique<add_torrent_params>(std::move(p));
-@@ -8440,7 +8443,7 @@ namespace {
+@@ -8545,7 +8548,7 @@ namespace {
  		TORRENT_ASSERT(is_single_thread());
  		INVARIANT_CHECK;
  
@@ -276,7 +267,7 @@ index 2bb6380de..18f0d48fe 100644
  
  		if (m_torrent_file->info_hashes().has_v1())
  		{
-@@ -8483,38 +8486,18 @@ namespace {
+@@ -8588,38 +8591,18 @@ namespace {
  		info_hash_t const old_ih = m_torrent_file->info_hashes();
  
  		error_code ec;
@@ -323,7 +314,7 @@ index 2bb6380de..18f0d48fe 100644
  			// this means the metadata is correct, since we
  			// verified it against the info-hash, but we
 diff --git a/src/torrent_info.cpp b/src/torrent_info.cpp
-index 8f2874a81..0f4fcf326 100644
+index 6c02878da2a9d5c23dc7cebf63320d8e98c39221..4cecc127cbcc36ce3bd63ce5dd34fb64c9b811db 100644
 --- a/src/torrent_info.cpp
 +++ b/src/torrent_info.cpp
 @@ -33,6 +33,7 @@ see LICENSE file.
@@ -334,7 +325,7 @@ index 8f2874a81..0f4fcf326 100644
  
  #include "libtorrent/load_torrent.hpp" // for aux::parse_torrent_file()
  #if TORRENT_ABI_VERSION < 4
-@@ -1032,6 +1033,198 @@ TORRENT_VERSION_NAMESPACE_4
+@@ -1036,6 +1037,198 @@ TORRENT_VERSION_NAMESPACE_4
  
  	torrent_info::~torrent_info() = default;
  

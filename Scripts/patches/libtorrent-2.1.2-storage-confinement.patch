@@ -120,10 +120,10 @@ index 2450d976eb915c1718c7e5a71041eae8be68fb3f..abecf3134d0990a70ff551e364a5a677
  
  		// allocate a slot and return the slot index
 diff --git a/include/libtorrent/aux_/path.hpp b/include/libtorrent/aux_/path.hpp
-index 6c5c75f6e96f6115e17a6c1b9a343ebe954464a5..70c3784fc6b3e05be6836f814d11d15e47c78011 100644
+index fa15113356724d9d43f5694d87534a8d45bf6929..2b3969c6d478b1cfe80397250fa3c3a0dc6b5655 100644
 --- a/include/libtorrent/aux_/path.hpp
 +++ b/include/libtorrent/aux_/path.hpp
-@@ -84,6 +84,32 @@ namespace libtorrent {
+@@ -82,6 +82,32 @@ namespace libtorrent {
  	TORRENT_EXTRA_EXPORT bool is_directory(std::string const& f
  		, error_code& ec);
  
@@ -157,13 +157,22 @@ index 6c5c75f6e96f6115e17a6c1b9a343ebe954464a5..70c3784fc6b3e05be6836f814d11d15e
  	// links are not supported by the filesystem or OS, the file will be copied.
  	TORRENT_EXTRA_EXPORT void hard_link(std::string const& file
 diff --git a/include/libtorrent/aux_/storage_utils.hpp b/include/libtorrent/aux_/storage_utils.hpp
-index 574928a08a67d26dae898cdbc1859048b19d49c1..e081bec79bbf984e3b7759d331a2b20710ca23ce 100644
+index 36c08b0ae49cf91d7a84cf0a87ba5856520b93a7..87b5a88abafe2b3cd0d18a3a2cbefcbb75f662f8 100644
 --- a/include/libtorrent/aux_/storage_utils.hpp
 +++ b/include/libtorrent/aux_/storage_utils.hpp
-@@ -81,9 +81,16 @@ namespace libtorrent::aux {
+@@ -48,7 +48,7 @@ namespace libtorrent::aux {
+ 	// ``renamed`` so it's created under the new name later). A rename that
+ 	// fails because the source and destination are on different
+ 	// filesystems falls back to copying the file and removing the
+-	// original.
++	// original. Paths must remain relative to save_path; symlinks are rejected.
+ 	TORRENT_EXTRA_EXPORT void rename_file(file_storage const& fs,
+ 		renamed_files& renamed,
+ 		file_index_t index,
+@@ -94,9 +94,16 @@ namespace libtorrent::aux {
  
- 	TORRENT_EXTRA_EXPORT void move_file(std::string const& f
- 		, std::string const& newf, storage_error& se);
+ 	TORRENT_EXTRA_EXPORT void move_file(
+ 		std::string const& f, std::string const& newf, storage_error& se);
 +	TORRENT_EXTRA_EXPORT void confined_move_file(std::string const& old_root
 +		, std::string const& old_relative, std::string const& new_root
 +		, std::string const& new_relative, storage_error& se);
@@ -492,7 +501,7 @@ index 0ebc9725b641b1864d1112036484abd616c19ce5..9e99d69c20f66d048147c736b312fc96
  }
 -
 diff --git a/src/mmap_storage.cpp b/src/mmap_storage.cpp
-index 97ce7a6d5a5e59f9fa589e7abdd3dcfd76ebc1e6..837a6af5b06df92963960b728b9d0faecec6b580 100644
+index f79ba477c7af0dc3aab75c0365da72039854f7c7..483f6e3568f085e75d77585e716a55d815b219f7 100644
 --- a/src/mmap_storage.cpp
 +++ b/src/mmap_storage.cpp
 @@ -150,7 +150,8 @@ mmap_storage::mmap_storage(storage_params const& params, aux::file_view_pool& po
@@ -551,91 +560,7 @@ index 97ce7a6d5a5e59f9fa589e7abdd3dcfd76ebc1e6..837a6af5b06df92963960b728b9d0fae
  		if (!ec) return true;
  
  		// the part file not existing is expected
-@@ -415,7 +429,25 @@ mmap_storage::mmap_storage(storage_params const& params, aux::file_view_pool& po
- 		, storage_error& ec)
- 	{
- 		if (index < file_index_t(0) || index >= files().end_file()) return;
--		std::string const old_name = m_renamed_files.file_path(files(), index, m_save_path);
-+		if (m_renamed_files.file_absolute_path(files(), index)
-+			|| is_complete(new_filename))
-+		{
-+			ec.ec = make_error_code(boost::system::errc::invalid_argument);
-+			ec.file(index);
-+			ec.operation = operation_t::file_rename;
-+			return;
-+		}
-+		error_code destination_error;
-+		confined_exists(m_save_path, new_filename, destination_error);
-+		if (destination_error)
-+		{
-+			ec.ec = destination_error;
-+			ec.file(index);
-+			ec.operation = operation_t::file_rename;
-+			return;
-+		}
-+
-+		std::string const old_name = m_renamed_files.file_path(files(), index);
- 		m_pool.release(storage_index(), index);
- 
- 		// if the old file doesn't exist, just succeed and change the filename
-@@ -425,15 +457,10 @@ mmap_storage::mmap_storage(storage_params const& params, aux::file_view_pool& po
- 		// fail later when we try to write to the file the first time, because
- 		// the user then will have had a chance to make the destination directory
- 		// valid.
--		if (exists(old_name, ec.ec))
-+		if (confined_exists(m_save_path, old_name, ec.ec))
- 		{
--			std::string new_path;
--			if (is_complete(new_filename)) new_path = new_filename;
--			else new_path = combine_path(m_save_path, new_filename);
--			std::string new_dir = parent_path(new_path);
--
- 			error_code best_effort;
--			if (exists(new_path, best_effort))
-+			if (confined_exists(m_save_path, new_filename, best_effort))
- 			{
- 				// We don't want to overwrite an existing file
- 				ec.ec = error_code(boost::system::errc::file_exists, generic_category());
-@@ -444,7 +471,8 @@ mmap_storage::mmap_storage(storage_params const& params, aux::file_view_pool& po
- 
- 			// create any missing directories that the new filename
- 			// lands in
--			create_directories(new_dir, ec.ec);
-+			confined_create_directories(m_save_path
-+				, parent_path(new_filename), ec.ec);
- 			if (ec.ec)
- 			{
- 				ec.file(index);
-@@ -452,7 +480,8 @@ mmap_storage::mmap_storage(storage_params const& params, aux::file_view_pool& po
- 				return;
- 			}
- 
--			rename(old_name, new_path, ec.ec);
-+			confined_rename(m_save_path, old_name
-+				, m_save_path, new_filename, ec.ec);
- 
- 			// if old_name doesn't exist, that's not an error
- 			// here. Once we start writing to the file, it will
-@@ -463,7 +492,8 @@ mmap_storage::mmap_storage(storage_params const& params, aux::file_view_pool& po
- 			if (ec)
- 			{
- 				ec.ec.clear();
--				aux::copy_file(old_name, new_path, ec);
-+				aux::confined_copy_file(m_save_path, old_name
-+					, m_save_path, new_filename, ec);
- 
- 				if (ec)
- 				{
-@@ -472,7 +502,7 @@ mmap_storage::mmap_storage(storage_params const& params, aux::file_view_pool& po
- 				}
- 
- 				error_code ignore;
--				remove(old_name, ignore);
-+				confined_remove(m_save_path, old_name, false, ignore);
- 			}
- 		}
- 		else if (ec.ec)
-@@ -542,18 +572,7 @@ mmap_storage::mmap_storage(storage_params const& params, aux::file_view_pool& po
+@@ -474,18 +488,7 @@ mmap_storage::mmap_storage(storage_params const& params, aux::file_view_pool& po
  		auto move_partfile = [&](std::string const& new_save_path, error_code& e)
  		{
  			if (!m_part_file) return;
@@ -764,20 +689,21 @@ index c6e5fe5d11b53f9a1edcfa457e7d716288ad1830..962f454a27c36d9609223a82af911202
  			if (ec == boost::system::errc::no_such_file_or_directory)
  				ec.clear();
 diff --git a/src/path.cpp b/src/path.cpp
-index 59b829db20f26901f930df918c9ca991679d4285..01c86ed0d4fb6669ca3198ea2661dd2a5544e8ed 100644
+index c52d72b1e94c488c6bd8284c966ae26b96a3beeb..cf5818072dedc8c739feba0dde54fc5dc8da8ce1 100644
 --- a/src/path.cpp
 +++ b/src/path.cpp
-@@ -46,6 +46,9 @@ see LICENSE file.
+@@ -45,6 +45,10 @@ see LICENSE file.
+ #include "libtorrent/config.hpp"
  #include "libtorrent/aux_/alloca.hpp"
  #include "libtorrent/aux_/path.hpp"
- #include "libtorrent/aux_/directory.hpp"
++#include "libtorrent/aux_/directory.hpp"
 +#ifndef TORRENT_WINDOWS
 +#include "libtorrent/aux_/file_descriptor.hpp"
 +#endif
  #include "libtorrent/aux_/string_util.hpp"
  #include <cstring>
  #include <algorithm> // for std::replace
-@@ -60,6 +63,10 @@ see LICENSE file.
+@@ -59,6 +63,10 @@ see LICENSE file.
  #include <sys/stat.h>
  #include <climits> // for IOV_MAX
  
@@ -788,7 +714,7 @@ index 59b829db20f26901f930df918c9ca991679d4285..01c86ed0d4fb6669ca3198ea2661dd2a
  #ifdef TORRENT_WINDOWS
  // windows part
  
-@@ -117,6 +124,55 @@ namespace {
+@@ -116,6 +124,55 @@ namespace {
  		return std::unique_ptr<T, free_function>(ptr, free_function{});
  	}
  
@@ -844,7 +770,7 @@ index 59b829db20f26901f930df918c9ca991679d4285..01c86ed0d4fb6669ca3198ea2661dd2a
  #ifdef TORRENT_WINDOWS
  	time_t file_time_to_posix(FILETIME f)
  	{
-@@ -330,6 +386,311 @@ namespace {
+@@ -329,6 +386,311 @@ namespace {
  #undef RenameFunction_
  	}
  
@@ -1157,10 +1083,10 @@ index 59b829db20f26901f930df918c9ca991679d4285..01c86ed0d4fb6669ca3198ea2661dd2a
  	{
  		ec.clear();
 diff --git a/src/pread_storage.cpp b/src/pread_storage.cpp
-index a8fc9effb633942cbb25b288777147a8183f382d..6edd914f1193830c2df82198189467e3974feffa 100644
+index b6cf4cb72aca8b6dfefd3ac7355ae1a054ec0d1f..f6363969c7118412e35abe044e6218e3cad3573f 100644
 --- a/src/pread_storage.cpp
 +++ b/src/pread_storage.cpp
-@@ -101,7 +101,8 @@ namespace libtorrent::aux {
+@@ -102,7 +102,8 @@ namespace libtorrent::aux {
  		if (m_part_file) return;
  
  		m_part_file = std::make_unique<part_file>(
@@ -1170,7 +1096,7 @@ index a8fc9effb633942cbb25b288777147a8183f382d..6edd914f1193830c2df82198189467e3
  			, m_part_file_name
  			, files().num_pieces(), files().piece_length());
  	}
-@@ -172,8 +173,8 @@ namespace libtorrent::aux {
+@@ -180,8 +181,8 @@ namespace libtorrent::aux {
  				// this is not implemented yet.
  				// so we just don't use a partfile for this file
  
@@ -1181,7 +1107,7 @@ index a8fc9effb633942cbb25b288777147a8183f382d..6edd914f1193830c2df82198189467e3
  				if (ec.ec)
  				{
  					ec.file(i);
-@@ -267,7 +268,21 @@ namespace libtorrent::aux {
+@@ -274,7 +275,21 @@ namespace libtorrent::aux {
  		initialize_storage(fs, m_save_path, m_stat_cache, m_file_priority
  			, [&sett, this](file_index_t const file_index, storage_error& e)
  			{ open_file(sett, file_index, open_mode::write, e); }
@@ -1204,7 +1130,7 @@ index a8fc9effb633942cbb25b288777147a8183f382d..6edd914f1193830c2df82198189467e3
  			, [&ret](file_index_t, std::int64_t) { ret = ret | disk_status::oversized_file; }
  			, ec);
  
-@@ -286,10 +301,8 @@ namespace libtorrent::aux {
+@@ -293,10 +308,8 @@ namespace libtorrent::aux {
  		if (ec) return false;
  
  		file_status s;
@@ -1217,83 +1143,7 @@ index a8fc9effb633942cbb25b288777147a8183f382d..6edd914f1193830c2df82198189467e3
  		if (!ec) return true;
  
  		// the part file not existing is expected
-@@ -308,7 +321,25 @@ namespace libtorrent::aux {
- 		, storage_error& ec)
- 	{
- 		if (index < file_index_t(0) || index >= files().end_file()) return;
--		std::string const old_name = m_renamed_files.file_path(files(), index, m_save_path);
-+		if (m_renamed_files.file_absolute_path(files(), index)
-+			|| is_complete(new_filename))
-+		{
-+			ec.ec = make_error_code(boost::system::errc::invalid_argument);
-+			ec.file(index);
-+			ec.operation = operation_t::file_rename;
-+			return;
-+		}
-+		error_code destination_error;
-+		confined_exists(m_save_path, new_filename, destination_error);
-+		if (destination_error)
-+		{
-+			ec.ec = destination_error;
-+			ec.file(index);
-+			ec.operation = operation_t::file_rename;
-+			return;
-+		}
-+
-+		std::string const old_name = m_renamed_files.file_path(files(), index);
- 		m_pool.release(storage_index(), index);
- 
- 		// if the old file doesn't exist, just succeed and change the filename
-@@ -318,16 +349,12 @@ namespace libtorrent::aux {
- 		// fail later when we try to write to the file the first time, because
- 		// the user then will have had a chance to make the destination directory
- 		// valid.
--		if (exists(old_name, ec.ec))
-+		if (confined_exists(m_save_path, old_name, ec.ec))
- 		{
--			std::string new_path;
--			if (is_complete(new_filename)) new_path = new_filename;
--			else new_path = combine_path(m_save_path, new_filename);
--			std::string new_dir = parent_path(new_path);
--
- 			// create any missing directories that the new filename
- 			// lands in
--			create_directories(new_dir, ec.ec);
-+			confined_create_directories(m_save_path
-+				, parent_path(new_filename), ec.ec);
- 			if (ec.ec)
- 			{
- 				ec.file(index);
-@@ -335,7 +362,8 @@ namespace libtorrent::aux {
- 				return;
- 			}
- 
--			rename(old_name, new_path, ec.ec);
-+			confined_rename(m_save_path, old_name
-+				, m_save_path, new_filename, ec.ec);
- 
- 			// if old_name doesn't exist, that's not an error
- 			// here. Once we start writing to the file, it will
-@@ -346,7 +374,8 @@ namespace libtorrent::aux {
- 			if (ec)
- 			{
- 				ec.ec.clear();
--				copy_file(old_name, new_path, ec);
-+				confined_copy_file(m_save_path, old_name
-+					, m_save_path, new_filename, ec);
- 
- 				if (ec)
- 				{
-@@ -355,7 +384,7 @@ namespace libtorrent::aux {
- 				}
- 
- 				error_code ignore;
--				remove(old_name, ignore);
-+				confined_remove(m_save_path, old_name, false, ignore);
- 			}
- 		}
- 		else if (ec.ec)
-@@ -424,18 +453,7 @@ namespace libtorrent::aux {
+@@ -373,18 +386,7 @@ namespace libtorrent::aux {
  		auto move_partfile = [&](std::string const& new_save_path, error_code& e)
  		{
  			if (!m_part_file) return;
@@ -1328,19 +1178,20 @@ index 5f20428fea267f51491f95e7094ada5fe8cd28b5..77a0fc241b243dc18f1ee06898687226
  			{
  				set_error_impl(i, ec);
 diff --git a/src/storage_utils.cpp b/src/storage_utils.cpp
-index 70f353acc0716e0cb1a91f9f34749c7667f58c08..2ba9d7765a1f96a1bbeeea8baa03c50bad680fbb 100644
+index 797ea7677d225376ac6025d59b23c95776a18500..417fd8c73e5dad367921120d59d81a605c00e10c 100644
 --- a/src/storage_utils.cpp
 +++ b/src/storage_utils.cpp
-@@ -56,7 +56,7 @@ namespace libtorrent { namespace aux {
+@@ -56,8 +56,7 @@ namespace libtorrent { namespace aux {
  					// files moved out to absolute paths are ignored
  					if (f.file_absolute_path(i)) continue;
  
--					stat_file(f.file_path(i, new_save_path), &s, err);
+-					// a dangling symlink still counts as existing
+-					stat_file(f.file_path(i, new_save_path), &s, err, dont_follow_links);
 +					confined_stat_file(new_save_path, f.file_path(i), &s, err);
  					if (err != boost::system::errc::no_such_file_or_directory)
  					{
  						ec.ec = err;
-@@ -110,11 +110,11 @@ namespace libtorrent { namespace aux {
+@@ -111,12 +110,11 @@ namespace libtorrent { namespace aux {
  			// files moved out to absolute paths are not moved
  			if (f.file_absolute_path(i)) continue;
  
@@ -1349,13 +1200,14 @@ index 70f353acc0716e0cb1a91f9f34749c7667f58c08..2ba9d7765a1f96a1bbeeea8baa03c50b
 +			std::string const relative_path = f.file_path(i);
  
  			error_code ignore;
--			if (flags == move_flags_t::dont_replace && exists(new_path, ignore))
+-			// a dangling symlink still counts as existing
+-			if (flags == move_flags_t::dont_replace && exists(new_path, ignore, dont_follow_links))
 +			if (flags == move_flags_t::dont_replace
 +				&& confined_exists(new_save_path, relative_path, ignore))
  			{
  				ret |= disk_status::need_full_check;
  				continue;
-@@ -123,7 +123,8 @@ namespace libtorrent { namespace aux {
+@@ -125,7 +123,8 @@ namespace libtorrent { namespace aux {
  			// TODO: ideally, if we end up copying files because of a move across
  			// volumes, the source should not be deleted until they've all been
  			// copied. That would let us rollback with higher confidence.
@@ -1365,17 +1217,42 @@ index 70f353acc0716e0cb1a91f9f34749c7667f58c08..2ba9d7765a1f96a1bbeeea8baa03c50b
  
  			// if the source file doesn't exist. That's not a problem
  			// we just ignore that file
-@@ -137,7 +138,8 @@ namespace libtorrent { namespace aux {
+@@ -139,32 +138,8 @@ namespace libtorrent { namespace aux {
  				// on OSX, the error when trying to rename a file across different
  				// volumes is EXDEV, which will make it fall back to copying.
  				ec.ec.clear();
--				copy_file(old_path, new_path, ec);
+-#if TORRENT_HAS_SYMLINK
+-				bool const declared_symlink = bool(f.file_flags(i) & file_storage::flag_symlink);
+-				file_status old_stat;
+-				error_code stat_ec;
+-				stat_file(old_path, &old_stat, stat_ec, dont_follow_links);
+-				bool const actual_symlink = !stat_ec && bool(old_stat.mode & file_status::symlink);
+-				if (declared_symlink != actual_symlink)
+-				{
+-					// what's on disk does not match what the torrent expects;
+-					// it's not safe to assume ownership of this file
+-					ec.ec = errors::mismatching_file_type;
+-					ec.operation = operation_t::file_stat;
+-				}
+-				else if (declared_symlink)
+-				{
+-					// copy_file() would follow the symlink and copy whatever
+-					// it points to, instead of moving the link itself
+-					std::string const target =
+-						lexically_relative(parent_path(f.file_path(i)), f.symlink(i));
+-					create_symlink(target, new_path, ec);
+-				}
+-				else
+-#endif
+-				{
+-					copy_file(old_path, new_path, ec);
+-				}
 +				confined_copy_file(save_path, relative_path
 +					, new_save_path, relative_path, ec);
  				if (!ec) copied_files[i] = true;
  			}
  
-@@ -173,12 +175,12 @@ namespace libtorrent { namespace aux {
+@@ -200,12 +175,12 @@ namespace libtorrent { namespace aux {
  				// roll-back
  				if (copied_files[file_index]) continue;
  
@@ -1391,7 +1268,7 @@ index 70f353acc0716e0cb1a91f9f34749c7667f58c08..2ba9d7765a1f96a1bbeeea8baa03c50b
  			}
  
  			return { disk_status::fatal_disk_error, save_path };
-@@ -203,23 +205,21 @@ namespace libtorrent { namespace aux {
+@@ -230,23 +205,21 @@ namespace libtorrent { namespace aux {
  			// need to delete the source.
  			if (copied_files[i] == false) continue;
  
@@ -1419,7 +1296,7 @@ index 70f353acc0716e0cb1a91f9f34749c7667f58c08..2ba9d7765a1f96a1bbeeea8baa03c50b
  				subdir = parent_path(subdir);
  			}
  		}
-@@ -229,9 +229,10 @@ namespace libtorrent { namespace aux {
+@@ -256,9 +229,10 @@ namespace libtorrent { namespace aux {
  
  	namespace {
  
@@ -1432,7 +1309,7 @@ index 70f353acc0716e0cb1a91f9f34749c7667f58c08..2ba9d7765a1f96a1bbeeea8baa03c50b
  
  		if (ec == boost::system::errc::no_such_file_or_directory)
  			ec.clear();
-@@ -250,20 +251,18 @@ namespace libtorrent { namespace aux {
+@@ -277,20 +251,18 @@ namespace libtorrent { namespace aux {
  			for (auto const i : fs.file_range())
  			{
  				std::string const fp = fs.file_path(i);
@@ -1463,7 +1340,7 @@ index 70f353acc0716e0cb1a91f9f34749c7667f58c08..2ba9d7765a1f96a1bbeeea8baa03c50b
  				if (ec) { ec.file(i); ec.operation = operation_t::file_remove; }
  			}
  
-@@ -274,7 +273,7 @@ namespace libtorrent { namespace aux {
+@@ -301,7 +273,7 @@ namespace libtorrent { namespace aux {
  				, end(directories.rend()); i != end; ++i)
  			{
  				error_code error;
@@ -1472,7 +1349,7 @@ index 70f353acc0716e0cb1a91f9f34749c7667f58c08..2ba9d7765a1f96a1bbeeea8baa03c50b
  				if (error && !ec)
  				{
  					ec.file(file_index_t(-1));
-@@ -289,7 +288,10 @@ namespace libtorrent { namespace aux {
+@@ -316,7 +288,10 @@ namespace libtorrent { namespace aux {
  			|| (options & session::delete_files))
  		{
  			error_code error;
@@ -1484,7 +1361,115 @@ index 70f353acc0716e0cb1a91f9f34749c7667f58c08..2ba9d7765a1f96a1bbeeea8baa03c50b
  			if (error && error != boost::system::errc::no_such_file_or_directory)
  			{
  				ec.file(file_index_t(-1));
-@@ -659,4 +661,25 @@ std::int64_t get_filesize(stat_cache& stat, file_index_t const file_index
+@@ -337,13 +312,29 @@ namespace libtorrent { namespace aux {
+ 		TORRENT_ASSERT(index < fs.end_file());
+ 		if (index < file_index_t(0) || index >= fs.end_file())
+ 			return;
+-		std::string const old_name = renamed.file_path(fs, index, save_path);
++		if (renamed.file_absolute_path(fs, index) || is_complete(new_filename))
++		{
++			ec.ec = make_error_code(boost::system::errc::invalid_argument);
++			ec.file(index);
++			ec.operation = operation_t::file_rename;
++			return;
++		}
+ 
+-		// this also tells us whether old_name is itself a symlink, which
+-		// is needed later in case the cross-filesystem fallback has to
+-		// recreate it instead of copying its content
++		// Validate even when the source does not exist: no future rename may
++		// publish an absolute, escaping, or symlink-traversing payload path.
++		confined_exists(save_path, new_filename, ec.ec);
++		if (ec.ec)
++		{
++			ec.file(index);
++			ec.operation = operation_t::file_rename;
++			return;
++		}
++		std::string const old_name = renamed.file_path(fs, index);
++
++		// Confined storage rejects symlinks rather than copying or moving
++		// targets outside the payload root.
+ 		file_status old_stat;
+-		stat_file(old_name, &old_stat, ec.ec, dont_follow_links);
++		confined_stat_file(save_path, old_name, &old_stat, ec.ec);
+ 		if (ec.ec == boost::system::errc::no_such_file_or_directory
+ 			|| ec.ec == boost::system::errc::filename_too_long)
+ 		{
+@@ -365,17 +356,10 @@ namespace libtorrent { namespace aux {
+ 			return;
+ 		}
+ 
+-#if TORRENT_HAS_SYMLINK
+-		bool const old_is_symlink = bool(old_stat.mode & file_status::symlink);
+-		bool const declared_symlink = bool(fs.file_flags(index) & file_storage::flag_symlink);
+-#endif
+-
+-		std::string const new_path =
+-			is_complete(new_filename) ? new_filename : combine_path(save_path, new_filename);
+-		std::string const new_dir = parent_path(new_path);
++		std::string const new_dir = parent_path(new_filename);
+ 
+ 		error_code best_effort;
+-		if (exists(new_path, best_effort, dont_follow_links))
++		if (confined_exists(save_path, new_filename, best_effort))
+ 		{
+ 			// We don't want to overwrite an existing file
+ 			ec.ec = error_code(boost::system::errc::file_exists, generic_category());
+@@ -384,7 +368,7 @@ namespace libtorrent { namespace aux {
+ 			return;
+ 		}
+ 
+-		create_directories(new_dir, ec.ec);
++		confined_create_directories(save_path, new_dir, ec.ec);
+ 		if (ec.ec)
+ 		{
+ 			ec.file(index);
+@@ -392,7 +376,7 @@ namespace libtorrent { namespace aux {
+ 			return;
+ 		}
+ 
+-		rename(old_name, new_path, ec.ec);
++		confined_rename(save_path, old_name, save_path, new_filename, ec.ec);
+ 
+ 		// if old_name doesn't exist, that's not an error
+ 		// here. Once we start writing to the file, it will
+@@ -412,32 +396,11 @@ namespace libtorrent { namespace aux {
+ 			// which are unlikely to be fixed by copying instead (e.g.
+ 			// EXDEV, when old_name and new_path are on different volumes)
+ 			ec.ec.clear();
+-#if TORRENT_HAS_SYMLINK
+-			if (old_is_symlink != declared_symlink)
+-			{
+-				// what's on disk does not match what the torrent expects;
+-				// it's not safe to assume ownership of this file
+-				ec.ec = errors::mismatching_file_type;
+-				ec.operation = operation_t::file_stat;
+-			}
+-			else if (old_is_symlink)
+-			{
+-				// copy_file() would dereference the link; new_filename may
+-				// sit at an unrelated depth or be absolute, so the target
+-				// is anchored to save_path, not to new_dir directly
+-				std::string const target =
+-					lexically_relative(new_dir, combine_path(save_path, fs.symlink(index)));
+-				create_symlink(target, new_path, ec);
+-			}
+-			else
+-#endif
+-			{
+-				copy_file(old_name, new_path, ec);
+-			}
++			confined_copy_file(save_path, old_name, save_path, new_filename, ec);
+ 			if (!ec)
+ 			{
+ 				error_code ignore;
+-				remove(old_name, ignore);
++				confined_remove(save_path, old_name, false, ignore);
+ 			}
+ 		}
+ 
+@@ -811,4 +774,25 @@ std::int64_t get_filesize(stat_cache& stat, file_index_t const file_index
  			se.operation = operation_t::file_rename;
  	}
  
@@ -1511,10 +1496,10 @@ index 70f353acc0716e0cb1a91f9f34749c7667f58c08..2ba9d7765a1f96a1bbeeea8baa03c50b
 +
  }}
 diff --git a/test/test_file.cpp b/test/test_file.cpp
-index 2ab0f66ecc262dc3061f1d706d89d0bf9e6ca62c..ccfaaf74dcf9ed0e2aea830453f89d5c9411dbce 100644
+index 835b59f65370f7f1d429f75167c8d24b17f53c76..048bb9612f6dadd5d0dc77c319cd999ebb87ee53 100644
 --- a/test/test_file.cpp
 +++ b/test/test_file.cpp
-@@ -604,6 +604,161 @@ TORRENT_TEST(lexically_relative_normal)
+@@ -605,6 +605,161 @@ TORRENT_TEST(lexically_relative_normal)
  #undef S
  }
  
@@ -1677,10 +1662,10 @@ index 2ab0f66ecc262dc3061f1d706d89d0bf9e6ca62c..ccfaaf74dcf9ed0e2aea830453f89d5c
  #if TORRENT_USE_UNC_PATHS
  
 diff --git a/test/test_storage.cpp b/test/test_storage.cpp
-index fac4bfff65e4339f12bb732ea19feac9ca983ca4..d976702b9a1dd6a6de4cd6bae6e251a117a5f69f 100644
+index 93d0456d8b6cad7d43547ee98be9a8188509d0aa..c7521cd5c95899786ceaeeb0adc144ec393be275 100644
 --- a/test/test_storage.cpp
 +++ b/test/test_storage.cpp
-@@ -332,6 +332,79 @@ std::vector<char> new_piece(std::size_t const size)
+@@ -337,6 +337,79 @@ std::vector<char> new_piece(std::size_t const size)
  	return ret;
  }
  
@@ -1760,11 +1745,94 @@ index fac4bfff65e4339f12bb732ea19feac9ca983ca4..d976702b9a1dd6a6de4cd6bae6e251a1
  template <typename StorageType>
  void run_storage_tests(std::shared_ptr<torrent_info const> info
  	, lt::storage_mode_t storage_mode)
-@@ -910,6 +983,20 @@ TORRENT_TEST_DISK_IO(check_files_allocate) { test_check_files_all_threads(zero_p
- TORRENT_TEST(test_pre_allocate_mmap) { test_pre_allocate<mmap_storage>(); }
+@@ -990,6 +1063,103 @@ TORRENT_TEST(test_pre_allocate_mmap) { test_pre_allocate<mmap_storage>(); }
+ TORRENT_TEST(test_pre_allocate_pread) { test_pre_allocate<pread_storage>(); }
  #endif
  
 +#if defined __APPLE__ && defined __MACH__
++
++TORRENT_TEST(confined_rename_file)
++{
++	auto const touch_file = [](std::string const& path, std::streamoff const size) {
++		std::ofstream file(path, std::ios::binary);
++		file.seekp(size - 1);
++		file.put('\0');
++		file.close();
++		TEST_CHECK(file.good());
++	};
++	std::string const root = complete("confined-rename-root");
++	std::string const outside = complete("confined-rename-outside");
++	error_code ec;
++	create_directories(root, ec);
++	TEST_CHECK(!ec);
++	create_directories(outside, ec);
++	TEST_CHECK(!ec);
++	touch_file(combine_path(outside, "victim"), 64);
++	touch_file(combine_path(root, "existing"), 48);
++	TEST_EQUAL(::symlink(outside.c_str(), combine_path(root, "escape").c_str()), 0);
++	TEST_EQUAL(::symlink(combine_path(outside, "victim").c_str()
++		, combine_path(root, "final-link").c_str()), 0);
++
++	file_storage files;
++	files.add_file("source", 32);
++	for (bool const source_exists : {false, true})
++	{
++		if (source_exists) touch_file(combine_path(root, "source"), 32);
++		for (std::string const& destination : {std::string("../confined-rename-outside/victim")
++			, combine_path(outside, "victim"), std::string("escape/victim")
++			, std::string("final-link")})
++		{
++			renamed_files renamed;
++			storage_error error;
++			aux::rename_file(files, renamed, 0_file, destination, root, error);
++			TEST_CHECK(error);
++			TEST_EQUAL(renamed.file_path(files, 0_file), "source");
++		}
++	}
++
++	renamed_files renamed;
++	storage_error error;
++	aux::rename_file(files, renamed, 0_file, "existing", root, error);
++	TEST_EQUAL(error.ec, error_code(boost::system::errc::file_exists, generic_category()));
++	TEST_EQUAL(renamed.file_path(files, 0_file), "source");
++	file_status status;
++	stat_file(combine_path(root, "existing"), &status, ec);
++	TEST_CHECK(!ec);
++	TEST_EQUAL(status.file_size, 48);
++
++	error = {};
++	aux::rename_file(files, renamed, 0_file, "subdir/renamed", root, error);
++	TEST_CHECK(!error);
++	TEST_EQUAL(renamed.file_path(files, 0_file), "subdir/renamed");
++	TEST_CHECK(!exists(combine_path(root, "source")));
++	stat_file(combine_path(root, "subdir/renamed"), &status, ec);
++	TEST_CHECK(!ec);
++	TEST_EQUAL(status.file_size, 32);
++
++	// A missing source may record a confined future destination.
++	renamed_files missing;
++	error = {};
++	aux::rename_file(files, missing, 0_file, "future/payload", root, error);
++	TEST_CHECK(!error);
++	TEST_EQUAL(missing.file_path(files, 0_file), "future/payload");
++
++	// The shared helper must reject source symlinks for every storage backend.
++	TEST_EQUAL(::symlink(combine_path(outside, "victim").c_str()
++		, combine_path(root, "source").c_str()), 0);
++	renamed_files symlink;
++	error = {};
++	aux::rename_file(files, symlink, 0_file, "moved-link", root, error);
++	TEST_CHECK(error);
++	TEST_EQUAL(symlink.file_path(files, 0_file), "source");
++	stat_file(combine_path(outside, "victim"), &status, ec);
++	TEST_CHECK(!ec);
++	TEST_EQUAL(status.file_size, 64);
++	remove_all(root, ec);
++	TEST_CHECK(!ec);
++	remove_all(outside, ec);
++	TEST_CHECK(!ec);
++}
++
 +TORRENT_TEST(confined_hard_link_write_pread)
 +{
 +	test_confined_hard_link_write<pread_storage>("pread");

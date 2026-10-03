@@ -1,5 +1,5 @@
 diff --git a/src/pe_crypto.cpp b/src/pe_crypto.cpp
-index 0665515e5..b927f4521 100644
+index 0665515e59737e15c9784b7f072a4392a402e3b4..b927f45215727cca0618dc14fc3ca43b3f37e10f 100644
 --- a/src/pe_crypto.cpp
 +++ b/src/pe_crypto.cpp
 @@ -139,7 +139,7 @@ namespace libtorrent::aux {
@@ -12,7 +12,7 @@ index 0665515e5..b927f4521 100644
  		// TODO: it would be nice to be able to export to a fixed width field, so
  		// we wouldn't have to shift it later
 diff --git a/src/random.cpp b/src/random.cpp
-index e321ab823..d65bfd1cc 100644
+index e321ab82355f62e3f2e15faadb5f8a3e197f7c05..d65bfd1cc22cda6d411511e273e24078396f55d2 100644
 --- a/src/random.cpp
 +++ b/src/random.cpp
 @@ -118,7 +118,11 @@ namespace libtorrent::aux {
@@ -28,10 +28,10 @@ index e321ab823..d65bfd1cc 100644
  #elif TORRENT_USE_GETRANDOM
  			ssize_t const r = ::getrandom(buffer.data(), static_cast<std::size_t>(buffer.size()), 0);
 diff --git a/src/torrent.cpp b/src/torrent.cpp
-index e6387b747..7b9a3d039 100644
+index 7a02f471bddb6c8ecf5c63acbafbc172c141b800..02907149f830e678fdb001b1fac461d61ea7bfd7 100644
 --- a/src/torrent.cpp
 +++ b/src/torrent.cpp
-@@ -1715,7 +1715,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -1727,7 +1727,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  		auto* gens = static_cast<GENERAL_NAMES*>(
  			X509_get_ext_d2i(cert, NID_subject_alt_name, nullptr, nullptr));
  
@@ -41,7 +41,7 @@ index e6387b747..7b9a3d039 100644
  		{
  			GENERAL_NAME* gen = sk_GENERAL_NAME_value(gens, i);
  			if (gen->type != GEN_DNS) continue;
-@@ -6382,6 +6383,7 @@ namespace {
+@@ -6480,6 +6481,7 @@ namespace {
  		if (should_log())
  			debug_log("*** use private key file: %s", ec.message().c_str());
  #endif
@@ -49,7 +49,7 @@ index e6387b747..7b9a3d039 100644
  		m_ssl_ctx->use_tmp_dh_file(dh_params, ec);
  		if (ec)
  		{
-@@ -6391,6 +6393,11 @@ namespace {
+@@ -6489,6 +6491,11 @@ namespace {
  #ifndef TORRENT_DISABLE_LOGGING
  		if (should_log())
  			debug_log("*** use DH file: %s", ec.message().c_str());
@@ -61,7 +61,7 @@ index e6387b747..7b9a3d039 100644
  #endif
  	}
  
-@@ -6418,6 +6425,7 @@ namespace {
+@@ -6516,6 +6523,7 @@ namespace {
  				alerts().emplace_alert<torrent_error_alert>(get_handle(), ec, "[private key]");
  		}
  
@@ -69,7 +69,7 @@ index e6387b747..7b9a3d039 100644
  		boost::asio::const_buffer dh_params_buf(dh_params.c_str(), dh_params.size());
  		m_ssl_ctx->use_tmp_dh(dh_params_buf, ec);
  		if (ec)
-@@ -6425,6 +6433,11 @@ namespace {
+@@ -6523,6 +6531,11 @@ namespace {
  			if (alerts().should_post<torrent_error_alert>())
  				alerts().emplace_alert<torrent_error_alert>(get_handle(), ec, "[dh params]");
  		}

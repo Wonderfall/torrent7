@@ -30,13 +30,19 @@ typeset -ra test_targets=(
     test_dht
     test_fast_extension
     test_file
+    test_hash_picker
     test_heterogeneous_queue
     test_http_connection
     test_system_trust
     test_http_parser
     test_ip_voter
+    test_merge_block_requests
+    test_merkle
+    test_merkle_tree
     test_pe_crypto
     test_peer_list
+    test_piece_picker
+    test_read_resume
     test_storage
     test_torrent
     test_private_tracker_lifecycle
@@ -83,6 +89,16 @@ restore_configuration=0
 (
     cd -- "$build_dir/test"
     ./test_heterogeneous_queue --no-redirect
+    ./test_hash_picker --no-redirect
+    ./test_merge_block_requests --no-redirect
+    ./test_merkle --no-redirect
+    ./test_merkle_tree --no-redirect
+    ./test_piece_picker --no-redirect
+    ./test_read_resume --no-redirect \
+        "$source_dir/test/test_read_resume.cpp.verified_pieces_too_large" \
+        "$source_dir/test/test_read_resume.cpp.have_pieces_too_large" \
+        "$source_dir/test/test_read_resume.cpp.merkle_tree_bitfield_too_large" \
+        "$source_dir/test/test_read_resume.cpp.unfinished_bitmask_overflow"
     ./test_buffer --no-redirect \
         "$source_dir/test/test_buffer.cpp.chained_buffer"
     ./test_pe_crypto --no-redirect \
@@ -187,6 +203,8 @@ restore_configuration=0
         "$source_dir/test/test_file.cpp.confined_filesystem_operations"
     ./test_file --no-redirect \
         "$source_dir/test/test_file.cpp.pwrite_all_short_write"
+    ./test_storage --no-redirect \
+        "$source_dir/test/test_storage.cpp.confined_rename_file"
     ./test_storage --no-redirect \
         "$source_dir/test/test_storage.cpp.confined_hard_link_write_pread"
     ./test_storage --no-redirect \

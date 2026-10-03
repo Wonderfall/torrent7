@@ -1,5 +1,5 @@
 diff --git a/include/libtorrent/aux_/session_settings.hpp b/include/libtorrent/aux_/session_settings.hpp
-index 6dda64820..8e965eec1 100644
+index 6dda64820308a8f24df38a8194038adeabfbf80e..8e965eec1a3102f40ff2961f00d644dc8350c839 100644
 --- a/include/libtorrent/aux_/session_settings.hpp
 +++ b/include/libtorrent/aux_/session_settings.hpp
 @@ -127,10 +127,7 @@ namespace libtorrent::aux {

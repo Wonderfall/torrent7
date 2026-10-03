@@ -1,8 +1,8 @@
 diff --git a/src/torrent.cpp b/src/torrent.cpp
-index da53ab6b5eca46ee51dfbeec096a5c3c4a270d45..1714ae552635182bdb15e0fe46aef5087d5ad3b4 100644
+index 1db5895a328ea64fc4241740e888f7b421782ab6..2fb7651a85ececd8147137258bad9c5e47ed202c 100644
 --- a/src/torrent.cpp
 +++ b/src/torrent.cpp
-@@ -10522,6 +10522,16 @@ namespace {
+@@ -10652,6 +10652,16 @@ namespace {
  		auto const it = std::find(m_web_seeds.begin(), m_web_seeds.end(), ent);
  		if (it != m_web_seeds.end())
  		{

@@ -1,6 +1,6 @@
 # Native parser inventory
 
-This inventory applies to Torrent7's pinned libtorrent 2.1.1 build. It records
+This inventory applies to Torrent7's pinned libtorrent 2.1.2 build. It records
 the parser boundary after the selective Swift cutovers described in
 `MetainfoParsing.md`. A parser symbol merely existing in the static archive does
 not make it a production route; reachability through the shipped bridge and

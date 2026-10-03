@@ -60,7 +60,7 @@ index 1827ddc874e2135a8b8410264791c9e58c172094..fb20b5b4e9519ba4872a87b4c2f563c3
  
  #endif
 diff --git a/include/libtorrent/aux_/torrent.hpp b/include/libtorrent/aux_/torrent.hpp
-index b9d333428bae9e1ff5d659a401eb777f2311a855..21f5cdc0ca140c3ba36f3a3a34571120148587c4 100644
+index 1b97576e8a2adf179acef6e133b21dd4fae039fb..fbbd81fcd028aa0a0feb0722da0427a87efc28ac 100644
 --- a/include/libtorrent/aux_/torrent.hpp
 +++ b/include/libtorrent/aux_/torrent.hpp
 @@ -71,6 +71,7 @@ see LICENSE file.
@@ -71,7 +71,7 @@ index b9d333428bae9e1ff5d659a401eb777f2311a855..21f5cdc0ca140c3ba36f3a3a34571120
  #include "libtorrent/extensions.hpp" // for add_peer_flags_t
  #include "libtorrent/aux_/ssl.hpp"
  #include "libtorrent/aux_/tracker_list.hpp"
-@@ -1761,6 +1762,10 @@ namespace libtorrent::aux {
+@@ -1786,6 +1787,10 @@ namespace libtorrent::aux {
  		bool m_disable_v1_hashes:1;
  		// ----
  
@@ -99,10 +99,10 @@ index cb604ff4d3f2516f737ab7d6555f3ba23a95a057..b7cd24cb60bb70efc9d54255846ad4dd
  		: public web_connection_base
  	{
 diff --git a/include/libtorrent/settings_pack.hpp b/include/libtorrent/settings_pack.hpp
-index cedc4b04b75a16b05f9b4d525859f7a934db87ae..8d2c4ecf07c19cec4c5070b98d2d8ca53af98d06 100644
+index aa05ff82dff9b6dc8e4765d43356a88e2c869fa1..d134ff4c5432f632c56373f849378587a23ce293 100644
 --- a/include/libtorrent/settings_pack.hpp
 +++ b/include/libtorrent/settings_pack.hpp
-@@ -996,13 +996,10 @@ namespace aux {
+@@ -999,17 +999,10 @@ namespace aux {
  			// tracker request to loopback will be rejected. This applies to
  			// trackers that redirect to loopback as well.
  			//
@@ -113,6 +113,10 @@ index cedc4b04b75a16b05f9b4d525859f7a934db87ae..8d2c4ecf07c19cec4c5070b98d2d8ca5
 -			//
 -			// Web seeds on global IPs (i.e. not local network) may not redirect
 -			// to a local network address
+-			//
+-			// this mitigation does not apply to connections whose hostname is
+-			// resolved by a proxy (see proxy_hostnames), since the target IP
+-			// is never known to the client in that case
 +			// Web seeds must resolve to globally routable addresses. Loopback,
 +			// private, link-local, multicast and unspecified endpoints are
 +			// rejected, including redirect targets. Well-known NAT64 addresses
@@ -143,10 +147,10 @@ index 97f654f3471a823e60a5f0156963a6c59cedb39a..c196f8707ef34e462a20e20a1fa5c3c9
  #endif
 -
 diff --git a/src/http_connection.cpp b/src/http_connection.cpp
-index eaf4876fee820329afd04bd4a90994f586761f38..be73073cd9df75d32694b6e9d6dc9a6819cf2c46 100644
+index 9ee9d4b6c640bf4977cd507031990b2f472e6737..b2400dac8b32654b53e409d5b9e8cf700c813e36 100644
 --- a/src/http_connection.cpp
 +++ b/src/http_connection.cpp
-@@ -761,6 +761,11 @@ void http_connection::on_read(error_code const& e
+@@ -780,6 +780,11 @@ void http_connection::on_read(error_code const& e
  			m_sock->close(ec);
  
  			std::string url = aux::resolve_redirect_location(m_url, location);
@@ -477,7 +481,7 @@ index e604da6be04b03c9435e518ea1e4a72691540caf..8a0bf7f7ef4ca3651d3b6ef4ccf349f3
  	{
  		if (url.empty())
 diff --git a/src/torrent.cpp b/src/torrent.cpp
-index 9b0ac0bdb3f782fb696043ecc1c38f1e82caaee2..5b8c3ec1c37992861c2e1280edcae1d0aaf8faed 100644
+index 70ab02c5a73ed187a3a44663bb4220bc7bc4ac56..4854995bb1884905300f8800eed21e953da817cd 100644
 --- a/src/torrent.cpp
 +++ b/src/torrent.cpp
 @@ -249,6 +249,7 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
@@ -488,7 +492,7 @@ index 9b0ac0bdb3f782fb696043ecc1c38f1e82caaee2..5b8c3ec1c37992861c2e1280edcae1d0
  		, m_max_uploads((1 << 24) - 1)
  		, m_num_uploads(0)
  		, m_enable_pex(!bool(p.flags & torrent_flags::disable_pex))
-@@ -960,6 +961,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -963,6 +964,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  			ret |= torrent_flags::i2p_torrent;
  		if (m_disable_v1_hashes)
  			ret |= torrent_flags::disable_v1_hashes;
@@ -497,7 +501,7 @@ index 9b0ac0bdb3f782fb696043ecc1c38f1e82caaee2..5b8c3ec1c37992861c2e1280edcae1d0
  		return ret;
  	}
  
-@@ -1019,6 +1022,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -1022,6 +1025,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  				set_need_save_resume(torrent_handle::if_config_changed);
  			m_enable_pex = new_value;
  		}
@@ -506,7 +510,7 @@ index 9b0ac0bdb3f782fb696043ecc1c38f1e82caaee2..5b8c3ec1c37992861c2e1280edcae1d0
  	}
  
  #ifndef TORRENT_DISABLE_SHARE_MODE
-@@ -3104,7 +3109,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -3158,7 +3163,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  		if(auto pos = ae.url.find(':'); pos != string_view::npos)
  		{
  			string_view const protocol = string_view(ae.url).substr(0, pos);
@@ -516,7 +520,7 @@ index 9b0ac0bdb3f782fb696043ecc1c38f1e82caaee2..5b8c3ec1c37992861c2e1280edcae1d0
  			{
  				// WebSocket trackers will ignore the endpoint anyway
  				valid_endpoints = std::min(valid_endpoints, std::size_t(1));
-@@ -6785,6 +6791,8 @@ namespace {
+@@ -6903,6 +6909,8 @@ namespace {
  		}
  
  		aux::proxy_settings const& ps = m_ses.proxy();
@@ -525,17 +529,28 @@ index 9b0ac0bdb3f782fb696043ecc1c38f1e82caaee2..5b8c3ec1c37992861c2e1280edcae1d0
  		if ((ps.type == settings_pack::http
  			|| ps.type == settings_pack::http_pw)
  			&& ps.proxy_peer_connections)
-@@ -6801,7 +6809,8 @@ namespace {
+@@ -6919,7 +6927,8 @@ namespace {
  				, [self = shared_from_this(), web, proxy_port](error_code const& e, std::vector<address> const& addrs)
  				{ self->wrap(&torrent::on_proxy_name_lookup, e, addrs, web, proxy_port); });
  		}
--		else if (ps.proxy_hostnames
+-		else if (web_seed_hostname_via_proxy(ps, hostname))
 +		else if (!enforce_endpoint_policy
-+			&& ps.proxy_hostnames
- 			&& (ps.type == settings_pack::socks5
- 				|| ps.type == settings_pack::socks5_pw)
- 			&& ps.proxy_peer_connections)
-@@ -6922,9 +6931,9 @@ namespace {
++			&& web_seed_hostname_via_proxy(ps, hostname))
+ 		{
+ 			// the hostname is resolved by the proxy itself; there's no local
+ 			// address to pass, so use a placeholder
+@@ -7016,7 +7025,9 @@ namespace {
+ 			return;
+ 		}
+ 
+-		if (web_seed_hostname_via_proxy(m_ses.proxy(), hostname))
++		if (!web->no_local_ips
++			&& !settings().get_bool(settings_pack::ssrf_mitigation)
++			&& web_seed_hostname_via_proxy(m_ses.proxy(), hostname))
+ 		{
+ 			// let the proxy resolve the web seed's hostname itself, instead
+ 			// of leaking it to the local resolver. connect_web_seed() forces
+@@ -7049,9 +7060,9 @@ namespace {
  #ifndef TORRENT_DISABLE_LOGGING
  		debug_log("completed resolve: %s", web->url.c_str());
  #endif
@@ -546,7 +561,7 @@ index 9b0ac0bdb3f782fb696043ecc1c38f1e82caaee2..5b8c3ec1c37992861c2e1280edcae1d0
  #ifndef TORRENT_DISABLE_LOGGING
  			debug_log("removed web seed");
  #endif
-@@ -6932,7 +6941,15 @@ namespace {
+@@ -7059,7 +7070,15 @@ namespace {
  			return;
  		}
  
@@ -563,7 +578,7 @@ index 9b0ac0bdb3f782fb696043ecc1c38f1e82caaee2..5b8c3ec1c37992861c2e1280edcae1d0
  
  		if (e || addrs.empty())
  		{
-@@ -6952,11 +6969,21 @@ namespace {
+@@ -7079,11 +7098,21 @@ namespace {
  			return;
  		}
  
@@ -588,7 +603,7 @@ index 9b0ac0bdb3f782fb696043ecc1c38f1e82caaee2..5b8c3ec1c37992861c2e1280edcae1d0
  
  			// fill in the peer struct's address field
  			web->endpoints.emplace_back(addr, std::uint16_t(port));
-@@ -6971,8 +6998,9 @@ namespace {
+@@ -7098,8 +7127,9 @@ namespace {
  		{
  			if (m_ses.alerts().should_post<url_seed_alert>())
  			{
@@ -600,11 +615,15 @@ index 9b0ac0bdb3f782fb696043ecc1c38f1e82caaee2..5b8c3ec1c37992861c2e1280edcae1d0
  			}
  
  			// the name lookup failed for the http host. Don't try
-@@ -6996,23 +7024,9 @@ namespace {
+@@ -7123,27 +7153,9 @@ namespace {
  		TORRENT_ASSERT(is_single_thread());
  		if (m_abort) return;
  
--		if (m_ip_filter && m_ip_filter->access(a.address()) & ip_filter::blocked)
+-		// when the hostname is resolved by the proxy (see
+-		// settings_pack::proxy_hostnames), "a" is an unspecified-address
+-		// placeholder and there's no IP known here to filter against
+-		bool const address_known = !a.address().is_unspecified();
+-		if (address_known && m_ip_filter && m_ip_filter->access(a.address()) & ip_filter::blocked)
 -		{
 -			if (m_ses.alerts().should_post<peer_blocked_alert>())
 -				m_ses.alerts().emplace_alert<peer_blocked_alert>(get_handle()
@@ -624,7 +643,7 @@ index 9b0ac0bdb3f782fb696043ecc1c38f1e82caaee2..5b8c3ec1c37992861c2e1280edcae1d0
  		if (is_paused()) return;
  		if (m_ses.is_aborted()) return;
  		if (is_upload_only()) return;
-@@ -7045,10 +7059,9 @@ namespace {
+@@ -7176,10 +7188,9 @@ namespace {
  		}
  
  		std::string hostname;
@@ -636,15 +655,17 @@ index 9b0ac0bdb3f782fb696043ecc1c38f1e82caaee2..5b8c3ec1c37992861c2e1280edcae1d0
  			= parse_url_components(web->url, ec);
  		if (ec)
  		{
-@@ -7073,18 +7086,22 @@ namespace {
+@@ -7204,20 +7215,22 @@ namespace {
  			return;
  		}
  
 -		// The SSRF mitigation for web seeds is that any HTTP server on the
--		// local network may not use any query string parameters
--		if (settings().get_bool(settings_pack::ssrf_mitigation)
--			&& aux::is_local(web->peer_info.addr)
--			&& path.find('?') != std::string::npos)
+-		// local network may not use any query string parameters. this can't
+-		// be evaluated when the hostname is resolved by the proxy (see
+-		// settings_pack::proxy_hostnames), since peer_info.addr is then an
+-		// unspecified placeholder rather than the real target address
+-		if (settings().get_bool(settings_pack::ssrf_mitigation) && address_known
+-			&& aux::is_local(web->peer_info.addr) && path.find('?') != std::string::npos)
 +		bool const is_ip = aux::is_ip_address(hostname);
 +		if (is_ip) a.address(make_address(hostname, ec));
 +
@@ -666,7 +687,7 @@ index 9b0ac0bdb3f782fb696043ecc1c38f1e82caaee2..5b8c3ec1c37992861c2e1280edcae1d0
  #endif
  			if (m_ses.alerts().should_post<url_seed_alert>())
  				m_ses.alerts().emplace_alert<url_seed_alert>(get_handle()
-@@ -7092,17 +7109,34 @@ namespace {
+@@ -7225,17 +7238,34 @@ namespace {
  			if (m_ses.alerts().should_post<peer_blocked_alert>())
  				m_ses.alerts().emplace_alert<peer_blocked_alert>(get_handle()
  					, a, peer_blocked_alert::ssrf_mitigation);
@@ -680,7 +701,7 @@ index 9b0ac0bdb3f782fb696043ecc1c38f1e82caaee2..5b8c3ec1c37992861c2e1280edcae1d0
 +		// Apply the user IP filter after replacing a proxy placeholder with a
 +		// numeric URL host. Otherwise a SOCKS remote-DNS connection could bypass
 +		// the filter by entering this function with an unspecified endpoint.
-+		if (m_ip_filter && m_ip_filter->access(a.address()) & ip_filter::blocked)
++		if (!a.address().is_unspecified() && m_ip_filter && m_ip_filter->access(a.address()) & ip_filter::blocked)
 +		{
 +			if (m_ses.alerts().should_post<peer_blocked_alert>())
 +				m_ses.alerts().emplace_alert<peer_blocked_alert>(get_handle()
@@ -702,10 +723,10 @@ index 9b0ac0bdb3f782fb696043ecc1c38f1e82caaee2..5b8c3ec1c37992861c2e1280edcae1d0
 -		if (!is_ip
 +		if (!enforce_endpoint_policy
 +			&& !is_ip
- 			&& settings().get_bool(settings_pack::proxy_send_host_in_connect))
+ 			&& (proxy_hostnames || settings().get_bool(settings_pack::proxy_send_host_in_connect)))
  		{
  			if (auto* inner1 = std::get_if<http_stream>(&s))
-@@ -11674,6 +11708,23 @@ namespace {
+@@ -11809,6 +11839,23 @@ namespace {
  
  		TORRENT_ASSERT(info_hash().has_v2() || !(flags & pex_lt_v2));
  
@@ -898,10 +919,10 @@ index 5af7453e6100ee3fd5e835360c0788433c1616f4..504ef039e76dd6fcfa33f3552e6ed75e
  		// work-around for buggy HTTP servers, that fail to encode the redirect URL
  		location = maybe_url_encode(location);
 diff --git a/test/http_proxy.py b/test/http_proxy.py
-index 70d049538ccba905742b89d6d47a6cdad6050132..a81b572efd61a205f2d7b70937bbc1fcd043c98e 100755
+index 5b2475d297929dd3c053aea031f75a9a185a266f..3b53841dc16010c3505187017d111b72de778a1b 100755
 --- a/test/http_proxy.py
 +++ b/test/http_proxy.py
-@@ -486,6 +486,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
+@@ -487,6 +487,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
      # pylint:disable=invalid-name
      def do_GET(self):
          """Handles a proxy GET request."""
@@ -1071,7 +1092,7 @@ index a9fb5156635a31631d949228d7be17df5cbb72fb..177c855f04317adf92130cd74b15d38b
  	// redirects is a bit unpredictable. under SSL for instance,
  	// it will be an ungraceful shutdown
 diff --git a/test/test_http_parser.cpp b/test/test_http_parser.cpp
-index 70fbf0a802ec91fd1c0070ccad455f3d4b878705..38ba3122972dcc51bbea065da68df2e380b3f3f9 100644
+index 38be83970e5a416372dfac2adc5a456f8c420f91..26f641400a8a57310139f09492920e65599ea7f7 100644
 --- a/test/test_http_parser.cpp
 +++ b/test/test_http_parser.cpp
 @@ -360,6 +360,8 @@ TORRENT_TEST(http_parser)
@@ -1083,7 +1104,7 @@ index 70fbf0a802ec91fd1c0070ccad455f3d4b878705..38ba3122972dcc51bbea065da68df2e3
  
  	TEST_CHECK(parse_url_components("http://host.com/path/to/file", ec)
  		== std::make_tuple("http", "", "host.com", -1, "/path/to/file"));
-@@ -589,6 +591,18 @@ TORRENT_TEST(http_parser)
+@@ -609,6 +611,18 @@ TORRENT_TEST(http_parser)
  	// unparseable URLs are never same-origin
  	TEST_CHECK(!same_origin("not a url", "not a url"));
  
@@ -1103,11 +1124,11 @@ index 70fbf0a802ec91fd1c0070ccad455f3d4b878705..38ba3122972dcc51bbea065da68df2e3
  
  	TEST_EQUAL(aux::is_ok_status(200), true);
 diff --git a/test/test_torrent.cpp b/test/test_torrent.cpp
-index 420ed0030b3f1a17798e8026612e5b3c75f002cb..19396370f4615ebc5206045f1530843c00eea628 100644
+index 032905fe3a9d290edd29db35117ecde5bed956a0..b88417e2736a10bc88bfa9b1cbba048754f0e0dd 100644
 --- a/test/test_torrent.cpp
 +++ b/test/test_torrent.cpp
-@@ -27,6 +27,8 @@ see LICENSE file.
- #include "libtorrent/magnet_uri.hpp"
+@@ -28,6 +28,8 @@ see LICENSE file.
+ #include "libtorrent/announce_entry.hpp"
  #include "libtorrent/span.hpp"
  #include "libtorrent/session_params.hpp"
 +#include "libtorrent/read_resume_data.hpp"
@@ -1115,7 +1136,7 @@ index 420ed0030b3f1a17798e8026612e5b3c75f002cb..19396370f4615ebc5206045f1530843c
  #include "libtorrent/aux_/random.hpp"
  #include "libtorrent/ip_filter.hpp"
  #include "settings.hpp"
-@@ -295,6 +297,87 @@ TORRENT_TEST(added_peers)
+@@ -296,6 +298,87 @@ TORRENT_TEST(added_peers)
  	if (ra) TEST_EQUAL(ra->params.peers.size(), 2);
  }
  
@@ -1299,7 +1320,7 @@ index 08a62deccf715a0077bab2b0c83a30f724db506b..b265d65e9629eaf5a7f25bd7df017503
 +	ios.run();
 +}
 diff --git a/test/test_web_seed_redirect.cpp b/test/test_web_seed_redirect.cpp
-index f7fd21c65bbfe0843e52e4d62925e51801737fba..337c3666d67f6373a4c0e608a2d07b96f46d3e03 100644
+index b3c8d80c5418b2cac583806365bbf1a9c18c4fb3..4a5eabacadc60196e802d51393f55507f90f4efe 100644
 --- a/test/test_web_seed_redirect.cpp
 +++ b/test/test_web_seed_redirect.cpp
 @@ -16,13 +16,207 @@ see LICENSE file.
@@ -1510,7 +1531,7 @@ index f7fd21c65bbfe0843e52e4d62925e51801737fba..337c3666d67f6373a4c0e608a2d07b96
  TORRENT_TEST_DISK_IO(web_seed_redirect)
  {
  	using namespace lt;
-@@ -64,6 +258,7 @@ TORRENT_TEST_DISK_IO(web_seed_redirect)
+@@ -65,6 +259,7 @@ TORRENT_TEST_DISK_IO(web_seed_redirect)
  
  	{
  		settings_pack p = settings();
@@ -1519,10 +1540,10 @@ index f7fd21c65bbfe0843e52e4d62925e51801737fba..337c3666d67f6373a4c0e608a2d07b96
  		session_params sp(p);
  		sp.disk_io_constructor = disk_io;
 diff --git a/test/web_seed_suite.cpp b/test/web_seed_suite.cpp
-index de81c714d4f135301318910f0655f29773dec804..39b2c0c92898df4dcd8a833ec5adf4fa894b6fb2 100644
+index f0d52db19236cf7581332f57f4959ead317c5b9c..a3df15fb71a7a6547c27bf1899b1ecdc75d6add1 100644
 --- a/test/web_seed_suite.cpp
 +++ b/test/web_seed_suite.cpp
-@@ -381,6 +381,9 @@ int EXPORT run_http_suite(int proxy,
+@@ -382,6 +382,9 @@ int EXPORT run_http_suite(int proxy,
  			pack.set_bool(settings_pack::enable_natpmp, false);
  			pack.set_bool(settings_pack::enable_upnp, false);
  			pack.set_bool(settings_pack::enable_dht, false);
@@ -1533,7 +1554,7 @@ index de81c714d4f135301318910f0655f29773dec804..39b2c0c92898df4dcd8a833ec5adf4fa
  			sp.disk_io_constructor = disk_io;
  			lt::session ses(std::move(sp));
 diff --git a/test/web_server.py b/test/web_server.py
-index ff8967feb27b42ee44f0db700662b58435423738..936d57b839f1861229b109152074833ebf73d894 100644
+index a82fdbb9b012317379b582a65ef89cd2d95629ad..30252f53c217fe8bf13ebf729e345ebadaf33413 100644
 --- a/test/web_server.py
 +++ b/test/web_server.py
 @@ -93,6 +93,12 @@ class http_handler(BaseHTTPRequestHandler):

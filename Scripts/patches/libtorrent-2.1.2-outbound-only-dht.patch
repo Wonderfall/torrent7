@@ -1,5 +1,5 @@
 diff --git a/include/libtorrent/aux_/torrent.hpp b/include/libtorrent/aux_/torrent.hpp
-index 4b2bba2b62e3a6f307465ec85c0fdfa44e0b5e63..693efb684e232a52f6601e05af3594a7ec5c7c33 100644
+index 285fc5dcc33f82da17e68cec6927270fff9bd8a7..76bd8e363a52e7a7bd6c45f9b1640632ad5cd584 100644
 --- a/include/libtorrent/aux_/torrent.hpp
 +++ b/include/libtorrent/aux_/torrent.hpp
 @@ -105,6 +105,12 @@ namespace libtorrent::aux {
@@ -48,10 +48,10 @@ index e045717a15865d7ffaba93577cffb2494122ebb7..976db28d16d5730f49921d82cf638bc2
  
  	void dht_tracker::announce(sha1_hash const& ih, int listen_port
 diff --git a/src/torrent.cpp b/src/torrent.cpp
-index 7b9a3d039931bc45279a6d6b7413534bdb5adf4a..9b6374a16b462ee5e47b2ab92c2fce1d65dc6419 100644
+index 02907149f830e678fdb001b1fac461d61ea7bfd7..63dec42ab58da2adc307f6756ff1afa1ef4de1c0 100644
 --- a/src/torrent.cpp
 +++ b/src/torrent.cpp
-@@ -2994,6 +2994,9 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -3040,6 +3040,9 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  		// our source port in the packet as our listen port, which is
  		// likely more accurate when behind a NAT
  		const auto announce_port = std::uint16_t(settings().get_int(settings_pack::announce_port));
@@ -61,7 +61,7 @@ index 7b9a3d039931bc45279a6d6b7413534bdb5adf4a..9b6374a16b462ee5e47b2ab92c2fce1d
  		if (is_ssl_torrent())
  		{
  			flags |= dht::announce::ssl_torrent;
-@@ -3006,8 +3009,12 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -3052,8 +3055,12 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  		std::weak_ptr<torrent> self(shared_from_this());
  		m_torrent_file->info_hashes().for_each([&](sha1_hash const& ih, protocol_version v)
  		{
@@ -174,10 +174,10 @@ index 3a1751a5d33165b43529b8db085104e76d01c53a..905939465b2bd8400d8314b5231dc57e
  
  namespace {
 diff --git a/test/test_torrent.cpp b/test/test_torrent.cpp
-index 19396370f4615ebc5206045f1530843c00eea628..f45289eb39f379ae2517ec0f750a5b94173959de 100644
+index b88417e2736a10bc88bfa9b1cbba048754f0e0dd..e02cd9d927a0bc3ab78e638158b67a1a96f0a0e2 100644
 --- a/test/test_torrent.cpp
 +++ b/test/test_torrent.cpp
-@@ -44,6 +44,13 @@ see LICENSE file.
+@@ -45,6 +45,13 @@ see LICENSE file.
  using namespace lt;
  using namespace std::chrono_literals;
  

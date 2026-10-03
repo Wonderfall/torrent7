@@ -1,8 +1,8 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 63f903ca9ec00c45a7156f42b2b9e1fca5eb41ba..0c637c81473c58f6f22a15c0feb749895a395a10 100644
+index 26b80304d8b079f274166934d3f27da72d601ac3..c7a2d0345f10a587781eedfe017c57859547e423 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -740,6 +740,7 @@ target_optional_compile_definitions(torrent-rasterbar PUBLIC FEATURE NAME deprec
+@@ -742,6 +742,7 @@ target_optional_compile_definitions(torrent-rasterbar PUBLIC FEATURE NAME deprec
  	ENABLED TORRENT_ABI_VERSION=2
  	DISABLED TORRENT_ABI_VERSION=100)
  feature_option(encryption "Enables encryption in libtorrent" ON)
@@ -10,7 +10,7 @@ index 63f903ca9ec00c45a7156f42b2b9e1fca5eb41ba..0c637c81473c58f6f22a15c0feb74989
  feature_option(exceptions "build with exception support" ON)
  feature_option(gnutls "build using GnuTLS instead of OpenSSL" OFF)
  target_optional_compile_definitions(torrent-rasterbar PUBLIC FEATURE NAME extensions DEFAULT ON
-@@ -771,16 +772,21 @@ if(NOT gnutls)
+@@ -773,16 +774,21 @@ if(NOT gnutls)
  			target_link_libraries(torrent-rasterbar PRIVATE crypt32)
  		endif()
  		target_link_libraries(torrent-rasterbar PUBLIC OpenSSL::SSL)
@@ -33,7 +33,7 @@ index 63f903ca9ec00c45a7156f42b2b9e1fca5eb41ba..0c637c81473c58f6f22a15c0feb74989
  	endif()
  endif()
  
-@@ -795,10 +801,10 @@ if(gnutls OR NOT TARGET OpenSSL::SSL)
+@@ -797,10 +803,10 @@ if(gnutls OR NOT TARGET OpenSSL::SSL)
  	)
  	if(GNUTLS_FOUND)
  		target_link_libraries(torrent-rasterbar PUBLIC GnuTLS::GnuTLS)
@@ -147,7 +147,7 @@ index cb30e43916b825bad6ffced28fab4c0f6ebe64a8..e17d7b14a8baf1c628e45f83868f0869
  } // libtorrent::aux:ssl
  
 diff --git a/src/session_impl.cpp b/src/session_impl.cpp
-index 242524293728346c28fcfca510bb9349d236ec93..04807a96f88a324db713c21505bb34d3da916ff2 100644
+index 41936b8087a6f3478ffbd8b542b8dc42d718feef..22a073fc54a581e819044b1b078fdc2e35097dde 100644
 --- a/src/session_impl.cpp
 +++ b/src/session_impl.cpp
 @@ -488,7 +488,8 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
@@ -188,7 +188,7 @@ index 242524293728346c28fcfca510bb9349d236ec93..04807a96f88a324db713c21505bb34d3
  #endif // TORRENT_SSL_PEERS
  
  #ifndef TORRENT_DISABLE_DHT
-@@ -6976,7 +6980,7 @@ retry:
+@@ -6978,7 +6982,7 @@ retry:
  
  	void session_impl::update_validate_https()
  	{
@@ -197,7 +197,7 @@ index 242524293728346c28fcfca510bb9349d236ec93..04807a96f88a324db713c21505bb34d3
  		auto const flags = m_settings.get_bool(settings_pack::validate_https_trackers)
  			? ssl::context::verify_peer
  				| ssl::context::verify_fail_if_no_peer_cert
-@@ -6988,7 +6992,7 @@ retry:
+@@ -6990,7 +6994,7 @@ retry:
  #ifndef TORRENT_DISABLE_LOGGING
  		if (ec) session_log("SSL set_verify_mode failed: %s", ec.message().c_str());
  #endif
@@ -684,10 +684,10 @@ index 834809d595c150f9c6b06dd7f7ed25f116a44252..7ccbe66b277df09f4b71205251286a4c
  
  void upnp::start()
 diff --git a/test/setup_transfer.cpp b/test/setup_transfer.cpp
-index 4071ebd4d61841a13970ea584d326279aa4d6ea3..382caa45d7f6b42b951841586d7b46c3ce04fe6d 100644
+index 22253ed33e9a46837bf7b6fa883d967a4f2a528e..0f682d0a1ece0d70d99a706df11494bde832bef3 100644
 --- a/test/setup_transfer.cpp
 +++ b/test/setup_transfer.cpp
-@@ -1238,12 +1238,15 @@ pid_type web_server_pid = 0;
+@@ -1479,7 +1479,8 @@ std::thread web_server_reader;
  }
  
  int start_web_server(
@@ -695,37 +695,29 @@ index 4071ebd4d61841a13970ea584d326279aa4d6ea3..382caa45d7f6b42b951841586d7b46c3
 +	bool ssl, bool chunked_encoding, bool keepalive, int min_interval, bool expect_host_header
 +	, char const* certificate_file)
  {
- 	int const port = find_available_port();
- 	char expected_host[200] = {};
- 	if (expect_host_header)
- 		std::snprintf(expected_host, sizeof(expected_host), "127.0.0.1:%d", port);
-+	else
-+		std::snprintf(expected_host, sizeof(expected_host), "-");
- 
- 	std::vector<std::string> python_exes = get_python();
- 
-@@ -1252,14 +1255,14 @@ int start_web_server(
+ 	// only one web_server.py is ever tracked at a time; callers must
+ 	// stop_web_server() before starting another one
+@@ -1492,13 +1493,13 @@ int start_web_server(
  		char buf[300];
  		std::snprintf(buf,
  			sizeof(buf),
--			"%s .." SEPARATOR "web_server.py %d %d %d %d %d %s",
-+			"%s .." SEPARATOR "web_server.py %d %d %d %d %d %s %s",
+-			"%s .." SEPARATOR "web_server.py %d %d %d %d %d",
++			"%s .." SEPARATOR "web_server.py %d %d %d %d %d %s",
  			python_exe.c_str(),
- 			port,
  			chunked_encoding,
  			ssl,
  			keepalive,
  			min_interval,
--			expected_host);
-+			expected_host, certificate_file);
- 
- 		std::printf("%s starting web_server on port %d...\n", time_now_string().c_str(), port);
- 
+-			expect_host_header);
++			expect_host_header, certificate_file);
+ 		cmdlines.emplace_back(buf);
+ 	}
+ 	spawned_process proc = spawn_with_retry(cmdlines, "web_server.py");
 diff --git a/test/setup_transfer.hpp b/test/setup_transfer.hpp
-index 86ca97ac5d34a0d034a819c30655f97ca35a3579..dc3eb00bf80dbcb821ccf7aa1a6266d9f8900b7a 100644
+index 3c1ce8e989619b91f4e9be1af5d315e94b9e9868..e902fe5c4e76dc6cfa392747007905b405998bdd 100644
 --- a/test/setup_transfer.hpp
 +++ b/test/setup_transfer.hpp
-@@ -102,7 +102,7 @@ EXPORT int start_web_server(bool ssl = false,
+@@ -105,7 +105,7 @@ EXPORT int start_web_server(bool ssl = false,
  	bool chunked = false,
  	bool keepalive = true,
  	int min_interval = 30,
@@ -1050,7 +1042,7 @@ index 0000000000000000000000000000000000000000..4bf8d5a334d71d7d8a06deea6350b9f6
 +		, errors::unsupported_url_protocol, 301, "");
 +}
 diff --git a/test/test_web_seed_redirect.cpp b/test/test_web_seed_redirect.cpp
-index 337c3666d67f6373a4c0e608a2d07b96f46d3e03..a4a44da3310bcc1358d386d54fe456dd56f19b45 100644
+index 4a5eabacadc60196e802d51393f55507f90f4efe..866be3fb5846b1ea186a4b54445e73d3489c12e2 100644
 --- a/test/test_web_seed_redirect.cpp
 +++ b/test/test_web_seed_redirect.cpp
 @@ -79,7 +79,8 @@ TORRENT_TEST(web_seed_proxy_request_uses_vetted_endpoint)
@@ -1106,23 +1098,15 @@ index 337c3666d67f6373a4c0e608a2d07b96f46d3e03..a4a44da3310bcc1358d386d54fe456dd
  TORRENT_TEST(web_seed_ssrf_blocks_non_global_endpoint)
  {
 diff --git a/test/web_server.py b/test/web_server.py
-index 936d57b839f1861229b109152074833ebf73d894..00685d60abb00bb3a4687ee17c3c3f166afd594e 100644
+index 30252f53c217fe8bf13ebf729e345ebadaf33413..6abd0e45b6604d9357bd9a791e41d997a8da6406 100644
 --- a/test/web_server.py
 +++ b/test/web_server.py
-@@ -274,14 +274,14 @@ if __name__ == '__main__':
-     use_ssl = sys.argv[3] != '0'
-     keepalive = sys.argv[4] != '0'
-     min_interval = sys.argv[5]
--    expected_host = sys.argv[6] if len(sys.argv) > 6 else ''
-+    expected_host = sys.argv[6] if len(sys.argv) > 6 and sys.argv[6] != '-' else ''
-     print('python version: %s' % sys.version_info.__str__())
+@@ -284,7 +284,7 @@ if __name__ == '__main__':
  
-     http_handler.protocol_version = 'HTTP/1.1'
-     httpd = http_server_with_timeout(('0.0.0.0', port), http_handler)
      if use_ssl:
          ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 -        ctx.load_cert_chain("../ssl/server.pem")
-+        ctx.load_cert_chain(sys.argv[7] if len(sys.argv) > 7 else "../ssl/server.pem")
++        ctx.load_cert_chain(sys.argv[6] if len(sys.argv) > 6 else "../ssl/server.pem")
          httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
  
-     while True:
+     print(f'LISTENING_PORT {port}')

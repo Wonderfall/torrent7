@@ -1,5 +1,5 @@
 diff --git a/include/libtorrent/aux_/session_impl.hpp b/include/libtorrent/aux_/session_impl.hpp
-index 5de95a222..1fb4ad7f4 100644
+index 5de95a222cc7d1e58a0f3cb686a02994cf748c61..1fb4ad7f4e7067c771ed85ef5f7f92b476490fcb 100644
 --- a/include/libtorrent/aux_/session_impl.hpp
 +++ b/include/libtorrent/aux_/session_impl.hpp
 @@ -259,13 +259,7 @@ namespace aux {
@@ -18,7 +18,7 @@ index 5de95a222..1fb4ad7f4 100644
  
  		struct TORRENT_EXTRA_EXPORT listen_endpoint_t
 diff --git a/src/session_impl.cpp b/src/session_impl.cpp
-index d6d5b2f3b..242524293 100644
+index 5fdf0a05c5906d808a817ac6cebdac60b8a29631..41936b8087a6f3478ffbd8b542b8dc42d718feef 100644
 --- a/src/session_impl.cpp
 +++ b/src/session_impl.cpp
 @@ -337,6 +337,14 @@ void apply_deprecated_dht_settings(settings_pack& sett, bdecode_node const& s)

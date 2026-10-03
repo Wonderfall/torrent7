@@ -1,5 +1,5 @@
 diff --git a/include/libtorrent/aux_/bind_to_device.hpp b/include/libtorrent/aux_/bind_to_device.hpp
-index 72640260e..bdea0f97e 100644
+index 72640260e7c5946e5dd77637a0015a955eed2b29..bdea0f97e354639d0f57d4cb0e6d2488fb35cb6b 100644
 --- a/include/libtorrent/aux_/bind_to_device.hpp
 +++ b/include/libtorrent/aux_/bind_to_device.hpp
 @@ -21,6 +21,24 @@ see LICENSE file.
@@ -41,7 +41,7 @@ index 72640260e..bdea0f97e 100644
  #endif
 -
 diff --git a/include/libtorrent/aux_/enum_net.hpp b/include/libtorrent/aux_/enum_net.hpp
-index 2fdf3265f..f3fc0996e 100644
+index 2fdf3265f28c8e49199e4829aecdbefa4dc8a70b..f3fc0996ed109a280419d77c3828f2f913cf897f 100644
 --- a/include/libtorrent/aux_/enum_net.hpp
 +++ b/include/libtorrent/aux_/enum_net.hpp
 @@ -132,19 +132,23 @@ enum class if_state : std::uint8_t {
@@ -103,10 +103,10 @@ index 2fdf3265f..f3fc0996e 100644
  		return bind_ep.address();
  	}
 diff --git a/src/http_connection.cpp b/src/http_connection.cpp
-index be73073cd..4beee357d 100644
+index b2400dac8b32654b53e409d5b9e8cf700c813e36..b0f33700c5d40a93861802d09124bba64c08a503 100644
 --- a/src/http_connection.cpp
 +++ b/src/http_connection.cpp
-@@ -295,10 +295,11 @@ void http_connection::start(std::string const& hostname, int port
+@@ -309,10 +309,11 @@ void http_connection::start(std::string const& hostname, int port
  			error_code ec;
  			m_sock->open(m_bind_addr->ip.is_v4() ? tcp::v4() : tcp::v6(), ec);
  #if TORRENT_HAS_BINDTODEVICE
@@ -122,10 +122,10 @@ index be73073cd..4beee357d 100644
  			{
  				post(m_ios, std::bind(&http_connection::callback
 diff --git a/src/session_impl.cpp b/src/session_impl.cpp
-index c0d5ee092..0f28f9fb2 100644
+index 381b5883f25460b4aaa459f90c06a9b0187e1167..15113fd12c0f1a76db26fc0ed3b2a4b250ff547a 100644
 --- a/src/session_impl.cpp
 +++ b/src/session_impl.cpp
-@@ -1764,6 +1764,7 @@ retry:
+@@ -1766,6 +1766,7 @@ retry:
  				// have SO_BINDTODEVICE functionality, use it now.
  #if TORRENT_HAS_BINDTODEVICE
  				bind_device(*ret->sock, lep.device.c_str(), ec);
@@ -133,7 +133,7 @@ index c0d5ee092..0f28f9fb2 100644
  #ifndef TORRENT_DISABLE_LOGGING
  				if (ec && should_log())
  				{
-@@ -1771,7 +1772,14 @@ retry:
+@@ -1773,7 +1774,14 @@ retry:
  						, lep.device.c_str(), ec.message().c_str());
  				}
  #endif // TORRENT_DISABLE_LOGGING
@@ -149,7 +149,7 @@ index c0d5ee092..0f28f9fb2 100644
  #endif // TORRENT_HAS_BINDTODEVICE
  			}
  
-@@ -1909,6 +1917,7 @@ retry:
+@@ -1911,6 +1919,7 @@ retry:
  			if (!lep.device.empty())
  			{
  				bind_device(ret->udp_sock->sock, lep.device.c_str(), ec);
@@ -157,7 +157,7 @@ index c0d5ee092..0f28f9fb2 100644
  #ifndef TORRENT_DISABLE_LOGGING
  				if (ec && should_log())
  				{
-@@ -1916,7 +1925,13 @@ retry:
+@@ -1918,7 +1927,13 @@ retry:
  						, lep.device.c_str(), ec.message().c_str());
  				}
  #endif // TORRENT_DISABLE_LOGGING
@@ -173,7 +173,7 @@ index c0d5ee092..0f28f9fb2 100644
  #endif
  			ret->udp_sock->sock.bind(udp_bind_ep, ec);
 diff --git a/test/test_enum_net.cpp b/test/test_enum_net.cpp
-index 038a63b6d..d778bf071 100644
+index 038a63b6d8e53953e8395cb76fcd0ec24e58ea84..d778bf071489801d1cc4262599a381d11a6b6895 100644
 --- a/test/test_enum_net.cpp
 +++ b/test/test_enum_net.cpp
 @@ -10,6 +10,7 @@ see LICENSE file.
@@ -303,7 +303,7 @@ index 038a63b6d..d778bf071 100644
  {
  	error_code ec;
 diff --git a/test/test_http_connection.cpp b/test/test_http_connection.cpp
-index b0284c7bd..6ceb6503b 100644
+index b0284c7bd8dc422ebb1bd9b2a8f4cf8064545a85..6ceb6503b723230819f76fee9d132941fcbb0cea 100644
 --- a/test/test_http_connection.cpp
 +++ b/test/test_http_connection.cpp
 @@ -16,6 +16,7 @@ see LICENSE file.

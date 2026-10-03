@@ -1,5 +1,5 @@
 diff --git a/include/libtorrent/aux_/chained_buffer.hpp b/include/libtorrent/aux_/chained_buffer.hpp
-index 3064c4e8f..11ad1c25e 100644
+index 3064c4e8f9cb158dd3d869f0adb9d198058a1a92..11ad1c25e28e63c8b9bc6b050ff992012793965f 100644
 --- a/include/libtorrent/aux_/chained_buffer.hpp
 +++ b/include/libtorrent/aux_/chained_buffer.hpp
 @@ -20,6 +20,10 @@ see LICENSE file.
@@ -13,12 +13,11 @@ index 3064c4e8f..11ad1c25e 100644
  #include "libtorrent/aux_/disable_warnings_push.hpp"
  #include <boost/asio/buffer.hpp>
  #include "libtorrent/aux_/disable_warnings_pop.hpp"
-@@ -48,8 +52,16 @@ namespace libtorrent::aux {
+@@ -48,7 +52,15 @@ namespace libtorrent::aux {
  	private:
  
  		// destructs/frees the holder object
 -		using destruct_holder_fun = void (*)(void*);
--		using move_construct_holder_fun = void (*)(void*, void*);
 +		using destruct_holder_function = void (*)(void*);
 +#if defined(__PTRAUTH__)
 +		using destruct_holder_fun = destruct_holder_function __ptrauth(
@@ -28,12 +27,11 @@ index 3064c4e8f..11ad1c25e 100644
 +#else
 +		using destruct_holder_fun = destruct_holder_function;
 +#endif
-+		using move_construct_holder_fun = void (*)(void*, void*);
+ 		using move_construct_holder_fun = void (*)(void*, void*);
  
  		struct buffer_t
- 		{
 diff --git a/include/libtorrent/aux_/heterogeneous_queue.hpp b/include/libtorrent/aux_/heterogeneous_queue.hpp
-index 1b99b9c6a..5e1d21f7b 100644
+index 1b99b9c6aeb1ed7167d006d8ee35664f180056e8..5e1d21f7b2957fd7edb9f6b42af15c5ccff0c3a1 100644
 --- a/include/libtorrent/aux_/heterogeneous_queue.hpp
 +++ b/include/libtorrent/aux_/heterogeneous_queue.hpp
 @@ -18,6 +18,10 @@ see LICENSE file.
@@ -73,7 +71,7 @@ index 1b99b9c6a..5e1d21f7b 100644
  
  		void grow_capacity(int const size)
 diff --git a/include/libtorrent/aux_/pe_crypto.hpp b/include/libtorrent/aux_/pe_crypto.hpp
-index ad8b12b6b..147e53398 100644
+index ad8b12b6b22f29bb78f3d3e14865dcb3399d394b..147e53398df9aabe71f43c54503ac6c3c675164a 100644
 --- a/include/libtorrent/aux_/pe_crypto.hpp
 +++ b/include/libtorrent/aux_/pe_crypto.hpp
 @@ -85,12 +85,18 @@ namespace libtorrent::aux {
@@ -106,7 +104,7 @@ index ad8b12b6b..147e53398 100644
  
  		// the DH generator (also the lower bound of the valid public-key range)
 diff --git a/src/pe_crypto.cpp b/src/pe_crypto.cpp
-index f7ad7fdca..0665515e5 100644
+index f7ad7fdca3220646f3ec92c8e076f0d5b362222a..0665515e59737e15c9784b7f072a4392a402e3b4 100644
 --- a/src/pe_crypto.cpp
 +++ b/src/pe_crypto.cpp
 @@ -50,6 +50,19 @@ namespace {

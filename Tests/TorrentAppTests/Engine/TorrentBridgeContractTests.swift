@@ -526,11 +526,11 @@ struct TorrentBridgeContractTests {
     // bounds/alignment: its contract guarantees a NUL-terminated CChar sequence;
     // synchronization: immutable storage is read once; safe alternative: the bridge exposes
     // the version only as a C string pointer.
-    @Test("Libtorrent version is pinned to 2.1.1")
+    @Test("Libtorrent version is pinned to 2.1.2")
     func libtorrentVersionIsPinned() {
         let version = unsafe String(cString: TorrentBridgeLibtorrentVersion())
 
-        #expect(version == "2.1.1.0")
+        #expect(version == "2.1.2.0")
     }
 
     @Test("Create reports invalid state paths through the error buffer")

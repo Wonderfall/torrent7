@@ -1,5 +1,5 @@
 diff --git a/src/pread_disk_io.cpp b/src/pread_disk_io.cpp
-index 3057cf673bfe9f0d09366d77e03e16cf75393555..56503064ffb8148ab5e08051d96996f0d2e65a44 100644
+index dbfb8120c74f14eeb397f79f87c394ea3b608525..d34916c4e2905808b7a39c23fc8cb3caaa138d32 100644
 --- a/src/pread_disk_io.cpp
 +++ b/src/pread_disk_io.cpp
 @@ -1282,9 +1282,10 @@ status_t pread_disk_io::do_job(aux::job::hash& a, aux::pread_disk_job* j)

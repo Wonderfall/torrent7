@@ -521,7 +521,7 @@ private enum TorrentEngineXPCIntegrationHost {
             },
             retryMode: retryMode
         )
-        guard client.libtorrentVersion == "2.1.1.0" else {
+        guard client.libtorrentVersion == "2.1.2.0" else {
             await client.shutdown()
             throw IntegrationFailure.unexpectedLibtorrentVersion(
                 client.libtorrentVersion

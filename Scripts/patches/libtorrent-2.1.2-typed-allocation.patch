@@ -1,5 +1,5 @@
 diff --git a/include/libtorrent/aux_/peer_list.hpp b/include/libtorrent/aux_/peer_list.hpp
-index ca9f8bda1..5ec0a2fb1 100644
+index ca9f8bda10ffbe33effb1dfe86f1a235d481e028..5ec0a2fb11fbc5f7bfedd9b36d2f9261aaccb06a 100644
 --- a/include/libtorrent/aux_/peer_list.hpp
 +++ b/include/libtorrent/aux_/peer_list.hpp
 @@ -19,7 +19,6 @@ see LICENSE file.
@@ -11,7 +11,7 @@ index ca9f8bda1..5ec0a2fb1 100644
  
  #include "libtorrent/aux_/torrent_peer.hpp"
 diff --git a/include/libtorrent/aux_/pool.hpp b/include/libtorrent/aux_/pool.hpp
-index 618378363..f70b43d88 100644
+index 618378363cf362a2299bca87ced8ae24f502b17a..f70b43d8880d6f64a6de4c40fcb56e0e9a765f84 100644
 --- a/include/libtorrent/aux_/pool.hpp
 +++ b/include/libtorrent/aux_/pool.hpp
 @@ -15,6 +15,12 @@ see LICENSE file.
@@ -73,7 +73,7 @@ index 618378363..f70b43d88 100644
  
  using pool = boost::pool<allocator_new_delete>;
 diff --git a/include/libtorrent/aux_/string_util.hpp b/include/libtorrent/aux_/string_util.hpp
-index a5729ea9b..937deeb92 100644
+index a5729ea9bcd8e7b176461d1146499e37597740b2..937deeb92166634b6a2152280fe26ae15f11dd4f 100644
 --- a/include/libtorrent/aux_/string_util.hpp
 +++ b/include/libtorrent/aux_/string_util.hpp
 @@ -107,11 +107,6 @@ namespace libtorrent::aux {
@@ -89,7 +89,7 @@ index a5729ea9b..937deeb92 100644
  	// if found, returns the string_view representing the range from the start of
  	// `last` up to (but not including) the separator. The second return value is
 diff --git a/include/libtorrent/aux_/tracker_list.hpp b/include/libtorrent/aux_/tracker_list.hpp
-index da21215f5..abbd0b1fa 100644
+index da21215f5fa879d77166a647067a332d032de266..abbd0b1fa5df01abdcf295332e2e936698b0dc42 100644
 --- a/include/libtorrent/aux_/tracker_list.hpp
 +++ b/include/libtorrent/aux_/tracker_list.hpp
 @@ -14,6 +14,7 @@ see LICENSE file.
@@ -117,7 +117,7 @@ index da21215f5..abbd0b1fa 100644
  #endif
 -
 diff --git a/include/libtorrent/entry.hpp b/include/libtorrent/entry.hpp
-index 6d78b6fb5..bb1ffb329 100644
+index 6d78b6fb5dc8f09a38b1604052d28759a28c7723..bb1ffb3296cec0564d0a1b2b81bad1d1f256a9ea 100644
 --- a/include/libtorrent/entry.hpp
 +++ b/include/libtorrent/entry.hpp
 @@ -40,6 +40,7 @@ see LICENSE file.
@@ -140,7 +140,7 @@ index 6d78b6fb5..bb1ffb329 100644
  		using list_type = std::vector<entry>;
  		using integer_type = std::int64_t;
 diff --git a/src/bt_peer_connection.cpp b/src/bt_peer_connection.cpp
-index 93dc0c367..dab91bab0 100644
+index 31510e865ed875502f12a052d464beac7998183d..5f7eb138e8a7d3b81e7ad316c1ef11238b2b0107 100644
 --- a/src/bt_peer_connection.cpp
 +++ b/src/bt_peer_connection.cpp
 @@ -20,6 +20,7 @@ see LICENSE file.
@@ -151,7 +151,7 @@ index 93dc0c367..dab91bab0 100644
  #include <vector>
  #include <functional>
  
-@@ -3063,7 +3064,13 @@ namespace {
+@@ -3065,7 +3066,13 @@ namespace {
  			{
  				TORRENT_ASSERT(m_sync_bytes_read == 0);
  
@@ -167,7 +167,7 @@ index 93dc0c367..dab91bab0 100644
  				{
  					disconnect(errors::no_memory, operation_t::encryption);
 diff --git a/src/disk_buffer_pool.cpp b/src/disk_buffer_pool.cpp
-index cfe9d76f0..fccf65f27 100644
+index cfe9d76f00d4f10a15940a661a478e5bc9ff7447..fccf65f2751796d7b2684bc96044d6bc1eb4045c 100644
 --- a/src/disk_buffer_pool.cpp
 +++ b/src/disk_buffer_pool.cpp
 @@ -33,9 +33,29 @@ see LICENSE file.
@@ -239,7 +239,7 @@ index cfe9d76f0..fccf65f27 100644
  	void disk_buffer_pool::free_multiple_buffers(span<char*> bufvec)
  	{
 diff --git a/src/enum_net.cpp b/src/enum_net.cpp
-index c91da7300..26283f64e 100644
+index e6c99af23de3ad125c569dbe879cdf5d92a13a62..99c6dddb6d04364362972fdb162e369be51c0926 100644
 --- a/src/enum_net.cpp
 +++ b/src/enum_net.cpp
 @@ -26,6 +26,7 @@ see LICENSE file.
@@ -248,9 +248,9 @@ index c91da7300..26283f64e 100644
  #include <cstdlib> // for wcstombscstombs
 +#include <new>
  #include <optional>
- 
- #include "libtorrent/aux_/disable_warnings_push.hpp"
-@@ -1157,7 +1158,14 @@ int _System __libsocket_sysctl(int* mib, u_int namelen, void *oldp, size_t *oldl
+ #include <cerrno>
+ #include <vector>
+@@ -1188,7 +1189,14 @@ int _System __libsocket_sysctl(int* mib, u_int namelen, void *oldp, size_t *oldl
  		return std::vector<ip_route>();
  	}
  
@@ -267,7 +267,7 @@ index c91da7300..26283f64e 100644
  	{
  		ec = boost::asio::error::no_memory;
 diff --git a/src/file_storage.cpp b/src/file_storage.cpp
-index c20c45f45..e0c904ced 100644
+index 5e56408b07f7d890ef97c3888adc073f9b7b8de2..ce3f7659a0b40169301d881eb45ce5ed6316e95b 100644
 --- a/src/file_storage.cpp
 +++ b/src/file_storage.cpp
 @@ -13,7 +13,7 @@ see LICENSE file.
@@ -292,7 +292,7 @@ index c20c45f45..e0c904ced 100644
  		}
  	}
 diff --git a/src/ip_voter.cpp b/src/ip_voter.cpp
-index fdfb06bdf..80b71e0cb 100644
+index fdfb06bdf1568c5a677894aad6dda2740e2b9eb6..80b71e0cb75bee5939250b828cd5c9f63cca8b5a 100644
 --- a/src/ip_voter.cpp
 +++ b/src/ip_voter.cpp
 @@ -104,12 +104,22 @@ namespace libtorrent::aux {
@@ -325,7 +325,7 @@ index fdfb06bdf..80b71e0cb 100644
  				// erase the last element, since it is one of the
  				// ones with the fewest votes
 diff --git a/src/string_util.cpp b/src/string_util.cpp
-index 51b30a80b..a51bc77d8 100644
+index 51b30a80b0a6be3d0e6badd3481d78a53f979e0e..a51bc77d8330f1547bd861e9613d6353c2d79e4d 100644
 --- a/src/string_util.cpp
 +++ b/src/string_util.cpp
 @@ -123,15 +123,6 @@ namespace libtorrent::aux {
@@ -345,7 +345,7 @@ index 51b30a80b..a51bc77d8 100644
  	|| !defined TORRENT_DISABLE_LOGGING
  	std::string print_listen_interfaces(std::vector<listen_interface_t> const& in)
 diff --git a/src/torrent.cpp b/src/torrent.cpp
-index bde9188fb..3337e5edd 100644
+index fb60c0cd50612959e96d61982f23e18bf15d6f10..7a02f471bddb6c8ecf5c63acbafbc172c141b800 100644
 --- a/src/torrent.cpp
 +++ b/src/torrent.cpp
 @@ -46,6 +46,7 @@ see LICENSE file.
@@ -356,7 +356,7 @@ index bde9188fb..3337e5edd 100644
  #include <cstdio> // for snprintf
  #include <functional>
  
-@@ -852,7 +853,13 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+@@ -847,7 +848,13 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
  		}
  
  		std::shared_ptr<read_piece_struct> rp = std::make_shared<read_piece_struct>();
@@ -372,7 +372,7 @@ index bde9188fb..3337e5edd 100644
  		{
  			m_ses.alerts().emplace_alert<read_piece_alert>(
 diff --git a/src/tracker_list.cpp b/src/tracker_list.cpp
-index 303c1a257..863f54b0e 100644
+index 303c1a2579077007fbdb9b94aca2bf73f5aaf63f..863f54b0edd09cacf41c84a222433f37a6fa7efb 100644
 --- a/src/tracker_list.cpp
 +++ b/src/tracker_list.cpp
 @@ -145,8 +145,8 @@ void tracker_list::replace(std::vector<lt::announce_entry> const& aes)
