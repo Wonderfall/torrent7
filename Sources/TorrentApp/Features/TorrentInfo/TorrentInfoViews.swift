@@ -779,6 +779,7 @@ private struct TorrentInfoView: View {
                     store.revealTorrentItemInFinder(torrent: torrent, itemID: itemID)
                 }
             )
+            .environment(\.torrentFileTransferState, TorrentFileTransferState(torrent: torrent))
         }
     }
 

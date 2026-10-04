@@ -45,10 +45,7 @@ struct TorrentFileOutline: View {
 
             if showsProgress {
                 TableColumn("Progress", sortUsing: TorrentFileTree.Sort(.progress)) { node in
-                    Text(node.progress.formatted(.percent.precision(.fractionLength(0))))
-                        .monospacedDigit()
-                        .foregroundStyle(node.priority == .skip ? .secondary : .primary)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
+                    TorrentFileProgressLabel(node: node)
                 }
                 .width(72)
             }
@@ -93,6 +90,49 @@ struct TorrentFileOutline: View {
     private func iconSource(for node: TorrentFileTree.Node) -> TorrentFileIconSource {
         if node.children != nil { return .folder }
         return node.filenameExtension.isEmpty ? .genericFile : .fileExtension(node.filenameExtension)
+    }
+}
+
+enum TorrentFileTransferState: Sendable {
+    case active, paused, queued
+
+    init(torrent: TorrentItem) {
+        if torrent.manuallyPaused { self = .paused }
+        else if torrent.queued { self = .queued }
+        else { self = .active }
+    }
+}
+
+extension EnvironmentValues {
+    @Entry var torrentFileTransferState = TorrentFileTransferState.active
+}
+
+private struct TorrentFileProgressLabel: View {
+    let node: TorrentFileTree.Node
+    // Read the changing torrent state in each cell, even when Table caches its
+    // column content and no file progress has changed since pausing or resuming.
+    @Environment(\.torrentFileTransferState) private var transferState
+
+    var body: some View {
+        let progress = node.progress.formatted(.percent.precision(.fractionLength(0)))
+        let description = "\(status) · \(ByteFormat.size(node.downloaded)) of \(ByteFormat.size(node.size))"
+        Text(progress)
+            .monospacedDigit()
+            .foregroundStyle(node.priority == .skip ? .secondary : .primary)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .help(description)
+            .accessibilityLabel("Progress")
+            .accessibilityValue("\(progress), \(description)")
+    }
+
+    private var status: String {
+        if node.priority == .skip { return "Skipped" }
+        if node.progress >= 1 { return "Finished" }
+        switch transferState {
+        case .paused: return "Paused"
+        case .queued: return "Queued"
+        case .active: return node.downloaded > 0 ? "Downloading" : "Waiting"
+        }
     }
 }
 
