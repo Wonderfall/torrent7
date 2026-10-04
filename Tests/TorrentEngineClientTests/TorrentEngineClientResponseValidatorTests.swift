@@ -29,6 +29,72 @@ struct TorrentEngineClientResponseValidatorTests {
 
     private let maximumPayloadBytes = 16 * 1024 * 1024
 
+    @Test("Snapshot names are bounded display text", arguments: [
+        "Album/Disc 1",
+        ".",
+        "..",
+        String(repeating: "a", count: 511),
+        String(repeating: "é", count: 255) + "a",
+    ])
+    func acceptsSnapshotDisplayNames(_ name: String) throws {
+        for hasMetadata in [false, true] {
+            let batch = TorrentSnapshotBatch(
+                revision: 1,
+                torrents: [makeSnapshot(name: name, hasMetadata: hasMetadata)]
+            )
+            let decoded = try roundTrip(batch)
+
+            #expect(decoded.torrents.first?.name == name)
+            try TorrentEngineClientResponseValidator.validate(decoded)
+            try TorrentEngineClientResponseValidator.validateDataset(
+                decoded.torrents,
+                kind: .torrentSnapshots
+            )
+        }
+    }
+
+    @Test("Snapshot display names reject empty, NUL, and oversized UTF-8 text", arguments: [
+        "",
+        "Album\0Disc",
+        String(repeating: "a", count: 512),
+        String(repeating: "é", count: 256),
+    ])
+    func rejectsInvalidSnapshotDisplayNames(_ name: String) throws {
+        let batch = try roundTrip(TorrentSnapshotBatch(
+            revision: 1,
+            torrents: [makeSnapshot(name: name)]
+        ))
+
+        #expect(throws: TorrentEngineClientError.self) {
+            try TorrentEngineClientResponseValidator.validate(batch)
+        }
+        #expect(throws: TorrentEngineClientError.self) {
+            try TorrentEngineClientResponseValidator.validateDataset(
+                batch.torrents,
+                kind: .torrentSnapshots
+            )
+        }
+    }
+
+    @Test("Display names do not relax snapshot path validation", arguments: [
+        "../payload",
+        "/Library/Torrent7/../payload",
+        "/Library/Torrent7/\0payload",
+    ])
+    func rejectsUnsafeSnapshotPaths(_ savePath: String) throws {
+        let batch = try roundTrip(TorrentSnapshotBatch(
+            revision: 1,
+            torrents: [makeSnapshot(name: "Album/Disc 1", savePath: savePath)]
+        ))
+
+        #expect(throws: TorrentEngineClientError.self) {
+            try TorrentEngineClientResponseValidator.validateDataset(
+                batch.torrents,
+                kind: .torrentSnapshots
+            )
+        }
+    }
+
     @Test("A tracker tier that would overflow the UI is rejected")
     func rejectsOverflowingTrackerTier() throws {
         let batch = TorrentTrackerBatch(
@@ -349,6 +415,51 @@ struct TorrentEngineClientResponseValidatorTests {
             verified: false,
             hasError: false,
             enabled: true
+        )
+    }
+
+    private func makeSnapshot(
+        name: String,
+        savePath: String = "/Library/Torrent7",
+        hasMetadata: Bool = false
+    ) -> TorrentItem {
+        TorrentItem(
+            id: "t:\(String(repeating: "a", count: 32))",
+            infoHash: "v1:\(String(repeating: "b", count: 40))",
+            name: name,
+            savePath: savePath,
+            error: "",
+            comment: "",
+            progress: 0,
+            totalDone: 0,
+            totalWanted: 0,
+            totalSize: 0,
+            totalUpload: 0,
+            totalDownload: 0,
+            totalPayloadUpload: 0,
+            totalPayloadDownload: 0,
+            allTimeUpload: 0,
+            allTimeDownload: 0,
+            addedTime: 0,
+            createdTime: 0,
+            completedTime: 0,
+            downloadRate: 0,
+            uploadRate: 0,
+            downloadPayloadRate: 0,
+            uploadPayloadRate: 0,
+            peers: 0,
+            knownPeers: 0,
+            seeds: 0,
+            state: .unknown,
+            queuePosition: -1,
+            queuePriority: .normal,
+            paused: true,
+            autoManaged: false,
+            seeding: false,
+            finished: false,
+            contentKind: .unknown,
+            hasMetadata: hasMetadata,
+            privateTorrent: false
         )
     }
 

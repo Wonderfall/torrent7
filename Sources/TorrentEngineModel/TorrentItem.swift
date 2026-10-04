@@ -9,6 +9,7 @@ package enum TorrentContentKind: UInt8, Codable, Hashable, Sendable {
 package struct TorrentItem: Codable, Identifiable, Hashable, Sendable {
     package let id: String
     package let infoHash: String
+    /// Display text from metadata or a pending magnet; never a filesystem path component.
     package let name: String
     package let savePath: String
     package let error: String

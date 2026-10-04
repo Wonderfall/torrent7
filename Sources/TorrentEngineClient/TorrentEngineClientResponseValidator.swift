@@ -169,9 +169,10 @@ enum TorrentEngineClientResponseValidator {
             guard isCanonicalTorrentID(torrent.id),
                   identifiers.insert(torrent.id).inserted,
                   isHashKey(torrent.infoHash),
-                  isBoundedLeafName(
+                  isBoundedText(
                       torrent.name,
-                      maximumBytes: maximumTorrentNameBytes
+                      maximumBytes: maximumTorrentNameBytes,
+                      allowsEmpty: false
                   ),
                   isCanonicalAbsolutePath(torrent.savePath),
                   isBoundedText(
@@ -383,16 +384,6 @@ enum TorrentEngineClientResponseValidator {
         (allowsEmpty || !value.isEmpty)
             && value.utf8.count <= maximumBytes
             && !value.contains("\0")
-    }
-
-    private static func isBoundedLeafName(
-        _ value: String,
-        maximumBytes: Int
-    ) -> Bool {
-        isBoundedText(value, maximumBytes: maximumBytes, allowsEmpty: false)
-            && value != "."
-            && value != ".."
-            && !value.contains("/")
     }
 
     private static func isCanonicalAbsolutePath(_ path: String) -> Bool {

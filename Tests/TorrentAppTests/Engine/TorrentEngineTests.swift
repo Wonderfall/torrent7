@@ -2,6 +2,8 @@ import Darwin
 import Foundation
 import Synchronization
 import Testing
+@testable import TorrentEngineClient
+import TorrentEngineIPC
 import TorrentEngineModel
 import TorrentMetainfo
 import TorrentStorageAuthority
@@ -946,6 +948,79 @@ struct TorrentEngineTests {
 
         #expect(try await engine.remove(id: id) == .removed)
         #expect(try await engine.snapshots().contains(where: { $0.id == id }) == false)
+    }
+
+    @Test("Magnet display names survive native snapshots and resume", arguments: [
+        "Album%2FDisc+1",
+        "%2E",
+        "%2E%2E",
+        "%E9%9F%B3%E6%A5%BD%2FDisc+1",
+    ])
+    func magnetDisplayNamesSurviveResume(_ encodedName: String) async throws {
+        let stateDirectory = try temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let magnet = try ParsedMagnet.parse(
+            "magnet:?xt=urn:btih:\(String(repeating: "a", count: 40))&dn=\(encodedName)"
+        )
+        let displayName = try #require(magnet.displayName)
+        let engine = try TorrentEngine(
+            stateDirectory: stateDirectory,
+            enablePeerExchangePlugin: false,
+            payloadBroker: TestPayloadBroker()
+        )
+        let addition: Result<[String: String], any Error> = await Result {
+            let controlID = try await engine.addMagnet(ParsedMagnet.parse(
+                "magnet:?xt=urn:btih:\(String(repeating: "b", count: 40))&dn=Control"
+            ))
+            let magnetID = try await engine.addMagnet(magnet)
+            let names = [controlID: "Control", magnetID: displayName]
+            try await validateMagnetSnapshots(engine, names: names)
+            return names
+        }
+        try await engine.shutdownSafely()
+        let names = try addition.get()
+
+        let reopened = try TorrentEngine(
+            stateDirectory: stateDirectory,
+            enablePeerExchangePlugin: false,
+            payloadBroker: TestPayloadBroker()
+        )
+        let restoration: Result<Void, any Error> = await Result {
+            try await validateMagnetSnapshots(reopened, names: names)
+        }
+        try await reopened.shutdownSafely()
+        try restoration.get()
+    }
+
+    private func validateMagnetSnapshots(
+        _ engine: TorrentEngine,
+        names: [String: String]
+    ) async throws {
+        let network = await engine.networkStatus()
+        #expect(network.networkBlocked)
+        #expect(!network.hasListener)
+        let rows = try await engine.snapshots()
+        #expect(rows.count == names.count)
+        for row in rows {
+            #expect(row.name == names[row.id])
+            #expect(!row.hasMetadata)
+        }
+        let wire = try TorrentEngineIPCJSONCodec.encode(
+            rows,
+            maximumBytes: TorrentEngineIPCLimits.maximumDatasetPageBytes,
+            limits: TorrentEngineIPCLimits.datasetPageJSONLimits
+        )
+        let decoded = try TorrentEngineIPCJSONCodec.decode(
+            [TorrentItem].self,
+            from: wire,
+            maximumBytes: TorrentEngineIPCLimits.maximumDatasetPageBytes,
+            limits: TorrentEngineIPCLimits.datasetPageJSONLimits
+        )
+        #expect(decoded == rows)
+        try TorrentEngineClientResponseValidator.validateDataset(
+            decoded,
+            kind: .torrentSnapshots
+        )
     }
 
     @Test("Safe shutdown is terminal and releases native state")
