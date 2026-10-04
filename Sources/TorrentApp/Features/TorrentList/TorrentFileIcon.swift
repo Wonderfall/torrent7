@@ -1,4 +1,5 @@
 import AppKit
+import Observation
 import SwiftUI
 import TorrentEngineModel
 import UniformTypeIdentifiers
@@ -38,42 +39,37 @@ struct TorrentFileIcon: View, @MainActor Equatable {
     }
 }
 
-@MainActor
-struct FileItemIcon: View, @MainActor Equatable {
+struct FileItemIcon: View {
     private static let size: CGFloat = 18
 
-    let path: String
-    @State private var icon: NSImage?
+    let source: TorrentFileIconSource
+    let images: TorrentFileIconImages
 
     var body: some View {
         Group {
-            if let icon {
+            if let icon = images.icons[source] {
                 Image(nsImage: icon)
                     .resizable()
             } else {
-                Image(systemName: "doc")
+                Image(systemName: source == .folder ? "folder" : "doc")
                     .resizable()
             }
         }
         .aspectRatio(contentMode: .fit)
         .frame(width: Self.size, height: Self.size)
         .accessibilityHidden(true)
-        .task(id: path) {
-            icon = nil
-            guard let loadedIcon = try? await FileIconService.shared.icon(forFilePath: path),
-                  !Task.isCancelled else {
-                return
-            }
-            icon = loadedIcon
-        }
-    }
-
-    static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.path == rhs.path
     }
 }
 
-private actor FileIconService {
+@Observable
+final class TorrentFileIconImages {
+    // Each cell reads this property in its own body. Passing a dictionary value
+    // through TableColumn's cached content closure can leave cells with the
+    // initial placeholder until an unrelated selection change redraws them.
+    var icons = [TorrentFileIconSource: NSImage]()
+}
+
+actor FileIconService {
     static let shared = FileIconService()
 
     private let cache: NSCache<NSString, NSImage> = {
@@ -89,11 +85,19 @@ private actor FileIconService {
         return try icon(for: source)
     }
 
-    func icon(forFilePath path: String) throws -> NSImage {
+    /// Loaded by the outline, so disappearing table cells cannot cancel or
+    /// discard their icons. Only filename types are consulted, never disk paths.
+    func icons(for filenameExtensions: Set<String>) throws -> [TorrentFileIconSource: NSImage] {
+        var icons = [TorrentFileIconSource: NSImage]()
+        icons[.folder] = try icon(for: .folder)
+        for filenameExtension in filenameExtensions {
+            try Task.checkCancellation()
+            let source: TorrentFileIconSource = filenameExtension.isEmpty
+                ? .genericFile : .fileExtension(filenameExtension)
+            icons[source] = try icon(for: source)
+        }
         try Task.checkCancellation()
-        let source = FileItemIconSource.resolve(for: path)
-        try Task.checkCancellation()
-        return try icon(for: source)
+        return icons
     }
 
     private func icon(for source: TorrentFileIconSource) throws -> NSImage {
@@ -105,22 +109,6 @@ private actor FileIconService {
                 }
                 return NSWorkspace.shared.icon(for: .data)
             case .genericFile:
-                return NSWorkspace.shared.icon(for: .data)
-            case .folder:
-                return NSWorkspace.shared.icon(for: .folder)
-            }
-        }
-    }
-
-    private func icon(for source: FileItemIconSource) throws -> NSImage {
-        try cachedIcon(for: source.identifier) {
-            switch source {
-            case .existingItem(let path):
-                return NSWorkspace.shared.icon(forFile: path)
-            case .fileExtension(let pathExtension):
-                if let contentType = UTType(filenameExtension: pathExtension) {
-                    return NSWorkspace.shared.icon(for: contentType)
-                }
                 return NSWorkspace.shared.icon(for: .data)
             case .folder:
                 return NSWorkspace.shared.icon(for: .folder)
@@ -141,36 +129,6 @@ private actor FileIconService {
         try Task.checkCancellation()
         cache.setObject(icon, forKey: cacheKey)
         return icon
-    }
-}
-
-nonisolated private enum FileItemIconSource: Hashable {
-    case existingItem(String)
-    case fileExtension(String)
-    case folder
-
-    static func resolve(for path: String) -> Self {
-        if (path as NSString).isAbsolutePath
-            && FileManager().fileExists(atPath: path) {
-            return .existingItem(path)
-        }
-
-        let pathExtension = (path as NSString).pathExtension
-        guard !pathExtension.isEmpty else {
-            return .folder
-        }
-        return .fileExtension(pathExtension.localizedLowercase)
-    }
-
-    var identifier: String {
-        switch self {
-        case .existingItem(let path):
-            "item:\(path)"
-        case .fileExtension(let pathExtension):
-            "extension:\(pathExtension)"
-        case .folder:
-            "folder"
-        }
     }
 }
 

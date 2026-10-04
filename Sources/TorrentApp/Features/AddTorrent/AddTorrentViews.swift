@@ -80,61 +80,6 @@ struct AddMagnetView: View {
     }
 }
 
-nonisolated struct TorrentAddFileSelectionPresentation: Sendable {
-    let generation: UInt64
-    let filePriorities: [Int32: TorrentFilePriority]?
-    let selectedFileCount: Int
-    let selectedFileSize: Int64
-
-    var hasDownloadableFile: Bool {
-        selectedFileCount > 0
-    }
-
-    @concurrent
-    static func prepare(
-        generation: UInt64,
-        files: [TorrentFileItem],
-        bulkPriority: TorrentFilePriority?,
-        overrides: [Int32: TorrentFilePriority]
-    ) async throws -> Self {
-        try Task.checkCancellation()
-        var priorities = [Int32: TorrentFilePriority]()
-        priorities.reserveCapacity(
-            bulkPriority == nil ? overrides.count : files.count
-        )
-        var selectedFileCount = 0
-        var selectedFileSize: Int64 = 0
-
-        for (offset, file) in files.enumerated() {
-            if offset.isMultiple(of: 128) {
-                try Task.checkCancellation()
-            }
-            let priority = overrides[file.index]
-                ?? bulkPriority
-                ?? .normal
-            if priority != .normal {
-                priorities[file.index] = priority
-            }
-            guard priority != .skip else {
-                continue
-            }
-            selectedFileCount += 1
-            let size = max(0, file.size)
-            selectedFileSize = selectedFileSize > Int64.max - size
-                ? .max
-                : selectedFileSize + size
-        }
-
-        try Task.checkCancellation()
-        return Self(
-            generation: generation,
-            filePriorities: priorities.isEmpty ? nil : priorities,
-            selectedFileCount: selectedFileCount,
-            selectedFileSize: selectedFileSize
-        )
-    }
-}
-
 private struct TorrentDestinationInspectionRequest: Identifiable, Sendable {
     let id = UUID()
     let torrentData: Data
@@ -250,15 +195,12 @@ struct TorrentDestinationConflictView: View {
 }
 
 struct AddTorrentConfirmationView: View {
-    private static let fileSelectionPreviewLimit = 5
-
     @Environment(TorrentStore.self) private var store
     let draft: TorrentAddDraft
     let add: (TorrentAddOptions) -> Bool
     let cancel: () -> Void
 
     @State private var isChoosingDownloadFolder = false
-    @State private var showsAllPreviewFiles = false
     @State private var isLoadingPreview = false
     @State private var preview: TorrentFilePreview?
     @State private var previewError: String?
@@ -266,7 +208,9 @@ struct AddTorrentConfirmationView: View {
         TorrentSourceSecuritySummary?
     @State private var filePriorities = [Int32: TorrentFilePriority]()
     @State private var bulkFilePriority: TorrentFilePriority?
+    @State private var fileSelectionChange: TorrentFilePriorityChange?
     @State private var fileSelectionGeneration: UInt64 = 0
+    @State private var fileSortOrder = [TorrentFileTree.Sort(.name)]
     @State private var fileSelectionPresentation:
         TorrentAddFileSelectionPresentation?
     @State private var selectedDownloadFolder: URL?
@@ -380,12 +324,18 @@ struct AddTorrentConfirmationView: View {
             .padding()
             .background(.bar)
         }
-        .frame(width: 620, height: 520)
+        .frame(
+            width: draft.fileURL == nil ? 620 : 680,
+            height: draft.fileURL == nil ? 520 : 640
+        )
         .onAppear {
             selectedDownloadFolder = store.downloadFolder
         }
         .task(id: draft.id) {
             await loadDraftPresentation(for: draft.id)
+        }
+        .onChange(of: fileSortOrder) { _, _ in
+            advanceFileSelectionGeneration()
         }
         .task(id: fileSelectionGeneration) {
             guard let preview else {
@@ -399,12 +349,16 @@ struct AddTorrentConfirmationView: View {
                         generation: generation,
                         files: preview.visibleFiles,
                         bulkPriority: bulkFilePriority,
-                        overrides: filePriorities
+                        overrides: filePriorities,
+                        change: fileSelectionChange,
+                        sortOrder: fileSortOrder
                     )
                 try Task.checkCancellation()
                 guard generation == fileSelectionGeneration else {
                     return
                 }
+                filePriorities = presentation.overrides
+                fileSelectionChange = nil
                 fileSelectionPresentation = presentation
             } catch {
                 return
@@ -601,17 +555,20 @@ struct AddTorrentConfirmationView: View {
                     Label("No Files", systemImage: "doc")
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(visiblePreviewFiles(for: preview)) { file in
-                        AddTorrentFilePriorityRow(
-                            file: file,
-                            priority: filePriorityBinding(for: file)
-                        )
-                    }
-
-                    if shouldShowPreviewFileLimitControl(for: preview) {
-                        SourceLimitButton(isShowingAll: showsAllPreviewFiles) {
-                            showsAllPreviewFiles.toggle()
+                    if let presentation = fileSelectionPresentation {
+                        TorrentFileOutline(
+                            tree: presentation.tree,
+                            sortOrder: $fileSortOrder,
+                            isEditing: presentation.generation != fileSelectionGeneration
+                        ) { node, priority in
+                            guard presentation.generation == fileSelectionGeneration else { return }
+                            fileSelectionChange = TorrentFilePriorityChange(
+                                fileIndices: node.fileIndices, priority: priority
+                            )
+                            advanceFileSelectionGeneration()
                         }
+                    } else {
+                        ProgressView().controlSize(.small)
                     }
                 }
             } else {
@@ -667,6 +624,7 @@ struct AddTorrentConfirmationView: View {
                 }
                 .fixedSize()
                 .help("Set priority for all files")
+                .disabled(fileSelectionPresentation?.generation != fileSelectionGeneration)
             }
         }
     }
@@ -766,41 +724,14 @@ struct AddTorrentConfirmationView: View {
         return "\(selectedCount) of \(fileText) · \(sizeText) selected"
     }
 
-    private func visiblePreviewFiles(for preview: TorrentFilePreview) -> [TorrentFileItem] {
-        guard !showsAllPreviewFiles else {
-            return preview.visibleFiles
-        }
-        return Array(preview.visibleFiles.prefix(Self.fileSelectionPreviewLimit))
-    }
-
-    private func shouldShowPreviewFileLimitControl(for preview: TorrentFilePreview) -> Bool {
-        preview.visibleFiles.count > Self.fileSelectionPreviewLimit
-    }
-
-    private func filePriority(for file: TorrentFileItem) -> TorrentFilePriority {
-        filePriorities[file.index] ?? bulkFilePriority ?? .normal
-    }
-
     private func setAllFiles(
         in _: TorrentFilePreview,
         to priority: TorrentFilePriority
     ) {
         bulkFilePriority = priority
+        fileSelectionChange = nil
         filePriorities.removeAll(keepingCapacity: true)
         advanceFileSelectionGeneration()
-    }
-
-    private func filePriorityBinding(for file: TorrentFileItem) -> Binding<TorrentFilePriority> {
-        Binding {
-            filePriority(for: file)
-        } set: { priority in
-            if priority == (bulkFilePriority ?? .normal) {
-                filePriorities.removeValue(forKey: file.index)
-            } else {
-                filePriorities[file.index] = priority
-            }
-            advanceFileSelectionGeneration()
-        }
     }
 
     @MainActor
@@ -840,7 +771,7 @@ struct AddTorrentConfirmationView: View {
         previewError = nil
         preview = nil
         fileSelectionPresentation = nil
-        showsAllPreviewFiles = false
+        fileSelectionChange = nil
         filePriorities.removeAll()
         bulkFilePriority = nil
         advanceFileSelectionGeneration()
@@ -964,35 +895,5 @@ struct AddTorrentConfirmationView: View {
 
     private func pluralized(_ singular: String, count: Int) -> String {
         count == 1 ? singular : "\(singular)s"
-    }
-}
-
-private struct AddTorrentFilePriorityRow: View {
-    let file: TorrentFileItem
-    @Binding var priority: TorrentFilePriority
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Text(file.path)
-                .lineLimit(1)
-                .truncationMode(.middle)
-
-            Spacer(minLength: 12)
-
-            Text(ByteFormat.size(file.size))
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .fixedSize()
-
-            Picker("Priority", selection: $priority) {
-                ForEach(TorrentFilePriority.allCases) { priority in
-                    Text(priority.title).tag(priority)
-                }
-            }
-            .labelsHidden()
-            .fixedSize()
-            .accessibilityLabel("Priority for \(file.path)")
-        }
-        .help(file.path)
     }
 }

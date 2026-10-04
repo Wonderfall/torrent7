@@ -90,8 +90,8 @@ struct TorrentInfoWindow: View {
             }
         }
         .frame(
-            minWidth: 500,
-            idealWidth: 560,
+            minWidth: 560,
+            idealWidth: 680,
             maxWidth: .infinity,
             minHeight: 560,
             idealHeight: 640,
@@ -109,129 +109,9 @@ struct TorrentInfoWindow: View {
     }
 }
 
-nonisolated enum TorrentInfoFileGroup: CaseIterable, Identifiable, Sendable {
-    case complete
-    case downloading
-    case skipped
-
-    var id: Self {
-        self
-    }
-
-    var title: String {
-        switch self {
-        case .complete:
-            return "Complete"
-        case .downloading:
-            return "Downloading"
-        case .skipped:
-            return "Skipped"
-        }
-    }
-
-    var systemImage: String {
-        switch self {
-        case .complete:
-            return "checkmark.circle"
-        case .downloading:
-            return "arrow.down.circle"
-        case .skipped:
-            return "slash.circle"
-        }
-    }
-
-}
-
-nonisolated struct TorrentInfoFileSection: Identifiable, Sendable {
-    let group: TorrentInfoFileGroup
-    let files: [TorrentFileItem]
-
-    var id: TorrentInfoFileGroup {
-        group
-    }
-}
-
-nonisolated struct TorrentFileBatchPresentation: Sendable {
-    static let visibleFileLimit = 100
-
-    let revision: UInt64
-    let sections: [TorrentInfoFileSection]
-    let remainingPendingPriorities: [
-        Int32: TorrentFilePriority
-    ]
-    let displayedFileCount: Int
-    let hasLimitedSections: Bool
-
-    @concurrent
-    static func prepare(
-        batch: TorrentFileBatch,
-        pendingPriorities: [Int32: TorrentFilePriority]
-    ) async throws -> TorrentFileBatchPresentation {
-        try Task.checkCancellation()
-        var completeFiles = [TorrentFileItem]()
-        var downloadingFiles = [TorrentFileItem]()
-        var skippedFiles = [TorrentFileItem]()
-        var remainingPendingPriorities = pendingPriorities
-
-        for (offset, file) in batch.files.enumerated() {
-            if offset.isMultiple(of: 128) {
-                try Task.checkCancellation()
-            }
-            if pendingPriorities[file.index] == file.priority {
-                remainingPendingPriorities.removeValue(forKey: file.index)
-            }
-            let presentedFile = file.withPriority(
-                remainingPendingPriorities[file.index] ?? file.priority
-            )
-            guard !presentedFile.isPadFile else {
-                continue
-            }
-            switch presentedFile.priority {
-            case .skip:
-                skippedFiles.append(presentedFile)
-            case .low, .normal, .high:
-                if presentedFile.progress >= 1 {
-                    completeFiles.append(presentedFile)
-                } else {
-                    downloadingFiles.append(presentedFile)
-                }
-            }
-        }
-
-        try Task.checkCancellation()
-        var sections = [TorrentInfoFileSection]()
-        sections.reserveCapacity(TorrentInfoFileGroup.allCases.count)
-        if !completeFiles.isEmpty {
-            sections.append(TorrentInfoFileSection(
-                group: .complete,
-                files: completeFiles
-            ))
-        }
-        if !downloadingFiles.isEmpty {
-            sections.append(TorrentInfoFileSection(
-                group: .downloading,
-                files: downloadingFiles
-            ))
-        }
-        if !skippedFiles.isEmpty {
-            sections.append(TorrentInfoFileSection(
-                group: .skipped,
-                files: skippedFiles
-            ))
-        }
-        return TorrentFileBatchPresentation(
-            revision: batch.revision,
-            sections: sections,
-            remainingPendingPriorities: remainingPendingPriorities,
-            displayedFileCount:
-                completeFiles.count
-                + downloadingFiles.count
-                + skippedFiles.count,
-            hasLimitedSections: sections.contains {
-                $0.files.count > Self.visibleFileLimit
-            }
-        )
-    }
+private struct TorrentFilePriorityRequest: Identifiable {
+    let id = UUID()
+    let change: TorrentFilePriorityChange
 }
 
 private struct TorrentInfoView: View {
@@ -256,24 +136,19 @@ private struct TorrentInfoView: View {
     @State private var torrentOptionsMutationGeneration: UInt64 = 0
     @State private var torrentOptionsMutationTask: Task<Void, Never>?
     @State private var torrentOptionsMutationTaskID: UUID?
-    @State private var filePriorityMutationGenerations = [Int32: UInt64]()
-    @State private var filePriorityMutationTasks = [Int32: Task<Void, Never>]()
-    @State private var filePriorityMutationTaskIDs = [Int32: UUID]()
+    @State private var filePriorityRequest: TorrentFilePriorityRequest?
     @State private var pendingFilePriorities = [Int32: TorrentFilePriority]()
-    @State private var filePriorityPresentationGeneration: UInt64 = 0
+    @State private var filePresentationGeneration: UInt64 = 0
     @State private var filePresentationTask: Task<Void, Never>?
     @State private var filePresentationTaskID: UUID?
     @State private var queueMoveGeneration: UInt64 = 0
     @State private var queueMoveTasks = [UUID: Task<Void, Never>]()
     @State private var torrentOptions: TorrentOptions?
-    @State private var latestFileBatch: TorrentFileBatch?
-    @State private var fileSections = [TorrentInfoFileSection]()
-    @State private var displayedFileCount = 0
-    @State private var hasLimitedFileSections = false
+    @State private var filePresentation = TorrentFilePresentationState()
+    @State private var fileSortOrder = [TorrentFileTree.Sort(.name)]
     @State private var pieceMap = TorrentPieceMap.empty
     @State private var trackerRevision: UInt64?
     @State private var webSeedRevision: UInt64?
-    @State private var fileRevision: UInt64?
     @State private var pieceMapRevision: UInt64?
     @State private var sourcesLoaded = false
     @State private var optionsLoaded = false
@@ -285,7 +160,6 @@ private struct TorrentInfoView: View {
     @State private var pieceMapError: String?
     @State private var showsAllTrackers = false
     @State private var showsAllWebSeeds = false
-    @State private var showsAllFiles = false
     @State private var sourcesRefreshToken: UUID?
     @State private var optionsRefreshToken: UUID?
     @State private var filesRefreshToken: UUID?
@@ -314,6 +188,10 @@ private struct TorrentInfoView: View {
             }
         }
         .scenePadding()
+        .onChange(of: fileSortOrder) { _, _ in
+            advanceFilePresentationGeneration()
+            scheduleFilePresentation()
+        }
         .task(id: sourcesRefreshID) {
             let token = UUID()
             sourcesRefreshToken = token
@@ -357,6 +235,10 @@ private struct TorrentInfoView: View {
                 hasMetadata: torrent.hasMetadata
             )
         }
+        .task(id: filePriorityRequest?.id) {
+            guard let request = filePriorityRequest else { return }
+            await applyFilePriorityRequest(request)
+        }
         .task(id: pieceMapRefreshID) {
             let token = UUID()
             pieceMapRefreshToken = token
@@ -388,12 +270,7 @@ private struct TorrentInfoView: View {
             torrentOptionsMutationTask?.cancel()
             torrentOptionsMutationTask = nil
             torrentOptionsMutationTaskID = nil
-            for task in filePriorityMutationTasks.values {
-                task.cancel()
-            }
-            filePriorityMutationTasks.removeAll()
-            filePriorityMutationTaskIDs.removeAll()
-            filePriorityMutationGenerations.removeAll()
+            filePriorityRequest = nil
             filePresentationTask?.cancel()
             filePresentationTask = nil
             filePresentationTaskID = nil
@@ -519,12 +396,56 @@ private struct TorrentInfoView: View {
         .formStyle(.grouped)
     }
 
-    @ViewBuilder
     private var filesTab: some View {
         Form {
-            filesContent
+            if let fileError {
+                Section {
+                    Text(fileError).foregroundStyle(.red)
+                }
+            }
+
+            Section {
+                filesContent
+            } header: {
+                HStack {
+                    Label("Files", systemImage: "doc")
+                    Spacer()
+                    if filesLoaded, filePresentation.tree.fileCount > 0 {
+                        Text(fileSummary)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                            .multilineTextAlignment(.trailing)
+                    }
+                }
+            } footer: {
+                if filePriorityRequest != nil {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Updating priorities…")
+                    }
+                } else if filePresentation.tree.fileCount > 0 {
+                    Text("Double-click to reveal in Finder.")
+                }
+            }
         }
         .formStyle(.grouped)
+    }
+
+    private var fileSummary: String {
+        let counts = filePresentation.tree.fileCounts
+        var parts = [String]()
+        if counts.finished > 0 { parts.append("\(counts.finished.formatted()) finished") }
+        let unfinished = counts.downloading + counts.waiting
+        if unfinished > 0, torrent.manuallyPaused {
+            parts.append("\(unfinished.formatted()) paused")
+        } else if unfinished > 0, torrent.queued {
+            parts.append("\(unfinished.formatted()) queued")
+        } else {
+            if counts.downloading > 0 { parts.append("\(counts.downloading.formatted()) downloading") }
+            if counts.waiting > 0 { parts.append("\(counts.waiting.formatted()) waiting") }
+        }
+        if counts.skipped > 0 { parts.append("\(counts.skipped.formatted()) skipped") }
+        return parts.joined(separator: " · ")
     }
 
     @ViewBuilder
@@ -837,60 +758,27 @@ private struct TorrentInfoView: View {
 
     @ViewBuilder
     private var filesContent: some View {
-        if let fileError {
-            Section {
-                Text(fileError)
-                    .foregroundStyle(.red)
-            }
-        } else if !torrent.hasMetadata {
-            Section {
-                Label("Files available after metadata downloads", systemImage: "clock")
-                    .foregroundStyle(.secondary)
-            }
+        if !torrent.hasMetadata {
+            Label("Files appear after metadata downloads", systemImage: "clock")
+                .foregroundStyle(.secondary)
         } else if !filesLoaded {
-            Section {
-                HStack {
-                    Label("Loading Files", systemImage: "doc")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    ProgressView()
-                        .controlSize(.small)
-                }
+            HStack {
+                Text("Loading Files")
+                Spacer()
+                ProgressView().controlSize(.small)
             }
+        } else if filePresentation.tree.fileCount == 0 {
+            Label("No Files", systemImage: "doc")
+                .foregroundStyle(.secondary)
         } else {
-            if displayedFileCount == 0 {
-                Section {
-                    Label("No Files", systemImage: "doc")
-                        .foregroundStyle(.secondary)
+            TorrentFileOutline(
+                tree: filePresentation.tree, sortOrder: $fileSortOrder, showsProgress: true,
+                isEditing: filePriorityRequest != nil,
+                setPriority: { node, priority in setFilePriority(priority, for: node) },
+                revealInFinder: { itemID in
+                    store.revealTorrentItemInFinder(torrent: torrent, itemID: itemID)
                 }
-            } else {
-                ForEach(fileSections) { section in
-                    Section {
-                        ForEach(visibleFiles(in: section)) { file in
-                            TorrentFileRow(file: file) {
-                                store.revealTorrentFileInFinder(torrent: torrent, file: file)
-                            } setPriority: { priority in
-                                setFilePriority(priority, for: file)
-                            }
-                        }
-                    } header: {
-                        SourceSectionHeader(
-                            title: section.group.title,
-                            count: section.files.count,
-                            detail: nil,
-                            systemImage: section.group.systemImage
-                        )
-                    }
-                }
-
-                if shouldShowFileLimitControl {
-                    Section {
-                        SourceLimitButton(isShowingAll: showsAllFiles) {
-                            showsAllFiles.toggle()
-                        }
-                    }
-                }
-            }
+            )
         }
     }
 
@@ -965,27 +853,12 @@ private struct TorrentInfoView: View {
         return Array(webSeeds.prefix(Self.sourceListLimit))
     }
 
-    private func visibleFiles(
-        in section: TorrentInfoFileSection
-    ) -> ArraySlice<TorrentFileItem> {
-        guard !showsAllFiles else {
-            return section.files[...]
-        }
-        return section.files.prefix(
-            TorrentFileBatchPresentation.visibleFileLimit
-        )
-    }
-
     private var shouldShowTrackerLimitControl: Bool {
         trackers.count > Self.sourceListLimit
     }
 
     private var shouldShowWebSeedLimitControl: Bool {
         webSeeds.count > Self.sourceListLimit
-    }
-
-    private var shouldShowFileLimitControl: Bool {
-        hasLimitedFileSections
     }
 
     private var filesRefreshID: TorrentInfoMetadataRefreshID {
@@ -1179,121 +1052,83 @@ private struct TorrentInfoView: View {
         }
     }
 
-    private func setFilePriority(_ priority: TorrentFilePriority, for file: TorrentFileItem) {
-        guard file.priority != priority else {
-            return
-        }
-        guard filePriorityMutationTasks[file.index] != nil
-                || filePriorityMutationTasks.count
-                    < Self.maximumPendingMutationTaskCount else {
-            fileError =
-                TorrentStoreError.tooManyPendingOperations
-                    .localizedDescription
-            return
-        }
+    private func setFilePriority(_ priority: TorrentFilePriority, for node: TorrentFileTree.Node) {
+        guard filePriorityRequest == nil, node.priority != priority else { return }
+        fileError = nil
+        filePriorityRequest = TorrentFilePriorityRequest(change: TorrentFilePriorityChange(
+            fileIndices: node.fileIndices, priority: priority
+        ))
+    }
 
-        let currentGeneration =
-            filePriorityMutationGenerations[file.index, default: 0]
-        precondition(
-            currentGeneration != UInt64.max,
-            "File-priority mutation generation exhausted"
-        )
-        let generation = currentGeneration + 1
-        filePriorityMutationGenerations[file.index] = generation
-        advanceFilePriorityPresentationGeneration()
-        pendingFilePriorities[file.index] = priority
-        scheduleFilePresentation()
-        filePriorityMutationTasks[file.index]?.cancel()
-        let torrentID = torrent.id
-        let taskID = UUID()
-        filePriorityMutationTaskIDs[file.index] = taskID
-        filePriorityMutationTasks[file.index] = Task { @MainActor in
-            defer {
-                if filePriorityMutationTaskIDs[file.index] == taskID {
-                    filePriorityMutationTasks.removeValue(
-                        forKey: file.index
-                    )
-                    filePriorityMutationTaskIDs.removeValue(
-                        forKey: file.index
-                    )
-                    filePriorityMutationGenerations.removeValue(
-                        forKey: file.index
-                    )
-                }
+    private func applyFilePriorityRequest(_ request: TorrentFilePriorityRequest) async {
+        defer {
+            if filePriorityRequest?.id == request.id {
+                filePriorityRequest = nil
             }
+        }
+        guard let sourceBatch = filePresentation.latestBatch else {
+            return
+        }
+        let torrentID = torrent.id
+        let store = store
+        var failure: String?
+        do {
+            let priorities = try await request.change.pendingPriorities(in: sourceBatch.files)
+            try Task.checkCancellation()
+            guard filePriorityRequest?.id == request.id else { return }
+            pendingFilePriorities = priorities
+            advanceFilePresentationGeneration()
+            scheduleFilePresentation()
+            try await store.setFilePriorities(for: torrentID, priorities: priorities)
+        } catch is CancellationError {
+            // View teardown cancels this task. A cancellation originating in
+            // the store still needs an authoritative refresh of completed files.
+            if Task.isCancelled { return }
+        } catch {
+            failure = error.localizedDescription
+        }
+        guard !Task.isCancelled, filePriorityRequest?.id == request.id else { return }
+
+        // Some files may have changed before an error. Refresh the complete
+        // authoritative snapshot instead of pretending the batch was atomic.
+        pendingFilePriorities.removeAll()
+        advanceFilePresentationGeneration()
+        filePresentationTask?.cancel()
+        if let batch = await store.fileBatch(for: torrentID, since: nil) {
             do {
-                try await store.setFilePriority(
-                    for: torrentID,
-                    fileIndex: file.index,
-                    priority: priority
+                let sortOrder = fileSortOrder
+                let presentation = try await TorrentFileBatchPresentation.prepare(
+                    batch: batch, pendingPriorities: [:], sortOrder: sortOrder
                 )
-                guard isCurrentFilePriorityMutation(
-                    generation,
-                    fileIndex: file.index
-                ) else {
-                    return
-                }
-                if let authoritativeBatch = await store.fileBatch(
-                    for: torrentID,
-                    since: nil
-                ) {
-                    _ = await applyFileBatch(
-                        authoritativeBatch,
-                        mutationGeneration: generation,
-                        fileIndex: file.index
-                    )
-                }
-                guard isCurrentFilePriorityMutation(
-                    generation,
-                    fileIndex: file.index
-                ) else {
-                    return
-                }
-                fileError = nil
-            } catch {
-                let errorMessage = error.localizedDescription
-                guard isCurrentFilePriorityMutation(
-                    generation,
-                    fileIndex: file.index
-                ) else {
-                    return
-                }
-                advanceFilePriorityPresentationGeneration()
-                pendingFilePriorities.removeValue(forKey: file.index)
-                let authoritativeBatch = await store.fileBatch(
-                    for: torrentID,
-                    since: nil
-                )
-                guard isCurrentFilePriorityMutation(
-                    generation,
-                    fileIndex: file.index
-                ) else {
-                    return
-                }
-                if let authoritativeBatch {
-                    guard await applyFileBatch(
-                        authoritativeBatch,
-                        mutationGeneration: generation,
-                        fileIndex: file.index
-                    ) else {
-                        return
-                    }
+                try Task.checkCancellation()
+                guard filePriorityRequest?.id == request.id else { return }
+                if sortOrder == fileSortOrder {
+                    applyFileBatchPresentation(presentation)
                 } else {
+                    filePresentation.accept(batch)
                     scheduleFilePresentation()
                 }
-                fileError = errorMessage
+            } catch is CancellationError {
+                return
+            } catch {
+                assertionFailure("Unexpected file presentation error: \(error)")
             }
+        } else {
+            scheduleFilePresentation()
         }
+        guard !Task.isCancelled, filePriorityRequest?.id == request.id else { return }
+        fileError = failure
     }
 
     @MainActor
     private func scheduleFilePresentation() {
-        guard let batch = latestFileBatch else {
+        guard let batch = filePresentation.latestBatch else {
             return
         }
         filePresentationTask?.cancel()
-        let presentationGeneration = filePriorityPresentationGeneration
+        let presentationGeneration = filePresentationGeneration
         let pendingPriorities = pendingFilePriorities
+        let sortOrder = fileSortOrder
         let taskID = UUID()
         filePresentationTaskID = taskID
         filePresentationTask = Task { @MainActor in
@@ -1306,17 +1141,15 @@ private struct TorrentInfoView: View {
             do {
                 let presentation = try await TorrentFileBatchPresentation.prepare(
                     batch: batch,
-                    pendingPriorities: pendingPriorities
+                    pendingPriorities: pendingPriorities,
+                    sortOrder: sortOrder
                 )
                 try Task.checkCancellation()
                 guard presentationGeneration
-                        == filePriorityPresentationGeneration else {
+                        == filePresentationGeneration else {
                     return
                 }
-                applyFileBatchPresentation(
-                    presentation,
-                    sourceBatch: batch
-                )
+                applyFileBatchPresentation(presentation)
             } catch is CancellationError {
                 return
             } catch {
@@ -1324,41 +1157,6 @@ private struct TorrentInfoView: View {
                     "Unexpected file presentation error: \(error)"
                 )
             }
-        }
-    }
-
-    @MainActor
-    private func applyFileBatch(
-        _ batch: TorrentFileBatch,
-        mutationGeneration: UInt64,
-        fileIndex: Int32
-    ) async -> Bool {
-        let presentationGeneration = filePriorityPresentationGeneration
-        let pendingPriorities = pendingFilePriorities
-        do {
-            let presentation = try await TorrentFileBatchPresentation.prepare(
-                batch: batch,
-                pendingPriorities: pendingPriorities
-            )
-            guard isCurrentFilePriorityMutation(
-                mutationGeneration,
-                fileIndex: fileIndex
-            ),
-            presentationGeneration == filePriorityPresentationGeneration else {
-                return false
-            }
-            applyFileBatchPresentation(
-                presentation,
-                sourceBatch: batch
-            )
-            return true
-        } catch is CancellationError {
-            return false
-        } catch {
-            assertionFailure(
-                "Unexpected file presentation error: \(error)"
-            )
-            return false
         }
     }
 
@@ -1805,14 +1603,9 @@ private struct TorrentInfoView: View {
         guard isCurrentFilesRefresh(token) else {
             return
         }
-        latestFileBatch = nil
-        fileSections = []
-        displayedFileCount = 0
-        hasLimitedFileSections = false
-        fileRevision = nil
+        filePresentation = TorrentFilePresentationState()
         filesLoaded = false
         fileError = nil
-        showsAllFiles = false
 
         while isCurrentFilesRefresh(token) {
             guard hasMetadata else {
@@ -1826,19 +1619,20 @@ private struct TorrentInfoView: View {
 
             let fileBatch = await store.fileBatch(
                 for: torrentID,
-                since: fileRevision
+                since: filePresentation.latestBatch?.revision
             )
             guard isCurrentFilesRefresh(token) else {
                 return
             }
             if let fileBatch {
-                let presentationGeneration = filePriorityPresentationGeneration
+                let presentationGeneration = filePresentationGeneration
                 let pendingPriorities = pendingFilePriorities
                 let presentation: TorrentFileBatchPresentation
                 do {
                     presentation = try await TorrentFileBatchPresentation.prepare(
                         batch: fileBatch,
-                        pendingPriorities: pendingPriorities
+                        pendingPriorities: pendingPriorities,
+                        sortOrder: fileSortOrder
                     )
                 } catch is CancellationError {
                     return
@@ -1849,14 +1643,10 @@ private struct TorrentInfoView: View {
                 guard isCurrentFilesRefresh(token) else {
                     return
                 }
-                guard presentationGeneration == filePriorityPresentationGeneration else {
+                guard presentationGeneration == filePresentationGeneration else {
                     continue
                 }
-                applyFileBatchPresentation(
-                    presentation,
-                    sourceBatch: fileBatch
-                )
-                fileError = nil
+                applyFileBatchPresentation(presentation)
             }
 
             try? await Task.sleep(for: .seconds(2))
@@ -1868,18 +1658,10 @@ private struct TorrentInfoView: View {
 
     @MainActor
     private func applyFileBatchPresentation(
-        _ presentation: TorrentFileBatchPresentation,
-        sourceBatch: TorrentFileBatch
+        _ presentation: TorrentFileBatchPresentation
     ) {
-        guard fileRevision.map({ presentation.revision >= $0 }) ?? true else {
-            return
-        }
-        fileRevision = presentation.revision
-        latestFileBatch = sourceBatch
+        guard filePresentation.apply(presentation) else { return }
         pendingFilePriorities = presentation.remainingPendingPriorities
-        fileSections = presentation.sections
-        displayedFileCount = presentation.displayedFileCount
-        hasLimitedFileSections = presentation.hasLimitedSections
         filesLoaded = true
     }
 
@@ -1939,20 +1721,12 @@ private struct TorrentInfoView: View {
     }
 
     @MainActor
-    private func isCurrentFilePriorityMutation(
-        _ generation: UInt64,
-        fileIndex: Int32
-    ) -> Bool {
-        !Task.isCancelled && filePriorityMutationGenerations[fileIndex] == generation
-    }
-
-    @MainActor
-    private func advanceFilePriorityPresentationGeneration() {
+    private func advanceFilePresentationGeneration() {
         precondition(
-            filePriorityPresentationGeneration != UInt64.max,
-            "File-priority presentation generation exhausted"
+            filePresentationGeneration != UInt64.max,
+            "File presentation generation exhausted"
         )
-        filePriorityPresentationGeneration += 1
+        filePresentationGeneration += 1
     }
 
     @MainActor
@@ -2181,90 +1955,6 @@ private struct TorrentWebSeedRow: View {
                 .fixedSize()
         }
         .help(webSeed.url)
-    }
-}
-
-private struct TorrentFileRow: View {
-    let file: TorrentFileItem
-    let revealInFinder: () -> Void
-    let setPriority: (TorrentFilePriority) -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .center, spacing: 8) {
-                FileItemIcon(path: file.path)
-
-                Text(file.path)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .layoutPriority(1)
-
-                Spacer(minLength: 8)
-
-                Button(action: revealInFinder) {
-                    Label("Reveal in Finder", systemImage: "folder")
-                        .labelStyle(.iconOnly)
-                }
-                .buttonStyle(.borderless)
-                .controlSize(.small)
-                .help("Reveal in Finder")
-                .accessibilityLabel("Reveal \(fileAccessibilityName) in Finder")
-            }
-
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                HStack(spacing: 8) {
-                    Text(file.detailText)
-                        .monospacedDigit()
-                    Text(file.statusText)
-                    Text(file.progress.formatted(.percent.precision(.fractionLength(1))))
-                        .monospacedDigit()
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-                Spacer(minLength: 12)
-
-                Picker("Priority", selection: priorityBinding) {
-                    ForEach(TorrentFilePriority.allCases) { priority in
-                        Text(priority.title).tag(priority)
-                    }
-                }
-                .labelsHidden()
-                .fixedSize()
-                .help("File priority")
-                .accessibilityLabel("Priority for \(fileAccessibilityName)")
-            }
-
-            ProgressView(value: displayedProgress)
-                .controlSize(.small)
-                .tint(progressTint)
-                .accessibilityLabel("Progress")
-                .accessibilityValue(displayedProgress.formatted(.percent.precision(.fractionLength(1))))
-        }
-        .help(file.path)
-    }
-
-    private var priorityBinding: Binding<TorrentFilePriority> {
-        Binding {
-            file.priority
-        } set: { priority in
-            setPriority(priority)
-        }
-    }
-
-    private var displayedProgress: Double {
-        file.isSkipped ? 1 : file.progress
-    }
-
-    private var progressTint: Color? {
-        if file.isSkipped {
-            return .secondary
-        }
-        return file.progress >= 1 ? .green : nil
-    }
-
-    private var fileAccessibilityName: String {
-        file.path.split(separator: "/").last.map(String.init) ?? file.path
     }
 }
 

@@ -593,6 +593,48 @@ package struct TorrentStorageDestinationPlanner: Sendable {
         }
     }
 
+    /// Resolve a folder through the GUI-owned manifest and pinned directory
+    /// identities, independently of whether its descendant file still exists.
+    package func revealFolderURL(
+        for location: TorrentStorageLocation,
+        containingFileIndex: Int32,
+        depth: Int
+    ) throws -> URL {
+        let manifest = location.claim.manifest
+        guard manifest.contentKind == .directory,
+              containingFileIndex >= 0,
+              manifest.logicalFiles.indices.contains(Int(containingFileIndex)),
+              !manifest.logicalFiles[Int(containingFileIndex)].isPadding,
+              let expectedRoot = manifest.topLevelIdentity else {
+            throw TorrentStoragePlanningError.unsupportedFilesystemObject
+        }
+        let fileComponents = manifest.logicalFiles[Int(containingFileIndex)].pathComponents
+        guard depth >= 0, depth < fileComponents.count,
+              fileComponents.allSatisfy(TorrentPathComponentValidation.isSafe) else {
+            throw TorrentStoragePlanningError.unsupportedFilesystemObject
+        }
+        try validateClaimRoot(location.claim, in: location.parent)
+        if depth == 0 { return location.displayURL }
+
+        let root = TorrentOwnedFileDescriptor(taking: try openVerifiedDirectory(
+            named: manifest.collisionSelectedTopLevelName,
+            in: location.parent.descriptor,
+            expectedIdentity: expectedRoot
+        ))
+        // The existing walker opens all but the final component. Including the
+        // next manifest component verifies exactly the requested folder depth.
+        let folder = TorrentOwnedFileDescriptor(taking: try openVerifiedParentDirectory(
+            of: Array(fileComponents.prefix(depth + 1)),
+            startingAt: root.rawValue,
+            manifest: manifest
+        ))
+        return withExtendedLifetime(folder) {
+            fileComponents.prefix(depth).reduce(location.displayURL) { url, component in
+                url.appending(path: component, directoryHint: .isDirectory)
+            }
+        }
+    }
+
     package func prepareDeletion(
         claim: TorrentStorageClaim,
         from parent: TorrentStorageParentAuthority

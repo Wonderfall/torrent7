@@ -314,6 +314,16 @@ actor RecordingTorrentFileLocationService: TorrentFileLocationServicing {
         return revealURLs[location.torrentID]
     }
 
+    func revealFolderURL(
+        for location: TorrentStorageLocation,
+        containingFileIndex: Int32,
+        depth: Int
+    ) async throws -> URL? {
+        _ = containingFileIndex
+        _ = depth
+        return revealURLs[location.torrentID]
+    }
+
     func revealURLs(
         for locations: [TorrentStorageLocation]
     ) async throws -> [URL] {
@@ -448,6 +458,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     private(set) var torrentOptionsUpdates = [(id: String, options: TorrentOptions)]()
     private var torrentOptionsUpdateError: (any Error)?
     private(set) var filePriorityUpdates = [(id: String, fileIndex: Int32, priority: TorrentFilePriority)]()
+    private var filePriorityHandler: (@Sendable (Int32, TorrentFilePriority) async throws -> Void)?
     private(set) var queueMoves = [(id: String, move: TorrentQueueMove)]()
     private(set) var restoredQueuePositions = [(id: String, position: TorrentQueuePosition)]()
     private var restoreQueuePositionError: (any Error)?
@@ -1116,6 +1127,13 @@ actor FakeTorrentEngine: TorrentEngineServicing {
 
     func setFilePriority(id: String, fileIndex: Int32, priority: TorrentFilePriority) async throws {
         filePriorityUpdates.append((id, fileIndex, priority))
+        try await filePriorityHandler?(fileIndex, priority)
+    }
+
+    func setFilePriorityHandler(
+        _ handler: @escaping @Sendable (Int32, TorrentFilePriority) async throws -> Void
+    ) {
+        filePriorityHandler = handler
     }
 
     func trackerBatch(id: String, since revision: UInt64?) async -> TorrentTrackerBatch? {

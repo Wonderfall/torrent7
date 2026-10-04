@@ -1,10 +1,10 @@
 import Testing
+import TorrentAppInfrastructure
 import TorrentEngineModel
-@testable import TorrentApp
 
 @Suite("Torrent file batch presentation")
 struct TorrentFileBatchPresentationTests {
-    @Test("Preparation overlays pending priorities in precomputed sections")
+    @Test("Preparation overlays pending priorities in the file tree")
     func preparationOverlaysPendingPriorities() async throws {
         let presentation = try await TorrentFileBatchPresentation.prepare(
             batch: TorrentFileBatch(
@@ -19,10 +19,43 @@ struct TorrentFileBatchPresentationTests {
 
         #expect(presentation.revision == 42)
         #expect(
-            presentation.sections.flatMap(\.files).map(\.priority)
+            presentation.tree.roots.map(\.priority)
                 == [.normal, .high]
         )
         #expect(presentation.remainingPendingPriorities == [1: .high])
+    }
+
+    @Test("An older refresh finishing after a sort change cannot replace a newer poll")
+    func staleRefreshDoesNotPoisonLaterSorts() async throws {
+        let older = TorrentFileBatch(revision: 1, files: [
+            makeFile(index: 0, priority: .normal), makeFile(index: 1, priority: .normal),
+        ])
+        let newer = TorrentFileBatch(revision: 2, files: [
+            makeFile(index: 0, priority: .skip), makeFile(index: 1, priority: .high),
+        ])
+        var state = TorrentFilePresentationState()
+        let publishedNewer = state.apply(try await TorrentFileBatchPresentation.prepare(
+            batch: newer, pendingPriorities: [:]
+        ))
+        #expect(publishedNewer)
+
+        // The priority refresh finishes with an obsolete sort order. Its cache
+        // update must not regress the snapshot that the next sort will use.
+        let acceptedOlder = state.accept(older)
+        #expect(!acceptedOlder)
+        let source = try #require(state.latestBatch)
+        let publishedSort = state.apply(try await TorrentFileBatchPresentation.prepare(
+            batch: source, pendingPriorities: [:], sortOrder: [.init(.priority)]
+        ))
+        #expect(publishedSort)
+        #expect(state.latestBatch?.revision == 2)
+        #expect(state.tree.roots.map(\.priority) == [.high, .skip])
+
+        let publishedOlder = state.apply(try await TorrentFileBatchPresentation.prepare(
+            batch: older, pendingPriorities: [:]
+        ))
+        #expect(!publishedOlder)
+        #expect(state.tree.roots.map(\.priority) == [.high, .skip])
     }
 
     @Test("Cancelled preparation does not return a partial presentation")

@@ -81,6 +81,77 @@ struct TorrentFileLocationServiceTests {
         }
     }
 
+    @Test("Folders resolve at every depth using the collision-selected root", arguments: [0, 1, 2])
+    func revealsClaimedFolder(depth: Int) async throws {
+        try await withTemporaryDirectory { downloads in
+            try FileManager.default.createDirectory(
+                at: downloads.appending(path: "Videos"), withIntermediateDirectories: true
+            )
+            let fixture = try makeLocation(
+                downloads: downloads, name: "Videos", contentKind: .directory,
+                files: [.init(index: 0, pathComponents: ["Season 1", "Disc 2", "episode.mkv"],
+                    expectedSize: 16, isPadding: false)]
+            )
+            // A folder remains revealable even when a descendant file is missing.
+            try FileManager.default.removeItem(at: fixture.location.displayURL
+                .appending(path: "Season 1/Disc 2/episode.mkv"))
+            let revealed = try await TorrentFileLocationService().revealFolderURL(
+                for: fixture.location, containingFileIndex: 0, depth: depth
+            )
+            let components = ["Videos 2"] + ["Season 1", "Disc 2"].prefix(depth)
+            let expected = components.reduce(downloads) {
+                $0.appending(path: $1, directoryHint: .isDirectory)
+            }
+            #expect(revealed?.path(percentEncoded: false) == expected.path(percentEncoded: false))
+        }
+    }
+
+    @Test("Folder reveal rejects invalid indices, padding, and depths", arguments: [
+        (Int32(-1), 0), (Int32.max, 0), (1, 0), (0, -1), (0, 2), (0, Int.max),
+    ] as [(Int32, Int)])
+    func invalidFolderTargets(index: Int32, depth: Int) async throws {
+        try await withTemporaryDirectory { downloads in
+            let fixture = try makeLocation(
+                downloads: downloads, name: "Videos", contentKind: .directory,
+                files: [
+                    .init(index: 0, pathComponents: ["Season 1", "episode.mkv"], expectedSize: 16, isPadding: false),
+                    .init(index: 1, pathComponents: [".pad", "16"], expectedSize: 16, isPadding: true),
+                ]
+            )
+            await #expect(throws: TorrentStoragePlanningError.self) {
+                _ = try await TorrentFileLocationService().revealFolderURL(
+                    for: fixture.location, containingFileIndex: index, depth: depth
+                )
+            }
+        }
+    }
+
+    @Test("Folder reveal rejects substituted directories and symlink ancestors", arguments: [false, true])
+    func substitutedFolder(symlink: Bool) async throws {
+        try await withTemporaryDirectory { downloads in
+            let fixture = try makeLocation(
+                downloads: downloads, name: "Videos", contentKind: .directory,
+                files: [.init(index: 0, pathComponents: ["Season 1", "Disc 2", "episode.mkv"],
+                    expectedSize: 16, isPadding: false)]
+            )
+            let original = fixture.location.displayURL.appending(path: "Season 1")
+            let moved = downloads.appending(path: "moved")
+            try FileManager.default.moveItem(at: original, to: moved)
+            if symlink {
+                try FileManager.default.createSymbolicLink(at: original, withDestinationURL: moved)
+            } else {
+                try FileManager.default.createDirectory(
+                    at: original.appending(path: "Disc 2"), withIntermediateDirectories: true
+                )
+            }
+            await #expect(throws: TorrentStoragePlanningError.self) {
+                _ = try await TorrentFileLocationService().revealFolderURL(
+                    for: fixture.location, containingFileIndex: 0, depth: 2
+                )
+            }
+        }
+    }
+
     @Test("A substituted file is not revealed")
     func substitutedFileFallsBackToClaimRoot() async throws {
         try await withTemporaryDirectory { root in

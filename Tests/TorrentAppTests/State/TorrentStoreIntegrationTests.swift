@@ -2164,15 +2164,145 @@ struct TorrentStoreIntegrationTests {
     }
 
     @Test("Set file priority delegates to engine")
-    func setFilePriorityDelegatesToEngine() async throws {
+    func setFilePrioritiesDelegatesToEngine() async throws {
         let harness = makeStoreHarness()
 
-        try await harness.store.setFilePriority(for: "alpha", fileIndex: 3, priority: .skip)
+        try await harness.store.setFilePriorities(for: "alpha", priorities: [3: .skip])
 
         #expect(await harness.engine.filePriorityUpdates.count == 1)
         #expect(await harness.engine.filePriorityUpdates.first?.id == "alpha")
         #expect(await harness.engine.filePriorityUpdates.first?.fileIndex == 3)
         #expect(await harness.engine.filePriorityUpdates.first?.priority == .skip)
+    }
+
+    @Test("Folder availability is persisted once per phase and surrounds engine commands")
+    func folderPriorityPersistsAvailabilityInBatches() async throws {
+        try await withKnownTorrentHarness { harness, folder in
+            let initial = try await addPriorityTestTorrent(harness, in: folder, fileCount: 128)
+            let journal = try #require(harness.storageClaimJournal)
+            for (phase, priority) in [TorrentFilePriority.skip, .normal, .high].enumerated() {
+                // Skips still have access until every command acknowledges handle
+                // release; increases have access before the first command runs.
+                await harness.engine.setFilePriorityHandler { _, _ in
+                    let claim = try #require(await journal.allClaims().first)
+                    #expect(claim.lease.fileAvailability.allSatisfy { $0 })
+                    let expectedRevision = initial.lease.availabilityRevision + (phase == 0 ? 0 : 2)
+                    #expect(claim.lease.availabilityRevision == expectedRevision)
+                }
+                try await harness.store.setFilePriorities(
+                    for: "priority", priorities: Dictionary(uniqueKeysWithValues:
+                        (0..<128).map { (Int32($0), priority) }
+                    )
+                )
+                let claim = try #require(await journal.allClaims().first)
+                #expect(claim.lease.fileAvailability == Array(repeating: priority != .skip, count: 128))
+                #expect(claim.lease.availabilityRevision == initial.lease.availabilityRevision + UInt64(min(phase + 1, 2)))
+            }
+            #expect(await harness.engine.filePriorityUpdates.count == 384)
+        }
+    }
+
+    @Test("A failed folder command preserves completed changes and removes unused grants",
+          arguments: [TorrentFilePriority.skip, .high], [false, true])
+    func folderPriorityPartialFailure(priority: TorrentFilePriority, cancellation: Bool) async throws {
+        try await withKnownTorrentHarness { harness, folder in
+            let initial = try await addPriorityTestTorrent(
+                harness, in: folder, skipped: priority == .high ? [0, 1, 2] : []
+            )
+            let journal = try #require(harness.storageClaimJournal)
+            await harness.engine.setFilePriorityHandler { index, _ in
+                if index == 1 {
+                    if cancellation { throw CancellationError() }
+                    throw FilePriorityTestFailure.rejected
+                }
+            }
+            if cancellation {
+                await #expect(throws: CancellationError.self) {
+                    try await harness.store.setFilePriorities(
+                        for: "priority", priorities: [0: priority, 1: priority, 2: priority]
+                    )
+                }
+            } else {
+                await #expect(throws: FilePriorityTestFailure.rejected) {
+                    try await harness.store.setFilePriorities(
+                        for: "priority", priorities: [0: priority, 1: priority, 2: priority]
+                    )
+                }
+            }
+            let claim = try #require(await journal.allClaims().first)
+            var expected = initial.lease.fileAvailability
+            expected[0] = priority != .skip
+            #expect(claim.lease.fileAvailability == expected)
+            #expect(claim.lease.availabilityRevision == initial.lease.availabilityRevision + (priority == .skip ? 1 : 2))
+            #expect(await harness.engine.filePriorityUpdates.map(\.fileIndex) == [0, 1])
+            #expect(harness.engine.isAvailable)
+        }
+    }
+
+    @Test("Cancelling a running folder request stops between commands and finishes cleanup",
+          arguments: [TorrentFilePriority.skip, .high])
+    func cancellingRunningFolderPriority(priority: TorrentFilePriority) async throws {
+        try await withKnownTorrentHarness { harness, folder in
+            let initial = try await addPriorityTestTorrent(
+                harness, in: folder, skipped: priority == .high ? [0, 1, 2] : []
+            )
+            let journal = try #require(harness.storageClaimJournal)
+            let barrier = FilePriorityTestBarrier()
+            await harness.engine.setFilePriorityHandler { _, _ in await barrier.suspend() }
+            let task = Task {
+                try await harness.store.setFilePriorities(
+                    for: "priority", priorities: [0: priority, 1: priority, 2: priority]
+                )
+            }
+            await barrier.waitForEntry()
+            task.cancel()
+            await #expect(throws: CancellationError.self) { try await task.value }
+            await barrier.resume()
+            // The shared FIFO owns cleanup even after its caller is cancelled.
+            await harness.store.saveAll()
+            let claim = try #require(await journal.allClaims().first)
+            var expected = initial.lease.fileAvailability
+            expected[0] = priority != .skip
+            #expect(claim.lease.fileAvailability == expected)
+            #expect(await harness.engine.filePriorityUpdates.map(\.fileIndex) == [0])
+        }
+    }
+
+    @Test("Invalid folder indices fail before any availability or engine changes",
+          arguments: [Int32(-1), 4, Int32(TorrentEngineLimits.maximumFileCount)])
+    func invalidFolderPriorityIndices(index: Int32) async throws {
+        try await withKnownTorrentHarness { harness, folder in
+            let initial = try await addPriorityTestTorrent(harness, in: folder)
+            await #expect(throws: TorrentStorageBrokerRegistryError.fileUnavailable) {
+                try await harness.store.setFilePriorities(for: "priority", priorities: [0: .skip, index: .skip])
+            }
+            #expect(await harness.storageClaimJournal?.allClaims().first == initial)
+            #expect(await harness.engine.filePriorityUpdates.isEmpty)
+        }
+    }
+
+    @Test("An unavailable journal during folder cleanup stops the engine and revokes the claim")
+    func failedFolderPriorityCleanupStopsEngine() async throws {
+        try await withKnownTorrentHarness { harness, folder in
+            _ = try await addPriorityTestTorrent(harness, in: folder, skipped: [0, 1, 2])
+            let journalDirectory = folder.deletingLastPathComponent().appending(path: "Journal")
+            await harness.engine.setFilePriorityHandler { index, _ in
+                if index == 1 {
+                    try FileManager.default.removeItem(at: journalDirectory)
+                    try Data().write(to: journalDirectory)
+                    throw FilePriorityTestFailure.rejected
+                }
+            }
+            await #expect(throws: TorrentStorageJournalError.unavailable) {
+                try await harness.store.setFilePriorities(
+                    for: "priority", priorities: [0: .high, 1: .high, 2: .high]
+                )
+            }
+            #expect(!harness.engine.isAvailable)
+            #expect(harness.engine.recoveryDisposition == .terminal)
+            #expect(harness.store.downloadLocationPath(for: "priority") == nil)
+            #expect(await harness.engine.filePriorityUpdates.map(\.fileIndex) == [0, 1])
+        }
     }
 
     @Test("Unchanged detail batches preserve caller state")
@@ -2952,7 +3082,7 @@ struct TorrentStoreIntegrationTests {
         await harness.engine.waitForSuspendedRemove()
 
         let mutation = Task { @MainActor in
-            try await harness.store.setFilePriority(for: "alpha", fileIndex: 3, priority: .skip)
+            try await harness.store.setFilePriorities(for: "alpha", priorities: [3: .skip])
         }
         await Task.yield()
         #expect(await harness.engine.filePriorityUpdates.isEmpty)
@@ -2976,11 +3106,7 @@ struct TorrentStoreIntegrationTests {
         await harness.engine.waitForSuspendedRemove()
 
         let mutation = Task { @MainActor in
-            try await harness.store.setFilePriority(
-                for: "alpha",
-                fileIndex: 3,
-                priority: .skip
-            )
+            try await harness.store.setFilePriorities(for: "alpha", priorities: [3: .skip])
         }
         await Task.yield()
         mutation.cancel()
@@ -3625,6 +3751,64 @@ private func withKnownTorrentHarness<Result>(
         )
         return try await body(harness, downloadFolder)
     }
+}
+
+private enum FilePriorityTestFailure: Error { case rejected }
+
+private actor FilePriorityTestBarrier {
+    private var entered = false
+    private var entry: CheckedContinuation<Void, Never>?
+    private var release: CheckedContinuation<Void, Never>?
+
+    func suspend() async {
+        await withCheckedContinuation { continuation in
+            release = continuation
+            entered = true
+            entry?.resume()
+            entry = nil
+        }
+    }
+
+    func waitForEntry() async {
+        if entered { return }
+        await withCheckedContinuation { entry = $0 }
+    }
+
+    func resume() {
+        release?.resume()
+        release = nil
+    }
+}
+
+@MainActor
+private func addPriorityTestTorrent(
+    _ harness: StoreHarness,
+    in folder: URL,
+    fileCount: Int = 4,
+    skipped: Set<Int32> = []
+) async throws -> TorrentStorageClaim {
+    let journal = try #require(harness.storageClaimJournal)
+    var data = Data("d4:infod5:filesl".utf8)
+    for index in 0..<fileCount {
+        let name = "file-\(index).bin"
+        data.append(contentsOf: "d6:lengthi4e4:pathl\(name.utf8.count):\(name)ee".utf8)
+    }
+    let pieceHashBytes = ((fileCount * 4 + 16_383) / 16_384) * 20
+    data.append(contentsOf: "e4:name6:Bundle12:piece lengthi16384e6:pieces\(pieceHashBytes):".utf8)
+    data.append(Data(repeating: 0, count: pieceHashBytes))
+    data.append(contentsOf: "ee".utf8)
+    await harness.engine.setNextAddedTorrentFileID("priority")
+    #expect(harness.store.addTorrentFile(
+        folder.appending(path: "Bundle.torrent"),
+        torrentData: data,
+        savePath: folder.torrentFilePath,
+        filePriorities: Dictionary(uniqueKeysWithValues: skipped.map { ($0, .skip) })
+    ))
+    await harness.store.saveAll()
+    try #require(harness.store.lastError == nil)
+    let claim = try #require(await journal.allClaims().first)
+    try #require(claim.lease.state == .active)
+    return claim
 }
 
 private func validSingleFileTorrentData() -> Data {

@@ -778,114 +778,22 @@ final class TorrentStore {
         }
     }
 
-    func setFilePriority(for id: TorrentItem.ID, fileIndex: Int32, priority: TorrentFilePriority) async throws {
-        try await performQueuedStoreOperation { store in
-            try await store.setBrokeredFilePriority(
-                torrentID: id,
-                fileIndex: fileIndex,
-                priority: priority
-            )
-        }
-    }
-
-    private func setBrokeredFilePriority(
-        torrentID: TorrentItem.ID,
-        fileIndex: Int32,
-        priority: TorrentFilePriority
+    func setFilePriorities(
+        for id: TorrentItem.ID,
+        priorities: [Int32: TorrentFilePriority]
     ) async throws {
-        guard let storageClaimJournal else {
-            try await engine.setFilePriority(
-                id: torrentID,
-                fileIndex: fileIndex,
-                priority: priority
-            )
-            return
-        }
-        let claims = await storageClaimJournal.allClaims().filter {
-            $0.torrentID == torrentID && $0.lease.state == .active
-        }
-        guard claims.count <= 1 else {
-            throw TorrentStorageJournalError.corrupt
-        }
-        guard let claim = claims.first else {
-            try await engine.setFilePriority(
-                id: torrentID,
-                fileIndex: fileIndex,
-                priority: priority
-            )
-            return
-        }
-        guard fileIndex >= 0,
-              Int(fileIndex) < claim.manifest.logicalFiles.count,
-              Int(fileIndex) < claim.lease.fileAvailability.count,
-              !claim.manifest.logicalFiles[Int(fileIndex)].isPadding else {
-            throw TorrentStorageBrokerRegistryError.fileUnavailable
-        }
-
-        let isAvailable = claim.lease.fileAvailability[Int(fileIndex)]
-        let enablesPayload = !isAvailable
-            && priority != .skip
-        let restrictsPayload = isAvailable
-            && priority == .skip
-        if enablesPayload {
-            let updated = try await replacePayloadAvailability(
-                claim: claim,
-                fileIndex: fileIndex,
-                isAvailable: true
-            )
-            do {
-                try await engine.setFilePriority(
-                    id: torrentID,
-                    fileIndex: fileIndex,
-                    priority: priority
+        let operation = TorrentFilePriorityOperation(torrentID: id, priorities: priorities)
+        try await withTaskCancellationHandler {
+            try await performQueuedStoreOperation { store in
+                try await operation.apply(
+                    engine: store.engine,
+                    journal: store.storageClaimJournal,
+                    registry: store.storageBrokerRegistry
                 )
-            } catch {
-                _ = try? await replacePayloadAvailability(
-                    claim: updated,
-                    fileIndex: fileIndex,
-                    isAvailable: false
-                )
-                throw error
             }
-            return
+        } onCancel: {
+            operation.cancel()
         }
-
-        try await engine.setFilePriority(
-            id: torrentID,
-            fileIndex: fileIndex,
-            priority: priority
-        )
-        if restrictsPayload {
-            _ = try await replacePayloadAvailability(
-                claim: claim,
-                fileIndex: fileIndex,
-                isAvailable: false
-            )
-        }
-    }
-
-    private func replacePayloadAvailability(
-        claim: TorrentStorageClaim,
-        fileIndex: Int32,
-        isAvailable: Bool
-    ) async throws -> TorrentStorageClaim {
-        guard let storageClaimJournal else {
-            throw storageClaimJournalInitializationError ?? .unavailable
-        }
-        guard fileIndex >= 0,
-              claim.lease.fileAvailability.indices.contains(Int(fileIndex)) else {
-            throw TorrentStorageBrokerRegistryError.fileUnavailable
-        }
-        var availability = claim.lease.fileAvailability
-        availability[Int(fileIndex)] = isAvailable
-        let updated = try await storageClaimJournal.replaceAvailability(
-            claimID: claim.manifest.claimID,
-            generation: claim.manifest.generation,
-            expectedAvailabilityRevision: claim.lease.availabilityRevision,
-            fileAvailability: availability
-        )
-        try storageBrokerRegistry.replace(claim: updated)
-        return updated
     }
 
     func trackerBatch(for id: TorrentItem.ID, since revision: UInt64?) async -> TorrentTrackerBatch? {
@@ -2080,20 +1988,23 @@ final class TorrentStore {
         revealTorrentsInFinder(ids: [id])
     }
 
-    func revealTorrentFileInFinder(torrent: TorrentItem, file: TorrentFileItem) {
+    func revealTorrentItemInFinder(torrent: TorrentItem, itemID: TorrentFileTree.Node.ID) {
         let location = storageBrokerRegistry
             .locationsByTorrentID()[torrent.id]
-        let fileIndex = file.index
         scheduleFileReveal(
-            missingLocationMessage: "The file location could not be found."
+            missingLocationMessage: "The item location could not be found."
         ) { service in
-            guard let location,
-                  let url = try await service.revealURL(
-                      for: location,
-                      fileIndex: fileIndex
-                  ) else {
-                return []
+            guard let location else { return [] }
+            let url: URL?
+            switch itemID {
+            case .file(let index):
+                url = try await service.revealURL(for: location, fileIndex: index)
+            case .folder(let index, let depth):
+                url = try await service.revealFolderURL(
+                    for: location, containingFileIndex: index, depth: depth
+                )
             }
+            guard let url else { return [] }
             return [url]
         }
     }

@@ -9,6 +9,12 @@ package protocol TorrentFileLocationServicing: Sendable {
     func revealURLs(
         for locations: [TorrentStorageLocation]
     ) async throws -> [URL]
+
+    func revealFolderURL(
+        for location: TorrentStorageLocation,
+        containingFileIndex: Int32,
+        depth: Int
+    ) async throws -> URL?
 }
 
 package struct TorrentFileLocationService: TorrentFileLocationServicing {
@@ -23,6 +29,20 @@ package struct TorrentFileLocationService: TorrentFileLocationServicing {
         let url = try TorrentStorageDestinationPlanner().revealURL(
             for: location,
             fileIndex: fileIndex
+        )
+        try Task.checkCancellation()
+        return url
+    }
+
+    @concurrent
+    package func revealFolderURL(
+        for location: TorrentStorageLocation,
+        containingFileIndex: Int32,
+        depth: Int
+    ) async throws -> URL? {
+        try Task.checkCancellation()
+        let url = try TorrentStorageDestinationPlanner().revealFolderURL(
+            for: location, containingFileIndex: containingFileIndex, depth: depth
         )
         try Task.checkCancellation()
         return url

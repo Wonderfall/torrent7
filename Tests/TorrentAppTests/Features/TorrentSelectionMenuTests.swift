@@ -54,4 +54,21 @@ struct TorrentSelectionMenuTests {
         submenu.performActionForItem(at: chosen)
         #expect(writes == [chosenPriority])
     }
+
+    @Test("File and folder priority menus display mixed state and issue one action",
+          arguments: [Optional<TorrentFilePriority>.none] + TorrentFilePriority.allCases.map(Optional.some))
+    func filePrioritySelection(_ priority: TorrentFilePriority?) throws {
+        _ = NSApplication.shared
+        var writes: [TorrentFilePriority] = []
+        let menu = NSHostingMenu(rootView: TorrentFilePriorityPicker(priority: priority) { writes.append($0) })
+        menu.update()
+        let submenu = try #require(menu.items.first?.submenu)
+        submenu.update()
+        let selected = submenu.items.filter { $0.state == .on }
+        #expect(selected.count == 1)
+        #expect(selected.first?.title == (priority?.title ?? "Mixed"))
+        let chosen = try #require(submenu.items.firstIndex { $0.title == "Skip" })
+        submenu.performActionForItem(at: chosen)
+        #expect(writes == [.skip])
+    }
 }

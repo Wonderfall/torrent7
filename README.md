@@ -73,6 +73,9 @@ another rewrite are tracked in the
 
 - Add `.torrent` files, magnet links, Finder-opened torrents, and dragged files.
 - Preview torrent contents before adding, including selected files and priorities.
+- Browse nested files in a collapsible tree and set priorities for entire folders.
+- Sort files within their folders by name, size, priority, or download progress using the column headers.
+- Double-click a file or folder in the torrent inspector to reveal it in Finder.
 - Pause, resume, remove, reannounce, force recheck, reveal in Finder, and inspect transfers.
 - Configure global and per-torrent transfer limits, queue priority, labels, and discovery policy.
 - Inspect trackers, web seeds, files, piece maps, peer sources, hashes, and transfer metadata.
