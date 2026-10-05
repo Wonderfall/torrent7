@@ -358,7 +358,7 @@ availability without a second polling loop.
 
 The dialog initially selects pre-metadata DHT only when no tracker is usable
 under the HTTPS policy and both the DHT network and default DHT preference are
-enabled. The choice remains visible and editable before Choose Files or Add
+enabled. The choice remains visible and editable before Fetch Metadata or Add
 starts discovery; retries preserve the user's choice. Magnets with a usable
 tracker keep pre-metadata DHT opt-in.
 

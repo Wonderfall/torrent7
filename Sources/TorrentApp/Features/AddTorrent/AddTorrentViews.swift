@@ -522,13 +522,6 @@ struct AddTorrentConfirmationView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-
-                Label(
-                    "After adding, use Get Info > Options to adjust discovery, or Sources to review trackers and web seeds.",
-                    systemImage: "info.circle"
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
             }
         }
     }
@@ -574,7 +567,7 @@ struct AddTorrentConfirmationView: View {
                     Text("Choose which files and folders to download.")
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Button(previewError == nil ? "Choose Files…" : "Retry") {
+                    Button(previewError == nil ? "Fetch Metadata" : "Retry") {
                         previewError = nil
                         isLoadingPreview = true
                         isMagnetLinkExpanded = false
