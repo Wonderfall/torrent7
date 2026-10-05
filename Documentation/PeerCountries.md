@@ -4,7 +4,8 @@ The Peers tab uses an offline, country-only index derived from
 [DB-IP Country Lite](https://db-ip.com/db/download/ip-to-country-lite), October
 2026. IP geolocation data is provided by [DB-IP](https://db-ip.com/) under
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Attribution also ships
-in the application's ThirdPartyNotices.txt and native About panel.
+in the application's ThirdPartyNotices.txt, shown in the Acknowledgments window
+from About Torrent 7.
 
 No peer address leaves the app for a lookup. There is no reverse DNS, location
 permission, web service, or runtime database download. Country flags describe an

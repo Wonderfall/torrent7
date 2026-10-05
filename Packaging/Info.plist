@@ -45,6 +45,16 @@
                 <string>magnet</string>
             </array>
         </dict>
+        <dict>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>CFBundleURLName</key>
+            <string>app.torrent7.navigation</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>torrent7</string>
+            </array>
+        </dict>
     </array>
     <key>CFBundleShortVersionString</key>
     <string>0.4.3</string>

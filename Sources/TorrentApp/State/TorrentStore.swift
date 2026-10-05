@@ -256,8 +256,6 @@ final class TorrentStore {
     private(set) var magnetDestinationConflict:
         TorrentMagnetDestinationConflict?
 
-    private(set) var libtorrentVersion: String
-
     private let dependencies: TorrentStoreDependencies
     private var engine: any TorrentEngineServicing
     private let storageBrokerRegistry = TorrentStorageBrokerRegistry()
@@ -412,7 +410,6 @@ final class TorrentStore {
         isEngineStarting = true
         appliedPeerExchangePluginEnabled =
             initialSettings.enablePeerExchangePlugin
-        libtorrentVersion = startingEngine.libtorrentVersion
         selectionState.didChange = { [weak self] in
             self?.updateCommandState()
         }
@@ -472,7 +469,6 @@ final class TorrentStore {
             downloadFolder: downloadFolder,
             networkInterfaces: networkInterfaces
         )
-        libtorrentVersion = engine.libtorrentVersion
         appliedNetworkBinding = currentNetworkBinding
         backgroundRefreshesEnabled = startsTasks
         hasStarted = startsTasks
@@ -3639,7 +3635,6 @@ final class TorrentStore {
             switch outcome {
             case .started(let engine):
                 self.engine = engine
-                self.libtorrentVersion = engine.libtorrentVersion
                 self.appliedPeerExchangePluginEnabled = enablePeerExchangePlugin
                 self.engineStartupFailed = false
                 // A controller is accepted only after the service has created

@@ -9,6 +9,8 @@ enum AppIdentity {
 
     static let marketingVersion = bundleString(forInfoDictionaryKey: "CFBundleShortVersionString") ?? "Unknown"
     static let buildVersion = bundleString(forInfoDictionaryKey: "CFBundleVersion") ?? "Unknown"
+    // The standard About panel follows URL links to open application content.
+    static let acknowledgmentsLink = "torrent7://acknowledgments"
 
     private static func bundleString(forInfoDictionaryKey key: String) -> String? {
         guard let value = Bundle.main.object(forInfoDictionaryKey: key) as? String,

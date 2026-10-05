@@ -37,6 +37,20 @@ struct TorrentApp: App {
         .defaultSize(width: 500, height: 560)
         .windowToolbarLabelStyle(fixed: .iconOnly)
 
+        WindowGroup("Acknowledgments") {
+            AcknowledgmentsView()
+                .handlesExternalEvents(
+                    preferring: [AppIdentity.acknowledgmentsLink],
+                    allowing: [AppIdentity.acknowledgmentsLink]
+                )
+        }
+        .handlesExternalEvents(matching: [AppIdentity.acknowledgmentsLink])
+        .defaultSize(width: 760, height: 540)
+        .windowResizability(.contentMinSize)
+        .defaultLaunchBehavior(.suppressed)
+        .restorationBehavior(.disabled)
+        .commandsRemoved()
+
         Settings {
             TorrentSettingsView(store: store, state: store.settingsState)
         }
