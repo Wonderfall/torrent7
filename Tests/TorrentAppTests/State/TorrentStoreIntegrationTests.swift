@@ -2141,6 +2141,294 @@ struct TorrentStoreIntegrationTests {
         }
     }
 
+    @Test("Magnet file selection activates validated metadata only after confirmation", arguments: [false, true])
+    func magnetPreviewRequiresConfirmation(startsPaused: Bool) async throws {
+        try await withKnownTorrentHarness { harness, folder in
+            let fixture = try magnetPromotionFixture()
+            await configureMetadataReadyMagnet(harness, fixture: fixture)
+            let preview = try await harness.store.previewMagnet(
+                fixture.magnet, allowPreMetadataDHT: false
+            )
+            #expect(preview.name == "sample.bin")
+            #expect(preview.visibleFileCount == 1)
+            #expect(try TorrentManifestParser().parse(preview.torrentData).rawInfoDictionary
+                == fixture.exactInfoDictionary)
+            #expect(preview.sourceSecuritySummary.hasUsableTracker(for: .require))
+            #expect(harness.store.torrents.isEmpty)
+            #expect(await harness.engine.addedMagnets.count == 1)
+            #expect(await harness.engine.addedMagnets.first?.startsPaused == false)
+            #expect(await harness.engine.addedMagnets.first?.enablePeerExchange == false)
+            #expect(await harness.engine.addedMagnets.first?.allowPreMetadataDHT == false)
+            #expect(await harness.engine.addedTorrentFiles.isEmpty)
+            #expect(await harness.engine.filePriorityUpdates.isEmpty)
+            #expect(await harness.engine.removedIDs == [fixture.torrentID])
+            let journal = try #require(harness.storageClaimJournal)
+            #expect(await journal.allClaims().isEmpty)
+            #expect(await journal.allPromotions().isEmpty)
+            #expect(try FileManager.default.contentsOfDirectory(atPath: folder.torrentFilePath).isEmpty)
+
+            #expect(harness.store.addTorrentMetadata(
+                preview.torrentData,
+                downloadFolder: folder,
+                filePriorities: [0: .high],
+                setsDownloadFolderAsDefault: false,
+                startsPaused: startsPaused,
+                queuePriority: .low
+            ))
+            await harness.store.saveAll()
+            let added = try #require(await harness.engine.addedTorrentFiles.first)
+            #expect(added.data == preview.torrentData)
+            #expect(added.filePriorities == [0: .high])
+            #expect(added.startsPaused == startsPaused)
+            #expect(added.queuePriority == .low)
+            #expect(await harness.engine.addedMagnets.count == 1)
+            #expect(harness.store.lastError == nil)
+        }
+    }
+
+    @Test("Cancelling a magnet preview during add waits for its owned ID and removes only that torrent")
+    func magnetPreviewCancellationDuringAdd() async throws {
+        try await withKnownTorrentHarness { harness, _ in
+            let fixture = try magnetPromotionFixture()
+            await harness.engine.setNextAddedMagnetID(fixture.torrentID)
+            await harness.engine.suspendNextAddMagnet()
+            let task = Task {
+                try await harness.store.previewMagnet(fixture.magnet, allowPreMetadataDHT: false)
+            }
+            await harness.engine.waitForSuspendedAddMagnet()
+            task.cancel()
+            await harness.engine.resumeSuspendedAddMagnets()
+            await #expect(throws: CancellationError.self) { try await task.value }
+            #expect(await harness.engine.removedIDs == [fixture.torrentID])
+            #expect(await harness.engine.addedTorrentFiles.isEmpty)
+            #expect(await harness.storageClaimJournal?.allPromotions().isEmpty == true)
+        }
+    }
+
+    @Test("A waiting magnet preview stays out of the library and leaves the command queue usable")
+    func magnetPreviewDoesNotBlockOtherTorrents() async throws {
+        try await withKnownTorrentHarness { harness, _ in
+            let fixture = try magnetPromotionFixture()
+            let barrier = FilePriorityTestBarrier()
+            await harness.engine.setNextAddedMagnetID(fixture.torrentID)
+            await harness.engine.setMetadataReadHandler { await barrier.suspend() }
+            await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+                revision: 1,
+                torrents: [makeTorrent(id: "existing"), makeTorrent(id: fixture.torrentID, hasMetadata: false)]
+            ))
+            let task = Task {
+                try await harness.store.previewMagnet(fixture.magnet, allowPreMetadataDHT: false)
+            }
+            await barrier.waitForEntry()
+            #expect(harness.store.torrents.map(\.id) == ["existing"])
+            let options = try await harness.engine.torrentOptions(id: "existing")
+            try await harness.store.setTorrentOptions(for: "existing", options: options)
+            #expect(await harness.engine.torrentOptionsUpdates.map(\.id) == ["existing"])
+            task.cancel()
+            await barrier.resume()
+            await #expect(throws: CancellationError.self) { try await task.value }
+            #expect(await harness.engine.removedIDs == [fixture.torrentID])
+        }
+    }
+
+    @Test("Metadata arriving after preview cancellation never activates a download")
+    func magnetPreviewRejectsLateMetadata() async throws {
+        try await withKnownTorrentHarness { harness, _ in
+            let fixture = try magnetPromotionFixture()
+            await configureMetadataReadyMagnet(harness, fixture: fixture)
+            let barrier = FilePriorityTestBarrier()
+            await harness.engine.setMetadataReadHandler { await barrier.suspend() }
+            let task = Task {
+                try await harness.store.previewMagnet(fixture.magnet, allowPreMetadataDHT: false)
+            }
+            await barrier.waitForEntry()
+            task.cancel()
+            await barrier.resume()
+            await #expect(throws: CancellationError.self) { try await task.value }
+            #expect(await harness.engine.removedIDs == [fixture.torrentID])
+            #expect(await harness.engine.addedTorrentFiles.isEmpty)
+        }
+    }
+
+    @Test("Metadata snapshots wake the preview without another polling loop or engine session")
+    func magnetPreviewReceivesMetadataFromRefresh() async throws {
+        try await withKnownTorrentHarness { harness, _ in
+            let fixture = try magnetPromotionFixture()
+            await configureMetadataPendingMagnet(harness, fixture: fixture)
+            let barrier = FilePriorityTestBarrier()
+            await harness.engine.setMetadataReadHandler { await barrier.suspend() }
+            let task = Task {
+                try await harness.store.previewMagnet(fixture.magnet, allowPreMetadataDHT: false)
+            }
+            await barrier.waitForEntry()
+            await harness.engine.setMetadataReadHandler(nil)
+            await harness.engine.setTorrentMetadata(fixture.exactInfoDictionary, for: fixture.torrentID)
+            await harness.engine.setSnapshotBatch(TorrentSnapshotBatch(
+                revision: 2, torrents: [makeTorrent(id: fixture.torrentID, hasMetadata: true)]
+            ))
+            await harness.store.refreshNow()
+            await barrier.resume()
+            let preview = try await task.value
+            #expect(preview.name == "sample.bin")
+            #expect(await harness.engine.addedMagnets.count == 1)
+            #expect(await harness.engine.wakeStreamRequestCount == 0)
+            #expect(await harness.engine.removedIDs == [fixture.torrentID])
+            #expect(harness.store.torrents.isEmpty)
+        }
+    }
+
+    @Test("Only one metadata preview can own temporary staging at a time")
+    func magnetPreviewBoundsConcurrentRequests() async throws {
+        try await withKnownTorrentHarness { harness, _ in
+            let fixture = try magnetPromotionFixture()
+            await configureMetadataPendingMagnet(harness, fixture: fixture)
+            let barrier = FilePriorityTestBarrier()
+            await harness.engine.setMetadataReadHandler { await barrier.suspend() }
+            let task = Task {
+                try await harness.store.previewMagnet(fixture.magnet, allowPreMetadataDHT: false)
+            }
+            await barrier.waitForEntry()
+            await #expect(throws: TorrentEngineError.self) {
+                try await harness.store.previewMagnet(fixture.magnet, allowPreMetadataDHT: false)
+            }
+            task.cancel()
+            await barrier.resume()
+            await #expect(throws: CancellationError.self) { try await task.value }
+            #expect(await harness.engine.addedMagnets.count == 1)
+            #expect(await harness.engine.removedIDs == [fixture.torrentID])
+            await harness.engine.setMetadataReadHandler(nil)
+            await harness.engine.setTorrentMetadata(fixture.exactInfoDictionary, for: fixture.torrentID)
+            let retried = try await harness.store.previewMagnet(fixture.magnet, allowPreMetadataDHT: false)
+            #expect(retried.name == "sample.bin")
+            #expect(await harness.engine.removedIDs.count == 2)
+        }
+    }
+
+    @Test("Engine failure wakes a pending preview and retains terminal containment")
+    func magnetPreviewEngineFailureEndsWaiting() async throws {
+        try await withKnownTorrentHarness { harness, _ in
+            let fixture = try magnetPromotionFixture()
+            await configureMetadataPendingMagnet(harness, fixture: fixture)
+            let barrier = FilePriorityTestBarrier()
+            await harness.engine.setMetadataReadHandler { await barrier.suspend() }
+            let task = Task {
+                try await harness.store.previewMagnet(fixture.magnet, allowPreMetadataDHT: false)
+            }
+            await barrier.waitForEntry()
+            await harness.engine.terminateConnection(recoveryDisposition: .terminal)
+            await harness.store.refreshNow()
+            await barrier.resume()
+            await #expect(throws: TorrentEngineClientError.self) { try await task.value }
+            #expect(harness.engine.recoveryDisposition == .terminal)
+            #expect(await harness.engine.addedTorrentFiles.isEmpty)
+        }
+    }
+
+    @Test("A duplicate preview never removes or changes the existing torrent")
+    func magnetPreviewDuplicateIsUntouched() async throws {
+        try await withKnownTorrentHarness { harness, _ in
+            let fixture = try magnetPromotionFixture()
+            await configureMetadataReadyMagnet(harness, fixture: fixture)
+            await harness.engine.setAddMagnetError(TorrentEngineClientError.serviceRejected("Torrent already exists."))
+            await #expect(throws: TorrentEngineClientError.self) {
+                try await harness.store.previewMagnet(fixture.magnet, allowPreMetadataDHT: false)
+            }
+            #expect(await harness.engine.removedIDs.isEmpty)
+            #expect(await harness.engine.filePriorityUpdates.isEmpty)
+            #expect(await harness.engine.addedTorrentFiles.isEmpty)
+            #expect(harness.engine.isAvailable)
+        }
+    }
+
+    @Test("Magnet preview verifies advertised hashes before publishing files")
+    func magnetPreviewRejectsWrongHash() async throws {
+        try await withKnownTorrentHarness { harness, _ in
+            let fixture = try magnetPromotionFixture()
+            await configureMetadataReadyMagnet(harness, fixture: fixture)
+            let wrongMagnet = "magnet:?xt=urn:btih:\(String(repeating: "f", count: 40))&tr=https%3A%2F%2Ftracker.example%2Fannounce"
+            await #expect(throws: TorrentManifestError.self) {
+                try await harness.store.previewMagnet(wrongMagnet, allowPreMetadataDHT: false)
+            }
+            #expect(await harness.engine.removedIDs == [fixture.torrentID])
+            #expect(await harness.engine.addedTorrentFiles.isEmpty)
+        }
+    }
+
+    @Test("An uncertain preview add is contained without removing an unidentified torrent")
+    func magnetPreviewUncertainAddFailsClosed() async throws {
+        try await withKnownTorrentHarness { harness, _ in
+            let fixture = try magnetPromotionFixture()
+            await harness.engine.setAddMagnetError(TorrentEngineClientError.requestTimedOut(outcomeUnknown: true))
+            await #expect(throws: TorrentEngineClientError.self) {
+                try await harness.store.previewMagnet(fixture.magnet, allowPreMetadataDHT: false)
+            }
+            #expect(!harness.engine.isAvailable)
+            #expect(harness.engine.recoveryDisposition == .replaceController)
+            #expect(await harness.engine.removedIDs.isEmpty)
+        }
+    }
+
+    @Test("Magnet preview removal warnings stop networking and never publish a usable preview")
+    func magnetPreviewCleanupFailsClosed() async throws {
+        try await withKnownTorrentHarness { harness, _ in
+            let fixture = try magnetPromotionFixture()
+            await configureMetadataReadyMagnet(harness, fixture: fixture)
+            await harness.engine.setRemoveOutcome(.removedWithWarning("Removal was not acknowledged."))
+            await #expect(throws: TorrentEngineError.self) {
+                try await harness.store.previewMagnet(fixture.magnet, allowPreMetadataDHT: false)
+            }
+            #expect(!harness.engine.isAvailable)
+            #expect(harness.engine.recoveryDisposition == .replaceController)
+            #expect(await harness.engine.addedTorrentFiles.isEmpty)
+        }
+    }
+
+    @Test("Trackerless previews require both DHT consent and the global network setting", arguments: [false, true], [false, true])
+    func magnetPreviewDHTConsent(enabled: Bool, consent: Bool) async throws {
+        try await withKnownTorrentHarness { harness, _ in
+            let fixture = try magnetPromotionFixture()
+            await configureMetadataReadyMagnet(harness, fixture: fixture)
+            var settings = harness.store.settings
+            settings.enableDHTNetwork = enabled
+            harness.store.updateSettings(settings)
+            await harness.store.saveAll()
+            let magnet = String(fixture.magnet.prefix(while: { $0 != "&" }))
+            if enabled && consent {
+                _ = try await harness.store.previewMagnet(magnet, allowPreMetadataDHT: consent)
+                #expect(await harness.engine.addedMagnets.first?.allowPreMetadataDHT == true)
+            } else {
+                await #expect(throws: TorrentEngineError.self) {
+                    try await harness.store.previewMagnet(magnet, allowPreMetadataDHT: consent)
+                }
+                #expect(await harness.engine.addedMagnets.isEmpty)
+            }
+        }
+    }
+
+    @Test("Select-only magnet hints initialize editable file priorities")
+    func magnetPreviewPreservesSelectionHints() async throws {
+        try await withKnownTorrentHarness { harness, _ in
+            let fixture = try magnetPromotionFixture()
+            await configureMetadataReadyMagnet(harness, fixture: fixture)
+            let preview = try await harness.store.previewMagnet(
+                fixture.magnet + "&so=1", allowPreMetadataDHT: false
+            )
+            #expect(preview.visibleFiles.map(\.priority) == [.skip])
+            let initial = try await TorrentAddFileSelectionPresentation.prepare(
+                generation: 0, files: preview.visibleFiles, bulkPriority: nil, overrides: [:]
+            )
+            #expect(!initial.hasDownloadableFile)
+            #expect(initial.filePriorities == [0: .skip])
+            let selected = try await TorrentAddFileSelectionPresentation.prepare(
+                generation: 1, files: preview.visibleFiles, bulkPriority: nil, overrides: [:],
+                change: TorrentFilePriorityChange(fileIndices: [0], priority: .normal)
+            )
+            #expect(selected.hasDownloadableFile)
+            #expect(selected.overrides == [0: .normal])
+            #expect(selected.filePriorities == nil)
+        }
+    }
+
     @Test("Add torrent file forwards file priorities")
     func addTorrentFileForwardsFilePriorities() async throws {
         try await withKnownTorrentHarness { harness, downloadFolder in

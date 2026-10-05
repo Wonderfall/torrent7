@@ -569,24 +569,19 @@ struct ContentView: View {
 
     private func confirmTorrentAdd(_ draft: TorrentAddDraft, options: TorrentAddOptions) -> Bool {
         let accepted: Bool
-        switch draft.source {
-        case .torrentFile(let url):
-            guard let torrentData = options.torrentData else {
-                return false
-            }
-            accepted = store.addTorrentFile(
-                url,
-                torrentData: torrentData,
+        if let torrentData = options.torrentData {
+            accepted = store.addTorrentMetadata(
+                torrentData,
                 downloadFolder: options.downloadFolder,
                 filePriorities: options.filePriorities,
-                moveOriginalToTrash: options.movesTorrentFileToTrash,
+                originalFileToTrash: options.movesTorrentFileToTrash ? draft.fileURL : nil,
                 setsDownloadFolderAsDefault: options.setsDownloadFolderAsDefault,
                 startsPaused: options.startsPaused,
                 queuePriority: options.queuePriority,
                 labelIDs: options.labelIDs,
                 destinationChoice: options.destinationChoice
             )
-        case .magnet(let uri):
+        } else if let uri = draft.magnetURI {
             accepted = store.addMagnet(
                 uri,
                 downloadFolder: options.downloadFolder,
@@ -596,6 +591,8 @@ struct ContentView: View {
                 labelIDs: options.labelIDs,
                 allowPreMetadataDHT: options.allowsPreMetadataDHT
             )
+        } else {
+            return false
         }
 
         if accepted {

@@ -94,6 +94,11 @@ private struct TorrentAddDestinationConflictRequest: Identifiable {
     let startsPaused: Bool
 }
 
+private struct TorrentMagnetFilePreviewRequest: Identifiable {
+    let id = UUID()
+    let allowsPreMetadataDHT: Bool
+}
+
 struct TorrentDestinationConflictView: View {
     let conflict: TorrentStorageDestinationConflict
     let cancel: () -> Void
@@ -204,6 +209,7 @@ struct AddTorrentConfirmationView: View {
     @State private var isLoadingPreview = false
     @State private var preview: TorrentFilePreview?
     @State private var previewError: String?
+    @State private var magnetPreviewRequest: TorrentMagnetFilePreviewRequest?
     @State private var magnetSourceSecuritySummary:
         TorrentSourceSecuritySummary?
     @State private var filePriorities = [Int32: TorrentFilePriority]()
@@ -238,7 +244,7 @@ struct AddTorrentConfirmationView: View {
                             .foregroundStyle(.secondary)
                             .help(displayName)
                     }
-                    if draft.fileURL != nil {
+                    if draft.fileURL != nil || preview != nil {
                         InfoDetailRow("Info hash") {
                             previewInfoHashValue
                         }
@@ -283,6 +289,12 @@ struct AddTorrentConfirmationView: View {
 
                     sourcePolicySection
 
+                    if preview != nil {
+                        fileSelectionSection
+                    } else {
+                        magnetFileSelectionSection
+                    }
+
                     Section("Magnet") {
                         DisclosureGroup("Magnet link", isExpanded: $isMagnetLinkExpanded) {
                             Text(magnetURI)
@@ -291,13 +303,6 @@ struct AddTorrentConfirmationView: View {
                                 .fixedSize(horizontal: false, vertical: true)
                                 .padding(.top, 4)
                         }
-
-                        Label(
-                            "Files and sizes appear after adding, once metadata is fetched from peers.",
-                            systemImage: "info.circle"
-                        )
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                     }
                 }
             }
@@ -325,14 +330,19 @@ struct AddTorrentConfirmationView: View {
             .background(.bar)
         }
         .frame(
-            width: draft.fileURL == nil ? 620 : 680,
-            height: draft.fileURL == nil ? 520 : 640
+            width: showsFileSelection ? 680 : 620,
+            height: showsFileSelection ? 640 : 520
         )
         .onAppear {
             selectedDownloadFolder = store.downloadFolder
         }
         .task(id: draft.id) {
             await loadDraftPresentation(for: draft.id)
+        }
+        .task(id: magnetPreviewRequest?.id) {
+            guard let request = magnetPreviewRequest,
+                  let magnet = draft.magnetURI else { return }
+            await loadMagnetPreview(magnet, request: request)
         }
         .onChange(of: fileSortOrder) { _, _ in
             advanceFileSelectionGeneration()
@@ -506,7 +516,7 @@ struct AddTorrentConfirmationView: View {
                         preMetadataDHTConsentTitle(for: sourceSecuritySummary),
                         isOn: $allowsPreMetadataDHT
                     )
-                        .disabled(!store.settings.enableDHTNetwork)
+                        .disabled(!store.settings.enableDHTNetwork || isLoadingPreview)
 
                     Text(preMetadataDHTConsentMessage(for: sourceSecuritySummary))
                         .font(.caption)
@@ -539,6 +549,48 @@ struct AddTorrentConfirmationView: View {
                 systemImage: "info.circle"
             )
             .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var magnetFileSelectionSection: some View {
+        Section("Files") {
+            if isLoadingPreview {
+                HStack {
+                    ProgressView().controlSize(.small)
+                    Text(magnetPreviewRequest == nil ? "Stopping…" : "Fetching Metadata…")
+                    Spacer()
+                    Button("Stop") { magnetPreviewRequest = nil }
+                        .disabled(magnetPreviewRequest == nil)
+                }
+                Text("Waiting for peers to provide the file list. Torrent contents are not downloaded.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                if let previewError {
+                    Text(previewError).foregroundStyle(.red)
+                }
+                HStack {
+                    Text("Choose which files and folders to download.")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button(previewError == nil ? "Choose Files…" : "Retry") {
+                        previewError = nil
+                        isLoadingPreview = true
+                        isMagnetLinkExpanded = false
+                        magnetPreviewRequest = TorrentMagnetFilePreviewRequest(
+                            allowsPreMetadataDHT: allowsPreMetadataDHT
+                        )
+                    }
+                    .disabled(magnetSourceSecuritySummary == nil || !store.engineAvailable)
+                }
+                if previewError != nil {
+                    Button("Continue Without Choosing Files") {
+                        magnetPreviewRequest = nil
+                        previewError = nil
+                    }
+                }
+            }
         }
     }
 
@@ -672,14 +724,14 @@ struct AddTorrentConfirmationView: View {
 
     private var isAddDisabled: Bool {
         if selectedDownloadFolder == nil
-            || destinationInspectionRequest != nil {
+            || destinationInspectionRequest != nil
+            || isLoadingPreview {
             return true
         }
-        guard draft.fileURL != nil else {
+        guard showsFileSelection else {
             return magnetSourceSecuritySummary == nil
         }
-        return isLoadingPreview
-            || preview == nil
+        return preview == nil
             || previewError != nil
             || fileSelectionPresentation?.generation
                 != fileSelectionGeneration
@@ -695,12 +747,16 @@ struct AddTorrentConfirmationView: View {
     }
 
     private var filePrioritiesForAdd: [Int32: TorrentFilePriority]? {
-        guard draft.fileURL != nil,
+        guard preview != nil,
               fileSelectionPresentation?.generation
                 == fileSelectionGeneration else {
             return nil
         }
         return fileSelectionPresentation?.filePriorities
+    }
+
+    private var showsFileSelection: Bool {
+        draft.fileURL != nil || magnetPreviewRequest != nil || isLoadingPreview
     }
 
     private func fileSummary(for preview: TorrentFilePreview) -> String {
@@ -804,6 +860,28 @@ struct AddTorrentConfirmationView: View {
         fileSelectionGeneration += 1
     }
 
+    private func loadMagnetPreview(
+        _ magnet: String,
+        request: TorrentMagnetFilePreviewRequest
+    ) async {
+        defer { isLoadingPreview = false }
+        do {
+            let loaded = try await store.previewMagnet(
+                magnet,
+                allowPreMetadataDHT: request.allowsPreMetadataDHT
+            )
+            try Task.checkCancellation()
+            guard magnetPreviewRequest?.id == request.id else { return }
+            preview = loaded
+            advanceFileSelectionGeneration()
+        } catch is CancellationError {
+            return
+        } catch {
+            guard !Task.isCancelled, magnetPreviewRequest?.id == request.id else { return }
+            previewError = error.localizedDescription
+        }
+    }
+
     private func handleDownloadFolderImport(_ result: Result<[URL], any Error>) {
         guard case .success(let urls) = result, let url = urls.first else {
             return
@@ -817,8 +895,7 @@ struct AddTorrentConfirmationView: View {
               destinationInspectionRequest == nil else {
             return
         }
-        guard let torrentData = preview?.torrentData,
-              draft.fileURL != nil else {
+        guard let torrentData = preview?.torrentData else {
             submitAdd(
                 startsPaused: startsPaused,
                 destinationChoice: .preferredName
@@ -865,7 +942,7 @@ struct AddTorrentConfirmationView: View {
     }
 
     private func needsPreMetadataDHTConsent(for summary: TorrentSourceSecuritySummary) -> Bool {
-        guard draft.magnetURI != nil else {
+        guard draft.magnetURI != nil, preview == nil else {
             return false
         }
         return !summary.hasUsableTracker(for: store.settings.httpsTrackerPolicy)

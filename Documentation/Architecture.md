@@ -348,6 +348,25 @@ may remove identity-pinned imported manifest objects.
 
 ## Magnet promotion
 
+The Add dialog can fetch a magnet's file list before confirmation. This uses
+one temporary metadata-only torrent in the existing session, under the normal
+network binding and explicit pre-metadata DHT policy. The request has no
+destination claim or promotion journal entry, so it cannot acquire payload
+storage authority or be promoted automatically. It is excluded from library
+presentation and bulk commands; existing snapshot refreshes signal metadata
+availability without a second polling loop.
+
+Swift verifies the exact info bytes against the magnet's advertised hashes
+before presenting files. The temporary torrent is removed before publishing
+the preview, and the dialog retains the validated metadata and editable file
+priorities, including select-only hints. Confirmation uses the same destination
+inspection and activation path as a torrent file. Cancellation waits for an
+in-flight add to return its owned ID before removing it; rejected duplicate
+adds never grant removal ownership. An uncertain add or cleanup terminates the
+controller to contain networking. After a crash, existing startup recovery
+removes these unclaimed staging entries before enabling networking. No new
+persisted state or migration is needed.
+
 Metadata-less magnets initially use only helper-private staging. Promotion is a
 durable GUI transaction:
 

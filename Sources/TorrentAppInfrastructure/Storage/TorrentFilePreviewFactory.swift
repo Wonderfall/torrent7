@@ -1,21 +1,37 @@
 package import Foundation
 package import TorrentEngineModel
-import TorrentMetainfo
+package import TorrentMetainfo
 import TorrentStorageAuthority
 
 package extension ParsedTorrentManifest {
-    func filePreview(torrentData: Data) -> TorrentFilePreview {
+    func filePreview(
+        torrentData: Data,
+        fileSelections: [ParsedMagnet.FileSelection]? = nil
+    ) -> TorrentFilePreview {
         let directoryPrefix = manifest.contentKind == .directory
             ? [manifest.name]
             : []
+        var selectionIndex = 0
         let files = manifest.files.map { file in
-            TorrentFileItem(
+            let priority: TorrentFilePriority
+            if let fileSelections {
+                while selectionIndex < fileSelections.count,
+                      fileSelections[selectionIndex].lastIndex < file.index {
+                    selectionIndex += 1
+                }
+                priority = selectionIndex < fileSelections.count
+                    && fileSelections[selectionIndex].firstIndex <= file.index
+                    ? .normal : .skip
+            } else {
+                priority = .normal
+            }
+            return TorrentFileItem(
                 path: (directoryPrefix + file.pathComponents).joined(separator: "/"),
                 size: file.expectedSize,
                 downloaded: 0,
                 progress: file.expectedSize == 0 ? 1 : 0,
                 index: file.index,
-                priority: .normal,
+                priority: priority,
                 isPadFile: file.isPadding
             )
         }

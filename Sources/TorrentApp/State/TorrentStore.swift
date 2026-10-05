@@ -69,6 +69,13 @@ private struct TorrentStorePendingUserOperation {
     let perform: TorrentStoreUserOperation
 }
 
+private struct TorrentStoreMagnetPreview {
+    let operation: TorrentMagnetPreviewOperation
+    let lifecycleGeneration: UInt64
+    var torrentID: String?
+    var task: Task<TorrentFilePreview, any Error>?
+}
+
 private struct TorrentStorePendingSettingsApplication {
     var settings: TorrentSettings
     var networkBinding: AppliedNetworkBinding
@@ -282,6 +289,8 @@ final class TorrentStore {
     @ObservationIgnored
     private var magnetPromotionInFlightID: UUID?
     @ObservationIgnored
+    private var magnetPreview: TorrentStoreMagnetPreview?
+    @ObservationIgnored
     private var hasStarted = false
     @ObservationIgnored
     private var operationDrainTask: Task<Void, Never>?
@@ -479,6 +488,7 @@ final class TorrentStore {
     }
 
     isolated deinit {
+        magnetPreview?.operation.cancel()
         engineStartupTask?.cancel()
         refreshTask?.cancel()
         wakeRefreshTask?.cancel()
@@ -928,6 +938,111 @@ final class TorrentStore {
         return parsed.filePreview(torrentData: torrentData)
     }
 
+    func previewMagnet(
+        _ magnet: String,
+        allowPreMetadataDHT: Bool
+    ) async throws -> TorrentFilePreview {
+        let summary = try await TorrentSourceSecurityInspector.prepareSummary(
+            magnetURI: magnet
+        )
+        try Task.checkCancellation()
+        guard summary.hasUsableTracker(for: settings.httpsTrackerPolicy)
+                || (settings.enableDHTNetwork && allowPreMetadataDHT) else {
+            throw TorrentEngineError.bridgeError(
+                "This magnet needs an allowed tracker or DHT to fetch its files."
+            )
+        }
+        guard magnetPreview == nil else {
+            throw TorrentEngineError.bridgeError(
+                "Another magnet is already fetching its files."
+            )
+        }
+        guard storageClaimJournal != nil else {
+            throw storageClaimJournalInitializationError ?? .unavailable
+        }
+
+        let operation = TorrentMagnetPreviewOperation()
+        magnetPreview = TorrentStoreMagnetPreview(
+            operation: operation,
+            lifecycleGeneration: engineLifecycleGeneration
+        )
+        // Cancellation signals the operation instead of cancelling this task:
+        // an in-flight add must return its owned ID before we can remove it.
+        // The dialog awaits this task through metadata retrieval and cleanup.
+        let task = Task {
+            defer {
+                magnetPreview = nil
+                lastSnapshotRevision = nil
+                advanceEngineMutationGeneration()
+            }
+            let (previewEngine, torrentID) = try await performQueuedStoreOperation { store in
+                try operation.checkCancellation()
+                let previewEngine = store.engine
+                let torrentID: String
+                do {
+                    torrentID = try await previewEngine.addMagnet(
+                        magnet,
+                        startsPaused: false,
+                        queuePriority: .normal,
+                        enablePeerExchange: false,
+                        httpsTrackerPolicy: .inherit,
+                        httpsWebSeedPolicy: .inherit,
+                        allowPreMetadataDHT: allowPreMetadataDHT
+                    )
+                } catch {
+                    if Self.storageActivationOutcomeIsUnknown(error) {
+                        // The add may have committed without returning an ID.
+                        // Recovery retires this unclaimed staging entry.
+                        await previewEngine.terminateConnection(
+                            recoveryDisposition: previewEngine.recoveryDisposition == .terminal
+                                ? .terminal : .replaceController
+                        )
+                    }
+                    throw error
+                }
+                store.magnetPreview?.torrentID = torrentID
+                store.advanceEngineMutationGeneration()
+                return (previewEngine, torrentID)
+            }
+            let result: Result<TorrentFilePreview, any Error>
+            do {
+                await refreshFromEngine()
+                result = .success(try await operation.load(
+                    magnet: magnet,
+                    torrentID: torrentID,
+                    engine: previewEngine
+                ))
+            } catch {
+                result = .failure(error)
+            }
+            do {
+                switch try await previewEngine.remove(id: torrentID) {
+                case .removed:
+                    break
+                case .removedWithWarning(let warning):
+                    throw TorrentEngineError.bridgeError(warning)
+                }
+            } catch {
+                // Never leave a cancelled preview networking after an
+                // uncertain removal. Startup recovery removes unclaimed
+                // staging entries before enabling the replacement session.
+                await previewEngine.terminateConnection(
+                    recoveryDisposition: previewEngine.recoveryDisposition == .terminal
+                        ? .terminal : .replaceController
+                )
+                throw error
+            }
+            try operation.checkCancellation()
+            return try result.get()
+        }
+        magnetPreview?.task = task
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            operation.cancel()
+        }
+    }
+
     func inspectTorrentDestination(
         torrentData: Data,
         downloadFolder: URL,
@@ -1254,13 +1369,12 @@ final class TorrentStore {
             return false
         }
 
-        return scheduleTorrentFileAdd(
-            url,
+        return scheduleTorrentMetadataAdd(
             torrentData: torrentData,
             savePath: savePath,
             prepareFolder: nil,
             filePriorities: filePriorities,
-            moveOriginalToTrash: moveOriginalToTrash,
+            originalFileToTrash: moveOriginalToTrash ? url : nil,
             startsPaused: startsPaused,
             queuePriority: queuePriority,
             labelIDs: labelIDs,
@@ -1271,12 +1385,11 @@ final class TorrentStore {
     }
 
     @discardableResult
-    func addTorrentFile(
-        _ url: URL,
-        torrentData: Data,
+    func addTorrentMetadata(
+        _ torrentData: Data,
         downloadFolder: URL,
         filePriorities: [Int32: TorrentFilePriority]? = nil,
-        moveOriginalToTrash: Bool = false,
+        originalFileToTrash: URL? = nil,
         setsDownloadFolderAsDefault: Bool,
         startsPaused: Bool = false,
         queuePriority: TorrentQueuePriority = .normal,
@@ -1285,8 +1398,7 @@ final class TorrentStore {
         httpsWebSeedPolicy: TorrentHTTPSWebSeedPolicyOverride = .inherit,
         destinationChoice: TorrentStorageDestinationChoice = .preferredName
     ) -> Bool {
-        scheduleTorrentFileAdd(
-            url,
+        scheduleTorrentMetadataAdd(
             torrentData: torrentData,
             savePath: nil,
             prepareFolder: { store in
@@ -1297,7 +1409,7 @@ final class TorrentStore {
                 )
             },
             filePriorities: filePriorities,
-            moveOriginalToTrash: moveOriginalToTrash,
+            originalFileToTrash: originalFileToTrash,
             startsPaused: startsPaused,
             queuePriority: queuePriority,
             labelIDs: labelIDs,
@@ -1307,13 +1419,12 @@ final class TorrentStore {
         )
     }
 
-    private func scheduleTorrentFileAdd(
-        _ url: URL,
+    private func scheduleTorrentMetadataAdd(
         torrentData: Data,
         savePath: String?,
         prepareFolder: (@MainActor @Sendable (TorrentStore) async throws -> PreparedDownloadFolder)?,
         filePriorities: [Int32: TorrentFilePriority]?,
-        moveOriginalToTrash: Bool,
+        originalFileToTrash: URL?,
         startsPaused: Bool,
         queuePriority: TorrentQueuePriority,
         labelIDs: Set<TorrentLabel.ID>,
@@ -1360,8 +1471,8 @@ final class TorrentStore {
                     torrentID: addedTorrentID,
                     requiresActiveTorrent: false
                 ))
-                if moveOriginalToTrash {
-                    try await Self.moveToTrash(url)
+                if let originalFileToTrash {
+                    try await Self.moveToTrash(originalFileToTrash)
                 }
                 await store.refreshFromEngine()
                 store.clearLastError(ifUnchangedSince: errorGeneration)
@@ -2440,7 +2551,23 @@ final class TorrentStore {
             await scheduleReadyMagnetPromotion(in: torrents)
             return
         }
-        let sortedSnapshots = snapshotBatch.torrents
+        // A preview has no storage claim or promotion journal entry. Keep it
+        // out of the library, bulk commands, and completion notifications.
+        // During add, defer publication until its owned engine ID is known.
+        let previewID = magnetPreview?.lifecycleGeneration == lifecycleGeneration
+            ? magnetPreview?.torrentID : nil
+        if magnetPreview?.lifecycleGeneration == lifecycleGeneration, previewID == nil {
+            return
+        }
+        if let previewID,
+           let item = snapshotBatch.torrents.first(where: { $0.id == previewID }) {
+            magnetPreview?.operation.observe(item)
+        }
+        let sortedSnapshots = if let previewID {
+            snapshotBatch.torrents.filter { $0.id != previewID }
+        } else {
+            snapshotBatch.torrents
+        }
         let previousTorrents = torrents
         let presentationRevision = torrentPresentationRevision
         let presentation: TorrentListPresentation
@@ -4650,6 +4777,7 @@ final class TorrentStore {
     }
 
     private func advanceEngineLifecycleGeneration() {
+        magnetPreview?.operation.fail(TorrentEngineClientError.engineRestarted)
         precondition(engineLifecycleGeneration != UInt64.max)
         engineLifecycleGeneration += 1
         advanceEngineMutationGeneration()
@@ -4865,6 +4993,7 @@ final class TorrentStore {
               !unavailableEngine.isAvailable else {
             return
         }
+        magnetPreview?.operation.fail(TorrentEngineClientError.engineRestarted)
         switch unavailableEngine.recoveryDisposition {
         case .replaceController:
             requestEngineReplacement()

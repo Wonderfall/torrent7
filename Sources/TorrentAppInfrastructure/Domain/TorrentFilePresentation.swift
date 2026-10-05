@@ -81,13 +81,13 @@ package struct TorrentAddFileSelectionPresentation: Sendable {
             if offset.isMultiple(of: 128) { try Task.checkCancellation() }
             guard !file.isPadFile else { continue }
             if let change, changedIndices.contains(file.index) {
-                if change.priority == (bulkPriority ?? .normal) {
+                if change.priority == (bulkPriority ?? file.priority) {
                     overrides.removeValue(forKey: file.index)
                 } else {
                     overrides[file.index] = change.priority
                 }
             }
-            let priority = overrides[file.index] ?? bulkPriority ?? .normal
+            let priority = overrides[file.index] ?? bulkPriority ?? file.priority
             presentedFiles.append(file.withPriority(priority))
             if priority != .normal { priorities[file.index] = priority }
             guard priority != .skip else { continue }

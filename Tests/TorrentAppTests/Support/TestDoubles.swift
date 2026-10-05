@@ -366,6 +366,7 @@ actor FakeTorrentEngine: TorrentEngineServicing {
     var fileBatchValue = TorrentFileBatch(revision: 0, files: [])
     var pieceMapBatchValue = TorrentPieceMapBatch(revision: 0, pieceMap: .empty)
     var torrentMetadataByID = [String: Data]()
+    private var metadataReadHandler: (@Sendable () async -> Void)?
     private var trackerBatchSuspensionCount = 0
     private var trackerBatchContinuations =
         [CheckedContinuation<Void, Never>]()
@@ -904,8 +905,14 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         return nextAddedTorrentFileID
     }
 
-    func torrentMetadata(id: String) -> Data? {
-        torrentMetadataByID[id]
+    func setMetadataReadHandler(_ handler: (@Sendable () async -> Void)?) {
+        metadataReadHandler = handler
+    }
+
+    func torrentMetadata(id: String) async -> Data? {
+        let metadata = torrentMetadataByID[id]
+        await metadataReadHandler?()
+        return metadata
     }
 
     func pause(id: String) async throws {
