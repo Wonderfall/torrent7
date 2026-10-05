@@ -8,10 +8,10 @@ struct TorrentFileOutline: View {
     @Binding var sortOrder: [TorrentFileTree.Sort]
     var showsProgress = false
     var isEditing = false
-    let setPriority: (TorrentFileTree.Node, TorrentFilePriority) -> Void
+    let setPriority: (TorrentFilePriorityChange) -> Void
     var revealInFinder: ((TorrentFileTree.Node.ID) -> Void)?
 
-    @State private var selection: TorrentFileTree.Node.ID?
+    @State private var selection = Set<TorrentFileTree.Node.ID>()
     @State private var expansion = [TorrentFileTree.Node.ID: Bool]()
     @State private var searchExpansion = [TorrentFileTree.Node.ID: Bool]()
     @State private var images = TorrentFileIconImages()
@@ -53,7 +53,7 @@ struct TorrentFileOutline: View {
 
             TableColumn("Priority", sortUsing: TorrentFileTree.Sort(.priority)) { node in
                 TorrentFilePriorityPicker(priority: node.priority) { priority in
-                    setPriority(node, priority)
+                    applyPriority(priority, to: [node.id])
                 }
                 .disabled(isEditing)
                 .accessibilityLabel("Priority for \(node.path)")
@@ -88,11 +88,20 @@ struct TorrentFileOutline: View {
         }
         .onChange(of: tree.query) { _, _ in
             searchExpansion.removeAll()
-            selection = nil
+            selection.removeAll()
         }
         .contextMenu(forSelectionType: TorrentFileTree.Node.ID.self) { ids in
             if ids.count == 1, let id = ids.first, let revealInFinder {
                 Button("Reveal in Finder") { revealInFinder(id) }
+                Divider()
+            }
+            if !ids.isEmpty {
+                Menu("Priority") {
+                    ForEach(TorrentFilePriority.allCases) { priority in
+                        Button(priority.title) { applyPriority(priority, to: ids) }
+                    }
+                }
+                .disabled(isEditing)
             }
         } primaryAction: { ids in
             guard ids.count == 1, let id = ids.first else { return }
@@ -108,6 +117,11 @@ struct TorrentFileOutline: View {
     private func iconSource(for node: TorrentFileTree.Node) -> TorrentFileIconSource {
         if node.children != nil { return .folder }
         return node.filenameExtension.isEmpty ? .genericFile : .fileExtension(node.filenameExtension)
+    }
+
+    private func applyPriority(_ priority: TorrentFilePriority, to ids: Set<TorrentFileTree.Node.ID>) {
+        guard !isEditing, let change = tree.priorityChange(for: ids, priority: priority) else { return }
+        setPriority(change)
     }
 }
 

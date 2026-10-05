@@ -792,7 +792,7 @@ private struct TorrentInfoView: View {
             TorrentFileOutline(
                 tree: filePresentation.tree, sortOrder: $fileSortOrder, showsProgress: true,
                 isEditing: filePriorityRequest != nil || filePresentation.tree.query != TorrentSearchQuery(fileSearchText),
-                setPriority: { node, priority in setFilePriority(priority, for: node) },
+                setPriority: setFilePriority,
                 revealInFinder: { itemID in
                     store.revealTorrentItemInFinder(torrent: torrent, itemID: itemID)
                 }
@@ -1071,12 +1071,11 @@ private struct TorrentInfoView: View {
         }
     }
 
-    private func setFilePriority(_ priority: TorrentFilePriority, for node: TorrentFileTree.Node) {
-        guard filePriorityRequest == nil, node.priority != priority else { return }
+    private func setFilePriority(_ change: TorrentFilePriorityChange) {
+        guard filePriorityRequest == nil,
+              filePresentation.tree.query == TorrentSearchQuery(fileSearchText) else { return }
         fileError = nil
-        filePriorityRequest = TorrentFilePriorityRequest(change: TorrentFilePriorityChange(
-            fileIndices: node.fileIndices, priority: priority
-        ))
+        filePriorityRequest = TorrentFilePriorityRequest(change: change)
     }
 
     private func applyFilePriorityRequest(_ request: TorrentFilePriorityRequest) async {

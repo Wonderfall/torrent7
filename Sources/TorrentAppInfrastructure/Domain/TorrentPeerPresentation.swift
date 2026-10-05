@@ -62,6 +62,21 @@ package struct TorrentPeerRow: Identifiable, Sendable {
         return peer.flags.contains(.choked) ? "Waiting for an upload slot" : "Waiting for requests"
     }
 
+    /// Copy in display order, excluding departed peers and duplicate values
+    /// such as one IP selected through multiple connections.
+    package static func copyText(
+        from rows: [Self], selection: Set<TorrentPeer.ID>, field: KeyPath<Self, String>
+    ) -> String? {
+        guard !selection.isEmpty else { return nil }
+        var seen = Set<String>()
+        let values = rows.compactMap { row -> String? in
+            guard selection.contains(row.id) else { return nil }
+            let value = row[keyPath: field]
+            return seen.insert(value).inserted ? value : nil
+        }
+        return values.isEmpty ? nil : values.joined(separator: "\n")
+    }
+
     @concurrent
     package static func prepare(
         snapshot: TorrentPeerSnapshot, countries: TorrentCountryDatabase?, sortOrder: [Sort], query: String = ""

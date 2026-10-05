@@ -605,11 +605,9 @@ struct AddTorrentConfirmationView: View {
                             tree: presentation.tree,
                             sortOrder: $fileSortOrder,
                             isEditing: presentation.generation != fileSelectionGeneration
-                        ) { node, priority in
+                        ) { change in
                             guard presentation.generation == fileSelectionGeneration else { return }
-                            fileSelectionChange = TorrentFilePriorityChange(
-                                fileIndices: node.fileIndices, priority: priority
-                            )
+                            fileSelectionChange = change
                             advanceFileSelectionGeneration()
                         }
                     } else {

@@ -209,6 +209,45 @@ struct TorrentFileTreeTests {
         #expect(presentation.tree.roots.first?.priority == .high)
     }
 
+    @Test("Batch selection handles overlapping folders and files once, including before adding")
+    func batchSelection() async throws {
+        let files = [
+            file(0, "Root/A/one"), file(1, "Root/A/Nested/two"),
+            file(2, "Root/B/three"), file(3, "Root/C/four"),
+        ]
+        let tree = try await TorrentFileTree.prepare(files: files)
+        let change = try #require(tree.priorityChange(for: [
+            .folder(containingFileIndex: 0, depth: 1),
+            .folder(containingFileIndex: 1, depth: 2), .file(1), .file(2), .file(999),
+        ], priority: .skip))
+        #expect(Set(change.fileIndices) == [0, 1, 2])
+        #expect(change.fileIndices.count == 3)
+        #expect(try await change.pendingPriorities(in: files) == [0: .skip, 1: .skip, 2: .skip])
+        let add = try await TorrentAddFileSelectionPresentation.prepare(
+            generation: 1, files: files, bulkPriority: nil, overrides: [:], change: change
+        )
+        #expect(add.filePriorities == [0: .skip, 1: .skip, 2: .skip])
+        #expect(add.selectedFileCount == 1)
+    }
+
+    @Test("Batch priority changes stay within search results and ignore empty or unchanged selections")
+    func filteredBatchSelection() async throws {
+        let tree = try await TorrentFileTree.prepare(files: [
+            file(0, "Root/cover.jpg"), file(1, "Root/A/one.flac", priority: .high),
+            file(2, "Root/B/two.flac"),
+        ], query: ".flac")
+        let selection: Set<TorrentFileTree.Node.ID> = [.folder(containingFileIndex: 0, depth: 0), .file(1)]
+        let change = try #require(tree.priorityChange(for: selection, priority: .skip))
+        #expect(change.fileIndices == [1, 2])
+        #expect(tree.priorityChange(for: [], priority: .skip) == nil)
+        #expect(tree.priorityChange(for: [.file(0), .file(999)], priority: .skip) == nil)
+        #expect(tree.priorityChange(for: [.file(1)], priority: .high) == nil)
+        // A selected row already at the requested priority must not prevent
+        // other selected rows from receiving the batch change.
+        let mixed = try #require(tree.priorityChange(for: [.file(1), .file(2)], priority: .high))
+        #expect(mixed.fileIndices == [2])
+    }
+
     private func file(
         _ index: Int32, _ path: String, size: Int64 = 10,
         downloaded: Int64 = 0, priority: TorrentFilePriority = .normal, pad: Bool = false

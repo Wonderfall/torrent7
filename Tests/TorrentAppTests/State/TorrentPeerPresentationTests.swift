@@ -49,4 +49,25 @@ struct TorrentPeerPresentationTests {
         }
         await #expect(throws: CancellationError.self) { try await task.value }
     }
+
+    @Test("Multiple peer copies keep display order, distinct IPv6 endpoints and exclude departed peers")
+    func copiedSelection() throws {
+        let first = TorrentPeerRow(peer: peer(Data([8, 8, 8, 8])), countries: nil)
+        let second = TorrentPeerRow(peer: peer(try #require(IPv6Address("2001:4860::8888")).rawValue), countries: nil)
+        let otherConnection = TorrentPeerRow(peer: TorrentPeer(
+            endpoint: .init(address: first.peer.endpoint.address, port: 6882), transport: .tcp,
+            client: "Example", progressPartsPerMillion: 0, downloadRate: 0, uploadRate: 0,
+            downloaded: 0, uploaded: 0, flags: [], sources: []
+        ), countries: nil)
+        let unselected = TorrentPeerRow(peer: peer(Data([1, 1, 1, 1])), countries: nil)
+        let departed = peer(Data([9, 9, 9, 9])).id
+        let rows = [second, unselected, otherConnection, first]
+        let selection: Set<TorrentPeer.ID> = [first.id, second.id, otherConnection.id, departed]
+        #expect(TorrentPeerRow.copyText(from: rows, selection: selection, field: \.address)
+            == "2001:4860::8888\n8.8.8.8")
+        #expect(TorrentPeerRow.copyText(from: rows, selection: selection, field: \.endpoint)
+            == "[2001:4860::8888]:6881\n8.8.8.8:6882\n8.8.8.8:6881")
+        #expect(TorrentPeerRow.copyText(from: rows, selection: [], field: \.address) == nil)
+        #expect(TorrentPeerRow.copyText(from: rows, selection: [departed], field: \.endpoint) == nil)
+    }
 }

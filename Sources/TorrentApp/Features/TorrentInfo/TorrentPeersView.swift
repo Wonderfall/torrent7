@@ -75,7 +75,7 @@ struct TorrentPeersContent: View {
     @Binding var searchText: String
     var error: String?
     var countryDataUnavailable = false
-    @State private var selection: TorrentPeer.ID?
+    @State private var selection = Set<TorrentPeer.ID>()
     @FocusState private var isFocused: Bool
 
     var body: some View {
@@ -115,7 +115,8 @@ struct TorrentPeersContent: View {
             }
         }
         .formStyle(.grouped)
-        .onChange(of: searchText) { _, _ in selection = nil }
+        .onChange(of: searchText) { _, _ in selection.removeAll() }
+        .onChange(of: rows.map(\.id)) { _, ids in selection.formIntersection(ids) }
     }
 
     private var table: some View {
@@ -170,12 +171,16 @@ struct TorrentPeersContent: View {
         .fixedSize(horizontal: false, vertical: true)
         .accessibilityLabel("Connected peers")
         .contextMenu(forSelectionType: TorrentPeer.ID.self) { ids in
-            if let id = ids.first, let row = rows.first(where: { $0.id == id }) {
-                Button("Copy IP Address") { copy(row.address) }
-                Button("Copy Endpoint") { copy(row.endpoint) }
+            if !ids.isEmpty {
+                Button(ids.count == 1 ? "Copy IP Address" : "Copy IP Addresses") {
+                    copy(ids, field: \.address)
+                }
+                Button(ids.count == 1 ? "Copy Endpoint" : "Copy Endpoints") {
+                    copy(ids, field: \.endpoint)
+                }
             }
         }
-        .copyable(rows.first(where: { $0.id == selection }).map { [$0.address] } ?? [])
+        .copyable(TorrentPeerRow.copyText(from: rows, selection: selection, field: \.address).map { [$0] } ?? [])
     }
 
     private func rate(_ value: Int32) -> some View {
@@ -196,7 +201,8 @@ struct TorrentPeersContent: View {
         return "\(count) · \(seeds.formatted()) \(seeds == 1 ? "seed" : "seeds")"
     }
 
-    private func copy(_ value: String) {
+    private func copy(_ ids: Set<TorrentPeer.ID>, field: KeyPath<TorrentPeerRow, String>) {
+        guard let value = TorrentPeerRow.copyText(from: rows, selection: ids, field: field) else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(value, forType: .string)
     }

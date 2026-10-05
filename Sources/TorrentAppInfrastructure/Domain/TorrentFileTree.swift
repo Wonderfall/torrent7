@@ -104,6 +104,27 @@ package struct TorrentFileTree: Sendable {
         totalFileCount: 0, query: TorrentSearchQuery(""), filenameExtensions: []
     )
 
+    /// Resolve commands against the displayed tree, so filtered-out files and
+    /// stale selections cannot be included. A selected folder covers its children.
+    package func priorityChange(
+        for selection: Set<Node.ID>, priority: TorrentFilePriority
+    ) -> TorrentFilePriorityChange? {
+        guard !selection.isEmpty else { return nil }
+        var indices = [Int32]()
+        func collect(_ nodes: [Node]) {
+            for node in nodes {
+                if selection.contains(node.id) {
+                    if node.priority != priority { indices.append(contentsOf: node.fileIndices) }
+                } else if let children = node.children {
+                    collect(children)
+                }
+            }
+        }
+        collect(roots)
+        guard !indices.isEmpty else { return nil }
+        return TorrentFilePriorityChange(fileIndices: indices, priority: priority)
+    }
+
     private struct Entry {
         let file: TorrentFileItem
         let components: [String]
