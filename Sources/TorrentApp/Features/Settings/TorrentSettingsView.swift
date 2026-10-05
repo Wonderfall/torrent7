@@ -553,7 +553,7 @@ struct TorrentSettingsView: View {
 
                         Text("An eligible torrent is public, has trusted metadata, and is not blocked from DHT by its source or per-torrent setting.")
 
-                        Text("This default does not replace explicit per-torrent choices. A magnet can use DHT before its metadata is known only with explicit consent.")
+                        Text("This default does not replace explicit per-torrent choices. For magnets without a usable tracker, it also selects DHT in the Add dialog. You can turn it off there before fetching metadata.")
                             .foregroundStyle(.secondary)
                     }
                     .padding(16)

@@ -356,6 +356,12 @@ storage authority or be promoted automatically. It is excluded from library
 presentation and bulk commands; existing snapshot refreshes signal metadata
 availability without a second polling loop.
 
+The dialog initially selects pre-metadata DHT only when no tracker is usable
+under the HTTPS policy and both the DHT network and default DHT preference are
+enabled. The choice remains visible and editable before Choose Files or Add
+starts discovery; retries preserve the user's choice. Magnets with a usable
+tracker keep pre-metadata DHT opt-in.
+
 Swift verifies the exact info bytes against the magnet's advertised hashes
 before presenting files. The temporary torrent is removed before publishing
 the preview, and the dialog retains the validated metadata and editable file

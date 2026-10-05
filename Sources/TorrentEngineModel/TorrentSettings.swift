@@ -184,6 +184,11 @@ package struct TorrentSettings: Codable, Equatable, Sendable {
         enableDHTNetwork && useDHTByDefault
     }
 
+    /// The Add dialog's initial choice, which remains editable before discovery starts.
+    package func shouldSelectPreMetadataDHT(for sources: TorrentSourceSecuritySummary) -> Bool {
+        effectiveUseDHTByDefault && !sources.hasUsableTracker(for: httpsTrackerPolicy)
+    }
+
     package var effectiveUsePeerExchangeByDefault: Bool {
         enablePeerExchangePlugin && usePeerExchangeByDefault
     }

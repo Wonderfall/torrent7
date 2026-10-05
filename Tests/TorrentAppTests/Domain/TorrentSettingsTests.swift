@@ -404,6 +404,41 @@ struct TorrentSettingsTests {
         #expect(settings.effectiveUseLocalServiceDiscoveryByDefault == false)
     }
 
+    @Test("Metadata DHT defaults depend on tracker usability", arguments: TorrentDHTDiscoveryPolicy.allCases)
+    func metadataDHTDefaultsDependOnTrackerUsability(_ discoveryPolicy: TorrentDHTDiscoveryPolicy) {
+        var settings = TorrentSettings()
+        settings.dhtDiscoveryPolicy = discoveryPolicy
+        let httpTracker = TorrentSourceSecuritySummary(
+            trackerCount: 1, httpsTrackerCount: 0, webSeedCount: 0, httpsWebSeedCount: 0
+        )
+        let httpsTracker = TorrentSourceSecuritySummary(
+            trackerCount: 1, httpsTrackerCount: 1, webSeedCount: 0, httpsWebSeedCount: 0
+        )
+
+        for policy in [TorrentHTTPSTrackerPolicy.original, .prefer] {
+            settings.httpsTrackerPolicy = policy
+            #expect(settings.shouldSelectPreMetadataDHT(for: .empty))
+            #expect(!settings.shouldSelectPreMetadataDHT(for: httpTracker))
+            #expect(!settings.shouldSelectPreMetadataDHT(for: httpsTracker))
+        }
+
+        settings.httpsTrackerPolicy = .require
+        #expect(settings.shouldSelectPreMetadataDHT(for: .empty))
+        #expect(settings.shouldSelectPreMetadataDHT(for: httpTracker))
+        #expect(!settings.shouldSelectPreMetadataDHT(for: httpsTracker))
+    }
+
+    @Test("Trackerless metadata defaults respect disabled DHT preferences", arguments: [
+        (false, true), (true, false), (false, false)
+    ])
+    func metadataDHTDefaultsRespectDisabledPreferences(networkEnabled: Bool, useByDefault: Bool) {
+        var settings = TorrentSettings()
+        settings.enableDHTNetwork = networkEnabled
+        settings.useDHTByDefault = useByDefault
+
+        #expect(!settings.shouldSelectPreMetadataDHT(for: .empty))
+    }
+
     @Test("Zero active limits map to libtorrent unlimited values")
     func zeroActiveLimitsMapToLibtorrentUnlimitedValues() {
         var settings = TorrentSettings()

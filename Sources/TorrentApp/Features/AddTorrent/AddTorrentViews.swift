@@ -808,6 +808,7 @@ struct AddTorrentConfirmationView: View {
             guard draft.id == draftID else {
                 return
             }
+            allowsPreMetadataDHT = store.settings.shouldSelectPreMetadataDHT(for: summary)
             magnetSourceSecuritySummary = summary
         } catch {
             return
@@ -967,7 +968,7 @@ struct AddTorrentConfirmationView: View {
         if hasUsableTracker {
             return "If every usable tracker fails, DHT can share this magnet's info hash before its metadata is checked."
         }
-        return "This magnet has no usable tracker. Enabling DHT shares its info hash before its metadata can be checked."
+        return "This magnet has no usable tracker. Using DHT shares its info hash before its metadata can be checked."
     }
 
     private func pluralized(_ singular: String, count: Int) -> String {
