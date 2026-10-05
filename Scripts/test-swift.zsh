@@ -61,6 +61,7 @@ verify_exported_symbols() {
 typeset -r fuzz_support_dir=$(/usr/bin/xcrun swift build "${swift_build_args[@]}" --show-bin-path)
 verify_exported_symbols \
     "$fuzz_support_dir/libTorrentEngineIPCFuzzSupport.dylib" \
+    TorrentCountryDatabaseFuzzOneInput \
     TorrentEngineIPCJSONPreflightFuzzOneInput \
     TorrentStorageBrokerIPCFuzzOneInput
 verify_exported_symbols \

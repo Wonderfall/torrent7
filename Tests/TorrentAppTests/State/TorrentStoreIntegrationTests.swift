@@ -2637,6 +2637,24 @@ struct TorrentStoreIntegrationTests {
         #expect(await harness.engine.pieceMapBatchRequests.map(\.revision) == [nil, 9])
     }
 
+    @Test("Peer snapshots cannot publish after engine replacement or caller cancellation", arguments: [false, true])
+    func stalePeersAreDiscarded(cancelCaller: Bool) async {
+        let replacementEngine = FakeTorrentEngine()
+        let harness = makeStoreHarness(engineStartupFactory: { _ in replacementEngine })
+        let barrier = FilePriorityTestBarrier()
+        await harness.engine.setPeerSnapshotHandler {
+            await barrier.suspend()
+            return .empty
+        }
+        let request = Task { @MainActor in try await harness.store.peers(for: "alpha") }
+        await barrier.waitForEntry()
+        if cancelCaller { request.cancel() }
+        else { harness.store.startProductionEngine(enablePeerExchangePlugin: true) }
+        await barrier.resume()
+        await #expect(throws: CancellationError.self) { try await request.value }
+        await harness.store.saveAll()
+    }
+
     @Test("A detail batch from a superseded engine is discarded")
     func staleDetailBatchIsDiscarded() async {
         let replacementEngine = FakeTorrentEngine()

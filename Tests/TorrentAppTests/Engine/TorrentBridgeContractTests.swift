@@ -263,7 +263,10 @@ private func bridgeString(_ buffer: [CChar]) -> String {
 struct TorrentBridgeContractTests {
     @Test("Pins bridge ABI version, limits, states, and native event kinds")
     func pinsBridgeConstants() {
-        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 65)
+        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 66)
+        #expect(Int(TTORRENT_MAX_PEER_COUNT) == TorrentEngineLimits.maximumPeerCount)
+        #expect(MemoryLayout<TTorrentPeerSnapshot>.size == 320)
+        #expect(MemoryLayout<TTorrentPeerListResult>.size == 12)
         #expect(UInt32(TTORRENT_MAGNET_IMPORT_SCHEMA_VERSION) == 1)
         #expect(UInt32(TTORRENT_METAINFO_CAPSULE_MAGIC) == 0x494d_3754)
         #expect(UInt16(TTORRENT_METAINFO_CAPSULE_SCHEMA_VERSION) == 1)
@@ -784,6 +787,13 @@ struct TorrentBridgeContractTests {
         let peerSourcesResult = TorrentClientCopyPeerSources(nil, 0)
         #expect(peerSourcesResult.status == 0)
         #expect(peerSourcesResult.sources.connected == 0)
+
+        var peers = [TTorrentPeerSnapshot()]
+        var peerSpan = peers.mutableSpan
+        // The safe imported signature accepts the bounded borrow directly.
+        let peerResult = TorrentClientCopyPeers(nil, 0, &peerSpan)
+        #expect(peerResult.status == 0)
+        #expect(peerResult.copied_count == 0)
 
         var pieceMap = TTorrentPieceMapSnapshot(
             total_pieces: 12,

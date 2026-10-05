@@ -676,6 +676,33 @@ bool TTorrentClient::copy_web_seed_activity(
     return true;
 }
 
+TTorrentPeerListResult TTorrentClient::copy_peers(
+    std::uint64_t const native_token, std::span<TTorrentPeerSnapshot> output
+)
+{
+    std::scoped_lock guard(lock);
+    auto const handle = find(native_token);
+    if (!handle) { return {}; }
+    std::vector<lt::peer_info> peers;
+    handle->get_peer_info(peers);
+    std::vector<TTorrentPeerSnapshot> staged;
+    staged.reserve(std::min(output.size(), peers.size()));
+    std::int32_t total = 0;
+    for (auto const &peer : peers) {
+        if (!is_connected_ip_peer(peer)) { continue; }
+        if (total == std::numeric_limits<std::int32_t>::max()) {
+            throw std::length_error("Too many connected peers");
+        }
+        ++total;
+        if (staged.size() < output.size()) {
+            staged.push_back(peer_snapshot(peer));
+        }
+    }
+    // Publish only after all copied records have been validated and staged.
+    std::ranges::copy(staged, output.begin());
+    return {.status = 1, .copied_count = static_cast<std::int32_t>(staged.size()), .total_count = total};
+}
+
 bool TTorrentClient::copy_peer_sources(
     std::uint64_t const native_token,
     TTorrentPeerSourceSnapshot *sources_out

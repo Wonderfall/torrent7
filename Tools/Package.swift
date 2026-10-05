@@ -19,6 +19,7 @@ let package = Package(
     name: "RepositoryTools",
     platforms: [.macOS(.v27)],
     products: [
+        .executable(name: "build-country-database", targets: ["CountryDatabaseBuilder"]),
         .executable(name: "compare-entitlements", targets: ["CompareEntitlements"]),
         .executable(name: "verify-enhanced-security-metadata", targets: ["VerifyEnhancedSecurityMetadata"]),
         .executable(name: "check-dependencies", targets: ["DependencyCheck"]),
@@ -28,6 +29,9 @@ let package = Package(
         .package(url: "https://github.com/swiftlang/swift-subprocess.git", exact: "1.0.0")
     ],
     targets: [
+        .executableTarget(
+            name: "CountryDatabaseBuilder", path: "CountryDatabaseBuilder", swiftSettings: strictSettings
+        ),
         .target(name: "ReleasePolicy", path: "ReleasePolicy", swiftSettings: strictSettings),
         .target(
             name: "ProcessRunner",
@@ -50,6 +54,10 @@ let package = Package(
         .executableTarget(
             name: "WriteNativeSBOM", dependencies: ["ReleasePolicy"],
             path: "WriteNativeSBOM", swiftSettings: strictSettings
+        ),
+        .testTarget(
+            name: "CountryDatabaseBuilderTests", dependencies: ["CountryDatabaseBuilder"],
+            path: "Tests/CountryDatabaseBuilderTests", swiftSettings: strictSettings
         ),
         .testTarget(
             name: "ReleasePolicyTests", dependencies: ["ReleasePolicy"],

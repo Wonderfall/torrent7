@@ -8,6 +8,21 @@ third-party software:
 - Boost 1.92.0
 - BoringSSL (commit 62fb8ab5bd611e4a9fbc54151adb951af1d45c72)
 
+The application also includes country-only IP geolocation data:
+
+DB-IP Country Lite, October 2026
+--------------------------------
+IP Geolocation by DB-IP: https://db-ip.com/
+Source: https://db-ip.com/db/download/ip-to-country-lite
+License: Creative Commons Attribution 4.0 International (CC BY 4.0)
+https://creativecommons.org/licenses/by/4.0/
+
+Torrent 7 converts the CSV into a compact binary country index, merges adjacent
+ranges with matching country codes, and fills uncovered ranges as unknown.
+This attribution and the linked license apply to the country data, independently
+of the application's source-code license. Country estimates are provided without
+warranty; DB-IP does not endorse Torrent 7.
+
 The corresponding license notices follow.
 
 libtorrent-rasterbar 2.1.2

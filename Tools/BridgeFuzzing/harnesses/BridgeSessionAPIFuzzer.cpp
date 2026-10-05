@@ -32,7 +32,7 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
     for (std::uint8_t operation = 0; operation < operation_count; ++operation) {
         bridge_fuzz::ErrorBuffer error;
 
-        switch (reader.read_u8() % 18U) {
+        switch (reader.read_u8() % 19U) {
         case 0: {
             bridge_fuzz::MagnetImportInput const magnet =
                 bridge_fuzz::magnet_import_from_reader(reader);
@@ -324,6 +324,15 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
                 reader.read_bool() ? 0 : static_cast<int32_t>(events.size()),
                 reader.read_bool() ? nullptr : &required_count,
                 reader.read_bool() ? nullptr : &available
+            ));
+            break;
+        }
+        case 18: {
+            std::array<TTorrentPeerSnapshot, 8> peers{};
+            auto const capacity = reader.read_bool() ? -1 : static_cast<int32_t>(peers.size());
+            static_cast<void>(TorrentClientCopyPeers(
+                harness.client(), selected_token(reader, harness.client()),
+                reader.read_bool() ? nullptr : peers.data(), capacity
             ));
             break;
         }

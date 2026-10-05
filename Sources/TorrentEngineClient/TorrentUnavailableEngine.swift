@@ -156,6 +156,9 @@ package actor TorrentUnavailableEngine: TorrentEngineServicing {
     package func trackerBatch(id: String, since revision: UInt64?) -> TorrentTrackerBatch? { nil }
     package func webSeedBatch(id: String, since revision: UInt64?) -> TorrentWebSeedBatch? { nil }
     package func webSeedActivity(id: String) -> TorrentWebSeedActivity? { nil }
+    package func peers(id: String) throws -> TorrentPeerSnapshot {
+        throw TorrentEngineError.bridgeError("Peer information is unavailable.")
+    }
     package func peerSources(id: String) -> TorrentPeerSources? { nil }
     package func fileBatch(id: String, since revision: UInt64?) -> TorrentFileBatch? { nil }
     package func pieceMapBatch(id: String, since revision: UInt64?) -> TorrentPieceMapBatch? { nil }

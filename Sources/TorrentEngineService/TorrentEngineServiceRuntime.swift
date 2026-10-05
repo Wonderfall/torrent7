@@ -683,6 +683,9 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
                 requireEngine().webSeedActivity(id: value.id),
                 for: operation
             )
+        case .peers:
+            let value = try decodeTorrentIDRequest(request)
+            return try await encode(requireEngine().peers(id: value.id), for: operation)
         case .peerSources:
             let value = try decodeTorrentIDRequest(request)
             return try await encodeOptional(

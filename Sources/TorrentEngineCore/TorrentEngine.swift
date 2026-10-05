@@ -1511,6 +1511,27 @@ private struct AddedTorrentIdentity: Sendable {
         )
     }
 
+    // SAFETY: The actor-owned client remains alive during this synchronous query.
+    // MutableSpan borrows a fully initialized, fixed-capacity array; result counts
+    // are checked before slicing, and no borrowed storage escapes the call.
+    package func peers(id: String) throws -> TorrentPeerSnapshot {
+        guard let client, let pointer = unsafe client.pointer,
+              let nativeToken = identityStore.nativeToken(for: id) else {
+            throw TorrentEngineError.bridgeError("Peer information is unavailable.")
+        }
+        var records = Array(repeating: TTorrentPeerSnapshot(), count: TorrentEngineLimits.maximumPeerCount)
+        let result = Self.withMutableBridgeSpan(&records) { span in
+            unsafe TorrentClientCopyPeers(pointer, nativeToken, &span)
+        }
+        guard result.status == 1,
+              result.total_count >= 0,
+              result.copied_count == min(result.total_count, Int32(records.count)) else {
+            throw TorrentEngineError.bridgeError("Could not read connected peers.")
+        }
+        let peers = try records.prefix(Int(result.copied_count)).map(TorrentPeer.init(snapshot:))
+        return TorrentPeerSnapshot(peers: peers, totalCount: result.total_count)
+    }
+
     // SAFETY: Ownership/lifetime: the actor-owned handle and each local file array live through
     // synchronous copies; bounds/alignment: exact MutableSpan capacities are capped and
     // returned counts are equality-checked before indexing; synchronization: actor isolation
@@ -2745,10 +2766,10 @@ private struct AddedTorrentIdentity: Sendable {
         }
     }
 
-    private static func withMutableBridgeSpan<Element>(
+    private static func withMutableBridgeSpan<Element, Result>(
         _ storage: inout [Element],
-        _ body: (inout MutableSpan<Element>) -> Int32
-    ) -> Int32 {
+        _ body: (inout MutableSpan<Element>) -> Result
+    ) -> Result {
         var span: MutableSpan<Element> = storage.mutableSpan
         return body(&span)
     }

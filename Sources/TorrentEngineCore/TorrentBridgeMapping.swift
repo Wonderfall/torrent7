@@ -287,3 +287,31 @@ extension String {
         self = String(decoding: bytes, as: UTF8.self)
     }
 }
+
+extension TorrentPeer {
+    init(snapshot: TTorrentPeerSnapshot) throws {
+        guard snapshot.address_size == 4 || snapshot.address_size == 16,
+              let transport = TorrentPeerTransport(rawValue: snapshot.transport) else {
+            throw TorrentEngineError.bridgeError("Invalid peer information.")
+        }
+        let address = snapshot.address
+        let bytes: [UInt8] = [
+            address.0, address.1, address.2, address.3,
+            address.4, address.5, address.6, address.7,
+            address.8, address.9, address.10, address.11,
+            address.12, address.13, address.14, address.15
+        ]
+        self.init(
+            endpoint: TorrentPeerEndpoint(
+                address: Data(bytes.prefix(Int(snapshot.address_size))),
+                port: snapshot.port, scopeID: snapshot.scope_id
+            ),
+            transport: transport, client: String(cStringTuple: snapshot.client),
+            progressPartsPerMillion: snapshot.progress_ppm,
+            downloadRate: snapshot.download_rate, uploadRate: snapshot.upload_rate,
+            downloaded: snapshot.downloaded, uploaded: snapshot.uploaded,
+            flags: TorrentPeerFlags(rawValue: snapshot.flags),
+            sources: TorrentPeerDiscovery(rawValue: snapshot.sources)
+        )
+    }
+}

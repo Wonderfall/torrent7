@@ -317,7 +317,7 @@ static_assert(
 );
 static_assert(kMaxTorrentIdentityTokenCount > static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 65U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 66U);
 static_assert(
     TORRENT_ABI_VERSION > 1,
     "Deprecated libtorrent ABIs can parse add_torrent_params.url as a raw magnet."
@@ -408,6 +408,18 @@ static_assert(std::is_standard_layout_v<TTorrentOptionsResult>);
 static_assert(std::is_trivially_copyable_v<TTorrentOptionsResult>);
 static_assert(std::is_standard_layout_v<TTorrentWebSeedActivityResult>);
 static_assert(std::is_trivially_copyable_v<TTorrentWebSeedActivityResult>);
+static_assert(std::is_standard_layout_v<TTorrentPeerSnapshot>);
+static_assert(std::is_trivially_copyable_v<TTorrentPeerSnapshot>);
+static_assert(sizeof(TTorrentPeerSnapshot) == 320U);
+static_assert(alignof(TTorrentPeerSnapshot) == 8U);
+static_assert(offsetof(TTorrentPeerSnapshot, downloaded) == 24U);
+static_assert(offsetof(TTorrentPeerSnapshot, flags) == 52U);
+static_assert(offsetof(TTorrentPeerSnapshot, client) == 60U);
+static_assert(std::is_standard_layout_v<TTorrentPeerListResult>);
+static_assert(std::is_trivially_copyable_v<TTorrentPeerListResult>);
+static_assert(sizeof(TTorrentPeerListResult) == 12U);
+static_assert(alignof(TTorrentPeerListResult) == 4U);
+
 static_assert(std::is_standard_layout_v<TTorrentPeerSourcesResult>);
 static_assert(std::is_trivially_copyable_v<TTorrentPeerSourcesResult>);
 static_assert(std::is_standard_layout_v<TTorrentNetworkStatusResult>);
@@ -1663,6 +1675,9 @@ TTorrentFileSnapshot file_snapshot_from_files(
     int32_t priority
 );
 
+bool is_connected_ip_peer(lt::peer_info const &peer) noexcept;
+TTorrentPeerSnapshot peer_snapshot(lt::peer_info const &peer);
+
 bool is_web_seed_peer(lt::peer_info const &peer) noexcept;
 
 TTorrentPeerSourceSnapshot peer_source_snapshot(std::vector<lt::peer_info> const &peers) noexcept;
@@ -2115,6 +2130,10 @@ struct TTorrentClient {
     bool copy_web_seed_activity(
         std::uint64_t native_token,
         TTorrentWebSeedActivitySnapshot *activity_out
+    ) TORRENT_BRIDGE_REQUIRES_NOT(lock) TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
+
+    TTorrentPeerListResult copy_peers(
+        std::uint64_t native_token, std::span<TTorrentPeerSnapshot> output
     ) TORRENT_BRIDGE_REQUIRES_NOT(lock) TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
 
     bool copy_peer_sources(

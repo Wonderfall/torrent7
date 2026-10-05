@@ -76,6 +76,9 @@ another rewrite are tracked in the
 - Browse nested files in a collapsible tree and set priorities for entire folders.
 - Sort files within their folders by name, size, priority, or download progress using the column headers.
 - Double-click a file or folder in the torrent inspector to reveal it in Finder.
+- Inspect connected peers in a compact sortable table, with offline country flags,
+  peer progress, payload rates, and connection details. Country data is provided by
+  [DB-IP](https://db-ip.com/); see [peer countries](Documentation/PeerCountries.md).
 - Pause, resume, remove, reannounce, force recheck, reveal in Finder, and inspect transfers.
 - Configure global and per-torrent transfer limits, queue priority, labels, and discovery policy.
 - Inspect trackers, web seeds, files, piece maps, peer sources, hashes, and transfer metadata.

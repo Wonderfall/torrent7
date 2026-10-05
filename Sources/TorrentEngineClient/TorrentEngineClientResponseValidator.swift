@@ -44,6 +44,8 @@ enum TorrentEngineClientResponseValidator {
             try validate(batch)
         case let activity as TorrentWebSeedActivity:
             try validate(activity)
+        case let snapshot as TorrentPeerSnapshot:
+            try validate(snapshot)
         case let sources as TorrentPeerSources:
             try validate(sources)
         case let batch as TorrentFileBatch:
@@ -278,6 +280,26 @@ enum TorrentEngineClientResponseValidator {
               activity.downloadRate >= 0,
               activity.totalDownload >= 0 else {
             throw TorrentEngineClientError.invalidReply
+        }
+    }
+
+    private static func validate(_ snapshot: TorrentPeerSnapshot) throws {
+        guard snapshot.totalCount >= 0,
+              snapshot.peers.count == min(Int(snapshot.totalCount), TorrentEngineLimits.maximumPeerCount) else {
+            throw TorrentEngineClientError.invalidReply
+        }
+        var identities = Set<TorrentPeer.ID>()
+        for peer in snapshot.peers {
+            guard peer.endpoint.isValid,
+                  (0...1_000_000).contains(peer.progressPartsPerMillion),
+                  peer.downloadRate >= 0, peer.uploadRate >= 0,
+                  peer.downloaded >= 0, peer.uploaded >= 0,
+                  peer.flags.subtracting(.allKnown).isEmpty,
+                  peer.sources.subtracting(.allKnown).isEmpty,
+                  isBoundedText(peer.client, maximumBytes: TorrentEngineLimits.maximumPeerClientBytes, allowsEmpty: true),
+                  identities.insert(peer.id).inserted else {
+                throw TorrentEngineClientError.invalidReply
+            }
         }
     }
 

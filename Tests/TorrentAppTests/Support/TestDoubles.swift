@@ -1178,6 +1178,16 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         .empty
     }
 
+    var peerSnapshotValue = TorrentPeerSnapshot.empty
+    var peerSnapshotHandler: (@Sendable () async throws -> TorrentPeerSnapshot)?
+    func setPeerSnapshotHandler(_ handler: @escaping @Sendable () async throws -> TorrentPeerSnapshot) {
+        peerSnapshotHandler = handler
+    }
+    func peers(id: String) async throws -> TorrentPeerSnapshot {
+        if let peerSnapshotHandler { return try await peerSnapshotHandler() }
+        return peerSnapshotValue
+    }
+
     func peerSources(id: String) async -> TorrentPeerSources? {
         .empty
     }

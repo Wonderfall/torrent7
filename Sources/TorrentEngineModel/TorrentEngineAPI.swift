@@ -127,6 +127,7 @@ package protocol TorrentEngineServicing: Sendable {
     func webSeedBatch(id: String, since revision: UInt64?) async -> TorrentWebSeedBatch?
     func webSeedActivity(id: String) async -> TorrentWebSeedActivity?
     func peerSources(id: String) async -> TorrentPeerSources?
+    func peers(id: String) async throws -> TorrentPeerSnapshot
     func fileBatch(id: String, since revision: UInt64?) async -> TorrentFileBatch?
     func pieceMapBatch(id: String, since revision: UInt64?) async -> TorrentPieceMapBatch?
 }

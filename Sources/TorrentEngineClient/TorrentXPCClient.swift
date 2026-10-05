@@ -748,6 +748,10 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         try? await invokeOptional(.webSeedActivity, TorrentEngineIPCTorrentIDRequest(id: id))
     }
 
+    package func peers(id: String) async throws -> TorrentPeerSnapshot {
+        try await invoke(.peers, TorrentEngineIPCTorrentIDRequest(id: id))
+    }
+
     package func peerSources(id: String) async -> TorrentPeerSources? {
         try? await invokeOptional(.peerSources, TorrentEngineIPCTorrentIDRequest(id: id))
     }

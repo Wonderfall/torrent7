@@ -179,6 +179,10 @@ private struct TorrentInfoView: View {
                 filesTab
             }
 
+            Tab("Peers", systemImage: "person.2", value: .peers) {
+                TorrentPeersView(torrentID: torrent.id, isPresented: selectedTab == .peers)
+            }
+
             Tab("Pieces", systemImage: "square.grid.3x3", value: .pieces) {
                 piecesTab
             }

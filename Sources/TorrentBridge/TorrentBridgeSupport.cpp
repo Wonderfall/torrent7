@@ -1869,6 +1869,70 @@ TTorrentFileSnapshot file_snapshot_from_files(
     return snapshot;
 }
 
+bool is_connected_ip_peer(lt::peer_info const &peer) noexcept
+{
+    return peer.connection_type == lt::peer_info::standard_bittorrent
+        && !(peer.flags & (lt::peer_info::connecting | lt::peer_info::handshake
+                          | lt::peer_info::i2p_socket));
+}
+
+TTorrentPeerSnapshot peer_snapshot(lt::peer_info const &peer)
+{
+    auto const endpoint = peer.remote_endpoint();
+    if (endpoint.port() == 0U || peer.total_download < 0 || peer.total_upload < 0
+        || peer.payload_down_speed < 0 || peer.payload_up_speed < 0
+        || peer.progress_ppm < 0 || peer.progress_ppm > 1'000'000) {
+        throw std::invalid_argument("Invalid peer snapshot");
+    }
+    TTorrentPeerSnapshot result{};
+    if (endpoint.address().is_v4()) {
+        std::ranges::copy(endpoint.address().to_v4().to_bytes(), std::span{result.address}.begin());
+        result.address_size = 4;
+    } else {
+        auto const address = endpoint.address().to_v6();
+        if (!std::in_range<std::uint32_t>(address.scope_id())) {
+            throw std::invalid_argument("Invalid peer scope");
+        }
+        std::ranges::copy(address.to_bytes(), std::span{result.address}.begin());
+        result.address_size = 16;
+        result.scope_id = static_cast<std::uint32_t>(address.scope_id());
+    }
+    result.port = endpoint.port();
+    result.transport = (peer.flags & lt::peer_info::utp_socket) ? 1 : 0;
+    result.downloaded = peer.total_download;
+    result.uploaded = peer.total_upload;
+    result.download_rate = peer.payload_down_speed;
+    result.upload_rate = peer.payload_up_speed;
+    result.progress_ppm = peer.progress_ppm;
+    copy_string(std::span{result.client}, peer.client);
+    auto flag = [&](lt::peer_flags_t native, std::uint32_t value) {
+        if (peer.flags & native) { result.flags |= value; }
+    };
+    flag(lt::peer_info::seed, TTORRENT_PEER_SEED);
+    if (!(peer.flags & lt::peer_info::outgoing_connection)) {
+        result.flags |= TTORRENT_PEER_INCOMING;
+    }
+    flag(lt::peer_info::interesting, TTORRENT_PEER_INTERESTED);
+    flag(lt::peer_info::remote_interested, TTORRENT_PEER_REMOTE_INTERESTED);
+    flag(lt::peer_info::choked, TTORRENT_PEER_CHOKED);
+    flag(lt::peer_info::remote_choked, TTORRENT_PEER_REMOTE_CHOKED);
+    flag(lt::peer_info::snubbed, TTORRENT_PEER_SNUBBED);
+    flag(lt::peer_info::on_parole, TTORRENT_PEER_ON_PAROLE);
+    flag(lt::peer_info::ssl_socket, TTORRENT_PEER_TLS);
+    flag(lt::peer_info::rc4_encrypted, TTORRENT_PEER_OBFUSCATED);
+    // Source bits are copied explicitly so new upstream flags cannot alter the ABI.
+    auto source = [&](lt::peer_source_flags_t native, unsigned bit) {
+        if (peer.source & native) { result.sources |= std::uint32_t{1} << bit; }
+    };
+    source(lt::peer_info::tracker, 0);
+    source(lt::peer_info::dht, 1);
+    source(lt::peer_info::pex, 2);
+    source(lt::peer_info::lsd, 3);
+    source(lt::peer_info::resume_data, 4);
+    source(lt::peer_info::incoming, 5);
+    return result;
+}
+
 bool is_web_seed_peer(lt::peer_info const &peer) noexcept
 {
     return peer.connection_type == lt::peer_info::web_seed;

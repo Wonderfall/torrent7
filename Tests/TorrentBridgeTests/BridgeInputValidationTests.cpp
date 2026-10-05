@@ -3635,6 +3635,79 @@ TEST_CASE("torrent metadata rejects unsafe renamed file layouts")
     expect_rejected(RenameMap{{lt::file_index_t(0), std::move(overlong_path)}});
 }
 
+TEST_CASE("peer snapshots copy bounded endpoints, payload counters and explicit flags")
+{
+    lt::peer_info peer;
+    peer.set_endpoints({}, {lt::make_address("8.8.8.8"), 6881});
+    peer.client = "Example\nClient";
+    peer.flags = lt::peer_info::seed | lt::peer_info::utp_socket | lt::peer_info::interesting
+        | lt::peer_info::remote_choked | lt::peer_info::rc4_encrypted;
+    peer.source = lt::peer_info::tracker | lt::peer_info::dht | lt::peer_info::pex;
+    peer.progress_ppm = 1'000'000;
+    peer.payload_down_speed = 42;
+    peer.payload_up_speed = 7;
+    peer.total_download = 1000;
+    peer.total_upload = 2000;
+    auto const snapshot = peer_snapshot(peer);
+    CHECK(snapshot.address_size == 4);
+    CHECK(snapshot.address[0] == 8);
+    CHECK(snapshot.address[4] == 0);
+    CHECK(snapshot.port == 6881);
+    CHECK(snapshot.transport == 1);
+    CHECK(snapshot.progress_ppm == 1'000'000);
+    CHECK(snapshot.download_rate == 42);
+    CHECK(snapshot.upload_rate == 7);
+    CHECK(snapshot.downloaded == 1000);
+    CHECK(snapshot.uploaded == 2000);
+    CHECK(snapshot.flags == (TTORRENT_PEER_SEED | TTORRENT_PEER_INCOMING | TTORRENT_PEER_INTERESTED
+        | TTORRENT_PEER_REMOTE_CHOKED | TTORRENT_PEER_OBFUSCATED));
+    CHECK(snapshot.sources == 7);
+    CHECK(std::string(snapshot.client).find('\n') == std::string::npos);
+
+    auto address = lt::make_address_v6("fe80::1");
+    address.scope_id(3);
+    peer.set_endpoints({}, {address, 443});
+    peer.client.assign(300, 'x');
+    peer.flags = lt::peer_info::outgoing_connection;
+    auto const ipv6 = peer_snapshot(peer);
+    CHECK(ipv6.address_size == 16);
+    CHECK(ipv6.address[0] == 0xfe);
+    CHECK(ipv6.address[15] == 1);
+    CHECK(ipv6.scope_id == 3);
+    CHECK(ipv6.transport == 0);
+    CHECK(ipv6.flags == 0);
+    CHECK(std::string(ipv6.client).size() == 255);
+}
+
+TEST_CASE("peer snapshots reject malformed counters and omit non-established IP connections")
+{
+    lt::peer_info peer;
+    peer.set_endpoints({}, {lt::make_address("8.8.8.8"), 6881});
+    peer.connection_type = lt::peer_info::standard_bittorrent;
+    CHECK(is_connected_ip_peer(peer));
+    for (auto const flag : {lt::peer_info::connecting, lt::peer_info::handshake, lt::peer_info::i2p_socket}) {
+        peer.flags = flag;
+        CHECK_FALSE(is_connected_ip_peer(peer));
+    }
+    peer.flags = {};
+    peer.connection_type = lt::peer_info::web_seed;
+    CHECK_FALSE(is_connected_ip_peer(peer));
+    peer.progress_ppm = 1'000'001;
+    CHECK_THROWS_AS(peer_snapshot(peer), std::invalid_argument);
+    peer.progress_ppm = 0;
+    peer.payload_down_speed = -1;
+    CHECK_THROWS_AS(peer_snapshot(peer), std::invalid_argument);
+    peer.payload_down_speed = 0;
+    peer.total_upload = -1;
+    CHECK_THROWS_AS(peer_snapshot(peer), std::invalid_argument);
+    peer.total_upload = 0;
+    peer.set_endpoints({}, {});
+    CHECK_THROWS_AS(peer_snapshot(peer), std::invalid_argument);
+    CHECK(TorrentClientCopyPeers(nullptr, 0, nullptr, 0).status == 0);
+    CHECK(TorrentClientCopyPeers(nullptr, 1, nullptr, -1).status == 0);
+    CHECK(TorrentClientCopyPeers(nullptr, 1, nullptr, TTORRENT_MAX_PEER_COUNT + 1).status == 0);
+}
+
 TEST_CASE("peer source snapshots count overlapping libtorrent source flags")
 {
     std::vector<lt::peer_info> peers(5);

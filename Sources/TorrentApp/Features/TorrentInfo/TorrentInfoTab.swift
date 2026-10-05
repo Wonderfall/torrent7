@@ -3,6 +3,7 @@ import Foundation
 enum TorrentInfoTab: Hashable {
     case general
     case sources
+    case peers
     case files
     case pieces
     case options

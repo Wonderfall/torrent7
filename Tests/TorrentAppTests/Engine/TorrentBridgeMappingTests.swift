@@ -5,6 +5,42 @@ import TorrentEngineModel
 
 @Suite("Torrent bridge mapping")
 struct TorrentBridgeMappingTests {
+    @Test("Peer records preserve address bytes, protocol, counters and flags")
+    func peerSnapshot() throws {
+        var record = TTorrentPeerSnapshot()
+        record.address = (8, 8, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        record.address_size = 4
+        record.port = 6881
+        record.transport = 1
+        record.progress_ppm = 250_000
+        record.downloaded = 1024
+        record.uploaded = 512
+        record.download_rate = 128
+        record.upload_rate = 64
+        record.flags = UInt32(TTORRENT_PEER_SEED | TTORRENT_PEER_REMOTE_CHOKED)
+        record.sources = 3
+        writeCString("Example", to: &record.client)
+        let peer = try TorrentPeer(snapshot: record)
+        #expect(Array(peer.endpoint.address) == [8, 8, 4, 4])
+        #expect(peer.endpoint.port == 6881)
+        #expect(peer.transport == .utp)
+        #expect(peer.client == "Example")
+        #expect(peer.progress == 0.25)
+        #expect(peer.downloaded == 1024 && peer.uploaded == 512)
+        #expect(peer.downloadRate == 128 && peer.uploadRate == 64)
+        #expect(peer.flags == [.seed, .peerChoked])
+        #expect(peer.sources == [.tracker, .dht])
+        record.address_size = 16
+        record.scope_id = 4
+        #expect(try TorrentPeer(snapshot: record).endpoint.address.count == 16)
+        #expect(try TorrentPeer(snapshot: record).endpoint.scopeID == 4)
+        record.address_size = 7
+        #expect(throws: TorrentEngineError.self) { try TorrentPeer(snapshot: record) }
+        record.address_size = 4
+        record.transport = 2
+        #expect(throws: TorrentEngineError.self) { try TorrentPeer(snapshot: record) }
+    }
+
     @Test("Maps bridge booleans")
     func mapsBridgeBooleans() {
         #expect(true.bridgeFlag == 1)

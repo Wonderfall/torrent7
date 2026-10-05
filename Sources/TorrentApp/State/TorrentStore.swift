@@ -845,6 +845,15 @@ final class TorrentStore {
         return activity
     }
 
+    func peers(for id: TorrentItem.ID) async throws -> TorrentPeerSnapshot {
+        let requestedEngine = engine
+        let generation = engineLifecycleGeneration
+        let snapshot = try await requestedEngine.peers(id: id)
+        try Task.checkCancellation()
+        guard generation == engineLifecycleGeneration else { throw CancellationError() }
+        return snapshot
+    }
+
     func peerSources(for id: TorrentItem.ID) async -> TorrentPeerSources? {
         let requestedEngine = engine
         let lifecycleGeneration = engineLifecycleGeneration

@@ -34,6 +34,17 @@ inline constexpr int32_t TTORRENT_BRIDGE_STATE_DOWNLOADING = 3;
 inline constexpr int32_t TTORRENT_BRIDGE_STATE_FINISHED = 4;
 inline constexpr int32_t TTORRENT_BRIDGE_STATE_SEEDING = 5;
 inline constexpr int32_t TTORRENT_BRIDGE_STATE_CHECKING_RESUME_DATA = 7;
+inline constexpr uint32_t TTORRENT_PEER_SEED = 1U << 0U;
+inline constexpr uint32_t TTORRENT_PEER_INCOMING = 1U << 1U;
+inline constexpr uint32_t TTORRENT_PEER_INTERESTED = 1U << 2U;
+inline constexpr uint32_t TTORRENT_PEER_REMOTE_INTERESTED = 1U << 3U;
+inline constexpr uint32_t TTORRENT_PEER_CHOKED = 1U << 4U;
+inline constexpr uint32_t TTORRENT_PEER_REMOTE_CHOKED = 1U << 5U;
+inline constexpr uint32_t TTORRENT_PEER_SNUBBED = 1U << 6U;
+inline constexpr uint32_t TTORRENT_PEER_ON_PAROLE = 1U << 7U;
+inline constexpr uint32_t TTORRENT_PEER_TLS = 1U << 8U;
+inline constexpr uint32_t TTORRENT_PEER_OBFUSCATED = 1U << 9U;
+inline constexpr int32_t TTORRENT_MAX_PEER_COUNT = 1024;
 inline constexpr int32_t TTORRENT_MAX_FILE_COUNT = 20000;
 inline constexpr int32_t TTORRENT_MAX_TRACKER_COUNT = 2000;
 inline constexpr int32_t TTORRENT_MAX_WEB_SEED_COUNT = 2000;
@@ -192,7 +203,7 @@ inline constexpr uint32_t TTORRENT_DHT_FLAG_IMPLIED_PORT = 1U << 4U;
 inline constexpr uint32_t TTORRENT_DHT_FLAG_WANT_SPECIFIED = 1U << 5U;
 inline constexpr uint32_t TTORRENT_DHT_FLAG_WANT_IPV4 = 1U << 6U;
 inline constexpr uint32_t TTORRENT_DHT_FLAG_WANT_IPV6 = 1U << 7U;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 65;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 66;
 namespace torrent_bridge::internal {
 struct TTorrentClient;
 }
@@ -208,6 +219,17 @@ enum {
     TTORRENT_BRIDGE_STATE_FINISHED = 4,
     TTORRENT_BRIDGE_STATE_SEEDING = 5,
     TTORRENT_BRIDGE_STATE_CHECKING_RESUME_DATA = 7,
+    TTORRENT_PEER_SEED = 1U << 0U,
+    TTORRENT_PEER_INCOMING = 1U << 1U,
+    TTORRENT_PEER_INTERESTED = 1U << 2U,
+    TTORRENT_PEER_REMOTE_INTERESTED = 1U << 3U,
+    TTORRENT_PEER_CHOKED = 1U << 4U,
+    TTORRENT_PEER_REMOTE_CHOKED = 1U << 5U,
+    TTORRENT_PEER_SNUBBED = 1U << 6U,
+    TTORRENT_PEER_ON_PAROLE = 1U << 7U,
+    TTORRENT_PEER_TLS = 1U << 8U,
+    TTORRENT_PEER_OBFUSCATED = 1U << 9U,
+    TTORRENT_MAX_PEER_COUNT = 1024,
     TTORRENT_MAX_FILE_COUNT = 20000,
     TTORRENT_MAX_TRACKER_COUNT = 2000,
     TTORRENT_MAX_WEB_SEED_COUNT = 2000,
@@ -366,7 +388,7 @@ enum {
     TTORRENT_DHT_FLAG_WANT_SPECIFIED = 1U << 5U,
     TTORRENT_DHT_FLAG_WANT_IPV4 = 1U << 6U,
     TTORRENT_DHT_FLAG_WANT_IPV6 = 1U << 7U,
-    TTORRENT_BRIDGE_ABI_VERSION = 65
+    TTORRENT_BRIDGE_ABI_VERSION = 66
 };
 #endif
 
@@ -482,6 +504,33 @@ typedef struct TTorrentPeerSourceSnapshot {
     int32_t web_seed;
     int32_t other;
 } TTorrentPeerSourceSnapshot;
+
+// A copied established IP peer, excluding web seeds and connection attempts.
+// Address bytes use network order; unused IPv4 bytes are zero. All counters are
+// nonnegative. Client text is bounded, NUL-terminated UTF-8.
+typedef struct TTorrentPeerSnapshot {
+    uint8_t address[16];
+    uint32_t scope_id;
+    uint16_t port;
+    uint8_t address_size;
+    uint8_t transport; // 0 = TCP, 1 = uTP
+    int64_t downloaded;
+    int64_t uploaded;
+    int32_t download_rate;
+    int32_t upload_rate;
+    int32_t progress_ppm;
+    uint32_t flags;
+    uint32_t sources; // Bits: tracker, DHT, PEX, LSD, resume data, incoming (0...5).
+    char client[256];
+} TTorrentPeerSnapshot;
+
+// A single coherent query. Failure publishes no records. total_count includes
+// eligible peers beyond capacity, allowing the UI to disclose truncation.
+typedef struct TTorrentPeerListResult {
+    int32_t status;
+    int32_t copied_count;
+    int32_t total_count;
+} TTorrentPeerListResult;
 
 typedef struct TTorrentFileSnapshot {
     char path[1024];
@@ -1218,6 +1267,14 @@ TTorrentWebSeedActivityResult TorrentClientCopyWebSeedActivity(
 TTorrentPeerSourcesResult TorrentClientCopyPeerSources(
     TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
     uint64_t native_token
+) TORRENT_BRIDGE_NOEXCEPT;
+
+// Borrows output only for this call; capacity must be in [0, MAX_PEER_COUNT].
+TTorrentPeerListResult TorrentClientCopyPeers(
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    uint64_t native_token,
+    TTorrentPeerSnapshot * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(capacity) peers TORRENT_BRIDGE_NOESCAPE,
+    int32_t capacity
 ) TORRENT_BRIDGE_NOEXCEPT;
 
 int32_t TorrentClientCopyFileBatch(

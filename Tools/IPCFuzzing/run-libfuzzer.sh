@@ -9,6 +9,7 @@ WORK_CORPUS_DIR="${WORK_CORPUS_DIR:-$ARTIFACTS_DIR/corpus}"
 RUNS="${RUNS:-100000}"
 
 all_targets=(
+    country_database
     dht_message_parser
     http_tracker_response_parser
     ipc_json_preflight
@@ -28,6 +29,9 @@ fi
 
 default_max_len() {
     case "$1" in
+        country_database)
+            printf '%s\n' 65536
+            ;;
         dht_message_parser)
             printf '%s\n' 1501
             ;;

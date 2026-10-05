@@ -456,7 +456,7 @@ extension TorrentEngineIPCOperation {
         switch self {
         case .poll, .sourcePolicy, .torrentOptions,
              .torrentMetadata, .trackerBatch, .webSeedBatch,
-             .webSeedActivity, .peerSources, .fileBatch,
+             .webSeedActivity, .peerSources, .peers, .fileBatch,
              .pieceMapBatch, .readDataset, .closeDataset, .changeHint:
             false
         default:

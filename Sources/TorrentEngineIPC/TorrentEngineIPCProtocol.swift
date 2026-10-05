@@ -3,7 +3,7 @@ import TorrentEngineModel
 package import XPC
 
 package enum TorrentEngineIPCProtocol {
-    package static let version: UInt64 = 14
+    package static let version: UInt64 = 15
 }
 
 package enum TorrentEngineIPCLimits {
@@ -83,6 +83,12 @@ package enum TorrentEngineIPCLimits {
         maximumStringByteCount: 8 * 1_024,
         maximumPrimitiveByteCount: maximumJSONPrimitiveByteCountLimit
     )
+    package static let peerReplyJSONLimits = TorrentEngineIPCJSONLimits(
+        maximumNestingDepth: 8,
+        maximumValueNodeCount: 64 * 1_024,
+        maximumStringByteCount: 8 * 1_024,
+        maximumPrimitiveByteCount: maximumJSONPrimitiveByteCountLimit
+    )
     package static let pieceMapReplyJSONLimits = TorrentEngineIPCJSONLimits(
         maximumNestingDepth: 8,
         maximumValueNodeCount: 256,
@@ -144,6 +150,7 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
     case trackerBatch = 40
     case webSeedBatch = 42
     case webSeedActivity = 43
+    case peers = 48
     case peerSources = 44
     case fileBatch = 45
     case pieceMapBatch = 46
@@ -193,6 +200,8 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
 
     package var replyJSONLimits: TorrentEngineIPCJSONLimits {
         switch self {
+        case .peers:
+            TorrentEngineIPCLimits.peerReplyJSONLimits
         case .fileBatch:
             TorrentEngineIPCLimits.fileMetadataReplyJSONLimits
         case .poll:
@@ -212,6 +221,8 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
 
     package var maximumReplyPayloadBytes: Int {
         switch self {
+        case .peers:
+            2 * 1_024 * 1_024
         case .poll:
             TorrentEngineIPCLimits.maximumPollReplyBytes
         case .trackerBatch:

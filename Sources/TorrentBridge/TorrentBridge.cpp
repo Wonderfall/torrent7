@@ -4160,6 +4160,20 @@ extern "C" TTorrentPeerSourcesResult TorrentClientCopyPeerSources(
     return output;
 }
 
+extern "C" TTorrentPeerListResult TorrentClientCopyPeers(
+    TTorrentClient *client, std::uint64_t const native_token,
+    TTorrentPeerSnapshot *peers, std::int32_t const capacity
+) noexcept
+{
+    if (client == nullptr || native_token == 0U || capacity < 0
+        || capacity > TTORRENT_MAX_PEER_COUNT) { return {}; }
+    try {
+        return client->copy_peers(native_token, output_span_from_c_buffer(peers, capacity));
+    } catch (...) {
+        return {};
+    }
+}
+
 extern "C" int32_t TorrentClientCopyFileBatch(TTorrentClient *client, std::uint64_t const native_token,
                                               TTorrentFileSnapshot *files, int32_t capacity,
                                               int32_t *required_count_out, uint8_t *available_out) noexcept

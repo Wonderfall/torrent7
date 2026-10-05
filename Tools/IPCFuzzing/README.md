@@ -12,6 +12,9 @@ Scripts/verify-xcode.zsh
 
 ## Targets
 
+- `country_database` exercises the production offline country-index decoder and
+  IPv4/IPv6 lookups with malformed headers, ranges, codes and lengths. It links
+  `TorrentAppInfrastructure` without invoking bundle I/O or network services.
 - `dht_message_parser` selects an IPv4 or IPv6 source context and feeds one
   arbitrary datagram to the production Swift KRPC parser. It checks exact
   body-relative ranges, typed query/response/error shapes, compact nodes and

@@ -266,13 +266,20 @@ struct TorrentAppCommands: Commands {
     }
 
     private func showAboutPanel() {
-        let credits = NSAttributedString(string: "libtorrent \(store.libtorrentVersion)")
+        var credits = AttributedString("libtorrent \(store.libtorrentVersion)\n\n")
+        var provider = AttributedString("IP Geolocation by DB-IP")
+        provider.link = URL(string: "https://db-ip.com/")
+        credits.append(provider)
+        credits.append(AttributedString("\nCountry Lite · "))
+        var license = AttributedString("CC BY 4.0")
+        license.link = URL(string: "https://creativecommons.org/licenses/by/4.0/")
+        credits.append(license)
 
         NSApplication.shared.orderFrontStandardAboutPanel(options: [
             .applicationName: AppIdentity.displayName,
             .applicationVersion: AppIdentity.marketingVersion,
             .version: AppIdentity.buildVersion,
-            .credits: credits
+            .credits: NSAttributedString(credits)
         ])
     }
 }

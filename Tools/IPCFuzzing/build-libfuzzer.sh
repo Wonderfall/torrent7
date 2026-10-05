@@ -25,6 +25,7 @@ if [[ ! -f "$FUZZER_RUNTIME" ]]; then
 fi
 
 all_targets=(
+    country_database
     dht_message_parser
     http_tracker_response_parser
     ipc_json_preflight
@@ -44,6 +45,9 @@ fi
 
 harness_for_target() {
     case "$1" in
+        country_database)
+            printf '%s\n' "$TOOLS_DIR/harnesses/CountryDatabaseFuzzer.cpp"
+            ;;
         dht_message_parser)
             printf '%s\n' "$TOOLS_DIR/harnesses/DHTMessageParserFuzzer.cpp"
             ;;
@@ -80,7 +84,7 @@ harness_for_target() {
 
 support_for_target() {
     case "$1" in
-        ipc_json_preflight | storage_broker_ipc)
+        country_database | ipc_json_preflight | storage_broker_ipc)
             printf '%s\n' TorrentEngineIPCFuzzSupport
             ;;
         dht_message_parser | http_tracker_response_parser | magnet_parser | peer_protocol_parser | storage_claim_validation | storage_manifest | swarm_info_parser)
