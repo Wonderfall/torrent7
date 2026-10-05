@@ -146,6 +146,7 @@ private struct TorrentInfoView: View {
     @State private var torrentOptions: TorrentOptions?
     @State private var filePresentation = TorrentFilePresentationState()
     @State private var fileSortOrder = [TorrentFileTree.Sort(.name)]
+    @State private var fileSearchText = ""
     @State private var pieceMap = TorrentPieceMap.empty
     @State private var trackerRevision: UInt64?
     @State private var webSeedRevision: UInt64?
@@ -193,6 +194,10 @@ private struct TorrentInfoView: View {
         }
         .scenePadding()
         .onChange(of: fileSortOrder) { _, _ in
+            advanceFilePresentationGeneration()
+            scheduleFilePresentation()
+        }
+        .onChange(of: fileSearchText) { _, _ in
             advanceFilePresentationGeneration()
             scheduleFilePresentation()
         }
@@ -411,15 +416,19 @@ private struct TorrentInfoView: View {
             Section {
                 filesContent
             } header: {
-                HStack {
-                    Label("Files", systemImage: "doc")
-                    Spacer()
-                    if filesLoaded, filePresentation.tree.fileCount > 0 {
-                        Text(fileSummary)
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                            .multilineTextAlignment(.trailing)
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Label("Files", systemImage: "doc")
+                        Spacer()
+                        if filesLoaded, filePresentation.tree.totalFileCount > 0 {
+                            Text(fileSummary)
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                                .multilineTextAlignment(.trailing)
+                        }
                     }
+                    TorrentInspectorSearchField(prompt: "Name or folder", text: $fileSearchText)
+                        .disabled(!torrent.hasMetadata)
                 }
             } footer: {
                 if filePriorityRequest != nil {
@@ -428,7 +437,9 @@ private struct TorrentInfoView: View {
                         Text("Updating priorities…")
                     }
                 } else if filePresentation.tree.fileCount > 0 {
-                    Text("Double-click to reveal in Finder.")
+                    Text(filePresentation.tree.query.isEmpty
+                        ? "Double-click to reveal in Finder."
+                        : "Double-click to reveal in Finder. Folder priorities apply to matching files.")
                 }
             }
         }
@@ -436,6 +447,9 @@ private struct TorrentInfoView: View {
     }
 
     private var fileSummary: String {
+        if !filePresentation.tree.query.isEmpty {
+            return "\(filePresentation.tree.fileCount.formatted()) of \(filePresentation.tree.totalFileCount.formatted()) files"
+        }
         let counts = filePresentation.tree.fileCounts
         var parts = [String]()
         if counts.finished > 0 { parts.append("\(counts.finished.formatted()) finished") }
@@ -771,13 +785,13 @@ private struct TorrentInfoView: View {
                 Spacer()
                 ProgressView().controlSize(.small)
             }
-        } else if filePresentation.tree.fileCount == 0 {
+        } else if filePresentation.tree.totalFileCount == 0 {
             Label("No Files", systemImage: "doc")
                 .foregroundStyle(.secondary)
         } else {
             TorrentFileOutline(
                 tree: filePresentation.tree, sortOrder: $fileSortOrder, showsProgress: true,
-                isEditing: filePriorityRequest != nil,
+                isEditing: filePriorityRequest != nil || filePresentation.tree.query != TorrentSearchQuery(fileSearchText),
                 setPriority: { node, priority in setFilePriority(priority, for: node) },
                 revealInFinder: { itemID in
                     store.revealTorrentItemInFinder(torrent: torrent, itemID: itemID)
@@ -1102,12 +1116,13 @@ private struct TorrentInfoView: View {
         if let batch = await store.fileBatch(for: torrentID, since: nil) {
             do {
                 let sortOrder = fileSortOrder
+                let query = fileSearchText
                 let presentation = try await TorrentFileBatchPresentation.prepare(
-                    batch: batch, pendingPriorities: [:], sortOrder: sortOrder
+                    batch: batch, pendingPriorities: [:], sortOrder: sortOrder, query: query
                 )
                 try Task.checkCancellation()
                 guard filePriorityRequest?.id == request.id else { return }
-                if sortOrder == fileSortOrder {
+                if sortOrder == fileSortOrder, query == fileSearchText {
                     applyFileBatchPresentation(presentation)
                 } else {
                     filePresentation.accept(batch)
@@ -1134,6 +1149,7 @@ private struct TorrentInfoView: View {
         let presentationGeneration = filePresentationGeneration
         let pendingPriorities = pendingFilePriorities
         let sortOrder = fileSortOrder
+        let query = fileSearchText
         let taskID = UUID()
         filePresentationTaskID = taskID
         filePresentationTask = Task { @MainActor in
@@ -1147,7 +1163,7 @@ private struct TorrentInfoView: View {
                 let presentation = try await TorrentFileBatchPresentation.prepare(
                     batch: batch,
                     pendingPriorities: pendingPriorities,
-                    sortOrder: sortOrder
+                    sortOrder: sortOrder, query: query
                 )
                 try Task.checkCancellation()
                 guard presentationGeneration
@@ -1637,7 +1653,7 @@ private struct TorrentInfoView: View {
                     presentation = try await TorrentFileBatchPresentation.prepare(
                         batch: fileBatch,
                         pendingPriorities: pendingPriorities,
-                        sortOrder: fileSortOrder
+                        sortOrder: fileSortOrder, query: fileSearchText
                     )
                 } catch is CancellationError {
                     return

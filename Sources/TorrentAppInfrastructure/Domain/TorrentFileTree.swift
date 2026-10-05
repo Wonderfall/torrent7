@@ -96,22 +96,26 @@ package struct TorrentFileTree: Sendable {
     package let roots: [Node]
     package let fileCounts: FileCounts
     package var fileCount: Int { fileCounts.total }
+    package let totalFileCount: Int
+    package let query: TorrentSearchQuery
     package let filenameExtensions: Set<String>
     package static let empty = Self(
         roots: [], fileCounts: FileCounts(finished: 0, downloading: 0, waiting: 0, skipped: 0),
-        filenameExtensions: []
+        totalFileCount: 0, query: TorrentSearchQuery(""), filenameExtensions: []
     )
 
     private struct Entry {
         let file: TorrentFileItem
         let components: [String]
+        let matches: Bool
     }
 
     @concurrent
     package static func prepare(
-        files: [TorrentFileItem], sortOrder: [Sort] = [Sort(.name)]
+        files: [TorrentFileItem], sortOrder: [Sort] = [Sort(.name)], query: String = ""
     ) async throws -> Self {
         try Task.checkCancellation()
+        let query = TorrentSearchQuery(query)
         var entries = [Entry]()
         var filenameExtensions = Set<String>()
         var finished = 0
@@ -122,6 +126,14 @@ package struct TorrentFileTree: Sendable {
         for (offset, file) in files.enumerated() {
             if offset.isMultiple(of: 128) { try Task.checkCancellation() }
             guard !file.isPadFile else { continue }
+            let matches = query.matches(file.path)
+            filenameExtensions.insert((file.path as NSString).pathExtension.lowercased())
+            entries.append(Entry(
+                file: file,
+                components: file.path.split(separator: "/", omittingEmptySubsequences: false).map(String.init),
+                matches: matches
+            ))
+            guard matches else { continue }
             if file.isSkipped {
                 skipped += 1
             } else if file.progress >= 1 {
@@ -131,17 +143,13 @@ package struct TorrentFileTree: Sendable {
             } else {
                 waiting += 1
             }
-            filenameExtensions.insert((file.path as NSString).pathExtension.lowercased())
-            entries.append(Entry(
-                file: file,
-                components: file.path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
-            ))
         }
         let roots = try nodes(entries: entries, depth: 0, parent: "", sortOrder: sortOrder)
         try Task.checkCancellation()
         return Self(
             roots: roots,
             fileCounts: FileCounts(finished: finished, downloading: downloading, waiting: waiting, skipped: skipped),
+            totalFileCount: entries.count, query: query,
             filenameExtensions: filenameExtensions
         )
     }
@@ -158,6 +166,7 @@ package struct TorrentFileTree: Sendable {
             if depth + 1 < entry.components.count {
                 folders[name, default: []].append(entry)
             } else {
+                guard entry.matches else { continue }
                 let file = entry.file
                 result.append(Node(
                     id: .file(file.index), name: name, path: file.path,
@@ -171,8 +180,11 @@ package struct TorrentFileTree: Sendable {
         for (name, entries) in folders {
             let path = parent.isEmpty ? name : "\(parent)/\(name)"
             let children = try nodes(entries: entries, depth: depth + 1, parent: path, sortOrder: sortOrder)
+            guard !children.isEmpty else { continue }
             let fileIndices = children.flatMap(\.fileIndices)
-            guard let anchor = fileIndices.min() else { continue }
+            // Filtering must not change folder identity. Commands and aggregate
+            // values use only visible descendants, including when the anchor is hidden.
+            guard let anchor = entries.lazy.map(\.file.index).min() else { continue }
             let size = children.reduce(Int64(0)) { sum($0, $1.size) }
             let downloaded = children.reduce(Int64(0)) { sum($0, $1.downloaded) }
             let priority = children.first?.priority

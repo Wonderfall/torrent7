@@ -4,6 +4,7 @@ import TorrentEngineModel
 
 struct TorrentAppCommands: Commands {
     @Environment(\.openWindow) private var openWindow
+    @FocusedValue(\.inspectorSearchFocus) private var inspectorSearchFocus
     let store: TorrentStore
     let actions: TorrentCommandActions
     let commandState: TorrentCommandState
@@ -46,7 +47,8 @@ struct TorrentAppCommands: Commands {
 
         CommandGroup(after: .textEditing) {
             Button("Find") {
-                actions.focusSearch()
+                if let inspectorSearchFocus { inspectorSearchFocus.wrappedValue = true }
+                else { actions.focusSearch() }
             }
             .keyboardShortcut("f", modifiers: .command)
         }

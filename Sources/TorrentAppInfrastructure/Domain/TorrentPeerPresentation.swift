@@ -8,6 +8,7 @@ package struct TorrentPeerRow: Identifiable, Sendable {
     package let endpoint: String
     package let flag: String
     package let country: String
+    package let countryCode: String?
     package let connectionDetails: String
     package var id: TorrentPeer.ID { peer.id }
 
@@ -22,7 +23,8 @@ package struct TorrentPeerRow: Identifiable, Sendable {
             address = "\(IPv6Address(ip.address)?.debugDescription ?? "Unknown")\(scope)"
             endpoint = "[\(address)]:\(ip.port)"
         }
-        if let code = countries?.countryCode(for: ip.address) {
+        countryCode = countries?.countryCode(for: ip.address)
+        if let code = countryCode {
             flag = String(String.UnicodeScalarView(code.unicodeScalars.compactMap {
                 UnicodeScalar(127_397 + $0.value)
             }))
@@ -62,13 +64,18 @@ package struct TorrentPeerRow: Identifiable, Sendable {
 
     @concurrent
     package static func prepare(
-        snapshot: TorrentPeerSnapshot, countries: TorrentCountryDatabase?, sortOrder: [Sort]
+        snapshot: TorrentPeerSnapshot, countries: TorrentCountryDatabase?, sortOrder: [Sort], query: String = ""
     ) async throws -> [Self] {
+        let query = TorrentSearchQuery(query)
         var rows = [Self]()
         rows.reserveCapacity(snapshot.peers.count)
         for peer in snapshot.peers {
             try Task.checkCancellation()
-            rows.append(Self(peer: peer, countries: countries))
+            let row = Self(peer: peer, countries: countries)
+            if query.matches(row.endpoint) || query.matches(peer.client)
+                || query.matches(row.country) || row.countryCode?.caseInsensitiveCompare(query.text) == .orderedSame {
+                rows.append(row)
+            }
         }
         // Always break equal column values by endpoint, independent of libtorrent's order.
         rows.sort(using: sortOrder + [Sort(.address)])

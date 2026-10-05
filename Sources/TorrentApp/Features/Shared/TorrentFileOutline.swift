@@ -13,6 +13,7 @@ struct TorrentFileOutline: View {
 
     @State private var selection: TorrentFileTree.Node.ID?
     @State private var expansion = [TorrentFileTree.Node.ID: Bool]()
+    @State private var searchExpansion = [TorrentFileTree.Node.ID: Bool]()
     @State private var images = TorrentFileIconImages()
     @FocusState private var isFocused: Bool
 
@@ -56,11 +57,16 @@ struct TorrentFileOutline: View {
                 }
                 .disabled(isEditing)
                 .accessibilityLabel("Priority for \(node.path)")
-                .help(node.children == nil ? "File priority" : "Set priority for all \(node.fileIndices.count) files in this folder")
+                .help(node.children == nil ? "File priority" : tree.query.isEmpty
+                    ? "Set priority for all \(node.fileIndices.count) files in this folder"
+                    : "Set priority for \(node.fileIndices.count) matching files in this folder")
             }
             .width(86)
         } rows: {
-            TorrentFileOutlineRows(nodes: tree.roots, isRoot: true, expansion: $expansion)
+            TorrentFileOutlineRows(
+                nodes: tree.roots, isRoot: true, expandsMatches: !tree.query.isEmpty,
+                expansion: tree.query.isEmpty ? $expansion : $searchExpansion
+            )
         }
         .tableStyle(.inset)
         .alternatingRowBackgrounds()
@@ -72,6 +78,18 @@ struct TorrentFileOutline: View {
         // A grouped Form owns scrolling for its embedded tables. Let the table
         // size itself to its rows so the form can scroll the entire hierarchy.
         .fixedSize(horizontal: false, vertical: true)
+        .padding(.bottom, tree.fileCount == 0 ? 48 : 0)
+        .overlay(alignment: .bottom) {
+            if tree.fileCount == 0 {
+                Text("No Matching Files")
+                    .foregroundStyle(.secondary)
+                    .padding(.bottom, 16)
+            }
+        }
+        .onChange(of: tree.query) { _, _ in
+            searchExpansion.removeAll()
+            selection = nil
+        }
         .contextMenu(forSelectionType: TorrentFileTree.Node.ID.self) { ids in
             if ids.count == 1, let id = ids.first, let revealInFinder {
                 Button("Reveal in Finder") { revealInFinder(id) }
@@ -139,16 +157,17 @@ private struct TorrentFileProgressLabel: View {
 private struct TorrentFileOutlineRows: TableRowContent {
     let nodes: [TorrentFileTree.Node]
     var isRoot = false
+    var expandsMatches = false
     @Binding var expansion: [TorrentFileTree.Node.ID: Bool]
 
     var tableRowBody: some TableRowContent<TorrentFileTree.Node> {
         ForEach(nodes) { node in
             if let children = node.children {
                 DisclosureTableRow(node, isExpanded: Binding(
-                    get: { expansion[node.id] ?? isRoot },
+                    get: { expansion[node.id] ?? (isRoot || expandsMatches) },
                     set: { expansion[node.id] = $0 }
                 )) {
-                    Self(nodes: children, expansion: $expansion)
+                    Self(nodes: children, expandsMatches: expandsMatches, expansion: $expansion)
                 }
             } else {
                 TableRow(node)

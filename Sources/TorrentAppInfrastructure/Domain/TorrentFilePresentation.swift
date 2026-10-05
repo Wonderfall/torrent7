@@ -31,7 +31,8 @@ package struct TorrentFileBatchPresentation: Sendable {
     package static func prepare(
         batch: TorrentFileBatch,
         pendingPriorities: [Int32: TorrentFilePriority],
-        sortOrder: [TorrentFileTree.Sort] = [TorrentFileTree.Sort(.name)]
+        sortOrder: [TorrentFileTree.Sort] = [TorrentFileTree.Sort(.name)],
+        query: String = ""
     ) async throws -> Self {
         try Task.checkCancellation()
         var files = [TorrentFileItem]()
@@ -44,7 +45,7 @@ package struct TorrentFileBatchPresentation: Sendable {
             }
             files.append(file.withPriority(remaining[file.index] ?? file.priority))
         }
-        let tree = try await TorrentFileTree.prepare(files: files, sortOrder: sortOrder)
+        let tree = try await TorrentFileTree.prepare(files: files, sortOrder: sortOrder, query: query)
         return Self(sourceBatch: batch, tree: tree, remainingPendingPriorities: remaining)
     }
 }

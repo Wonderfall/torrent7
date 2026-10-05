@@ -13,17 +13,20 @@ struct TorrentPeersView: View {
     @State private var error: String?
     @State private var countryDataUnavailable = false
     @State private var sortOrder = [TorrentPeerRow.Sort(.address)]
+    @State private var searchText = ""
 
     private struct PresentationRequest: Equatable {
         let snapshot: TorrentPeerSnapshot?
         let sortOrder: [TorrentPeerRow.Sort]
         let countryDate: UInt32?
         let isPresented: Bool
+        let query: String
     }
 
     var body: some View {
         TorrentPeersContent(
-            rows: rows, totalCount: snapshot?.totalCount, sortOrder: $sortOrder,
+            rows: rows, totalCount: snapshot?.totalCount, snapshotCount: snapshot?.peers.count ?? 0,
+            sortOrder: $sortOrder, searchText: $searchText,
             error: error, countryDataUnavailable: countryDataUnavailable
         )
         .task(id: isPresented) {
@@ -47,12 +50,13 @@ struct TorrentPeersView: View {
             }
         }
         .task(id: PresentationRequest(
-            snapshot: snapshot, sortOrder: sortOrder, countryDate: countries?.date, isPresented: isPresented
+            snapshot: snapshot, sortOrder: sortOrder, countryDate: countries?.date,
+            isPresented: isPresented, query: searchText
         )) {
             guard isPresented, let snapshot else { return }
             do {
                 let prepared = try await TorrentPeerRow.prepare(
-                    snapshot: snapshot, countries: countries, sortOrder: sortOrder
+                    snapshot: snapshot, countries: countries, sortOrder: sortOrder, query: searchText
                 )
                 try Task.checkCancellation()
                 rows = prepared
@@ -66,7 +70,9 @@ struct TorrentPeersView: View {
 struct TorrentPeersContent: View {
     let rows: [TorrentPeerRow]
     let totalCount: Int32?
+    let snapshotCount: Int
     @Binding var sortOrder: [TorrentPeerRow.Sort]
+    @Binding var searchText: String
     var error: String?
     var countryDataUnavailable = false
     @State private var selection: TorrentPeer.ID?
@@ -81,30 +87,35 @@ struct TorrentPeersContent: View {
                 if totalCount == nil {
                     ProgressView("Loading peers…").controlSize(.small)
                 } else if rows.isEmpty {
-                    Text("No Connected Peers").foregroundStyle(.secondary)
+                    Text(TorrentSearchQuery(searchText).isEmpty ? "No Connected Peers" : "No Matching Peers")
+                        .foregroundStyle(.secondary)
                 } else {
                     table
                 }
             } header: {
-                HStack {
-                    Label("Peers", systemImage: "person.2")
-                    Spacer()
-                    if let totalCount {
-                        Text(summary(totalCount: totalCount))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Label("Peers", systemImage: "person.2")
+                        Spacer()
+                        if let totalCount {
+                            Text(summary(totalCount: totalCount))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
                     }
+                    TorrentInspectorSearchField(prompt: "IP, client, or country", text: $searchText)
                 }
             } footer: {
                 if countryDataUnavailable {
                     Text("Country information is unavailable.")
                 }
-                if let totalCount, totalCount > rows.count {
-                    Text("Showing \(rows.count.formatted()) of \(totalCount.formatted()) connected peers.")
+                if let totalCount, totalCount > snapshotCount {
+                    Text("Peer details are limited to the first \(snapshotCount.formatted()) of \(totalCount.formatted()) connected peers.")
                 }
             }
         }
         .formStyle(.grouped)
+        .onChange(of: searchText) { _, _ in selection = nil }
     }
 
     private var table: some View {
@@ -176,6 +187,9 @@ struct TorrentPeersContent: View {
     }
 
     private func summary(totalCount: Int32) -> String {
+        if !TorrentSearchQuery(searchText).isEmpty {
+            return "\(rows.count.formatted()) of \(totalCount.formatted()) peers"
+        }
         let seeds = rows.count { $0.peer.flags.contains(.seed) }
         let count = "\(totalCount.formatted()) connected"
         guard seeds > 0, totalCount == rows.count else { return count }
