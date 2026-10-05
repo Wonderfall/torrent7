@@ -3,6 +3,7 @@ import Network
 
 /// Converts the pinned DB-IP country CSV into disjoint, complete address maps.
 /// Each record stores an inclusive upper bound and a two-byte country code.
+/// The complete index is stored as an LZFSE-compressed resource.
 struct CountryDatabaseBuilder {
     enum Failure: Error { case invalidInput }
     private struct Record {
@@ -53,7 +54,7 @@ struct CountryDatabaseBuilder {
                 data.append(contentsOf: record.country)
             }
         }
-        return data
+        return try (data as NSData).compressed(using: .lzfse) as Data
     }
 
     private static func address(_ text: String) throws -> Data {

@@ -6,13 +6,14 @@ import Testing
 struct CountryDatabaseBuilderTests {
     @Test("Ranges merge, gaps remain unknown and both address families are complete")
     func ranges() throws {
-        let data = try CountryDatabaseBuilder.build(csv: """
+        let compressed = try CountryDatabaseBuilder.build(csv: """
         0.0.0.0,0.0.0.1,US
         0.0.0.2,0.0.0.3,US
         0.0.0.5,255.255.255.255,JP
         ::,::1,ZZ
         ::2,ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff,FR
         """, date: 20261001)
+        let data = try (compressed as NSData).decompressed(using: .lzfse) as Data
         #expect(data.count == 24 + 3 * 6 + 2 * 18)
         #expect(Array(data[16..<24]) == [0, 0, 0, 3, 0, 0, 0, 2])
         #expect(Array(data[24..<42]) == [0, 0, 0, 3, 85, 83, 0, 0, 0, 4, 90, 90, 255, 255, 255, 255, 74, 80])
@@ -20,7 +21,8 @@ struct CountryDatabaseBuilderTests {
 
     @Test("Unknown gaps and tails coalesce with unknown input records")
     func unknownGaps() throws {
-        let bytes = try CountryDatabaseBuilder.build(csv: "1.0.0.0,1.0.0.1,ZZ\n::1,::2,ZZ", date: 20261001)
+        let compressed = try CountryDatabaseBuilder.build(csv: "1.0.0.0,1.0.0.1,ZZ\n::1,::2,ZZ", date: 20261001)
+        let bytes = try (compressed as NSData).decompressed(using: .lzfse) as Data
         #expect(bytes.count == 24 + 6 + 18)
         #expect(Array(bytes[16..<24]) == [0, 0, 0, 1, 0, 0, 0, 1])
     }

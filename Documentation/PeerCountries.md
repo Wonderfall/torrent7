@@ -26,9 +26,24 @@ SHA-256: `097426b8ddae89157d444a59ac1847e873f7943c32d52becc4371c8b0273af80`
 
 The CSV is converted to sorted, disjoint IPv4 and IPv6 ranges. Adjacent ranges
 with equal country codes are merged; uncovered ranges receive `ZZ` (unknown).
-The checked-in index is 8,449,572 bytes, without an MMDB library or native parser.
-`TorrentCountryDatabase` validates it once off the main actor and uses binary
-search for lookups. The immutable process-wide index carries no app authority.
+The checked-in `Packaging/PeerCountries.bin.lzfse` is 2,377,988 bytes and expands
+losslessly to the original 8,449,572-byte index. It uses Apple's built-in LZFSE
+compression, without a third-party compression or MMDB library.
+LZFSE keeps decoder memory bounded; the system LZMA decoder accepts arbitrary
+dictionary sizes from input without exposing a memory limit through its Swift API.
+
+On first use, `TorrentCountryDatabase` decompresses and validates the resource
+off the main actor. Swift's thread-safe static initialization runs this once per
+app process, even when several torrent windows request it together. The decoded
+immutable index is shared across windows and tab changes, and lookups use the
+same binary search. It retains neither the compressed bytes nor a disk cache.
+Failures are cached too. Caller cancellation is checked before and after the
+shared initialization; it cannot leave a partially initialized cache. The index
+carries no app authority.
+
+Stored input and decoded output are each capped at 32 MiB. Decompression reads
+bounded chunks and enforces the output limit before appending to the index.
+The loader accepts only the compressed resource; there is no legacy file fallback.
 
 ## Binary format (version 1)
 

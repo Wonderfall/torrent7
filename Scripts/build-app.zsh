@@ -238,7 +238,7 @@ if (( enable_diagnostics )); then
 fi
 cp "$document_icon" "$resources_dir/Torrent7Document.icns"
 cp "$third_party_notices" "$resources_dir/ThirdPartyNotices.txt"
-cp "$root_dir/Packaging/PeerCountries.bin" "$resources_dir/PeerCountries.bin"
+cp "$root_dir/Packaging/PeerCountries.bin.lzfse" "$resources_dir/PeerCountries.bin.lzfse"
 
 rm -f -- "$app_icon_info_plist"
 /usr/bin/xcrun actool \

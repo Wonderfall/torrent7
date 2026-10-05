@@ -1,3 +1,4 @@
+import Compression
 package import Foundation
 
 /// Immutable country-only index. The signed bundle contains the data; no lookup
@@ -9,18 +10,22 @@ package struct TorrentCountryDatabase: Sendable {
     private let ipv6Count: Int
     private let ipv6Offset: Int
     package let date: UInt32
+    private static let maximumByteCount = 32 * 1_024 * 1_024
 
-    // A process-wide immutable resource, initialized on loadBundled's executor.
-    // A failure is retained too, so unavailable flags cannot cause repeated I/O.
+    // Swift initializes this immutable resource once, including concurrent first
+    // callers. Decompression and validation run on loadBundled's executor; only
+    // the decoded index is retained. A failure is cached too, preventing retries
+    // on every tab change or peer refresh. An individual caller's cancellation
+    // doesn't abandon the shared initialization; loadBundled checks it afterward.
     private static let bundled: Result<Self, Failure> = {
-        guard let url = Bundle.main.url(forResource: "PeerCountries", withExtension: "bin") else {
+        guard let url = Bundle.main.url(forResource: "PeerCountries", withExtension: "bin.lzfse") else {
             return .failure(.unavailable)
         }
         do {
             let file = try FileHandle(forReadingFrom: url)
             defer { try? file.close() }
-            let bytes = try file.read(upToCount: 32 * 1_024 * 1_024 + 1) ?? Data()
-            return .success(try Self(data: bytes))
+            let bytes = try file.read(upToCount: maximumByteCount + 1) ?? Data()
+            return .success(try Self(compressedData: bytes))
         } catch { return .failure(.invalidDatabase) }
     }()
 
@@ -32,8 +37,37 @@ package struct TorrentCountryDatabase: Sendable {
         return database
     }
 
+    package init(compressedData: Data) throws {
+        guard !compressedData.isEmpty, compressedData.count <= Self.maximumByteCount else {
+            throw Failure.invalidDatabase
+        }
+        do {
+            var remaining = compressedData
+            // LZFSE has bounded decoder state. LZMA's system decoder accepts
+            // input-controlled dictionary sizes without exposing a memory limit.
+            let filter = try InputFilter(.decompress, using: .lzfse) { count -> Data? in
+                guard !remaining.isEmpty else { return nil }
+                // InputFilter doesn't expose unused bytes in its input buffer.
+                // Supply the final byte separately: a stream ending before it
+                // leaves remaining nonempty, including concatenated streams.
+                let chunk = remaining.prefix(min(count, max(1, remaining.count - 1)))
+                remaining = remaining.dropFirst(chunk.count)
+                return chunk
+            }
+            var decoded = Data()
+            while let chunk = try filter.readData(ofLength: min(65_536, Self.maximumByteCount - decoded.count + 1)) {
+                guard !chunk.isEmpty, chunk.count <= Self.maximumByteCount - decoded.count else {
+                    throw Failure.invalidDatabase
+                }
+                decoded.append(chunk)
+            }
+            guard remaining.isEmpty else { throw Failure.invalidDatabase }
+            try self.init(data: decoded)
+        } catch { throw Failure.invalidDatabase }
+    }
+
     package init(data: Data) throws {
-        guard (24...32 * 1_024 * 1_024).contains(data.count),
+        guard (24...Self.maximumByteCount).contains(data.count),
               data.prefix(8) == Data("T7CCDB01".utf8) else { throw Failure.invalidDatabase }
         let bytes = Data(data) // Normalize collection indices, including sliced test inputs.
         guard Self.number(bytes, at: 8, width: 4) == 1 else { throw Failure.invalidDatabase }

@@ -57,11 +57,70 @@ struct TorrentCountryDatabaseTests {
         #expect(throws: TorrentCountryDatabase.Failure.self) { try TorrentCountryDatabase(data: bytes + Data([0])) }
     }
 
+    @Test("Compressed indices preserve lookups, including sliced input")
+    func compressed() throws {
+        let compressed = try (fixture() as NSData).compressed(using: .lzfse) as Data
+        let prefixed = Data([0, 0, 0]) + compressed
+        let database = try TorrentCountryDatabase(compressedData: prefixed.dropFirst(3))
+        #expect(database.date == 20261001)
+        #expect(database.countryCode(for: Data([1, 0, 0, 0])) == "US")
+        #expect(database.countryCode(for: Data([1, 0, 0, 1])) == "JP")
+        #expect(database.countryCode(for: try #require(IPv6Address("2001:4860::8888")).rawValue) == "FR")
+    }
+
+    @Test("Compressed input rejects corruption, truncation, trailing bytes and invalid decoded indices")
+    func malformedCompressed() throws {
+        let compressed = try (fixture() as NSData).compressed(using: .lzfse) as Data
+        for length in 0..<compressed.count {
+            #expect(throws: TorrentCountryDatabase.Failure.self) {
+                try TorrentCountryDatabase(compressedData: compressed.prefix(length))
+            }
+        }
+        for index in [0, compressed.count / 2, compressed.count - 1] {
+            var damaged = compressed
+            damaged[index] ^= 255
+            #expect(throws: TorrentCountryDatabase.Failure.self) {
+                try TorrentCountryDatabase(compressedData: damaged)
+            }
+        }
+        for invalid in [
+            fixture(), compressed + Data([1]), compressed + compressed,
+            compressed + Data(repeating: 0, count: 65_536)
+        ] {
+            #expect(throws: TorrentCountryDatabase.Failure.self) {
+                try TorrentCountryDatabase(compressedData: invalid)
+            }
+        }
+        let invalid = try (Data("not a country index".utf8) as NSData).compressed(using: .lzfse) as Data
+        #expect(throws: TorrentCountryDatabase.Failure.self) {
+            try TorrentCountryDatabase(compressedData: invalid)
+        }
+        // Regression for an input that made the system LZMA auto-decoder request
+        // a 4 GiB dictionary. Only our bounded-state LZFSE format is accepted.
+        let oversizedDictionary = Data([1]) + Data(repeating: 255, count: 38)
+            + Data([49, 49, 0, 254, 255, 6, 255, 82])
+        #expect(throws: TorrentCountryDatabase.Failure.self) {
+            try TorrentCountryDatabase(compressedData: oversizedDictionary)
+        }
+    }
+
+    @Test("Both stored input and decompressed output have a hard size limit")
+    func compressionLimits() throws {
+        let oversized = Data(repeating: 0, count: 32 * 1_024 * 1_024 + 1)
+        #expect(throws: TorrentCountryDatabase.Failure.self) {
+            try TorrentCountryDatabase(compressedData: oversized)
+        }
+        let compressed = try (oversized as NSData).compressed(using: .lzfse) as Data
+        #expect(throws: TorrentCountryDatabase.Failure.self) {
+            try TorrentCountryDatabase(compressedData: compressed)
+        }
+    }
+
     @Test("Pinned bundled index resolves both IP families without a network request")
     func bundled() throws {
         let root = URL(filePath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
-        let database = try TorrentCountryDatabase(data: Data(contentsOf: root.appending(path: "Packaging/PeerCountries.bin")))
+        let database = try TorrentCountryDatabase(compressedData: Data(contentsOf: root.appending(path: "Packaging/PeerCountries.bin.lzfse")))
         #expect(database.date == 20261001)
         #expect(database.countryCode(for: Data([8, 8, 8, 8])) == "US")
         // The pinned CSV labels 2001:4860:4802::...2001:4860:6dff:ffff:... as CA.

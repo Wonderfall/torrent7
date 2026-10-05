@@ -25,4 +25,4 @@ typeset -r actual_sha256=$(/usr/bin/shasum -a 256 "$temporary_dir/countries.csv.
 /usr/bin/xcrun swift run --package-path "$root_dir/Tools" \
     --scratch-path "$root_dir/.build/repository-tools" --configuration release \
     build-country-database "$temporary_dir/countries.csv" \
-    "$root_dir/Packaging/PeerCountries.bin" "$database_date"
+    "$root_dir/Packaging/PeerCountries.bin.lzfse" "$database_date"

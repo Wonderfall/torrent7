@@ -9,11 +9,18 @@ public func torrentCountryDatabaseFuzzOneInput(_ bytes: UnsafePointer<UInt8>?, _
     guard byteCount <= 32 * 1_024 * 1_024 + 1,
           let data = unsafe copiedIPCFuzzInput(bytes, byteCount) else { return }
     autoreleasepool {
-        guard let database = try? TorrentCountryDatabase(data: data) else { return }
-        _ = database.countryCode(for: Data(data.prefix(4)))
-        _ = database.countryCode(for: Data(data.suffix(16)))
-        _ = database.countryCode(for: Data([1, 0, 0, 0]))
-        _ = database.countryCode(for: Data([1, 0, 0, 1]))
-        precondition(database.countryCode(for: Data([127, 0, 0, 1])) == nil)
+        // Exercise compression independently of the inner index, so corrupt
+        // streams don't prevent mutations from reaching range validation.
+        for database in [
+            try? TorrentCountryDatabase(data: data),
+            try? TorrentCountryDatabase(compressedData: data)
+        ] {
+            guard let database else { continue }
+            _ = database.countryCode(for: Data(data.prefix(4)))
+            _ = database.countryCode(for: Data(data.suffix(16)))
+            _ = database.countryCode(for: Data([1, 0, 0, 0]))
+            _ = database.countryCode(for: Data([1, 0, 0, 1]))
+            precondition(database.countryCode(for: Data([127, 0, 0, 1])) == nil)
+        }
     }
 }
