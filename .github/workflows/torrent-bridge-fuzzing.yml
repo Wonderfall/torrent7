@@ -75,23 +75,14 @@ jobs:
     steps:
       - name: Check out repository
         shell: zsh {0}
-        env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
 
-          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
-            checkout_ref="refs/pull/${PR_NUMBER}/merge"
-          elif [[ "$GITHUB_EVENT_NAME" == "schedule" ]]; then
-            checkout_ref="refs/heads/${BASE_BRANCH}"
-          else
-            checkout_ref="$GITHUB_REF"
-          fi
-
           git init .
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --depth=1 origin "$checkout_ref"
+          git fetch --depth=1 origin "$GITHUB_SHA"
           git checkout --detach FETCH_HEAD
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
 
       - name: Verify Xcode toolchain
         shell: zsh {0}
