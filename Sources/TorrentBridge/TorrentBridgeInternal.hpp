@@ -273,6 +273,8 @@ constexpr auto kAlertWaitInterval = std::chrono::milliseconds(250);
 // for the fail-closed engine shutdown and reply if libtorrent never confirms
 // that its disk pipeline has quiesced.
 constexpr auto kTorrentRemovalQuiescenceTimeout = std::chrono::seconds(30);
+// Shared by a full native batch; disk callbacks own their state after timeout.
+constexpr auto kResumeCaptureTimeout = std::chrono::seconds(20);
 // Synchronous adds post critical and high-priority alerts. The worker normally
 // drains them immediately; this bounded queue extends burst tolerance when it
 // is temporarily starved on the client lock. Explicit cadence drains below are
@@ -690,17 +692,9 @@ struct ResumePolicySnapshot {
     std::vector<lt::download_priority_t> intended_file_priorities;
 };
 
-struct PendingResumeWrite {
-    lt::add_torrent_params params;
-    TorrentIdentity *identity = nullptr;
-    ResumePolicySnapshot policy;
-    std::vector<PendingResumeCleanup> cleanups;
-};
-
 struct PendingResumeHandle {
     lt::torrent_handle handle;
     TorrentIdentity *identity = nullptr;
-    ResumePolicySnapshot policy;
     std::vector<PendingResumeCleanup> cleanups;
 };
 
@@ -1838,9 +1832,11 @@ struct TTorrentClient {
 
     [[nodiscard]] std::string staging_path(lt::info_hash_t const &hashes) const;
 
-    AnalyzedMutex lock;
-    AnalyzedMutex resume_capture_lock TORRENT_BRIDGE_ACQUIRED_AFTER(lock);
-    mutable AnalyzedMutex resume_io_lock TORRENT_BRIDGE_ACQUIRED_AFTER(resume_capture_lock);
+    // Checkpoint transactions may briefly publish state and then commit I/O.
+    // No caller holding state or I/O authority may enter checkpoint serialization.
+    AnalyzedMutex resume_capture_lock;
+    AnalyzedMutex lock TORRENT_BRIDGE_ACQUIRED_AFTER(resume_capture_lock);
+    mutable AnalyzedMutex resume_io_lock TORRENT_BRIDGE_ACQUIRED_AFTER(lock);
     fs::path part_files_directory;
     fs::path staging_directory;
     std::shared_ptr<PayloadBrokerContext> payload_broker;
@@ -2297,9 +2293,6 @@ struct TTorrentClient {
                                                std::vector<PendingResumeCleanup> cleanups)
         TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
 
-    ResumeSaveResult write_resume_data(PendingResumeWrite const &write)
-        TORRENT_BRIDGE_REQUIRES_NOT(lock) TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
-
     ResumeSaveResult save_added_torrent_resume_data(lt::add_torrent_params params, lt::info_hash_t const &hashes,
                                                     TorrentIdentity *identity)
         TORRENT_BRIDGE_REQUIRES(lock) TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
@@ -2336,10 +2329,12 @@ struct TTorrentClient {
 
     std::vector<PendingResumeHandle> collect_resume_handles() TORRENT_BRIDGE_REQUIRES(lock);
 
-    std::vector<PendingResumeWrite> collect_resume_data(
-        std::span<PendingResumeHandle const> handles,
-        lt::resume_data_flags_t flags
-    ) TORRENT_BRIDGE_REQUIRES_NOT(resume_capture_lock)
+    ResumeSaveResult save_resume_handle(
+        PendingResumeHandle const &pending,
+        lt::resume_data_flags_t flags,
+        std::chrono::steady_clock::time_point deadline
+    ) TORRENT_BRIDGE_REQUIRES_NOT(lock)
+        TORRENT_BRIDGE_REQUIRES_NOT(resume_capture_lock)
         TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
 
     void save_all()

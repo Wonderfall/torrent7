@@ -34,6 +34,7 @@ readonly -a LIBTORRENT_PATCHES=(
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.2-test-server-startup.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.2-bounded-tracker-deadlines.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.2-acknowledged-skipped-storage.patch"
+    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.2-checked-resume-checkpoints.patch"
 )
 
 fail() {

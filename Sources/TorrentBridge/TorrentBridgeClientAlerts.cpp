@@ -187,15 +187,14 @@ void TTorrentClient::pump_alerts()
     }
     invoke_wake_callback(wake);
 
+    auto const resume_deadline = std::chrono::steady_clock::now() + kResumeCaptureTimeout;
     for (PendingResumeHandle const &pending : forced_resume_handles) {
         if (pending.cleanups.empty()) {
             request_save(pending.handle, kFullResumeSaveFlags);
             continue;
         }
 
-        std::array<PendingResumeHandle, 1> const handles{pending};
-        std::vector<PendingResumeWrite> writes = collect_resume_data(handles, kFullResumeSaveFlags);
-        if (writes.size() != 1U || !write_resume_data(writes.front())) {
+        if (!save_resume_handle(pending, kFullResumeSaveFlags, resume_deadline)) {
             // The durable tombstone remains authoritative. Swift owns the
             // subsequent full-save retry and tombstone recovery schedule.
             request_save(pending.handle, kFullResumeSaveFlags);

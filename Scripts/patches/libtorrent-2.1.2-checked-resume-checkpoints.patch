@@ -1,0 +1,294 @@
+diff --git a/include/libtorrent/aux_/disk_job.hpp b/include/libtorrent/aux_/disk_job.hpp
+index 33446ec09..0f682e082 100644
+--- a/include/libtorrent/aux_/disk_job.hpp
++++ b/include/libtorrent/aux_/disk_job.hpp
+@@ -189,6 +189,7 @@ namespace job {
+ 	struct release_files
+ 	{
+ 		std::function<void()> handler;
++		std::function<void(storage_error const&)> checked_handler{};
+ 	};
+ 
+ 	struct delete_files
+diff --git a/include/libtorrent/aux_/torrent.hpp b/include/libtorrent/aux_/torrent.hpp
+index 57a11c709..de7ff9835 100644
+--- a/include/libtorrent/aux_/torrent.hpp
++++ b/include/libtorrent/aux_/torrent.hpp
+@@ -714,12 +714,18 @@ namespace libtorrent::aux {
+ 
+ 		void set_need_save_resume(resume_data_flags_t const flag)
+ 		{
++			// Count changes even while a dirty bit is already set. Saturation
++			// deliberately keeps future checkpoints dirty instead of wrapping.
++			if (m_resume_revision < std::numeric_limits<std::uint64_t>::max()) ++m_resume_revision;
+ 			if (m_need_save_resume_data & flag) return;
+ 			m_need_save_resume_data |= flag;
+ 			state_updated();
+ 		}
+ 
+ 		add_torrent_params get_resume_data(resume_data_flags_t flags) const;
++		void capture_resume_data(resume_data_flags_t flags,
++			std::shared_ptr<std::promise<resume_checkpoint_result>> completion);
++		void acknowledge_resume_data(std::uint64_t revision);
+ 
+ 		bool is_auto_managed() const { return m_auto_managed; }
+ 		void auto_managed(bool a);
+@@ -1927,6 +1933,7 @@ namespace libtorrent::aux {
+ 
+ 		// bits set to indicate which category of resume data state has updated
+ 		resume_data_flags_t m_need_save_resume_data;
++		std::uint64_t m_resume_revision = 1;
+ 
+ // ----
+ 
+diff --git a/include/libtorrent/disk_interface.hpp b/include/libtorrent/disk_interface.hpp
+index fc7286f8d..945a2a948 100644
+--- a/include/libtorrent/disk_interface.hpp
++++ b/include/libtorrent/disk_interface.hpp
+@@ -18,6 +18,7 @@ see LICENSE file.
+ #include <memory>
+ 
+ #include "libtorrent/fwd.hpp"
++#include "libtorrent/error_code.hpp"
+ #include "libtorrent/units.hpp"
+ #include "libtorrent/disk_buffer_holder.hpp"
+ #include "libtorrent/aux_/vector.hpp"
+@@ -263,6 +264,14 @@ namespace file_open_mode {
+ 		virtual void async_release_files(storage_index_t storage
+ 			, std::function<void()> handler = std::function<void()>()) = 0;
+ 
++		// A checked checkpoint requires an error-reporting storage fence.
++		// Unsupported backends fail closed instead of claiming a flush.
++		virtual void async_checkpoint(storage_index_t
++			, std::function<void(storage_error const&)> handler)
++		{
++			handler(storage_error(make_error_code(boost::system::errc::operation_not_supported)));
++		}
++
+ 		// this is called when torrents are added to validate their resume data
+ 		// against the files on disk. This function is expected to do a few things:
+ 		//
+diff --git a/include/libtorrent/resume_checkpoint.hpp b/include/libtorrent/resume_checkpoint.hpp
+new file mode 100644
+index 000000000..244dfe331
+--- /dev/null
++++ b/include/libtorrent/resume_checkpoint.hpp
+@@ -0,0 +1,22 @@
++/*
++Copyright (c) 2026, Torrent7 contributors
++All rights reserved.
++You may use, distribute and modify this code under the BSD license, see LICENSE.
++*/
++#ifndef TORRENT_RESUME_CHECKPOINT_HPP
++#define TORRENT_RESUME_CHECKPOINT_HPP
++#include "libtorrent/add_torrent_params.hpp"
++#include "libtorrent/error_code.hpp"
++#include <cstdint>
++#include <expected>
++#include <optional>
++namespace libtorrent {
++struct resume_checkpoint
++{
++    add_torrent_params params;
++    std::uint64_t revision;
++};
++// Empty success means an unchanged conditional save; errors never carry state.
++using resume_checkpoint_result = std::expected<std::optional<resume_checkpoint>, error_code>;
++}
++#endif
+diff --git a/include/libtorrent/torrent_handle.hpp b/include/libtorrent/torrent_handle.hpp
+index 77fa6bfdc..b021c5131 100644
+--- a/include/libtorrent/torrent_handle.hpp
++++ b/include/libtorrent/torrent_handle.hpp
+@@ -44,6 +44,7 @@ see LICENSE file.
+ #include "libtorrent/storage_defs.hpp"
+ #include "libtorrent/torrent_flags.hpp"
+ #include "libtorrent/torrent_info.hpp"
++#include "libtorrent/resume_checkpoint.hpp"
+ #include "libtorrent/peer_info.hpp" // for peer_source_flags_t
+ #include "libtorrent/download_priority.hpp"
+ #include "libtorrent/pex_flags.hpp"
+@@ -862,6 +863,10 @@ namespace aux {
+ 		//	the initial loop, and thwart the counter otherwise.
+ 		void save_resume_data(resume_data_flags_t flags = {}) const;
+ 		add_torrent_params get_resume_data(resume_data_flags_t flags = {}) const;
++		// An owned snapshot returns only after its disk fence. Dirty state is
++		// cleared only after the application acknowledges its durable commit.
++		[[nodiscard]] std::future<resume_checkpoint_result> capture_resume_data(resume_data_flags_t flags) const;
++		void acknowledge_resume_data(std::uint64_t revision) const;
+ 
+ 		// This function returns true if anything that is stored in the resume
+ 		// data has changed since the last time resume data was saved.
+diff --git a/src/disk_job.cpp b/src/disk_job.cpp
+index 6d2a01d25..8b355c0fc 100644
+--- a/src/disk_job.cpp
++++ b/src/disk_job.cpp
+@@ -51,8 +51,8 @@ namespace {
+ 
+ 		void operator()(job::release_files& j) const
+ 		{
+-			if (!j.handler) return;
+-			j.handler();
++			if (j.checked_handler) j.checked_handler(m_job.error);
++			if (j.handler) j.handler();
+ 		}
+ 
+ 		void operator()(job::delete_files& j) const
+diff --git a/src/pread_disk_io.cpp b/src/pread_disk_io.cpp
+index d34916c4e..e65c09c88 100644
+--- a/src/pread_disk_io.cpp
++++ b/src/pread_disk_io.cpp
+@@ -133,6 +133,8 @@ struct TORRENT_EXTRA_EXPORT pread_disk_io final
+ 		, std::function<void(status_t, std::string const&, storage_error const&)> handler) override;
+ 	void async_release_files(storage_index_t storage
+ 		, std::function<void()> handler = std::function<void()>()) override;
++	void async_checkpoint(storage_index_t storage
++		, std::function<void(storage_error const&)> handler) override;
+ 	void async_delete_files(storage_index_t storage, remove_flags_t options
+ 		, std::function<void(storage_error const&)> handler) override;
+ 	void async_check_files(storage_index_t storage
+@@ -998,6 +1000,14 @@ void pread_disk_io::async_release_files(storage_index_t const storage
+ 	add_fence_job(j);
+ }
+ 
++void pread_disk_io::async_checkpoint(storage_index_t const storage
++	, std::function<void(storage_error const&)> handler)
++{
++	auto* j = m_job_pool.allocate_job<aux::job::release_files>(
++		{}, m_torrents[storage]->shared_from_this(), std::function<void()>{}, std::move(handler));
++	add_fence_job(j);
++}
++
+ void pread_disk_io::abort_hash_jobs(storage_index_t const storage)
+ {
+ 	// abort outstanding hash jobs belonging to this torrent
+diff --git a/src/pread_storage.cpp b/src/pread_storage.cpp
+index 006d0bb68..a184267c5 100644
+--- a/src/pread_storage.cpp
++++ b/src/pread_storage.cpp
+@@ -433,12 +433,16 @@ namespace libtorrent::aux {
+ 		aux::rename_file(files(), m_renamed_files, index, new_filename, m_save_path, ec);
+ 	}
+ 
+-	void pread_storage::release_files(storage_error&)
++	void pread_storage::release_files(storage_error& error)
+ 	{
+ 		if (m_part_file)
+ 		{
+-			error_code ignore;
+-			m_part_file->flush_metadata(ignore);
++			m_part_file->flush_metadata(error.ec);
++			if (error)
++			{
++				error.file(torrent_status::error_file_partfile);
++				error.operation = operation_t::partfile_write;
++			}
+ 		}
+ 
+ 		// make sure we don't have the files open
+diff --git a/src/torrent.cpp b/src/torrent.cpp
+index 51ccb4638..3a96b6a38 100644
+--- a/src/torrent.cpp
++++ b/src/torrent.cpp
+@@ -9425,6 +9425,10 @@ namespace {
+ 	{
+ 		if (!has_picker()) return;
+ 
++		// Hash verification can precede disk completion. A checkpoint captured
++		// between them must not acknowledge the newly persistable blocks.
++		set_need_save_resume(torrent_handle::if_download_progress);
++
+ 		if (m_picker->is_seeding())
+ 		{
+ 			// no need for the piece picker anymore
+@@ -10453,6 +10457,66 @@ namespace {
+ 		alerts().emplace_alert<save_resume_data_alert>(std::move(atp), get_handle());
+ 	}
+ 
++	void torrent::capture_resume_data(resume_data_flags_t const flags,
++		std::shared_ptr<std::promise<resume_checkpoint_result>> completion)
++	{
++		TORRENT_ASSERT(is_single_thread());
++		if (m_abort)
++		{
++			completion->set_value(std::unexpected(error_code{errors::torrent_removed}));
++			return;
++		}
++		auto const conditions = flags & torrent_handle::only_if_modified;
++		if (conditions && !(m_need_save_resume_data & conditions))
++		{
++			completion->set_value(std::nullopt);
++			return;
++		}
++		// Capture a prefix of native state before enqueueing its fence. Writes
++		// arriving after that fence must not enter this checkpoint, even if
++		// their network callbacks run before the fence's completion callback.
++		resume_checkpoint checkpoint;
++		write_resume_data(flags, checkpoint.params);
++		checkpoint.revision = m_resume_revision;
++		// The callback owns the snapshot, torrent and its one completion path.
++		// A caller timing out cannot invalidate any borrowed state.
++		auto finish = [self = shared_from_this(), response = std::move(completion), captured = std::move(checkpoint)]
++			(storage_error const& error) mutable
++		{
++			try
++			{
++				if (error || self->m_abort)
++				{
++					response->set_value(std::unexpected(error ? error.ec : error_code{errors::torrent_removed}));
++					return;
++				}
++				response->set_value(std::move(captured));
++			}
++			catch (...)
++			{
++				response->set_exception(std::current_exception());
++			}
++		};
++		// Every durable snapshot needs the partfile's slot mapping, including
++		// routine/policy saves that happen to include new download progress.
++		if (m_storage)
++		{
++			m_ses.disk_thread().async_checkpoint(m_storage, std::move(finish));
++			m_ses.deferred_submit_jobs();
++		}
++		else finish(storage_error{});
++	}
++
++	void torrent::acknowledge_resume_data(std::uint64_t const revision)
++	{
++		TORRENT_ASSERT(is_single_thread());
++		if (revision == m_resume_revision && revision != std::numeric_limits<std::uint64_t>::max())
++		{
++			m_need_save_resume_data = resume_data_flags_t{};
++			state_updated();
++		}
++	}
++
+ 	add_torrent_params torrent::get_resume_data(resume_data_flags_t const flags) const
+ 	{
+ 		TORRENT_ASSERT(is_single_thread());
+diff --git a/src/torrent_handle.cpp b/src/torrent_handle.cpp
+index e631e6435..6618ef974 100644
+--- a/src/torrent_handle.cpp
++++ b/src/torrent_handle.cpp
+@@ -370,6 +370,19 @@ namespace libtorrent {
+ 		return sync_call_ret<bool>(false, &aux::torrent::need_save_resume_data, flags);
+ 	}
+ 
++	std::future<resume_checkpoint_result> torrent_handle::capture_resume_data(resume_data_flags_t flags) const
++	{
++		auto completion = std::make_shared<std::promise<resume_checkpoint_result>>();
++		auto result = completion->get_future();
++		async_call(&aux::torrent::capture_resume_data, flags, std::move(completion));
++		return result;
++	}
++
++	void torrent_handle::acknowledge_resume_data(std::uint64_t revision) const
++	{
++		async_call(&aux::torrent::acknowledge_resume_data, revision);
++	}
++
+ 	add_torrent_params torrent_handle::get_resume_data(resume_data_flags_t const flags) const
+ 	{
+ 		return sync_call_ret<add_torrent_params>({}, &aux::torrent::get_resume_data, flags);

@@ -331,17 +331,6 @@ ResumeSaveResult TTorrentClient::write_resume_data_checked(
                                                                         .cleanups = std::move(cleanups)});
 }
 
-ResumeSaveResult TTorrentClient::write_resume_data(PendingResumeWrite const &write)
-{
-    ResumeSaveResult result =
-        write_resume_data_checked(write.params, write.identity, write.policy, write.cleanups);
-    if (!result) {
-        queue_alert_error_threadsafe("Resume data could not be saved: " + result.error() + ".");
-        return result;
-    }
-    return {};
-}
-
 ResumeSaveResult TTorrentClient::save_added_torrent_resume_data(lt::add_torrent_params params, lt::info_hash_t const &hashes,
                                                 TorrentIdentity *identity)
 {
@@ -514,45 +503,77 @@ BridgeResult TTorrentClient::save_resume_data_checked(
         pending = PendingResumeHandle{
             .handle = *handle,
             .identity = identity,
-            .policy = resume_policy_snapshot_locked(identity),
             .cleanups = {},
         };
     }
 
-    lt::add_torrent_params params;
-    try {
-        std::scoped_lock capture_guard(resume_capture_lock);
-        if (!pending.handle.is_valid()) {
-            return bridge_error(2, "Torrent handle became invalid while saving resume data.");
-        }
-        params = pending.handle.get_resume_data(*flags);
-    } catch (std::exception const &exception) {
-        return bridge_error(3, std::string("Resume data could not be collected: ") + exception.what());
-    } catch (...) {
-        return bridge_error(3, "Resume data could not be collected.");
-    }
-
-    WakeCallbackInvocation wake;
-    {
-        std::scoped_lock guard(lock);
-        DirtyMask const changes = capture_requested_presentation_metadata(pending.identity, params);
-        if (has_dirty_changes(changes)) {
-            request_snapshot_update_locked();
-        }
-        wake = publish_changes_locked(changes);
-    }
-    invoke_wake_callback(wake);
-
-    ResumeSaveResult const saved = write_resume_data_checked(
-        params,
-        pending.identity,
-        pending.policy,
-        pending.cleanups
+    ResumeSaveResult const saved = save_resume_handle(
+        pending, *flags, std::chrono::steady_clock::now() + kResumeCaptureTimeout
     );
     if (!saved) {
         return bridge_error(3, saved.error());
     }
     return {};
+}
+
+ResumeSaveResult TTorrentClient::save_resume_handle(
+    PendingResumeHandle const &pending,
+    lt::resume_data_flags_t const flags,
+    std::chrono::steady_clock::time_point const deadline
+)
+{
+    WakeCallbackInvocation wake;
+    ResumeSaveResult const result = [&]() -> ResumeSaveResult {
+        try {
+            // Serialize the complete capture/commit/acknowledgement transaction.
+            // Native disk callbacks never acquire this lock, and their future
+            // owns its state if the bounded wait expires.
+            std::scoped_lock capture_guard(resume_capture_lock);
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return std::unexpected("Resume storage checkpoint timed out.");
+            }
+            auto completion = pending.handle.capture_resume_data(flags);
+            if (completion.wait_until(deadline) != std::future_status::ready) {
+                return std::unexpected("Resume storage checkpoint timed out.");
+            }
+            auto captured = completion.get();
+            if (!captured) {
+                return std::unexpected("Resume storage checkpoint failed: " + captured.error().message());
+            }
+            if (!*captured) {
+                return {}; // A conditional save of unchanged native state.
+            }
+            lt::resume_checkpoint checkpoint = std::move(**captured);
+            ResumePolicySnapshot policy;
+            {
+                std::scoped_lock guard(lock);
+                // Collect queued application intent inside the transaction,
+                // after any preceding file-priority transition completed.
+                policy = resume_policy_snapshot_locked(pending.identity);
+                DirtyMask const changes = capture_requested_presentation_metadata(pending.identity, checkpoint.params);
+                if (has_dirty_changes(changes)) {
+                    request_snapshot_update_locked();
+                }
+                wake = publish_changes_locked(changes);
+            }
+            ResumeSaveResult const saved = write_resume_data_checked(
+                checkpoint.params, pending.identity, policy, pending.cleanups
+            );
+            if (!saved) {
+                return saved;
+            }
+            // Changes made after capture keep their dirty state. Failed commits
+            // never acknowledge, so a routine retry cannot silently skip them.
+            pending.handle.acknowledge_resume_data(checkpoint.revision);
+            return {};
+        } catch (std::exception const &exception) {
+            return std::unexpected(std::string("Resume data could not be collected: ") + exception.what());
+        } catch (...) {
+            return std::unexpected("Resume data could not be collected.");
+        }
+    }();
+    invoke_wake_callback(wake);
+    return result;
 }
 
 std::vector<lt::torrent_handle> TTorrentClient::collect_torrent_handles()
@@ -599,42 +620,10 @@ std::vector<PendingResumeHandle> TTorrentClient::collect_resume_handles()
         handles.push_back(PendingResumeHandle{
             .handle = handle,
             .identity = identity,
-            .policy = resume_policy_snapshot_locked(identity),
             .cleanups = {}
         });
     }
     return handles;
-}
-
-std::vector<PendingResumeWrite> TTorrentClient::collect_resume_data(
-    std::span<PendingResumeHandle const> handles,
-    lt::resume_data_flags_t flags
-)
-{
-    std::vector<PendingResumeWrite> resume_data;
-    std::scoped_lock capture_guard(resume_capture_lock);
-    for (PendingResumeHandle const &pending : handles) {
-        if (!pending.handle.is_valid()) {
-            continue;
-        }
-
-        if (pending.identity == nullptr) {
-            continue;
-        }
-
-        try {
-            lt::add_torrent_params params = pending.handle.get_resume_data(flags);
-            resume_data.push_back(PendingResumeWrite{
-                .params = std::move(params),
-                .identity = pending.identity,
-                .policy = pending.policy,
-                .cleanups = pending.cleanups
-            });
-        } catch (...) {
-            continue;
-        }
-    }
-    return resume_data;
 }
 
 void TTorrentClient::save_all()
@@ -650,9 +639,9 @@ void TTorrentClient::save_all()
         handles = collect_resume_handles();
     }
 
-    std::vector<PendingResumeWrite> resume_data = collect_resume_data(handles, kFullResumeSaveFlags);
-    for (PendingResumeWrite const &write : resume_data) {
-        ResumeSaveResult saved = write_resume_data(write);
+    auto const deadline = std::chrono::steady_clock::now() + kResumeCaptureTimeout;
+    for (PendingResumeHandle const &pending : handles) {
+        ResumeSaveResult saved = save_resume_handle(pending, kFullResumeSaveFlags, deadline);
         if (!saved) {
             ignore_shutdown_failure();
         }

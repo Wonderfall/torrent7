@@ -407,7 +407,6 @@ DirtyMask TTorrentClient::resolve_torrent_conflict(
         PendingResumeHandle forced_save{
             .handle = survivor,
             .identity = survivor_identity,
-            .policy = resume_policy_snapshot_locked(survivor_identity),
             .cleanups = std::move(pending_cleanups)
         };
         forced_resume_handles.push_back(std::move(forced_save));

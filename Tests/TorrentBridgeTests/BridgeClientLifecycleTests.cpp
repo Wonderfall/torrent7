@@ -5832,3 +5832,76 @@ TEST_CASE("metadata resolution keeps staged payload disabled and owns source pol
         client.metadata_validation_pending.contains(private_identity)
     ));
 }
+
+TEST_CASE("unchanged routine saves do not replace the durable resume file")
+{
+    bridge_tests::TemporaryDirectory directory;
+    TTorrentClient client((directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+    client.stop_alert_worker();
+    TorrentIdentity *identity = nullptr;
+    auto const info = make_torrent_info(false);
+    lt::add_torrent_params params;
+    params.ti = std::make_shared<lt::torrent_info>(*info);
+    // Complete initial resume validation synchronously. Otherwise its later
+    // disk callback is a real change, not an unchanged paused-library cycle.
+    params.flags |= lt::torrent_flags::no_verify_files;
+    auto const handle = BRIDGE_WITH_CLIENT_LOCK(client,
+        add_metadata_torrent(client, std::move(params), directory.path(), identity));
+    REQUIRE(identity != nullptr);
+    handle.unset_flags(lt::torrent_flags::auto_managed);
+    handle.pause();
+    REQUIRE(client.save_resume_data_checked(identity->token->value, ResumeSaveMode::full));
+    REQUIRE_FALSE(handle.need_save_resume_data());
+    fs::path const path = directory.path() / "State" / "ResumeData"
+        / (primary_hash_key(info->info_hashes()) + std::string(kResumeExtension));
+    struct stat before {};
+    REQUIRE(::stat(path.c_str(), &before) == 0);
+    REQUIRE(client.save_resume_data_checked(identity->token->value, ResumeSaveMode::routine));
+    REQUIRE(client.save_resume_data_checked(identity->token->value, ResumeSaveMode::routine));
+    struct stat after {};
+    REQUIRE(::stat(path.c_str(), &after) == 0);
+    CHECK(before.st_ino == after.st_ino);
+    CHECK(before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec);
+    CHECK(before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec);
+
+    handle.set_upload_limit(1234);
+    REQUIRE(fs::remove(path));
+    REQUIRE(fs::create_directory(path));
+    CHECK_FALSE(client.save_resume_data_checked(identity->token->value, ResumeSaveMode::routine));
+    CHECK(handle.need_save_resume_data());
+    REQUIRE(fs::remove(path));
+    REQUIRE(client.save_resume_data_checked(identity->token->value, ResumeSaveMode::routine));
+    CHECK(fs::is_regular_file(path));
+    CHECK_FALSE(handle.need_save_resume_data());
+}
+
+TEST_CASE("queued checkpoints capture current staged file-priority intent")
+{
+    bridge_tests::TemporaryDirectory directory;
+    TTorrentClient client((directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+    client.stop_alert_worker();
+    TorrentIdentity *identity = nullptr;
+    auto const info = make_torrent_info(false);
+    static_cast<void>(BRIDGE_WITH_CLIENT_LOCK(client,
+        add_metadata_torrent(client, *info, directory.path(), identity)));
+    REQUIRE(identity != nullptr);
+    auto const pending = BRIDGE_WITH_CLIENT_LOCK(client, client.collect_resume_handles());
+    REQUIRE(pending.size() == 1U);
+    std::array<char, 512> error{};
+    std::uint8_t completed = 0;
+    REQUIRE(::TorrentClientSetFilePriority(
+        &client, identity->token->value, 0, TTORRENT_FILE_PRIORITY_HIGH,
+        &completed, error.data(), static_cast<int32_t>(error.size())) == 0);
+    REQUIRE(client.save_resume_handle(pending.front(), kFullResumeSaveFlags,
+        std::chrono::steady_clock::now() + kResumeCaptureTimeout));
+    auto const saved = read_file(directory.path() / "State" / "ResumeData"
+        / (primary_hash_key(info->info_hashes()) + std::string(kResumeExtension)), kMaxResumeFileBytes);
+    REQUIRE(saved);
+    lt::error_code parse_error;
+    auto const restored = lt::read_resume_data(lt::span<char const>{*saved}, parse_error);
+    REQUIRE_FALSE(parse_error);
+    REQUIRE(restored.file_priorities.size() == 1U);
+    CHECK(restored.file_priorities.front() == lt::top_priority);
+}

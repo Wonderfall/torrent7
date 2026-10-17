@@ -559,6 +559,17 @@ restricted permissions, file sync, rename, and directory sync; it never
 retains retryable encoded data or a long-lived removal-marker index. Startup
 recovery is likewise a bounded native directory scan before libtorrent restore.
 
+Conditional saves skip unchanged native state. Every emitted checkpoint follows
+an acknowledged disk fence that flushes the private partfile's slot mapping and
+reports storage errors. Capture, durable commit, and acknowledgement are serialized;
+only the captured native revision is acknowledged after a successful commit.
+State is captured before enqueueing its fence, so later writes cannot enter a
+checkpoint whose storage barrier has already run.
+Concurrent changes and failed commits remain dirty. Native full-save batches share
+a 20-second capture deadline, and late disk callbacks retain only owned native state.
+This ordering covers abrupt helper loss; it does not claim power-loss durability
+for every filesystem containing payload data.
+
 Pure size, shape, and policy rules are enforced in Swift where they drive app
 behavior. Raw magnet text is parsed once by the shared `TorrentMetainfo` Swift
 module before XPC. The typed result is revalidated during decoding, then lowered

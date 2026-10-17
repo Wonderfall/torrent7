@@ -552,6 +552,7 @@ let package = Package(
                 "Tests/TorrentBridgeTests/BridgeInputValidationTests.cpp",
                 "Tests/TorrentBridgeTests/BridgePersistenceTests.cpp",
                 "Tests/TorrentBridgeTests/BridgePointerAuthenticationTests.cpp",
+                "Tests/TorrentBridgeTests/BridgeResumeCheckpointTests.cpp",
                 "Tests/TorrentBridgeTests/BridgeSkippedFileStorageTests.cpp",
                 "Tests/TorrentBridgeTests/BridgeSLSThunks.cpp",
                 "Tests/TorrentBridgeTests/BridgeStringTests.cpp",

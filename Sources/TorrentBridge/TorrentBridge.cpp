@@ -4331,6 +4331,9 @@ extern "C" int32_t TorrentClientSetFilePriority(
             return bridge_error(1, "Invalid file priority.");
         }
 
+        // A checkpoint must commit before a priority transition can move its
+        // completed bytes between payload storage and the private partfile.
+        std::scoped_lock checkpoint_guard(client->resume_capture_lock);
         std::optional<lt::torrent_handle> handle;
         std::shared_future<lt::error_code> completion;
         {
