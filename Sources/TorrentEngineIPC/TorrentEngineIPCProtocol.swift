@@ -3,7 +3,7 @@ import TorrentEngineModel
 package import XPC
 
 package enum TorrentEngineIPCProtocol {
-    package static let version: UInt64 = 15
+    package static let version: UInt64 = 16
 }
 
 package enum TorrentEngineIPCLimits {
@@ -253,6 +253,7 @@ package enum TorrentEngineIPCFailureCode: UInt64, Sendable {
     case controllerBusy = 2
     case serviceShuttingDown = 3
     case operationOutcomeUnknown = 4
+    case datasetExpired = 5
 }
 
 package struct TorrentEngineIPCHeader: Equatable, Sendable {

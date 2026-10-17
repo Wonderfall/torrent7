@@ -1677,6 +1677,9 @@ final class TorrentStore {
             return false
         case .requestTimedOut(let outcomeUnknown):
             return outcomeUnknown
+        case .datasetExpired:
+            // Expiry is valid only for reads, never for a storage mutation.
+            return true
         case .connectionFailed, .connectionCancelled, .invalidReply,
              .engineRestarted, .operationOutcomeUnknown,
              .recoveryDeadlineExceeded:

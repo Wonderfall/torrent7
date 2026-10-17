@@ -1801,6 +1801,164 @@ struct TorrentXPCClientSecurityTests {
         #expect(transport.sequences == [1, 2, 3])
     }
 
+    @Test("Expired polls discard partial results and retry once from the committed revision",
+          arguments: [DatasetExpiryScenario.retrySucceeds, .expiresAgain, .cleanupFails, .cancelDuringCleanup])
+    private func expiredPollRecovery(_ scenario: DatasetExpiryScenario) async throws {
+        let epoch = epoch
+        let snapshotID = UUID()
+        let trackerID = UUID()
+        let freshSnapshotID = UUID()
+        let freshTrackerID = UUID()
+        let pollCount = Mutex(0)
+        let closedIDs = Mutex([UUID]())
+        let cleanupGate = AsyncRequestBlocker()
+        let torrent = makeDatasetTorrent(savePath: testPath("expired-poll"))
+        let transport = ScriptedTorrentEngineTransport { request in
+            switch request.header.operation {
+            case .handshake:
+                return try successReply(
+                    TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.2"),
+                    for: request, epoch: epoch
+                )
+            case .poll:
+                let poll: TorrentEngineIPCPollRequest = try decodeRequest(request)
+                #expect(poll.snapshotRevision == 41)
+                let attempt = pollCount.withLock { $0 += 1; return $0 }
+                if attempt == 2 {
+                    #expect(closedIDs.withLock { $0 } == [snapshotID, trackerID])
+                }
+                let first = attempt == 1
+                return try successReply(
+                    TorrentEngineIPCPollResponse(
+                        dirtyMask: 0, alertErrors: [], networkStatus: .empty,
+                        bridgeHealth: .healthy,
+                        networkInterfaceSnapshot: TorrentNetworkInterfaceSnapshot(revision: 1, interfaces: []),
+                        snapshotDataset: TorrentEngineIPCDatasetDescriptor(
+                            id: first ? snapshotID : freshSnapshotID,
+                            kind: .torrentSnapshots, revision: first ? 42 : 43,
+                            itemCount: first || scenario == .expiresAgain ? 1 : 0,
+                            pageCount: first || scenario == .expiresAgain ? 1 : 0
+                        ),
+                        trackerHostDataset: TorrentEngineIPCDatasetDescriptor(
+                            id: first ? trackerID : freshTrackerID,
+                            kind: .trackerHosts, revision: first ? 42 : 43,
+                            itemCount: first ? 1 : 0, pageCount: first ? 1 : 0
+                        )
+                    ),
+                    for: request, epoch: epoch
+                )
+            case .readDataset:
+                let read: TorrentEngineIPCReadDatasetRequest = try decodeRequest(request)
+                if read.id == snapshotID {
+                    return try successReply(
+                        TorrentEngineIPCDatasetPage(
+                            id: snapshotID, kind: .torrentSnapshots, page: 0,
+                            encodedItems: try TorrentEngineIPCJSONCodec.encode(
+                                [torrent], maximumBytes: TorrentEngineIPCLimits.maximumDatasetPageBytes,
+                                limits: TorrentEngineIPCLimits.datasetPageJSONLimits
+                            )
+                        ),
+                        for: request, epoch: epoch
+                    )
+                }
+                return try TorrentEngineXPCTransport.validateDecodedReply(
+                    TorrentEngineIPCReply(
+                        header: request.header, engineEpoch: epoch, status: .failure,
+                        failureCode: .datasetExpired, errorMessage: "Expired"
+                    ),
+                    for: request
+                )
+            case .closeDataset:
+                let close: TorrentEngineIPCCloseDatasetRequest = try decodeRequest(request)
+                closedIDs.withLock { $0.append(close.id) }
+                if scenario == .cleanupFails && close.id == trackerID {
+                    throw TorrentEngineClientError.serviceTemporarilyUnavailable("Cleanup interrupted")
+                }
+                if scenario == .cancelDuringCleanup && close.id == trackerID {
+                    await cleanupGate.block()
+                }
+                return try successReply(TorrentEngineIPCEmpty(), for: request, epoch: epoch)
+            default:
+                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
+            }
+        }
+        let client = try await makeClient(transport: transport)
+        let poll = Task {
+            try await client.poll(
+                since: 41, sortedBy: .name, direction: .ascending, includeTrackerHosts: true
+            )
+        }
+        if scenario == .cancelDuringCleanup {
+            await cleanupGate.waitUntilBlocked()
+            poll.cancel()
+            await cleanupGate.release()
+        }
+        do {
+            let result = try await poll.value
+            #expect(scenario == .retrySucceeds)
+            #expect(result.snapshotBatch?.revision == 43)
+            #expect(result.snapshotBatch?.torrents.isEmpty == true)
+            #expect(result.trackerHostBatch?.revision == 43)
+        } catch is CancellationError {
+            #expect(scenario == .cancelDuringCleanup)
+        } catch {
+            let failure = try #require(error as? TorrentEngineClientError)
+            switch scenario {
+            case .retrySucceeds, .cancelDuringCleanup:
+                Issue.record("Unexpected retry failure: \(failure)")
+            case .expiresAgain:
+                guard case .datasetExpired = failure else {
+                    Issue.record("Expected recoverable expiry, got \(failure)")
+                    return
+                }
+            case .cleanupFails:
+                guard case .connectionFailed = failure else {
+                    Issue.record("Expected controller replacement, got \(failure)")
+                    return
+                }
+            }
+        }
+        let retried = scenario == .retrySucceeds || scenario == .expiresAgain
+        #expect(pollCount.withLock { $0 } == (retried ? 2 : 1))
+        #expect(client.isAvailable == (scenario != .cleanupFails))
+        #expect(client.recoveryDisposition == (scenario == .cleanupFails ? .replaceController : .none))
+        #expect(transport.isCancelled == (scenario == .cleanupFails))
+        #expect(closedIDs.withLock { $0 } == (retried
+            ? [snapshotID, trackerID, freshSnapshotID, freshTrackerID]
+            : [snapshotID, trackerID]))
+    }
+
+    @Test("Dataset expiry is accepted only for correlated page-read failures",
+          arguments: TorrentEngineIPCOperation.allCases)
+    func datasetExpiryReplyScope(_ operation: TorrentEngineIPCOperation) throws {
+        let request = TorrentEngineIPCRequest(header: TorrentEngineIPCHeader(
+            requestID: UUID(), controllerID: UUID(), sequence: 1,
+            operation: operation, operationID: UUID(), expectedEpoch: epoch
+        ))
+        let reply = TorrentEngineIPCReply(
+            header: request.header, engineEpoch: epoch, status: .failure,
+            failureCode: .datasetExpired, errorMessage: "Expired"
+        )
+        do {
+            _ = try TorrentEngineXPCTransport.validateDecodedReply(reply, for: request)
+            Issue.record("Expected a typed failure")
+        } catch TorrentEngineClientError.datasetExpired {
+            #expect(operation == .readDataset)
+        } catch TorrentEngineClientError.invalidReply {
+            #expect(operation != .readDataset)
+        }
+        let uncorrelated = TorrentEngineIPCRequest(header: TorrentEngineIPCHeader(
+            requestID: UUID(), controllerID: request.header.controllerID, sequence: 1,
+            operation: operation, operationID: request.header.operationID, expectedEpoch: epoch
+        ))
+        do {
+            _ = try TorrentEngineXPCTransport.validateDecodedReply(reply, for: uncorrelated)
+            Issue.record("Expected correlation rejection")
+        } catch TorrentEngineClientError.invalidReply {
+            // An expiry code must never bypass request correlation.
+        }
+    }
+
     private func makeClient(
         transport: ScriptedTorrentEngineTransport
     ) async throws -> TorrentXPCClient {
@@ -1874,6 +2032,13 @@ struct TorrentXPCClientSecurityTests {
         )
     }
 
+}
+
+private enum DatasetExpiryScenario: Sendable {
+    case retrySucceeds
+    case expiresAgain
+    case cleanupFails
+    case cancelDuringCleanup
 }
 
 enum InvalidReplyKind: CaseIterable, Sendable {

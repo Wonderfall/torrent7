@@ -29,8 +29,10 @@ private enum UnknownEnvelopeFields: CaseIterable, Sendable {
 
 @Suite("Torrent engine IPC envelopes")
 struct TorrentEngineIPCEnvelopeTests {
-    @Test("Request and reply envelopes round trip")
-    func envelopeRoundTrips() throws {
+    @Test("Request and reply envelopes round trip", arguments: [
+        TorrentEngineIPCFailureCode.controllerBusy, .datasetExpired,
+    ])
+    func envelopeRoundTrips(_ failureCode: TorrentEngineIPCFailureCode) throws {
         let header = makeHeader()
         let request = TorrentEngineIPCRequest(
             header: header,
@@ -53,7 +55,7 @@ struct TorrentEngineIPCEnvelopeTests {
             header: header,
             engineEpoch: UUID(),
             status: .failure,
-            failureCode: .controllerBusy,
+            failureCode: failureCode,
             errorMessage: "The operation failed safely.",
             payload: Data([3, 4, 5])
         )
@@ -539,7 +541,7 @@ struct TorrentEngineIPCEnvelopeTests {
 
     @Test("Stable dataset and hint operation numbers")
     func stableOperationNumbers() {
-        #expect(TorrentEngineIPCProtocol.version == 15)
+        #expect(TorrentEngineIPCProtocol.version == 16)
         #expect(TorrentEngineIPCOperation(rawValue: 7) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 10) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 11) == nil)
@@ -559,6 +561,7 @@ struct TorrentEngineIPCEnvelopeTests {
         #expect(TorrentEngineIPCFailureCode.controllerBusy.rawValue == 2)
         #expect(TorrentEngineIPCFailureCode.serviceShuttingDown.rawValue == 3)
         #expect(TorrentEngineIPCFailureCode.operationOutcomeUnknown.rawValue == 4)
+        #expect(TorrentEngineIPCFailureCode.datasetExpired.rawValue == 5)
     }
 
     @Test("Queue restoration round trips bounded positions")

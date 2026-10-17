@@ -15,6 +15,7 @@ package enum TorrentEngineClientError: LocalizedError, Sendable {
     case requestExpiredBeforeSubmission
     case requestTimedOut(outcomeUnknown: Bool)
     case recoveryDeadlineExceeded
+    case datasetExpired
 
     package var errorDescription: String? {
         switch self {
@@ -44,6 +45,8 @@ package enum TorrentEngineClientError: LocalizedError, Sendable {
                 : "The isolated torrent engine did not respond before its deadline."
         case .recoveryDeadlineExceeded:
             "The isolated torrent engine could not recover before its deadline."
+        case .datasetExpired:
+            "The torrent engine snapshot expired. Try refreshing again."
         }
     }
 }
@@ -405,6 +408,11 @@ package protocol TorrentEngineIPCTransport: Sendable {
                 throw TorrentEngineClientError.serviceTemporarilyUnavailable(
                     reply.errorMessage ?? ""
                 )
+            case .datasetExpired:
+                guard request.header.operation == .readDataset else {
+                    throw TorrentEngineClientError.invalidReply
+                }
+                throw TorrentEngineClientError.datasetExpired
             case .operationRejected, nil:
                 throw TorrentEngineClientError.serviceRejected(reply.errorMessage ?? "")
             case .operationOutcomeUnknown:
@@ -427,7 +435,7 @@ extension TorrentEngineClientError {
              .operationOutcomeUnknown,
              .recoveryDeadlineExceeded:
             true
-        case .serviceRejected, .serviceTemporarilyUnavailable,
+        case .serviceRejected, .serviceTemporarilyUnavailable, .datasetExpired,
              .requestQueueFull,
              .requestExpiredBeforeSubmission:
             false

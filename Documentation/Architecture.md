@@ -102,13 +102,26 @@ completed shared handle remains available to later callers. One 305-second
 connection deadline covers discovery, launch, the command handshake, and all
 retry attempts.
 
-Command IPC version 14 uses typed, operation-specific envelopes with bounded
+Command IPC version 16 uses typed, operation-specific envelopes with bounded
 JSON and raw attachments. Requests carry an engine epoch, monotonic sequence,
 and replay identifier. The implementation bounds queue depth, nesting, value
 count, strings, raw torrent bytes, piece-map data, paged datasets, and response
 sizes before allocating or decoding deeply.
 Envelope UUIDs must occupy exactly 36 raw XPC bytes and error messages at most
 4 KiB; these lengths are checked before conversion to Swift strings.
+
+Poll datasets retain their controller ownership after their 30-second page
+lifetime expires. Expiration releases encoded pages; the small ownership records
+remain within the four-dataset quota until close or disconnect. Only a valid
+page read of an expired, controller-owned dataset returns `datasetExpired`.
+Its owner can still close it successfully; unknown IDs, foreign ownership, and
+invalid page numbers remain rejections.
+
+The client closes every dataset from an expired attempt before retrying the
+read-only poll once, from the caller's last committed revision. It publishes
+only a complete result. Repeated expiry remains recoverable; uncertain cleanup
+requires controller replacement, without upgrading expiry to a terminal policy
+failure. Expiry codes on other operations or uncorrelated replies are invalid.
 
 Errors after native mutation begins are treated as commit-ambiguous. The client
 does not retry or report a definite rejection when libtorrent may already have

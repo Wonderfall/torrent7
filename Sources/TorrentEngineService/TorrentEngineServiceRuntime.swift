@@ -26,10 +26,6 @@ private enum TorrentEngineServiceRuntimeError: LocalizedError {
     case invalidFilePriorities
     case operationOutcomeUnknown(String)
     case unsupportedOperation
-    case tooManyOpenDatasets
-    case datasetStorageLimitExceeded
-    case unknownDataset
-    case invalidDatasetPage
     case networkBindingRejected(TorrentNetworkBindingBlockReason)
 
     var errorDescription: String? {
@@ -74,26 +70,10 @@ private enum TorrentEngineServiceRuntimeError: LocalizedError {
                 : message
         case .unsupportedOperation:
             "The requested torrent engine operation is not supported."
-        case .tooManyOpenDatasets:
-            "Too many torrent engine datasets are open."
-        case .datasetStorageLimitExceeded:
-            "The torrent engine dataset storage limit was exceeded."
-        case .unknownDataset:
-            "The torrent engine dataset is unavailable or expired."
-        case .invalidDatasetPage:
-            "The requested torrent engine dataset page is invalid."
         case .networkBindingRejected(let reason):
             reason.userMessage
         }
     }
-}
-
-private struct TorrentEngineServiceDataset: Sendable {
-    let descriptor: TorrentEngineIPCDatasetDescriptor
-    let ownerControllerID: UUID
-    let pages: [Data]
-    let byteCount: Int
-    let expiresAt: ContinuousClock.Instant
 }
 
 private struct TorrentEngineControllerLease: Equatable, Sendable {
@@ -153,7 +133,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
     private var networkAuthority: TorrentNetworkBindingAuthority?
     private var networkAuthorityID: UUID?
     private var networkAuthorityStartIsPending = false
-    private var datasetsByID = [UUID: TorrentEngineServiceDataset]()
+    private var datasets = TorrentEngineServiceDatasetStore()
     private var transactionIsActive = false
     private var isShuttingDown = false
     private var isHandlingRequest = false
@@ -216,7 +196,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
                 inFlightError = .controllerBusy
             case .serviceShuttingDown:
                 inFlightError = .serviceShuttingDown
-            case .operationRejected, .operationOutcomeUnknown:
+            case .operationRejected, .operationOutcomeUnknown, .datasetExpired:
                 inFlightError = .concurrentRequest
             }
             do {
@@ -703,11 +683,11 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
 
         case .readDataset:
             let value = try decode(TorrentEngineIPCReadDatasetRequest.self, from: request)
-            let page = try readDataset(value, controllerID: scope.controllerID)
+            let page = try datasets.read(value, controllerID: scope.controllerID, now: clock.now)
             return try encode(page, for: operation)
         case .closeDataset:
             let value = try decode(TorrentEngineIPCCloseDatasetRequest.self, from: request)
-            try closeDataset(value.id, controllerID: scope.controllerID)
+            try datasets.close(value.id, controllerID: scope.controllerID, now: clock.now)
             return try encode(TorrentEngineIPCEmpty(), for: operation)
 
         case .changeHint:
@@ -801,7 +781,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         _ request: TorrentEngineIPCRestartRequest,
         controllerLease: TorrentEngineControllerLease
     ) async throws {
-        datasetsByID.removeAll()
+        datasets.removeAll()
         do {
             if let networkAuthority {
                 await networkAuthority.forceBlock(reason: .authorizationReplaced)
@@ -982,11 +962,11 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         }
         try requireActiveController(controllerLease)
 
-        cleanupExpiredDatasets()
+        datasets.expire(at: clock.now)
         var candidates = [TorrentEngineServiceDataset]()
         if let batch = result.snapshotBatch {
             guard batch.torrents.count <= TorrentEngineLimits.maximumTorrentSnapshotCount else {
-                throw TorrentEngineServiceRuntimeError.datasetStorageLimitExceeded
+                throw TorrentEngineServiceDatasetError.storageLimitExceeded
             }
             candidates.append(try makeDataset(
                 kind: .torrentSnapshots,
@@ -997,7 +977,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         }
         if let batch = result.trackerHostBatch {
             guard batch.hosts.count <= TorrentEngineLimits.maximumTrackerHostRowCount else {
-                throw TorrentEngineServiceRuntimeError.datasetStorageLimitExceeded
+                throw TorrentEngineServiceDatasetError.storageLimitExceeded
             }
             candidates.append(try makeDataset(
                 kind: .trackerHosts,
@@ -1018,7 +998,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             trackerHostDataset: trackerHosts?.descriptor
         )
         let payload = try encode(response, for: operation)
-        try registerDatasets(candidates)
+        try datasets.register(candidates)
         return payload
     }
 
@@ -1228,9 +1208,11 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         return TorrentEngineServiceDataset(
             descriptor: descriptor,
             ownerControllerID: ownerControllerID,
-            pages: encoded.pages,
-            byteCount: encoded.byteCount,
-            expiresAt: clock.now.advanced(by: Self.datasetLifetime)
+            contents: .available(
+                pages: encoded.pages,
+                byteCount: encoded.byteCount,
+                expiresAt: clock.now.advanced(by: Self.datasetLifetime)
+            )
         )
     }
 
@@ -1249,7 +1231,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         var index = 0
         while index < items.count {
             guard pages.count < TorrentEngineIPCLimits.maximumDatasetPageCount else {
-                throw TorrentEngineServiceRuntimeError.datasetStorageLimitExceeded
+                throw TorrentEngineServiceDatasetError.storageLimitExceeded
             }
             var pageEnd = min(
                 index + TorrentEngineIPCLimits.maximumDatasetPageItemCount,
@@ -1263,7 +1245,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
                 } catch TorrentEngineIPCError.payloadTooLarge {
                     let count = pageEnd - index
                     guard count > 1 else {
-                        throw TorrentEngineServiceRuntimeError.datasetStorageLimitExceeded
+                        throw TorrentEngineServiceDatasetError.storageLimitExceeded
                     }
                     pageEnd = index + max(1, count / 2)
                 }
@@ -1271,70 +1253,13 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             guard let encodedPage,
                   encodedPage.count <= TorrentEngineIPCLimits.maximumDatasetPageBytes,
                   encodedPage.count <= TorrentEngineIPCLimits.maximumDatasetAggregateBytes - byteCount else {
-                throw TorrentEngineServiceRuntimeError.datasetStorageLimitExceeded
+                throw TorrentEngineServiceDatasetError.storageLimitExceeded
             }
             pages.append(encodedPage)
             byteCount += encodedPage.count
             index = pageEnd
         }
         return (pages, byteCount)
-    }
-
-    private func registerDatasets(_ datasets: [TorrentEngineServiceDataset]) throws {
-        guard datasetsByID.count <= TorrentEngineIPCLimits.maximumOpenDatasets - datasets.count else {
-            throw TorrentEngineServiceRuntimeError.tooManyOpenDatasets
-        }
-        let currentBytes = datasetsByID.values.reduce(into: 0) { $0 += $1.byteCount }
-        guard Set(datasets.map(\.descriptor.id)).count == datasets.count else {
-            throw TorrentEngineServiceRuntimeError.datasetStorageLimitExceeded
-        }
-        var projectedBytes = currentBytes
-        for dataset in datasets {
-            guard dataset.byteCount <= TorrentEngineIPCLimits.maximumDatasetAggregateBytes - projectedBytes else {
-                throw TorrentEngineServiceRuntimeError.datasetStorageLimitExceeded
-            }
-            guard datasetsByID[dataset.descriptor.id] == nil else {
-                throw TorrentEngineServiceRuntimeError.datasetStorageLimitExceeded
-            }
-            projectedBytes += dataset.byteCount
-        }
-        for dataset in datasets {
-            datasetsByID[dataset.descriptor.id] = dataset
-        }
-    }
-
-    private func readDataset(
-        _ request: TorrentEngineIPCReadDatasetRequest,
-        controllerID: UUID
-    ) throws -> TorrentEngineIPCDatasetPage {
-        cleanupExpiredDatasets()
-        guard let dataset = datasetsByID[request.id],
-              dataset.ownerControllerID == controllerID else {
-            throw TorrentEngineServiceRuntimeError.unknownDataset
-        }
-        guard dataset.pages.indices.contains(request.page) else {
-            throw TorrentEngineServiceRuntimeError.invalidDatasetPage
-        }
-        return TorrentEngineIPCDatasetPage(
-            id: dataset.descriptor.id,
-            kind: dataset.descriptor.kind,
-            page: request.page,
-            encodedItems: dataset.pages[request.page]
-        )
-    }
-
-    private func closeDataset(_ id: UUID, controllerID: UUID) throws {
-        cleanupExpiredDatasets()
-        guard let dataset = datasetsByID[id],
-              dataset.ownerControllerID == controllerID else {
-            throw TorrentEngineServiceRuntimeError.unknownDataset
-        }
-        datasetsByID.removeValue(forKey: id)
-    }
-
-    private func cleanupExpiredDatasets() {
-        let now = clock.now
-        datasetsByID = datasetsByID.filter { now < $0.value.expiresAt }
     }
 
     private func requireEngine() throws -> TorrentEngine {
@@ -1533,14 +1458,18 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         switch failureCode {
         case .controllerBusy, .serviceShuttingDown:
             true
-        case .operationRejected, .operationOutcomeUnknown:
+        case .operationRejected, .operationOutcomeUnknown, .datasetExpired:
             false
         }
     }
 
-    private static func failureCode(
+    static func failureCode(
         for error: any Error
     ) -> TorrentEngineIPCFailureCode {
+        if let datasetError = error as? TorrentEngineServiceDatasetError,
+           case .expired = datasetError {
+            return .datasetExpired
+        }
         if let runtimeError = error as? TorrentEngineServiceRuntimeError,
            case .operationOutcomeUnknown = runtimeError {
             return .operationOutcomeUnknown
@@ -1652,7 +1581,7 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
         self.engine = nil
         brokerClient?.cancel()
         brokerClient = nil
-        datasetsByID.removeAll()
+        datasets.removeAll()
 
         activePeerToken = nil
         activeControllerID = nil
