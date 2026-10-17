@@ -1314,6 +1314,9 @@ int32_t TorrentClientSetFilePriority(
     uint64_t native_token,
     int32_t file_index,
     int32_t priority,
+    // True when no disk transition remains outstanding, including known failure.
+    // On false, quiesce the client before reducing payload authority.
+    uint8_t * TORRENT_BRIDGE_NULLABLE transition_completed_out TORRENT_BRIDGE_NOESCAPE,
     char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;

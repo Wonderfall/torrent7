@@ -338,7 +338,17 @@ used during magnet promotion.
 
 File availability is enabled in the broker before priority increases are sent
 to the engine. Restrictions are committed after native handle-release
-operations. Folder priority changes occupy one store queue operation and persist
+operations. Provider-backed skipped files always use private part storage, even
+when the original payload exists. A live skip copies existing bytes into that
+storage before closing the payload handle and acknowledging the disk fence;
+this preserves both shared pieces and completed pieces still advertised to peers.
+Copying uses a fixed 64 KiB buffer and a 20-second deadline, and may require
+temporary space proportional to the existing file. Copy or metadata-write failure
+retains the old priority and access. A separate 30-second acknowledgement deadline
+also covers stuck I/O; an unconfirmed transition requires joined engine teardown
+before the GUI rolls back access grants. Initial skipped imports do not open their
+payload; wanted pieces are verified/downloaded against private part storage.
+Folder priority changes occupy one store queue operation and persist
 availability once per phase. Cancellation or partial failure preserves confirmed
 changes and revokes unused grants before the queue advances; a failed durable
 update stops the engine and revokes the claim's live registration.

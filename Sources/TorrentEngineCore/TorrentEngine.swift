@@ -1206,15 +1206,32 @@ private struct AddedTorrentIdentity: Sendable {
         queueStore = nextQueueStore
     }
 
-    // SAFETY: Ownership/lifetime: the actor-owned handle and local error buffer live through
+    // SAFETY: Ownership/lifetime: the actor-owned handle and local completion/error buffers live through
     // the synchronous call; bounds/alignment: token/index/priority are validated typed scalars
     // and the error span is bounded; synchronization: actor isolation serializes mutation;
     // safe alternative: native file-priority mutation requires the C bridge ABI.
     package func setFilePriority(id: String, fileIndex: Int32, priority: TorrentFilePriority) throws {
         let client = try unsafe requireClient()
         let nativeToken = try nativeToken(for: id)
-        try throwingBridgeCall { errorBuffer in
-            unsafe TorrentClientSetFilePriority(client, nativeToken, fileIndex, priority.bridgeValue, &errorBuffer)
+        var transitionCompleted: UInt8 = 0
+        do {
+            try throwingBridgeCall { errorBuffer in
+                unsafe TorrentClientSetFilePriority(
+                    client, nativeToken, fileIndex, priority.bridgeValue,
+                    &transitionCompleted, &errorBuffer
+                )
+            }
+            guard transitionCompleted == 1 else {
+                throw TorrentEngineError.bridgeError("File priority storage completion was not confirmed.")
+            }
+        } catch {
+            if transitionCompleted != 1 {
+                runtimeFailureMessage.withLock { $0 = error.localizedDescription }
+                // A timed-out disk job may still hold payload capabilities. Join
+                // teardown before the GUI rolls back any temporary access grants.
+                destroyClient(waitForShutdown: true)
+            }
+            throw error
         }
     }
 

@@ -4314,69 +4314,92 @@ extern "C" int32_t TorrentClientSetFilePriority(
     std::uint64_t const native_token,
     int32_t file_index,
     int32_t priority,
+    std::uint8_t *transition_completed_out,
     char *error_out,
     int32_t error_capacity
 ) noexcept
 {
+    if (transition_completed_out != nullptr) {
+        *transition_completed_out = bridge_bool(true);
+    }
     WakeCallbackInvocation wake;
     int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 2, [&]() -> BridgeResult {
-        if (client == nullptr || native_token == 0U) {
+        if (client == nullptr || native_token == 0U || transition_completed_out == nullptr) {
             return bridge_error(1, "Missing torrent client or native token.");
         }
         if (file_index < 0 || !is_valid_file_priority(priority)) {
             return bridge_error(1, "Invalid file priority.");
         }
 
+        std::optional<lt::torrent_handle> handle;
+        std::shared_future<lt::error_code> completion;
+        {
+            std::scoped_lock guard(client->lock);
+            LockedChangePublisher publisher(*client, wake);
+            BridgeResult const persistence = client->ensure_persistence_available(2);
+            if (!persistence) {
+                return persistence;
+            }
+
+            handle = client->find(native_token);
+            if (!handle) {
+                return bridge_error(2, "Torrent not found.");
+            }
+
+            std::shared_ptr<lt::torrent_info const> const torrent_file = handle->torrent_file();
+            if (!torrent_file || !torrent_file->is_valid()) {
+                return bridge_error(2, "Torrent metadata is not available.");
+            }
+
+            lt::renamed_files const renamed_files = handle->get_renamed_files();
+            BridgeResult const valid_info = validate_torrent_info(
+                *torrent_file,
+                renamed_files.export_filenames(torrent_file->layout())
+            );
+            if (!valid_info) {
+                return valid_info;
+            }
+            if (file_index >= torrent_file->layout().num_files()) {
+                return bridge_error(2, "File not found.");
+            }
+
+            TorrentIdentity *const identity = identity_from_handle(*handle);
+            if (identity != nullptr && !identity->storage_activation) {
+                identity->intended_file_priorities.resize(
+                    static_cast<std::size_t>(torrent_file->layout().num_files()),
+                    identity->intended_default_dont_download
+                        ? lt::dont_download
+                        : lt::default_priority
+                );
+                identity->intended_file_priorities.at(
+                    static_cast<std::size_t>(file_index)
+                ) = file_priority_from_bridge(priority);
+                handle->file_priority(
+                    lt::file_index_t(file_index),
+                    lt::dont_download
+                );
+            } else {
+                *transition_completed_out = bridge_bool(false);
+                completion = handle->set_file_priority_checked(
+                    lt::file_index_t(file_index), file_priority_from_bridge(priority)
+                );
+            }
+        }
+        // Never wait while holding the bridge state lock: disk completion and
+        // callback processing must remain able to make progress. The future owns
+        // its state after timeout; Swift must quiesce the engine before rollback.
+        if (completion.valid()) {
+            if (completion.wait_for(std::chrono::seconds(30)) != std::future_status::ready) {
+                return bridge_error(2, "File priority storage transition timed out.");
+            }
+            lt::error_code const error = completion.get();
+            *transition_completed_out = bridge_bool(true);
+            if (error) {
+                return bridge_error(2, "File priority storage transition failed: " + error.message());
+            }
+        }
         std::scoped_lock guard(client->lock);
         LockedChangePublisher publisher(*client, wake);
-        BridgeResult const persistence = client->ensure_persistence_available(2);
-        if (!persistence) {
-            return persistence;
-        }
-
-        auto handle = client->find(native_token);
-        if (!handle) {
-            return bridge_error(2, "Torrent not found.");
-        }
-
-        std::shared_ptr<lt::torrent_info const> const torrent_file = handle->torrent_file();
-        if (!torrent_file || !torrent_file->is_valid()) {
-            return bridge_error(2, "Torrent metadata is not available.");
-        }
-
-        lt::renamed_files const renamed_files = handle->get_renamed_files();
-        BridgeResult const valid_info = validate_torrent_info(
-            *torrent_file,
-            renamed_files.export_filenames(torrent_file->layout())
-        );
-        if (!valid_info) {
-            return valid_info;
-        }
-        if (file_index >= torrent_file->layout().num_files()) {
-            return bridge_error(2, "File not found.");
-        }
-
-        TorrentIdentity *const identity = identity_from_handle(*handle);
-        if (identity != nullptr && !identity->storage_activation) {
-            identity->intended_file_priorities.resize(
-                static_cast<std::size_t>(torrent_file->layout().num_files()),
-                identity->intended_default_dont_download
-                    ? lt::dont_download
-                    : lt::default_priority
-            );
-            identity->intended_file_priorities.at(
-                static_cast<std::size_t>(file_index)
-            ) = file_priority_from_bridge(priority);
-            handle->file_priority(
-                lt::file_index_t(file_index),
-                lt::dont_download
-            );
-        } else {
-            handle->file_priority(
-                lt::file_index_t(file_index),
-                file_priority_from_bridge(priority)
-            );
-        }
         client->request_save_locked(*handle);
         publisher.add(client->mark_files_changed());
         publisher.add(client->observe_torrent_handle(*handle));

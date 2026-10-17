@@ -351,11 +351,13 @@ int32_t TorrentClientSetFilePriority(
     int32_t error_capacity
 )
 {
+    std::uint8_t completed = 0;
     return ::TorrentClientSetFilePriority(
         client,
         native_token(*client, id),
         file_index,
         priority,
+        &completed,
         error,
         error_capacity
     );
@@ -5420,9 +5422,10 @@ TEST_CASE("validated staged magnets retain metadata and user intent across resum
                     client, client.metadata_validation_pending.contains(identity)
                 ));
                 if (change_priority) {
+                    std::uint8_t completed = 0;
                     REQUIRE(::TorrentClientSetFilePriority(
                         &client, identity->token->value, 0, TTORRENT_FILE_PRIORITY_HIGH,
-                        error.data(), static_cast<int32_t>(error.size())
+                        &completed, error.data(), static_cast<int32_t>(error.size())
                     ) == 0);
                 }
                 REQUIRE(client.save_resume_data_checked(identity->token->value, mode));

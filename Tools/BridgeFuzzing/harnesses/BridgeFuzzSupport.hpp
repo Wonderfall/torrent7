@@ -746,11 +746,13 @@ inline void exercise_detail_copies(TTorrentClient *client)
             &required_count,
             &available
         ));
+        std::uint8_t transition_completed = 0U;
         static_cast<void>(TorrentClientSetFilePriority(
             client,
             token,
             0,
             TTORRENT_FILE_PRIORITY_NORMAL,
+            &transition_completed,
             error.data(),
             error.capacity()
         ));

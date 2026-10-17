@@ -1,0 +1,366 @@
+diff --git a/include/libtorrent/aux_/pread_storage.hpp b/include/libtorrent/aux_/pread_storage.hpp
+index 49085c24c..27bcb6630 100644
+--- a/include/libtorrent/aux_/pread_storage.hpp
++++ b/include/libtorrent/aux_/pread_storage.hpp
+@@ -17,6 +17,7 @@ see LICENSE file.
+ #include <optional>
+ 
+ #include "libtorrent/fwd.hpp"
++#include "libtorrent/time.hpp"
+ #include "libtorrent/aux_/disk_job_fence.hpp"
+ #include "libtorrent/storage_defs.hpp"
+ #include "libtorrent/aux_/part_file.hpp"
+@@ -53,7 +54,7 @@ namespace libtorrent::aux {
+ 		bool has_any_file(storage_error&);
+ 		void set_file_priority(settings_interface const&
+ 			, aux::vector<download_priority_t, file_index_t>& prio
+-			, storage_error&);
++			, storage_error&, time_point deadline = clock_type::now() + seconds{20});
+ 		void rename_file(file_index_t index, std::string const& new_filename
+ 			, storage_error&);
+ 		void release_files(storage_error&);
+diff --git a/include/libtorrent/aux_/torrent.hpp b/include/libtorrent/aux_/torrent.hpp
+index d6016fadc..57a11c709 100644
+--- a/include/libtorrent/aux_/torrent.hpp
++++ b/include/libtorrent/aux_/torrent.hpp
+@@ -31,6 +31,7 @@ see LICENSE file.
+ #include <deque>
+ #include <limits> // for numeric_limits
+ #include <memory> // for unique_ptr
++#include <future>
+ #include <mutex>
+ #include <optional>
+ 
+@@ -750,6 +751,8 @@ namespace libtorrent::aux {
+ 		void piece_priorities(aux::vector<download_priority_t, piece_index_t>*) const;
+ 
+ 		void set_file_priority(file_index_t index, download_priority_t priority);
++		[[nodiscard]] std::shared_future<error_code> set_file_priority_checked(file_index_t index, download_priority_t priority);
++		void submit_checked_file_priority();
+ 		download_priority_t file_priority(file_index_t index) const;
+ 
+ 		void on_file_priority(storage_error const& err, aux::vector<download_priority_t, file_index_t> prios);
+@@ -1613,6 +1616,16 @@ namespace libtorrent::aux {
+ 		// this dictionary. Once the outstanding update comes back, all of these
+ 		// are applied in one batch
+ 		std::map<file_index_t, download_priority_t> m_deferred_file_priorities;
++		struct checked_file_priority
++		{
++			file_index_t index;
++			download_priority_t priority;
++			std::promise<error_code> completion;
++			bool submitted = false;
++		};
++		// Network-thread owned. Destruction breaks an abandoned promise without
++		// retaining any bridge/Swift state or borrowing a caller's stack.
++		std::unique_ptr<checked_file_priority> m_checked_file_priority;
+ 
+ 		// this object is used to track download progress of individual files
+ 		aux::file_progress m_file_progress;
+diff --git a/include/libtorrent/torrent_handle.hpp b/include/libtorrent/torrent_handle.hpp
+index f2f75259b..77fa6bfdc 100644
+--- a/include/libtorrent/torrent_handle.hpp
++++ b/include/libtorrent/torrent_handle.hpp
+@@ -26,6 +26,7 @@ see LICENSE file.
+ #include <set>
+ #include <functional>
+ #include <memory>
++#include <future>
+ 
+ #include "libtorrent/aux_/disable_warnings_push.hpp"
+ #if TORRENT_ABI_VERSION == 1
+@@ -1201,6 +1202,9 @@ namespace aux {
+ 		// supported. If a file has its priority set to 0 *after* it has already
+ 		// been created, it will not be moved into the partfile.
+ 		void file_priority(file_index_t index, download_priority_t priority) const;
++		// Resolves after the fenced storage transition and payload-handle release.
++		// Only one checked request may be outstanding per torrent.
++		[[nodiscard]] std::shared_future<error_code> set_file_priority_checked(file_index_t index, download_priority_t priority) const;
+ 		download_priority_t file_priority(file_index_t index) const;
+ 		void prioritize_files(std::vector<download_priority_t> const& files) const;
+ 		std::vector<download_priority_t> get_file_priorities() const;
+diff --git a/src/part_file.cpp b/src/part_file.cpp
+index 962f454a2..34552456c 100644
+--- a/src/part_file.cpp
++++ b/src/part_file.cpp
+@@ -385,7 +385,11 @@ namespace libtorrent::aux {
+ 				span<char> v = {buf.get(), block_to_copy};
+ 				int const bytes_read =
+ 					aux::pread_all(file.fd(), v, slot_offset(slot) + piece_offset, ec);
+-				if (bytes_read < 0) return;
++				if (bytes_read != block_to_copy)
++				{
++					if (!ec) ec = make_error_code(boost::system::errc::io_error);
++					return;
++				}
+ 
+ 				f(file_offset, {buf.get(), block_to_copy});
+ 
+@@ -393,27 +397,24 @@ namespace libtorrent::aux {
+ 				// the slot map
+ 				l.lock();
+ 
+-				if (block_to_copy == m_piece_size)
+-				{
+-					// since we released the lock, it's technically possible that
+-					// another thread removed this slot map entry, and invalidated
+-					// our iterator. Now that we hold the lock again, perform
+-					// another lookup to be sure.
+-					auto const j = m_piece_map.find(piece);
+-					if (j != m_piece_map.end())
+-					{
+-						// if the slot moved, that's really suspicious
+-						TORRENT_ASSERT(j->second == slot);
+-						m_free_slots.push_back(j->second);
+-						m_piece_map.erase(j);
+-						m_dirty_metadata = true;
+-					}
+-				}
++
+ 			}
+ 			file_offset += block_to_copy;
+ 			piece_offset = 0;
+ 			size -= block_to_copy;
+ 		}
++		// Only relinquish complete slots after every output write succeeded.
++		// A failed export must leave the skipped route fully readable.
++		m_free_slots.reserve(m_free_slots.size() + m_piece_map.size());
++		for (auto p = piece_index_t{int((offset + m_piece_size - 1) / m_piece_size)};
++			p < piece_index_t{int((offset + file_offset) / m_piece_size)}; ++p)
++		{
++			auto const i = m_piece_map.find(p);
++			if (i == m_piece_map.end()) continue;
++			m_free_slots.push_back(i->second);
++			m_piece_map.erase(i);
++			m_dirty_metadata = true;
++		}
+ 	}
+ 
+ 	void part_file::flush_metadata(error_code& ec)
+diff --git a/src/pread_storage.cpp b/src/pread_storage.cpp
+index 8631927dd..006d0bb68 100644
+--- a/src/pread_storage.cpp
++++ b/src/pread_storage.cpp
+@@ -13,6 +13,8 @@ see LICENSE file.
+ #include "libtorrent/hasher.hpp"
+ 
+ #include <ctime>
++#include <array>
++#include <chrono>
+ #include <algorithm>
+ #include <numeric>
+ #include <set>
+@@ -112,7 +114,7 @@ namespace libtorrent::aux {
+ 
+ 	void pread_storage::set_file_priority(settings_interface const& sett
+ 		, vector<download_priority_t, file_index_t>& prio
+-		, storage_error& ec)
++		, storage_error& ec, time_point const deadline)
+ 	{
+ 		// extend our file priorities in case it's truncated
+ 		// the default assumed priority is 4 (the default)
+@@ -135,6 +137,7 @@ namespace libtorrent::aux {
+ 			// priority 0, we allow re-trying them.
+ 			auto restore_prio = aux::scope_end([&] {
+ 				m_file_priority[i] = old_prio;
++				if (m_file_provider) m_pool.release(storage_index(), i);
+ 				prio = m_file_priority;
+ 			});
+ 
+@@ -179,22 +182,73 @@ namespace libtorrent::aux {
+ 			}
+ 			else if (old_prio != dont_download && new_prio == dont_download)
+ 			{
+-				// move stuff into the part file
+-				// this is not implemented yet.
+-				// so we just don't use a partfile for this file
+-
+-				bool file_exists;
+ 				if (m_file_provider)
+ 				{
+-					file_exists = m_file_provider->payload_size(i, ec.ec) >= 0;
+-					if (!file_exists && !ec.ec)
+-						ec.ec = make_error_code(boost::system::errc::io_error);
+-				}
+-				else
+-				{
+-					file_exists = confined_exists(
+-						m_save_path, fs.file_path(i), ec.ec);
++					// Existing verified pieces may still be advertised to peers, so
++					// preserve all existing bytes, including shared-piece fragments.
++					// Do not publish the route until the copy and header are complete.
++					need_partfile();
++					auto const size = m_file_provider->payload_size(i, ec.ec);
++					if (ec.ec || size < 0 || size > fs.file_size(i))
++					{
++						if (!ec.ec) ec.ec = errors::invalid_range;
++						ec.file(i);
++						ec.operation = operation_t::file_stat;
++						return;
++					}
++					if (size > 0)
++					{
++						auto source = open_file(sett, i, open_mode::read_only, ec);
++						if (ec) return;
++						std::array<char, 64 * 1024> buffer;
++						for (std::int64_t offset = 0; offset < size;)
++						{
++							if (clock_type::now() >= deadline)
++							{
++								ec.ec = make_error_code(boost::system::errc::timed_out);
++								ec.file(i);
++								ec.operation = operation_t::partfile_write;
++								return;
++							}
++							auto const absolute = fs.file_offset(i) + offset;
++							auto const piece = piece_index_t{int(absolute / files().piece_length())};
++							int const in_piece = int(absolute % files().piece_length());
++							int const count = int(std::min({size - offset,
++								std::int64_t(buffer.size()), std::int64_t(files().piece_length() - in_piece)}));
++							span<char> const block = span<char>{buffer}.first(count);
++							int const read = pread_all(source->fd(), block, offset, ec.ec);
++							if (read != count || ec.ec)
++							{
++								if (!ec.ec) ec.ec = make_error_code(boost::system::errc::io_error);
++								ec.file(i);
++								ec.operation = operation_t::file_read;
++								return;
++							}
++							if (m_part_file->write(block, piece, in_piece, ec.ec) != count || ec.ec)
++							{
++								if (!ec.ec) ec.ec = make_error_code(boost::system::errc::io_error);
++								ec.file(i);
++								ec.operation = operation_t::partfile_write;
++								return;
++							}
++							offset += count;
++						}
++					}
++					m_part_file->flush_metadata(ec.ec);
++					if (ec.ec)
++					{
++						ec.file(i);
++						ec.operation = operation_t::partfile_write;
++						return;
++					}
++					m_pool.release(storage_index(), i);
++					use_partfile(i, true);
++					restore_prio.disarm();
++					continue;
+ 				}
++
++				bool file_exists;
++				file_exists = confined_exists(m_save_path, fs.file_path(i), ec.ec);
+ 				if (ec.ec)
+ 				{
+ 					ec.file(i);
+@@ -203,6 +257,9 @@ namespace libtorrent::aux {
+ 				}
+ 				use_partfile(i, !file_exists);
+ 			}
++			// Also release a failed/successful unskip's temporary capability
++			// before the caller can roll back its provisional broker grant.
++			if (m_file_provider) m_pool.release(storage_index(), i);
+ 			ec.ec.clear();
+ 			restore_prio.disarm();
+ 
+@@ -211,7 +268,7 @@ namespace libtorrent::aux {
+ 				need_partfile();
+ 			}
+ 		}
+-		if (m_part_file) m_part_file->flush_metadata(ec.ec);
++		if (m_part_file && !m_file_provider) m_part_file->flush_metadata(ec.ec);
+ 		if (ec)
+ 		{
+ 			ec.file(torrent_status::error_file_partfile);
+@@ -277,6 +334,16 @@ namespace libtorrent::aux {
+ 			if (m_file_priority[i] != dont_download || fs.pad_file_at(i))
+ 				continue;
+ 
++			// A skipped payload is unavailable, even when stat says it exists.
++			// Fresh imports are checked against private storage; resumed skips
++			// use the mapping committed by the acknowledged transition.
++			if (m_file_provider)
++			{
++				use_partfile(i, true);
++				need_partfile();
++				continue;
++			}
++
+ 			error_code err;
+ 			auto const size = m_stat_cache.get_filesize(
+ 				i, fs, m_save_path, err, m_file_provider);
+diff --git a/src/torrent.cpp b/src/torrent.cpp
+index b65a91046..51ccb4638 100644
+--- a/src/torrent.cpp
++++ b/src/torrent.cpp
+@@ -6267,6 +6267,12 @@ namespace {
+ 			alerts().emplace_alert<file_prio_alert>(get_handle());
+ 		}
+ 
++		if (m_checked_file_priority && m_checked_file_priority->submitted)
++		{
++			m_checked_file_priority->completion.set_value(err.ec);
++			m_checked_file_priority.reset();
++		}
++
+ 		// apply queued priorities even on failure; m_file_priority reflects
+ 		// the storage's actual state, and m_storage stays valid after pause()
+ 		if (!m_deferred_file_priorities.empty() && !m_abort)
+@@ -6288,6 +6294,40 @@ namespace {
+ 			}
+ 			prioritize_files(std::move(new_priority));
+ 		}
++		submit_checked_file_priority();
++	}
++
++	std::shared_future<error_code> torrent::set_file_priority_checked(file_index_t index, download_priority_t priority)
++	{
++		if (m_checked_file_priority || m_abort || !m_storage || !valid_metadata()
++			|| index < file_index_t{0} || index >= m_torrent_file->layout().end_file()
++			|| m_torrent_file->layout().pad_file_at(index))
++			throw_ex<system_error>(errors::invalid_torrent_handle);
++		m_checked_file_priority = std::make_unique<checked_file_priority>(index, priority);
++		auto result = m_checked_file_priority->completion.get_future().share();
++		submit_checked_file_priority();
++		return result;
++	}
++
++	void torrent::submit_checked_file_priority()
++	{
++		if (!m_checked_file_priority || m_checked_file_priority->submitted || m_outstanding_file_priority) return;
++		if (m_abort || !m_storage)
++		{
++			m_checked_file_priority->completion.set_value(errors::torrent_removed);
++			m_checked_file_priority.reset();
++			return;
++		}
++		m_checked_file_priority->submitted = true;
++		try
++		{
++			set_file_priority(m_checked_file_priority->index, m_checked_file_priority->priority);
++		}
++		catch (...)
++		{
++			m_checked_file_priority->completion.set_exception(std::current_exception());
++			m_checked_file_priority.reset();
++		}
+ 	}
+ 
+ 	void torrent::prioritize_files(aux::vector<download_priority_t, file_index_t> files)
+diff --git a/src/torrent_handle.cpp b/src/torrent_handle.cpp
+index 14ae8c026..e631e6435 100644
+--- a/src/torrent_handle.cpp
++++ b/src/torrent_handle.cpp
+@@ -545,6 +545,11 @@ namespace libtorrent {
+ 	}
+ #endif
+ 
++	std::shared_future<error_code> torrent_handle::set_file_priority_checked(file_index_t index, download_priority_t priority) const
++	{
++		return sync_call_ret<std::shared_future<error_code>>({}, &aux::torrent::set_file_priority_checked, index, priority);
++	}
++
+ 	void torrent_handle::file_priority(file_index_t index, download_priority_t priority) const
+ 	{
+ 		async_call(&aux::torrent::set_file_priority, index, priority);

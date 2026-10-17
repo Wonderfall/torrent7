@@ -442,7 +442,7 @@ extension TorrentEngineIPCOperation {
         switch self {
         case .handshake, .restart:
             .seconds(120)
-        case .shutdown, .remove, .saveAll:
+        case .shutdown, .remove, .saveAll, .setFilePriority:
             .seconds(60)
         case .poll, .addMagnet, .addTorrentFile,
              .applySettings, .blockNetwork:

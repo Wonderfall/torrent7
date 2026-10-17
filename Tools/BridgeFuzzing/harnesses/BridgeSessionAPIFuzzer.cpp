@@ -245,11 +245,13 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
         }
         case 11: {
             std::uint64_t const token = selected_token(reader, harness.client());
+            std::uint8_t transition_completed = 0U;
             static_cast<void>(TorrentClientSetFilePriority(
                 harness.client(),
                 token,
                 reader.read_i32(),
                 reader.read_i32(),
+                &transition_completed,
                 error.data(),
                 error.capacity()
             ));
