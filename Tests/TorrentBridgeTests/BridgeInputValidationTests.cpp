@@ -3,6 +3,7 @@
 #include <doctest.h>
 
 #include <libtorrent/aux_/preparsed_metainfo.hpp>
+#include <libtorrent/aux_/tracker_deadline.hpp>
 #include <libtorrent/create_torrent.hpp>
 
 #include <array>
@@ -4659,4 +4660,51 @@ TEST_CASE("untrusted magnet endpoint hints are discarded")
 
     CHECK(params.dht_nodes.empty());
     CHECK(params.peers.empty());
+}
+
+TEST_CASE("tracker deadlines reject excessive intervals and saturate the clock boundary")
+{
+    using lt::aux::make_tracker_announce_deadlines;
+    lt::time_point32 const now{lt::seconds32{1}};
+    auto const ordinary = make_tracker_announce_deadlines(now, lt::seconds32{60}, lt::seconds32{30});
+    REQUIRE(ordinary);
+    CHECK(ordinary->next_announce.time_since_epoch().count() == 61);
+    CHECK(ordinary->min_announce.time_since_epoch().count() == 31);
+    REQUIRE(make_tracker_announce_deadlines(now, lt::seconds32{604'800}, lt::seconds32{604'800}));
+    for (std::int32_t const invalid : {-1, 604'801, std::numeric_limits<std::int32_t>::max()}) {
+        CHECK_FALSE(make_tracker_announce_deadlines(now, lt::seconds32{invalid}, lt::seconds32{30}));
+        CHECK_FALSE(make_tracker_announce_deadlines(now, lt::seconds32{60}, lt::seconds32{invalid}));
+    }
+    lt::time_point32 const near_limit = lt::time_point32::max() - lt::seconds32{60};
+    auto const at_limit = make_tracker_announce_deadlines(near_limit, lt::seconds32{60}, lt::seconds32{59});
+    REQUIRE(at_limit);
+    CHECK(at_limit->next_announce == lt::time_point32::max());
+    CHECK(at_limit->min_announce == lt::time_point32::max() - lt::seconds32{1});
+    auto const saturated = make_tracker_announce_deadlines(near_limit, lt::seconds32{61}, lt::seconds32{604'800});
+    REQUIRE(saturated);
+    CHECK(saturated->next_announce == lt::time_point32::max());
+    CHECK(saturated->min_announce == lt::time_point32::max());
+}
+
+TEST_CASE("HTTP tracker import rejects excessive intervals without changing the result")
+{
+    TrackerResponseParserProbe probe;
+    probe.result.downloaders = -1;
+    BridgeTrackerResponseParser parser(probe.callbacks());
+    for (bool const minimum : {false, true}) {
+        for (std::int32_t const interval : {-1, 0, 604'800, 604'801, std::numeric_limits<std::int32_t>::max()}) {
+            probe.result.interval = minimum ? 60 : interval;
+            probe.result.minimum_interval = minimum ? interval : 30;
+            lt::aux::tracker_response imported;
+            imported.trackerid = "unchanged";
+            lt::error_code error;
+            bool const accepted = parser.parse_http_response("de", false, lt::sha1_hash{}, imported, error);
+            bool const expected = interval >= 0 && interval <= 604'800;
+            CHECK(accepted == expected);
+            if (!expected) {
+                CHECK(error == lt::errors::invalid_tracker_response);
+                CHECK(imported.trackerid == "unchanged");
+            }
+        }
+    }
 }

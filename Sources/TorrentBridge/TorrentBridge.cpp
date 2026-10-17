@@ -1,5 +1,7 @@
 #include "TorrentBridgeInternal.hpp"
 
+#include <libtorrent/aux_/tracker_deadline.hpp>
+
 extern "C" {
 __attribute__((visibility("hidden"), used, retain))
 extern char const torrent7_native_deps_build_id[] = TORRENT7_NATIVE_DEPS_BUILD_ID;
@@ -1756,7 +1758,8 @@ bool BridgeTrackerResponseParser::parse_http_response(
             | TTORRENT_TRACKER_HAS_EXTERNAL_ADDRESS;
         if (status != 0 || parsed.reserved0 != 0U || parsed.reserved1 != 0U
             || (parsed.present_fields & ~known_fields) != 0U
-            || parsed.interval < 0 || parsed.minimum_interval < 0
+            || !lt::aux::valid_tracker_announce_interval(lt::seconds32{parsed.interval})
+            || !lt::aux::valid_tracker_announce_interval(lt::seconds32{parsed.minimum_interval})
             || !valid_tracker_statistic(parsed.complete)
             || !valid_tracker_statistic(parsed.incomplete)
             || !valid_tracker_statistic(parsed.downloaded)

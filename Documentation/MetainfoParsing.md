@@ -86,6 +86,11 @@ Validation followed by passing the same bytes to libtorrent is not a cutover.
 
 ## Accepted HTTP tracker-response dialect
 
+Announce intervals and minimum intervals must be between zero and one week
+(604,800 seconds). The native importer enforces the same bound, and the shared
+HTTP/UDP scheduler rejects excessive durations before accepting a response.
+Deadline construction saturates at the clock limit instead of overflowing.
+
 - Only the final decompressed bencoded HTTP response body crosses into Swift.
   Native code continues to own DNS, TCP, TLS, HTTP status and header parsing,
   chunk framing, redirects, proxy behavior, and gzip inflation.

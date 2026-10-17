@@ -32,6 +32,7 @@ readonly -a LIBTORRENT_PATCHES=(
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.2-external-dht-message-parser.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.2-fail-closed-interface-binding.patch"
     "$ROOT_DIR/Scripts/patches/libtorrent-2.1.2-test-server-startup.patch"
+    "$ROOT_DIR/Scripts/patches/libtorrent-2.1.2-bounded-tracker-deadlines.patch"
 )
 
 fail() {

@@ -48,6 +48,9 @@ package struct TorrentHTTPTrackerResponse: Equatable, Sendable {
 /// of an HTTP tracker announce or scrape response. HTTP framing, redirects,
 /// decompression, TLS, and endpoint policy intentionally remain native.
 package struct TorrentHTTPTrackerResponseParser: Sendable {
+    // Match the native HTTP/UDP scheduling policy, independently of Int32 capacity.
+    package static let maximumAnnounceInterval: Int32 = 7 * 24 * 60 * 60
+
     package struct Limits: Equatable, Sendable {
         package var maximumResponseBytes = 512 * 1_024
         package var maximumPeerCount = 3_000
@@ -109,14 +112,14 @@ package struct TorrentHTTPTrackerResponseParser: Sendable {
             in: root,
             document: document,
             defaultValue: 1_800,
-            range: 0...Int64(Int32.max)
+            range: 0...Int64(Self.maximumAnnounceInterval)
         )
         let minimumInterval = try boundedInteger(
             named: "min interval",
             in: root,
             document: document,
             defaultValue: 30,
-            range: 0...Int64(Int32.max)
+            range: 0...Int64(Self.maximumAnnounceInterval)
         )
         let trackerIDRange = try optionalStringRange(
             named: "tracker id",

@@ -1,0 +1,98 @@
+diff --git a/include/libtorrent/aux_/tracker_deadline.hpp b/include/libtorrent/aux_/tracker_deadline.hpp
+new file mode 100644
+index 000000000..8f6ac23af
+--- /dev/null
++++ b/include/libtorrent/aux_/tracker_deadline.hpp
+@@ -0,0 +1,43 @@
++/*
++Copyright (c) 2026, Torrent7 contributors
++All rights reserved.
++You may use, distribute and modify this code under the BSD license, see LICENSE.
++*/
++#ifndef TORRENT_TRACKER_DEADLINE_HPP
++#define TORRENT_TRACKER_DEADLINE_HPP
++
++#include "libtorrent/time.hpp"
++#include <optional>
++
++namespace libtorrent::aux {
++
++// Operational policy, independent of the signed 32-bit deadline representation.
++inline constexpr seconds32 maximum_tracker_announce_interval{7 * 24 * 60 * 60};
++
++[[nodiscard]] constexpr bool valid_tracker_announce_interval(seconds32 interval)
++{
++    return interval >= seconds32{0} && interval <= maximum_tracker_announce_interval;
++}
++
++struct tracker_announce_deadlines
++{
++    time_point32 next_announce;
++    time_point32 min_announce;
++};
++
++// HTTP and UDP share this boundary. Validate both fields before publishing either
++// deadline. Even an allowed duration can exceed the clock's remaining range.
++[[nodiscard]] inline std::optional<tracker_announce_deadlines> make_tracker_announce_deadlines(
++    time_point32 now, seconds32 interval, seconds32 minimum_interval)
++{
++    if (!valid_tracker_announce_interval(interval)
++        || !valid_tracker_announce_interval(minimum_interval)) return std::nullopt;
++    auto const deadline = [now](seconds32 delay)
++    {
++        return now > time_point32::max() - delay ? time_point32::max() : now + delay;
++    };
++    return tracker_announce_deadlines{deadline(interval), deadline(minimum_interval)};
++}
++
++}
++#endif
+diff --git a/src/torrent.cpp b/src/torrent.cpp
+index 15ac2706f..b65a91046 100644
+--- a/src/torrent.cpp
++++ b/src/torrent.cpp
+@@ -51,6 +51,7 @@ see LICENSE file.
+ #include <functional>
+ 
+ #include "libtorrent/aux_/torrent.hpp"
++#include "libtorrent/aux_/tracker_deadline.hpp"
+ 
+ #ifdef TORRENT_SSL_PEERS
+ #include "libtorrent/aux_/ssl_stream.hpp"
+@@ -3985,6 +3986,16 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 			return;
+ 		}
+ 
++		time_point32 const now = aux::time_now32();
++		auto const deadlines = aux::make_tracker_announce_deadlines(
++			now, resp.interval, resp.min_interval);
++		if (!deadlines)
++		{
++			tracker_request_error(r, errors::invalid_tracker_response
++				, operation_t::bittorrent, "invalid tracker interval", seconds32{0});
++			return;
++		}
++
+ 		// if the tracker told us what our external IP address is, record it with
+ 		// out external IP counter (and pass along the IP of the tracker to know
+ 		// who to attribute this vote to)
+@@ -3993,8 +4004,6 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 				, resp.external_ip
+ 				, aux::session_interface::source_tracker, tracker_ip);
+ 
+-		time_point32 const now = aux::time_now32();
+-
+ 		protocol_version const v = r.info_hash == torrent_file().info_hashes().v1
+ 			? protocol_version::V1 : protocol_version::V2;
+ 
+@@ -4026,8 +4035,8 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 					m_complete_sent = true;
+ 				}
+ 				ae->verified = true;
+-				a.next_announce = now + resp.interval;
+-				a.min_announce = now + resp.min_interval;
++				a.next_announce = deadlines->next_announce;
++				a.min_announce = deadlines->min_announce;
+ 				a.fails = 0;
+ 				a.last_error.clear();
+ 				a.message = !resp.warning_message.empty() ? resp.warning_message : std::string();

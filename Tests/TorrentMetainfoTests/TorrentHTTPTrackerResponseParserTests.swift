@@ -6,6 +6,23 @@ import Testing
 struct TorrentHTTPTrackerResponseParserTests {
     private let parser = TorrentHTTPTrackerResponseParser()
 
+    @Test("Both tracker intervals have a one-week operational bound", arguments: ["interval", "min interval"])
+    func boundsAnnounceIntervals(field: String) throws {
+        for interval in [Int64(0), 60, 604_800] {
+            let response = try parser.parse(bencodedDictionary([
+                (field, bencodedInteger(interval)),
+            ]))
+            #expect(Int64(field == "interval" ? response.interval : response.minimumInterval) == interval)
+        }
+        for interval in [Int64(-1), 604_801, Int64(Int32.max)] {
+            #expect(throws: TorrentHTTPTrackerResponseError.invalidField) {
+                _ = try parser.parse(bencodedDictionary([
+                    (field, bencodedInteger(interval)),
+                ]))
+            }
+        }
+    }
+
     @Test("Announce responses produce bounded typed compact peers")
     func parsesCompactAnnounceResponse() throws {
         let ipv4 = Data([203, 0, 113, 8, 0x1a, 0xe1])
