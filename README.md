@@ -306,7 +306,7 @@ it to exactly match the reviewed notices in `Packaging/ThirdPartyNotices.txt`.
 Requirements:
 
 - macOS 27 on Apple silicon
-- Xcode 27.0 (build 27A266a), including Swift 6.4 and the macOS 27.0 SDK
+- Xcode 27.1 (build 27A9275), including Swift 6.4 and the macOS 27.0 SDK
 - Homebrew build tools
 
 The [toolchain notes](Documentation/Toolchain.md) record the Swift 6.4 adoption,

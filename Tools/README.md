@@ -48,8 +48,9 @@ including Boolean versus numeric distinctions. `ProcessRunner/` uses pinned
 Swift Subprocess 1.0 to drain both output streams concurrently, bound each
 stream to 1 MiB, enforce a 30-second deadline, and terminate/reap cancelled or
 timed-out children with a one-second graceful shutdown allowance. Commands run
-in a dedicated session, so teardown signals also reach their helper processes
-without reaching the tool's process group. Tests cover
+in a dedicated process group, so teardown signals also reach their helper
+processes without reaching the tool's process group. This uses `posix_spawn`
+without the session-creation `fork` path that can deadlock in ASan. Tests cover
 those resource and lifecycle boundaries. These dependencies are developer-only
 and are not linked into the application.
 

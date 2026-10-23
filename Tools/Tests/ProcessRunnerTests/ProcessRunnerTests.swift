@@ -30,6 +30,24 @@ import Testing
         #expect(result.stderr.utf8.count == 17 * 12000)
     }
 
+    @Test func concurrentlyLaunchesAndReapsChildren() async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for _ in 0..<16 {
+                group.addTask {
+                    let identifier = Mutex<Int32?>(nil)
+                    let result = try await ProcessRunner.run("/usr/bin/true", arguments: []) { pid in
+                        identifier.withLock { $0 = pid }
+                    }
+                    #expect(result.status == 0)
+                    let pid = try #require(identifier.withLock { $0 })
+                    #expect(kill(pid, 0) == -1)
+                    #expect(errno == ESRCH)
+                }
+            }
+            try await group.waitForAll()
+        }
+    }
+
     @Test func preservesArgumentsAndNonzeroExit() async throws {
         let value = "a b;$(not-a-command)"
         let result = try await ProcessRunner.run("/bin/zsh", arguments: ["-c", "print -rn -- $1; exit 7", "probe", value])

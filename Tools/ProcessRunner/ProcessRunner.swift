@@ -32,9 +32,10 @@ package enum ProcessRunner {
             group.addTask {
                 do {
                     var options = PlatformOptions()
-                    // Git may spawn transport helpers. A separate session lets
-                    // teardown signal their group without reaching this tool.
-                    options.createSession = true
+                    // A child-led process group also contains Git's transport helpers,
+                    // so teardown cannot signal this tool. Unlike creating a session,
+                    // this uses posix_spawn without fork's sanitizer-sensitive locks.
+                    options.processGroupID = 0
                     options.teardownSequence = [
                         .gracefulShutDown(toProcessGroup: true, allowedDurationToNextStep: .seconds(1))
                     ]

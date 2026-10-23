@@ -1,6 +1,6 @@
 # Toolchain baseline
 
-The project requires macOS 27 on Apple silicon and Xcode 27.0 (27A266a),
+The project requires macOS 27 on Apple silicon and Xcode 27.1 (27A9275),
 including the macOS 27.0 SDK and Apple Swift 6.4
 (`swiftlang-6.4.0.34.1`). All three packages require Swift tools 6.4. Build, test,
 analysis, benchmark, and fuzz entry points run `Scripts/verify-xcode.zsh`;
@@ -8,10 +8,38 @@ the packaged GUI and extensions require macOS 27.0. Bundle verification checks
 both the property lists and Mach-O deployment/SDK versions.
 
 GitHub Actions uses the `xcode-27` Apple-silicon image and selects
-`/Applications/Xcode_27.0.app`. GitHub currently labels this runner image a
-public preview; the exact Xcode build remains checked before compilation.
-See the [runner announcement](https://github.blog/changelog/2026-09-10-xcode-27-runner-image-now-runs-on-macos-27/)
-and [installed tool versions](https://github.com/actions/runner-images/releases/tag/xcode-27-arm64%2F20260912.0186).
+`/Applications/Xcode_27.1.app`. The runner's published software inventory
+includes build 27A9275; the exact Xcode build remains checked before compilation.
+See the [installed tool versions](https://github.com/actions/runner-images/blob/main/images/macos/xcode-27-arm64-Readme.md).
+
+## Xcode 27.1 update
+
+Xcode 27.1 retains Swift 6.4 and the macOS 27.0 SDK. The selected C++ compiler
+reports Apple Clang 21.0.0 (`clang-2100.3.34.2`). Native dependency stamps now
+include the Xcode and SDK build identifiers alongside compiler/archive-tool
+hashes, flags, and source provenance. Replacing Xcode or its SDK at the same
+path therefore invalidates the dependency cache even when compiler executables
+do not change.
+
+The rebuild exposed an ASan deadlock in the developer tools' subprocess runner:
+requesting a new session takes Swift Subprocess's `fork` path, which stalled in
+the sanitizer's allocator locks. Commands now use a separate process group via
+`posix_spawn`. Group-wide cancellation still includes transport helpers, and
+concurrent launch, deadline, cancellation, and reaping tests cover the change.
+
+[Apple's 27.1 release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-27_1-release-notes)
+announce no new compiler security opt-ins or C++26 features. The existing
+Enhanced Security version 2 entitlements, checked allocations, pointer
+authentication, typed allocation, stack initialization, and libc++ hardening
+remain enabled.
+
+C++26 support remains partial. Local compile probes exercise pack indexing,
+structured-binding packs in templates, `constexpr` stable sorting, and
+`std::span::at()`. The default toolchain does not expose reflection or contracts
+feature macros, or the `<meta>`, `<contracts>`, `<hive>`, and `<inplace_vector>`
+headers. These results agree with the supported subset in Apple's
+[C++ feature table](https://developer.apple.com/xcode/cpp/); they do not establish
+full C++26 conformance. The project continues to use C++23.
 
 ## Swift 6.4 adoption
 
@@ -122,32 +150,33 @@ was suppressed to hide this advisory.
 
 ## Local verification
 
-Validated on macOS 27.0 (26A428), Xcode 27.0 (27A266a), and Swift 6.4:
+Validated on macOS 27.0.1 (26A434), Xcode 27.1 (27A9275), and Swift 6.4:
 
-- `Scripts/build-app.zsh`: release GUI and Enhanced Security extension built
-  and passed bundle, deployment target, signing, PAC, typed-allocation, and
+- `Scripts/build-deps.zsh` and `Scripts/build-app.zsh`: native dependencies,
+  GUI, and engine extensions rebuilt in release, ASan, and TSan profiles and
+  passed bundle, deployment target, signing, PAC, typed-allocation, and
   parser-reachability verification.
-- `Scripts/test-swift.zsh`: 605 application tests passed in each of debug,
+- `Scripts/test-swift.zsh`: 708 application tests passed in each of debug,
   release, ASan, and TSan configurations. The repository tool package passed
-  14 tests in all four configurations, covering exact/bounded policy parsing,
+  34 tests in all four configurations, covering exact/bounded policy parsing,
   concurrent pipe draining, process groups, exit status, signals, cancellation,
   deadlines, output bounds, encoding, and child reaping. The unsafe-boundary
   linter also passed; its separate test package passed all 33 tests against
   SwiftSyntax 604.0.0.
 - `Scripts/analyze-bridge.zsh`, followed by `Scripts/test-bridge.zsh`: static
-  analysis passed; all 192 native tests and 6,481 assertions passed in each of
+  analysis passed; all 223 native tests and 7,807 assertions passed in each of
   normal, ASan, and TSan profiles, including PAC code-generation verification.
 - `Scripts/test-libtorrent-security.zsh`: dependency security replay and
-  hardening checks passed against rebuilt Xcode 27 dependencies.
-- Bridge and IPC fuzz smoke suites: all 15 targets completed 1,000 executions
+  hardening checks passed against rebuilt Xcode 27.1 dependencies in all three
+  profiles.
+- Bridge and IPC fuzz smoke suites: all 16 targets completed 1,000 executions
   each with ASan enabled.
 - `Scripts/test-enhanced-security-extension.zsh` in automated mode: packaged
-  launch, forced helper exit, replacement, restart, and reconnect passed.
-- A GUI smoke check exercised settings confirmations carrying both `false`
-  and `true`. Escape and Cancel dismissed the alerts while preserving the
-  saved network-binding and Peer Exchange policies.
+  launch, forced helper exit, replacement, restart, and reconnect passed in
+  normal, ASan, and TSan profiles.
 
-First-party builds and tests emitted no compiler warnings. Shell syntax,
-packaging property lists, and whitespace checks passed. An explicit macOS 26
-deployment-target override was rejected by the toolchain verifier. Hosted
-GitHub Actions execution remains to be confirmed by CI.
+Final first-party builds and tests emitted no compiler warnings. The third-party
+fuzz-only allocator advisory described above remains reviewed and unsuppressed.
+Shell syntax, workflow YAML, packaging property lists, and whitespace checks
+passed. An explicit macOS 26 deployment-target override was rejected by the
+toolchain verifier. Hosted GitHub Actions execution remains to be confirmed by CI.

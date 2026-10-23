@@ -7,8 +7,8 @@ fail() {
     exit 1
 }
 
-typeset -r expected_xcode_version="27.0"
-typeset -r expected_xcode_build="27A266a"
+typeset -r expected_xcode_version="27.1"
+typeset -r expected_xcode_build="27A9275"
 typeset -r expected_macos_sdk="27.0"
 typeset -r expected_swift_version="Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)"
 typeset -r actual_macos_version=$(/usr/bin/sw_vers -productVersion)

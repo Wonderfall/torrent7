@@ -58,8 +58,8 @@ permissions: {}
 
 env:
   BASE_BRANCH: ${{ github.event.repository.default_branch }}
-  DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
-  XCODE_CACHE_KEY: xcode-27.0-27A266a
+  DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+  XCODE_CACHE_KEY: xcode-27.1-27A9275
 
 concurrency:
   group: torrent-bridge-fuzzing-${{ github.event_name == 'schedule' && 'schedule' || github.event.pull_request.number || github.ref }}
