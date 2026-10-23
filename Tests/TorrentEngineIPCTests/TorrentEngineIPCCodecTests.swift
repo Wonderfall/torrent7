@@ -541,13 +541,14 @@ struct TorrentEngineIPCEnvelopeTests {
 
     @Test("Stable dataset and hint operation numbers")
     func stableOperationNumbers() {
-        #expect(TorrentEngineIPCProtocol.version == 16)
+        #expect(TorrentEngineIPCProtocol.version == 17)
         #expect(TorrentEngineIPCOperation(rawValue: 7) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 10) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 11) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 30) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 36) == nil)
-        #expect(TorrentEngineIPCOperation(rawValue: 38) == nil)
+        #expect(TorrentEngineIPCOperation(rawValue: 37) == .beginFilePriorities)
+        #expect(TorrentEngineIPCOperation(rawValue: 38) == .fileSelectionResult)
         #expect(TorrentEngineIPCOperation.torrentMetadata.rawValue == 39)
         #expect(TorrentEngineIPCOperation(rawValue: 41) == nil)
         #expect(TorrentEngineIPCOperation(rawValue: 50) == nil)
@@ -658,6 +659,23 @@ struct TorrentEngineIPCEnvelopeTests {
                 TorrentEngineIPCOperation.addTorrentFile.maximumRequestPayloadBytes,
             limits: TorrentEngineIPCOperation.addTorrentFile.requestJSONLimits
         )
+        let batch = TorrentEngineIPCSetFilePrioritiesRequest(
+            id: "t:\(String(repeating: "a", count: 32))",
+            priorities: (0..<TorrentEngineLimits.maximumFileCount).map {
+                TorrentEngineIPCFilePriorityEntry(index: Int32($0), priority: .skip)
+            }
+        )
+        let data = try TorrentEngineIPCJSONCodec.encode(
+            batch,
+            maximumBytes: TorrentEngineIPCOperation.beginFilePriorities.maximumRequestPayloadBytes,
+            limits: TorrentEngineIPCOperation.beginFilePriorities.requestJSONLimits
+        )
+        let decoded = try TorrentEngineIPCJSONCodec.decode(
+            TorrentEngineIPCSetFilePrioritiesRequest.self, from: data,
+            maximumBytes: TorrentEngineIPCOperation.beginFilePriorities.maximumRequestPayloadBytes,
+            limits: TorrentEngineIPCOperation.beginFilePriorities.requestJSONLimits
+        )
+        #expect(decoded.priorities.count == TorrentEngineLimits.maximumFileCount)
     }
 
     @Test("Maximum canonical magnet selections fit their JSON allocation profile")

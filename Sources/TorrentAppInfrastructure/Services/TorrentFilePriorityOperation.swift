@@ -2,8 +2,8 @@ import Synchronization
 package import TorrentEngineModel
 import TorrentStorageAuthority
 
-/// The store's FIFO owns execution and cleanup; cancellation stops the next
-/// file command without cancelling that shared queue or abandoning grants.
+/// The store's FIFO owns the batch and cleanup. Cancellation reaches the native
+/// operation without abandoning provisional grants or cancelling the shared queue.
 package final class TorrentFilePriorityOperation: Sendable {
     private let torrentID: String
     private let priorities: [Int32: TorrentFilePriority]
@@ -38,10 +38,10 @@ package final class TorrentFilePriorityOperation: Sendable {
         } ?? []
         guard claims.count <= 1 else { throw TorrentStorageJournalError.corrupt }
         guard let journal, var claim = claims.first else {
-            for (index, priority) in changes {
-                try checkCancellation()
-                try await engine.setFilePriority(id: torrentID, fileIndex: index, priority: priority)
-            }
+            try await engine.setFilePriorities(
+                id: torrentID, priorities: priorities,
+                isCancelled: { self.cancelled.withLock { $0 } }
+            )
             try checkCancellation()
             return
         }
@@ -67,9 +67,11 @@ package final class TorrentFilePriorityOperation: Sendable {
 
         var failure: (any Error)?
         do {
+            try await engine.setFilePriorities(
+                id: torrentID, priorities: priorities,
+                isCancelled: { self.cancelled.withLock { $0 } }
+            )
             for (index, priority) in changes {
-                try checkCancellation()
-                try await engine.setFilePriority(id: torrentID, fileIndex: index, priority: priority)
                 confirmedAvailability[Int(index)] = priority != .skip
             }
             try checkCancellation()
@@ -77,8 +79,8 @@ package final class TorrentFilePriorityOperation: Sendable {
             failure = error
         }
         // Skips become restrictive only after native handle release is confirmed.
-        // Even on cancellation/failure, retain completed changes and revoke grants
-        // for unattempted or failed increases before the FIFO advances.
+        // A committed batch remains authoritative even if its caller cancelled.
+        // A rejected batch revokes every provisional increase before advancing.
         _ = try await replaceAvailability(
             confirmedAvailability, claim: claim, journal: journal, registry: registry, engine: engine
         )

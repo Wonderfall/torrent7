@@ -1206,33 +1206,62 @@ private struct AddedTorrentIdentity: Sendable {
         queueStore = nextQueueStore
     }
 
-    // SAFETY: Ownership/lifetime: the actor-owned handle and local completion/error buffers live through
-    // the synchronous call; bounds/alignment: token/index/priority are validated typed scalars
-    // and the error span is bounded; synchronization: actor isolation serializes mutation;
-    // safe alternative: native file-priority mutation requires the C bridge ABI.
-    package func setFilePriority(id: String, fileIndex: Int32, priority: TorrentFilePriority) throws {
+    // SAFETY: The actor owns the client for each synchronous call; entries and
+    // error spans are borrowed only until return. Native copies the sorted batch
+    // and owns its future. Scalar IDs carry no pointers across suspension.
+    package func beginFilePriorities(id: String, priorities: [Int32: TorrentFilePriority]) throws -> UInt64 {
+        guard !priorities.isEmpty, priorities.count <= TorrentEngineLimits.maximumFileCount else {
+            throw TorrentEngineError.bridgeError("Invalid file priority batch.")
+        }
         let client = try unsafe requireClient()
         let nativeToken = try nativeToken(for: id)
-        var transitionCompleted: UInt8 = 0
+        let entries = priorities.sorted { $0.key < $1.key }.map {
+            TTorrentFilePriorityEntry(index: $0.key, priority: $0.value.bridgeValue)
+        }
+        var operation: UInt64 = 0
         do {
-            try throwingBridgeCall { errorBuffer in
-                unsafe TorrentClientSetFilePriority(
-                    client, nativeToken, fileIndex, priority.bridgeValue,
-                    &transitionCompleted, &errorBuffer
-                )
+            try throwingBridgeCall { error in
+                unsafe TorrentClientBeginFilePriorities(client, nativeToken, entries.span, &operation, &error)
             }
-            guard transitionCompleted == 1 else {
-                throw TorrentEngineError.bridgeError("File priority storage completion was not confirmed.")
+            guard operation != 0 else {
+                throw TorrentEngineError.bridgeError("File selection was not acknowledged.")
             }
+            return operation
         } catch {
-            if transitionCompleted != 1 {
+            if operation != 0 {
                 runtimeFailureMessage.withLock { $0 = error.localizedDescription }
-                // A timed-out disk job may still hold payload capabilities. Join
-                // teardown before the GUI rolls back any temporary access grants.
                 destroyClient(waitForShutdown: true)
             }
             throw error
         }
+    }
+
+    // SAFETY: Actor isolation keeps the client alive through this nonblocking
+    // observation. Native borrows the local scalar/error span only for the call;
+    // state and operation IDs are validated before any broker-facing result.
+    package func fileSelectionResult(operation: UInt64, cancel: Bool) throws -> TorrentFileSelectionStatus {
+        let client = try unsafe requireClient()
+        var state = UInt8(TTORRENT_FILE_SELECTION_UNCONFIRMED)
+        var buffer = Array<CChar>(repeating: 0, count: 1_024)
+        var errorSpan = buffer.mutableSpan
+        let result = unsafe TorrentClientFilePriorityResult(client, operation, cancel ? 1 : 0, &state, &errorSpan)
+        errorSpan = .init()
+        let message = stringFromBridgeBuffer(buffer)
+        if result == 0 {
+            switch state {
+            case UInt8(TTORRENT_FILE_SELECTION_PENDING): return .pending
+            case UInt8(TTORRENT_FILE_SELECTION_COMMITTED): return .committed
+            case UInt8(TTORRENT_FILE_SELECTION_CANCELLED): return .cancelled
+            case UInt8(TTORRENT_FILE_SELECTION_REJECTED): return .rejected(message)
+            default: break
+            }
+        }
+        let detail = message.isEmpty ? "File selection completion could not be confirmed." : message
+        runtimeFailureMessage.withLock { $0 = detail }
+        // An unconfirmed mutation may retain capabilities. Quiesce native work
+        // before the GUI receives an error and rolls back provisional grants.
+        destroyClient(waitForShutdown: true)
+        throw TorrentEngineError.bridgeError(detail)
     }
 
     // SAFETY: Ownership/lifetime: the actor-owned handle and each local snapshot array live

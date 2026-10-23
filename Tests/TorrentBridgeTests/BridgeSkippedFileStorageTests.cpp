@@ -36,12 +36,16 @@ public:
 
     std::int64_t payload_size(lt::file_index_t file, lt::error_code &error) override
     {
-        if (static_cast<int>(file) == 0 && gate_armed.exchange(false)) {
+        if (gate_armed.exchange(false)) {
             gate_entered.set_value();
             if (gate_release.get_future().wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
                 error = make_error_code(boost::system::errc::timed_out);
                 return -1;
             }
+        }
+        if (reject_stat.load()) {
+            error = make_error_code(boost::system::errc::permission_denied);
+            return -1;
         }
         std::error_code filesystem_error;
         auto const size = fs::file_size(paths.at(static_cast<std::size_t>(static_cast<int>(file))), filesystem_error);
@@ -57,6 +61,7 @@ public:
     std::array<std::atomic_int, 2> last_descriptor{-1, -1};
     std::atomic_int denied_opens{0};
     std::atomic_bool gate_armed{false};
+    std::atomic_bool reject_stat{false};
     std::promise<void> gate_entered;
     std::promise<void> gate_release;
 };
@@ -108,9 +113,10 @@ struct SharedPieceStorage {
         }
     }
 
-    void check_piece()
+    void check_piece(bool wanted_only = false)
     {
         for (auto piece : files.piece_range()) {
+            if (wanted_only && (static_cast<int>(piece) + 1) * files.piece_length() <= files.file_size(lt::file_index_t{0})) continue;
             std::vector<char> bytes(static_cast<std::size_t>(files.piece_size(piece)));
             lt::storage_error error;
             CHECK(storage->read(settings, lt::span<char>{bytes}, piece, 0,
@@ -193,16 +199,17 @@ TEST_CASE("failed skip keeps the original priority and readable payload")
     fixture.check_piece();
 }
 
-TEST_CASE("an expired copy deadline retains priority, closes its handle and preserves data")
+TEST_CASE("a cancelled copy retains priority, closes its handle and preserves data")
 {
     SharedPieceStorage fixture(false, 8192);
     fixture.write_piece();
     int const descriptor = fixture.provider->last_descriptor[0].load();
     fixture.priorities[lt::file_index_t{0}] = lt::dont_download;
     lt::storage_error error;
-    fixture.storage->set_file_priority(fixture.settings, fixture.priorities, error,
-        lt::clock_type::now() - lt::seconds{1});
-    CHECK(error.ec == make_error_code(boost::system::errc::timed_out));
+    std::stop_source cancellation;
+    cancellation.request_stop();
+    fixture.storage->set_file_priority(fixture.settings, fixture.priorities, error, cancellation.get_token());
+    CHECK(error.ec == boost::asio::error::operation_aborted);
     CHECK(fixture.priorities[lt::file_index_t{0}] == lt::default_priority);
     CHECK(::fcntl(descriptor, F_GETFD) == -1);
     CHECK(errno == EBADF);
@@ -211,42 +218,52 @@ TEST_CASE("an expired copy deadline retains priority, closes its handle and pres
 
 TEST_CASE("checked native priority completion waits for the disk transition")
 {
-    SharedPieceStorage fixture(false, 8192);
-    fixture.write_piece();
-    fixture.storage.reset();
-    std::vector<lt::create_file_entry> entries;
-    entries.emplace_back("bundle/skip.bin", 8192);
-    entries.emplace_back("bundle/wanted.bin", 8192);
-    lt::create_torrent creator(std::move(entries), 16384, lt::create_torrent::v1_only);
-    std::string const bytes(16384, 'x');
-    creator.set_hash(lt::piece_index_t{0}, lt::hasher(lt::span<char const>{bytes}).final());
-    auto params = bridge_tests::load_torrent_params(creator.generate_buf(), "shared piece");
-    params.save_path = fixture.directory.path().string();
-    params.file_provider = fixture.provider;
-    params.flags = lt::torrent_flags::paused | lt::torrent_flags::seed_mode;
-    lt::settings_pack settings;
-    settings.set_str(lt::settings_pack::listen_interfaces, "");
-    settings.set_bool(lt::settings_pack::enable_dht, false);
-    settings.set_bool(lt::settings_pack::enable_lsd, false);
-    settings.set_bool(lt::settings_pack::enable_upnp, false);
-    settings.set_bool(lt::settings_pack::enable_natpmp, false);
-    lt::session_params session_params(settings);
-    session_params.disk_io_constructor = lt::pread_disk_io_constructor;
-    lt::session session(std::move(session_params));
-    auto handle = session.add_torrent(params);
-    auto entered = fixture.provider->gate_entered.get_future();
-    fixture.provider->gate_armed = true;
-    auto completion = handle.set_file_priority_checked(lt::file_index_t{0}, lt::dont_download);
-    REQUIRE(entered.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
-    CHECK(completion.wait_for(std::chrono::seconds(0)) == std::future_status::timeout);
-    CHECK_THROWS_AS(static_cast<void>(handle.set_file_priority_checked(
-        lt::file_index_t{0}, lt::default_priority)), lt::system_error);
-    fixture.provider->gate_release.set_value();
-    REQUIRE(completion.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
-    CHECK_FALSE(completion.get());
-    CHECK(handle.file_priority(lt::file_index_t{0}) == lt::dont_download);
-    fixture.provider->available[0] = false;
-    CHECK(fixture.provider->denied_opens.load() == 0);
+    for (bool const cancelled : {false, true}) {
+        CAPTURE(cancelled);
+        SharedPieceStorage fixture(false, 8192);
+        fixture.write_piece();
+        fixture.storage.reset();
+        std::vector<lt::create_file_entry> entries;
+        entries.emplace_back("bundle/skip.bin", 8192);
+        entries.emplace_back("bundle/wanted.bin", 8192);
+        lt::create_torrent creator(std::move(entries), 16384, lt::create_torrent::v1_only);
+        std::string const bytes(16384, 'x');
+        creator.set_hash(lt::piece_index_t{0}, lt::hasher(lt::span<char const>{bytes}).final());
+        auto params = bridge_tests::load_torrent_params(creator.generate_buf(), "shared piece");
+        params.save_path = fixture.directory.path().string();
+        params.file_provider = fixture.provider;
+        params.flags = lt::torrent_flags::paused | lt::torrent_flags::seed_mode;
+        lt::settings_pack settings;
+        settings.set_str(lt::settings_pack::listen_interfaces, "");
+        settings.set_bool(lt::settings_pack::enable_dht, false);
+        settings.set_bool(lt::settings_pack::enable_lsd, false);
+        settings.set_bool(lt::settings_pack::enable_upnp, false);
+        settings.set_bool(lt::settings_pack::enable_natpmp, false);
+        lt::session_params session_params(settings);
+        session_params.disk_io_constructor = lt::pread_disk_io_constructor;
+        lt::session session(std::move(session_params));
+        auto handle = session.add_torrent(params);
+        auto entered = fixture.provider->gate_entered.get_future();
+        fixture.provider->gate_armed = true;
+        std::stop_source cancellation;
+        auto completion = handle.set_file_priorities_checked({{lt::file_index_t{0}, lt::dont_download}}, cancellation.get_token());
+        REQUIRE(entered.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+        CHECK(completion.wait_for(std::chrono::seconds(0)) == std::future_status::timeout);
+        CHECK_THROWS_AS(static_cast<void>(handle.set_file_priorities_checked(
+            {{lt::file_index_t{0}, lt::default_priority}}, {})), lt::system_error);
+        if (cancelled) cancellation.request_stop();
+        fixture.provider->gate_release.set_value();
+        REQUIRE(completion.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+        if (cancelled) {
+            CHECK(completion.get() == boost::asio::error::operation_aborted);
+            CHECK(handle.file_priority(lt::file_index_t{0}) == lt::default_priority);
+        } else {
+            CHECK_FALSE(completion.get());
+            CHECK(handle.file_priority(lt::file_index_t{0}) == lt::dont_download);
+            fixture.provider->available[0] = false;
+        }
+        CHECK(fixture.provider->denied_opens.load() == 0);
+    }
 }
 
 TEST_CASE("failed partfile export retains every complete slot")
@@ -271,19 +288,170 @@ TEST_CASE("failed partfile export retains every complete slot")
     }
 }
 
-TEST_CASE("skipping a larger file preserves complete pieces as well as boundary fragments")
+TEST_CASE("skipping a larger file copies only its wanted boundary fragment")
 {
     SharedPieceStorage fixture(false, 40960, 40960);
     fixture.write_piece();
     fixture.change_priority(lt::dont_download);
+    CHECK(fs::file_size(fixture.directory.path() / ("." + lt::aux::to_hex(fixture.hash) + ".parts")) < 2 * 16384);
     fixture.provider->available[0] = false;
     fixture.pool.release();
-    fixture.check_piece();
+    fixture.check_piece(true);
     fixture.reopen();
-    fixture.check_piece();
+    fixture.check_piece(true);
     fixture.provider->available[0] = true;
     fixture.change_priority(lt::default_priority);
     fixture.pool.release();
     fixture.check_piece();
     CHECK(fixture.provider->denied_opens.load() == 0);
+}
+
+TEST_CASE("private storage retains boundary pieces and physically reclaims unused slots")
+{
+    bridge_tests::TemporaryDirectory directory;
+    auto const path = directory.path() / "test.parts";
+    lt::aux::part_file part(directory.path().string(), "test.parts", 256, 16384);
+    std::string const bytes(16384, 'x');
+    lt::error_code error;
+    for (int index = 0; index < 256; ++index) {
+        REQUIRE(part.write(lt::span<char const>{bytes}, lt::piece_index_t{index}, 0, error) == 16384);
+        REQUIRE_FALSE(error);
+    }
+    part.flush_metadata(error);
+    REQUIRE_FALSE(error);
+    auto const original_size = fs::file_size(path);
+    lt::typed_bitfield<lt::piece_index_t> keep(256, false);
+    keep.set_bit(lt::piece_index_t{127});
+    std::stop_source stop;
+    stop.request_stop();
+    part.retain_pieces(keep, stop.get_token(), error);
+    CHECK(error == boost::asio::error::operation_aborted);
+    CHECK(fs::file_size(path) == original_size);
+    CHECK_FALSE(fs::exists(directory.path() / "test.parts.compact"));
+
+    error.clear();
+    part.retain_pieces(keep, {}, error);
+    REQUIRE_FALSE(error);
+    CHECK(fs::file_size(path) < 2 * 16384);
+    std::array<char, 16384> restored{};
+    CHECK(part.read(restored, lt::piece_index_t{127}, 0, error) == 16384);
+    REQUIRE_FALSE(error);
+    CHECK(std::ranges::all_of(restored, [](char value) { return value == 'x'; }));
+    keep.clear_all();
+    part.retain_pieces(keep, {}, error);
+    REQUIRE_FALSE(error);
+    CHECK_FALSE(fs::exists(path));
+}
+
+TEST_CASE("a whole-folder skip allocates no private copy, even for large sparse files")
+{
+    SharedPieceStorage fixture(false, 0, 512 * 1024 * 1024);
+    fs::resize_file(fixture.provider->paths[0], 512 * 1024 * 1024);
+    fs::resize_file(fixture.provider->paths[1], 512 * 1024 * 1024);
+    fixture.priorities.assign(2, lt::dont_download);
+    lt::storage_error error;
+    fixture.storage->set_file_priority(fixture.settings, fixture.priorities, error);
+    REQUIRE_FALSE(error);
+    CHECK(fixture.provider->last_descriptor[0].load() == -1);
+    CHECK(fixture.provider->last_descriptor[1].load() == -1);
+    CHECK_FALSE(fs::exists(fixture.directory.path() / ("." + lt::aux::to_hex(fixture.hash) + ".parts")));
+    CHECK(fs::file_size(fixture.provider->paths[0]) == 512 * 1024 * 1024);
+}
+
+TEST_CASE("selection forgets skipped-only availability and reuses re-enabled payloads")
+{
+    enum class Format { v1, hybrid, v2_metadata };
+    for (auto const format : {Format::v1, Format::hybrid, Format::v2_metadata}) {
+        CAPTURE(static_cast<int>(format));
+        SharedPieceStorage fixture(false, 32768, 32768);
+        fixture.write_piece();
+        fixture.storage.reset();
+        std::vector<lt::create_file_entry> entries;
+        entries.emplace_back("bundle/skip.bin", 32768);
+        entries.emplace_back("bundle/wanted.bin", 32768);
+        lt::create_torrent creator(std::move(entries), 16384,
+            format == Format::v1 ? lt::create_torrent::v1_only
+                : format == Format::hybrid ? lt::create_flags_t{} : lt::create_torrent::v2_only);
+        std::string const bytes(16384, 'x');
+        if (format != Format::v2_metadata) {
+            for (int index = 0; index < 4; ++index)
+                creator.set_hash(lt::piece_index_t{index}, lt::hasher(lt::span<char const>{bytes}).final());
+        }
+        if (format != Format::v1) {
+            for (int file = 0; file < 2; ++file)
+                for (int piece = 0; piece < 2; ++piece)
+                    creator.set_hash2(lt::file_index_t{file}, lt::piece_index_t::diff_type{piece},
+                        lt::hasher256(lt::span<char const>{bytes}).final());
+        }
+        auto params = bridge_tests::load_torrent_params(creator.generate_buf(), "selective pieces");
+        if (format == Format::v2_metadata) {
+            // A v2 magnet has file roots without the optional piece layers.
+            params.merkle_trees.clear();
+            params.merkle_tree_mask.clear();
+            params.verified_leaf_hashes.clear();
+        }
+        params.save_path = fixture.directory.path().string();
+        params.file_provider = fixture.provider;
+        params.flags = lt::torrent_flags::paused | lt::torrent_flags::seed_mode;
+        lt::settings_pack settings;
+        settings.set_str(lt::settings_pack::listen_interfaces, "");
+        settings.set_bool(lt::settings_pack::enable_dht, false);
+        settings.set_bool(lt::settings_pack::enable_lsd, false);
+        settings.set_bool(lt::settings_pack::enable_upnp, false);
+        settings.set_bool(lt::settings_pack::enable_natpmp, false);
+        lt::session_params session_params(settings);
+        session_params.disk_io_constructor = lt::pread_disk_io_constructor;
+        lt::session session(std::move(session_params));
+        auto handle = session.add_torrent(params);
+        auto skipped = handle.set_file_priorities_checked({{lt::file_index_t{0}, lt::dont_download}}, {});
+        REQUIRE(skipped.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+        REQUIRE_FALSE(skipped.get());
+        fixture.provider->available[0] = false;
+        auto const status = handle.status(lt::torrent_handle::query_pieces);
+        REQUIRE(status.pieces.size() == 4);
+        CHECK_FALSE(status.pieces[lt::piece_index_t{0}]);
+        CHECK_FALSE(status.pieces[lt::piece_index_t{1}]);
+        CHECK(status.pieces[lt::piece_index_t{2}]);
+        CHECK(status.pieces[lt::piece_index_t{3}]);
+        CHECK(status.total_wanted_done == 32768);
+        CHECK(static_cast<bool>(status.flags & lt::torrent_flags::paused));
+        auto capture = handle.capture_resume_data(lt::torrent_handle::save_info_dict);
+        REQUIRE(capture.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+        auto checkpoint = capture.get();
+        REQUIRE(checkpoint.has_value());
+        REQUIRE(checkpoint->has_value());
+        CHECK((**checkpoint).params.have_pieces == status.pieces);
+        REQUIRE((**checkpoint).params.file_priorities.size() == 2);
+        CHECK((**checkpoint).params.file_priorities.front() == lt::dont_download);
+        fixture.provider->available[0] = true;
+        auto enabled = handle.set_file_priorities_checked({{lt::file_index_t{0}, lt::default_priority}}, {});
+        REQUIRE(enabled.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+        REQUIRE_FALSE(enabled.get());
+        auto const restored = handle.status(lt::torrent_handle::query_pieces);
+        CHECK(restored.total_wanted_done == 65536);
+        CHECK(restored.is_seeding);
+        CHECK(fixture.provider->denied_opens.load() == 0);
+        handle.force_recheck();
+        auto during_check = handle.set_file_priorities_checked({{lt::file_index_t{0}, lt::dont_download}}, {});
+        REQUIRE(during_check.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+        REQUIRE_FALSE(during_check.get());
+        CHECK(handle.file_priority(lt::file_index_t{0}) == lt::dont_download);
+        CHECK(static_cast<bool>(handle.status().flags & lt::torrent_flags::paused));
+        if (format == Format::v1) {
+            auto entered = fixture.provider->gate_entered.get_future();
+            fixture.provider->gate_armed = true;
+            fixture.provider->reject_stat = true;
+            handle.force_recheck();
+            REQUIRE(entered.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+            auto rejected = handle.set_file_priorities_checked({{lt::file_index_t{0}, lt::default_priority}}, {});
+            fixture.provider->gate_release.set_value();
+            REQUIRE(rejected.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+            CHECK(rejected.get() == boost::system::errc::permission_denied);
+            // An already failed check must also reject a later selection.
+            rejected = handle.set_file_priorities_checked({{lt::file_index_t{0}, lt::default_priority}}, {});
+            REQUIRE(rejected.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+            CHECK(rejected.get() == boost::system::errc::permission_denied);
+            CHECK(handle.file_priority(lt::file_index_t{0}) == lt::dont_download);
+        }
+    }
 }

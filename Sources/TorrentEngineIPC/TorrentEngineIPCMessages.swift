@@ -314,14 +314,28 @@ package struct TorrentEngineIPCRestoreQueuePositionRequest: Codable, Equatable, 
     }
 }
 
-package struct TorrentEngineIPCSetFilePriorityRequest: Codable, Equatable, Sendable {
+package struct TorrentEngineIPCSetFilePrioritiesRequest: Codable, Equatable, Sendable {
     package let id: String
-    package let fileIndex: Int32
-    package let priority: TorrentFilePriority
+    package let priorities: [TorrentEngineIPCFilePriorityEntry]
 
-    package init(id: String, fileIndex: Int32, priority: TorrentFilePriority) {
+    package init(id: String, priorities: [TorrentEngineIPCFilePriorityEntry]) {
         self.id = id
-        self.fileIndex = fileIndex
-        self.priority = priority
+        self.priorities = priorities
+    }
+}
+
+package struct TorrentEngineIPCFileSelectionOperation: Codable, Equatable, Sendable {
+    package let operation: UInt64
+
+    package init(operation: UInt64) { self.operation = operation }
+}
+
+package struct TorrentEngineIPCFileSelectionRequest: Codable, Equatable, Sendable {
+    package let operation: UInt64
+    package let cancel: Bool
+
+    package init(operation: UInt64, cancel: Bool) {
+        self.operation = operation
+        self.cancel = cancel
     }
 }

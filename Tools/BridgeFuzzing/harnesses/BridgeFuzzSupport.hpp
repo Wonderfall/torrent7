@@ -28,7 +28,7 @@ namespace bridge_fuzz {
 
 namespace fs = std::filesystem;
 
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 66, "Update the fuzz harnesses for the current TorrentBridge ABI.");
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 67, "Update the fuzz harnesses for the current TorrentBridge ABI.");
 #if !defined(TORRENT_USE_ASSERTS) || !TORRENT_USE_ASSERTS
 #error "Fuzz consumers must match the assertion-enabled Debug libtorrent archive."
 #endif
@@ -746,16 +746,13 @@ inline void exercise_detail_copies(TTorrentClient *client)
             &required_count,
             &available
         ));
-        std::uint8_t transition_completed = 0U;
-        static_cast<void>(TorrentClientSetFilePriority(
-            client,
-            token,
-            0,
-            TTORRENT_FILE_PRIORITY_NORMAL,
-            &transition_completed,
-            error.data(),
-            error.capacity()
-        ));
+        std::array<TTorrentFilePriorityEntry, 1> const changes{{{0, TTORRENT_FILE_PRIORITY_NORMAL}}};
+        std::uint64_t selection = 0;
+        static_cast<void>(TorrentClientBeginFilePriorities(client, token,
+            changes.data(), 1, &selection, error.data(), error.capacity()));
+        std::uint8_t state = 0;
+        static_cast<void>(TorrentClientFilePriorityResult(client, selection, 1,
+            &state, error.data(), error.capacity()));
     }
 }
 

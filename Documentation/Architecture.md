@@ -352,19 +352,33 @@ used during magnet promotion.
 File availability is enabled in the broker before priority increases are sent
 to the engine. Restrictions are committed after native handle-release
 operations. Provider-backed skipped files always use private part storage, even
-when the original payload exists. A live skip copies existing bytes into that
-storage before closing the payload handle and acknowledging the disk fence;
-this preserves both shared pieces and completed pieces still advertised to peers.
-Copying uses a fixed 64 KiB buffer and a 20-second deadline, and may require
-temporary space proportional to the existing file. Copy or metadata-write failure
-retains the old priority and access. A separate 30-second acknowledgement deadline
-also covers stuck I/O; an unconfirmed transition requires joined engine teardown
-before the GUI rolls back access grants. Initial skipped imports do not open their
-payload; wanted pieces are verified/downloaded against private part storage.
-Folder priority changes occupy one store queue operation and persist
-availability once per phase. Cancellation or partial failure preserves confirmed
-changes and revokes unused grants before the queue advances; a failed durable
-update stops the engine and revokes the claim's live registration.
+when the original payload exists. A batch that changes file selection quiesces
+the torrent, disconnects its peers, and copies only skipped fragments of pieces
+shared with wanted files. Whole skipped-only pieces are forgotten from the
+picker, progress, caches, and resume state. Wanted verified pieces and partial
+blocks remain available; re-enabling files verifies and reuses existing payload.
+The original user files are never deleted or truncated by Skip.
+
+All files in a folder are changed in one native disk fence. Copies use a fixed
+64 KiB buffer and cooperative cancellation, without a total copy deadline. The
+owned native operation is observed through short IPC requests, each retaining
+the normal transport watchdog. Before publication, failure or cancellation keeps
+the old selection. After publication, cancellation cannot undo a committed
+selection. An unconfirmed result requires engine teardown before grant rollback.
+Initial skipped imports never open their payload.
+
+Old private fragments remain readable until a checked resume checkpoint commits
+the new priorities and piece map. A fenced, cancellable compaction then replaces
+the partfile with only the still-needed shared pieces, physically reclaiming
+unused slots (or removing the empty file). A compaction failure retains the
+readable file and reports an error; it cannot roll back a durable selection.
+Compaction may temporarily require a second copy of the retained boundary pieces,
+never the whole skipped payload. It uses the existing partfile format.
+
+Folder priority changes occupy one store queue operation and persist availability
+once per phase. Rejected batches revoke every provisional grant before the queue
+advances; a failed durable availability update stops the engine and revokes the
+claim's live registration.
 Ownership is claim-wide and independent of availability: automatic
 cleanup requires app-created ownership evidence, while an explicit user delete
 may remove identity-pinned imported manifest objects.

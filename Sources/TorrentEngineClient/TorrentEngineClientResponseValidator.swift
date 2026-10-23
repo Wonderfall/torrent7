@@ -20,6 +20,13 @@ enum TorrentEngineClientResponseValidator {
 
     static func validate<Value: Sendable>(_ value: Value) throws {
         switch value {
+        case let response as TorrentEngineIPCFileSelectionOperation:
+            guard response.operation != 0 else { throw TorrentEngineClientError.invalidReply }
+        case let status as TorrentFileSelectionStatus:
+            if case .rejected(let message) = status,
+               !isBoundedText(message, maximumBytes: 1_023, allowsEmpty: false) {
+                throw TorrentEngineClientError.invalidReply
+            }
         case let response as TorrentEngineIPCHandshakeResponse:
             try validate(response)
         case let response as TorrentEngineIPCPollResponse:

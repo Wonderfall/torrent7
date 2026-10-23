@@ -82,6 +82,11 @@ inline constexpr int32_t TTORRENT_FILE_PRIORITY_SKIP = 0;
 inline constexpr int32_t TTORRENT_FILE_PRIORITY_LOW = 1;
 inline constexpr int32_t TTORRENT_FILE_PRIORITY_NORMAL = 4;
 inline constexpr int32_t TTORRENT_FILE_PRIORITY_HIGH = 7;
+inline constexpr uint8_t TTORRENT_FILE_SELECTION_PENDING = 0;
+inline constexpr uint8_t TTORRENT_FILE_SELECTION_COMMITTED = 1;
+inline constexpr uint8_t TTORRENT_FILE_SELECTION_CANCELLED = 2;
+inline constexpr uint8_t TTORRENT_FILE_SELECTION_REJECTED = 3;
+inline constexpr uint8_t TTORRENT_FILE_SELECTION_UNCONFIRMED = 4;
 inline constexpr int32_t TTORRENT_ADD_REJECTED = 0;
 inline constexpr int32_t TTORRENT_ADD_COMMITTED = 1;
 inline constexpr int32_t TTORRENT_ADD_OUTCOME_UNKNOWN = 2;
@@ -203,7 +208,7 @@ inline constexpr uint32_t TTORRENT_DHT_FLAG_IMPLIED_PORT = 1U << 4U;
 inline constexpr uint32_t TTORRENT_DHT_FLAG_WANT_SPECIFIED = 1U << 5U;
 inline constexpr uint32_t TTORRENT_DHT_FLAG_WANT_IPV4 = 1U << 6U;
 inline constexpr uint32_t TTORRENT_DHT_FLAG_WANT_IPV6 = 1U << 7U;
-inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 66;
+inline constexpr uint32_t TTORRENT_BRIDGE_ABI_VERSION = 67;
 namespace torrent_bridge::internal {
 struct TTorrentClient;
 }
@@ -267,6 +272,11 @@ enum {
     TTORRENT_FILE_PRIORITY_LOW = 1,
     TTORRENT_FILE_PRIORITY_NORMAL = 4,
     TTORRENT_FILE_PRIORITY_HIGH = 7,
+    TTORRENT_FILE_SELECTION_PENDING = 0,
+    TTORRENT_FILE_SELECTION_COMMITTED = 1,
+    TTORRENT_FILE_SELECTION_CANCELLED = 2,
+    TTORRENT_FILE_SELECTION_REJECTED = 3,
+    TTORRENT_FILE_SELECTION_UNCONFIRMED = 4,
     TTORRENT_ADD_REJECTED = 0,
     TTORRENT_ADD_COMMITTED = 1,
     TTORRENT_ADD_OUTCOME_UNKNOWN = 2,
@@ -388,7 +398,7 @@ enum {
     TTORRENT_DHT_FLAG_WANT_SPECIFIED = 1U << 5U,
     TTORRENT_DHT_FLAG_WANT_IPV4 = 1U << 6U,
     TTORRENT_DHT_FLAG_WANT_IPV6 = 1U << 7U,
-    TTORRENT_BRIDGE_ABI_VERSION = 66
+    TTORRENT_BRIDGE_ABI_VERSION = 67
 };
 #endif
 
@@ -1309,14 +1319,29 @@ int32_t TorrentClientCopyTorrentMetadata(
     uint8_t * TORRENT_BRIDGE_NULLABLE available_out TORRENT_BRIDGE_NOESCAPE
 ) TORRENT_BRIDGE_NOEXCEPT;
 
-int32_t TorrentClientSetFilePriority(
+// Begins one atomic batch. Entries must be sorted, unique and nonempty.
+// The client owns its operation until completion or joined teardown; no caller
+// buffers are retained. A later begin may replace only a completed operation.
+int32_t TorrentClientBeginFilePriorities(
     TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
     uint64_t native_token,
-    int32_t file_index,
-    int32_t priority,
-    // True when no disk transition remains outstanding, including known failure.
-    // On false, quiesce the client before reducing payload authority.
-    uint8_t * TORRENT_BRIDGE_NULLABLE transition_completed_out TORRENT_BRIDGE_NOESCAPE,
+    const TTorrentFilePriorityEntry * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(count) entries TORRENT_BRIDGE_NOESCAPE,
+    int32_t count,
+    uint64_t * TORRENT_BRIDGE_NULLABLE operation_out TORRENT_BRIDGE_NOESCAPE,
+    char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
+    int32_t error_capacity
+) TORRENT_BRIDGE_NOEXCEPT;
+
+// A nonblocking observation; cancel requests cooperative cancellation. States:
+// 0 pending; 1 committed (including its resume checkpoint); 2 cancelled before
+// commitment; 3 rejected with the old selection intact; 4 unconfirmed outcome.
+// States 3/4 include a message in error_out. State 4 requires joined teardown
+// before reducing broker authority. Completion remains observable until begin.
+int32_t TorrentClientFilePriorityResult(
+    TTorrentClient * TORRENT_BRIDGE_NULLABLE client,
+    uint64_t operation,
+    uint8_t cancel,
+    uint8_t * TORRENT_BRIDGE_NULLABLE state_out TORRENT_BRIDGE_NOESCAPE,
     char * TORRENT_BRIDGE_NULLABLE TORRENT_BRIDGE_COUNTED_BY(error_capacity) error_out TORRENT_BRIDGE_NOESCAPE,
     int32_t error_capacity
 ) TORRENT_BRIDGE_NOEXCEPT;

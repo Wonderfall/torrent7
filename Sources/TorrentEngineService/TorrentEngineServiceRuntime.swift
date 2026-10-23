@@ -633,18 +633,18 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
             try Self.validateTorrentID(value.id)
             try await requireEngine().restoreQueuePosition(id: value.id, position: value.position)
             return try encode(TorrentEngineIPCEmpty(), for: operation)
-        case .setFilePriority:
-            let value = try decode(TorrentEngineIPCSetFilePriorityRequest.self, from: request)
+        case .beginFilePriorities:
+            let value = try decode(TorrentEngineIPCSetFilePrioritiesRequest.self, from: request)
             try Self.validateTorrentID(value.id)
-            guard (0..<TorrentEngineLimits.maximumFileCount).contains(Int(value.fileIndex)) else {
+            guard let priorities = try Self.validatedFilePriorities(value.priorities), !priorities.isEmpty else {
                 throw TorrentEngineServiceRuntimeError.invalidFilePriorities
             }
-            try await requireEngine().setFilePriority(
-                id: value.id,
-                fileIndex: value.fileIndex,
-                priority: value.priority
-            )
-            return try encode(TorrentEngineIPCEmpty(), for: operation)
+            let selection = try await requireEngine().beginFilePriorities(id: value.id, priorities: priorities)
+            return try encode(TorrentEngineIPCFileSelectionOperation(operation: selection), for: operation)
+        case .fileSelectionResult:
+            let value = try decode(TorrentEngineIPCFileSelectionRequest.self, from: request)
+            guard value.operation != 0 else { throw TorrentEngineServiceRuntimeError.invalidFilePriorities }
+            return try await encode(requireEngine().fileSelectionResult(operation: value.operation, cancel: value.cancel), for: operation)
         case .torrentMetadata:
             let value = try decodeTorrentIDRequest(request)
             return try await requireEngine().torrentMetadata(id: value.id) ?? Data()

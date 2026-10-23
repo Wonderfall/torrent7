@@ -1132,9 +1132,16 @@ actor FakeTorrentEngine: TorrentEngineServicing {
         restoredQueuePositions.append((id, position))
     }
 
-    func setFilePriority(id: String, fileIndex: Int32, priority: TorrentFilePriority) async throws {
-        filePriorityUpdates.append((id, fileIndex, priority))
-        try await filePriorityHandler?(fileIndex, priority)
+    func setFilePriorities(
+        id: String, priorities: [Int32: TorrentFilePriority],
+        isCancelled: @escaping @Sendable () -> Bool
+    ) async throws {
+        for (index, priority) in priorities.sorted(by: { $0.key < $1.key }) {
+            if isCancelled() { throw CancellationError() }
+            try await filePriorityHandler?(index, priority)
+        }
+        if isCancelled() { throw CancellationError() }
+        filePriorityUpdates += priorities.sorted { $0.key < $1.key }.map { (id, $0.key, $0.value) }
     }
 
     func setFilePriorityHandler(

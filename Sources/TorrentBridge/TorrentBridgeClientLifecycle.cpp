@@ -528,10 +528,15 @@ void TTorrentClient::start_alert_worker()
 void TTorrentClient::stop_alert_worker() noexcept
 {
     try {
+        {
+            std::scoped_lock guard(lock);
+            if (file_selection) {
+                file_selection->cancellation.request_stop();
+            }
+        }
         if (!alert_thread.joinable()) {
             return;
         }
-
         alert_thread.request_stop();
         alert_thread.join();
     } catch (...) {
@@ -565,6 +570,91 @@ void TTorrentClient::drain_synchronous_add_alerts_if_needed() noexcept
     }
 }
 
+void TTorrentClient::advance_file_selection()
+{
+    [[maybe_unused]] IdentityReclamationBlock identity_lifetime(*this);
+    std::shared_future<lt::error_code> completion;
+    lt::torrent_handle handle;
+    auto phase = PendingFileSelection::Phase::applying;
+    std::vector<lt::download_priority_t> previous;
+    std::stop_token stop;
+    {
+        std::scoped_lock guard(lock);
+        if (!file_selection || file_selection->state != FileSelectionState::pending) {
+            return;
+        }
+        completion = file_selection->completion;
+        if (!completion.valid() || completion.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            return;
+        }
+        handle = file_selection->handle;
+        phase = file_selection->phase;
+        previous = file_selection->previous;
+        stop = file_selection->cancellation.get_token();
+    }
+    FileSelectionState state = FileSelectionState::committed;
+    std::string error;
+    try {
+        auto const native_error = completion.get();
+        if (phase == PendingFileSelection::Phase::applying) {
+            if (native_error) {
+                state = handle.is_valid() && handle.get_file_priorities() == previous
+                    ? (native_error == boost::asio::error::operation_aborted
+                        ? FileSelectionState::cancelled : FileSelectionState::rejected)
+                    : FileSelectionState::unconfirmed;
+                error = native_error.message();
+            } else {
+                // Old partfile slots still exist. Commit the new priority and
+                // piece map before any private data can be reclaimed.
+                auto const saved = save_resume_handle(
+                    PendingResumeHandle{.handle = handle, .identity = identity_from_handle(handle), .cleanups = {}},
+                    kFullResumeSaveFlags, std::chrono::steady_clock::now() + kResumeCaptureTimeout);
+                if (!saved) {
+                    state = FileSelectionState::unconfirmed;
+                    error = saved.error();
+                } else {
+                    try {
+                        auto compact = handle.compact_selection(stop);
+                        std::scoped_lock guard(lock);
+                        file_selection->phase = PendingFileSelection::Phase::compacting;
+                        file_selection->completion = std::move(compact);
+                        return;
+                    } catch (std::exception const &exception) {
+                        queue_alert_error_threadsafe("Private skipped-file storage could not be reclaimed: "
+                            + std::string(exception.what()));
+                    } catch (...) {
+                        queue_alert_error_threadsafe("Private skipped-file storage could not be reclaimed.");
+                    }
+                }
+            }
+        } else if (native_error && native_error != boost::asio::error::operation_aborted) {
+            // The selection is already durable. Reclamation failure must not
+            // falsely report rollback; retain readable storage and surface it.
+            error = native_error.message();
+        }
+    } catch (std::exception const &exception) {
+        state = FileSelectionState::unconfirmed;
+        error = exception.what();
+    } catch (...) {
+        state = FileSelectionState::unconfirmed;
+        error = "File selection completion could not be confirmed.";
+    }
+    if (phase == PendingFileSelection::Phase::compacting && !error.empty()) {
+        queue_alert_error_threadsafe("Private skipped-file storage could not be reclaimed: " + error);
+        state = FileSelectionState::committed;
+        error.clear();
+    }
+    WakeCallbackInvocation wake;
+    {
+        std::scoped_lock guard(lock);
+        file_selection->state = state;
+        file_selection->error = std::move(error);
+        wake = publish_changes_locked(mark_files_changed() | mark_piece_map_changed());
+        request_snapshot_update_locked();
+    }
+    invoke_wake_callback(wake);
+}
+
 void TTorrentClient::alert_loop(std::stop_token const &stop_token)
 {
     using clock = std::chrono::steady_clock;
@@ -589,6 +679,7 @@ void TTorrentClient::alert_loop(std::stop_token const &stop_token)
             );
             session.wait_for_alert(wait_duration);
             pump_alerts();
+            advance_file_selection();
 
             auto const after_alerts = clock::now();
             bool const persistence_faulted_now = persistence_is_faulted();

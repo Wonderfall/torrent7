@@ -142,14 +142,10 @@ package actor TorrentUnavailableEngine: TorrentEngineServicing {
         throw unavailableError
     }
 
-    package func setFilePriority(
-        id: String,
-        fileIndex: Int32,
-        priority: TorrentFilePriority
+    package func setFilePriorities(
+        id: String, priorities: [Int32: TorrentFilePriority],
+        isCancelled: @escaping @Sendable () -> Bool
     ) throws {
-        _ = id
-        _ = fileIndex
-        _ = priority
         throw unavailableError
     }
 

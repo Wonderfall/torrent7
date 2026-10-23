@@ -263,7 +263,7 @@ private func bridgeString(_ buffer: [CChar]) -> String {
 struct TorrentBridgeContractTests {
     @Test("Pins bridge ABI version, limits, states, and native event kinds")
     func pinsBridgeConstants() {
-        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 66)
+        #expect(UInt32(TTORRENT_BRIDGE_ABI_VERSION) == 67)
         #expect(Int(TTORRENT_MAX_PEER_COUNT) == TorrentEngineLimits.maximumPeerCount)
         #expect(MemoryLayout<TTorrentPeerSnapshot>.size == 320)
         #expect(MemoryLayout<TTorrentPeerListResult>.size == 12)

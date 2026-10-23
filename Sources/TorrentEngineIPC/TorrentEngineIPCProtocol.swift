@@ -3,7 +3,7 @@ import TorrentEngineModel
 package import XPC
 
 package enum TorrentEngineIPCProtocol {
-    package static let version: UInt64 = 16
+    package static let version: UInt64 = 17
 }
 
 package enum TorrentEngineIPCLimits {
@@ -144,7 +144,8 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
     case torrentOptions = 33
     case setTorrentOptions = 34
     case moveTorrentInQueue = 35
-    case setFilePriority = 37
+    case beginFilePriorities = 37
+    case fileSelectionResult = 38
     case torrentMetadata = 39
 
     case trackerBatch = 40
@@ -167,7 +168,7 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
             TorrentEngineIPCLimits.maximumSmallPayloadBytes
         case .addMagnet:
             TorrentEngineIPCLimits.maximumMagnetRequestBytes
-        case .addTorrentFile:
+        case .addTorrentFile, .beginFilePriorities:
             TorrentEngineIPCLimits.maximumFilePriorityRequestBytes
         case .applySettings:
             TorrentEngineIPCLimits.maximumSettingsRequestBytes
@@ -189,7 +190,7 @@ package enum TorrentEngineIPCOperation: UInt64, CaseIterable, Sendable {
         switch self {
         case .addMagnet:
             TorrentEngineIPCLimits.magnetRequestJSONLimits
-        case .addTorrentFile:
+        case .addTorrentFile, .beginFilePriorities:
             TorrentEngineIPCLimits.filePriorityRequestJSONLimits
         case .applySettings:
             TorrentEngineIPCLimits.settingsRequestJSONLimits

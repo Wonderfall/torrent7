@@ -2490,9 +2490,9 @@ struct TorrentStoreIntegrationTests {
         }
     }
 
-    @Test("A failed folder command preserves completed changes and removes unused grants",
+    @Test("A rejected folder batch preserves the old selection and removes provisional grants",
           arguments: [TorrentFilePriority.skip, .high], [false, true])
-    func folderPriorityPartialFailure(priority: TorrentFilePriority, cancellation: Bool) async throws {
+    func folderPriorityAtomicFailure(priority: TorrentFilePriority, cancellation: Bool) async throws {
         try await withKnownTorrentHarness { harness, folder in
             let initial = try await addPriorityTestTorrent(
                 harness, in: folder, skipped: priority == .high ? [0, 1, 2] : []
@@ -2518,16 +2518,14 @@ struct TorrentStoreIntegrationTests {
                 }
             }
             let claim = try #require(await journal.allClaims().first)
-            var expected = initial.lease.fileAvailability
-            expected[0] = priority != .skip
-            #expect(claim.lease.fileAvailability == expected)
-            #expect(claim.lease.availabilityRevision == initial.lease.availabilityRevision + (priority == .skip ? 1 : 2))
-            #expect(await harness.engine.filePriorityUpdates.map(\.fileIndex) == [0, 1])
+            #expect(claim.lease.fileAvailability == initial.lease.fileAvailability)
+            #expect(claim.lease.availabilityRevision == initial.lease.availabilityRevision + (priority == .skip ? 0 : 2))
+            #expect(await harness.engine.filePriorityUpdates.isEmpty)
             #expect(harness.engine.isAvailable)
         }
     }
 
-    @Test("Cancelling a running folder request stops between commands and finishes cleanup",
+    @Test("Cancelling a running folder batch preserves the old selection and finishes cleanup",
           arguments: [TorrentFilePriority.skip, .high])
     func cancellingRunningFolderPriority(priority: TorrentFilePriority) async throws {
         try await withKnownTorrentHarness { harness, folder in
@@ -2549,10 +2547,8 @@ struct TorrentStoreIntegrationTests {
             // The shared FIFO owns cleanup even after its caller is cancelled.
             await harness.store.saveAll()
             let claim = try #require(await journal.allClaims().first)
-            var expected = initial.lease.fileAvailability
-            expected[0] = priority != .skip
-            #expect(claim.lease.fileAvailability == expected)
-            #expect(await harness.engine.filePriorityUpdates.map(\.fileIndex) == [0])
+            #expect(claim.lease.fileAvailability == initial.lease.fileAvailability)
+            #expect(await harness.engine.filePriorityUpdates.isEmpty)
         }
     }
 
@@ -2589,7 +2585,7 @@ struct TorrentStoreIntegrationTests {
             #expect(!harness.engine.isAvailable)
             #expect(harness.engine.recoveryDisposition == .terminal)
             #expect(harness.store.downloadLocationPath(for: "priority") == nil)
-            #expect(await harness.engine.filePriorityUpdates.map(\.fileIndex) == [0, 1])
+            #expect(await harness.engine.filePriorityUpdates.isEmpty)
         }
     }
 

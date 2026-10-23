@@ -342,7 +342,7 @@ int32_t TorrentClientRemove(
     );
 }
 
-int32_t TorrentClientSetFilePriority(
+int32_t set_file_priority(
     TTorrentClient *client,
     char const *id,
     int32_t file_index,
@@ -352,7 +352,7 @@ int32_t TorrentClientSetFilePriority(
 )
 {
     std::uint8_t completed = 0;
-    return ::TorrentClientSetFilePriority(
+    return bridge_tests::set_file_priority(
         client,
         native_token(*client, id),
         file_index,
@@ -5423,7 +5423,7 @@ TEST_CASE("validated staged magnets retain metadata and user intent across resum
                 ));
                 if (change_priority) {
                     std::uint8_t completed = 0;
-                    REQUIRE(::TorrentClientSetFilePriority(
+                    REQUIRE(bridge_tests::set_file_priority(
                         &client, identity->token->value, 0, TTORRENT_FILE_PRIORITY_HIGH,
                         &completed, error.data(), static_cast<int32_t>(error.size())
                     ) == 0);
@@ -5725,7 +5725,7 @@ TEST_CASE("metadata resolution keeps staged payload disabled and owns source pol
     CHECK(files.front().priority == TTORRENT_FILE_PRIORITY_LOW);
 
     char priority_error[256]{};
-    REQUIRE(TorrentClientSetFilePriority(
+    REQUIRE(set_file_priority(
         &client,
         public_identity->canonical_id.c_str(),
         0,
@@ -5891,7 +5891,7 @@ TEST_CASE("queued checkpoints capture current staged file-priority intent")
     REQUIRE(pending.size() == 1U);
     std::array<char, 512> error{};
     std::uint8_t completed = 0;
-    REQUIRE(::TorrentClientSetFilePriority(
+    REQUIRE(bridge_tests::set_file_priority(
         &client, identity->token->value, 0, TTORRENT_FILE_PRIORITY_HIGH,
         &completed, error.data(), static_cast<int32_t>(error.size())) == 0);
     REQUIRE(client.save_resume_handle(pending.front(), kFullResumeSaveFlags,
@@ -5904,4 +5904,53 @@ TEST_CASE("queued checkpoints capture current staged file-priority intent")
     REQUIRE_FALSE(parse_error);
     REQUIRE(restored.file_priorities.size() == 1U);
     CHECK(restored.file_priorities.front() == lt::top_priority);
+}
+
+TEST_CASE("file-selection batches reject malformed entries before mutation and retain their outcome")
+{
+    bridge_tests::TemporaryDirectory directory;
+    TTorrentClient client((directory.path() / "State").string());
+    client.set_session_shutdown_asynchronous(false);
+    client.stop_alert_worker();
+    TorrentIdentity *identity = nullptr;
+    auto const info = make_torrent_info(false);
+    static_cast<void>(BRIDGE_WITH_CLIENT_LOCK(client,
+        add_metadata_torrent(client, *info, directory.path(), identity)));
+    REQUIRE(identity != nullptr);
+    auto const token = identity->token->value;
+    auto const original = identity->intended_file_priorities;
+    std::array<char, 512> error{};
+    for (auto const entries : {
+        std::array<TTorrentFilePriorityEntry, 2>{{{0, 4}, {0, 7}}},
+        std::array<TTorrentFilePriorityEntry, 2>{{{1, 4}, {0, 7}}},
+        std::array<TTorrentFilePriorityEntry, 2>{{{-1, 4}, {0, 7}}},
+        std::array<TTorrentFilePriorityEntry, 2>{{{0, 2}, {1, 7}}},
+        std::array<TTorrentFilePriorityEntry, 2>{{{0, 4}, {TTORRENT_MAX_FILE_COUNT, 7}}}
+    }) {
+        std::uint64_t operation = 42;
+        CHECK(TorrentClientBeginFilePriorities(&client, token, entries.data(), 2, &operation,
+            error.data(), static_cast<int32_t>(error.size())) != 0);
+        CHECK(operation == 0);
+        CHECK(identity->intended_file_priorities == original);
+    }
+    std::array<TTorrentFilePriorityEntry, 1> const entries{{{0, TTORRENT_FILE_PRIORITY_HIGH}}};
+    std::uint64_t operation = 0;
+    REQUIRE(TorrentClientBeginFilePriorities(&client, token, entries.data(), 1, &operation,
+        error.data(), static_cast<int32_t>(error.size())) == 0);
+    std::uint64_t rejected_operation = 0;
+    CHECK(TorrentClientBeginFilePriorities(&client, token, entries.data(), 1, &rejected_operation,
+        error.data(), static_cast<int32_t>(error.size())) != 0);
+    CHECK(rejected_operation == 0);
+    REQUIRE(eventually([&] {
+        client.advance_file_selection();
+        std::uint8_t state = TTORRENT_FILE_SELECTION_UNCONFIRMED;
+        REQUIRE(TorrentClientFilePriorityResult(&client, operation, 0, &state,
+            error.data(), static_cast<int32_t>(error.size())) == 0);
+        return state == TTORRENT_FILE_SELECTION_COMMITTED;
+    }));
+    std::uint8_t state = TTORRENT_FILE_SELECTION_UNCONFIRMED;
+    REQUIRE(TorrentClientFilePriorityResult(&client, operation, 1, &state,
+        error.data(), static_cast<int32_t>(error.size())) == 0);
+    CHECK(state == TTORRENT_FILE_SELECTION_COMMITTED);
+    CHECK(identity->intended_file_priorities.front() == lt::top_priority);
 }

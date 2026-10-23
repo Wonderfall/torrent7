@@ -38,6 +38,14 @@ package enum TorrentNetworkBlockDisposition: Equatable, Sendable {
     case engineReplacementRequired
 }
 
+/// The acknowledged outcome of one native file-selection batch.
+package enum TorrentFileSelectionStatus: Codable, Equatable, Sendable {
+    case pending
+    case committed
+    case cancelled
+    case rejected(String)
+}
+
 /// Describes whether an unavailable engine can be recovered by creating a new
 /// isolated controller, or whether the failure must remain terminal.
 package enum TorrentEngineRecoveryDisposition: Equatable, Sendable {
@@ -122,7 +130,11 @@ package protocol TorrentEngineServicing: Sendable {
     /// Returns libtorrent's exact immutable bencoded info dictionary once
     /// magnet metadata is resident. The bytes are never re-encoded.
     func torrentMetadata(id: String) async throws -> Data?
-    func setFilePriority(id: String, fileIndex: Int32, priority: TorrentFilePriority) async throws
+    /// Applies one atomic selection; cancellation never abandons broker cleanup.
+    func setFilePriorities(
+        id: String, priorities: [Int32: TorrentFilePriority],
+        isCancelled: @escaping @Sendable () -> Bool
+    ) async throws
     func trackerBatch(id: String, since revision: UInt64?) async -> TorrentTrackerBatch?
     func webSeedBatch(id: String, since revision: UInt64?) async -> TorrentWebSeedBatch?
     func webSeedActivity(id: String) async -> TorrentWebSeedActivity?

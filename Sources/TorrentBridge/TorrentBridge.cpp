@@ -4309,110 +4309,110 @@ extern "C" int32_t TorrentClientCopyTorrentMetadata(
     }
 }
 
-extern "C" int32_t TorrentClientSetFilePriority(
-    TTorrentClient *client,
-    std::uint64_t const native_token,
-    int32_t file_index,
-    int32_t priority,
-    std::uint8_t *transition_completed_out,
-    char *error_out,
-    int32_t error_capacity
+extern "C" int32_t TorrentClientBeginFilePriorities(
+    TTorrentClient *client, std::uint64_t const native_token,
+    TTorrentFilePriorityEntry const *entries, int32_t count,
+    std::uint64_t *operation_out, char *error_out, int32_t error_capacity
 ) noexcept
 {
-    if (transition_completed_out != nullptr) {
-        *transition_completed_out = bridge_bool(true);
+    if (operation_out != nullptr) {
+        *operation_out = 0;
     }
-    WakeCallbackInvocation wake;
-    int32_t const result = run_bridge_operation(output_buffer(error_out, error_capacity), 2, [&]() -> BridgeResult {
-        if (client == nullptr || native_token == 0U || transition_completed_out == nullptr) {
-            return bridge_error(1, "Missing torrent client or native token.");
+    return run_bridge_operation(output_buffer(error_out, error_capacity), 2, [&]() -> BridgeResult {
+        if (client == nullptr || native_token == 0 || operation_out == nullptr
+            || count <= 0 || count > TTORRENT_MAX_FILE_COUNT || entries == nullptr) {
+            return bridge_error(1, "Invalid file priority batch.");
         }
-        if (file_index < 0 || !is_valid_file_priority(priority)) {
-            return bridge_error(1, "Invalid file priority.");
-        }
-
-        // A checkpoint must commit before a priority transition can move its
-        // completed bytes between payload storage and the private partfile.
-        std::scoped_lock checkpoint_guard(client->resume_capture_lock);
-        std::optional<lt::torrent_handle> handle;
-        std::shared_future<lt::error_code> completion;
-        {
-            std::scoped_lock guard(client->lock);
-            LockedChangePublisher publisher(*client, wake);
-            BridgeResult const persistence = client->ensure_persistence_available(2);
-            if (!persistence) {
-                return persistence;
+        auto const input = input_span_from_c_buffer(entries, count);
+        std::vector<std::pair<lt::file_index_t, lt::download_priority_t>> changes;
+        changes.reserve(input.size());
+        int32_t previous_index = -1;
+        for (auto const &entry : input) {
+            if (entry.index <= previous_index || entry.index >= TTORRENT_MAX_FILE_COUNT
+                || !is_valid_file_priority(entry.priority)) {
+                return bridge_error(1, "Invalid file priority entry.");
             }
-
-            handle = client->find(native_token);
-            if (!handle) {
-                return bridge_error(2, "Torrent not found.");
-            }
-
-            std::shared_ptr<lt::torrent_info const> const torrent_file = handle->torrent_file();
-            if (!torrent_file || !torrent_file->is_valid()) {
-                return bridge_error(2, "Torrent metadata is not available.");
-            }
-
-            lt::renamed_files const renamed_files = handle->get_renamed_files();
-            BridgeResult const valid_info = validate_torrent_info(
-                *torrent_file,
-                renamed_files.export_filenames(torrent_file->layout())
-            );
-            if (!valid_info) {
-                return valid_info;
-            }
-            if (file_index >= torrent_file->layout().num_files()) {
-                return bridge_error(2, "File not found.");
-            }
-
-            TorrentIdentity *const identity = identity_from_handle(*handle);
-            if (identity != nullptr && !identity->storage_activation) {
-                identity->intended_file_priorities.resize(
-                    static_cast<std::size_t>(torrent_file->layout().num_files()),
-                    identity->intended_default_dont_download
-                        ? lt::dont_download
-                        : lt::default_priority
-                );
-                identity->intended_file_priorities.at(
-                    static_cast<std::size_t>(file_index)
-                ) = file_priority_from_bridge(priority);
-                handle->file_priority(
-                    lt::file_index_t(file_index),
-                    lt::dont_download
-                );
-            } else {
-                *transition_completed_out = bridge_bool(false);
-                completion = handle->set_file_priority_checked(
-                    lt::file_index_t(file_index), file_priority_from_bridge(priority)
-                );
-            }
-        }
-        // Never wait while holding the bridge state lock: disk completion and
-        // callback processing must remain able to make progress. The future owns
-        // its state after timeout; Swift must quiesce the engine before rollback.
-        if (completion.valid()) {
-            if (completion.wait_for(std::chrono::seconds(30)) != std::future_status::ready) {
-                return bridge_error(2, "File priority storage transition timed out.");
-            }
-            lt::error_code const error = completion.get();
-            *transition_completed_out = bridge_bool(true);
-            if (error) {
-                return bridge_error(2, "File priority storage transition failed: " + error.message());
-            }
+            previous_index = entry.index;
+            changes.emplace_back(lt::file_index_t{entry.index}, file_priority_from_bridge(entry.priority));
         }
         std::scoped_lock guard(client->lock);
-        LockedChangePublisher publisher(*client, wake);
-        client->request_save_locked(*handle);
-        publisher.add(client->mark_files_changed());
-        publisher.add(client->observe_torrent_handle(*handle));
-        client->request_snapshot_update_locked();
+        if (client->file_selection && client->file_selection->state == FileSelectionState::pending) {
+            return bridge_error(2, "A file selection is already in progress.");
+        }
+        if (client->next_file_selection == std::numeric_limits<std::uint64_t>::max()) {
+            return bridge_error(2, "File selection identifiers exhausted.");
+        }
+        auto const persistence = client->ensure_persistence_available(2);
+        if (!persistence) {
+            return persistence;
+        }
+        auto const handle = client->find(native_token);
+        if (!handle) {
+            return bridge_error(2, "Torrent not found.");
+        }
+        auto const info = handle->torrent_file();
+        if (!info || !info->is_valid()) {
+            return bridge_error(2, "Torrent metadata is not available.");
+        }
+        for (auto const &[file, priority] : changes) {
+            static_cast<void>(priority);
+            if (file >= info->layout().end_file() || info->layout().pad_file_at(file)) {
+                return bridge_error(1, "Invalid file priority entry.");
+            }
+        }
+        auto operation = std::make_unique<PendingFileSelection>();
+        operation->operation = client->next_file_selection++;
+        operation->handle = *handle;
+        operation->previous = handle->get_file_priorities();
+        *operation_out = operation->operation;
+        client->file_selection = std::move(operation);
+        auto &pending = *client->file_selection;
+        TorrentIdentity *const identity = identity_from_handle(*handle);
+        if (identity != nullptr && !identity->storage_activation) {
+            auto priorities = identity->intended_file_priorities;
+            priorities.resize(static_cast<std::size_t>(info->layout().num_files()),
+                identity->intended_default_dont_download ? lt::dont_download : lt::default_priority);
+            for (auto const &[file, priority] : changes) {
+                priorities.at(static_cast<std::size_t>(int(file))) = priority;
+            }
+            identity->intended_file_priorities = std::move(priorities);
+            std::promise<lt::error_code> staged;
+            pending.completion = staged.get_future().share();
+            staged.set_value({});
+        } else {
+            pending.completion = handle->set_file_priorities_checked(std::move(changes), pending.cancellation.get_token());
+        }
         return {};
     });
-    if (client != nullptr) {
-        client->invoke_wake_callback(wake);
+}
+
+extern "C" int32_t TorrentClientFilePriorityResult(
+    TTorrentClient *client, std::uint64_t operation, std::uint8_t cancel,
+    std::uint8_t *state_out, char *error_out, int32_t error_capacity
+) noexcept
+{
+    if (state_out != nullptr) {
+        *state_out = static_cast<std::uint8_t>(FileSelectionState::unconfirmed);
     }
-    return result;
+    return run_bridge_operation(output_buffer(error_out, error_capacity), 2, [&]() -> BridgeResult {
+        if (client == nullptr || operation == 0 || state_out == nullptr || cancel > 1) {
+            return bridge_error(1, "Invalid file selection result request.");
+        }
+        std::scoped_lock guard(client->lock);
+        if (!client->file_selection || client->file_selection->operation != operation) {
+            return bridge_error(1, "Unknown file selection operation.");
+        }
+        auto &pending = *client->file_selection;
+        if (cancel != 0 && pending.state == FileSelectionState::pending) {
+            pending.cancellation.request_stop();
+            if (pending.phase == PendingFileSelection::Phase::applying && pending.handle.is_valid()) {
+                pending.handle.cancel_file_priorities();
+            }
+        }
+        *state_out = static_cast<std::uint8_t>(pending.state);
+        copy_error(output_buffer(error_out, error_capacity), pending.error);
+        return {};
+    });
 }
 
 extern "C" int32_t TorrentClientPause(TTorrentClient *client, std::uint64_t const native_token, char *error_out,
@@ -4514,6 +4514,10 @@ extern "C" int32_t TorrentClientForceRecheck(TTorrentClient *client, std::uint64
             return bridge_error(2, "Torrent not found.");
         }
 
+        if (client->file_selection && client->file_selection->state == FileSelectionState::pending
+            && client->file_selection->handle == *handle) {
+            return bridge_error(2, "File selection is still in progress.");
+        }
         handle->force_recheck();
         publisher.add(client->observe_torrent_handle(*handle));
         client->request_snapshot_update_locked();

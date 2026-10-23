@@ -47,6 +47,32 @@ using namespace torrent_bridge::internal;
 
 namespace bridge_tests {
 
+// Integration adapter: exercise begin/status with a bounded test-only wait.
+// A stopped alert worker is advanced explicitly for deterministic white-box tests.
+inline int32_t set_file_priority(TTorrentClient *client, std::uint64_t token,
+    int32_t index, int32_t priority, std::uint8_t *completed, char *error, int32_t capacity)
+{
+    std::array<TTorrentFilePriorityEntry, 1> const changes{{{index, priority}}};
+    std::uint64_t operation = 0;
+    *completed = 1;
+    auto result = TorrentClientBeginFilePriorities(client, token, changes.data(), 1, &operation, error, capacity);
+    if (result != 0) return result;
+    auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    *completed = 0;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (!client->alert_thread.joinable()) client->advance_file_selection();
+        std::uint8_t state = 4;
+        result = TorrentClientFilePriorityResult(client, operation, 0, &state, error, capacity);
+        if (result != 0) return result;
+        if (state != 0) {
+            *completed = state == 4 ? 0 : 1;
+            return state == 1 ? 0 : 2;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return 2;
+}
+
 struct ParsedMagnetFixture {
     TTorrentMagnetImport header{};
     std::vector<std::uint8_t> blob;

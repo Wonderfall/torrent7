@@ -245,16 +245,18 @@ extern "C" __attribute__((visibility("default"))) int LLVMFuzzerTestOneInput(
         }
         case 11: {
             std::uint64_t const token = selected_token(reader, harness.client());
-            std::uint8_t transition_completed = 0U;
-            static_cast<void>(TorrentClientSetFilePriority(
-                harness.client(),
-                token,
-                reader.read_i32(),
-                reader.read_i32(),
-                &transition_completed,
-                error.data(),
-                error.capacity()
-            ));
+            std::array<TTorrentFilePriorityEntry, 4> changes{};
+            for (auto &change : changes) {
+                change.index = reader.read_i32();
+                change.priority = reader.read_i32();
+            }
+            auto const count = reader.read_bool() ? -1 : static_cast<int32_t>(reader.read_u8() % 5U);
+            std::uint64_t selection = 0;
+            static_cast<void>(TorrentClientBeginFilePriorities(harness.client(), token,
+                reader.read_bool() ? nullptr : changes.data(), count, &selection, error.data(), error.capacity()));
+            std::uint8_t state = 0;
+            static_cast<void>(TorrentClientFilePriorityResult(harness.client(), selection,
+                reader.read_bool() ? 1 : 0, &state, error.data(), error.capacity()));
             break;
         }
         case 12: {

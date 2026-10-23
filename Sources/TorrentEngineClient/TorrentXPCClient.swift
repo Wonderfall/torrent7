@@ -734,19 +734,58 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         )
     }
 
-    package func setFilePriority(
-        id: String,
-        fileIndex: Int32,
-        priority: TorrentFilePriority
+    package func setFilePriorities(
+        id: String, priorities: [Int32: TorrentFilePriority],
+        isCancelled: @escaping @Sendable () -> Bool
     ) async throws {
-        try await invokeUnit(
-            .setFilePriority,
-            TorrentEngineIPCSetFilePriorityRequest(
-                id: id,
-                fileIndex: fileIndex,
-                priority: priority
+        try Task.checkCancellation()
+        guard !priorities.isEmpty, priorities.count <= TorrentEngineLimits.maximumFileCount,
+              priorities.keys.allSatisfy({ (0..<Int32(TorrentEngineLimits.maximumFileCount)).contains($0) }) else {
+            throw TorrentEngineError.bridgeError("Invalid file priority batch.")
+        }
+        let cancellation = Mutex(false)
+        // This awaited task owns the operation through its acknowledged terminal
+        // state. Caller cancellation requests a stop; it cannot abandon grants.
+        let operation = Task {
+            if isCancelled() || cancellation.withLock({ $0 }) { throw CancellationError() }
+            let started: TorrentEngineIPCFileSelectionOperation = try await invoke(
+                .beginFilePriorities,
+                TorrentEngineIPCSetFilePrioritiesRequest(id: id, priorities: priorities.sorted { $0.key < $1.key }.map {
+                    TorrentEngineIPCFilePriorityEntry(index: $0.key, priority: $0.value)
+                })
             )
-        )
+            while true {
+                let status: TorrentFileSelectionStatus
+                do {
+                    status = try await invoke(
+                        .fileSelectionResult,
+                        TorrentEngineIPCFileSelectionRequest(
+                            operation: started.operation,
+                            cancel: isCancelled() || cancellation.withLock { $0 }
+                        )
+                    )
+                } catch {
+                    // A failed observation is not a rejected selection. End the
+                    // engine session before allowing provisional grant rollback.
+                    await shutdown()
+                    throw error
+                }
+                switch status {
+                case .pending:
+                    // Rate-limit observations; each short RPC retains the normal
+                    // transport watchdog, with no deadline for healthy disk work.
+                    try await Task.sleep(for: .milliseconds(100))
+                case .committed: return
+                case .cancelled: throw CancellationError()
+                case .rejected(let message): throw TorrentEngineError.bridgeError(message)
+                }
+            }
+        }
+        try await withTaskCancellationHandler {
+            try await operation.value
+        } onCancel: {
+            cancellation.withLock { $0 = true }
+        }
     }
 
     package func trackerBatch(id: String, since revision: UInt64?) async -> TorrentTrackerBatch? {

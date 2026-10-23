@@ -1,55 +1,116 @@
+diff --git a/include/libtorrent/aux_/disk_job.hpp b/include/libtorrent/aux_/disk_job.hpp
+index 33446ec09..65c243571 100644
+--- a/include/libtorrent/aux_/disk_job.hpp
++++ b/include/libtorrent/aux_/disk_job.hpp
+@@ -25,6 +25,7 @@ see LICENSE file.
+ #include <string>
+ #include <vector>
+ #include <memory>
++#include <stop_token>
+ #include <functional>
+ 
+ namespace libtorrent::aux {
+@@ -232,6 +233,9 @@ namespace job {
+ 		std::function<void(storage_error const&, aux::vector<download_priority_t, file_index_t>)> handler;
+ 		// passed in/out
+ 		aux::vector<download_priority_t, file_index_t> prio;
++		std::stop_token stop{};
++		bool checked = false;
++		bool compact = false;
+ 	};
+ 
+ 	struct clear_piece
+diff --git a/include/libtorrent/aux_/part_file.hpp b/include/libtorrent/aux_/part_file.hpp
+index abecf3134..8caf0a721 100644
+--- a/include/libtorrent/aux_/part_file.hpp
++++ b/include/libtorrent/aux_/part_file.hpp
+@@ -19,6 +19,8 @@ see LICENSE file.
+ #include <unordered_map>
+ #include <cstdint>
+ #include <memory>
++#include <stop_token>
++#include "libtorrent/bitfield.hpp"
+ 
+ #include "libtorrent/config.hpp"
+ #include "libtorrent/aux_/file.hpp"
+@@ -58,7 +60,10 @@ namespace libtorrent::aux {
+ 		// specified range that's in the part_file. The first parameter is the
+ 		// offset within the range
+ 		void export_file(std::function<void(std::int64_t, span<char>)> f
+-			, std::int64_t offset, std::int64_t size, error_code& ec);
++			, std::int64_t offset, std::int64_t size, error_code& ec, bool release_slots = true);
++
++		// Called only after the new selection checkpoint is durable, under a disk fence.
++		void retain_pieces(typed_bitfield<piece_index_t> const&, std::stop_token, error_code&);
+ 
+ 		// flush the metadata
+ 		void flush_metadata(error_code& ec);
 diff --git a/include/libtorrent/aux_/pread_storage.hpp b/include/libtorrent/aux_/pread_storage.hpp
-index 49085c24c..27bcb6630 100644
+index 49085c24c..08528ba6c 100644
 --- a/include/libtorrent/aux_/pread_storage.hpp
 +++ b/include/libtorrent/aux_/pread_storage.hpp
 @@ -17,6 +17,7 @@ see LICENSE file.
  #include <optional>
  
  #include "libtorrent/fwd.hpp"
-+#include "libtorrent/time.hpp"
++#include <stop_token>
  #include "libtorrent/aux_/disk_job_fence.hpp"
  #include "libtorrent/storage_defs.hpp"
  #include "libtorrent/aux_/part_file.hpp"
-@@ -53,7 +54,7 @@ namespace libtorrent::aux {
+@@ -53,7 +54,10 @@ namespace libtorrent::aux {
  		bool has_any_file(storage_error&);
  		void set_file_priority(settings_interface const&
  			, aux::vector<download_priority_t, file_index_t>& prio
 -			, storage_error&);
-+			, storage_error&, time_point deadline = clock_type::now() + seconds{20});
++			, storage_error&, std::stop_token stop = {});
++		void compact_partfile(storage_error&, std::stop_token stop);
++		void set_provider_priorities(settings_interface const&
++			, aux::vector<download_priority_t, file_index_t>&, storage_error&, std::stop_token);
  		void rename_file(file_index_t index, std::string const& new_filename
  			, storage_error&);
  		void release_files(storage_error&);
 diff --git a/include/libtorrent/aux_/torrent.hpp b/include/libtorrent/aux_/torrent.hpp
-index d6016fadc..57a11c709 100644
+index d6016fadc..dbc048d46 100644
 --- a/include/libtorrent/aux_/torrent.hpp
 +++ b/include/libtorrent/aux_/torrent.hpp
-@@ -31,6 +31,7 @@ see LICENSE file.
+@@ -31,6 +31,8 @@ see LICENSE file.
  #include <deque>
  #include <limits> // for numeric_limits
  #include <memory> // for unique_ptr
 +#include <future>
++#include <stop_token>
  #include <mutex>
  #include <optional>
  
-@@ -750,6 +751,8 @@ namespace libtorrent::aux {
+@@ -750,6 +752,15 @@ namespace libtorrent::aux {
  		void piece_priorities(aux::vector<download_priority_t, piece_index_t>*) const;
  
  		void set_file_priority(file_index_t index, download_priority_t priority);
-+		[[nodiscard]] std::shared_future<error_code> set_file_priority_checked(file_index_t index, download_priority_t priority);
++		[[nodiscard]] std::shared_future<error_code> set_file_priorities_checked(std::vector<std::pair<file_index_t, download_priority_t>> changes, std::stop_token stop);
++		[[nodiscard]] std::shared_future<error_code> compact_selection(std::stop_token stop);
++		void cancel_file_priorities();
 +		void submit_checked_file_priority();
++		void apply_checked_file_priority();
++		void rebuild_selected_pieces();
++		void verify_selected_piece();
++		void finish_checked_file_priority(error_code error);
++
  		download_priority_t file_priority(file_index_t index) const;
  
  		void on_file_priority(storage_error const& err, aux::vector<download_priority_t, file_index_t> prios);
-@@ -1613,6 +1616,16 @@ namespace libtorrent::aux {
+@@ -1613,6 +1624,19 @@ namespace libtorrent::aux {
  		// this dictionary. Once the outstanding update comes back, all of these
  		// are applied in one batch
  		std::map<file_index_t, download_priority_t> m_deferred_file_priorities;
 +		struct checked_file_priority
 +		{
-+			file_index_t index;
-+			download_priority_t priority;
++			std::vector<std::pair<file_index_t, download_priority_t>> changes;
++			std::stop_token stop;
 +			std::promise<error_code> completion;
-+			bool submitted = false;
++			enum class phase { queued, quiescing, applying, verifying } state = phase::queued;
++			bool quiesced = false;
++			typed_bitfield<piece_index_t> recheck;
++			piece_index_t next_piece{0};
 +		};
 +		// Network-thread owned. Destruction breaks an abandoned promise without
 +		// retaining any bridge/Swift state or borrowing a caller's stack.
@@ -57,49 +118,193 @@ index d6016fadc..57a11c709 100644
  
  		// this object is used to track download progress of individual files
  		aux::file_progress m_file_progress;
+diff --git a/include/libtorrent/disk_interface.hpp b/include/libtorrent/disk_interface.hpp
+index fc7286f8d..8659d3c4e 100644
+--- a/include/libtorrent/disk_interface.hpp
++++ b/include/libtorrent/disk_interface.hpp
+@@ -15,6 +15,7 @@ see LICENSE file.
+ #include "libtorrent/bdecode.hpp"
+ 
+ #include <string>
++#include <stop_token>
+ #include <memory>
+ 
+ #include "libtorrent/fwd.hpp"
+@@ -328,6 +329,15 @@ namespace file_open_mode {
+ 			, std::function<void(storage_error const&
+ 				, aux::vector<download_priority_t, file_index_t>)> handler) = 0;
+ 
++		// Provider selection changes need cancellation and acknowledged compaction.
++		// Other storage implementations do not implement this capability.
++		virtual void async_select_files(storage_index_t
++			, aux::vector<download_priority_t, file_index_t> prio, std::stop_token, bool
++			, std::function<void(storage_error const&, aux::vector<download_priority_t, file_index_t>)> handler)
++		{
++			handler(storage_error(make_error_code(boost::system::errc::operation_not_supported)), std::move(prio));
++		}
++
+ 		// This is called when a piece fails the hash check, to ensure there are
+ 		// no outstanding disk operations to the piece before blocks are
+ 		// re-requested from peers to overwrite the existing blocks. The disk I/O
 diff --git a/include/libtorrent/torrent_handle.hpp b/include/libtorrent/torrent_handle.hpp
-index f2f75259b..77fa6bfdc 100644
+index f2f75259b..06c93f848 100644
 --- a/include/libtorrent/torrent_handle.hpp
 +++ b/include/libtorrent/torrent_handle.hpp
-@@ -26,6 +26,7 @@ see LICENSE file.
+@@ -26,6 +26,8 @@ see LICENSE file.
  #include <set>
  #include <functional>
  #include <memory>
 +#include <future>
++#include <stop_token>
  
  #include "libtorrent/aux_/disable_warnings_push.hpp"
  #if TORRENT_ABI_VERSION == 1
-@@ -1201,6 +1202,9 @@ namespace aux {
+@@ -1201,6 +1203,12 @@ namespace aux {
  		// supported. If a file has its priority set to 0 *after* it has already
  		// been created, it will not be moved into the partfile.
  		void file_priority(file_index_t index, download_priority_t priority) const;
 +		// Resolves after the fenced storage transition and payload-handle release.
 +		// Only one checked request may be outstanding per torrent.
-+		[[nodiscard]] std::shared_future<error_code> set_file_priority_checked(file_index_t index, download_priority_t priority) const;
++		// After its checkpoint is durable, compact_selection releases old private slots.
++		[[nodiscard]] std::shared_future<error_code> compact_selection(std::stop_token stop) const;
++		void cancel_file_priorities() const;
++		[[nodiscard]] std::shared_future<error_code> set_file_priorities_checked(std::vector<std::pair<file_index_t, download_priority_t>> changes, std::stop_token stop) const;
  		download_priority_t file_priority(file_index_t index) const;
  		void prioritize_files(std::vector<download_priority_t> const& files) const;
  		std::vector<download_priority_t> get_file_priorities() const;
 diff --git a/src/part_file.cpp b/src/part_file.cpp
-index 962f454a2..34552456c 100644
+index 962f454a2..107e8f1c4 100644
 --- a/src/part_file.cpp
 +++ b/src/part_file.cpp
-@@ -385,7 +385,11 @@ namespace libtorrent::aux {
- 				span<char> v = {buf.get(), block_to_copy};
- 				int const bytes_read =
- 					aux::pread_all(file.fd(), v, slot_offset(slot) + piece_offset, ec);
+@@ -49,6 +49,9 @@ see LICENSE file.
+ 
+ #include <functional> // for std::function
+ #include <cstdint>
++#include <array>
++#include <boost/asio/error.hpp>
++#include "libtorrent/aux_/scope_end.hpp"
+ 
+ namespace {
+ 
+@@ -351,69 +354,109 @@ namespace libtorrent::aux {
+ 	}
+ 
+ 	void part_file::export_file(std::function<void(std::int64_t, span<char>)> f
+-		, std::int64_t const offset, std::int64_t size, error_code& ec)
++		, std::int64_t const offset, std::int64_t const size, error_code& ec, bool const release_slots)
+ 	{
+-		std::unique_lock<std::mutex> l(m_mutex);
+-
+-		// there's nothing stored in the part_file. Nothing to do
++		std::unique_lock<std::mutex> lock(m_mutex);
+ 		if (m_piece_map.empty()) return;
+-
+-		piece_index_t piece(int(offset / m_piece_size));
+-		piece_index_t const end = piece_index_t(int(((offset + size) + m_piece_size - 1) / m_piece_size));
+-
+-		std::unique_ptr<char[]> buf;
+-
+-		std::int64_t piece_offset = offset - std::int64_t(static_cast<int>(piece))
+-			* m_piece_size;
+-		std::int64_t file_offset = 0;
+-		auto file = open_file(aux::open_mode::read_only, ec);
++		auto source = open_file(open_mode::read_only, ec);
+ 		if (ec) return;
+-
+-		for (; piece < end; ++piece)
++		file_status status;
++		confined_stat_file(m_root, combine_path(m_relative_path, m_name), &status, ec);
++		if (ec) return;
++		std::array<char, 64 * 1024> buffer;
++		auto const first = piece_index_t{int(offset / m_piece_size)};
++		auto const end = piece_index_t{int((offset + size + m_piece_size - 1) / m_piece_size)};
++		for (auto piece = first; piece < end; ++piece)
++		{
++			auto const entry = m_piece_map.find(piece);
++			if (entry == m_piece_map.end()) continue;
++			auto const slot = entry->second;
++			auto const piece_start = std::int64_t(int(piece)) * m_piece_size;
++			auto begin = std::max(offset, piece_start) - piece_start;
++			// An incomplete piece can end before the requested file fragment.
++			// Export only existing bytes; the picker retains the completion map.
++			auto const limit = std::min({std::int64_t(m_piece_size), offset + size - piece_start,
++				status.file_size - slot_offset(slot)});
++			lock.unlock();
++			while (begin < limit)
++			{
++				auto bytes = span<char>{buffer}.first(int(std::min<std::int64_t>(buffer.size(), limit - begin)));
++				if (pread_all(source.fd(), bytes, slot_offset(slot) + begin, ec) != bytes.size() || ec)
++				{ if (!ec) ec = make_error_code(boost::system::errc::io_error); return; }
++				f(piece_start + begin - offset, bytes);
++				begin += bytes.size();
++			}
++			lock.lock();
++		}
++		if (!release_slots) return;
++		// Relinquish complete slots only after every output write succeeds.
++		m_free_slots.reserve(m_free_slots.size() + m_piece_map.size());
++		for (auto piece = piece_index_t{int((offset + m_piece_size - 1) / m_piece_size)};
++			piece < piece_index_t{int((offset + size) / m_piece_size)}; ++piece)
+ 		{
+ 			auto const i = m_piece_map.find(piece);
+-			int const block_to_copy = int(std::min(m_piece_size - piece_offset, size));
+-			if (i != m_piece_map.end())
++			if (i == m_piece_map.end()) continue;
++			m_free_slots.push_back(i->second);
++			m_piece_map.erase(i);
++			m_dirty_metadata = true;
++		}
++	}
++
++	void part_file::retain_pieces(typed_bitfield<piece_index_t> const& keep
++		, std::stop_token const stop, error_code& ec)
++	{
++		std::unique_lock<std::mutex> lock(m_mutex);
++		if (m_piece_map.empty()) return;
++		bool const removes = std::any_of(m_piece_map.begin(), m_piece_map.end()
++			, [&](auto const& p) { return !keep[p.first]; });
++		if (!removes) return;
++		auto const temporary = m_name + ".compact";
++		auto const path = combine_path(m_relative_path, temporary);
++		confined_remove(m_root, path, false, ec);
++		if (ec == boost::system::errc::no_such_file_or_directory) ec.clear();
++		if (ec) return;
++		auto cleanup = scope_end([&] { error_code ignored; confined_remove(m_root, path, false, ignored); });
++		part_file replacement(m_root, m_relative_path, temporary, m_max_pieces, m_piece_size);
++		auto source = open_file(open_mode::read_only, ec);
++		if (ec) return;
++		file_status status;
++		confined_stat_file(m_root, combine_path(m_relative_path, m_name), &status, ec);
++		if (ec) return;
++		// The storage fence excludes data readers/writers. Metadata ticks may
++		// still flush the old header, so lock again for the atomic replacement.
++		lock.unlock();
++		std::array<char, 64 * 1024> buffer;
++		for (auto const& [piece, slot] : m_piece_map)
++		{
++			if (!keep[piece]) continue;
++			auto const count = std::min<std::int64_t>(m_piece_size, status.file_size - slot_offset(slot));
++			if (count <= 0) { ec = make_error_code(boost::system::errc::io_error); return; }
++			for (int offset = 0; offset < count;)
+ 			{
+-				slot_index_t const slot = i->second;
+-
+-				if (!buf) buf.reset(new char[std::size_t(m_piece_size)]);
+-
+-				// don't hold the lock during disk I/O
+-				l.unlock();
+-
+-				span<char> v = {buf.get(), block_to_copy};
+-				int const bytes_read =
+-					aux::pread_all(file.fd(), v, slot_offset(slot) + piece_offset, ec);
 -				if (bytes_read < 0) return;
-+				if (bytes_read != block_to_copy)
-+				{
-+					if (!ec) ec = make_error_code(boost::system::errc::io_error);
-+					return;
-+				}
- 
- 				f(file_offset, {buf.get(), block_to_copy});
- 
-@@ -393,27 +397,24 @@ namespace libtorrent::aux {
- 				// the slot map
- 				l.lock();
- 
+-
+-				f(file_offset, {buf.get(), block_to_copy});
+-
+-				// we're done with the disk I/O, grab the lock again to update
+-				// the slot map
+-				l.lock();
+-
 -				if (block_to_copy == m_piece_size)
 -				{
 -					// since we released the lock, it's technically possible that
@@ -116,29 +321,99 @@ index 962f454a2..34552456c 100644
 -						m_dirty_metadata = true;
 -					}
 -				}
-+
++				if (stop.stop_requested()) { ec = boost::asio::error::operation_aborted; return; }
++				auto bytes = span<char>{buffer}.first(int(std::min<std::int64_t>(buffer.size(), count - offset)));
++				if (pread_all(source.fd(), bytes, slot_offset(slot) + offset, ec) != bytes.size() || ec)
++				{ if (!ec) ec = make_error_code(boost::system::errc::io_error); return; }
++				if (replacement.write(bytes, piece, offset, ec) != bytes.size() || ec) return;
++				offset += int(bytes.size());
  			}
- 			file_offset += block_to_copy;
- 			piece_offset = 0;
- 			size -= block_to_copy;
+-			file_offset += block_to_copy;
+-			piece_offset = 0;
+-			size -= block_to_copy;
  		}
-+		// Only relinquish complete slots after every output write succeeded.
-+		// A failed export must leave the skipped route fully readable.
-+		m_free_slots.reserve(m_free_slots.size() + m_piece_map.size());
-+		for (auto p = piece_index_t{int((offset + m_piece_size - 1) / m_piece_size)};
-+			p < piece_index_t{int((offset + file_offset) / m_piece_size)}; ++p)
-+		{
-+			auto const i = m_piece_map.find(p);
-+			if (i == m_piece_map.end()) continue;
-+			m_free_slots.push_back(i->second);
-+			m_piece_map.erase(i);
-+			m_dirty_metadata = true;
-+		}
++		replacement.flush_metadata(ec);
++		if (ec) return;
++		if (stop.stop_requested()) { ec = boost::asio::error::operation_aborted; return; }
++		// Keep the rename and map swap indivisible with metadata flushes: an
++		// old slot map must never be written into the newly compacted file.
++		lock.lock();
++		if (replacement.m_piece_map.empty())
++			confined_remove(m_root, combine_path(m_relative_path, m_name), false, ec);
++		else
++			confined_rename(m_root, path, m_root, combine_path(m_relative_path, m_name), ec);
++		if (ec) return;
++		m_piece_map.swap(replacement.m_piece_map);
++		m_free_slots.swap(replacement.m_free_slots);
++		std::swap(m_num_allocated, replacement.m_num_allocated);
++		m_dirty_metadata = false;
++		replacement.m_dirty_metadata = false;
  	}
  
  	void part_file::flush_metadata(error_code& ec)
+diff --git a/src/pread_disk_io.cpp b/src/pread_disk_io.cpp
+index d34916c4e..c90a5cf96 100644
+--- a/src/pread_disk_io.cpp
++++ b/src/pread_disk_io.cpp
+@@ -148,6 +148,10 @@ struct TORRENT_EXTRA_EXPORT pread_disk_io final
+ 		, std::function<void(storage_error const&
+ 			, aux::vector<download_priority_t, file_index_t>)> handler) override;
+ 
++	void async_select_files(storage_index_t, aux::vector<download_priority_t, file_index_t>
++		, std::stop_token, bool
++		, std::function<void(storage_error const&, aux::vector<download_priority_t, file_index_t>)>) override;
++
+ 	void async_clear_piece(storage_index_t storage, piece_index_t index
+ 		, std::function<void(piece_index_t)> handler) override;
+ 
+@@ -1088,12 +1092,21 @@ void pread_disk_io::async_set_file_priority(storage_index_t const storage
+ 		{},
+ 		m_torrents[storage]->shared_from_this(),
+ 		std::move(handler),
+-		std::move(prios)
++		std::move(prios), std::stop_token{}, false, false
+ 	);
+ 
+ 	add_fence_job(j);
+ }
+ 
++void pread_disk_io::async_select_files(storage_index_t const storage
++	, aux::vector<download_priority_t, file_index_t> prios, std::stop_token const stop, bool const compact
++	, std::function<void(storage_error const&, aux::vector<download_priority_t, file_index_t>)> handler)
++{
++	auto* j = m_job_pool.allocate_job<aux::job::file_priority>({},
++		m_torrents[storage]->shared_from_this(), std::move(handler), std::move(prios), stop, true, compact);
++	add_fence_job(j);
++}
++
+ // Called by the bittorrent layer in two distinct scenarios:
+ //
+ // 1. Hash check failed: peer_connection / torrent calls this after the piece
+@@ -1545,9 +1558,19 @@ void pread_disk_io::update_stats_counters(counters& c) const
+ 
+ status_t pread_disk_io::do_job(aux::job::file_priority& a, aux::pread_disk_job* j)
+ {
+-	j->storage->set_file_priority(m_settings
+-		, a.prio
+-		, j->error);
++	if (a.checked && !a.compact)
++	{
++		flush_storage(j->storage);
++		m_cache.wait_for_hashing(j->storage->storage_index());
++		// The torrent is quiesced and the fence has drained writes/hashes.
++		// Discard derived cache state before rebuilding piece availability.
++		jobqueue_t aborted;
++		m_cache.remove_storage(j->storage->storage_index(), aborted);
++		m_completed_jobs.abort_jobs(m_ios, std::move(aborted));
++		for (auto const piece : j->storage->files().piece_range()) j->storage->drop_precomputed_v2(piece);
++	}
++	if (a.compact) j->storage->compact_partfile(j->error, a.stop);
++	else j->storage->set_file_priority(m_settings, a.prio, j->error, a.stop);
+ 	return status_t{};
+ }
+ 
 diff --git a/src/pread_storage.cpp b/src/pread_storage.cpp
-index 8631927dd..006d0bb68 100644
+index 8631927dd..dd8cd2eb6 100644
 --- a/src/pread_storage.cpp
 +++ b/src/pread_storage.cpp
 @@ -13,6 +13,8 @@ see LICENSE file.
@@ -146,38 +421,37 @@ index 8631927dd..006d0bb68 100644
  
  #include <ctime>
 +#include <array>
-+#include <chrono>
++#include "libtorrent/file_storage.hpp"
  #include <algorithm>
  #include <numeric>
  #include <set>
-@@ -112,7 +114,7 @@ namespace libtorrent::aux {
+@@ -112,8 +114,14 @@ namespace libtorrent::aux {
  
  	void pread_storage::set_file_priority(settings_interface const& sett
  		, vector<download_priority_t, file_index_t>& prio
 -		, storage_error& ec)
-+		, storage_error& ec, time_point const deadline)
++		, storage_error& ec, std::stop_token const stop)
  	{
++		if (m_file_provider)
++		{
++			set_provider_priorities(sett, prio, ec, stop);
++			return;
++		}
++
  		// extend our file priorities in case it's truncated
  		// the default assumed priority is 4 (the default)
-@@ -135,6 +137,7 @@ namespace libtorrent::aux {
- 			// priority 0, we allow re-trying them.
- 			auto restore_prio = aux::scope_end([&] {
- 				m_file_priority[i] = old_prio;
-+				if (m_file_provider) m_pool.release(storage_index(), i);
- 				prio = m_file_priority;
- 			});
- 
-@@ -179,22 +182,73 @@ namespace libtorrent::aux {
+ 		if (prio.size() > m_file_priority.size())
+@@ -179,22 +187,9 @@ namespace libtorrent::aux {
  			}
  			else if (old_prio != dont_download && new_prio == dont_download)
  			{
 -				// move stuff into the part file
 -				// this is not implemented yet.
 -				// so we just don't use a partfile for this file
--
--				bool file_exists;
- 				if (m_file_provider)
- 				{
+ 
+ 				bool file_exists;
+-				if (m_file_provider)
+-				{
 -					file_exists = m_file_provider->payload_size(i, ec.ec) >= 0;
 -					if (!file_exists && !ec.ec)
 -						ec.ec = make_error_code(boost::system::errc::io_error);
@@ -186,94 +460,148 @@ index 8631927dd..006d0bb68 100644
 -				{
 -					file_exists = confined_exists(
 -						m_save_path, fs.file_path(i), ec.ec);
-+					// Existing verified pieces may still be advertised to peers, so
-+					// preserve all existing bytes, including shared-piece fragments.
-+					// Do not publish the route until the copy and header are complete.
-+					need_partfile();
-+					auto const size = m_file_provider->payload_size(i, ec.ec);
-+					if (ec.ec || size < 0 || size > fs.file_size(i))
-+					{
-+						if (!ec.ec) ec.ec = errors::invalid_range;
-+						ec.file(i);
-+						ec.operation = operation_t::file_stat;
-+						return;
-+					}
-+					if (size > 0)
-+					{
-+						auto source = open_file(sett, i, open_mode::read_only, ec);
-+						if (ec) return;
-+						std::array<char, 64 * 1024> buffer;
-+						for (std::int64_t offset = 0; offset < size;)
-+						{
-+							if (clock_type::now() >= deadline)
-+							{
-+								ec.ec = make_error_code(boost::system::errc::timed_out);
-+								ec.file(i);
-+								ec.operation = operation_t::partfile_write;
-+								return;
-+							}
-+							auto const absolute = fs.file_offset(i) + offset;
-+							auto const piece = piece_index_t{int(absolute / files().piece_length())};
-+							int const in_piece = int(absolute % files().piece_length());
-+							int const count = int(std::min({size - offset,
-+								std::int64_t(buffer.size()), std::int64_t(files().piece_length() - in_piece)}));
-+							span<char> const block = span<char>{buffer}.first(count);
-+							int const read = pread_all(source->fd(), block, offset, ec.ec);
-+							if (read != count || ec.ec)
-+							{
-+								if (!ec.ec) ec.ec = make_error_code(boost::system::errc::io_error);
-+								ec.file(i);
-+								ec.operation = operation_t::file_read;
-+								return;
-+							}
-+							if (m_part_file->write(block, piece, in_piece, ec.ec) != count || ec.ec)
-+							{
-+								if (!ec.ec) ec.ec = make_error_code(boost::system::errc::io_error);
-+								ec.file(i);
-+								ec.operation = operation_t::partfile_write;
-+								return;
-+							}
-+							offset += count;
-+						}
-+					}
-+					m_part_file->flush_metadata(ec.ec);
-+					if (ec.ec)
-+					{
-+						ec.file(i);
-+						ec.operation = operation_t::partfile_write;
-+						return;
-+					}
-+					m_pool.release(storage_index(), i);
-+					use_partfile(i, true);
-+					restore_prio.disarm();
-+					continue;
- 				}
-+
-+				bool file_exists;
+-				}
 +				file_exists = confined_exists(m_save_path, fs.file_path(i), ec.ec);
  				if (ec.ec)
  				{
  					ec.file(i);
-@@ -203,6 +257,9 @@ namespace libtorrent::aux {
- 				}
- 				use_partfile(i, !file_exists);
- 			}
-+			// Also release a failed/successful unskip's temporary capability
-+			// before the caller can roll back its provisional broker grant.
-+			if (m_file_provider) m_pool.release(storage_index(), i);
- 			ec.ec.clear();
- 			restore_prio.disarm();
- 
-@@ -211,7 +268,7 @@ namespace libtorrent::aux {
- 				need_partfile();
- 			}
+@@ -219,6 +214,135 @@ namespace libtorrent::aux {
  		}
--		if (m_part_file) m_part_file->flush_metadata(ec.ec);
-+		if (m_part_file && !m_file_provider) m_part_file->flush_metadata(ec.ec);
- 		if (ec)
- 		{
- 			ec.file(torrent_status::error_file_partfile);
-@@ -277,6 +334,16 @@ namespace libtorrent::aux {
+ 	}
+ 
++	namespace {
++		typed_bitfield<piece_index_t> wanted_pieces(file_storage const& files
++			, vector<download_priority_t, file_index_t> const& priorities)
++		{
++			typed_bitfield<piece_index_t> wanted(files.num_pieces(), false);
++			for (auto const file : files.file_range())
++			{
++				if (files.pad_file_at(file) || files.file_size(file) == 0
++					|| (file < priorities.end_index() && priorities[file] == dont_download)) continue;
++				for (auto const piece : file_piece_range_inclusive(files, file)) wanted.set_bit(piece);
++			}
++			return wanted;
++		}
++	}
++
++	void pread_storage::set_provider_priorities(settings_interface const& sett
++		, vector<download_priority_t, file_index_t>& prio, storage_error& ec
++		, std::stop_token const stop)
++	{
++		prio.resize(files().num_files(), default_priority);
++		auto const wanted = wanted_pieces(files(), prio);
++		auto const restore = scope_end([&] {
++			// This fenced job owns every temporary payload capability. Release
++			// them on success, cancellation and failure before acknowledging.
++			m_pool.release(storage_index());
++			if (ec) prio = m_file_priority;
++		});
++		std::array<char, 64 * 1024> buffer;
++		for (auto const file : files().file_range())
++		{
++			if (stop.stop_requested())
++			{
++				ec.ec = boost::asio::error::operation_aborted;
++				return;
++			}
++			if (files().pad_file_at(file)) { prio[file] = dont_download; continue; }
++			auto const old = file < m_file_priority.end_index() ? m_file_priority[file] : default_priority;
++			if ((old == dont_download) == (prio[file] == dont_download)) continue;
++			if (old == dont_download)
++			{
++				if (!m_part_file) continue;
++				auto out = open_file(sett, file, open_mode::write, ec);
++				if (ec) return;
++				try
++				{
++					// Keep the old mapping until the new resume checkpoint commits.
++					m_part_file->export_file([&](std::int64_t offset, span<char> bytes) {
++						if (stop.stop_requested()) throw_ex<system_error>(boost::asio::error::operation_aborted);
++						error_code err;
++						if (pwrite_all(out->fd(), bytes, offset, err) != bytes.size() && !err)
++							err = make_error_code(boost::system::errc::io_error);
++						if (err) throw_ex<system_error>(err);
++					}, files().file_offset(file), files().file_size(file), ec.ec, false);
++				}
++				catch (system_error const& error) { ec.ec = error.code(); }
++				if (ec) { ec.file(file); ec.operation = operation_t::partfile_read; return; }
++				continue;
++			}
++			if (files().file_size(file) == 0) continue;
++			auto const begin = files().file_offset(file);
++			auto const end = begin + files().file_size(file);
++			auto const first = piece_index_t{int(begin / files().piece_length())};
++			auto const last = piece_index_t{int((end - 1) / files().piece_length())};
++			// Interior pieces contain no bytes belonging to another file. Only
++			// the first and last piece can be needed by the final selection.
++			std::shared_ptr<file_handle> source;
++			std::int64_t size = 0;
++			for (auto const piece : {first, last})
++			{
++				if (!wanted[piece]) continue;
++				if (!source)
++				{
++					size = m_file_provider->payload_size(file, ec.ec);
++					if (!ec.ec && (size < 0 || size > files().file_size(file))) ec.ec = errors::invalid_range;
++					if (ec) { ec.file(file); ec.operation = operation_t::file_stat; return; }
++					if (size == 0) break;
++					source = open_file(sett, file, open_mode::read_only, ec);
++					if (ec) return;
++					need_partfile();
++				}
++				auto const piece_start = std::int64_t(int(piece)) * files().piece_length();
++				auto offset = std::max(begin, piece_start);
++				auto const limit = std::min(begin + size, piece_start + files().piece_length());
++				while (offset < limit)
++				{
++					if (stop.stop_requested()) { ec.ec = boost::asio::error::operation_aborted; return; }
++					auto bytes = span<char>{buffer}.first(int(std::min<std::int64_t>(buffer.size(), limit - offset)));
++					if (pread_all(source->fd(), bytes, offset - begin, ec.ec) != bytes.size() || ec.ec)
++					{
++						if (!ec.ec) ec.ec = make_error_code(boost::system::errc::io_error);
++						ec.file(file); ec.operation = operation_t::file_read; return;
++					}
++					if (m_part_file->write(bytes, piece, int(offset - piece_start), ec.ec) != bytes.size() || ec.ec)
++					{
++						if (!ec.ec) ec.ec = make_error_code(boost::system::errc::io_error);
++						ec.file(file); ec.operation = operation_t::partfile_write; return;
++					}
++					offset += bytes.size();
++				}
++				if (first == last) break;
++			}
++		}
++		if (stop.stop_requested()) { ec.ec = boost::asio::error::operation_aborted; return; }
++		if (m_part_file) m_part_file->flush_metadata(ec.ec);
++		if (ec) { ec.operation = operation_t::partfile_write; return; }
++		// Copies are additive and exports retain their old slots. Before this
++		// assignment both the old selection and its durable checkpoint remain
++		// readable; no partially applied batch is published.
++		m_file_priority = prio;
++		for (auto const file : files().file_range())
++			if (prio[file] == dont_download && !files().pad_file_at(file)) { use_partfile(file, true); need_partfile(); }
++	}
++
++	void pread_storage::compact_partfile(storage_error& ec, std::stop_token const stop)
++	{
++		if (!m_part_file) return;
++		auto keep = wanted_pieces(files(), m_file_priority);
++		typed_bitfield<piece_index_t> skipped(files().num_pieces(), false);
++		for (auto const file : files().file_range())
++		{
++			if (files().pad_file_at(file) || files().file_size(file) == 0
++				|| file >= m_file_priority.end_index() || m_file_priority[file] != dont_download) continue;
++			for (auto const piece : file_piece_range_inclusive(files(), file)) skipped.set_bit(piece);
++		}
++		for (auto const piece : keep.range()) if (!skipped[piece]) keep.clear_bit(piece);
++		m_part_file->retain_pieces(keep, stop, ec.ec);
++		if (ec) ec.operation = operation_t::partfile_write;
++	}
++
+ 	bool pread_storage::use_partfile(file_index_t const index) const
+ 	{
+ 		TORRENT_ASSERT_VAL(index >= file_index_t{}, index);
+@@ -277,6 +401,16 @@ namespace libtorrent::aux {
  			if (m_file_priority[i] != dont_download || fs.pad_file_at(i))
  				continue;
  
@@ -291,75 +619,382 @@ index 8631927dd..006d0bb68 100644
  			auto const size = m_stat_cache.get_filesize(
  				i, fs, m_save_path, err, m_file_provider);
 diff --git a/src/torrent.cpp b/src/torrent.cpp
-index b65a91046..51ccb4638 100644
+index b65a91046..9f834fb04 100644
 --- a/src/torrent.cpp
 +++ b/src/torrent.cpp
-@@ -6267,6 +6267,12 @@ namespace {
+@@ -2532,6 +2532,7 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 		// restore m_need_save_resume_data to its state when we entered this
+ 		// function.
+ 		m_need_save_resume_data = need_save_resume_data;
++		submit_checked_file_priority();
+ 	}
+ 	catch (...) { handle_exception(); }
+ 
+@@ -2618,6 +2619,7 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 		if (error)
+ 		{
+ 			handle_disk_error("force_recheck", error);
++			finish_checked_file_priority(error.ec);
+ 			return;
+ 		}
+ #ifndef TORRENT_DISABLE_LOGGING
+@@ -2646,6 +2648,7 @@ aux::vector<download_priority_t, piece_index_t> file_to_piece_prio(
+ 			if (should_check_files()) start_checking();
+ 			else m_ses.trigger_auto_manage();
+ 		}
++		submit_checked_file_priority();
+ 	}
+ 	catch (...) { handle_exception(); }
+ 
+@@ -5531,6 +5534,7 @@ namespace {
+ 		if (m_abort) return;
+ 
+ 		m_abort = true;
++		finish_checked_file_priority(errors::torrent_removed);
+ 		m_paused = false;
+ 
+ 		// flush the live segment into the accumulators and mark them all
+@@ -6236,7 +6240,7 @@ namespace {
+ 	}
+ 
+ 	void torrent::on_file_priority(storage_error const& err
+-		, aux::vector<download_priority_t, file_index_t> prios)
++		, aux::vector<download_priority_t, file_index_t> prios) try
+ 	{
+ 		m_outstanding_file_priority = false;
+ 		COMPLETE_ASYNC("file_priority");
+@@ -6252,7 +6256,7 @@ namespace {
+ #endif
+ 		}
+ 
+-		if (err)
++		if (err && err.ec != boost::asio::error::operation_aborted)
+ 		{
+ 			// in this case, some file priorities failed to get set
+ 			if (alerts().should_post<file_error_alert>())
+@@ -6267,6 +6271,16 @@ namespace {
  			alerts().emplace_alert<file_prio_alert>(get_handle());
  		}
  
-+		if (m_checked_file_priority && m_checked_file_priority->submitted)
++		if (m_checked_file_priority && m_checked_file_priority->state == checked_file_priority::phase::applying)
 +		{
-+			m_checked_file_priority->completion.set_value(err.ec);
-+			m_checked_file_priority.reset();
++			if (!err && m_checked_file_priority->quiesced)
++			{
++				rebuild_selected_pieces();
++				verify_selected_piece();
++			}
++			else finish_checked_file_priority(err.ec);
 +		}
 +
  		// apply queued priorities even on failure; m_file_priority reflects
  		// the storage's actual state, and m_storage stays valid after pause()
  		if (!m_deferred_file_priorities.empty() && !m_abort)
-@@ -6288,6 +6294,40 @@ namespace {
+@@ -6288,6 +6302,259 @@ namespace {
  			}
  			prioritize_files(std::move(new_priority));
  		}
 +		submit_checked_file_priority();
 +	}
-+
-+	std::shared_future<error_code> torrent::set_file_priority_checked(file_index_t index, download_priority_t priority)
++	catch (...)
 +	{
-+		if (m_checked_file_priority || m_abort || !m_storage || !valid_metadata()
-+			|| index < file_index_t{0} || index >= m_torrent_file->layout().end_file()
-+			|| m_torrent_file->layout().pad_file_at(index))
++		pause();
++		finish_checked_file_priority(boost::asio::error::fault);
++		handle_exception();
++	}
++
++	std::shared_future<error_code> torrent::set_file_priorities_checked(
++		std::vector<std::pair<file_index_t, download_priority_t>> changes, std::stop_token const stop)
++	{
++		if (m_checked_file_priority || m_abort || !m_storage || !valid_metadata() || changes.empty())
 +			throw_ex<system_error>(errors::invalid_torrent_handle);
-+		m_checked_file_priority = std::make_unique<checked_file_priority>(index, priority);
++		for (auto const& [index, priority] : changes)
++			if (index < file_index_t{0} || index >= m_torrent_file->layout().end_file()
++				|| m_torrent_file->layout().pad_file_at(index) || priority > top_priority)
++				throw_ex<system_error>(errors::invalid_range);
++		m_checked_file_priority = std::make_unique<checked_file_priority>();
++		m_checked_file_priority->changes = std::move(changes);
++		m_checked_file_priority->stop = stop;
 +		auto result = m_checked_file_priority->completion.get_future().share();
 +		submit_checked_file_priority();
 +		return result;
 +	}
 +
-+	void torrent::submit_checked_file_priority()
++	void torrent::submit_checked_file_priority() try
 +	{
-+		if (!m_checked_file_priority || m_checked_file_priority->submitted || m_outstanding_file_priority) return;
-+		if (m_abort || !m_storage)
++		if (!m_checked_file_priority || m_checked_file_priority->state != checked_file_priority::phase::queued
++			|| m_outstanding_file_priority) return;
++		if (m_abort || !m_storage || m_checked_file_priority->stop.stop_requested())
 +		{
-+			m_checked_file_priority->completion.set_value(errors::torrent_removed);
-+			m_checked_file_priority.reset();
++			finish_checked_file_priority(boost::asio::error::operation_aborted);
 +			return;
 +		}
-+		m_checked_file_priority->submitted = true;
-+		try
++		// Resume initialization must publish its picker first. Full checking
++		// may be user-paused indefinitely; selection must not wait for it.
++		if (m_state == torrent_status::checking_resume_data)
 +		{
-+			set_file_priority(m_checked_file_priority->index, m_checked_file_priority->priority);
++			if (has_error()) finish_checked_file_priority(error());
++			return;
 +		}
-+		catch (...)
++		auto& change = *m_checked_file_priority;
++		change.recheck.resize(m_torrent_file->num_pieces(), false);
++		for (auto const& [file, priority] : change.changes)
 +		{
-+			m_checked_file_priority->completion.set_exception(std::current_exception());
-+			m_checked_file_priority.reset();
++			auto const old = file_priority(file);
++			if ((old == dont_download) != (priority == dont_download)) change.quiesced = true;
++			if (old == dont_download && priority != dont_download && m_torrent_file->layout().file_size(file) > 0)
++				for (auto const piece : file_piece_range_inclusive(m_torrent_file->layout(), file)) change.recheck.set_bit(piece);
 +		}
++		if (!change.quiesced) { apply_checked_file_priority(); return; }
++		change.state = checked_file_priority::phase::quiescing;
++		// is_paused() includes this internal operation, independently of user
++		// pause/auto-management. No new peer can observe the old piece map.
++		do_pause();
++		disconnect_all(errors::torrent_paused, operation_t::bittorrent);
++		// do_pause() can leave a graceful pause or initial check in flight.
++		// This owned fence is the completion barrier for either path.
++		m_ses.disk_thread().async_stop_torrent(m_storage, [self = shared_from_this()] {
++			self->apply_checked_file_priority();
++		});
++		m_ses.deferred_submit_jobs();
++	}
++	catch (...)
++	{
++		pause();
++		finish_checked_file_priority(boost::asio::error::fault);
++		handle_exception();
++	}
++
++	void torrent::cancel_file_priorities()
++	{ submit_checked_file_priority(); }
++
++	void torrent::apply_checked_file_priority() try
++	{
++		if (!m_checked_file_priority) return;
++		if (m_abort || !m_storage || m_checked_file_priority->stop.stop_requested())
++		{ finish_checked_file_priority(boost::asio::error::operation_aborted); return; }
++		auto priorities = m_file_priority;
++		priorities.resize(m_torrent_file->num_files(), default_priority);
++		for (auto const& [file, priority] : m_checked_file_priority->changes) priorities[file] = priority;
++		m_checked_file_priority->state = checked_file_priority::phase::applying;
++		m_outstanding_file_priority = true;
++		ADD_OUTSTANDING_ASYNC("file_priority");
++		if (!m_checked_file_priority->quiesced)
++		{
++			m_ses.disk_thread().async_set_file_priority(m_storage, std::move(priorities),
++				[self = shared_from_this()](storage_error const& error, vector<download_priority_t, file_index_t> result) {
++					self->on_file_priority(error, std::move(result));
++				});
++			m_ses.deferred_submit_jobs();
++			return;
++		}
++		m_ses.disk_thread().async_select_files(m_storage, std::move(priorities)
++			, m_checked_file_priority->stop, false
++			, [self = shared_from_this()](storage_error const& error, vector<download_priority_t, file_index_t> result) {
++				self->on_file_priority(error, std::move(result));
++			});
++		m_ses.deferred_submit_jobs();
++	}
++	catch (...)
++	{
++		pause();
++		finish_checked_file_priority(boost::asio::error::fault);
++		handle_exception();
++	}
++
++	void torrent::rebuild_selected_pieces()
++	{
++		add_torrent_params before;
++		write_resume_data({}, before);
++		auto const wanted = file_to_piece_prio(m_torrent_file->layout(), m_file_priority);
++		++m_picker_generation;
++		leave_seed_mode(seed_mode_t::skip_checking);
++		m_picker.reset();
++		m_hash_picker.reset();
++		m_file_progress.clear();
++		set_have_all(false);
++		if (m_files_checked) set_state(torrent_status::downloading);
++		need_picker();
++		for (auto const piece : wanted.range())
++		{
++			if (wanted[piece] == dont_download) continue;
++			if (int(piece) < before.have_pieces.size() && before.have_pieces[piece])
++				m_picker->piece_flushed(piece);
++		}
++		for (auto const& [piece, blocks] : before.unfinished_pieces)
++		{
++			if (wanted[piece] == dont_download || m_picker->have_piece(piece)) continue;
++			for (int block = 0; block < blocks.size(); ++block)
++				if (blocks[block]) m_picker->mark_as_finished(piece_block(piece, block), nullptr);
++			if (m_picker->is_piece_finished(piece)) m_checked_file_priority->recheck.set_bit(piece);
++		}
++		m_file_progress.clear();
++		m_file_progress.init(*m_picker, m_torrent_file->layout());
++		// Initial checking will visit the unexamined suffix when resumed.
++		// Only newly enabled pieces behind that cursor need a separate check.
++		if (!m_files_checked)
++			for (auto piece = m_checking_piece; piece < m_torrent_file->end_piece(); ++piece)
++				m_checked_file_priority->recheck.clear_bit(piece);
++		m_checked_file_priority->state = checked_file_priority::phase::verifying;
++		set_need_save_resume(torrent_handle::if_download_progress);
++		update_gauge();
++	}
++
++	void torrent::verify_selected_piece() try
++	{
++		if (!m_checked_file_priority) return;
++		auto& change = *m_checked_file_priority;
++		if (m_abort || !m_storage) { finish_checked_file_priority(errors::torrent_removed); return; }
++		if (!m_picker) { finish_checked_file_priority({}); return; }
++		while (change.next_piece < m_torrent_file->end_piece()
++			&& (!change.recheck[change.next_piece] || m_picker->have_piece(change.next_piece))) ++change.next_piece;
++		// Selection is committed. Cancellation can stop optional reuse checking;
++		// the remaining pieces stay missing and will be downloaded normally.
++		if (change.stop.stop_requested() || change.next_piece == m_torrent_file->end_piece())
++		{ finish_checked_file_priority({}); return; }
++		auto const piece = change.next_piece++;
++		auto flags = disk_interface::sequential_access | disk_interface::volatile_read;
++		bool const v1 = torrent_file().info_hashes().has_v1() && !m_disable_v1_hashes;
++		if (v1) flags |= disk_interface::v1_hash;
++		aux::vector<sha256_hash> hashes;
++		if (torrent_file().info_hashes().has_v2()) hashes.resize(torrent_file().layout().blocks_in_piece2(piece));
++		span<sha256_hash> output(hashes);
++		m_ses.disk_thread().async_hash(m_storage, piece, output, flags,
++			[self = shared_from_this(), block_hashes = std::move(hashes), v1, generation = m_picker_generation](piece_index_t p, sha1_hash const& hash, storage_error const& error) {
++			try {
++				if (!self->m_checked_file_priority || self->m_abort) return;
++				if (generation != self->m_picker_generation)
++				{ self->finish_checked_file_priority(boost::asio::error::operation_aborted); return; }
++				if (error && error.ec != boost::system::errc::no_such_file_or_directory
++					&& error.ec != boost::asio::error::eof && error.ec != errors::file_too_short)
++				{
++					self->handle_disk_error("file_selection", error);
++					self->finish_checked_file_priority(error.ec);
++					return;
++				}
++				boost::tribool passed = boost::indeterminate;
++				boost::tribool v2_passed = boost::indeterminate;
++				if (!error)
++				{
++					if (v1) passed = hash == self->m_torrent_file->hash_for_piece(p);
++					if (!block_hashes.empty() && !bool(passed == false)) v2_passed = self->on_blocks_hashed(p, block_hashes);
++					if ((passed && !v2_passed) || (!passed && v2_passed))
++					{
++						self->handle_inconsistent_hashes(p);
++						self->finish_checked_file_priority(errors::torrent_inconsistent_hashes);
++						return;
++					}
++					if ((passed || v2_passed) && self->m_picker && !self->m_picker->have_piece(p))
++					{
++						self->m_picker->piece_flushed(p);
++						self->update_gauge();
++						self->we_have(p);
++					}
++				}
++				if (self->m_picker && !self->m_picker->have_piece(p))
++				{
++					if (!error && boost::indeterminate(passed) && boost::indeterminate(v2_passed))
++					{
++						// Without a v2 piece layer, later blocks may authenticate
++						// this piece against the file root. Keep it pending then.
++						for (int block = 0; block < self->m_picker->blocks_in_piece(p); ++block)
++							self->m_picker->mark_as_finished(piece_block(p, block), nullptr);
++					}
++					else self->m_picker->restore_piece(p);
++				}
++				self->verify_selected_piece();
++			} catch (...) {
++				self->pause();
++				self->finish_checked_file_priority(boost::asio::error::fault);
++				self->handle_exception();
++			}
++			});
++		m_ses.deferred_submit_jobs();
++	}
++	catch (...)
++	{
++		pause();
++		finish_checked_file_priority(boost::asio::error::fault);
++		handle_exception();
++	}
++
++	void torrent::finish_checked_file_priority(error_code const error)
++	{
++		if (!m_checked_file_priority) return;
++		bool const quiesced = m_checked_file_priority->quiesced;
++		auto completion = std::move(m_checked_file_priority->completion);
++		m_checked_file_priority.reset();
++		if (quiesced && !m_abort)
++		{
++			if (!error && m_files_checked)
++			{
++				maybe_done_flushing();
++				if (is_finished()) finished();
++				else resume_download();
++			}
++			update_gauge();
++			if (!is_paused()) do_resume();
++		}
++		completion.set_value(error);
++	}
++
++	std::shared_future<error_code> torrent::compact_selection(std::stop_token const stop)
++	{
++		auto completion = std::make_shared<std::promise<error_code>>();
++		auto result = completion->get_future().share();
++		if (m_abort || !m_storage) { completion->set_value(errors::torrent_removed); return result; }
++		m_ses.disk_thread().async_select_files(m_storage, {}, stop, true,
++			[completion](storage_error const& error, vector<download_priority_t, file_index_t>) { completion->set_value(error.ec); });
++		m_ses.deferred_submit_jobs();
++		return result;
  	}
  
  	void torrent::prioritize_files(aux::vector<download_priority_t, file_index_t> files)
+@@ -9531,6 +9798,7 @@ namespace {
+ 		start_announcing();
+ 
+ 		maybe_connect_web_seeds();
++		submit_checked_file_priority();
+ 	}
+ 
+ 	aux::alert_manager& torrent::alerts() const
+@@ -10477,7 +10745,7 @@ namespace {
+ 
+ 	bool torrent::is_paused() const
+ 	{
+-		return m_paused || m_session_paused;
++		return m_paused || m_session_paused || (m_checked_file_priority && m_checked_file_priority->quiesced);
+ 	}
+ 
+ 	void torrent::pause(pause_flags_t const flags)
+@@ -11088,6 +11356,7 @@ namespace {
+ 
+ 	void torrent::second_tick(int const tick_interval_ms)
+ 	{
++		submit_checked_file_priority();
+ 		TORRENT_ASSERT(want_tick());
+ 		TORRENT_ASSERT(is_single_thread());
+ 		INVARIANT_CHECK;
 diff --git a/src/torrent_handle.cpp b/src/torrent_handle.cpp
-index 14ae8c026..e631e6435 100644
+index 14ae8c026..500b9997e 100644
 --- a/src/torrent_handle.cpp
 +++ b/src/torrent_handle.cpp
-@@ -545,6 +545,11 @@ namespace libtorrent {
+@@ -545,6 +545,20 @@ namespace libtorrent {
  	}
  #endif
  
-+	std::shared_future<error_code> torrent_handle::set_file_priority_checked(file_index_t index, download_priority_t priority) const
++	std::shared_future<error_code> torrent_handle::set_file_priorities_checked(
++		std::vector<std::pair<file_index_t, download_priority_t>> changes, std::stop_token stop) const
 +	{
-+		return sync_call_ret<std::shared_future<error_code>>({}, &aux::torrent::set_file_priority_checked, index, priority);
++		return sync_call_ret<std::shared_future<error_code>>({}, &aux::torrent::set_file_priorities_checked, std::move(changes), stop);
 +	}
++
++	std::shared_future<error_code> torrent_handle::compact_selection(std::stop_token stop) const
++	{
++		return sync_call_ret<std::shared_future<error_code>>({}, &aux::torrent::compact_selection, stop);
++	}
++
++	void torrent_handle::cancel_file_priorities() const
++	{ async_call(&aux::torrent::cancel_file_priorities); }
 +
  	void torrent_handle::file_priority(file_index_t index, download_priority_t priority) const
  	{

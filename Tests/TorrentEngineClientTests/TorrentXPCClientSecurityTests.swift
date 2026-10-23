@@ -11,6 +11,77 @@ struct TorrentXPCClientSecurityTests {
     private let epoch = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
     private let torrentID = "t:\(String(repeating: "a", count: 32))"
 
+    @Test("File selection cancellation waits for the acknowledged batch outcome", arguments: [false, true])
+    func fileSelectionCancellationWaitsForAcknowledgement(committed: Bool) async throws {
+        let epoch = epoch
+        let blocker = AsyncRequestBlocker()
+        let transport = ScriptedTorrentEngineTransport { request in
+            switch request.header.operation {
+            case .handshake:
+                return try successReply(TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.2"),
+                                        for: request, epoch: epoch)
+            case .beginFilePriorities:
+                let batch: TorrentEngineIPCSetFilePrioritiesRequest = try decodeRequest(request)
+                #expect(batch.priorities.map(\.index) == [0, 3])
+                #expect(batch.priorities.map(\.priority) == [.high, .skip])
+                await blocker.block()
+                return try successReply(TorrentEngineIPCFileSelectionOperation(operation: 1),
+                                        for: request, epoch: epoch)
+            case .fileSelectionResult:
+                let query: TorrentEngineIPCFileSelectionRequest = try decodeRequest(request)
+                #expect(query.operation == 1)
+                #expect(query.cancel)
+                return try successReply(committed ? TorrentFileSelectionStatus.committed : .cancelled,
+                                        for: request, epoch: epoch)
+            default:
+                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
+            }
+        }
+        let client = try await makeClient(transport: transport)
+        let id = torrentID
+        let task = Task {
+            try await client.setFilePriorities(id: id, priorities: [3: .skip, 0: .high], isCancelled: { false })
+        }
+        await blocker.waitUntilBlocked()
+        task.cancel()
+        await blocker.release()
+        if committed {
+            try await task.value
+        } else {
+            await #expect(throws: CancellationError.self) { try await task.value }
+        }
+        #expect(transport.operations == [.handshake, .beginFilePriorities, .fileSelectionResult])
+        #expect(client.isAvailable)
+    }
+
+    @Test("An unconfirmed file-selection observation shuts down before returning")
+    func fileSelectionObservationFailureStopsEngine() async throws {
+        let epoch = epoch
+        let transport = ScriptedTorrentEngineTransport { request in
+            switch request.header.operation {
+            case .handshake:
+                return try successReply(TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.2"),
+                                        for: request, epoch: epoch)
+            case .beginFilePriorities:
+                return try successReply(TorrentEngineIPCFileSelectionOperation(operation: 1),
+                                        for: request, epoch: epoch)
+            case .fileSelectionResult:
+                throw TorrentEngineClientError.requestExpiredBeforeSubmission
+            case .shutdown:
+                return try successReply(TorrentEngineIPCEmpty(), for: request, epoch: epoch)
+            default:
+                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
+            }
+        }
+        let client = try await makeClient(transport: transport)
+        await #expect(throws: TorrentEngineClientError.self) {
+            try await client.setFilePriorities(id: torrentID, priorities: [0: .skip], isCancelled: { false })
+        }
+        #expect(transport.operations == [.handshake, .beginFilePriorities, .fileSelectionResult, .shutdown])
+        #expect(!client.isAvailable)
+        #expect(client.recoveryDisposition == .terminal)
+    }
+
     @Test("Change hints are validated without acquiring message resources")
     func changeHintValidationUsesMetadata() throws {
         let controllerID = UUID()

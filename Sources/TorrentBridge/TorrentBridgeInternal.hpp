@@ -319,7 +319,7 @@ static_assert(
 );
 static_assert(kMaxTorrentIdentityTokenCount > static_cast<std::size_t>(TTORRENT_MAX_TORRENT_SNAPSHOT_COUNT));
 static_assert(TTORRENT_MAX_TRACKER_HOST_ROW_COUNT > 0);
-static_assert(TTORRENT_BRIDGE_ABI_VERSION == 66U);
+static_assert(TTORRENT_BRIDGE_ABI_VERSION == 67U);
 static_assert(
     TORRENT_ABI_VERSION > 1,
     "Deprecated libtorrent ABIs can parse add_torrent_params.url as a raw magnet."
@@ -690,6 +690,24 @@ struct ResumePolicySnapshot {
     std::vector<lt::announce_entry> source_trackers;
     std::vector<std::string> source_web_seeds;
     std::vector<lt::download_priority_t> intended_file_priorities;
+};
+
+enum class FileSelectionState : std::uint8_t {
+    pending = TTORRENT_FILE_SELECTION_PENDING,
+    committed = TTORRENT_FILE_SELECTION_COMMITTED,
+    cancelled = TTORRENT_FILE_SELECTION_CANCELLED,
+    rejected = TTORRENT_FILE_SELECTION_REJECTED,
+    unconfirmed = TTORRENT_FILE_SELECTION_UNCONFIRMED,
+};
+struct PendingFileSelection {
+    enum class Phase : std::uint8_t { applying, compacting } phase = Phase::applying;
+    std::uint64_t operation = 0;
+    lt::torrent_handle handle;
+    std::vector<lt::download_priority_t> previous;
+    std::stop_source cancellation;
+    std::shared_future<lt::error_code> completion;
+    FileSelectionState state = FileSelectionState::pending;
+    std::string error;
 };
 
 struct PendingResumeHandle {
@@ -1872,6 +1890,12 @@ struct TTorrentClient {
     DeferredSessionProxy deferred_session_shutdown;
     lt::session session;
     std::jthread alert_thread;
+    std::uint64_t next_file_selection TORRENT_BRIDGE_GUARDED_BY(lock) = 1;
+    std::unique_ptr<PendingFileSelection> file_selection TORRENT_BRIDGE_GUARDED_BY(lock);
+    void advance_file_selection() TORRENT_BRIDGE_REQUIRES_NOT(lock)
+        TORRENT_BRIDGE_REQUIRES_NOT(resume_capture_lock)
+        TORRENT_BRIDGE_REQUIRES_NOT(resume_io_lock);
+
 #if defined(TORRENT_BRIDGE_TESTING)
     bool fail_next_dht_diagnostics_poll TORRENT_BRIDGE_GUARDED_BY(lock) = false;
     bool fail_next_source_policy_application TORRENT_BRIDGE_GUARDED_BY(lock) = false;
@@ -1910,7 +1934,7 @@ struct TTorrentClient {
 
     void start_alert_worker();
 
-    void stop_alert_worker() noexcept;
+    void stop_alert_worker() noexcept TORRENT_BRIDGE_REQUIRES_NOT(lock);
 
     void record_synchronous_add_alert_locked() noexcept TORRENT_BRIDGE_REQUIRES(lock);
 
