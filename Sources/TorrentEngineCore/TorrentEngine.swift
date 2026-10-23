@@ -1231,6 +1231,7 @@ private struct AddedTorrentIdentity: Sendable {
             if operation != 0 {
                 runtimeFailureMessage.withLock { $0 = error.localizedDescription }
                 destroyClient(waitForShutdown: true)
+                throw TorrentFileSelectionError.outcomeUnknown(error.localizedDescription)
             }
             throw error
         }
@@ -1258,10 +1259,10 @@ private struct AddedTorrentIdentity: Sendable {
         }
         let detail = message.isEmpty ? "File selection completion could not be confirmed." : message
         runtimeFailureMessage.withLock { $0 = detail }
-        // An unconfirmed mutation may retain capabilities. Quiesce native work
-        // before the GUI receives an error and rolls back provisional grants.
+        // Quiesce native work, but preserve the unknown outcome: only restored
+        // priorities establish which durable selection the GUI must authorize.
         destroyClient(waitForShutdown: true)
-        throw TorrentEngineError.bridgeError(detail)
+        throw TorrentFileSelectionError.outcomeUnknown(detail)
     }
 
     // SAFETY: Ownership/lifetime: the actor-owned handle and each local snapshot array live

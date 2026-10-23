@@ -1478,6 +1478,9 @@ enum TorrentEngineServiceNetworkContainmentResult: Equatable, Sendable {
            case .commitStatusUnknown = addError {
             return .operationOutcomeUnknown
         }
+        if error is TorrentFileSelectionError {
+            return .operationOutcomeUnknown
+        }
         guard let runtimeError = error as? TorrentEngineServiceRuntimeError else {
             return .operationRejected
         }

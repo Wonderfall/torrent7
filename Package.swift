@@ -510,7 +510,7 @@ let package = Package(
         ),
         .testTarget(
             name: "TorrentEngineServiceTests",
-            dependencies: ["TorrentEngineService", "TorrentEngineIPC", "TorrentNetworkSecurity"],
+            dependencies: ["TorrentEngineService", "TorrentEngineIPC", "TorrentEngineModel", "TorrentNetworkSecurity"],
             swiftSettings: swiftBaselineSettings + [
                 .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
             ] + nonisolatedConcurrencySwiftSettings

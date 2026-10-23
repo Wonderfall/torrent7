@@ -220,7 +220,7 @@ nonisolated struct TorrentStoreDependencies: Sendable {
         }
     }
 
-    private init(startEngine: @escaping TorrentStoreEngineStartupFactory) {
+    init(startEngine: @escaping TorrentStoreEngineStartupFactory) {
         self.startEngine = startEngine
     }
 }
@@ -3410,6 +3410,14 @@ final class TorrentStore {
         }
 
         do {
+            for claim in retainedClaims {
+                guard let id = claim.torrentID, currentTorrentIDs.contains(id) else { continue }
+                try await TorrentFilePriorityOperation.reconcileAvailability(
+                    claim: claim, journal: storageClaimJournal,
+                    registry: storageBrokerRegistry, engine: engine
+                )
+            }
+
             for preparation in await storageClaimJournal
                 .unresolvedPreparations() {
                 try await storageClaimJournal.cancelPreparation(

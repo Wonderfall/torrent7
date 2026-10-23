@@ -364,8 +364,15 @@ All files in a folder are changed in one native disk fence. Copies use a fixed
 owned native operation is observed through short IPC requests, each retaining
 the normal transport watchdog. Before publication, failure or cancellation keeps
 the old selection. After publication, cancellation cannot undo a committed
-selection. An unconfirmed result requires engine teardown before grant rollback.
-Initial skipped imports never open their payload.
+selection. A lost begin or status reply is an explicitly unknown outcome, not a
+rejection. The journal and broker registry retain the provisional union of old
+and requested availability; cancelling XPC only starts asynchronous cleanup.
+After a replacement controller's handshake proves that the previous owner has
+drained, startup reconciles the retained grants against its restored file
+priorities before enabling networking. This also covers a crash between native
+commit and GUI acknowledgement. Reconciliation can only restrict the durable
+grant union, never authorize an engine-supplied increase. Initial skipped imports
+never open their payload.
 
 Old private fragments remain readable until a checked resume checkpoint commits
 the new priorities and piece map. A fenced, cancellable compaction then replaces

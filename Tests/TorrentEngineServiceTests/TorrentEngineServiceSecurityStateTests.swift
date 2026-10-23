@@ -2,6 +2,7 @@ import Foundation
 import Synchronization
 import Testing
 @testable import TorrentEngineIPC
+import TorrentEngineModel
 @testable import TorrentEngineService
 import TorrentNetworkSecurity
 import XPC
@@ -81,6 +82,13 @@ struct TorrentEngineServiceSecurityStateTests {
         } catch {
             #expect(error.localizedDescription == "The torrent engine dataset storage limit was exceeded.")
         }
+    }
+
+    @Test("An unconfirmed native file selection is never encoded as a rejection")
+    func fileSelectionFailureCode() {
+        #expect(TorrentEngineServiceRuntime.failureCode(
+            for: TorrentFileSelectionError.outcomeUnknown("Native begin was not acknowledged")
+        ) == .operationOutcomeUnknown)
     }
 
     @Test("Overlapping peers receive retryable busy and shutdown classifications")

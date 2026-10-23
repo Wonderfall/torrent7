@@ -1,6 +1,6 @@
 import Synchronization
 package import TorrentEngineModel
-import TorrentStorageAuthority
+package import TorrentStorageAuthority
 
 /// The store's FIFO owns the batch and cleanup. Cancellation reaches the native
 /// operation without abandoning provisional grants or cancelling the shared queue.
@@ -61,7 +61,7 @@ package final class TorrentFilePriorityOperation: Sendable {
         try checkCancellation()
         // Authorize all increases before sending any engine commands, with one
         // durable journal update regardless of the number of descendant files.
-        claim = try await replaceAvailability(
+        claim = try await Self.replaceAvailability(
             grantedAvailability, claim: claim, journal: journal, registry: registry, engine: engine
         )
 
@@ -75,13 +75,18 @@ package final class TorrentFilePriorityOperation: Sendable {
                 confirmedAvailability[Int(index)] = priority != .skip
             }
             try checkCancellation()
+        } catch let error as TorrentFileSelectionError {
+            // A lost reply can hide a committed native checkpoint. Connection
+            // cancellation is not teardown confirmation: retain both the journal
+            // and registry's provisional union for startup reconciliation.
+            throw error
         } catch {
             failure = error
         }
         // Skips become restrictive only after native handle release is confirmed.
         // A committed batch remains authoritative even if its caller cancelled.
         // A rejected batch revokes every provisional increase before advancing.
-        _ = try await replaceAvailability(
+        _ = try await Self.replaceAvailability(
             confirmedAvailability, claim: claim, journal: journal, registry: registry, engine: engine
         )
         if let failure { throw failure }
@@ -92,7 +97,48 @@ package final class TorrentFilePriorityOperation: Sendable {
         if cancelled.withLock({ $0 }) { throw CancellationError() }
     }
 
-    private func replaceAvailability(
+    /// Called only during initial synchronization of a fresh controller, before
+    /// networking is enabled. Its handshake proves the previous owner drained.
+    @concurrent
+    package static func reconcileAvailability(
+        claim: TorrentStorageClaim,
+        journal: TorrentStorageClaimJournal,
+        registry: TorrentStorageBrokerRegistry,
+        engine: any TorrentEngineServicing
+    ) async throws {
+        try Task.checkCancellation()
+        guard let id = claim.torrentID else {
+            throw TorrentStorageBrokerRegistryError.invalidClaim
+        }
+        let restoredBatch = await engine.fileBatch(id: id, since: nil)
+        try Task.checkCancellation()
+        guard let batch = restoredBatch,
+              batch.files.count == claim.manifest.logicalFiles.count else {
+            throw TorrentStorageBrokerRegistryError.invalidClaim
+        }
+        var availability = [Bool]()
+        availability.reserveCapacity(batch.files.count)
+        for (file, logicalFile) in zip(batch.files.sorted { $0.index < $1.index }, claim.manifest.logicalFiles) {
+            guard file.index == logicalFile.index,
+                  claim.lease.fileAvailability.indices.contains(Int(file.index)),
+                  file.size == logicalFile.expectedSize,
+                  file.isPadFile == logicalFile.isPadding else {
+                throw TorrentStorageBrokerRegistryError.invalidClaim
+            }
+            let wanted = !file.isPadFile && file.priority != .skip
+            // Recovery may restrict a previously granted union, never authorize
+            // an engine-supplied increase outside the GUI's durable authority.
+            guard !wanted || claim.lease.fileAvailability[Int(file.index)] else {
+                throw TorrentStorageBrokerRegistryError.fileUnavailable
+            }
+            availability.append(wanted)
+        }
+        _ = try await replaceAvailability(
+            availability, claim: claim, journal: journal, registry: registry, engine: engine
+        )
+    }
+
+    private static func replaceAvailability(
         _ availability: [Bool],
         claim: TorrentStorageClaim,
         journal: TorrentStorageClaimJournal,

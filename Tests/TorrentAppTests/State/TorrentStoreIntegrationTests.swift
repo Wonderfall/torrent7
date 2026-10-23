@@ -1,3 +1,4 @@
+import Darwin
 import Dispatch
 import Foundation
 import Synchronization
@@ -5,6 +6,7 @@ import Testing
 import TorrentAppInfrastructure
 import TorrentBridge
 import TorrentEngineClient
+import TorrentEngineIPC
 import TorrentEngineModel
 import TorrentMetainfo
 import TorrentStorageAuthority
@@ -1817,6 +1819,8 @@ struct TorrentStoreIntegrationTests {
                     )]
                 )
             )
+            let claim = try #require(await journal.allClaims().first)
+            await productionEngine.setFileBatch(priorityRecoveryBatch(claim, availability: claim.lease.fileAvailability))
             let restored = makeStoreHarness(
                 storageClaimJournal: journal,
                 engineStartupFactory: { _ in productionEngine }
@@ -2522,6 +2526,99 @@ struct TorrentStoreIntegrationTests {
             #expect(claim.lease.availabilityRevision == initial.lease.availabilityRevision + (priority == .skip ? 0 : 2))
             #expect(await harness.engine.filePriorityUpdates.isEmpty)
             #expect(harness.engine.isAvailable)
+        }
+    }
+
+    @Test("Unknown file selections retain access until a fresh controller restores the durable outcome",
+          arguments: [false, true])
+    func unknownFileSelectionRetainsAccess(committed: Bool) async throws {
+        let suiteName = "app.torrent7.selection-recovery.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        try await withKnownTorrentHarness(defaultsDomain: .suite(suiteName)) { harness, folder in
+            let initial = try await addPriorityTestTorrent(harness, in: folder, skipped: [0, 2])
+            let journal = try #require(harness.storageClaimJournal)
+            await harness.engine.setFilePriorityHandler { _, _ in
+                throw TorrentFileSelectionError.outcomeUnknown("Reply lost")
+            }
+            await #expect(throws: TorrentFileSelectionError.self) {
+                try await harness.store.setFilePriorities(
+                    for: "priority", priorities: [0: .normal, 1: .skip, 2: .high]
+                )
+            }
+            let pending = try #require(await journal.allClaims().first)
+            #expect(pending.lease.fileAvailability == [true, true, true, true])
+            #expect(pending.lease.availabilityRevision == initial.lease.availabilityRevision + 1)
+
+            let expected = committed ? [true, false, true, true] : initial.lease.fileAvailability
+            let replacement = FakeTorrentEngine(initialSnapshotBatch: TorrentSnapshotBatch(
+                revision: 1, torrents: [makeTorrent(id: "priority", name: "Bundle", hasMetadata: true)]
+            ))
+            await replacement.setFileBatch(priorityRecoveryBatch(initial, availability: expected))
+            let cleanup = FilePriorityTestBarrier()
+            let registry = Mutex<TorrentStorageBrokerRegistry?>(nil)
+            let restored = makeStoreHarness(
+                defaultsDomain: .suite(suiteName),
+                storageClaimJournal: journal,
+                startupDependencies: TorrentStoreDependencies(startEngine: { _, broker, _ in
+                    registry.withLock { $0 = broker }
+                    // Models the existing handshake admission barrier: the new
+                    // controller cannot be returned until old native work drains.
+                    await cleanup.suspend()
+                    return replacement
+                })
+            )
+            await restored.accessStore.setRestoreDefaultResult(.success(folder))
+            restored.store.start()
+            await cleanup.waitForEntry()
+            #expect(await journal.allClaims().first?.lease.fileAvailability == [true, true, true, true])
+            #expect(await replacement.fileBatchRequests.isEmpty)
+            #expect(await replacement.appliedSettings.isEmpty)
+            if let broker = registry.withLock({ $0 }) {
+                for index in [Int32(0), 2] {
+                    #expect(throws: Never.self) {
+                        let opened = try broker.openPayload(claimID: initial.manifest.claimID,
+                            generation: initial.manifest.generation, fileIndex: index, access: .readOnly)
+                        _ = Darwin.close(opened.descriptor)
+                    }
+                }
+            } else {
+                Issue.record("The restored broker was not installed")
+            }
+            await cleanup.resume()
+            await restored.store.saveAll()
+            #expect(await journal.allClaims().first?.lease.fileAvailability == expected)
+            #expect(await replacement.fileBatchRequests.map(\.id) == ["priority"])
+            #expect(restored.store.lastError == nil)
+            #expect(await replacement.appliedSettings.last?.networkBlocked == false)
+        }
+    }
+
+    @Test("Selection recovery rejects missing files and ungranted engine priorities", arguments: [false, true])
+    func selectionRecoveryFailsClosed(missingFiles: Bool) async throws {
+        let suiteName = "app.torrent7.invalid-selection-recovery.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        try await withKnownTorrentHarness(defaultsDomain: .suite(suiteName)) { harness, folder in
+            let initial = try await addPriorityTestTorrent(harness, in: folder, skipped: [0])
+            let journal = try #require(harness.storageClaimJournal)
+            let replacement = FakeTorrentEngine(initialSnapshotBatch: TorrentSnapshotBatch(
+                revision: 1, torrents: [makeTorrent(id: "priority", name: "Bundle", hasMetadata: true)]
+            ))
+            await replacement.setFileBatch(missingFiles
+                ? TorrentFileBatch(revision: 1, files: [])
+                : priorityRecoveryBatch(initial, availability: [true, true, true, true]))
+            let restored = makeStoreHarness(
+                defaultsDomain: .suite(suiteName), storageClaimJournal: journal,
+                engineStartupFactory: { _ in replacement }
+            )
+            await restored.accessStore.setRestoreDefaultResult(.success(folder))
+            restored.store.start()
+            await restored.store.saveAll()
+            #expect(await journal.allClaims().first?.lease == initial.lease)
+            #expect(!replacement.isAvailable)
+            #expect(restored.store.lastError != nil)
+            #expect(await replacement.appliedSettings.allSatisfy(\.networkBlocked))
         }
     }
 
@@ -3971,7 +4068,8 @@ private func makeStoreHarness(
     keepsWakeStreamOpen: Bool = false,
     suspendsInitialSnapshotBatch: Bool = false,
     storageClaimJournal: TorrentStorageClaimJournal? = nil,
-    engineStartupFactory: TorrentStoreEngineFactory? = nil
+    engineStartupFactory: TorrentStoreEngineFactory? = nil,
+    startupDependencies: TorrentStoreDependencies? = nil
 ) -> StoreHarness {
     let engine = FakeTorrentEngine(
         keepsWakeStreamOpen: keepsWakeStreamOpen,
@@ -3997,7 +4095,7 @@ private func makeStoreHarness(
         TorrentStoreDependencies.live
     }
     let store = TorrentStore(
-        dependencies: dependencies,
+        dependencies: startupDependencies ?? dependencies,
         settings: settings,
         sortOrder: sortOrder,
         sortDirection: sortDirection,
@@ -4056,6 +4154,14 @@ private func withKnownTorrentHarness<Result>(
 }
 
 private enum FilePriorityTestFailure: Error { case rejected }
+
+private func priorityRecoveryBatch(_ claim: TorrentStorageClaim, availability: [Bool]) -> TorrentFileBatch {
+    TorrentFileBatch(revision: 1, files: claim.manifest.logicalFiles.map { file in
+        TorrentFileItem(path: file.pathComponents.joined(separator: "/"), size: file.expectedSize,
+            downloaded: 0, progress: 0, index: file.index,
+            priority: availability[Int(file.index)] ? .normal : .skip, isPadFile: file.isPadding)
+    })
+}
 
 private actor FilePriorityTestBarrier {
     private var entered = false

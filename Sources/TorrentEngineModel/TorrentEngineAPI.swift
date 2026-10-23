@@ -46,6 +46,19 @@ package enum TorrentFileSelectionStatus: Codable, Equatable, Sendable {
     case rejected(String)
 }
 
+/// Neither rejection nor commitment was acknowledged. Keep the provisional
+/// availability until a replacement controller restores the durable selection.
+package enum TorrentFileSelectionError: LocalizedError, Sendable {
+    case outcomeUnknown(String)
+
+    package var errorDescription: String? {
+        switch self {
+        case .outcomeUnknown(let detail):
+            "The file selection outcome could not be confirmed. \(detail)"
+        }
+    }
+}
+
 /// Describes whether an unavailable engine can be recovered by creating a new
 /// isolated controller, or whether the failure must remain terminal.
 package enum TorrentEngineRecoveryDisposition: Equatable, Sendable {
@@ -131,6 +144,8 @@ package protocol TorrentEngineServicing: Sendable {
     /// magnet metadata is resident. The bytes are never re-encoded.
     func torrentMetadata(id: String) async throws -> Data?
     /// Applies one atomic selection; cancellation never abandons broker cleanup.
+    /// An unknown outcome throws TorrentFileSelectionError and requires retained
+    /// provisional grants. Other failures acknowledge the old selection intact.
     func setFilePriorities(
         id: String, priorities: [Int32: TorrentFilePriority],
         isCancelled: @escaping @Sendable () -> Bool

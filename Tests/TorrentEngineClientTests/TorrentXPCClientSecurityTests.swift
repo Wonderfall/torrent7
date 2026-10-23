@@ -54,10 +54,14 @@ struct TorrentXPCClientSecurityTests {
         #expect(client.isAvailable)
     }
 
-    @Test("An unconfirmed file-selection observation shuts down before returning")
-    func fileSelectionObservationFailureStopsEngine() async throws {
+    @Test("Lost begin and status replies preserve an explicitly unknown selection outcome",
+          arguments: [TorrentEngineIPCOperation.beginFilePriorities, .fileSelectionResult],
+          [TorrentEngineClientError.connectionFailed, .connectionCancelled,
+           .requestTimedOut(outcomeUnknown: true), .invalidReply])
+    func fileSelectionLostReply(stage: TorrentEngineIPCOperation, failure: TorrentEngineClientError) async throws {
         let epoch = epoch
         let transport = ScriptedTorrentEngineTransport { request in
+            if request.header.operation == stage { throw failure }
             switch request.header.operation {
             case .handshake:
                 return try successReply(TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.2"),
@@ -65,21 +69,54 @@ struct TorrentXPCClientSecurityTests {
             case .beginFilePriorities:
                 return try successReply(TorrentEngineIPCFileSelectionOperation(operation: 1),
                                         for: request, epoch: epoch)
-            case .fileSelectionResult:
-                throw TorrentEngineClientError.requestExpiredBeforeSubmission
-            case .shutdown:
-                return try successReply(TorrentEngineIPCEmpty(), for: request, epoch: epoch)
             default:
                 throw TorrentEngineClientError.serviceRejected("Unexpected operation")
             }
         }
         let client = try await makeClient(transport: transport)
-        await #expect(throws: TorrentEngineClientError.self) {
+        await #expect(throws: TorrentFileSelectionError.self) {
             try await client.setFilePriorities(id: torrentID, priorities: [0: .skip], isCancelled: { false })
         }
-        #expect(transport.operations == [.handshake, .beginFilePriorities, .fileSelectionResult, .shutdown])
+        #expect(transport.operations == (stage == .beginFilePriorities
+            ? [.handshake, .beginFilePriorities]
+            : [.handshake, .beginFilePriorities, .fileSelectionResult]))
+        #expect(transport.isCancelled)
         #expect(!client.isAvailable)
-        #expect(client.recoveryDisposition == .terminal)
+        #expect(client.recoveryDisposition == failure.recoveryDisposition)
+    }
+
+    @Test("An unsent request is safe to reject only before selection begins",
+          arguments: [TorrentEngineIPCOperation.beginFilePriorities, .fileSelectionResult])
+    func fileSelectionUnsentRequest(stage: TorrentEngineIPCOperation) async throws {
+        let epoch = epoch
+        let transport = ScriptedTorrentEngineTransport { request in
+            if request.header.operation == stage { throw TorrentEngineClientError.requestExpiredBeforeSubmission }
+            switch request.header.operation {
+            case .handshake:
+                return try successReply(TorrentEngineIPCHandshakeResponse(libtorrentVersion: "2.1.2"),
+                                        for: request, epoch: epoch)
+            case .beginFilePriorities:
+                return try successReply(TorrentEngineIPCFileSelectionOperation(operation: 1),
+                                        for: request, epoch: epoch)
+            default:
+                throw TorrentEngineClientError.serviceRejected("Unexpected operation")
+            }
+        }
+        let client = try await makeClient(transport: transport)
+        if stage == .beginFilePriorities {
+            await #expect(throws: TorrentEngineClientError.self) {
+                try await client.setFilePriorities(id: torrentID, priorities: [0: .skip], isCancelled: { false })
+            }
+            #expect(client.isAvailable)
+            #expect(!transport.isCancelled)
+        } else {
+            await #expect(throws: TorrentFileSelectionError.self) {
+                try await client.setFilePriorities(id: torrentID, priorities: [0: .skip], isCancelled: { false })
+            }
+            #expect(!client.isAvailable)
+            #expect(transport.isCancelled)
+            #expect(client.recoveryDisposition == .replaceController)
+        }
     }
 
     @Test("Change hints are validated without acquiring message resources")

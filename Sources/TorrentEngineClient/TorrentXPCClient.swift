@@ -748,12 +748,26 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         // state. Caller cancellation requests a stop; it cannot abandon grants.
         let operation = Task {
             if isCancelled() || cancellation.withLock({ $0 }) { throw CancellationError() }
-            let started: TorrentEngineIPCFileSelectionOperation = try await invoke(
-                .beginFilePriorities,
-                TorrentEngineIPCSetFilePrioritiesRequest(id: id, priorities: priorities.sorted { $0.key < $1.key }.map {
-                    TorrentEngineIPCFilePriorityEntry(index: $0.key, priority: $0.value)
-                })
-            )
+            let started: TorrentEngineIPCFileSelectionOperation
+            do {
+                started = try await invoke(
+                    .beginFilePriorities,
+                    TorrentEngineIPCSetFilePrioritiesRequest(id: id, priorities: priorities.sorted { $0.key < $1.key }.map {
+                        TorrentEngineIPCFilePriorityEntry(index: $0.key, priority: $0.value)
+                    })
+                )
+            } catch {
+                switch error {
+                case is CancellationError,
+                     TorrentEngineClientError.serviceRejected,
+                     TorrentEngineClientError.serviceTemporarilyUnavailable,
+                     TorrentEngineClientError.requestQueueFull,
+                     TorrentEngineClientError.requestExpiredBeforeSubmission:
+                    throw error
+                default:
+                    throw unconfirmedFileSelection(error)
+                }
+            }
             while true {
                 let status: TorrentFileSelectionStatus
                 do {
@@ -765,10 +779,7 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
                         )
                     )
                 } catch {
-                    // A failed observation is not a rejected selection. End the
-                    // engine session before allowing provisional grant rollback.
-                    await shutdown()
-                    throw error
+                    throw unconfirmedFileSelection(error)
                 }
                 switch status {
                 case .pending:
@@ -786,6 +797,19 @@ package struct TorrentEngineConnectionRetryPolicy: Sendable {
         } onCancel: {
             cancellation.withLock { $0 = true }
         }
+    }
+
+    private func unconfirmedFileSelection(_ error: any Error) -> TorrentFileSelectionError {
+        let disposition = (error as? TorrentEngineClientError)?.recoveryDisposition ?? .terminal
+        engineEpoch = nil
+        terminalize(
+            message: error.localizedDescription,
+            recoveryDisposition: disposition == .terminal ? .terminal : .replaceController
+        )
+        // Cancellation starts cleanup; it does not acknowledge native teardown.
+        // The caller must retain the durable grant union until a fresh handshake
+        // proves the old controller drained, then reconcile restored priorities.
+        return .outcomeUnknown(error.localizedDescription)
     }
 
     package func trackerBatch(id: String, since revision: UInt64?) async -> TorrentTrackerBatch? {
