@@ -90,6 +90,11 @@ complete patched build.
 | `boringssl-active-pointer-hardening.patch` | Active TLS pointer authentication. |
 | `boringssl-typed-allocation.patch` | Typed BoringSSL allocation. |
 
+The BoringSSL pointer patch follows upstream's `bssl::SSLSession` implementation;
+its session method and cipher pointers retain the same address-and-role PAC.
+The hardening tests exercise session duplication to verify that both pointers
+are re-signed for the new object. The typed-allocation patch applies unchanged.
+
 Executor callback and carrier protections belong together because they protect
 the same erased objects. Allocator typing remains a separate invariant. The Boost
 manifest records each current stage's exact header digest; update those digests

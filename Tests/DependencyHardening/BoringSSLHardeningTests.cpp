@@ -185,6 +185,21 @@ __attribute__((noinline)) void replay_context_bytes(
   return actual == expected;
 }
 
+[[nodiscard]] bool verify_session_duplication(SSL_CTX const& context)
+{
+  bssl::UniquePtr<SSL_SESSION> source(SSL_SESSION_new(&context));
+  auto const* cipher = SSL_get_cipher_by_value(0x1301); // TLS_AES_128_GCM_SHA256.
+  if (!source || cipher == nullptr) {
+    return false;
+  }
+  auto* const source_impl = bssl::FromOpaque(source.get());
+  source_impl->cipher = cipher;
+  // Duplication must re-sign both stored pointers for the new session address.
+  auto duplicate = bssl::SSL_SESSION_dup(source_impl, SSL_SESSION_DUP_ALL);
+  return duplicate && duplicate->cipher == cipher
+      && duplicate->x509_method == source_impl->x509_method;
+}
+
 } // namespace
 
 extern "C" __attribute__((noinline)) ssl_verify_result_t
@@ -276,6 +291,10 @@ int main()
   }
   if (!verify_digest_move()) {
     std::fputs("BoringSSL digest move failed\n", stderr);
+    return 1;
+  }
+  if (!verify_session_duplication(*source)) {
+    std::fputs("BoringSSL authenticated session duplication failed\n", stderr);
     return 1;
   }
   return 0;
