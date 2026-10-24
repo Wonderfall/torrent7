@@ -396,7 +396,8 @@ package struct TorrentStorageDestinationPlanner: Sendable {
     }
 
     /// Inspects an explicitly selected existing payload without creating,
-    /// truncating, renaming, or marking any filesystem object. Imported
+    /// truncating, renaming, or adding app-ownership tags. macOS can apply
+    /// quarantine when an existing file is opened for writing. Imported
     /// writable files must be regular, owned by this user, no larger than the
     /// torrent layout, and have exactly one hard link before their identities
     /// are pinned into the claim.

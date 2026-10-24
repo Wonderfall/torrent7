@@ -1,8 +1,21 @@
 import ExtensionFoundation
+import Foundation
 import TorrentEngineService
 
 @main
 struct TorrentEngineIntegrationExtension: TorrentEngineAppExtension {
+    @MainActor
+    var configuration: ConnectionHandler {
+        if Bundle.main.object(forInfoDictionaryKey: "Torrent7QuarantineProbe") as? Bool == true {
+            return QuarantineProbeConfiguration.make()
+        }
+        do {
+            return try TorrentEngineExtensionConfiguration.make()
+        } catch {
+            fatalError("The integration engine could not start: \(error)")
+        }
+    }
+
     @AppExtensionPoint.Bind
     var boundExtensionPoint: AppExtensionPoint {
         #if TORRENT_ADDRESS_SANITIZER

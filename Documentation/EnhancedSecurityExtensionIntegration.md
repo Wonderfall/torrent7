@@ -9,13 +9,13 @@ boundary. The fixture uses the release entitlement files with isolated
 preserves sandbox and entitlement fidelity for this local gate; it does not
 exercise production identified-peer signing.
 
-The automated lifecycle also supports `SANITIZER_PROFILE=address` and
-`SANITIZER_PROFILE=thread`. These correctness-only variants use separate build
-directories plus `app.torrent7.integration.asan` or
+The automated lifecycle and quarantine checks also support
+`SANITIZER_PROFILE=address` and `SANITIZER_PROFILE=thread`. These correctness-only
+variants use separate build directories plus `app.torrent7.integration.asan` or
 `app.torrent7.integration.tsan` identities, so their registrations and sandbox
-containers cannot collide with the release fixture. They require `--automated`
-or `--build-only`; interactive timing and maximum-dataset runs remain release
-only.
+containers cannot collide with the release fixture. They require `--automated`,
+`--quarantine`, or `--build-only`; interactive timing and maximum-dataset runs
+remain release only.
 
 The fixture has the same structural security properties as production:
 
@@ -108,9 +108,11 @@ This mode needs no Powerbox interaction and does not add torrents. Its purpose
 is the signed Enhanced Security process lifecycle, broker authentication,
 recovery path, and network observation. The practical and maximum modes add
 paged-dataset and transport measurements plus a genuine GUI-side Powerbox scope.
-None of these modes currently exercises a broker-returned payload descriptor,
-so they are not a production-identified adversarial proof of Seatbelt behavior
-for descriptor-relative path, link, rename, unlink, xattr, or flag operations.
+These lifecycle and dataset modes do not request payload descriptors. The
+separate quarantine mode below exercises writable descriptors and quarantine
+xattrs. Broader adversarial coverage of descriptor-relative paths, links,
+rename, unlink, other xattrs, and file flags remains separate release-validation
+work, as does production identified-peer signing.
 
 To run the same lifecycle with the fully instrumented ThreadSanitizer dependency
 profile:
@@ -124,3 +126,37 @@ The sanitizer runtime is verified in both the host and helper before launch.
 ASan and TSan use fail-fast options without suppressions; the Bridge also embeds
 the active profile's defaults because the system-launched Enhanced Security
 helper is not guaranteed to inherit the runner's environment.
+
+## Payload quarantine
+
+Run:
+
+```sh
+SKIP_BUILD_DEPS=1 Scripts/test-enhanced-security-extension.zsh --quarantine
+```
+
+This mode verifies quarantine through real broker-returned writable descriptors.
+The host uses the production destination planner, registry, and broker; the
+extension uses the production broker client. A test-only extension handler
+performs the hostile syscalls. Its protocol and probe code are dependencies of
+the integration executables only. The app code audit rejects their symbols in
+either shipped binary.
+The fixture uses the production entitlement files and enables
+`LSFileQuarantineEnabled` in both bundles.
+
+The runner seeds an unquarantined file in the host's disposable container. The
+host confirms that initial state, imports it for writing, and separately reserves
+a new payload. It requires quarantine on both files before handing descriptors
+to the helper. The helper writes known payload bytes, then attempts both
+`fremovexattr` and `fsetxattr` with cleared quarantine flags. Both attempts must
+fail with a permission error. The host reopens each file and verifies its payload
+and unchanged quarantine attribute. The log also records whether the helper can
+read the attribute; that read is not required to succeed.
+
+CI runs this mode in release, ASan, and TSan profiles. It uses the same isolated
+identities, cleanup, and outer timeout as the lifecycle gate, plus a 15-second
+probe reply deadline. Logs include before/after attributes and syscall errors.
+No Powerbox interaction, network download, or executable launch is involved.
+This verifies the ad-hoc signed sandbox boundary on the host container's
+filesystem; it does not establish behavior on every filesystem, a particular
+Gatekeeper dialog, or production identified-peer authentication.

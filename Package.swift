@@ -335,9 +335,17 @@ let package = Package(
         .executableTarget(
             name: "TorrentEngineXPCIntegrationHost",
             dependencies: [
-                "TorrentAppInfrastructure", "TorrentEngineClient", "TorrentEngineIPC", "TorrentEngineModel"
+                "TorrentAppInfrastructure", "TorrentEngineClient", "TorrentEngineIPC", "TorrentEngineModel",
+                "TorrentStorageAuthority", "TorrentQuarantineProbeSupport"
             ],
             path: "Tools/XPCIntegrationHost",
+            swiftSettings: swiftBaselineSettings + [
+                .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
+            ] + nonisolatedConcurrencySwiftSettings
+        ),
+        .target(
+            name: "TorrentQuarantineProbeSupport",
+            path: "Tools/QuarantineProbeSupport",
             swiftSettings: swiftBaselineSettings + [
                 .unsafeFlags(appSwiftStrictnessFlags + appSwiftPointerAuthenticationFlags)
             ] + nonisolatedConcurrencySwiftSettings
@@ -421,7 +429,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "TorrentEngineIntegrationExtension",
-            dependencies: ["TorrentEngineService"],
+            dependencies: ["TorrentEngineService", "TorrentEngineIPC", "TorrentQuarantineProbeSupport"],
             swiftSettings: swiftBaselineSettings + [
                 .unsafeFlags(engineExtensionSwiftFlags)
             ] + nonisolatedConcurrencySwiftSettings + integrationExtensionIdentityFlags,

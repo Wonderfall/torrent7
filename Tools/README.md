@@ -21,8 +21,11 @@ boundaries.
 `Scripts/test-enhanced-security-extension.zsh` to exercise the Enhanced Security
 extension through its real ExtensionFoundation and XPC boundary. The script is
 the supported entry point: it assembles, signs, and registers a temporary host
-and extension fixture, then runs automated lifecycle recovery checks or
-interactive dataset and scale checks with an explicitly authorized folder.
+and extension fixture, then runs automated lifecycle recovery and quarantine
+checks or interactive dataset and scale checks with an explicitly authorized folder.
+`QuarantineProbeSupport/` shares the test-only protocol between that host and
+the integration extension. See the [integration gate](../Documentation/EnhancedSecurityExtensionIntegration.md)
+for commands, coverage, and limitations.
 
 `DependencyCheck/` contains the read-only upstream dependency monitor for pinned
 third-party source dependencies. See the [dependency monitor guide](../Scripts/patches/README.md#dependency-monitor)

@@ -135,6 +135,11 @@ done
 /usr/bin/xcrun nm -m "$executable" >"$app_symbol_output"
 /usr/bin/xcrun nm -m "$engine_extension_executable" >"$engine_symbol_output"
 
+for symbols in "$app_symbol_output" "$engine_symbol_output"; do
+    reject_match 'QuarantineProbe|QuarantineVerification' "$symbols" \
+        "Shipped executable retains the test-only quarantine probe"
+done
+
 typeset tls_symbol
 for tls_symbol in \
     _TLS_with_buffers_method \

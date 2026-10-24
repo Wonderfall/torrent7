@@ -58,23 +58,27 @@ case $# in
                 mode=automated
                 torrent_count=0
                 ;;
+            --quarantine)
+                mode=quarantine
+                torrent_count=0
+                ;;
             --maximum)
                 mode=maximum
                 torrent_count=20000
                 timeout_seconds=${ENHANCED_SECURITY_TIMEOUT_SECONDS:-3600}
                 ;;
             *)
-                fail "Usage: Scripts/test-enhanced-security-extension.zsh [--automated|--build-only|--maximum]"
+                fail "Usage: Scripts/test-enhanced-security-extension.zsh [--automated|--quarantine|--build-only|--maximum]"
                 ;;
         esac
         ;;
     *)
-        fail "Usage: Scripts/test-enhanced-security-extension.zsh [--automated|--build-only|--maximum]"
+        fail "Usage: Scripts/test-enhanced-security-extension.zsh [--automated|--quarantine|--build-only|--maximum]"
         ;;
 esac
 
-if [[ -n $sanitizer_profile && $mode != automated && $mode != build-only ]]; then
-    fail "Sanitizer Enhanced Security runs are correctness-only; use --automated or --build-only"
+if [[ -n $sanitizer_profile && $mode != automated && $mode != quarantine && $mode != build-only ]]; then
+    fail "Sanitizer Enhanced Security runs are correctness-only; use --automated, --quarantine, or --build-only"
 fi
 
 typeset configuration=release
@@ -136,9 +140,10 @@ typeset -r invocation_lock="${user_temp_dir%/}/$host_bundle_id.test-enhanced-sec
 typeset -r recovery_marker_dir="$HOME/Library/Containers/$host_bundle_id/Data/Library/Application Support/Torrent7EnhancedSecurityIntegration"
 typeset -r recovery_ready_marker="$recovery_marker_dir/ready"
 typeset -r recovery_killed_marker="$recovery_marker_dir/killed"
+typeset -r quarantine_root="$HOME/Library/Containers/$host_bundle_id/Data/Library/Application Support/Torrent7QuarantineFixtures"
 
 [[ $torrent_count == <-> ]] || fail "ENHANCED_SECURITY_TORRENT_COUNT must be an integer"
-if [[ $mode == automated ]]; then
+if [[ $mode == automated || $mode == quarantine ]]; then
     (( torrent_count == 0 )) || fail "Automated integration must use an empty dataset"
 else
     (( torrent_count >= 1 && torrent_count <= 20000 )) \
@@ -371,6 +376,9 @@ verify_sanitizer_runtime "$host_executable"
 verify_sanitizer_runtime "$engine_executable"
 /bin/cp "$host_info" "$host_contents/Info.plist"
 /bin/cp "$engine_info" "$engine_contents/Info.plist"
+if [[ $mode == quarantine ]]; then
+    /usr/bin/plutil -insert Torrent7QuarantineProbe -bool true "$engine_contents/Info.plist"
+fi
 /bin/cp "$extension_point_source" "$extension_point"
 /usr/bin/plutil -lint \
     "$host_contents/Info.plist" \
@@ -419,6 +427,13 @@ typeset -a host_arguments
 typeset canonical_powerbox_root=""
 if [[ $mode == automated ]]; then
     host_arguments=(--automated)
+elif [[ $mode == quarantine ]]; then
+    host_arguments=(--quarantine)
+    /bin/mkdir -p -- "$quarantine_root"
+    print -rn -- "fixture" > "$quarantine_root/imported.bin"
+    if /usr/bin/xattr -p com.apple.quarantine "$quarantine_root/imported.bin" >/dev/null 2>&1; then
+        /usr/bin/xattr -d com.apple.quarantine "$quarantine_root/imported.bin"
+    fi
 else
     /bin/mkdir -p -- "$powerbox_root"
     canonical_powerbox_root=${powerbox_root:A}
@@ -435,7 +450,7 @@ print -- "system_version=$(sw_vers -productVersion)"
 print -- "mode=$mode"
 print -- "torrent_count=$torrent_count"
 print -- "timeout_seconds=$timeout_seconds"
-if [[ $mode != automated ]]; then
+if [[ $mode == interactive || $mode == maximum ]]; then
     print -- "powerbox_root=$canonical_powerbox_root"
     print -- "Approve that exact folder in the system Open panel to begin the integration run."
 fi
@@ -619,6 +634,10 @@ if [[ $mode == automated ]]; then
         || fail "Forced helper exit did not produce a distinct replacement process"
     /usr/bin/grep -qx 'integration.forced_helper_exit=observed' "$host_output" \
         || fail "The client did not observe the forced helper exit"
+fi
+if [[ $mode == quarantine ]]; then
+    /usr/bin/grep -qx 'integration.quarantine=pass' "$host_output" \
+        || fail "Quarantine verification exited without a pass marker"
 fi
 /usr/bin/grep -qx 'integration.result=pass' "$host_output" \
     || fail "Enhanced Security extension integration exited without a pass marker"

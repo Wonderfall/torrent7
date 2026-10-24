@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import TorrentAppInfrastructure
 import Foundation
 import TorrentEngineClient
@@ -29,7 +30,7 @@ private enum IntegrationFailure: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidArguments:
-            "Usage: TorrentEngineXPCIntegrationHost --automated | --count <1...20000> --download-root <absolute path>"
+            "Usage: TorrentEngineXPCIntegrationHost --automated | --quarantine | --count <1...20000> --download-root <absolute path>"
         case .bookmarkScopeUnavailable:
             "The integration download folder could not acquire a security scope."
         case .folderSelectionFailed:
@@ -71,12 +72,17 @@ private enum IntegrationFailure: LocalizedError {
 private struct IntegrationConfiguration {
     enum Mode {
         case automated
+        case quarantine
         case dataset(count: Int, downloadRoot: URL)
     }
 
     let mode: Mode
 
     init(arguments: [String]) throws {
+        if arguments.count == 2, arguments[1] == "--quarantine" {
+            mode = .quarantine
+            return
+        }
         if arguments.count == 2, arguments[1] == "--automated" {
             mode = .automated
             return
@@ -208,7 +214,12 @@ private enum TorrentEngineXPCIntegrationHost {
         guard let result = state.result else {
             throw IntegrationFailure.applicationRunLoopStopped
         }
-        try result.get()
+        do {
+            try result.get()
+        } catch {
+            try? FileHandle.standardError.write(contentsOf: Data("integration.error=\(error.localizedDescription)\n".utf8))
+            exit(EXIT_FAILURE)
+        }
     }
 
     private static func runIntegration() async throws {
@@ -219,6 +230,9 @@ private enum TorrentEngineXPCIntegrationHost {
         print("integration.host_bundle=\(Bundle.main.bundleIdentifier ?? "missing")")
 
         switch configuration.mode {
+        case .quarantine:
+            print("integration.mode=quarantine")
+            try await QuarantineVerification.run()
         case .automated:
             print("integration.mode=automated")
             print("integration.torrent_count=0")

@@ -792,8 +792,11 @@ adapter, and the broader native API input surfaces. Their
 expensive build and execution are intentionally independent of the routine test
 gates, and the harness entry points are absent from shipped products.
 
-The signed Enhanced Security integration gate currently verifies the real
-process lifecycle and authenticated broker handshake, but its staged dataset
-does not request payload descriptors. A production-identified adversarial
-Seatbelt test covering descriptor-relative path, link, rename, unlink, xattr,
-flag, and raw-XPC attempts remains a release-validation gap.
+The signed Enhanced Security integration gate verifies the real process
+lifecycle and authenticated broker handshake. Its separate
+[quarantine mode](EnhancedSecurityExtensionIntegration.md#payload-quarantine)
+verifies payload quarantine and rejects removal or flag clearing through real
+broker-returned writable descriptors. Broader adversarial Seatbelt coverage of
+descriptor-relative paths, links, rename, unlink, other xattrs, file flags, and
+raw-XPC attempts remains a release-validation gap, as does production
+identified-peer signing.

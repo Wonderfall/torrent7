@@ -151,3 +151,7 @@ jobs:
         run: |
           set -euo pipefail
           SKIP_BUILD_DEPS=1 Scripts/test-enhanced-security-extension.zsh --automated
+
+      - name: Verify payload quarantine under sanitizer
+        shell: zsh {0}
+        run: SKIP_BUILD_DEPS=1 Scripts/test-enhanced-security-extension.zsh --quarantine

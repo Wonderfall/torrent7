@@ -131,7 +131,7 @@ supported undefined-behavior checks. The production hardening profile is unchang
 | Dependency security, PAC replay, TLS, allocation | [Patch verification](../Scripts/patches/README.md#verification-and-maintenance); focused scripts include `Scripts/test-boringssl-hardening.zsh`, `Scripts/test-boost-asio-pac.zsh`, and `Scripts/test-boost-asio-recycling-allocator.zsh`. |
 | Native and Swift-to-native fuzzing | [Bridge fuzzing](../Tools/BridgeFuzzing/README.md). |
 | Swift parser, IPC, and storage-authority fuzzing | [Swift/IPC fuzzing](../Tools/IPCFuzzing/README.md). |
-| Real helper launch, shutdown, and recovery | [Enhanced Security integration](EnhancedSecurityExtensionIntegration.md). |
+| Real helper launch, shutdown, recovery, and payload quarantine | [Enhanced Security integration](EnhancedSecurityExtensionIntegration.md). |
 | Repeated concurrency tests, UI/VoiceOver, Instruments | [Release and UI diagnostics](ReleaseDiagnostics.md). |
 | Native/Swift parser comparison | [Parser microbenchmarks](../Tools/ParserBenchmarks/README.md). |
 | Startup filesystem verification | `Scripts/benchmark-storage-restoration.zsh`; [methodology and limitations](StorageRestorationBenchmark.md). |
