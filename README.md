@@ -70,6 +70,8 @@ The post-cutover native protocol surface and the evidence required before
 another rewrite are tracked in the
 [Native Parser Inventory](Documentation/NativeParserInventory.md).
 
+See the [documentation index](Documentation/README.md) for the complete guide list.
+
 ## Features
 
 - Add `.torrent` files, magnet links, Finder-opened torrents, and dragged files.

@@ -31,6 +31,7 @@ remain non-negotiable.
 
 ## Task reading map
 
+The [documentation index](Documentation/README.md) lists all guides by purpose.
 Before working on the project, read this guide, the README, the coding standards,
 the toolchain baseline, and the opening architecture overview and invariants.
 Then read the documents relevant to the area you will investigate or change:
@@ -93,6 +94,7 @@ Keep each kind of guidance in its authoritative home:
 - `README.md`: product orientation, capabilities, and build/test entry points.
 - `CONTRIBUTING.md`: shared contribution policy, reading routes, and verification
   requirements.
+- `Documentation/README.md`: index of documentation and tool guides.
 - `Documentation/CodingStandards.md`: shared engineering requirements.
 - `Documentation/Toolchain.md`: exact supported versions, compiler-specific
   settings, and necessary build workarounds.
@@ -108,7 +110,8 @@ hard to recover from code alone. Keep local `SAFETY:` and `PERF:` explanations
 beside the code they justify. Avoid duplicating API catalogs, obvious control
 flow, or the same policy in several files; link to the authoritative section.
 
-Update or remove obsolete guidance as part of the change. Rewrite the relevant
+Update or remove obsolete guidance as part of the change. Keep the documentation
+index current when adding, moving, or removing guides. Rewrite the relevant
 explanation instead of appending a running history of pull requests. Keep
 temporary investigation notes and agent plans out of permanent project docs.
 Retain historical verification or benchmark evidence when it explains a decision,
