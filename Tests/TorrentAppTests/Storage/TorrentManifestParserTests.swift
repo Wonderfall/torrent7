@@ -329,6 +329,27 @@ struct TorrentManifestParserTests {
         #expect(parsed.envelope.webSeeds == [validSource])
     }
 
+    @Test("Source envelopes omit trailing-dot hosts for trackers and web seeds")
+    func trailingDotSourceEnvelopeSyntax() throws {
+        let validSource = "https://tracker.example/announce."
+        let invalidSources = [
+            "https://tracker.example./announce",
+            "https://tracker.example.:443/announce",
+            "https://192.0.2.1./announce",
+        ]
+        let sources = (invalidSources + [validSource]).map(TestBencode.string)
+        let parsed = try TorrentManifestParser().parse(Self.torrent(
+            info: Self.v1SingleFileInfo(name: "sample.bin", size: 5),
+            topLevel: [
+                Self.key("announce", .string(invalidSources[0])),
+                Self.key("announce-list", .list([.list(sources)])),
+                Self.key("url-list", .list(sources)),
+            ]
+        ))
+        #expect(parsed.envelope.trackers.map(\.url) == [validSource])
+        #expect(parsed.envelope.webSeeds == [validSource])
+    }
+
     @Test("Source envelope parsing enforces independent resource limits")
     func sourceEnvelopeLimits() throws {
         let info = Self.v1SingleFileInfo(

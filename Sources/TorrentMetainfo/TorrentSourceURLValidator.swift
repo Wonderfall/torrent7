@@ -85,6 +85,9 @@ enum TorrentSourceURLValidator {
 
     private static func isValidDNSOrIPv4Host(_ host: Substring) -> Bool {
         guard !host.isEmpty,
+              // The TLS boundary rejects a terminal DNS root dot.
+              // Intake must validate the same spelling used for SNI and trust.
+              host.last != ".",
               host.utf8.count < TorrentEngineLimits.trackerHostCapacity,
               !host.contains("%"),
               host.utf8.allSatisfy({
@@ -92,14 +95,10 @@ enum TorrentSourceURLValidator {
               }) else {
             return false
         }
-        let withoutTrailingDot = host.last == "." ? host.dropLast() : host
-        guard !withoutTrailingDot.isEmpty else {
-            return false
+        if host.utf8.allSatisfy({ isASCIIDigit($0) || $0 == 46 }) {
+            return isValidIPv4Address(host)
         }
-        if withoutTrailingDot.utf8.allSatisfy({ isASCIIDigit($0) || $0 == 46 }) {
-            return isValidIPv4Address(withoutTrailingDot)
-        }
-        return withoutTrailingDot
+        return host
             .split(separator: ".", omittingEmptySubsequences: false)
             .allSatisfy { label in
                 !label.isEmpty

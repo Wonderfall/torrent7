@@ -134,6 +134,23 @@ struct ParsedMagnetTests {
         }
     }
 
+    @Test("Magnet intake and typed decoding reject trailing-dot source hosts", arguments: ["tr", "ws"])
+    func trailingDotSourceHosts(field: String) throws {
+        let magnet = "magnet:?xt=urn:btih:\(String(repeating: "3", count: 40))&\(field)=https://tracker.example/announce"
+        let parsed = try ParsedMagnet.parse(magnet)
+        let dotted = magnet.replacingOccurrences(of: "tracker.example", with: "tracker.example.")
+        #expect(throws: ParsedMagnetError.invalidSourceURL) {
+            _ = try ParsedMagnet.parse(dotted)
+        }
+
+        let encoded = try JSONEncoder().encode(parsed)
+        let dottedJSON = String(decoding: encoded, as: UTF8.self)
+            .replacingOccurrences(of: "tracker.example", with: "tracker.example.")
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(ParsedMagnet.self, from: Data(dottedJSON.utf8))
+        }
+    }
+
     @Test("Typed decoding revalidates hashes, sources, tiers, and selections")
     func decodingRevalidatesModel() throws {
         let valid = try ParsedMagnet.parse(

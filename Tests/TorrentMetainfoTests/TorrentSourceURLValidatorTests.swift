@@ -3,6 +3,24 @@ import Testing
 
 @Suite("Source URL syntax")
 struct TorrentSourceURLValidatorTests {
+    @Test("Source hostnames reject trailing dots without rejecting dots in paths", arguments: [
+        "https", "http", "udp",
+    ], ["tracker.example", "192.0.2.1"])
+    func trailingDotHostnames(scheme: String, host: String) {
+        for suffix in ["/announce.", ":443/announce?key=."] {
+            for userInfo in ["", "user:password@"] {
+                #expect(TorrentSourceURLValidator.isValid(
+                    "\(scheme)://\(userInfo)\(host)\(suffix)",
+                    maximumBytes: 2_048, allowedSchemes: [scheme]
+                ))
+                #expect(!TorrentSourceURLValidator.isValid(
+                    "\(scheme)://\(userInfo)\(host).\(suffix)",
+                    maximumBytes: 2_048, allowedSchemes: [scheme]
+                ))
+            }
+        }
+    }
+
     @Test("IPv6 accepts ordinary literals and a final dotted IPv4 tail", arguments: [
         "::", "::1", "2001:db8::1", "2001:db8:1:2:3:4:5:6",
         "::192.0.2.1", "::ffff:192.0.2.1", "2001:db8::192.0.2.1",
