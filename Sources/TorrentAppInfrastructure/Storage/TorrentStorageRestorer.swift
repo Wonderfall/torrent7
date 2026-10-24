@@ -19,8 +19,11 @@ package struct TorrentStorageRestorer: Sendable {
     private let maximumDuration: Duration
     private let now: @Sendable () -> ContinuousClock.Instant
 
+    // Near-journal-limit verification reached 105 seconds on local APFS.
+    // Five minutes leaves about 2.9x measured headroom; see
+    // Documentation/StorageRestorationBenchmark.md for the workload and limits.
     package init(
-        maximumDuration: Duration = .seconds(30),
+        maximumDuration: Duration = .seconds(300),
         now: @escaping @Sendable () -> ContinuousClock.Instant = { .now }
     ) {
         precondition(maximumDuration >= .zero)

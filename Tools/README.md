@@ -56,3 +56,7 @@ and are not linked into the application.
 
 `ParserBenchmarks/` contains reproducible native-versus-Swift parser
 microbenchmarks, their recorded baseline, and the raw-result summarizer.
+
+`Scripts/benchmark-storage-restoration.zsh` exercises production startup storage
+verification against temporary libraries, including file, path-depth, torrent,
+and journal-size stress cases. See the [measurements and methodology](../Documentation/StorageRestorationBenchmark.md).

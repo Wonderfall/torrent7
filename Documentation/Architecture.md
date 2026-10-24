@@ -249,8 +249,10 @@ unknown claim becomes orphaned and remains preserved. Ambiguous deletion becomes
 Startup filesystem verification runs in an infrastructure operation awaited and
 cancelled by the owned bootstrap task. Parent authorities and broker registrations
 are staged privately, then published together on MainActor only after the scan
-completes and the bootstrap is still current. A 30-second total work budget is
+completes and the bootstrap is still current. A five-minute total work budget is
 checked between filesystem operations, including each file in a stat batch.
+This leaves about 2.9 times the longest measured verification of a library near
+the journal limit; see the [workloads, measurements, and limitations](StorageRestorationBenchmark.md).
 Cancellation or budget expiry discards the staged result; expiry stops engine
 startup without changing the journal or payloads. These cooperative checks cannot
 interrupt an in-progress kernel filesystem call, but that call never runs on

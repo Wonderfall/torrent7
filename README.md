@@ -473,6 +473,15 @@ XPC boundary now pages the resulting high-cardinality datasets independently.
 The probe does not use wall-clock assertions; review gates are documented in
 [Architecture and Security Decisions](Documentation/Architecture.md).
 
+Measure startup storage verification against temporary file libraries:
+
+```sh
+Scripts/benchmark-storage-restoration.zsh
+```
+
+The [recorded measurements and methodology](Documentation/StorageRestorationBenchmark.md)
+explain the startup work budget and the limits of local SSD measurements.
+
 Run the opt-in DHT message callback probe in release mode:
 
 ```sh
