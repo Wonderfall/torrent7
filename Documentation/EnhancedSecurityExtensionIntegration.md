@@ -158,6 +158,8 @@ read the attribute; that read is not required to succeed.
 CI runs this mode in release, ASan, and TSan profiles. It uses the same isolated
 identities, cleanup, and outer timeout as the lifecycle gate, plus a 15-second
 probe reply deadline. Logs include before/after attributes and syscall errors.
+Memory sampling is informational in this mode: the helper may finish between
+samples. Success requires the XPC probe and all payload/quarantine assertions.
 No Powerbox interaction, network download, or executable launch is involved.
 This verifies the ad-hoc signed sandbox boundary on the host container's
 filesystem; it does not establish behavior on every filesystem, a particular
