@@ -1843,6 +1843,79 @@ struct TorrentStoreIntegrationTests {
         }
     }
 
+    @Test("Expired restoration preserves claims and never starts the engine")
+    func restorationDeadlinePreservesClaims() async throws {
+        try await withKnownTorrentHarness { harness, downloadFolder in
+            #expect(harness.store.addTorrentFile(
+                downloadFolder.appending(path: "sample.torrent"),
+                torrentData: validSingleFileTorrentData(),
+                savePath: downloadFolder.torrentFilePath
+            ))
+            await harness.store.saveAll()
+            let journal = try #require(harness.storageClaimJournal)
+            let originalClaims = await journal.allClaims()
+            try #require(originalClaims.count == 1)
+            let startedEngine = Mutex(false)
+            let restored = makeStoreHarness(
+                storageClaimJournal: journal,
+                startupDependencies: .init(startEngine: { _, _, _ in
+                    startedEngine.withLock { $0 = true }
+                    return FakeTorrentEngine()
+                }, storageRestorer: .init(maximumDuration: .zero))
+            )
+            await restored.accessStore.setRestoreDefaultResult(.success(downloadFolder))
+            restored.store.start()
+            await restored.store.saveAll()
+
+            #expect(!startedEngine.withLock { $0 })
+            #expect(!restored.store.engineAvailable)
+            #expect(restored.store.engineLifecycleState == .unavailable)
+            #expect(restored.store.lastError?.contains("startup time budget") == true)
+            #expect(await journal.allClaims() == originalClaims)
+            #expect(FileManager.default.fileExists(
+                atPath: downloadFolder.appending(path: "sample.bin").path()
+            ))
+        }
+    }
+
+    @Test("Termination cancels restoration before publishing or starting an engine")
+    func terminationCancelsStorageRestoration() async throws {
+        try await withKnownTorrentHarness { harness, downloadFolder in
+            #expect(harness.store.addTorrentFile(
+                downloadFolder.appending(path: "sample.torrent"),
+                torrentData: validSingleFileTorrentData(),
+                savePath: downloadFolder.torrentFilePath
+            ))
+            await harness.store.saveAll()
+            let journal = try #require(harness.storageClaimJournal)
+            let originalClaims = await journal.allClaims()
+            let claim = try #require(originalClaims.first)
+            let torrentID = try #require(claim.torrentID)
+            // For one parent and one file, the ninth clock read is the final
+            // checkpoint. It has already checked cancellation before reading
+            // the clock, so this exercises rejection of a completed result.
+            let gate = StorageRestorationTestGate(pauseOnRead: 9)
+            let startedEngine = Mutex(false)
+            let restored = makeStoreHarness(
+                storageClaimJournal: journal,
+                startupDependencies: .init(startEngine: { _, _, _ in
+                    startedEngine.withLock { $0 = true }
+                    return FakeTorrentEngine()
+                }, storageRestorer: .init(now: { gate.now() }))
+            )
+            await restored.accessStore.setRestoreDefaultResult(.success(downloadFolder))
+            restored.store.start()
+            await gate.waitUntilEntered()
+            // Cancellation happens on this actor before a completed worker can
+            // return here to publish its result, even if it wins the release.
+            gate.release()
+            #expect(await restored.store.saveAllChecked())
+            #expect(!startedEngine.withLock { $0 })
+            #expect(restored.store.downloadLocationPath(for: torrentID) == nil)
+            #expect(await journal.allClaims() == originalClaims)
+        }
+    }
+
     @Test("Restart resumes an acknowledged payload deletion")
     func restartResumesAcknowledgedPayloadDeletion() async throws {
         try await withKnownTorrentHarness { harness, downloadFolder in

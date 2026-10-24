@@ -246,6 +246,16 @@ If bookmark or root identity restoration fails, an active, activating, or
 unknown claim becomes orphaned and remains preserved. Ambiguous deletion becomes
 `deletionPending`; it is not retried as if ownership were certain.
 
+Startup filesystem verification runs in an infrastructure operation awaited and
+cancelled by the owned bootstrap task. Parent authorities and broker registrations
+are staged privately, then published together on MainActor only after the scan
+completes and the bootstrap is still current. A 30-second total work budget is
+checked between filesystem operations, including each file in a stat batch.
+Cancellation or budget expiry discards the staged result; expiry stops engine
+startup without changing the journal or payloads. These cooperative checks cannot
+interrupt an in-progress kernel filesystem call, but that call never runs on
+MainActor and its descriptors remain owned until it returns.
+
 ## Exact-file broker
 
 The GUI creates an anonymous `XPCListener` before constructing or restoring the

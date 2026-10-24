@@ -13,6 +13,100 @@ import XPC
 @MainActor
 @Suite("Torrent storage authority", .serialized)
 struct TorrentStorageAuthorityTests {
+    @Test("Restoration verifies every batch before publishing a claim", arguments: [false, true])
+    func restorationVerifiesAllBatches(substituteLastFile: Bool) async throws {
+        try await withTemporaryDirectory { root in
+            let parent = try makeParent(root)
+            let files = (0...TorrentStorageBrokerProtocol.maximumStatBatchCount).map { index in
+                TorrentLogicalFile(
+                    index: Int32(index), pathComponents: ["Disc", "\(index).bin"],
+                    expectedSize: 1, isPadding: false
+                )
+            }
+            let manifest = try makeLogicalManifest(
+                name: "collection", contentKind: .directory, files: files
+            )
+            let reservation = try TorrentStorageDestinationPlanner().reserve(
+                manifest: manifest, in: parent, claimID: UUID(), generation: 1,
+                ownershipKey: TorrentStorageDestinationPlanner.randomOwnershipKey()
+            )
+            let claim = makeClaim(reservation, state: .active)
+            if substituteLastFile {
+                let lastFile = root.appending(path: "collection/Disc/\(files.count - 1).bin")
+                try FileManager.default.moveItem(at: lastFile, to: root.appending(path: "original.bin"))
+                try Data([0]).write(to: lastFile)
+            }
+            let restored = try await TorrentStorageRestorer().restore(
+                leases: [DownloadFolderAccessLease(access: FakeDownloadFolderAccess(url: root))],
+                claims: [claim]
+            )
+            #expect(restored.parents[parent.id] != nil)
+            #expect(restored.registry.installedClaimIDs()
+                == (substituteLastFile ? [] : [claim.manifest.claimID]))
+        }
+    }
+
+    @Test("Restoration leaves MainActor and propagates owned task cancellation")
+    func restorationCancellation() async throws {
+        let gate = StorageRestorationTestGate()
+        let restorer = TorrentStorageRestorer(now: { gate.now() })
+        let operation = Task { try await restorer.restore(leases: [], claims: []) }
+        await gate.waitUntilEntered()
+        operation.cancel()
+        gate.release()
+        await #expect(throws: CancellationError.self) { _ = try await operation.value }
+    }
+
+    @Test("A deadline during verification aborts restoration")
+    func restorationDeadlineDuringScan() async throws {
+        try await withTemporaryDirectory { root in
+            let fixture = try reserveSingleFile(in: root, name: "payload.bin", size: 16)
+            let claim = makeClaim(fixture.reservation, state: .active)
+            let clock = Mutex(ContinuousClock.now)
+            let restorer = TorrentStorageRestorer(maximumDuration: .seconds(7), now: {
+                clock.withLock { instant in
+                    defer { instant = instant.advanced(by: .seconds(1)) }
+                    return instant
+                }
+            })
+            await #expect(throws: TorrentStorageRestorationError.deadlineExceeded) {
+                _ = try await restorer.restore(
+                    leases: [DownloadFolderAccessLease(
+                        access: FakeDownloadFolderAccess(url: fixture.downloads)
+                    )],
+                    claims: [claim]
+                )
+            }
+            #expect(FileManager.default.fileExists(
+                atPath: fixture.downloads.appending(path: "payload.bin").path()
+            ))
+        }
+    }
+
+    @Test("Stat batches check interruption while a file descriptor is owned")
+    func statBatchInterruption() throws {
+        try withTemporaryDirectory { root in
+            let fixture = try reserveSingleFile(in: root, name: "payload.bin", size: 16)
+            let claim = makeClaim(fixture.reservation, state: .active)
+            let registry = TorrentStorageBrokerRegistry()
+            try registry.install(claim: claim, parent: fixture.parent)
+            var checks = 0
+            #expect(throws: CancellationError.self) {
+                _ = try registry.statBatch(
+                    claimID: claim.manifest.claimID, generation: 1,
+                    fileIndices: [0, 0], checkInterruption: {
+                        checks += 1
+                        if checks == 2 { throw CancellationError() }
+                    }
+                )
+            }
+            #expect(checks == 2)
+            #expect(try registry.statBatch(
+                claimID: claim.manifest.claimID, generation: 1, fileIndices: [0]
+            ).count == 1)
+        }
+    }
+
     @Test("The journal records the exact destination before reservation")
     func plannedDestinationPrecedesMutation() async throws {
         try await withTemporaryDirectory { root in

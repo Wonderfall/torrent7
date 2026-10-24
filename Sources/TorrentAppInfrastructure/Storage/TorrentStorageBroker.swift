@@ -186,13 +186,15 @@ package enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Senda
         claimID: UUID,
         generation: UInt64,
         fileIndices: [Int32],
-        deadlineUptimeNanoseconds: UInt64? = nil
+        deadlineUptimeNanoseconds: UInt64? = nil,
+        checkInterruption: () throws -> Void = {}
     ) throws -> [TorrentStorageBrokerFileMetadata] {
         guard !fileIndices.isEmpty,
               fileIndices.count <= TorrentStorageBrokerProtocol.maximumStatBatchCount else {
             throw TorrentStorageBrokerRegistryError.invalidClaim
         }
         return try fileIndices.map { fileIndex in
+            try checkInterruption()
             try Self.checkDeadline(deadlineUptimeNanoseconds)
             let resolved = try resolvedFile(
                 claimID: claimID,
@@ -218,6 +220,7 @@ package enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Senda
                 resolved: resolved,
                 access: .readOnly
             )
+            try checkInterruption()
             try Self.checkDeadline(deadlineUptimeNanoseconds)
             return metadata
         }

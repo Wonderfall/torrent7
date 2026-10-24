@@ -199,6 +199,7 @@ typealias TorrentStoreEngineStartupFactory = @Sendable (
 
 nonisolated struct TorrentStoreDependencies: Sendable {
     let startEngine: TorrentStoreEngineStartupFactory
+    let storageRestorer: TorrentStorageRestorer
 
     static let live = Self(startEngine: { enablePeerExchangePlugin, registry, retryMode in
         let configuration = try TorrentEngineXPCIdentity.configuration()
@@ -215,13 +216,17 @@ nonisolated struct TorrentStoreDependencies: Sendable {
     })
 
     init(makeEngine: @escaping TorrentStoreEngineFactory) {
-        startEngine = { enablePeerExchangePlugin, _, _ in
+        self.init(startEngine: { enablePeerExchangePlugin, _, _ in
             try makeEngine(enablePeerExchangePlugin)
-        }
+        })
     }
 
-    init(startEngine: @escaping TorrentStoreEngineStartupFactory) {
+    init(
+        startEngine: @escaping TorrentStoreEngineStartupFactory,
+        storageRestorer: TorrentStorageRestorer = .init()
+    ) {
         self.startEngine = startEngine
+        self.storageRestorer = storageRestorer
     }
 }
 
@@ -258,7 +263,7 @@ final class TorrentStore {
 
     private let dependencies: TorrentStoreDependencies
     private var engine: any TorrentEngineServicing
-    private let storageBrokerRegistry = TorrentStorageBrokerRegistry()
+    private var storageBrokerRegistry = TorrentStorageBrokerRegistry()
     private let storageClaimJournal: TorrentStorageClaimJournal?
     private let storageClaimJournalInitializationError:
         TorrentStorageJournalError?
@@ -3238,8 +3243,30 @@ final class TorrentStore {
             }
             self.downloadFolder = folder.defaultURL
             self.settingsState.downloadFolder = folder.defaultURL
-            if let storageWarning = await self.restoreStorageClaims() {
-                self.setLastError(storageWarning, source: .userAction)
+            do {
+                if let storageWarning = try await self.restoreStorageClaims(
+                    bootstrapID: bootstrapID
+                ) {
+                    self.setLastError(storageWarning, source: .userAction)
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled,
+                      self.productionBootstrapID == bootstrapID else {
+                    return
+                }
+                self.productionBootstrapID = nil
+                self.engineStartupTask = nil
+                self.isEngineStarting = false
+                self.failEngineStartup(
+                    "Saved payload verification did not finish. Existing payloads and storage claims were preserved. \(error.localizedDescription)"
+                )
+                return
+            }
+            guard !Task.isCancelled,
+                  self.productionBootstrapID == bootstrapID else {
+                return
             }
             self.completionNotifier.updateConfiguration(self.settings)
             self.appliedPeerExchangePluginEnabled =
@@ -3269,7 +3296,7 @@ final class TorrentStore {
         )
     }
 
-    private func restoreStorageClaims() async -> String? {
+    private func restoreStorageClaims(bootstrapID: UUID) async throws -> String? {
         guard let storageClaimJournal else {
             let reason = storageClaimJournalInitializationError?
                 .localizedDescription
@@ -3278,52 +3305,16 @@ final class TorrentStore {
         }
         let accessSnapshot = await downloadFolderAccessStore.makeAccessSnapshot()
         let claims = await storageClaimJournal.allClaims()
-        storageParents.removeAll(keepingCapacity: true)
-        for lease in accessSnapshot.leases {
-            guard let parent = try? await Self.makeStorageParentAuthority(lease)
-            else {
-                continue
-            }
-            storageParents[parent.id] = parent
+        let restored = try await dependencies.storageRestorer.restore(
+            leases: accessSnapshot.leases,
+            claims: claims
+        )
+        try Task.checkCancellation()
+        guard productionBootstrapID == bootstrapID else {
+            throw CancellationError()
         }
-        for claim in claims where claim.lease.state == .active {
-            guard let restoredParent = storageParents[claim.manifest.parentID]
-            else {
-                continue
-            }
-            do {
-                try TorrentStorageDestinationPlanner().validateClaimRoot(
-                    claim,
-                    in: restoredParent
-                )
-                try storageBrokerRegistry.install(
-                    claim: claim,
-                    parent: restoredParent
-                )
-                let indices = claim.manifest.logicalFiles.map(\.index)
-                for start in stride(
-                    from: 0,
-                    to: indices.count,
-                    by: TorrentStorageBrokerProtocol.maximumStatBatchCount
-                ) {
-                    let end = min(
-                        indices.count,
-                        start + TorrentStorageBrokerProtocol.maximumStatBatchCount
-                    )
-                    _ = try storageBrokerRegistry.statBatch(
-                        claimID: claim.manifest.claimID,
-                        generation: claim.manifest.generation,
-                        fileIndices: Array(indices[start..<end])
-                    )
-                }
-            } catch {
-                try? storageBrokerRegistry.removeClaim(
-                    claimID: claim.manifest.claimID,
-                    generation: claim.manifest.generation
-                )
-            }
-        }
-
+        storageParents = restored.parents
+        storageBrokerRegistry = restored.registry
         return nil
     }
 
@@ -3659,20 +3650,23 @@ final class TorrentStore {
                     afterLeadingOperation: restoreMayPrecedeSynchronization && scheduledRestore
                 )
             case .failed(let message):
-                self.engine = TorrentUnavailableEngine(message: message)
-                self.engineStartupFailed = true
-                let startupError = TorrentEngineError.startupFailed(message).localizedDescription
-                let messages = [self.lastError, startupError].compactMap { $0 }
-                self.setLastError(messages.joined(separator: "\n\n"), source: .userAction)
-                // Resolve queued callers deterministically against the
-                // unavailable placeholder instead of leaving continuations
-                // suspended forever behind a failed replacement.
-                self.startOperationDrainIfNeeded()
-                self.schedulePendingRestoreDefaultsIfPossible()
+                self.failEngineStartup(message)
             case .cancelled:
                 break
             }
         }
+    }
+
+    private func failEngineStartup(_ message: String) {
+        engine = TorrentUnavailableEngine(message: message)
+        engineStartupFailed = true
+        let startupError = TorrentEngineError.startupFailed(message).localizedDescription
+        let messages = [lastError, startupError].compactMap { $0 }
+        setLastError(messages.joined(separator: "\n\n"), source: .userAction)
+        // Resolve queued callers against the unavailable placeholder instead
+        // of leaving continuations suspended behind a failed startup.
+        startOperationDrainIfNeeded()
+        schedulePendingRestoreDefaultsIfPossible()
     }
 
     private func startInitialEngineSync(afterLeadingOperation: Bool = false) {
