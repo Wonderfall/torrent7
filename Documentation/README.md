@@ -5,6 +5,15 @@ instructions. The [contributor guide](../CONTRIBUTING.md) defines required
 reading, verification, and documentation responsibilities.
 [AGENTS.md](../AGENTS.md) adds project character and workflow guidance for agents.
 
+## Workflows and support
+
+| Document | Contents |
+| --- | --- |
+| [Development](Development.md) | Local build profiles, incremental work, tests, CI coverage and reproduction, and safe cache cleanup. |
+| [Troubleshooting and recovery](Troubleshooting.md) | Settings, storage, and engine recovery; data preservation and useful bug reports. |
+| [Release and UI diagnostics](ReleaseDiagnostics.md) | Release preparation, signing/notarization, retained evidence, crash symbols, lifecycle checks, accessibility, and Instruments. |
+| [Security policy](../SECURITY.md) | Vulnerability reporting and disclosure policy. |
+
 ## Foundations
 
 | Document | Contents |
@@ -25,14 +34,13 @@ reading, verification, and documentation responsibilities.
 
 | Document | Contents |
 | --- | --- |
-| [Release and UI diagnostics](ReleaseDiagnostics.md) | Lifecycle checks, release evidence, packaging verification, accessibility, and Instruments. |
 | [Enhanced Security extension integration](EnhancedSecurityExtensionIntegration.md) | Real helper-process integration fixtures, lifecycle recovery, dataset checks, and coverage limits. |
 | [Startup storage verification measurements](StorageRestorationBenchmark.md) | Benchmark methodology, recorded workloads, and the rationale and limits of the startup work budget. |
 
 ## Guides alongside tools and scripts
 
 - [Developer tools](../Tools/README.md): tool purposes, entry points, and lifecycle contracts.
-- [Dependency patches](../Scripts/patches/README.md): ordered patch purposes, dependencies, verification, and maintenance.
+- [Dependency patches](../Scripts/patches/README.md): ordered patch purposes, upgrades, provenance, monitoring, verification, and maintenance.
 - [Bridge fuzzing](../Tools/BridgeFuzzing/README.md): native and Swift-to-native boundary targets, builds, and runs.
 - [Swift/IPC fuzzing](../Tools/IPCFuzzing/README.md): bounded parsers and storage-authority targets, corpora, and runs.
 - [Unsafe-boundary lint](../Tools/UnsafeBoundaryLint/README.md): safety-comment placement checks and rule fixtures.

@@ -25,7 +25,8 @@ and extension fixture, then runs automated lifecycle recovery checks or
 interactive dataset and scale checks with an explicitly authorized folder.
 
 `DependencyCheck/` contains the read-only upstream dependency monitor for pinned
-third-party source dependencies.
+third-party source dependencies. See the [dependency monitor guide](../Scripts/patches/README.md#dependency-monitor)
+for cooldowns, report interpretation, and the upgrade procedure.
 
 `Package.swift` compiles the dependency monitor and the entitlement/Enhanced
 Security metadata verifiers with Swift 6.4, strict memory safety, complete

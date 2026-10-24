@@ -4,6 +4,10 @@ These requirements apply to all contributors, human and agent. Start with the
 [README](README.md) for product scope and build instructions. Agents must also
 follow [AGENTS.md](AGENTS.md).
 
+Use the [security policy](SECURITY.md) for vulnerability reports and the
+[troubleshooting guide](Documentation/Troubleshooting.md) for supported recovery
+and useful bug-report details.
+
 ## Design and compatibility
 
 Torrent 7 aims to be clean, elegant, and modern, with security as a first-class
@@ -38,12 +42,14 @@ Then read the documents relevant to the area you will investigate or change:
 
 | Area | Read before working |
 | --- | --- |
-| Module ownership, storage, bookmarks, file selection, or teardown | The affected sections of [Architecture and security decisions](Documentation/Architecture.md). For startup verification budgets, also read the [storage restoration measurements](Documentation/StorageRestorationBenchmark.md). |
+| Module ownership, storage, bookmarks, file selection, or teardown | The affected sections of [Architecture and security decisions](Documentation/Architecture.md), including [engine lifecycle](Documentation/Architecture.md#engine-state-and-lifecycle) and [resume checkpoints](Documentation/Architecture.md#resume-checkpoints). For startup verification budgets, also read the [storage restoration measurements](Documentation/StorageRestorationBenchmark.md). |
 | IPC, helper lifecycle, or process authority | The architecture's [command channel](Documentation/Architecture.md#command-channel) and [exact-file broker](Documentation/Architecture.md#exact-file-broker), plus [Enhanced Security integration](Documentation/EnhancedSecurityExtensionIntegration.md) and [lifecycle diagnostics](Documentation/ReleaseDiagnostics.md#repeated-lifecycle-tests). |
 | Parsers, protocol input, or imported native interfaces | [Metainfo and protocol parsing](Documentation/MetainfoParsing.md), [Native parser inventory](Documentation/NativeParserInventory.md), and the relevant [Swift/IPC](Tools/IPCFuzzing/README.md) or [bridge](Tools/BridgeFuzzing/README.md) fuzzing guide. |
 | Native dependencies, patches, or hardening | [Dependency patches](Scripts/patches/README.md) and the architecture's [native and dependency hardening](Documentation/Architecture.md#native-and-dependency-hardening). |
 | SwiftUI, menus, or accessibility | The [SwiftUI standards](Documentation/CodingStandards.md#swiftui) and [native menu and VoiceOver diagnostics](Documentation/ReleaseDiagnostics.md#native-menus-and-voiceover). |
-| Build, packaging, signing, or release verification | [Build instructions](README.md#build), [release diagnostics](Documentation/ReleaseDiagnostics.md), and [Enhanced Security integration](Documentation/EnhancedSecurityExtensionIntegration.md). |
+| Local builds, CI reproduction, or cache cleanup | [Development](Documentation/Development.md), plus the affected workflow and scripts. |
+| Packaging, signing, or release preparation | [Release and UI diagnostics](Documentation/ReleaseDiagnostics.md) and [Enhanced Security integration](Documentation/EnhancedSecurityExtensionIntegration.md). |
+| Startup, settings, folder-access, or recovery reports | [Troubleshooting and recovery](Documentation/Troubleshooting.md), then the linked architecture contracts and affected tests. |
 | Offline IP-to-country data | [Peer countries](Documentation/PeerCountries.md). |
 | Developer tools or unsafe-boundary lint | [Developer tools](Tools/README.md) and the [unsafe-boundary lint](Tools/UnsafeBoundaryLint/README.md) guide when changing that checker. |
 
@@ -67,7 +73,7 @@ additional risk-specific checks supplement the ordinary language checks.
 | Documentation only | Check local links and section anchors, command accuracy, and `git diff --check`. A rebuild or sanitizer run is not required when source and build settings are unchanged. |
 
 Risk-specific entry points are documented in the
-[diagnostics and tests guide](README.md#diagnostics-and-tests),
+[development guide](Documentation/Development.md#tests-and-diagnostics),
 [release and lifecycle diagnostics](Documentation/ReleaseDiagnostics.md),
 [bridge fuzzing](Tools/BridgeFuzzing/README.md), and
 [Swift/IPC fuzzing](Tools/IPCFuzzing/README.md). Select coverage based on the
@@ -95,6 +101,12 @@ Keep each kind of guidance in its authoritative home:
 - `CONTRIBUTING.md`: shared contribution policy, reading routes, and verification
   requirements.
 - `Documentation/README.md`: index of documentation and tool guides.
+- `Documentation/Development.md`: local build workflows, CI coverage, and safe
+  cleanup of generated artifacts.
+- `Documentation/Troubleshooting.md`: supported user recovery and diagnostic
+  collection, aligned with current behavior.
+- `Documentation/ReleaseDiagnostics.md`: release preparation and evidence,
+  lifecycle/UI diagnostics, and clearly labeled historical verification.
 - `Documentation/CodingStandards.md`: shared engineering requirements.
 - `Documentation/Toolchain.md`: exact supported versions, compiler-specific
   settings, and necessary build workarounds.
@@ -104,6 +116,7 @@ Keep each kind of guidance in its authoritative home:
   maintenance procedures, and evidence for the subsystem they cover.
 - `AGENTS.md`: project character for agents, agent-specific workflow, and
   mandatory reading instructions.
+- `SECURITY.md`: vulnerability-reporting routes and disclosure policy.
 
 Document decisions, constraints, failure modes, and operational steps that are
 hard to recover from code alone. Keep local `SAFETY:` and `PERF:` explanations

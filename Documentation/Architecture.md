@@ -30,6 +30,30 @@ a process or trust boundary; both modules execute with the GUI's sandbox
 authority. All Swift targets enable approachable-concurrency semantics, while
 non-UI modules retain explicit nonisolated default isolation.
 
+## Contents
+
+- [Non-negotiable invariants](#non-negotiable-invariants)
+- [Process and authority split](#process-and-authority-split)
+- [Saved settings and network authorization](#saved-settings-and-network-authorization)
+- [Command channel](#command-channel)
+- [Independent manifest validation](#independent-manifest-validation)
+- [Destination planning](#destination-planning)
+- [Storage claims](#storage-claims)
+- [Crash-consistent journal](#crash-consistent-journal)
+- [Exact-file broker](#exact-file-broker)
+- [Engine broker client and native provider](#engine-broker-client-and-native-provider)
+- [Residual file capabilities](#residual-file-capabilities)
+- [Activation and import](#activation-and-import)
+- [Magnet promotion](#magnet-promotion)
+- [Removal and revocation](#removal-and-revocation)
+- [Persistence cutover](#persistence-cutover)
+- [Network authority](#network-authority)
+- [Engine state and lifecycle](#engine-state-and-lifecycle)
+- [Resume checkpoints](#resume-checkpoints)
+- [Protocol parsing boundaries](#protocol-parsing-boundaries)
+- [Native and dependency hardening](#native-and-dependency-hardening)
+- [Verification](#verification)
+
 ## Non-negotiable invariants
 
 1. The GUI sends no bookmark, payload path, or parent directory descriptor to
@@ -249,16 +273,20 @@ and authenticated app-ownership evidence; a matching name alone never proves
 ownership. An interrupted keep-payload removal can retire its claim without
 touching the payload.
 
-An `activating` claim found after a crash becomes `activationUnknown`, retains
-its exact broker authority, and is restored without guessing whether native add
-committed. After the first engine snapshot, matching torrents are paused before
-normal network settings are applied. User resume commands exclude them. If the
-pause cannot be confirmed, the app terminates the engine connection and leaves
-the claim unresolved.
+Unknown activation keeps the authority needed by the current engine owner until
+teardown is confirmed. On a fresh startup, storage restoration installs only
+active claims whose parent and root validate. After the first blocked engine
+snapshot, recovery untracks torrents without restored authority before applying
+normal network settings. It then retires unconfirmed or orphaned claims without
+touching their payloads, except where an explicit durable delete intent already
+requires deletion recovery. It does not infer a successful activation from a
+matching payload name or keep an unconfirmed torrent resumable.
 
-If bookmark or root identity restoration fails, an active, activating, or
-unknown claim becomes orphaned and remains preserved. Ambiguous deletion becomes
-`deletionPending`; it is not retried as if ownership were certain.
+An interrupted deletion is retried only through its recorded intent and identity
+checks. Missing authority or incomplete deletion can leave `deletionPending` for
+later recovery. A failure to confirm engine removal stops recovery and terminates
+the connection before claim retirement. See [troubleshooting](Troubleshooting.md)
+for supported user actions; there is no generic journal-repair UI.
 
 Startup filesystem verification runs in an infrastructure operation awaited and
 cancelled by the owned bootstrap task. Parent authorities and broker registrations
@@ -569,13 +597,19 @@ replacement, and revocation return to blocked state. Separate containment and
 cleanup watchdogs cover startup, restart, shutdown, disconnect, and scope
 cleanup so an unresponsive native engine cannot leave network authority active.
 
-## Native and dependency hardening
+Anonymous mode and DHT privacy lookups are independent, enabled-by-default
+settings. Incoming connections, peer exchange, and local discovery are disabled
+by default. Strict BEP 42 node-ID enforcement and DHT routing/search IP diversity
+remain pinned on. HTTPS trackers are preferred with HTTP/UDP fallback, and web
+seeds require HTTPS by default. Tracker, DHT, PEX, and persisted peer endpoints
+must be globally routable; explicitly enabled local discovery is the only local
+peer-discovery route. Outbound-only sessions can discover peers through DHT
+without advertising an unreachable incoming endpoint. Eligible public torrents
+query DHT alongside trackers by default; the optional fallback policy waits
+until every usable tracker endpoint has failed or timed out. Hostname lookup
+uses macOS system DNS, so interface binding is not a system-wide VPN kill switch.
 
-The C++23 bridge uses RAII, `std::span`, `std::expected`, strict warnings, and no
-exception crossing the Swift boundary. The C ABI documents lifetime-scoped
-borrows and validates every count, pointer, enum, identifier, activation, and
-callback table. Stored callbacks and long-lived opaque contexts use diversified
-pointer authentication in arm64e production builds.
+## Engine state and lifecycle
 
 Inside the helper, the `TorrentEngine` Swift actor owns application state. Its
 bounded stores hold snapshot and detail caches, semantic revisions, dirty-state
@@ -611,6 +645,8 @@ retains only undrained typed bits; the `TorrentEngine` actor owns durable
 latching, diagnostics, operation rejection, client destruction when
 containment was not confirmed, and explicit restart recovery.
 
+## Resume checkpoints
+
 Swift schedules all ordinary and policy resume saves and owns their modes,
 generations, coalescing, failures, and retries. C++ exposes one-shot
 capture/encode/write commands plus stateless removal-marker recovery. The
@@ -629,6 +665,8 @@ Concurrent changes and failed commits remain dirty. Native full-save batches sha
 a 20-second capture deadline, and late disk callbacks retain only owned native state.
 This ordering covers abrupt helper loss; it does not claim power-loss durability
 for every filesystem containing payload data.
+
+## Protocol parsing boundaries
 
 Pure size, shape, and policy rules are enforced in Swift where they drive app
 behavior. Raw magnet text is parsed once by the shared `TorrentMetainfo` Swift
@@ -688,12 +726,34 @@ get/put envelopes are classified but their arbitrary values are never decoded;
 the node returns an unsupported-method error. Generic DHT request plugins and
 direct-response payloads are not exposed by Torrent7.
 
+## Native and dependency hardening
+
+The C++23 bridge uses RAII, `std::span`, `std::expected`, strict warnings, and no
+exception crossing the Swift boundary. The C ABI documents lifetime-scoped
+borrows and validates every count, pointer, enum, identifier, activation, and
+callback table. Stored callbacks and long-lived opaque contexts use diversified
+pointer authentication in arm64e production builds.
+
 Libtorrent and BoringSSL are pinned, patched, verified, and linked statically.
 The app bundle contains only the GUI and helper Mach-O executables. TLS uses the
 buffer-only BoringSSL client path with macOS system trust and hostname binding.
+TLS 1.0/1.1, 0-RTT, legacy TLS 1.2 ciphers, and SSL-torrent peers are disabled;
+network certificate fetching is disabled during system-trust evaluation. UPnP's
+encryption-only HTTPS context remains isolated from authenticated tracker and
+web-seed traffic. BoringSSL builds only static `crypto` and `ssl`, with assembly
+and tests disabled and `OPENSSL_SMALL` enabled. The `decrepit` and `pki` targets
+are not staged. WebTorrent remains disabled.
+
 The release profiles enable hardened runtime, library validation, checked
-allocations, hardened heap, dyld read-only data, platform restrictions, stack
-protection, fortify, hidden visibility, PAC, BTI, and trap-only sanitizer checks.
+allocations (including pure-data enforcement, without soft mode), hardened heap,
+dyld read-only data, platform restrictions, stack protection, fortify, hidden
+visibility, PAC, BTI, straight-line speculation and jump-table hardening, typed
+allocation, libc++ hardening, and trap-only sanitizer checks. The dependency
+build rejects raw C and untyped global C++ allocation imports in libtorrent.
+Both executable bundles enable file quarantine; the GUI creates payload files
+and the helper writes through brokered descriptors. See the [toolchain baseline](Toolchain.md)
+for compiler-specific settings and the [patch guide](../Scripts/patches/README.md)
+for dependency contracts and their verification.
 
 ## Verification
 

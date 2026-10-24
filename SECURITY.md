@@ -2,8 +2,10 @@
 
 If you find a security issue or vulnerability, public disclosure is allowed.
 
-Coordinated disclosure is appreciated, but not required. You can report issues in
-this GitHub repository or contact the main maintainer directly.
+Coordinated disclosure is appreciated, but not required. You can report issues
+in [this repository](https://github.com/Wonderfall/torrent7/issues) or contact
+[Wonderfall](https://github.com/Wonderfall) through the public contact links on
+the maintainer's profile.
 
-Note that upstream vulnerabilities should probably be reported directly to
-the relevant maintainers.
+Report vulnerabilities in upstream dependencies to their maintainers as
+appropriate, and describe any Torrent 7 integration impact in the project report.
