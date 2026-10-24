@@ -29,11 +29,26 @@
 
 ## Purpose
 
-Torrent 7 is a focused macOS torrent client built with SwiftUI and
-libtorrent-rasterbar. It keeps the common workflow fast and understandable:
-add a torrent or magnet link, choose files and a destination, and inspect
-transfer details when needed. Native presentation and security are core parts
-of that experience.
+Torrent 7 is a macOS torrent client built around a security goal: use every
+applicable mitigation offered by modern macOS and Apple silicon to contain
+untrusted workloads and limit exploitation. A torrent client continuously
+handles untrusted metadata, tracker responses, and peer traffic. The project
+aims to make vulnerabilities harder to exploit and constrain what a compromised
+component can access or affect.
+
+That goal drives the architecture and implementation. Memory-safe Swift, bounded
+parsing, and strict compiler checks reduce opportunities for memory corruption.
+Separately sandboxed GUI and engine processes, authenticated IPC, and exact-file
+access keep authority narrow. Apple's Enhanced Security protections, arm64e
+pointer authentication, hardened heap, checked allocations on supported hardware,
+and native compiler hardening provide further layers of mitigation around
+libtorrent and the remaining native code.
+
+Following current macOS, Apple silicon, and toolchain capabilities is deliberate:
+older-platform compatibility must not constrain the security design. These
+protections belong in a practical client with a compact, native SwiftUI interface,
+where adding torrents, choosing files, and inspecting transfers remain fast and
+straightforward.
 
 ## Architecture
 
