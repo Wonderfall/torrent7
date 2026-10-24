@@ -20,6 +20,7 @@ namespace {
 
 struct PayloadOpenGate {
     std::atomic_bool armed{false};
+    std::atomic_bool fail_write{false};
     std::promise<void> entered;
     std::promise<void> release;
 };
@@ -35,6 +36,10 @@ public:
             gate_->entered.set_value();
             if (gate_->release.get_future().wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
                 error = make_error_code(boost::system::errc::timed_out);
+                return -1;
+            }
+            if (gate_->fail_write) {
+                error = make_error_code(boost::system::errc::io_error);
                 return -1;
             }
         }
@@ -67,8 +72,9 @@ public:
         auto params = bridge_tests::load_torrent_params(creator.generate_buf(), "checkpoint fixture");
         info_hash_ = params.ti->info_hashes().get_best();
         auto activation = broker_.register_torrent(params);
-        params.file_provider = std::make_shared<GatedPayloadProvider>(
+        provider_ = std::make_shared<GatedPayloadProvider>(
             std::make_shared<BridgePayloadFileProvider>(broker_.context(), activation), open_gate);
+        params.file_provider = provider_;
         fs::create_directories(root_ / "parts");
         params.save_path = (root_ / "parts").string();
         params.file_priorities = {lt::dont_download, lt::default_priority};
@@ -93,9 +99,9 @@ public:
         wait_for<lt::torrent_paused_alert>();
     }
 
-    void write_piece()
+    void write_piece(lt::piece_index_t piece = lt::piece_index_t{0})
     {
-        handle.add_piece(lt::piece_index_t{0}, std::vector<char>(16384, 'x'));
+        handle.add_piece(piece, std::vector<char>(16384, 'x'));
         // Hash verification can finish against the write cache. Wait for both
         // the hash and disk-write callbacks before asserting saved completion.
         wait_for<lt::piece_finished_alert, lt::block_finished_alert>();
@@ -103,6 +109,50 @@ public:
 
     void wait_for_piece_hash() { wait_for<lt::piece_finished_alert>(); }
     void wait_for_piece_write() { wait_for<lt::block_finished_alert>(); }
+    void wait_for_write_error() { wait_for<lt::file_error_alert>(); }
+
+    void check_wanted_payload(char prefix) const
+    {
+        lt::error_code error;
+        REQUIRE(provider_->payload_size(lt::file_index_t{1}, error) == 24576);
+        REQUIRE_FALSE(error);
+        UniqueFileDescriptor descriptor(provider_->open_payload(lt::file_index_t{1}, false, error));
+        REQUIRE_FALSE(error);
+        REQUIRE(descriptor.is_valid());
+        std::vector<char> bytes(24576);
+        // SAFETY: pread borrows this live descriptor and writes at most the
+        // owned vector's size; no asynchronous work retains either resource.
+        __unsafe_buffer_usage_begin
+        auto const count = ::pread(descriptor.get(), bytes.data(), bytes.size(), 0);
+        __unsafe_buffer_usage_end
+        REQUIRE(count == 24576);
+        auto const content = std::span<char const>(bytes);
+        CHECK(std::ranges::all_of(content.first(8192), [prefix](char value) { return value == prefix; }));
+        CHECK(std::ranges::all_of(content.subspan(8192), [](char value) { return value == 'x'; }));
+    }
+
+    void restart(lt::add_torrent_params const &checkpoint)
+    {
+        auto const encoded = encoded_resume_data(checkpoint, nullptr);
+        REQUIRE_FALSE(encoded.empty());
+        lt::error_code error;
+        auto params = lt::read_resume_data(lt::span<char const>{encoded}, error);
+        REQUIRE_FALSE(error);
+        // Production restores separately validated metadata and broker authority;
+        // neither belongs to the native resume decoder.
+        params.ti = checkpoint.ti;
+        params.file_provider = provider_;
+        params.save_path = (root_ / "parts").string();
+        params.flags &= ~(lt::torrent_flags::paused | lt::torrent_flags::auto_managed);
+        lt::session_params settings(session_->get_settings());
+        settings.disk_io_constructor = lt::pread_disk_io_constructor;
+        session_.reset();
+        session_ = std::make_unique<lt::session>(std::move(settings));
+        handle = session_->add_torrent(std::move(params));
+        wait_for<lt::torrent_checked_alert>();
+        handle.pause();
+        wait_for<lt::torrent_paused_alert>();
+    }
 
     [[nodiscard]] lt::resume_checkpoint_result capture(lt::resume_data_flags_t flags = lt::torrent_handle::flush_disk_cache)
     {
@@ -156,6 +206,7 @@ private:
     fs::path root_;
     bridge_tests::TestPayloadBroker broker_;
     lt::sha1_hash info_hash_;
+    std::shared_ptr<GatedPayloadProvider> provider_;
     std::unique_ptr<lt::session> session_;
 };
 
@@ -293,6 +344,11 @@ TEST_CASE("disk completion after capture remains dirty even when hashing finishe
 {
     bridge_tests::TemporaryDirectory directory;
     CheckpointFixture fixture(directory.path());
+    SUBCASE("another piece is still missing") {}
+    SUBCASE("the last outstanding piece passes its hash check") {
+        fixture.write_piece(lt::piece_index_t{1});
+        REQUIRE(fixture.capture());
+    }
     auto entered = fixture.open_gate->entered.get_future();
     fixture.open_gate->armed = true;
     fixture.handle.add_piece(lt::piece_index_t{0}, std::vector<char>(16384, 'x'));
@@ -341,6 +397,54 @@ TEST_CASE("resume checkpoint propagates a partfile header write failure")
     REQUIRE(retry);
     REQUIRE(retry->has_value());
     CHECK(fixture.persisted_part_is_readable());
+}
+
+TEST_CASE("last-piece checkpoints exclude a failed wanted write across restart")
+{
+    bridge_tests::TemporaryDirectory directory;
+    CheckpointFixture fixture(directory.path());
+    // The later extent is correct, but the first wanted extent is still zero.
+    // Its full-sized file would pass the seed fast-resume size check.
+    fixture.write_piece(lt::piece_index_t{1});
+    REQUIRE(fixture.capture()); // Release cached descriptors before gating open.
+    fixture.check_wanted_payload('\0');
+    auto entered = fixture.open_gate->entered.get_future();
+    fixture.open_gate->fail_write = true;
+    fixture.open_gate->armed = true;
+    fixture.handle.add_piece(lt::piece_index_t{0}, std::vector<char>(16384, 'x'));
+    REQUIRE(entered.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    fixture.wait_for_piece_hash();
+    REQUIRE(fixture.handle.status().is_seeding);
+    auto completion = fixture.handle.capture_resume_data(lt::torrent_handle::save_info_dict);
+    static_cast<void>(fixture.handle.upload_limit()); // Capture precedes failure.
+    fixture.open_gate->release.set_value();
+    REQUIRE(completion.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    auto checkpoint = completion.get();
+    REQUIRE(checkpoint);
+    REQUIRE(checkpoint->has_value());
+    CHECK_FALSE((**checkpoint).params.have_pieces[lt::piece_index_t{0}]);
+    CHECK((**checkpoint).params.have_pieces[lt::piece_index_t{1}]);
+    fixture.wait_for_write_error();
+    fixture.check_wanted_payload('\0');
+    CHECK(fixture.persisted_part_is_readable()); // The release itself succeeded.
+    auto retry = fixture.capture();
+    REQUIRE(retry);
+    REQUIRE(retry->has_value());
+    CHECK_FALSE((**retry).params.have_pieces[lt::piece_index_t{0}]);
+
+    fixture.restart((**checkpoint).params);
+    REQUIRE_FALSE(fixture.handle.status().is_seeding);
+    CHECK_FALSE(fixture.handle.have_piece(lt::piece_index_t{0}));
+    CHECK(fixture.handle.have_piece(lt::piece_index_t{1}));
+    fixture.check_wanted_payload('\0');
+    fixture.write_piece();
+    fixture.check_wanted_payload('x');
+    auto repaired = fixture.capture();
+    REQUIRE(repaired);
+    REQUIRE(repaired->has_value());
+    CHECK((**repaired).params.have_pieces.all_set());
+    fixture.restart((**repaired).params);
+    CHECK(fixture.handle.status().is_seeding);
 }
 
 TEST_CASE("an abandoned resume future owns no caller state when its queued callback runs")

@@ -187,21 +187,60 @@ index 006d0bb68..a184267c5 100644
  
  		// make sure we don't have the files open
 diff --git a/src/torrent.cpp b/src/torrent.cpp
-index 51ccb4638..3a96b6a38 100644
+index 9f834fb04..e13827d9f 100644
 --- a/src/torrent.cpp
 +++ b/src/torrent.cpp
-@@ -9425,6 +9425,10 @@ namespace {
+@@ -8118,9 +8118,8 @@ namespace {
+ 			ret.ti = m_torrent_file;
+ 		}
+ 
+-		// if this torrent is a seed, we won't have a piece picker
+-		// if we don't have anything, we may also not have a picker
+-		// in either case; there will be no half-finished pieces.
++		// A seed retains its picker while hash-verified writes are pending.
++		// Only completed writes may enter either resume piece map.
+ 		if (has_picker())
+ 		{
+ 			int const num_blocks_per_piece = torrent_file().blocks_per_piece();
+@@ -8185,16 +8184,16 @@ namespace {
+ 		TORRENT_ASSERT(ret.have_pieces.empty());
+ 		if (max_piece > piece_index_t(0))
+ 		{
+-			if (is_seed())
+-			{
+-				ret.have_pieces.resize(static_cast<int>(max_piece), true);
+-			}
+-			else if (has_picker())
++			if (has_picker())
+ 			{
+ 				ret.have_pieces.resize(static_cast<int>(max_piece), false);
+ 				for (auto const i : ret.have_pieces.range())
+ 					if (m_picker->is_piece_flushed(i)) ret.have_pieces.set_bit(i);
+ 			}
++			else if (is_seed())
++			{
++				ret.have_pieces.resize(static_cast<int>(max_piece), true);
++			}
+ 
+ 			if (m_seed_mode)
+ 				ret.verified_pieces = m_verified;
+@@ -9652,7 +9651,14 @@ namespace {
  	{
  		if (!has_picker()) return;
  
+-		if (m_picker->is_seeding())
 +		// Hash verification can precede disk completion. A checkpoint captured
 +		// between them must not acknowledge the newly persistable blocks.
 +		set_need_save_resume(torrent_handle::if_download_progress);
 +
- 		if (m_picker->is_seeding())
++		// Hash success alone establishes seed status. Keep the picker until
++		// every write completes, including failures, so checkpoints cannot lose
++		// the distinction between verified data and successfully flushed data.
++		if (m_picker->is_seeding() && m_picker->get_download_queue_size() == 0)
  		{
  			// no need for the piece picker anymore
-@@ -10453,6 +10457,66 @@ namespace {
+ 			// when we're suggesting read cache pieces, we
+@@ -10681,6 +10687,66 @@ namespace {
  		alerts().emplace_alert<save_resume_data_alert>(std::move(atp), get_handle());
  	}
  

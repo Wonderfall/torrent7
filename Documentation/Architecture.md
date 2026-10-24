@@ -657,10 +657,15 @@ recovery is likewise a bounded native directory scan before libtorrent restore.
 
 Conditional saves skip unchanged native state. Every emitted checkpoint follows
 an acknowledged disk fence that flushes the private partfile's slot mapping and
-reports storage errors. Capture, durable commit, and acknowledgement are serialized;
+reports storage-release errors. Capture, durable commit, and acknowledgement are serialized;
 only the captured native revision is acknowledged after a successful commit.
 State is captured before enqueueing its fence, so later writes cannot enter a
 checkpoint whose storage barrier has already run.
+Only pieces whose payload writes have succeeded enter the captured piece map,
+including during the hash-before-write transition to seed status. The picker
+remains alive until every piece is flushed, so a failed final write cannot make
+an incomplete full-sized payload appear complete after restart. A successful
+write after capture remains outside that snapshot and dirties the next save.
 Concurrent changes and failed commits remain dirty. Native full-save batches share
 a 20-second capture deadline, and late disk callbacks retain only owned native state.
 This ordering covers abrupt helper loss; it does not claim power-loss durability

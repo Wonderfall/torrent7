@@ -47,7 +47,7 @@ important relationships, not alternative supported patch subsets.
 | `test-server-startup` | Removes reverse lookups from the Python web and HTTP proxy fixtures and binds both HTTP and SOCKS proxies to numeric loopback. The security suite exercises all three entry points with hostname resolution forbidden, verifying their readiness reports and listening sockets. |
 | `bounded-tracker-deadlines` | Validates HTTP and UDP announce intervals before publishing checked deadlines; rejects negative, excessive, or overflowing values. |
 | `acknowledged-skipped-storage` | Adds acknowledged, cancellable file-selection fences, keeps only needed skipped boundary fragments, and compacts private part storage after a durable checkpoint. Builds on the file-provider contract. |
-| `checked-resume-checkpoints` | Reports disk-fence failures and tracks native resume revisions so only a successfully committed captured revision is acknowledged. Completes the checkpoint ordering used by skipped-storage reclamation. |
+| `checked-resume-checkpoints` | Captures only flushed pieces, retaining the picker through pending seed writes. Reports disk-fence failures and tracks native resume revisions so only a successfully committed captured revision is acknowledged. Completes the checkpoint ordering used by skipped-storage reclamation. |
 
 The shared address-policy patch includes the former tracker-endpoint, DHT-global,
 peer-source, session-NAT64, and tracker-session-NAT64 changes. Its session state is
