@@ -38,11 +38,13 @@ component can access or affect.
 
 That goal drives the architecture and implementation. Memory-safe Swift, bounded
 parsing, and strict compiler checks reduce opportunities for memory corruption.
-Separately sandboxed GUI and engine processes, authenticated IPC, and exact-file
-access keep authority narrow. Apple's Enhanced Security protections, arm64e
-pointer authentication, hardened heap, checked allocations on supported hardware,
-and native compiler hardening provide further layers of mitigation around
-libtorrent and the remaining native code.
+The torrent engine runs in an application-scoped Enhanced Security helper
+extension, isolating libtorrent and its C++ bridge from the GUI. Separate
+sandboxes, authenticated IPC, and exact-file access keep authority narrow.
+Apple's Enhanced Security protections, arm64e pointer authentication, hardened
+heap, checked allocations on supported hardware, and native compiler hardening
+provide further layers of mitigation around libtorrent and the remaining native
+code.
 
 Following current macOS, Apple silicon, and toolchain capabilities is deliberate:
 older-platform compatibility must not constrain the security design. These
@@ -55,8 +57,9 @@ straightforward.
 Torrent 7 has two separately sandboxed executables. The pure-Swift GUI owns
 SwiftUI state, user consent, persistent security-scoped bookmarks, storage
 claims, destination creation, and payload deletion. It talks over a versioned,
-bounded XPC protocol to a system-managed engine extension, which owns network
-access, resume state, remaining native protocol execution, and libtorrent.
+bounded XPC protocol to a system-managed Enhanced Security helper extension,
+which owns network access, resume state, remaining native protocol execution,
+and libtorrent.
 Magnet links are consumed by a shared bounded Swift parser and cross XPC as a
 validated typed model rather than raw text. Payload I/O is
 pathless across this boundary: the helper asks a mutually authenticated GUI
