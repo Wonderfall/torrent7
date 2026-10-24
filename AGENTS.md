@@ -1,8 +1,34 @@
 # Agent instructions
 
-Shared contributor requirements apply to agents in full. This file covers
-agent workflow and required reading; engineering policy lives in the shared
-documentation.
+Shared contributor requirements apply to agents in full. This file describes
+the project's character, agent workflow, and required reading; detailed
+engineering policy lives in the shared documentation.
+
+## Project character and taste
+
+Torrent 7 is a focused torrent client for modern macOS on Apple silicon.
+It should feel fast, compact, and native. Adding a magnet, choosing files,
+and inspecting a transfer should be straightforward, even when the underlying
+protocol and storage work is complicated. Security is a first-class part of
+that product quality.
+
+Use these preferences when making decisions:
+
+- Make the interface feel at home on macOS. Prefer native SwiftUI controls and
+  familiar interactions. Scrolling, selection, focus, spacing, and accurate
+  status deserve the same care as the feature itself.
+- Keep the product focused. Features should serve concrete workflows; settings,
+  dependencies, and abstractions should justify their ongoing complexity.
+- Use the current Apple platform and compiler capabilities to make code smaller
+  and safer. Treat strict diagnostics as design feedback.
+- Choose the simplest complete solution, with clear ownership and lifecycle.
+  Solve problems at the responsible boundary, choose fixes that hold up over
+  time, and remove obsolete paths as part of the work.
+- Keep security architectural. User-file authority stays explicit and narrow;
+  untrusted protocol work stays contained. Preserve user data when an outcome
+  is uncertain and make that uncertainty visible.
+- Base performance policies on measurements and safety claims on focused
+  verification. Make tradeoffs and remaining uncertainty explicit.
 
 ## Required reading before starting work
 
@@ -32,5 +58,5 @@ not only when preparing the final verification.
   the change. Report the checks actually run, their results, and any required
   checks that remain unperformed or blocked.
 - Update shared policies in their authoritative documentation. Keep this file
-  focused on agent workflow and reading instructions rather than duplicating
-  engineering requirements.
+  focused on project character, agent workflow, and reading instructions;
+  link to detailed engineering requirements in the shared documents.

@@ -100,7 +100,8 @@ Keep each kind of guidance in its authoritative home:
   invariants, and the reasoning behind cross-component decisions.
 - Topic documents and `Tools/` guides: domain contracts, reproducible diagnostics,
   maintenance procedures, and evidence for the subsystem they cover.
-- `AGENTS.md`: agent-specific workflow and mandatory reading instructions.
+- `AGENTS.md`: project character for agents, agent-specific workflow, and
+  mandatory reading instructions.
 
 Document decisions, constraints, failure modes, and operational steps that are
 hard to recover from code alone. Keep local `SAFETY:` and `PERF:` explanations
