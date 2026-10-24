@@ -100,9 +100,10 @@ ownership, lifecycle, and security invariants, and the
 - **Data preservation:** durable storage claims track ownership and access.
   Uncertain operations retain the authority needed for safe teardown and
   recovery. Imported data is never automatically deleted.
-- **Platform hardening:** arm64e pointer authentication, Enhanced Security,
-  checked allocations on supported hardware, strict Swift checks, and native
-  compiler hardening are part of the [build baseline](Documentation/Toolchain.md).
+- **Platform hardening:** arm64e pointer authentication (PAC), Enhanced Security,
+  checked allocations with [hardware memory tagging (MTE/EMTE)](https://developer.apple.com/documentation/xcode/enabling-enhanced-security-for-your-app)
+  on supported hardware, strict Swift checks, and native compiler hardening
+  are part of the [build baseline](Documentation/Toolchain.md).
   Both executable bundles enable file quarantine.
 - **Constrained dependencies:** libtorrent and BoringSSL are linked statically.
   HTTPS uses macOS system trust with strict hostname binding. The reviewed
