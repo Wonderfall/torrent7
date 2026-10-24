@@ -2,6 +2,7 @@ import Darwin
 import Dispatch
 import Foundation
 import Synchronization
+import System
 import Testing
 import TorrentAppInfrastructure
 import TorrentBridge
@@ -2142,6 +2143,41 @@ struct TorrentStoreIntegrationTests {
             #expect(error == .unreadableTorrentFile)
         } catch {
             Issue.record("Expected TorrentStoreError.unreadableTorrentFile, got \(error)")
+        }
+    }
+
+    @Test("Torrent preview rejects a FIFO without waiting for a writer")
+    func torrentPreviewRejectsFIFOWithoutBlocking() async throws {
+        try await withTemporaryDirectory { directory in
+            let fifo = directory.appending(path: "input.torrent")
+            // SAFETY: The path's NUL-terminated storage lives through mkfifo.
+            // This creates only a named pipe inside the test's private directory.
+            let status = fifo.path(percentEncoded: false).withCString {
+                unsafe Darwin.mkfifo($0, 0o600)
+            }
+            try #require(status == 0)
+
+            // A real-time watchdog rescues a blocking-open regression so the
+            // test can fail instead of hanging. Its descriptor stays open until
+            // preview returns; the task is cancelled and joined on success.
+            let rescueWriter = Task {
+                try await Task.sleep(for: .seconds(1))
+                return try FileDescriptor.open(
+                    FilePath(fifo.path(percentEncoded: false)),
+                    .readWrite,
+                    options: [.closeOnExec, .noFollow, .nonBlocking]
+                )
+            }
+            let harness = makeStoreHarness()
+            await #expect(throws: TorrentStoreError.unreadableTorrentFile) {
+                _ = try await harness.store.previewTorrentFile(fifo)
+            }
+            rescueWriter.cancel()
+            let rescuedDescriptor = try? await rescueWriter.value
+            if let rescuedDescriptor {
+                try rescuedDescriptor.close()
+            }
+            #expect(rescuedDescriptor == nil, "FIFO import needed a writer to unblock")
         }
     }
 

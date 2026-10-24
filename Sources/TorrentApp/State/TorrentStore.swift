@@ -5352,7 +5352,9 @@ final class TorrentStore {
             return try FileDescriptor.open(
                 FilePath(url.path(percentEncoded: false)),
                 .readOnly,
-                options: [.closeOnExec, .noFollow]
+                // A FIFO must reach descriptor validation without waiting for
+                // a writer. Nonblocking mode does not change regular-file I/O.
+                options: [.closeOnExec, .noFollow, .nonBlocking]
             )
         } catch {
             throw TorrentStoreError.unreadableTorrentFile
