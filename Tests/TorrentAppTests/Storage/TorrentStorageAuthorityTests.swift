@@ -2,6 +2,7 @@ import Darwin
 import CryptoKit
 import Foundation
 import Synchronization
+import System
 import Testing
 import TorrentAppInfrastructure
 import TorrentEngineIPC
@@ -448,6 +449,146 @@ struct TorrentStorageAuthorityTests {
                 try contents(of: surviving.descriptor, count: 8)
                     == Data("second--".utf8)
             )
+        }
+    }
+
+    private enum OpenInterruption: CaseIterable {
+        case removal, reinstallation, unavailable, inactive, deadline
+
+        var expectedError: TorrentStorageBrokerRegistryError {
+            switch self {
+            case .removal, .reinstallation: .claimUnavailable
+            case .unavailable: .accessDenied
+            case .inactive: .claimInactive
+            case .deadline: .deadlineExceeded
+            }
+        }
+    }
+
+    @Test("Broker revalidates authority after opening and closes rejected descriptors",
+          arguments: OpenInterruption.allCases,
+          [TorrentStorageBrokerAccess.readOnly, .readWrite])
+    private func brokerRevalidatesOpen(
+        interruption: OpenInterruption,
+        access: TorrentStorageBrokerAccess
+    ) throws {
+        try withTemporaryDirectory { root in
+            let fixture = try reserveSingleFile(in: root, name: "payload.bin", size: 16)
+            let claim = makeClaim(fixture.reservation, state: .active)
+            let identity = try #require(claim.manifest.physicalFileIdentities[0])
+            let registry = TorrentStorageBrokerRegistry()
+            try registry.install(claim: claim, parent: fixture.parent)
+            var pendingDescriptor: Int32?
+
+            #expect(throws: interruption.expectedError) {
+                let opened = try registry.openPayload(
+                    claimID: claim.manifest.claimID,
+                    generation: claim.manifest.generation,
+                    fileIndex: 0,
+                    access: access,
+                    checkInterruption: {
+                        // Observe the real, validated descriptor before changing authority.
+                        // No timing assumptions or production-only test hook are needed.
+                        let descriptors = try FileManager.default.contentsOfDirectory(
+                            atPath: "/dev/fd"
+                        ).compactMap(Int32.init).filter { descriptor in
+                            guard let metadata = try? FileDescriptor(rawValue: descriptor)
+                                .stat(retryOnInterrupt: false).rawValue else { return false }
+                            return UInt64(truncatingIfNeeded: metadata.st_dev) == identity.device
+                                && UInt64(truncatingIfNeeded: metadata.st_ino) == identity.inode
+                        }
+                        #expect(descriptors.count == 1)
+                        let descriptor: Int32 = try #require(descriptors.first)
+                        pendingDescriptor = descriptor
+                        switch interruption {
+                        case .removal, .reinstallation:
+                            try registry.removeClaim(
+                                claimID: claim.manifest.claimID,
+                                generation: claim.manifest.generation
+                            )
+                            if interruption == .reinstallation {
+                                try registry.install(claim: claim, parent: fixture.parent)
+                            }
+                        case .unavailable, .inactive:
+                            var updated = claim
+                            if interruption == .unavailable {
+                                updated.lease.fileAvailability[0] = false
+                                updated.lease.availabilityRevision += 1
+                            } else {
+                                updated.lease.state = .orphaned
+                            }
+                            try registry.replace(claim: updated)
+                        case .deadline:
+                            throw TorrentStorageBrokerRegistryError.deadlineExceeded
+                        }
+                    }
+                )
+                _ = Darwin.close(opened.descriptor)
+            }
+            let descriptor = try #require(pendingDescriptor)
+            #expect(throws: Errno.badFileDescriptor) {
+                _ = try FileDescriptor(rawValue: descriptor).stat(retryOnInterrupt: false)
+            }
+        }
+    }
+
+    @Test("Broker opens survive unrelated availability and active-state changes")
+    func brokerAllowsUnrelatedLeaseChanges() throws {
+        try withTemporaryDirectory { root in
+            let parent = try makeParent(root)
+            let manifest = try makeLogicalManifest(
+                name: "bundle", contentKind: .directory,
+                files: (0...1).map {
+                    .init(index: Int32($0), pathComponents: ["\($0).bin"],
+                          expectedSize: 16, isPadding: false)
+                }
+            )
+            let reservation = try TorrentStorageDestinationPlanner().reserve(
+                manifest: manifest, in: parent, claimID: UUID(), generation: 1,
+                ownershipKey: TorrentStorageDestinationPlanner.randomOwnershipKey()
+            )
+            let claim = makeClaim(reservation, state: .activating)
+            let registry = TorrentStorageBrokerRegistry()
+            try registry.install(claim: claim, parent: parent)
+            let opened = try registry.openPayload(
+                claimID: claim.manifest.claimID, generation: claim.manifest.generation,
+                fileIndex: 0, access: .readWrite,
+                checkInterruption: {
+                    try registry.install(claim: claim, parent: parent)
+                    var updated = makeClaim(reservation, state: .active)
+                    updated.lease.fileAvailability[1] = false
+                    updated.lease.availabilityRevision += 1
+                    try registry.replace(claim: updated)
+                }
+            )
+            defer { _ = Darwin.close(opened.descriptor) }
+            #expect(opened.metadata.fileIndex == 0)
+        }
+    }
+
+    @Test("Broker stat rejects a claim removed during filesystem verification")
+    func brokerRevalidatesStat() throws {
+        try withTemporaryDirectory { root in
+            let fixture = try reserveSingleFile(in: root, name: "payload.bin", size: 16)
+            let claim = makeClaim(fixture.reservation, state: .active)
+            let registry = TorrentStorageBrokerRegistry()
+            try registry.install(claim: claim, parent: fixture.parent)
+            var checks = 0
+            #expect(throws: TorrentStorageBrokerRegistryError.claimUnavailable) {
+                _ = try registry.statBatch(
+                    claimID: claim.manifest.claimID, generation: claim.manifest.generation,
+                    fileIndices: [0], checkInterruption: {
+                        checks += 1
+                        if checks == 2 {
+                            try registry.removeClaim(
+                                claimID: claim.manifest.claimID,
+                                generation: claim.manifest.generation
+                            )
+                        }
+                    }
+                )
+            }
+            #expect(checks == 2)
         }
     }
 

@@ -334,6 +334,15 @@ unexpected hard links, size violations, stale mappings, invalid ownership tags,
 and unavailable content. A successful reply carries exactly one descriptor
 plus bounded `fstat` metadata.
 
+After filesystem validation, the broker rechecks the installed registration,
+active lease state, and requested file's availability under its registry lock.
+Removal and reinstallation cannot reuse an earlier open's authorization, even
+with identical claim contents. Unrelated availability changes do not invalidate
+an otherwise authorized open. Rejected opens close their descriptors. This final
+check is the authorization point; a subsequent removal can still overlap reply
+delivery and cannot recall an already granted descriptor. Filesystem work never
+holds the registry lock.
+
 `statBatch` can return bounded metadata for a mapped unavailable file, but
 cannot return its descriptor or contents. In this model,
 unavailable means content-unavailable rather than entirely unobservable.

@@ -46,11 +46,13 @@ package enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Senda
     }
 
     private struct Registration: Sendable {
+        let id = UUID()
         var claim: TorrentStorageClaim
         let parent: TorrentStorageParentAuthority
     }
 
     private struct ResolvedFile: Sendable {
+        let registrationID: UUID
         let claimID: UUID
         let claimGeneration: UInt64
         let parent: TorrentStorageParentAuthority
@@ -150,7 +152,8 @@ package enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Senda
         claimID: UUID,
         generation: UInt64,
         fileIndex: Int32,
-        access: TorrentStorageBrokerAccess
+        access: TorrentStorageBrokerAccess,
+        checkInterruption: () throws -> Void = {}
     ) throws -> (descriptor: Int32, metadata: TorrentStorageBrokerFileMetadata) {
         let resolved = try resolvedFile(
             claimID: claimID,
@@ -175,6 +178,8 @@ package enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Senda
                 resolved: resolved,
                 access: access
             )
+            try checkInterruption()
+            try revalidate(resolved, requiresAvailableFile: true)
             return (descriptor, metadata)
         } catch {
             _ = Darwin.close(descriptor)
@@ -204,6 +209,7 @@ package enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Senda
                 requiresAvailableFile: false
             )
             if resolved.logicalFile.isPadding {
+                try revalidate(resolved, requiresAvailableFile: false)
                 return TorrentStorageBrokerFileMetadata(
                     fileIndex: fileIndex,
                     size: resolved.logicalFile.expectedSize,
@@ -222,6 +228,7 @@ package enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Senda
             )
             try checkInterruption()
             try Self.checkDeadline(deadlineUptimeNanoseconds)
+            try revalidate(resolved, requiresAvailableFile: false)
             return metadata
         }
     }
@@ -267,6 +274,7 @@ package enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Senda
                 throw TorrentStorageBrokerRegistryError.accessDenied
             }
             return ResolvedFile(
+                registrationID: registration.id,
                 claimID: claim.manifest.claimID,
                 claimGeneration: claim.manifest.generation,
                 parent: registration.parent,
@@ -276,6 +284,31 @@ package enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Senda
                 expectedIdentity: claim.manifest.physicalFileIdentities[index],
                 ownership: claim.manifest.ownership
             )
+        }
+    }
+
+    /// The final authorization point follows filesystem work without holding the
+    /// registry lock across I/O. A later revocation cannot recall an in-flight reply.
+    private func revalidate(
+        _ resolved: ResolvedFile,
+        requiresAvailableFile: Bool
+    ) throws {
+        try state.withLock { state in
+            guard let registration = state.registrations[resolved.claimID],
+                  registration.id == resolved.registrationID else {
+                throw TorrentStorageBrokerRegistryError.claimUnavailable
+            }
+            // replace() preserves the immutable manifest, including its generation
+            // and indexed mapping. A fresh installation always has a different ID.
+            let lease = registration.claim.lease
+            guard lease.state == .activating || lease.state == .active
+                    || lease.state == .activationUnknown else {
+                throw TorrentStorageBrokerRegistryError.claimInactive
+            }
+            guard !requiresAvailableFile
+                    || lease.fileAvailability[Int(resolved.logicalFile.index)] else {
+                throw TorrentStorageBrokerRegistryError.accessDenied
+            }
         }
     }
 
@@ -560,10 +593,12 @@ package enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Senda
                     claimID: claimID,
                     generation: generation,
                     fileIndex: fileIndex,
-                    access: access
+                    access: access,
+                    checkInterruption: {
+                        try self.checkDeadline(common.deadlineUptimeNanoseconds)
+                    }
                 )
                 descriptorToClose = opened.descriptor
-                try checkDeadline(common.deadlineUptimeNanoseconds)
                 reply = .success(
                     requestID: common.requestID,
                     metadata: opened.metadata,
