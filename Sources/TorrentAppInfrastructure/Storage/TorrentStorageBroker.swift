@@ -416,6 +416,9 @@ package enum TorrentStorageBrokerRegistryError: LocalizedError, Equatable, Senda
                 throw TorrentStorageBrokerRegistryError.filesystemObjectChanged
             }
         case .imported:
+            // The identity comparison above enforces the claim-validated owner
+            // and single link even for read-only opens. Imports intentionally
+            // have no app-created ownership tag.
             if access == .readWrite {
                 guard metadata.st_uid == geteuid(),
                       metadata.st_nlink == 1 else {

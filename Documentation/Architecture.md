@@ -228,16 +228,28 @@ Immutable authority and mutable lease state are separate.
 - claim-wide ownership: imported, or app-created with a random HMAC key stored
   only in the GUI journal.
 
+Filesystem identities record and compare the OS-reported `st_gen`, separately
+from the claim generation and the broker's in-memory registration ID.
+[Apple's `stat(2)` caveat](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/stat.2.html)
+restricts this field to the superuser; the unprivileged app observes zero.
+The field remains in persisted identities, authority digests, and ownership tags
+for compatibility. It supplies no independent protection against inode reuse
+when masked to zero: identity comparison cannot distinguish a replacement if
+all recorded identity fields are reused.
+
 Each app-created object stores an HMAC tag over the claim, generation, canonical
-relative mapping, object kind, device, inode, owner UID, and file generation.
+relative mapping, object kind, device, inode, owner UID, and OS-reported `st_gen`.
 The helper can read a tag through an issued descriptor, but never receives the
-key; copying a tag to another object or mapping does not authenticate it.
+key; copying a tag to a different pinned identity or mapping does not
+authenticate it.
 
 `TorrentStorageLease` records lifecycle state, availability revision, and one
 availability bit per logical file. Claim-wide ownership determines whether
 object-bound HMAC tags are required. Imported objects are writable only after
-the explicit conflict choice and remain identity- and hard-link-pinned. Padding
-files are always unavailable and have no physical identity.
+the explicit conflict choice and remain identity- and hard-link-pinned.
+Read-only opens also enforce the pinned current-user owner and single hard link;
+imports deliberately omit app-ownership tags. Padding files are always
+unavailable and have no physical identity.
 
 Generation changes only when immutable authority is replaced. Availability
 changes increment the availability revision without pretending to revoke
@@ -327,7 +339,7 @@ Claim installation uses the same central validator as journal loading. For
 every open, the broker validates the current claim and generation, checks
 availability, directly indexes the immutable mapping, traverses each stored
 component from the verified parent descriptor, and compares the opened object
-with its pinned device, inode, link count, owner UID, and file generation. Leaf
+with its pinned device, inode, link count, owner UID, and OS-reported `st_gen`. Leaf
 opens use `O_NONBLOCK` before type validation, so substituted FIFOs cannot
 occupy a worker waiting for a peer. The broker rejects links, non-regular files,
 unexpected hard links, size violations, stale mappings, invalid ownership tags,

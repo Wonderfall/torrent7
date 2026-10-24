@@ -101,6 +101,8 @@ package struct TorrentFilesystemIdentity: Codable, Equatable, Sendable {
     package let inode: UInt64
     package let linkCount: UInt64
     package let ownerUserID: UInt32
+    // Raw st_gen is masked to zero for unprivileged macOS callers. Keep it in
+    // persisted identities/digests/tags, but do not treat it as inode-reuse proof.
     package let fileGeneration: UInt32
 
     private var objectKey: ObjectKey {
