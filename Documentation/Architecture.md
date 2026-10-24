@@ -30,6 +30,20 @@ a process or trust boundary; both modules execute with the GUI's sandbox
 authority. All Swift targets enable approachable-concurrency semantics, while
 non-UI modules retain explicit nonisolated default isolation.
 
+## Non-negotiable invariants
+
+1. The GUI sends no bookmark, payload path, or parent directory descriptor to
+   the helper.
+2. A broker request never contains a path.
+3. Only the GUI creates claims, physical mappings, destinations, or payload files.
+4. A successful broker open grants one exact regular-file descriptor.
+5. Libtorrent has no path fallback while a provider is installed.
+6. Padding files never receive descriptors.
+7. Only the GUI can delete user payloads.
+8. Imported files are never automatically deleted.
+9. Ambiguous activation, ownership, or deletion is preserved and paused.
+10. The helper starts blocked and cannot grant itself network authority.
+
 ## Process and authority split
 
 | Responsibility | GUI application | Engine helper extension |
@@ -681,29 +695,11 @@ The release profiles enable hardened runtime, library validation, checked
 allocations, hardened heap, dyld read-only data, platform restrictions, stack
 protection, fortify, hidden visibility, PAC, BTI, and trap-only sanitizer checks.
 
-## Non-negotiable invariants
-
-1. The GUI sends no bookmark, payload path, or parent directory descriptor to
-   the helper.
-2. A broker request never contains a path.
-3. Only the GUI creates claims, physical mappings, destinations, or payload files.
-4. A successful broker open grants one exact regular-file descriptor.
-5. Libtorrent has no path fallback while a provider is installed.
-6. Padding files never receive descriptors.
-7. Only the GUI can delete user payloads.
-8. Imported files are never automatically deleted.
-9. Ambiguous activation, ownership, or deletion is preserved and paused.
-10. The helper starts blocked and cannot grant itself network authority.
-
 ## Verification
 
-The routine gates are:
-
-```sh
-Scripts/analyze-bridge.zsh
-Scripts/test-bridge.zsh
-Scripts/test-swift.zsh
-```
+The [contributor verification requirements](../CONTRIBUTING.md#required-verification)
+define the checks for each kind of change, including bridge analysis before
+bridge tests and additional coverage for changes to security boundaries.
 
 The bridge analysis gate applies and validates the ordered libtorrent patch
 series. Bridge and Swift tests cover provider routing, no-fallback behavior,

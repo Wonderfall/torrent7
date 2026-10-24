@@ -26,6 +26,7 @@
 - [Dependencies](#dependencies)
 - [Build](#build)
 - [Diagnostics and Tests](#diagnostics-and-tests)
+- [Contributing](#contributing)
 
 ## Purpose
 
@@ -309,8 +310,9 @@ Requirements:
 - Xcode 27.1 (build 27A9275), including Swift 6.4 and the macOS 27.0 SDK
 - Homebrew build tools
 
-The [toolchain notes](Documentation/Toolchain.md) record the Swift 6.4 adoption,
-retired experimental flags, and retained hardening requirements.
+The [toolchain baseline](Documentation/Toolchain.md) records exact supported
+versions, build-specific hardening details, and historical adoption evidence.
+Before changing the project, read the [contributor guide](CONTRIBUTING.md).
 
 Install build tools:
 
@@ -428,15 +430,20 @@ Scripts/verify-app.zsh --mode distribution --build-products /path/to/matching/pr
 
 ## Diagnostics and Tests
 
+The [contributor verification requirements](CONTRIBUTING.md#required-verification)
+define which checks a change needs. The commands below are entry points for
+routine testing and focused diagnostics.
+
 Run the Swift test suite:
 
 ```sh
 Scripts/test-swift.zsh
 ```
 
-Run the C++ bridge test suite:
+Run bridge static analysis before the C++ bridge test suite:
 
 ```sh
+Scripts/analyze-bridge.zsh
 Scripts/test-bridge.zsh
 ```
 
@@ -453,12 +460,6 @@ callback replay, and typed-allocation tests. They can be invoked directly with:
 Scripts/test-boringssl-hardening.zsh
 Scripts/test-boost-asio-pac.zsh
 Scripts/test-boost-asio-recycling-allocator.zsh
-```
-
-Run the bridge static-analysis pass:
-
-```sh
-Scripts/analyze-bridge.zsh
 ```
 
 Run the opt-in maximum snapshot transport probe in release mode:
@@ -548,3 +549,10 @@ Run the correctness-only Enhanced Security lifecycle under ThreadSanitizer:
 SANITIZER_PROFILE=thread SKIP_BUILD_DEPS=1 \
   Scripts/test-enhanced-security-extension.zsh --automated
 ```
+
+## Contributing
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for shared design policy, the task reading
+map, required verification, and documentation responsibilities. The
+[coding standards](Documentation/CodingStandards.md) apply to all contributors.
+[AGENTS.md](AGENTS.md) adds agent-specific workflow and mandatory reading.

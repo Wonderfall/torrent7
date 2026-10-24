@@ -3,6 +3,10 @@
 Developer-only utilities that are useful for security, diagnostics, or release
 engineering, but are not part of the shipped app product.
 
+The [contributor guide](../CONTRIBUTING.md) and
+[coding standards](../Documentation/CodingStandards.md) apply to these tools,
+including their tests, benchmarks, and fuzz support.
+
 `BridgeFuzzing/` contains the TorrentBridge libFuzzer suite, including the
 end-to-end Swift parser callback and native typed-import boundary. Keeping it
 here lets the fuzz harnesses own their scripts, corpora, fuzz-only dependencies,

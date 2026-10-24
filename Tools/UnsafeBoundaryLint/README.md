@@ -1,7 +1,9 @@
 # Unsafe boundary lint
 
-This package implements the repository policy that explicit Swift ownership
-and concurrency escape hatches require a nearby `SAFETY:` explanation. It
+This package enforces the placement rules in the
+[Swift unsafe-boundary policy](../../Documentation/CodingStandards.md#swift-interop-and-unsafe-boundaries).
+It checks that explicit Swift ownership and concurrency escape hatches have a
+nearby `SAFETY:` explanation; reviewers must assess the invariant itself. It
 parses Swift with the SwiftSyntax version pinned for the repository's Swift 6.4
 toolchain, so spellings in comments and string literals are not treated as
 code.

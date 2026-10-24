@@ -12,7 +12,56 @@ GitHub Actions uses the `xcode-27` Apple-silicon image and selects
 includes build 27A9275; the exact Xcode build remains checked before compilation.
 See the [installed tool versions](https://github.com/actions/runner-images/blob/main/images/macos/xcode-27-arm64-Readme.md).
 
-## Xcode 27.1 update
+## Current build configuration
+
+The [coding standards](CodingStandards.md#baseline-and-target-isolation)
+define the required Swift language features, compiler checks, import access,
+and target isolation for every first-party Swift target, including tests and
+tools. The following details explain their implementation in this toolchain:
+
+- `InferIsolatedConformances` and `NonisolatedNonsendingByDefault` require
+  explicit enablement: the installed compiler reports that they become defaults
+  in Swift 7 language mode. The project uses Swift 6 language mode.
+- Compiler import checks do not replace independent manifest dependency
+  validation. Native builds and static analysis also enable
+  `-Wconditional-uninitialized`.
+- Safe return-value imports using `__lifetimebound` remain experimental in
+  Xcode 27. The bridge does not use them, so their flag is absent.
+- Apple Clang 21 still exposes typed C allocation rewriting as
+  `-ftyped-memory-operations-experimental`. Keep that flag, typed C++
+  allocation/deallocation, and the existing allocation/codegen checks.
+- Clang 21 rejects the driver spelling of `-fptrauth-returns` on link-only
+  invocations. Dependency builds pass `-Xclang -fptrauth-returns`, preserving
+  the same compiler protection without applying it to CMake's link driver.
+- Swift Build adds a configuration-dependent libc++ hardening define. The
+  bridge explicitly replaces that default with the dependency profile's
+  extensive/debug mode; mixing modes across C++ translation units is avoided.
+- Xcode 27's `lipo -verify_arch arm64e` rejects executables carrying the
+  versioned arm64e ABI capability bits emitted by Swift Build, although
+  `lipo -archs` and `otool -hv` identify them as arm64e. Executable checks
+  require the architecture inventory to be exactly `arm64e`, then inspect
+  authenticated instructions and exercise the existing PAC replay tests.
+
+The dependency patches implement current storage, protocol, allocation, and
+authentication contracts and remain necessary with the pinned dependencies.
+Their replay and code-generation checks remain enabled.
+
+The arm64 libFuzzer dependency build emits an allocator-wrapper advisory for
+libtorrent's untyped `allocator_new_delete::malloc` branch. That branch belongs
+to the third-party compatibility allocator used when typed allocation is
+disabled for the fuzz runtime. Its paired `new[]`/`delete[]` ownership remains
+covered by ASan; production arm64e builds exercise the separate typed branch
+and pass the typed-allocation code-generation and replay checks. No diagnostic
+was suppressed to hide this advisory.
+
+## Adoption records
+
+These notes retain the reasons for toolchain-specific changes and the evidence
+recorded during adoption. Use the
+[contributor verification requirements](../CONTRIBUTING.md#required-verification)
+for checks on new changes.
+
+### Xcode 27.1 update
 
 Xcode 27.1 retains Swift 6.4 and the macOS 27.0 SDK. The selected C++ compiler
 reports Apple Clang 21.0.0 (`clang-2100.3.34.2`). Native dependency stamps now
@@ -33,15 +82,15 @@ Enhanced Security version 2 entitlements, checked allocations, pointer
 authentication, typed allocation, stack initialization, and libc++ hardening
 remain enabled.
 
-C++26 support remains partial. Local compile probes exercise pack indexing,
+C++26 support was partial in the adoption probes. They exercised pack indexing,
 structured-binding packs in templates, `constexpr` stable sorting, and
-`std::span::at()`. The default toolchain does not expose reflection or contracts
+`std::span::at()`. The tested toolchain did not expose reflection or contracts
 feature macros, or the `<meta>`, `<contracts>`, `<hive>`, and `<inplace_vector>`
 headers. These results agree with the supported subset in Apple's
 [C++ feature table](https://developer.apple.com/xcode/cpp/); they do not establish
 full C++26 conformance. The project continues to use C++23.
 
-## Swift 6.4 adoption
+### Swift 6.4 adoption
 
 - Use SwiftPM's default Swift Build engine. Select the native architecture with
   `--arch arm64e` (or `arm64` for the standalone libFuzzer runtime), and query
@@ -106,49 +155,11 @@ loads or temporary unsafe allocations needing the new safe loading/allocation
 APIs. Other new collection, observation, and concurrency facilities are not
 added where they would only rewrite working abstractions.
 
-## Retained hardening and toolchain details
+### Xcode 27.1 verification record
 
-- `InferIsolatedConformances` and `NonisolatedNonsendingByDefault` remain
-  explicit upcoming features: the installed compiler reports that they become
-  defaults in Swift 7 language mode. Swift 6, complete concurrency checking,
-  strict memory safety, and warnings as errors remain enabled.
-- `MemberImportVisibility`, `InternalImportsByDefault`, `ExistentialAny`, and
-  `ImmutableWeakCaptures` are enabled for every first-party Swift target,
-  including tests and tools. Imports explicitly expose only the access needed
-  by their signatures. These compiler checks do not replace independent
-  manifest dependency validation. Native builds and static analysis also
-  enable `-Wconditional-uninitialized`.
-- Safe return-value imports using `__lifetimebound` remain experimental in
-  Xcode 27. The bridge does not use them, so their flag is absent.
-- Apple Clang 21 still exposes typed C allocation rewriting as
-  `-ftyped-memory-operations-experimental`. Keep that flag, typed C++
-  allocation/deallocation, and the existing allocation/codegen checks.
-- Clang 21 rejects the driver spelling of `-fptrauth-returns` on link-only
-  invocations. Dependency builds pass `-Xclang -fptrauth-returns`, preserving
-  the same compiler protection without applying it to CMake's link driver.
-- Swift Build adds a configuration-dependent libc++ hardening define. The
-  bridge explicitly replaces that default with the dependency profile's
-  extensive/debug mode; mixing modes across C++ translation units is avoided.
-- Xcode 27's `lipo -verify_arch arm64e` rejects executables carrying the
-  versioned arm64e ABI capability bits emitted by Swift Build, although
-  `lipo -archs` and `otool -hv` identify them as arm64e. Executable checks
-  require the architecture inventory to be exactly `arm64e`, then inspect
-  authenticated instructions and exercise the existing PAC replay tests.
-
-The dependency patches implement current storage, protocol, allocation, and
-authentication contracts and remain necessary with the pinned dependencies.
-Their replay and code-generation checks remain enabled. No persisted data
-format or migration is changed by this toolchain update.
-
-The arm64 libFuzzer dependency build emits an allocator-wrapper advisory for
-libtorrent's untyped `allocator_new_delete::malloc` branch. That branch belongs
-to the third-party compatibility allocator used when typed allocation is
-disabled for the fuzz runtime. Its paired `new[]`/`delete[]` ownership remains
-covered by ASan; production arm64e builds exercise the separate typed branch
-and pass the typed-allocation code-generation and replay checks. No diagnostic
-was suppressed to hide this advisory.
-
-## Local verification
+Recorded in repository revision `e35b0c6` on 2026-10-24. These test counts and
+results describe that adoption, not the current suite size or evidence for later
+changes. No persisted data format or migration changed in that update.
 
 Validated on macOS 27.0.1 (26A434), Xcode 27.1 (27A9275), and Swift 6.4:
 
@@ -179,4 +190,5 @@ Final first-party builds and tests emitted no compiler warnings. The third-party
 fuzz-only allocator advisory described above remains reviewed and unsuppressed.
 Shell syntax, workflow YAML, packaging property lists, and whitespace checks
 passed. An explicit macOS 26 deployment-target override was rejected by the
-toolchain verifier. Hosted GitHub Actions execution remains to be confirmed by CI.
+toolchain verifier. Hosted GitHub Actions execution had not yet been confirmed
+when this record was written.

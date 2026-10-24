@@ -124,7 +124,8 @@ Run [bridge analysis](../analyze-bridge.zsh) before
 policy, trackers, storage, TLS, allocation, and the PAC replay/code-generation
 checks, including the consolidated patches' existing tests. Use the relevant
 sanitizer, parser-fuzz, and [Swift](../test-swift.zsh) checks when the imported
-surfaces or implementations change, as required by the root `AGENTS.md`.
+surfaces or implementations change, as required by the shared
+[contributor verification policy](../../CONTRIBUTING.md#required-verification).
 
 The dependency suite also replays all 140 pinned AES-GCM and 300 CTR-DRBG known
 answers, checks allocator failure and alignment boundaries, and exercises v1,

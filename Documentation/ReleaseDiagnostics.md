@@ -1,8 +1,9 @@
 # Release and UI diagnostics
 
-These checks use Xcode 27 / Swift 6.4 and macOS 27. They complement the
-compiler, native analysis, sanitizer, fuzz, and extension-lifecycle checks
-described in [Toolchain.md](Toolchain.md).
+These checks use the [pinned toolchain](Toolchain.md). The
+[contributor verification requirements](../CONTRIBUTING.md#required-verification)
+identify when to run them alongside compiler, native analysis, sanitizer, and
+fuzz checks.
 
 ## Repeated lifecycle tests
 
