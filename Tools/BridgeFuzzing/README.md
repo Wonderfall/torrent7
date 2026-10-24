@@ -31,7 +31,7 @@ tooling self-contained.
   so mutation reaches policy restoration. The corpus includes full-width policy
   overflow, wrong types, duplicates and retired encodings that require recovery.
 - `bridge_session_api`: runs short mutated operation sequences across add,
-  preview, file priorities, settings, snapshots, detail batches, torrent
+  file priorities, settings, snapshots, detail batches, torrent
   options, queue movement, piece maps, wake/change, pause/resume/remove, save,
   network, health, payload-broker lifecycle, and alert APIs. Settings seeds cover
   independent anonymous-mode and DHT privacy choices and invalid privacy flags.

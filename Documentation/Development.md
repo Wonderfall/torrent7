@@ -111,9 +111,11 @@ runs a focused app suite while retaining those preliminary checks.
 when using the optional `clang-tidy` analysis or the libFuzzer harnesses.
 
 For relevant sanitizer coverage, build that profile's dependencies first, then
-run its suites. For example:
+run its suites. Bridge analysis uses the verified normal dependency prefix and
+precedes the native sanitizer tests. For example:
 
 ```sh
+Scripts/analyze-bridge.zsh
 SANITIZER_PROFILE=thread Scripts/build-deps.zsh
 SANITIZER_PROFILE=thread Scripts/test-bridge.zsh
 SANITIZER_PROFILE=thread Scripts/test-swift.zsh
@@ -135,7 +137,7 @@ supported undefined-behavior checks. The production hardening profile is unchang
 | Repeated concurrency tests, UI/VoiceOver, Instruments | [Release and UI diagnostics](ReleaseDiagnostics.md). |
 | Native/Swift parser comparison | [Parser microbenchmarks](../Tools/ParserBenchmarks/README.md). |
 | Startup filesystem verification | `Scripts/benchmark-storage-restoration.zsh`; [methodology and limitations](StorageRestorationBenchmark.md). |
-| Snapshot copying, mapping, latency, and footprint | `Scripts/benchmark-snapshot-transport.zsh`; [architecture review gates](Architecture.md#verification). |
+| Snapshot copying, mapping, latency, and footprint | `Scripts/benchmark-snapshot-transport.zsh`; [resource-model assertions and timing fixtures](../Tests/TorrentAppTests/Engine/SnapshotTransportBenchmarkTests.swift). |
 | Bounded DHT callback cost and retained allocation | `Scripts/benchmark-dht-message-parser.zsh`; [parsing contract](MetainfoParsing.md). |
 
 Benchmark timing is diagnostic. It does not replace correctness assertions or
@@ -148,9 +150,9 @@ artifact uploads. Use the failed job's commands and profile when reproducing it:
 
 | Workflow | Coverage and local entry points |
 | --- | --- |
-| [TorrentApp](../.github/workflows/torrent-app.yml) | Swift/tool/linter checks, repeated lifecycle tests, release app and packaging evidence, bundle verification, automated helper lifecycle, and UI test compilation. See the commands above and [release diagnostics](ReleaseDiagnostics.md). |
+| [TorrentApp](../.github/workflows/torrent-app.yml) | Swift/tool/linter checks, repeated lifecycle tests, release app and packaging evidence, bundle verification, automated helper lifecycle and payload quarantine, and UI test compilation. See the commands above and [release diagnostics](ReleaseDiagnostics.md). |
 | [TorrentBridge](../.github/workflows/torrent-bridge.yml) | Dependency security regressions, bridge analysis, then bridge tests. |
-| [Sanitizers](../.github/workflows/sanitizers.yml) | ASan and TSan native dependency instrumentation, security/bridge/Swift/lifecycle tests, app builds, and automated helper lifecycle. |
+| [Sanitizers](../.github/workflows/sanitizers.yml) | ASan and TSan native dependency instrumentation, security/bridge/Swift/lifecycle tests, app builds, automated helper lifecycle, and payload quarantine. |
 | [Bridge fuzzing](../.github/workflows/torrent-bridge-fuzzing.yml) / [storage boundary fuzzing](../.github/workflows/torrent-ipc-fuzzing.yml) | Their `run-libfuzzer.sh` entry points; weekly runs use the scheduled budgets defined in each workflow. |
 | [Parser benchmarks](../.github/workflows/parser-benchmarks.yml) | `Tools/ParserBenchmarks/run.zsh` and uploaded results. |
 | [Dependencies](../.github/workflows/dependencies.yml) | Checker tests and the read-only [upstream monitor](../Scripts/patches/README.md#dependency-monitor), also scheduled weekly. |

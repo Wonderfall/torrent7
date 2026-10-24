@@ -67,7 +67,7 @@ saved state to force a match. Report the error and the preceding operation.
 When a resume record is rejected for invalid saved HTTPS policy, the ordinary
 add flow can replace it after the torrent's HTTPS settings and destination have
 been reviewed. This is the specific recovery described under
-[persisted resume policy](Architecture.md#persistence-cutover), not a general
+[persisted resume policy](Architecture.md#resume-persistence), not a general
 repair procedure for every storage error.
 
 ## Engine interruptions and file selection

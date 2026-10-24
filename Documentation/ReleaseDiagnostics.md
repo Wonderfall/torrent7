@@ -189,9 +189,9 @@ Scripts/test-release-evidence.zsh ".build/App/Torrent 7.app" \
 Use a fresh SBOM output directory for each build. The archive helper deliberately
 rejects multiple SBOMs for a product rather than guessing which one belongs to
 the release. Keep the symbol and unstripped-binary archives privately alongside
-their matching release; the app download does not contain them. Swift 6.4 no
-longer embeds binary Swift modules in dSYMs. These archives support crash symbolication, not reconstruction
-of an entire LLDB expression-evaluation environment.
+their matching release; the app download does not contain them. Swift 6.4 dSYMs
+do not embed binary Swift modules. These archives support crash symbolication,
+not reconstruction of an entire LLDB expression-evaluation environment.
 
 **Xcode 27 packaging limitation:** the installed SwiftPM prints
 `Bundle 'SwiftPM_SBOMModel' with schemas not found - skipping SBOM validation`.

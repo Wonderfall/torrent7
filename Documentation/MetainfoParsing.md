@@ -1,9 +1,11 @@
-# Metainfo parsing boundary
+# Metainfo and protocol parsing
 
-Torrent7 replaces native parsing of untrusted torrent protocol bytes with
-bounded, protocol-specific Swift parsers. A route is migrated only when the
-original bytes can no longer reach the retired native parser in production.
-Validation followed by passing the same bytes to libtorrent is not a cutover.
+Bounded Swift parsers own metainfo, magnets, peer-extension dictionaries, HTTP
+tracker bodies, and DHT KRPC messages. Native code receives validated typed
+values and rechecks their framing and semantics; rejected input has no native
+parser fallback. Libtorrent owns the transport and connection state around
+these boundaries. See the [native parser inventory](NativeParserInventory.md)
+for the protocol parsing that executes in C++ and its verification limits.
 
 ## Accepted metainfo dialect
 
@@ -17,7 +19,7 @@ Validation followed by passing the same bytes to libtorrent is not a cutover.
   and symlink paths are rejected rather than sanitized.
 - A named v2 single-file layout uses the exact file-tree leaf bytes as its
   effective filename. The advisory `info.name` and hash-defining bytes remain
-  unchanged. Hybrid paths must still agree under the existing case and Unicode
+  unchanged. Hybrid paths must agree under the case and Unicode
   normalization checks; rootless v2 layouts retain their synthetic directory.
 - SSL torrents and mutable-torrent semantics are unsupported. Top-level DHT
   bootstrap nodes are ignored by product policy.
@@ -42,6 +44,9 @@ Validation followed by passing the same bytes to libtorrent is not a cutover.
   Trackers are limited to HTTP, HTTPS, and UDP URLs; web seeds are limited to
   HTTP and HTTPS URLs. Authorities, ports, escapes, and aggregate retained bytes
   are bounded before the typed value is created.
+- The shared tracker/web-seed URL validator rejects a terminal DNS root dot.
+  Intake therefore uses the hostname spelling accepted by SNI and TLS identity
+  validation; it does not accept a spelling that will fail only during TLS setup.
 - Bracketed IPv6 sources may have a dotted IPv4 tail only in the final 32 bits;
   `::` compression cannot follow that tail. Scoped IPv6 hosts remain supported.
 - Display names are never storage names. Tracker tiers and select-only hints are
@@ -112,7 +117,7 @@ Deadline construction saturates at the clock limit instead of overflowing.
   but peers, warnings, external addresses, and swarm statistics cannot.
   Endpoint/source admission remains native after typed parsing.
 
-This cutover is deliberately HTTP-body-only. UDP tracker replies remain in
+The Swift tracker boundary covers HTTP bodies. UDP tracker replies remain in
 libtorrent because they are fixed binary records parsed from bounded,
 length-checked spans and do not expose the same generic bencode surface.
 WebTorrent and I2P are disabled in the product build.
@@ -161,7 +166,7 @@ BEP 9 input is decoded through the same core path directly from the exact bare
 `info` dictionary; no synthetic envelope is created and no tracker, web-seed,
 or piece-layer state can enter through swarm metadata.
 
-The production local-file route is now raw `.torrent` bytes to the isolated
+The production local-file route passes raw `.torrent` bytes to the isolated
 Swift parser, then a validated metainfo capsule to native code. The public C ABI
 has no raw-torrent add operation. Passing bencoded data where a capsule is
 required fails capsule framing before any libtorrent construction occurs.
@@ -206,7 +211,7 @@ commits it only after the full import succeeds. Swift retains no pointer and
 transfers no allocation. The context and all callback roles have separate
 arm64e pointer-authentication discriminators.
 
-DHT messages use a still narrower synchronous boundary. Libtorrent supplies one
+DHT messages use a synchronous typed boundary. Libtorrent supplies one
 borrowed datagram and its source address family. Swift fills a fixed result and
 caller-owned arrays of at most 64 nodes and 256 peers; sample hashes remain one
 checked range of at most 64 fixed-width values. C++ rederives the query kind,
@@ -218,10 +223,10 @@ separate arm64e pointer-authentication discriminators.
 The incoming BEP 10 handshake, BEP 9 control dictionary, BEP 11 compact-peer
 dictionary, final HTTP tracker body, and inbound DHT KRPC datagram have no
 native bdecode fallback.
-Libtorrent still owns connection state, additive update semantics, metadata
+Libtorrent owns connection state, additive update semantics, metadata
 hash verification and assembly, message-rate rules, peer filtering, tracker
 transport, and admission. Its bencoding of outgoing self-generated messages is
-intentionally unchanged.
+performed in native code.
 
 ### Metainfo capsule schema v1
 
@@ -267,10 +272,10 @@ Merkle state from typed records, owns every retained byte, and never bdecodes
 the exact-info payload.
 
 Exact original `info` bytes may be retained for info-hash calculation and BEP 9
-metadata serving. They must never be decoded later, including through lazy or
+metadata serving. Native code must not decode them, including through lazy or
 compatibility accessors. Production has no fallback to `load_torrent_buffer`,
-`parse_magnet_uri`, or generic bdecode after the corresponding route is cut
-over. Libtorrent remains available as a corpus and differential-test oracle.
+`parse_magnet_uri`, or generic native bdecode for the Swift-owned input routes.
+Libtorrent remains available as a corpus and differential-test oracle.
 
 Resume persistence preserves the same boundary. Before calling libtorrent's
 resume writer, the bridge removes `torrent_info` from the copied state and

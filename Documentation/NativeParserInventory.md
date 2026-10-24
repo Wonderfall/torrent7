@@ -1,22 +1,22 @@
 # Native parser inventory
 
-This inventory applies to Torrent7's pinned libtorrent 2.1.2 build. It records
-the parser boundary after the selective Swift cutovers described in
-`MetainfoParsing.md`. A parser symbol merely existing in the static archive does
-not make it a production route; reachability through the shipped bridge and
-current feature configuration is the relevant property.
+This inventory applies to Torrent 7's pinned libtorrent 2.1.2 build. It records
+which inputs terminate in [Swift parsers](MetainfoParsing.md), which reach
+native parsers, and how feature policy controls that exposure. A parser symbol
+merely existing in the static archive does not make it a production route;
+reachability through the shipped bridge and current feature configuration is
+the relevant property.
 
-The phase-10 decision is to stop the current migration sequence here. No
-clearly separable part of peer wire, uTP, protocol encryption, or web-seed
-streaming would remove a meaningful native trust boundary without duplicating
-their connection state machines. Those implementations remain native and are
-covered by the pinned upstream fuzz targets and Torrent7's sanitizer and
-security suites.
+Peer wire, uTP, protocol encryption, and web-seed streaming remain native because
+their parsing is coupled to connection state machines. Moving individual fields
+across a callback would retain the consequential native state transitions while
+adding another representation. The reassessment policy below identifies the
+evidence needed to justify a different boundary.
 
-## Retired external-input parser routes
+## Swift-owned input routes
 
-These raw inputs no longer reach their former native semantic parser in
-production:
+These inputs terminate in Swift; production native code accepts only the typed
+result and cannot retry rejected bytes through a native semantic parser:
 
 | Input | Production boundary | Native enforcement |
 | --- | --- | --- |
@@ -35,16 +35,16 @@ the exact production Swift callback and capsule sources, then passes their
 outputs through the real native adapters for every callback route under
 coverage guidance and sanitizers.
 
-`Scripts/analyze-bridge.zsh` fails if the production bridge regains the retired
-magnet or raw-torrent APIs, or if the patched swarm, peer-extension, HTTP
+`Scripts/analyze-bridge.zsh` fails if the production bridge exposes raw-magnet
+or raw-torrent APIs, or if the patched swarm, peer-extension, HTTP
 tracker-body, DHT, or resume-metainfo routes regain a native fallback.
 `Scripts/verify-parser-reachability.zsh` complements that source gate for every
 architecture slice in the shipped helper. It requires the Swift callbacks and
-typed C++ adapters in the final Mach-O, rejects uniquely retired parser symbols,
+typed C++ adapters in the final Mach-O, rejects forbidden raw-parser symbols,
 and inspects undefined references from each affected libtorrent archive member.
 When invoked by `Scripts/build-app.zsh`, it also checks the production bridge
 objects before signing. Generic `bdecode` is deliberately not a final-product
-denylist item because bounded helper-private resume state still uses it.
+denylist item because bounded helper-private resume state uses it.
 
 Runtime rejection is covered independently of symbol names. The bridge suite
 passes parser failures and malformed callback records through each production
@@ -57,14 +57,21 @@ parse terminal rather than a trigger for a native retry.
 
 ## Reachable native parsers retained by design
 
+Upstream fuzzer names below identify available harnesses, not a record that
+every harness runs in Torrent 7 CI. The repository workflows run its own
+[bridge](../Tools/BridgeFuzzing/README.md) and
+[Swift/IPC](../Tools/IPCFuzzing/README.md) fuzz suites plus focused dependency
+security tests. Source review, harness availability, and an executed test result
+are separate kinds of evidence.
+
 | Surface and pinned source | Exposure in Torrent7 | Why it remains native | Existing controls and evidence |
 | --- | --- | --- | --- |
 | BitTorrent handshake, message framing, and core peer messages: `bt_peer_connection.cpp`, `peer_connection.cpp`, `receive_buffer.cpp` | Outgoing TCP and uTP are enabled during normal network operation. Incoming peers are optional and off by default. | Length prefixes, partial receive buffers, choke/request/piece state, disk queues, the piece picker, backpressure, and teardown form one hot state machine. Moving only the first fields would not remove the consequential native state transitions. | Libtorrent's `peer_conn` and `pe_conn` fuzzers; Torrent7 extension integration and sanitizer suites; BEP 10, BEP 9 control, and PEX payload dictionaries already leave this path for Swift. |
 | uTP packet and extension processing: `utp_socket_manager.cpp`, `utp_stream.cpp` | Outgoing uTP is enabled during normal operation; incoming uTP follows the incoming-connections setting and is off by default. | Header parsing is coupled to sequence windows, SACK, retransmission, congestion control, MTU discovery, timers, and socket teardown. A callback would add a second representation without retiring the native protocol machine. | Libtorrent's `utp` and `utp_stream` fuzzers; fixed datagram/header bounds; bridge ASan, UBSan, and TSan profiles. |
-| Message Stream Encryption and encrypted peer handshake: `pe_crypto.cpp` and `bt_peer_connection.cpp` | Protocol encryption is allowed by default for peer connections. | Parsing and negotiation directly mutate Diffie-Hellman, cipher, receive-buffer, and peer-connection state. The candidate boundary is neither flat nor independently committable. | Libtorrent's `pe_crypto_state` and `pe_conn` fuzzers; focused normal and degenerate-key tests in `Scripts/test-libtorrent-security.zsh`; BoringSSL is not used for this BitTorrent protocol layer. |
-| URL, HTTP transport, redirects, headers, chunking, and gzip: `parse_url.cpp`, `http_parser.cpp`, `http_connection.cpp`, `http_tracker_connection.cpp`, `gzip.cpp`, `puff.cpp` | Trackers are active network sources; HTTPS is preferred while HTTP and UDP remain available. | Tracker-body bencode is gone, but transport parsing is shared with connection, proxy, redirect, TLS, buffering, and decompression state. Replacing it would be a tracker transport project rather than a selective parser cutover. | Typed source-policy validation before use; SSRF and global-address policy; certificate and hostname validation; 512 KiB bottled and inflated tracker-body cap; `http_parser`, `http_tracker`, and `gzip` upstream fuzzers plus focused redirect, TLS, and parser tests. |
+| Message Stream Encryption and encrypted peer handshake: `pe_crypto.cpp` and `bt_peer_connection.cpp` | Protocol encryption is allowed by default for peer connections. | Parsing and negotiation directly mutate Diffie-Hellman, cipher, receive-buffer, and peer-connection state. The candidate boundary is neither flat nor independently committable. | Libtorrent's `pe_crypto_state` and `pe_conn` fuzzers; focused normal and degenerate-key tests in `Scripts/test-libtorrent-security.zsh`. The pinned build uses BoringSSL's big-number primitives for Diffie-Hellman; MSE is a libtorrent protocol, not the HTTPS/TLS certificate-authentication path. |
+| URL, HTTP transport, redirects, headers, chunking, and gzip: `parse_url.cpp`, `http_parser.cpp`, `http_connection.cpp`, `http_tracker_connection.cpp`, `gzip.cpp`, `puff.cpp` | Trackers are active network sources; HTTPS is preferred while HTTP and UDP remain available. | Swift owns tracker-body bencode. Native transport parsing is shared with connection, proxy, redirect, TLS, buffering, and decompression state, so moving it requires a complete transport boundary. | Typed source-policy validation before use; SSRF and global-address policy; certificate and hostname validation; 512 KiB bottled and inflated tracker-body cap; `http_parser`, `http_tracker`, and `gzip` upstream fuzzers plus focused redirect, TLS, and parser tests. |
 | HTTP web-seed streaming and range/chunk handling: `web_connection_base.cpp`, `web_peer_connection.cpp`, plus the shared HTTP files above | A typed metainfo source may activate a web seed; HTTPS is required by default. | Response ranges and chunks are consumed incrementally into piece requests and are coupled to redirects, peer state, rate control, disk writes, cancellation, and retry behavior. A header-only Swift callback would retain most of the native attack surface. | Typed URL admission, HTTPS default, SSRF/IP-filter checks, upstream `web_seed` fuzzer, and focused proxy, certificate, redirect, and endpoint tests. |
-| UDP tracker replies: `udp_tracker_connection.cpp` | UDP trackers remain an allowed fallback. | Replies are fixed binary records read from bounded spans and tied to transaction matching and tracker scheduling. This is separable, but its marginal safety value is below the migrated generic bencode surfaces. | Size checks before field reads, transaction validation, endpoint policy, upstream `udp_tracker` fuzzer, and tracker security tests. |
+| UDP tracker replies: `udp_tracker_connection.cpp` | UDP trackers remain an allowed fallback. | Replies are fixed binary records read from bounded spans and tied to transaction matching and tracker scheduling. They are separable, but do not expose a generic bencode decoder. | Size checks before field reads, transaction validation, endpoint policy, upstream `udp_tracker` fuzzer, and tracker security tests. |
 
 Native DNS, TCP/IP, and TLS record parsing performed by the operating system,
 Boost.Asio, or BoringSSL is outside this libtorrent parser inventory. It remains
@@ -85,7 +92,7 @@ number of peers that can reach the retained peer and uTP state machines.
 
 ## Helper-private and generated parsing
 
-- `read_resume_data.cpp` still bdecodes bounded helper-private resume state such
+- `read_resume_data.cpp` bdecodes bounded helper-private resume state such
   as priorities, counters, peer caches, and source state. Files are read through
   descriptor-relative, no-follow persistence code with a 64 MiB cap. Exact
   metainfo is not part of that semantic parse: it is opaque, returns through
@@ -145,7 +152,6 @@ when at least one of these triggers exists:
 - a pinned libtorrent upgrade changes parser ownership, limits, or fallback
   reachability.
 
-Any new cutover must keep the established completion rule: Swift consumes the
-raw external bytes, native code receives a narrow typed representation, and the
-old production parser route is removed or poisoned rather than retained as a
-fallback.
+Moving another parser to Swift requires a complete boundary: Swift consumes the
+raw external bytes, native code receives a narrow typed representation, and
+production cannot reach a native parser fallback for that input.

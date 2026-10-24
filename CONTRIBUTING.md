@@ -130,3 +130,8 @@ temporary investigation notes and agent plans out of permanent project docs.
 Retain historical verification or benchmark evidence when it explains a decision,
 but label its date, source revision, configuration, method, and limitations.
 Separate those observations from current requirements and reproducible commands.
+Explain current ownership and behavior without requiring readers to know a
+migration phase or former implementation. Keep historical evidence in labeled
+sections. Link to authoritative version/limit definitions when repeating their
+values adds no useful context, and update documentation indexes and CI coverage
+summaries when their linked workflows change.

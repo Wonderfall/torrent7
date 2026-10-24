@@ -46,7 +46,7 @@ non-UI modules retain explicit nonisolated default isolation.
 - [Activation and import](#activation-and-import)
 - [Magnet promotion](#magnet-promotion)
 - [Removal and revocation](#removal-and-revocation)
-- [Persistence cutover](#persistence-cutover)
+- [Resume persistence](#resume-persistence)
 - [Network authority](#network-authority)
 - [Engine state and lifecycle](#engine-state-and-lifecycle)
 - [Resume checkpoints](#resume-checkpoints)
@@ -90,8 +90,7 @@ non-UI modules retain explicit nonisolated default isolation.
 
 The GUI executable has no network entitlement and does not link the C++ bridge
 or libtorrent. The helper has no user-selected-file or bookmark entitlement.
-The former folder-wide authority model was removed at the cutover; there is no
-parallel compatibility path.
+The helper receives user-payload authority only as brokered file descriptors.
 
 ## Saved settings and network authorization
 
@@ -104,7 +103,7 @@ The decoder checks the declared version before reading the settings payload.
 Every settings field must be present, correctly typed, and canonical. Missing
 or null fields, inconsistent VPN policy, unsupported versions, and unversioned
 records require explicit recovery; loading never repairs or overwrites them.
-There is no migration or transition from either previous unversioned format.
+Unversioned records are not migrated automatically.
 New saves and explicit defaults restoration write version 1. Changes to the
 stored structure or meaning increment the schema version. Any future migration
 must be explicitly approved, narrow, documented, and tested, and validate the
@@ -140,9 +139,11 @@ completed shared handle remains available to later callers. One 305-second
 connection deadline covers discovery, launch, the command handshake, and all
 retry attempts.
 
-Command IPC version 16 uses typed, operation-specific envelopes with bounded
-JSON and raw attachments. Requests carry an engine epoch, monotonic sequence,
-and replay identifier. The implementation bounds queue depth, nesting, value
+The command channel requires an exact match to
+[`TorrentEngineIPCProtocol.version`](../Sources/TorrentEngineIPC/TorrentEngineIPCProtocol.swift).
+It uses typed, operation-specific envelopes with bounded JSON and raw
+attachments. Requests carry an engine epoch, monotonic sequence, and replay
+identifier. The implementation bounds queue depth, nesting, value
 count, strings, raw torrent bytes, piece-map data, paged datasets, and response
 sizes before allocating or decoding deeply.
 Envelope UUIDs must occupy exactly 36 raw XPC bytes and error messages at most
@@ -446,8 +447,10 @@ After a replacement controller's handshake proves that the previous owner has
 drained, startup reconciles the retained grants against its restored file
 priorities before enabling networking. This also covers a crash between native
 commit and GUI acknowledgement. Reconciliation can only restrict the durable
-grant union, never authorize an engine-supplied increase. Initial skipped imports
-never open their payload.
+grant union, never authorize an engine-supplied increase. The engine receives no
+content descriptors for initially skipped files. The GUI nevertheless opens
+imported files to pin and validate their identities; writable import can apply
+macOS quarantine even to a file the user chooses to skip.
 
 Old private fragments remain readable until a checked resume checkpoint commits
 the new priorities and piece map. A fenced, cancellable compaction then replaces
@@ -489,8 +492,8 @@ inspection and activation path as a torrent file. Cancellation waits for an
 in-flight add to return its owned ID before removing it; rejected duplicate
 adds never grant removal ownership. An uncertain add or cleanup terminates the
 controller to contain networking. After a crash, existing startup recovery
-removes these unclaimed staging entries before enabling networking. No new
-persisted state or migration is needed.
+removes these unclaimed staging entries before enabling networking. Preview
+discovery does not create a durable GUI promotion record.
 
 Metadata-less magnets initially use only helper-private staging. Promotion is a
 durable GUI transaction:
@@ -524,8 +527,8 @@ file priorities. Restore revalidates the metadata through Swift, retains the
 public torrent ID, and keeps payload priorities disabled in helper-private
 staging until promotion completes. The marker cannot coexist with storage
 claim fields or pending metadata validation. Metadata-bearing records without
-either the staged marker or valid storage authority remain unclaimed; there is
-no migration of previously unclaimed records.
+either the staged marker or valid storage authority remain unclaimed. Restore
+never infers a storage grant from the presence of metadata or a saved path.
 
 ## Removal and revocation
 
@@ -575,33 +578,31 @@ not terminate the helper process and does not promise temporal revocation or
 secure erasure; terminating it would not recover data already copied. This does
 not expand spatial authority beyond objects the broker previously granted.
 
-## Persistence cutover
+## Resume persistence
 
 Broker-backed resume records contain the pathless storage activation and an
 explicit broker validation marker. Metadata-less discovery and explicitly
 marked staged metadata restore only into helper-private staging. Other records
 without storage authority are preserved on disk but skipped during restore.
-Payload data is untouched. There is no automatic path migration and no old
-filesystem-authority API in Swift, IPC, the
-C ABI, or native restore logic.
+Payload data is untouched. Saved paths cannot grant filesystem authority;
+restoring payload access requires an independently validated GUI storage claim.
 
 Validated exact info-dictionary bytes are stored in a separate opaque
 application field, never as libtorrent's nested `info` resume dictionary. On
 reload those bytes return through the synchronous Swift `InfoCore` parser and
 typed importer, then must match the persisted torrent identity before storage
-activation. The pinned libtorrent resume reader rejects the retired nested
-representation, so a legacy or injected resume record cannot re-enter the
-native metainfo semantic parser.
+activation. The pinned libtorrent resume reader rejects nested `info`
+dictionaries, so a resume record cannot bypass Swift metainfo validation.
 
 Persisted HTTPS overrides require canonical integer tokens and exact enum
 membership before narrowing. Conversion checks the original token with
 `std::from_chars`; libtorrent's integer-value helper can return zero on overflow.
-An omitted field is the current writer's encoding of Inherit; a present wrong type, unknown value, duplicate key, or retired boolean
-encoding is not. Such records are preserved byte for byte and skipped before
-metadata parsing or storage activation. One aggregate error requests explicit
-recovery. Re-adding the torrent with reviewed HTTPS policies replaces the bad
-record through the ordinary durable add path; restart never repairs or defaults
-a malformed policy.
+An omitted field encodes Inherit. A present wrong type, unknown value, duplicate
+key, or Boolean encoding is invalid. Such records are preserved byte for byte
+and skipped before metadata parsing or storage activation. One aggregate error
+requests explicit recovery. Re-adding the torrent with reviewed HTTPS policies
+replaces the bad record through the ordinary durable add path; restart never
+repairs or defaults a malformed policy.
 
 Resume state and removal tombstones remain in the helper's private container.
 The claim journal and security-scoped bookmarks remain in the GUI container.
@@ -699,7 +700,7 @@ behavior. Raw magnet text is parsed once by the shared `TorrentMetainfo` Swift
 module before XPC. The typed result is revalidated during decoding, then lowered
 to a versioned flat C ABI containing fixed hashes, fixed-width records, and
 checked ranges into one byte blob. Native code copies only those narrow fields;
-the production engine contains neither the former raw-magnet C entry point nor
+the production engine contains neither a raw-magnet C entry point nor
 a reachable `parse_magnet_uri`. Local torrent files are independently parsed in
 the isolated Swift engine, lowered to a versioned metainfo capsule, and passed
 through a capsule-only C ABI. Native code validates the capsule framing and
@@ -722,27 +723,27 @@ no borrowed bytes and transfers no output allocation. C++ revalidates the flat
 records before constructing libtorrent types. Libtorrent continues to own
 connection state, additive extension updates, metadata hash assembly, message
 rate limits, and peer admission, but these three peer-controlled dictionaries
-have no native bdecode fallback. Build-time reachability checks pin that cutover,
-while arm64e code-generation and replay tests cover every new callback and its
-long-lived context.
+have no native bdecode fallback. Build-time reachability checks enforce this
+boundary, while arm64e code-generation and replay tests cover each callback and
+its long-lived context.
 
 Final decompressed HTTP tracker bodies follow a separate synchronous Swift
-callback. Libtorrent still owns DNS, TLS, HTTP framing, redirects, proxying,
+callback. Libtorrent owns DNS, TLS, HTTP framing, redirects, proxying,
 chunk handling, gzip inflation, tracker scheduling, and endpoint admission. It
 caps both the bottled response and inflated output at 512 KiB before invoking
 Swift. Swift accepts unordered unique dictionaries while retaining canonical
 scalar syntax, then produces one fixed result
 and at most 3,000 caller-owned peer records; C++ revalidates all fields and
-commits an entirely constructed tracker response atomically. The retired HTTP
-tracker bdecode implementation is absent and build-gated. UDP tracker replies
+commits an entirely constructed tracker response atomically. The production
+build rejects the native HTTP tracker-body bdecode route. UDP tracker replies
 remain native by design: they are fixed binary, length-checked span parsing,
 not another generic bencode surface. WebTorrent and I2P are disabled.
 
 Inbound Mainline DHT datagrams terminate in another synchronous Swift callback.
 The scanner accepts unordered unique dictionaries within a 1,500-byte envelope
-and has independent limits for
-nesting, tokens, keys, transaction IDs, tokens, human-readable text, compact
-nodes, peers, and sample hashes. Swift writes one fixed result and caller-owned
+and has independent limits for nesting, bencode values, keys, transaction IDs,
+binary tokens, human-readable text, compact nodes, peers, and sample hashes.
+Swift writes one fixed result and caller-owned
 node and peer arrays; C++ revalidates the schema, ranges, enums, presence bits,
 address families, ports, and record counts, then atomically installs an owning
 KRPC message. Libtorrent retains UDP transport, source admission, routing,
@@ -789,9 +790,9 @@ bridge tests and additional coverage for changes to security boundaries.
 
 The bridge analysis gate applies and validates the ordered libtorrent patch
 series. Bridge and Swift tests cover provider routing, no-fallback behavior,
-resume cutover, parser bounds, destination races, broker nonce, epoch, claim,
-and parent isolation, pathless exact-key XPC decoding, returned-FD type,
-metadata, and access validation, hostile XPC bounds, nonblocking special-file
+resume authority and checkpoints, parser bounds, destination races, broker
+nonce, epoch, claim, and parent isolation, pathless exact-key XPC decoding,
+returned-FD type, metadata, and access validation, hostile XPC bounds, nonblocking special-file
 rejection, per-object ownership authentication, descriptor-relative namespace
 rejection, replacement-safe retained-descriptor soft revocation, claim recovery,
 ambiguous activation containment, imports, removal, and magnet promotion.

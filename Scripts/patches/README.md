@@ -49,34 +49,30 @@ important relationships, not alternative supported patch subsets.
 | `acknowledged-skipped-storage` | Adds acknowledged, cancellable file-selection fences, keeps only needed skipped boundary fragments, and compacts private part storage after a durable checkpoint. Builds on the file-provider contract. |
 | `checked-resume-checkpoints` | Captures only flushed pieces, retaining the picker through pending seed writes. Reports disk-fence failures and tracks native resume revisions so only a successfully committed captured revision is acknowledged. Completes the checkpoint ordering used by skipped-storage reclamation. |
 
-The shared address-policy patch includes the former tracker-endpoint, DHT-global,
-peer-source, session-NAT64, and tracker-session-NAT64 changes. Its session state is
-introduced in its final shared location, without separate tracker, DHT, or web-seed discovery
-implementations that would immediately be replaced.
+The shared address-policy patch owns one session NAT64 discovery state used by
+trackers, DHT, peers, and web seeds. Generation invalidation and endpoint
+admission operate on that shared state rather than independent per-protocol
+discovery caches.
 
-### 2.1.2 rebase
+### Integration contracts
 
-The series targets upstream tag `v2.1.2`, commit
-`6da363d2994f17c0b3c0450d124cf73a31a73847`. At that rebase, all 25 pre-existing
-patches remained necessary; upstream did not replace their application-specific
-boundaries or hardening. The ordered manifest also includes subsequent fixes.
-The rebase preserves upstream's hashing, piece-picker generation, Merkle-tree,
-file-priority, and resume-bitfield fixes. The substantive adaptations are:
+The [ordered manifest](../libtorrent-patch-series.sh) pins the exact upstream
+revision. These relationships matter when reviewing or rebasing the series:
 
-- `storage-confinement` now hardens upstream's shared `aux::rename_file`
-  helper instead of duplicating rename logic in the pread and mmap backends.
-  Relative-path confinement and symlink rejection also cover the posix caller.
+- `storage-confinement` hardens the shared `aux::rename_file` helper used by
+  the pread, mmap, and posix backends.
+  Relative-path confinement and symlink rejection apply to each caller.
   The regression checks existing and missing sources, escaping paths, source
   and destination symlinks, destination preservation, and successful renames.
-  `file-provider` still rejects renaming broker-owned payloads before that helper.
+  `file-provider` rejects renaming broker-owned payloads before that helper.
 - `network-security` retains upstream's proxy-hostname handling while requiring
   local endpoint validation whenever the address policy applies. Both SOCKS and
-  HTTP proxy paths retain that requirement; the controlled stale-proxy test now
+  HTTP proxy paths retain that requirement; the controlled stale-proxy test
   explicitly enables remote DNS. Tracker patches preserve upstream's proxy DNS
   privacy guard while carrying the private and public tracker generations.
-- `external-metainfo-import` retains the `piece_limit` parameter now used by
-  upstream's resume-bitfield bounds checks. Nested native metainfo stays rejected.
-- `boringssl-system-trust` passes its fixture certificate through upstream's new
+- `external-metainfo-import` preserves the `piece_limit` parameter used by
+  upstream's resume-bitfield bounds checks. Nested native metainfo is rejected.
+- `boringssl-system-trust` passes its fixture certificate through the upstream
   test-server startup protocol, which reports the OS-selected port over stdout.
 
 The dependency security suite also runs upstream's hash-picker, piece-picker,
@@ -97,7 +93,7 @@ complete patched build.
 The BoringSSL pointer patch follows upstream's `bssl::SSLSession` implementation;
 its session method and cipher pointers retain the same address-and-role PAC.
 The hardening tests exercise session duplication to verify that both pointers
-are re-signed for the new object. The typed-allocation patch applies unchanged.
+are re-signed for the new object.
 
 Executor callback and carrier protections belong together because they protect
 the same erased objects. Allocator typing remains a separate invariant. The Boost
@@ -192,7 +188,11 @@ dependency tests. Verify repeated application is a no-op and unexpected local
 changes are still rejected. Matching final trees is required for a change that
 claims to reorganize patches without changing behavior.
 
-The consolidation from repository revision `e73722f` preserved:
+#### Recorded consolidation evidence
+
+The consolidation from repository revision `e73722f` preserved the following
+identities. They describe that regrouping only; the current manifests and
+build stamps determine the expected trees after subsequent patch changes.
 
 - Libtorrent's complete patched Git tree:
   `e945b922c76227aceb22cf7d5147425d71cbf366`.

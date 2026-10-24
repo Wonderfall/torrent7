@@ -2,9 +2,11 @@
 
 `Scripts/test-enhanced-security-extension.zsh` assembles a dedicated ad-hoc host
 with the production engine runtime packaged as a macOS 27 Enhanced Security
-helper extension. It exercises the production client, bounded XPC protocol,
-helper runtime, engine, and bridge across the real ExtensionFoundation process
-boundary. The fixture uses the release entitlement files with isolated
+helper extension. Lifecycle and dataset modes exercise the production client,
+bounded XPC protocol, helper runtime, engine, and bridge across the real
+ExtensionFoundation process boundary. The quarantine mode uses a test-only
+helper handler with the production storage broker and client. The fixture uses
+the release entitlement files with isolated
 `app.torrent7.integration` bundle identifiers and containers. Ad-hoc signing
 preserves sandbox and entitlement fidelity for this local gate; it does not
 exercise production identified-peer signing.

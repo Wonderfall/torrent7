@@ -1,9 +1,10 @@
 # Toolchain baseline
 
 The project requires macOS 27 on Apple silicon and Xcode 27.1 (27A9275),
-including the macOS 27.0 SDK and Apple Swift 6.4
-(`swiftlang-6.4.0.34.1`). All three packages require Swift tools 6.4. Build, test,
-analysis, benchmark, and fuzz entry points run `Scripts/verify-xcode.zsh`;
+including the macOS 27.0 SDK, Apple Swift 6.4 (`swiftlang-6.4.0.34.1`), and
+Apple Clang 21.0.0 (`clang-2100.3.34.2`). All three packages require Swift tools
+6.4. Build, test, analysis, benchmark, and fuzz entry points run
+`Scripts/verify-xcode.zsh`;
 the packaged GUI and extensions require macOS 27.0. Bundle verification checks
 both the property lists and Mach-O deployment/SDK versions.
 
@@ -27,7 +28,7 @@ tools. The following details explain their implementation in this toolchain:
   `-Wconditional-uninitialized`.
 - Safe return-value imports using `__lifetimebound` remain experimental in
   Xcode 27. The bridge does not use them, so their flag is absent.
-- Apple Clang 21 still exposes typed C allocation rewriting as
+- Apple Clang 21 exposes typed C allocation rewriting as
   `-ftyped-memory-operations-experimental`. Keep that flag, typed C++
   allocation/deallocation, and the existing allocation/codegen checks.
 - Clang 21 rejects the driver spelling of `-fptrauth-returns` on link-only
@@ -54,106 +55,61 @@ covered by ASan; production arm64e builds exercise the separate typed branch
 and pass the typed-allocation code-generation and replay checks. No diagnostic
 was suppressed to hide this advisory.
 
-## Adoption records
+## Swift build and SDK contracts
 
-These notes retain the reasons for toolchain-specific changes and the evidence
-recorded during adoption. Use the
+SwiftPM uses its default Swift Build engine. Select `--arch arm64e` for app
+products, or `arm64` for the standalone libFuzzer runtime, and query
+`--show-bin-path` for product locations. Release targets use whole-module
+optimization. The public C ABI has explicit default visibility so the
+intermediate relocatable link preserves those entry points; native
+implementation symbols remain hidden.
+
+Annotated C pointer/count parameters import as standard `Span` and
+`MutableSpan` overloads. Empty spans carry zero-capacity queries. Neither
+`SafeInteropWrappers` nor an explicit importer
+`-fexperimental-bounds-safety-attributes` flag is needed. Required SDK headers
+are included directly. The narrow C ABI and ownership rules are described in
+[protocol interoperability](MetainfoParsing.md#native-interoperability);
+direct C++ interoperability is not needed for this boundary.
+
+`XPCSession` supports compiler-checked `Sendable` conformance.
+`AppExtensionProcess` does not conform in this SDK, so the
+[process handle](../Sources/TorrentEngineClient/TorrentEngineExtensionProcessCoordinator.swift)
+uses a narrowly documented wrapper. Recheck this exception when changing SDKs.
+SwiftSyntax is pinned to the compiler's syntax generation by the
+[linter package](../Tools/UnsafeBoundaryLint/Package.swift) and its resolved file.
+
+Native dependency stamps include Xcode and SDK build identifiers alongside
+compiler/archive-tool hashes, flags, and source provenance. Replacing Xcode or
+its SDK at the same path invalidates the dependency cache even when compiler
+executables do not change.
+
+Developer tools launch subprocesses in separate process groups using
+`posix_spawn`. A new-session launch takes Swift Subprocess's `fork` path,
+which deadlocks in the sanitizer's allocator locks in the recorded ASan
+reproduction. Group-wide cancellation includes transport helpers; see
+[tool lifecycle contracts](../Tools/README.md).
+
+## C++ language support
+
+The project uses C++23. The Xcode 27.1 adoption probes exercised a partial C++26
+subset: pack indexing, structured-binding packs in templates, `constexpr`
+stable sorting, and `std::span::at()`. They did not expose reflection or
+contracts feature macros, or the `<meta>`, `<contracts>`, `<hive>`, and
+`<inplace_vector>` headers. These observations describe the pinned compiler,
+not full C++26 conformance. See Apple's [C++ feature table](https://developer.apple.com/xcode/cpp/)
+when considering a language-version change.
+
+## Historical verification
+
+The following record retains adoption evidence for its stated revision and
+toolchain. Use the
 [contributor verification requirements](../CONTRIBUTING.md#required-verification)
-for checks on new changes.
-
-### Xcode 27.1 update
-
-Xcode 27.1 retains Swift 6.4 and the macOS 27.0 SDK. The selected C++ compiler
-reports Apple Clang 21.0.0 (`clang-2100.3.34.2`). Native dependency stamps now
-include the Xcode and SDK build identifiers alongside compiler/archive-tool
-hashes, flags, and source provenance. Replacing Xcode or its SDK at the same
-path therefore invalidates the dependency cache even when compiler executables
-do not change.
-
-The rebuild exposed an ASan deadlock in the developer tools' subprocess runner:
-requesting a new session takes Swift Subprocess's `fork` path, which stalled in
-the sanitizer's allocator locks. Commands now use a separate process group via
-`posix_spawn`. Group-wide cancellation still includes transport helpers, and
-concurrent launch, deadline, cancellation, and reaping tests cover the change.
-
+for new changes. The adoption review of
 [Apple's 27.1 release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-27_1-release-notes)
-announce no new compiler security opt-ins or C++26 features. The existing
-Enhanced Security version 2 entitlements, checked allocations, pointer
-authentication, typed allocation, stack initialization, and libc++ hardening
-remain enabled.
-
-C++26 support was partial in the adoption probes. They exercised pack indexing,
-structured-binding packs in templates, `constexpr` stable sorting, and
-`std::span::at()`. The tested toolchain did not expose reflection or contracts
-feature macros, or the `<meta>`, `<contracts>`, `<hive>`, and `<inplace_vector>`
-headers. These results agree with the supported subset in Apple's
-[C++ feature table](https://developer.apple.com/xcode/cpp/); they do not establish
-full C++26 conformance. The project continues to use C++23.
-
-### Swift 6.4 adoption
-
-- Use SwiftPM's default Swift Build engine. Select the native architecture with
-  `--arch arm64e` (or `arm64` for the standalone libFuzzer runtime), and query
-  `--show-bin-path` instead of assuming the former build directory layout.
-  Only the public C ABI has explicit default visibility so Swift Build's
-  intermediate relocatable link preserves those entry points; native
-  implementation symbols remain hidden.
-- Annotated C pointer/count parameters import as standard `Span` and
-  `MutableSpan` overloads. Empty spans replace optional-buffer branches and
-  retain the bridge's zero-capacity query behavior. Neither
-  `SafeInteropWrappers` nor an explicit importer
-  `-fexperimental-bounds-safety-attributes` flag is needed. The required SDK
-  headers are included directly instead of silently dropping annotations when
-  a header is unavailable.
-- Release targets use whole-module optimization again. The Swift 6.3 IRGen
-  workaround that disabled it for the engine, bridge contract tests, and DHT
-  benchmark is removed.
-- SwiftSyntax 604.0.0 keeps the unsafe-boundary linter on the compiler's syntax
-  generation. Its exact revision is recorded in `Package.resolved`.
-  Benchmark JSON reports join typed string fields instead of relying on long
-  overloaded concatenations that exceed the new compiler's type-checking limit.
-- SwiftUI text fields use `.bordered` with a rounded rectangle input border.
-  Checked continuations inherit isolation through the new
-  `nonisolated(nonsending)` overload. Strict safety no longer needs redundant
-  outer acknowledgements around borrowing closures whose actual unsafe
-  operations are already acknowledged inside.
-- ExtensionFoundation can be imported normally. The process wrapper still
-  needs its narrowly documented `@unchecked Sendable` conformance because
-  `AppExtensionProcess` itself does not conform to `Sendable` in this SDK.
-- The XPC transport now has a compiler-checked `Sendable` conformance;
-  `XPCSession` supports it. Reply slots own noncopyable `Continuation` values
-  under a mutex and consume them once, resuming outside the lock. Early replies,
-  cancellation, deadlines, duplicate replies, and descriptor cleanup retain
-  their existing ownership contracts.
-- Request-slot and poll-pipeline queues store noncopyable waiter records in
-  `UniqueArray`. Cancellation, deadlines, FIFO handoff, and terminal draining
-  remove each waiter before consuming its continuation. Queued cancellation
-  consumes no wire sequence and leaves neighboring waiters in order.
-- Polling uses asynchronous `defer` and `withTaskCancellationShield` for
-  mandatory dataset cleanup. Cleanup completes before recovery and before
-  releasing the polling slot. Each close retains its independent deadline;
-  fatal protocol failures still stop sending requests to the peer.
-- Filesystem metadata uses System's descriptor and descriptor-relative `Stat`
-  APIs. Path observations explicitly reject symlink following, errors retain
-  their existing fail-closed mapping, and interrupted calls remain failures.
-  Raw metadata fields are read only to preserve existing identity/size checks
-  and persisted encodings; descriptor ownership is unchanged.
-- SwiftUI alerts and confirmation dialogs use optional item bindings. Actions
-  receive the presented value, including a pending `false` setting, and model
-  dismissal callbacks and destructive action roles are preserved.
-- Release-policy verifiers and the dependency monitor are compiled SwiftPM
-  products under `Tools/Package.swift`; none runs as an unchecked Swift script.
-  Typed, bounded plist decoding and pinned Swift Subprocess replace dynamically
-  typed comparisons and wait-before-drain process handling. See [developer
-  tools](../Tools/README.md) for entry points and lifecycle limits.
-
-See [Swift 6.4's release announcement](https://www.swift.org/blog/swift-6.4-released/)
-and [Xcode 27's release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-27-release-notes).
-The bridge continues to use a narrow C ABI: direct `std::span` interoperability
-does not justify exposing native implementation types. There are no raw-span
-loads or temporary unsafe allocations needing the new safe loading/allocation
-APIs. Other new collection, observation, and concurrency facilities are not
-added where they would only rewrite working abstractions.
+found no additional compiler security opt-ins or C++26 features. Enhanced
+Security version 2 entitlements, checked allocations, pointer authentication,
+typed allocation, stack initialization, and libc++ hardening remained enabled.
 
 ### Xcode 27.1 verification record
 

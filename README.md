@@ -64,8 +64,8 @@ Magnet links are consumed by a shared bounded Swift parser and cross XPC as a
 validated typed model rather than raw text. Payload I/O is
 pathless across this boundary: the helper asks a mutually authenticated GUI
 broker for one exact file descriptor at a time. Inside the helper, a narrow C
-ABI remains the language boundary around the C++23 bridge; it is no longer part
-of the GUI process.
+ABI provides the language boundary around the C++23 bridge. The GUI does not
+link native torrent code.
 
 See [architecture and security decisions](Documentation/Architecture.md) for
 ownership, lifecycle, and security invariants, and the

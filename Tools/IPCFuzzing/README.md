@@ -3,7 +3,8 @@
 Developer-only coverage-guided fuzzing for the Swift parsers and authority
 validators on the file-broker trust boundary.
 
-The latest project Xcode and Homebrew LLVM are required:
+The [pinned project Xcode](../../Documentation/Toolchain.md) and Homebrew LLVM
+are required:
 
 ```sh
 brew install llvm

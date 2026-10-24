@@ -20,21 +20,21 @@ reading, verification, and documentation responsibilities.
 | --- | --- |
 | [Architecture and security decisions](Architecture.md) | Process authority, module ownership, storage and network contracts, and security invariants. |
 | [Coding standards](CodingStandards.md) | Swift, SwiftUI, concurrency, C++, ownership, and unsafe-boundary requirements. |
-| [Toolchain baseline](Toolchain.md) | Pinned tools and platform, build configuration, necessary workarounds, and historical adoption evidence. |
+| [Toolchain baseline](Toolchain.md) | Pinned tools and platform, current compiler/SDK constraints, and separately labeled verification evidence. |
 
 ## Subsystem contracts
 
 | Document | Contents |
 | --- | --- |
 | [Metainfo and protocol parsing](MetainfoParsing.md) | Accepted torrent, magnet, peer-extension, tracker, and DHT inputs; bounds and native interoperability. |
-| [Native parser inventory](NativeParserInventory.md) | Retired and reachable native parser routes, retained boundaries, and evidence required for reassessment. |
+| [Native parser inventory](NativeParserInventory.md) | Swift-owned input routes, reachable native parsers, exposure controls, and evidence required for reassessment. |
 | [Peer countries](PeerCountries.md) | Offline country lookups, database format and updates, privacy, and attribution. |
 
 ## Verification and measurements
 
 | Document | Contents |
 | --- | --- |
-| [Enhanced Security extension integration](EnhancedSecurityExtensionIntegration.md) | Real helper-process integration fixtures, lifecycle recovery, dataset checks, and coverage limits. |
+| [Enhanced Security extension integration](EnhancedSecurityExtensionIntegration.md) | Real helper-process fixtures, lifecycle recovery, payload quarantine, dataset checks, and coverage limits. |
 | [Startup storage verification measurements](StorageRestorationBenchmark.md) | Benchmark methodology, recorded workloads, and the rationale and limits of the startup work budget. |
 
 ## Guides alongside tools and scripts
