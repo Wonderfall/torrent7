@@ -160,6 +160,9 @@ typeset -a swift_build_args=(
     --configuration "$configuration"
     --arch arm64e
     --disable-local-rpath
+    # Swift Build's link-only Clang invocation needs -isysroot to record the SDK.
+    -Xswiftc -Xclang-linker -Xswiftc -isysroot
+    -Xswiftc -Xclang-linker -Xswiftc "$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
 )
 # Swift Build separates instrumented objects from the normal object directory.
 # Keep the bridge object audit on the same variant as the packaged products.

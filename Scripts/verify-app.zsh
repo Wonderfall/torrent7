@@ -177,9 +177,9 @@ verify_mach_o_load_commands() {
     /usr/bin/xcrun vtool -show-build "$binary" | /usr/bin/awk '
         $1 == "platform" && $2 == "MACOS" { platform++ }
         $1 == "minos" && $2 == "27.0" { minimum++ }
-        $1 == "sdk" && $2 == "27.0" { sdk++ }
+        $1 == "sdk" && $2 == "27.2" { sdk++ }
         END { exit !(platform == 1 && minimum == 1 && sdk == 1) }
-    ' || fail "Expected a macOS 27.0 deployment target and SDK in $binary"
+    ' || fail "Expected a macOS 27.0 deployment target and 27.2 SDK in $binary"
     local expected_runtime=
     case $expected_sanitizer in
         none)

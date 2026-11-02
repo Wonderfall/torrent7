@@ -27,6 +27,8 @@ typeset -a swift_build_args=(
     --configuration "$configuration"
     --arch arm64e
     --explicit-target-dependency-import-check error
+    -Xswiftc -Xclang-linker -Xswiftc -isysroot
+    -Xswiftc -Xclang-linker -Xswiftc "$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
 )
 case $sanitizer_profile in
     address) swift_build_args+=(--sanitize address --sanitize undefined) ;;
