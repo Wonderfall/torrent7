@@ -27,9 +27,15 @@ fuzz checks.
    [build-app.zsh](../Scripts/build-app.zsh) copies those values into the packaged
    engine extension, including diagnostic variants. Do not independently version
    the extension templates or edit a built bundle.
-3. Review dependency pins, patch descriptions, and
+3. Run the [dependency monitor](../Scripts/patches/README.md#dependency-monitor)
+   without release cooldowns (`DEPENDENCY_COOLDOWN_DAYS=0` and
+   `BORINGSSL_COOLDOWN_DAYS=0`), then review upstream release notes and security
+   advisories against the pinned versions. A security-relevant upstream fix is
+   release-blocking until adopted or explicitly mitigated and verified. If the
+   monitor cannot check upstream, obtain equivalent current evidence before
+   release. Review patch descriptions and
    [third-party notices](../Packaging/ThirdPartyNotices.txt). Resolve known build
-   or verification failures and explicitly record any remaining coverage limits,
+   or verification failures and record any remaining coverage limits,
    including interactive checks that CI only compiles.
 4. Prepare concise release notes against the previous released revision: user
    behavior changes, fixes, dependency/security updates, platform requirements,

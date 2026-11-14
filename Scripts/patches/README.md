@@ -40,9 +40,9 @@ important relationships, not alternative supported patch subsets.
 | `revive-removed-web-seeds` | Re-enables a removed web seed when it is added again. |
 | `disable-embedded-magnet-uri` | Rejects metainfo that would fall back to an embedded magnet URI. |
 | [external-metainfo-import](libtorrent-2.1.2-external-metainfo-import.patch) | Imports preparsed metadata, requires the external swarm metadata parser, and rejects native resume-metainfo parsing. Retains the parser independently of add parameters. |
-| `external-peer-message-parser` | External typed BEP 10/9/11 parsing; builds on peer policy and metainfo import. |
+| `external-peer-message-parser` | External typed BEP 10/9/11 parsing with a native metadata payload-span recheck; builds on peer policy and metainfo import. |
 | `external-http-tracker-parser` | External typed tracker-body parsing; retains the shared address and TLS policies. |
-| `external-dht-message-parser` | External typed DHT message parsing; retains outbound, address, and late-response policies. |
+| `external-dht-message-parser` | External typed DHT message parsing with runtime presence checks before query consumption; retains outbound, address, and late-response policies. |
 | `fail-closed-interface-binding` | Makes failed device binding terminal for peer, listener, and HTTP sockets. |
 | `test-server-startup` | Removes reverse lookups from the Python web and HTTP proxy fixtures and binds both HTTP and SOCKS proxies to numeric loopback. The security suite exercises all three entry points with hostname resolution forbidden, verifying their readiness reports and listening sockets. |
 | `bounded-tracker-deadlines` | Validates HTTP and UDP announce intervals before publishing checked deadlines; rejects negative, excessive, or overflowing values. |
@@ -167,6 +167,8 @@ A nonzero result can mean an eligible update, a source-identity mismatch, or a
 failed upstream/history check. Read the generated summary before changing pins;
 a network/API failure is not proof that the dependency is outdated. The native
 monitor does not replace review of Swift package or GitHub Actions updates.
+The [release procedure](../../Documentation/ReleaseDiagnostics.md#preparing-a-release)
+requires a no-cooldown check and review of security-relevant upstream changes.
 
 ## Verification and maintenance
 

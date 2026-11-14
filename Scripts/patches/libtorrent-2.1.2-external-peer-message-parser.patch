@@ -341,7 +341,7 @@ index 580a5050fdeba44efb02ab4b53ece1fe9dae9765..be7073a14b9a46ac57bda41c7984a926
  		// TODO: 3 we could probably get away with just saving a few fields here
  		m_add_torrent_params = std::make_unique<add_torrent_params>(std::move(p));
 diff --git a/src/ut_metadata.cpp b/src/ut_metadata.cpp
-index 8deb3d53cc4c9bda450960953aaa5c777af89001..46821686b80c71d8c3f543eaa2a7694dd50aeb96 100644
+index 8deb3d53cc4c9bda450960953aaa5c777af89001..edf9763e1206438df0bbe24d72031b0e457129e5 100644
 --- a/src/ut_metadata.cpp
 +++ b/src/ut_metadata.cpp
 @@ -31,6 +31,7 @@ see LICENSE file.
@@ -394,30 +394,30 @@ index 8deb3d53cc4c9bda450960953aaa5c777af89001..46821686b80c71d8c3f543eaa2a7694d
  			error_code ec;
 -			bdecode_node msg = bdecode(body, ec);
 -			if (msg.type() != bdecode_node::dict_t)
--			{
--#ifndef TORRENT_DISABLE_LOGGING
--				m_pc.peer_log(peer_log_alert::incoming_message, peer_log_alert::ut_metadata
--					, "not a dictionary");
--#endif
--				m_pc.disconnect(errors::invalid_metadata_message, operation_t::bittorrent, peer_connection_interface::peer_error);
--				return true;
--			}
--
--			bdecode_node const& type_ent = msg.dict_find_int("msg_type");
--			bdecode_node const& piece_ent = msg.dict_find_int("piece");
--			if (!type_ent || !piece_ent)
 +			aux::ut_metadata_message message;
 +			aux::peer_message_parser* const parser = m_torrent.extension_message_parser();
 +			if (parser == nullptr || !parser->parse_ut_metadata(body, message, ec))
  			{
  #ifndef TORRENT_DISABLE_LOGGING
  				m_pc.peer_log(peer_log_alert::incoming_message, peer_log_alert::ut_metadata
--					, "missing or invalid keys");
+-					, "not a dictionary");
 +					, "invalid externally parsed control dictionary");
  #endif
  				m_pc.disconnect(errors::invalid_metadata_message, operation_t::bittorrent, peer_connection_interface::peer_error);
  				return true;
  			}
+-
+-			bdecode_node const& type_ent = msg.dict_find_int("msg_type");
+-			bdecode_node const& piece_ent = msg.dict_find_int("piece");
+-			if (!type_ent || !piece_ent)
+-			{
+-#ifndef TORRENT_DISABLE_LOGGING
+-				m_pc.peer_log(peer_log_alert::incoming_message, peer_log_alert::ut_metadata
+-					, "missing or invalid keys");
+-#endif
+-				m_pc.disconnect(errors::invalid_metadata_message, operation_t::bittorrent, peer_connection_interface::peer_error);
+-				return true;
+-			}
 -			auto const type = msg_t(type_ent.int_value());
 -			auto const piece = static_cast<int>(piece_ent.int_value());
 +			auto const piece = message.piece;
@@ -436,16 +436,28 @@ index 8deb3d53cc4c9bda450960953aaa5c777af89001..46821686b80c71d8c3f543eaa2a7694d
  				{
  					if (!m_torrent.valid_metadata()
  						|| piece < 0 || piece >= (m_tp.metadata().size() + 16 * 1024 - 1) / (16 * 1024))
-@@ -342,7 +326,7 @@ namespace {
+@@ -342,8 +326,19 @@ namespace {
  						write_metadata_packet(msg_t::dont_have, piece);
  				}
  				break;
 -				case msg_t::piece:
 +				case aux::ut_metadata_message_type::piece:
  				{
++					// The parser owns the offset, but this span is the native
++					// consumer's final boundary before subspan().
++					if (message.payload_offset <= 0
++						|| message.payload_offset > body.size()
++						|| message.payload_size <= 0
++						|| message.payload_size != body.size() - message.payload_offset)
++					{
++						m_pc.disconnect(errors::invalid_metadata_message, operation_t::bittorrent
++							, peer_connection_interface::peer_error);
++						return true;
++					}
  					auto const i = std::find(m_sent_requests.begin()
  						, m_sent_requests.end(), piece);
-@@ -358,13 +342,13 @@ namespace {
+ 
+@@ -358,13 +353,13 @@ namespace {
  					}
  
  					m_sent_requests.erase(i);
@@ -463,7 +475,7 @@ index 8deb3d53cc4c9bda450960953aaa5c777af89001..46821686b80c71d8c3f543eaa2a7694d
  				{
  					m_request_limit = std::max(aux::time_now() + minutes(1), m_request_limit);
  					auto const i = std::find(m_sent_requests.begin()
-@@ -374,6 +358,8 @@ namespace {
+@@ -374,6 +369,8 @@ namespace {
  					m_sent_requests.erase(i);
  				}
  				break;

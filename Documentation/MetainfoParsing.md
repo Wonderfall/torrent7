@@ -79,6 +79,8 @@ for the protocol parsing that executes in C++ and its verification limits.
   of 1 through 16 KiB. Unknown message types retain their numeric type and exact
   suffix range so native policy can ignore them as the protocol requires. The
   whole message is limited to 17 KiB and advertised metadata to 4 MiB.
+  The native data consumer rechecks the payload range against its own body
+  span before slicing it.
 - BEP 11 peer exchange accepts exact six-byte IPv4 and eighteen-byte IPv6
   compact contacts. Optional flag strings must match their contact count; only
   public protocol bits 0 through 4 survive. Ports are nonzero, address encodings
@@ -156,6 +158,8 @@ revalidates and copies the fixed callback result before dispatch. If the parser
 is absent or rejects a datagram, the packet is dropped; no production native
 bdecode fallback exists. Generic request plugins, direct-response payloads, and
 BEP 44 item APIs are not exposed through Torrent7's bridge.
+The native query consumer also checks mandatory target, announce port, and
+announce token presence before dereferencing typed optional fields.
 
 ## Native interoperability
 

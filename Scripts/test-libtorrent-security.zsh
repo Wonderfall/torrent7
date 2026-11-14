@@ -164,6 +164,8 @@ restore_configuration=0
     ./test_dht --no-redirect \
         "$source_dir/test/test_dht.cpp.dht_parser_is_required"
     ./test_dht --no-redirect \
+        "$source_dir/test/test_dht.cpp.dht_typed_queries_reject_missing_fields"
+    ./test_dht --no-redirect \
         "$source_dir/test/test_dht.cpp.dht_global_address_policy"
     ./test_dht --no-redirect \
         "$source_dir/test/test_dht.cpp.session_nat64_discovery_is_fail_closed_for_peers"

@@ -608,7 +608,7 @@ index 36521b4761460a599a44f680b724cea94549f760..83a4975eb7f08406217cc4b1b661b492
  #ifndef TORRENT_DISABLE_LOGGING
  		get_observer()->log(dht_logger::traversal, "[%u] invalid id in response"
 diff --git a/src/kademlia/node.cpp b/src/kademlia/node.cpp
-index c760478a6d64b55209e2cd557bf0289eddcb2c11..eb1d726701df62e78a2882d771b4507afca1445e 100644
+index c760478a6d64b55209e2cd557bf0289eddcb2c11..92d9768988c18a9548e6448e83ba8f07bd2170f8 100644
 --- a/src/kademlia/node.cpp
 +++ b/src/kademlia/node.cpp
 @@ -248,54 +248,30 @@ void node::unreachable(udp::endpoint const& ep)
@@ -729,7 +729,7 @@ index c760478a6d64b55209e2cd557bf0289eddcb2c11..eb1d726701df62e78a2882d771b4507a
  			[this](node_endpoint const& nep) { algorithm()->get_node().m_table.heard_about(nep.id, nep.ep); });
  	}
  };
-@@ -796,28 +758,43 @@ void node::incoming_request(msg const& m, entry& e)
+@@ -796,28 +758,50 @@ void node::incoming_request(msg const& m, entry& e)
  {
  	e = entry(entry::dictionary_t);
  	e["y"] = "r";
@@ -745,11 +745,19 @@ index c760478a6d64b55209e2cd557bf0289eddcb2c11..eb1d726701df62e78a2882d771b4507a
 -	bdecode_node top_level[4];
 -	char error_string[200];
 -	if (!verify_message(m.message, top_desc, top_level, error_string))
+-	{
+-		incoming_error(e, error_string);
 +	e["t"] = m.message.transaction_id;
 +
-+	if (!m.message.query_valid || !m.message.sender_id)
- 	{
--		incoming_error(e, error_string);
++	bool const needs_target = m.message.query == krpc_query_kind::get_peers
++		|| m.message.query == krpc_query_kind::find_node
++		|| m.message.query == krpc_query_kind::announce_peer
++		|| m.message.query == krpc_query_kind::sample_infohashes;
++	bool const needs_announce_fields = m.message.query == krpc_query_kind::announce_peer;
++	if (!m.message.query_valid || !m.message.sender_id
++		|| (needs_target && !m.message.target)
++		|| (needs_announce_fields && (!m.message.port || !m.message.token)))
++	{
 +		switch (m.message.query)
 +		{
 +			case krpc_query_kind::get_peers:
@@ -789,7 +797,7 @@ index c760478a6d64b55209e2cd557bf0289eddcb2c11..eb1d726701df62e78a2882d771b4507a
  
  	// if this nodes ID doesn't match its IP, tell it what
  	// its IP is with an error
-@@ -837,47 +814,28 @@ void node::incoming_request(msg const& m, entry& e)
+@@ -837,47 +821,28 @@ void node::incoming_request(msg const& m, entry& e)
  	// mirror back the other node's external port
  	reply["p"] = m.addr.port();
  
@@ -845,7 +853,7 @@ index c760478a6d64b55209e2cd557bf0289eddcb2c11..eb1d726701df62e78a2882d771b4507a
  		if (!full) reply["token"] = generate_token(m.addr, info_hash);
  
  #ifndef TORRENT_DISABLE_LOGGING
-@@ -888,66 +846,31 @@ void node::incoming_request(msg const& m, entry& e)
+@@ -888,66 +853,31 @@ void node::incoming_request(msg const& m, entry& e)
  		}
  #endif
  	}
@@ -924,7 +932,7 @@ index c760478a6d64b55209e2cd557bf0289eddcb2c11..eb1d726701df62e78a2882d771b4507a
  		{
  			m_counters.inc_stats_counter(counters::dht_invalid_announce);
  			incoming_error(e, "invalid token");
-@@ -962,270 +885,67 @@ void node::incoming_request(msg const& m, entry& e)
+@@ -962,270 +892,67 @@ void node::incoming_request(msg const& m, entry& e)
  		m_table.node_seen(id, m.addr, 0xffff);
  
  		tcp::endpoint const addr = tcp::endpoint(m.addr.address(), std::uint16_t(port));
@@ -1533,7 +1541,7 @@ index 1a2c94dd4c3ff0227219332cff2ec504c8facf7d..381b5883f25460b4aaa459f90c06a9b0
  	}
  
 diff --git a/test/test_dht.cpp b/test/test_dht.cpp
-index 809cd18eb82209fc58bbabfd697d57c09eab252a..ad919aab8fb3e3608c37237590cedd968d5a1ae4 100644
+index 809cd18eb82209fc58bbabfd697d57c09eab252a..3285f317842bdd43bcb6892ef07ae2df592c7644 100644
 --- a/test/test_dht.cpp
 +++ b/test/test_dht.cpp
 @@ -23,6 +23,7 @@ see LICENSE file.
@@ -1948,7 +1956,7 @@ index 809cd18eb82209fc58bbabfd697d57c09eab252a..ad919aab8fb3e3608c37237590cedd96
  	auto ls = dummy_listen_socket(udp::endpoint(addr("10.0.0.1"), 6881));
  	aux::listen_socket_handle const handle(ls);
  	dht.new_socket(handle);
-@@ -3693,6 +4027,41 @@ TORRENT_TEST(dht_tracker_ip_filter)
+@@ -3693,6 +4027,81 @@ TORRENT_TEST(dht_tracker_ip_filter)
  	TEST_EQUAL(sent, true);
  }
  
@@ -1987,10 +1995,50 @@ index 809cd18eb82209fc58bbabfd697d57c09eab252a..ad919aab8fb3e3608c37237590cedd96
 +	TEST_EQUAL(sent, false);
 +}
 +
++TORRENT_TEST(dht_typed_queries_reject_missing_fields)
++{
++	dht_test_setup t(udp::endpoint(rand_v4(), 20));
++	krpc_message message;
++	message.kind = krpc_message_kind::query;
++	message.query_valid = true;
++	message.transaction_id = "aa";
++	message.sender_id = generate_next();
++	message.port = 6881;
++	message.token = "fixture";
++
++	auto const expect_invalid = [&](krpc_message const& candidate)
++	{
++		g_sent_packets.clear();
++		msg const incoming(candidate, t.source);
++		t.dht_node.incoming(t.dht_node.m_sock, incoming);
++		auto const reply = find_packet(t.source);
++		TEST_CHECK(reply != g_sent_packets.end());
++		if (reply != g_sent_packets.end())
++			TEST_EQUAL(reply->second["y"].string(), "e");
++	};
++
++	for (krpc_query_kind const query : {krpc_query_kind::get_peers
++		, krpc_query_kind::find_node, krpc_query_kind::announce_peer
++		, krpc_query_kind::sample_infohashes})
++	{
++		message.query = query;
++		message.target.reset();
++		expect_invalid(message);
++	}
++	message.query = krpc_query_kind::announce_peer;
++	message.target = generate_next();
++	message.port.reset();
++	expect_invalid(message);
++	message.port = 6881;
++	message.token.reset();
++	expect_invalid(message);
++	g_sent_packets.clear();
++}
++
  TORRENT_TEST(dht_global_address_policy)
  {
  	// Incoming DHT UDP packets are rejected before parsing or dispatch.
-@@ -3708,7 +4077,8 @@ TORRENT_TEST(dht_global_address_policy)
+@@ -3708,7 +4117,8 @@ TORRENT_TEST(dht_global_address_policy)
  		dht_tracker::send_fun_t const send = [&sent](aux::listen_socket_handle const&,
  			udp::endpoint const&, span<char const>, error_code&,
  			aux::udp_send_flags_t) { sent = true; };
@@ -2000,7 +2048,7 @@ index 809cd18eb82209fc58bbabfd697d57c09eab252a..ad919aab8fb3e3608c37237590cedd96
  		auto ls = dummy_listen_socket(udp::endpoint(addr("10.0.0.1"), 6881));
  		aux::listen_socket_handle const handle(ls);
  		dht.new_socket(handle);
-@@ -4412,7 +4782,8 @@ void test_rate_limit(aux::session_settings const& sett, std::function<void(lt::d
+@@ -4412,7 +4822,8 @@ void test_rate_limit(aux::session_settings const& sett, std::function<void(lt::d
  
  	lt::dht::dht_tracker::send_fun_t send;
  
