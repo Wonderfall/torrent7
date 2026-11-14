@@ -95,6 +95,32 @@ struct TorrentStorageBrokerIPCCodecTests {
         }
     }
 
+    @Test("Broker numeric fields require their wire XPC types", arguments: [
+        "v", "d", "o", "g", "a",
+    ])
+    func signedIntegersDoNotCoerceToUnsignedFields(field: String) {
+        let request = TorrentStorageBrokerRequest.openPayload(
+            makeCommon(), claimID: UUID(), generation: 1, fileIndex: 0, access: .readOnly
+        )
+        var dictionary = TorrentStorageBrokerIPCCodec.encode(request)
+        dictionary[field] = Int64(1)
+        #expect(throws: TorrentStorageBrokerIPCError.malformedMessage) {
+            _ = try TorrentStorageBrokerIPCCodec.decodeRequest(dictionary)
+        }
+    }
+
+    @Test("Broker file indices require signed XPC integers")
+    func unsignedFileIndexIsRejected() {
+        let request = TorrentStorageBrokerRequest.openPayload(
+            makeCommon(), claimID: UUID(), generation: 1, fileIndex: 0, access: .readOnly
+        )
+        var dictionary = TorrentStorageBrokerIPCCodec.encode(request)
+        dictionary["i"] = UInt64(0)
+        #expect(throws: TorrentStorageBrokerIPCError.malformedMessage) {
+            _ = try TorrentStorageBrokerIPCCodec.decodeRequest(dictionary)
+        }
+    }
+
     @Test("Oversized reply messages are rejected before bridging")
     func oversizedReplyMessageIsRejected() throws {
         let request = TorrentStorageBrokerRequest.handshake(makeCommon())

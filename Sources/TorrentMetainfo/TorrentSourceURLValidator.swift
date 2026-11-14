@@ -35,19 +35,11 @@ enum TorrentSourceURLValidator {
         guard !authority.isEmpty else {
             return false
         }
-        let hostAndPort: Substring
-        if let atSign = authority.firstIndex(of: "@") {
-            guard atSign != authority.startIndex,
-                  !authority[authority.index(after: atSign)...].contains("@") else {
-                return false
-            }
-            hostAndPort = authority[authority.index(after: atSign)...]
-        } else {
-            hostAndPort = authority
-        }
-        guard !hostAndPort.isEmpty else {
+        // Tracker and web-seed sources carry no credential authority.
+        guard !authority.contains("@") else {
             return false
         }
+        let hostAndPort = authority
 
         if hostAndPort.first == "[" {
             guard let closingBracket = hostAndPort.firstIndex(of: "]"),
@@ -98,9 +90,13 @@ enum TorrentSourceURLValidator {
         if host.utf8.allSatisfy({ isASCIIDigit($0) || $0 == 46 }) {
             return isValidIPv4Address(host)
         }
-        return host
-            .split(separator: ".", omittingEmptySubsequences: false)
-            .allSatisfy { label in
+        // The system resolver also recognizes hexadecimal IPv4 spellings as
+        // numeric addresses. Keep them out of the DNS-label branch.
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        if labels.allSatisfy(isNumericAddressLabel) {
+            return false
+        }
+        return labels.allSatisfy { label in
                 !label.isEmpty
                     && label.utf8.count <= 63
                     && label.first != "-"
@@ -205,8 +201,20 @@ enum TorrentSourceURLValidator {
             !component.isEmpty
                 && component.utf8.allSatisfy(isASCIIDigit)
                 && component.count <= 3
+                && (component.count == 1 || component.first != "0")
                 && UInt8(component) != nil
         }
+    }
+
+    private static func isNumericAddressLabel(_ label: Substring) -> Bool {
+        if label.utf8.allSatisfy(isASCIIDigit) {
+            return true
+        }
+        guard label.count > 2,
+              label.prefix(2).lowercased() == "0x" else {
+            return false
+        }
+        return label.dropFirst(2).utf8.allSatisfy(isASCIIHexDigit)
     }
 
     private static func hasValidPercentEscapes(_ value: String) -> Bool {

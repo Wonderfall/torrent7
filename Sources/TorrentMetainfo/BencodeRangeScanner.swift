@@ -415,6 +415,9 @@ struct BencodeRangeDocument: Sendable {
         }
 
         private mutating func openContainer(kind: ContainerKind) throws {
+            guard frames.count < limits.maximumNestingDepth else {
+                throw BencodeScanError.nestingLimitExceeded
+            }
             let next = containerCount.addingReportingOverflow(1)
             guard !next.overflow,
                   next.partialValue <= limits.maximumContainerCount else {

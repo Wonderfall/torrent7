@@ -139,7 +139,7 @@ struct TorrentSourceModelTests {
     @Test("Magnet source security summary accepts supported tracker authorities")
     func magnetSourceSecuritySummaryAcceptsSupportedTrackerAuthorities() {
         let summary = TorrentSourceSecurityInspector.summary(
-            magnetURI: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&tr=http%3A%2F%2Fuser%3Apass%40tracker.example%3A8080%2Fannounce&tr=HTTPS%3A%2F%2F%5Bfe80%3A%3A1%2525en0%5D%3A443%2Fannounce&tr=udp%3A%2F%2Ftracker.example%3A1337"
+            magnetURI: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&tr=http%3A%2F%2Ftracker.example%3A8080%2Fannounce&tr=HTTPS%3A%2F%2F%5Bfe80%3A%3A1%2525en0%5D%3A443%2Fannounce&tr=udp%3A%2F%2Ftracker.example%3A1337"
         )
 
         #expect(summary.trackerCount == 3)

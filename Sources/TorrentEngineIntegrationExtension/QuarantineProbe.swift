@@ -29,7 +29,7 @@ private final class QuarantineProbePeer: XPCPeerHandler {
         let request: QuarantineProbeRequest
         do {
             request = try message.decode(as: QuarantineProbeRequest.self)
-            guard request.claims.count == 2 else {
+            guard request.claims.count == 2, request.paths.count == 2 else {
                 return QuarantineProbeReply.failure("Expected two fixture claims")
             }
         } catch {
@@ -69,13 +69,13 @@ private final class QuarantineProbePeer: XPCPeerHandler {
         )
         defer { broker.cancel() }
         var observations = [QuarantineObservation]()
-        for claim in request.claims {
+        for (index, claim) in request.claims.enumerated() {
             try Task.checkCancellation()
             let descriptor = try await broker.openPayload(
                 claimID: claim, generation: 1, fileIndex: 0, access: .readWrite
             )
             defer { _ = close(descriptor) }
-            observations.append(try probe(descriptor))
+            observations.append(try probe(descriptor, path: request.paths[index]))
         }
         return observations
     }
@@ -84,7 +84,7 @@ private final class QuarantineProbePeer: XPCPeerHandler {
     // Data and attribute-name storage stay pinned for synchronous positioned I/O
     // and xattr calls. The write fits the fixture's 64-byte bound. Each syscall's
     // result/errno is captured immediately; no pointer or borrowed buffer escapes.
-    private static func probe(_ descriptor: Int32) throws -> QuarantineObservation {
+    private static func probe(_ descriptor: Int32, path: String) throws -> QuarantineObservation {
         let read = QuarantineProbe.attribute.withCString { name in
             unsafe fgetxattr(descriptor, name, nil, 0, 0, 0)
         }
@@ -109,9 +109,87 @@ private final class QuarantineProbePeer: XPCPeerHandler {
             }
         }
         let overwriteError = overwritten == 0 ? 0 : errno
+        let path = probePath(descriptor, path: path)
+        let metadata = probeMetadata(descriptor)
         return QuarantineObservation(
-            readError: readError, removalError: removalError, overwriteError: overwriteError
+            readError: readError, removalError: removalError, overwriteError: overwriteError,
+            pathOpenError: path.openError,
+            descriptorTraversalError: path.traversalError, linkError: path.linkError,
+            symlinkError: path.symlinkError, renameError: path.renameError,
+            unlinkError: path.unlinkError, otherAttributeError: metadata.attributeError,
+            flagsError: metadata.flagsError
         )
+    }
+
+    private struct PathObservation {
+        let openError: Int32
+        let traversalError: Int32
+        let linkError: Int32
+        let symlinkError: Int32
+        let renameError: Int32
+        let unlinkError: Int32
+    }
+
+    // SAFETY: Each pathname String pins its C bytes for one synchronous
+    // syscall; returned descriptors are closed immediately. No pointer escapes.
+    private static func probePath(_ descriptor: Int32, path: String) -> PathObservation {
+        let opened = path.withCString { pointer in
+            unsafe open(pointer, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        }
+        let openError = opened < 0 ? errno : 0
+        if opened >= 0 { _ = close(opened) }
+
+        let traversed = "..".withCString { pointer in
+            unsafe openat(descriptor, pointer, O_RDONLY | O_CLOEXEC | O_DIRECTORY)
+        }
+        let traversalError = traversed < 0 ? errno : 0
+        if traversed >= 0 { _ = close(traversed) }
+
+        let linked = path.withCString { source in
+            (path + ".probe-linked").withCString { destination in
+                unsafe link(source, destination)
+            }
+        }
+        let linkError = linked == 0 ? 0 : errno
+        let symlinked = path.withCString { source in
+            (path + ".probe-symlink").withCString { destination in
+                unsafe symlink(source, destination)
+            }
+        }
+        let symlinkError = symlinked == 0 ? 0 : errno
+        let renamed = path.withCString { source in
+            (path + ".probe-renamed").withCString { destination in
+                unsafe rename(source, destination)
+            }
+        }
+        let renameError = renamed == 0 ? 0 : errno
+        let unlinked = path.withCString { pointer in unsafe unlink(pointer) }
+        let unlinkError = unlinked == 0 ? 0 : errno
+        return PathObservation(
+            openError: openError,
+            traversalError: traversalError, linkError: linkError,
+            symlinkError: symlinkError, renameError: renameError, unlinkError: unlinkError
+        )
+    }
+
+    private struct MetadataObservation {
+        let attributeError: Int32
+        let flagsError: Int32
+    }
+
+    // SAFETY: The attribute bytes and name are pinned for one synchronous
+    // fsetxattr. fchflags borrows only the already owned descriptor.
+    private static func probeMetadata(_ descriptor: Int32) -> MetadataObservation {
+        let attribute = Data("fixture".utf8)
+        let result = "app.torrent7.integration.probe".withCString { name in
+            unsafe attribute.withUnsafeBytes { bytes in
+                unsafe fsetxattr(descriptor, name, bytes.baseAddress, bytes.count, 0, 0)
+            }
+        }
+        let attributeError = result == 0 ? 0 : errno
+        let flagsResult = fchflags(descriptor, UInt32(UF_NODUMP))
+        let flagsError = flagsResult == 0 ? 0 : errno
+        return MetadataObservation(attributeError: attributeError, flagsError: flagsError)
     }
 }
 

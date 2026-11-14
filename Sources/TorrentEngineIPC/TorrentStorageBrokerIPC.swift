@@ -171,14 +171,14 @@ package enum TorrentStorageBrokerIPCCodec {
     package static func decodeRequest(_ dictionary: XPCDictionary) throws
         -> TorrentStorageBrokerRequest {
         guard dictionary.count <= 10,
-              let version: UInt64 = dictionary[Field.version],
+              let version = uint64(in: dictionary, forKey: Field.version),
               version == TorrentStorageBrokerProtocol.version,
               let requestID = uuid(in: dictionary, forKey: Field.requestID),
               let engineEpoch = uuid(in: dictionary, forKey: Field.engineEpoch),
               let sessionNonce = uuid(in: dictionary, forKey: Field.sessionNonce),
-              let deadline: UInt64 = dictionary[Field.deadline],
+              let deadline = uint64(in: dictionary, forKey: Field.deadline),
               deadline > 0,
-              let rawOperation: UInt64 = dictionary[Field.operation],
+              let rawOperation = uint64(in: dictionary, forKey: Field.operation),
               let operation = TorrentStorageBrokerOperation(rawValue: rawOperation) else {
             throw TorrentStorageBrokerIPCError.malformedMessage
         }
@@ -205,12 +205,12 @@ package enum TorrentStorageBrokerIPCCodec {
                  Field.claimID, Field.generation, Field.fileIndex, Field.access]
             )
             guard let claimID = uuid(in: dictionary, forKey: Field.claimID),
-                  let generation: UInt64 = dictionary[Field.generation],
+                  let generation = uint64(in: dictionary, forKey: Field.generation),
                   generation > 0,
-                  let rawIndex: Int64 = dictionary[Field.fileIndex],
+                  let rawIndex = int64(in: dictionary, forKey: Field.fileIndex),
                   rawIndex >= 0,
                   rawIndex <= Int64(Int32.max),
-                  let rawAccess: UInt64 = dictionary[Field.access],
+                  let rawAccess = uint64(in: dictionary, forKey: Field.access),
                   let access = TorrentStorageBrokerAccess(rawValue: rawAccess) else {
                 throw TorrentStorageBrokerIPCError.malformedMessage
             }
@@ -234,7 +234,7 @@ package enum TorrentStorageBrokerIPCCodec {
             // immutable request is decoded synchronously; safe alternative: raw XPC type
             // validation requires the unsafe object subscript.
             guard let claimID = uuid(in: dictionary, forKey: Field.claimID),
-                  let generation: UInt64 = dictionary[Field.generation],
+                  let generation = uint64(in: dictionary, forKey: Field.generation),
                   generation > 0,
                   let object = unsafe dictionary[Field.fileIndices, as: XPC_TYPE_DATA] else {
                 throw TorrentStorageBrokerIPCError.malformedMessage
@@ -319,11 +319,11 @@ package enum TorrentStorageBrokerIPCCodec {
         for request: TorrentStorageBrokerRequest
     ) throws -> TorrentStorageBrokerReply {
         guard dictionary.count <= 7,
-              let version: UInt64 = dictionary[Field.version],
+              let version = uint64(in: dictionary, forKey: Field.version),
               version == TorrentStorageBrokerProtocol.version,
               let requestID = uuid(in: dictionary, forKey: Field.requestID),
               requestID == request.common.requestID,
-              let status: UInt64 = dictionary[Field.status] else {
+              let status = uint64(in: dictionary, forKey: Field.status) else {
             throw TorrentStorageBrokerIPCError.requestMismatch
         }
         if status == 1 {
@@ -331,7 +331,7 @@ package enum TorrentStorageBrokerIPCCodec {
                 dictionary,
                 [Field.version, Field.requestID, Field.status, Field.failure, Field.message]
             )
-            guard let rawFailure: UInt64 = dictionary[Field.failure],
+            guard let rawFailure = uint64(in: dictionary, forKey: Field.failure),
                   let failure = TorrentStorageBrokerFailure(rawValue: rawFailure),
                   let message = boundedString(
                       in: dictionary,
@@ -547,6 +547,24 @@ package enum TorrentStorageBrokerIPCCodec {
               }) else {
             throw TorrentStorageBrokerIPCError.malformedMessage
         }
+    }
+
+    // SAFETY: The dictionary retains each borrowed object during the synchronous
+    // type check. No buffer is accessed; raw XPC types prevent integer coercion.
+    private static func uint64(in dictionary: XPCDictionary, forKey key: String) -> UInt64? {
+        guard let object = unsafe dictionary[key, as: XPC_TYPE_UINT64] else {
+            return nil
+        }
+        return xpc_uint64_get_value(object)
+    }
+
+    // SAFETY: The dictionary retains the borrowed object during the synchronous
+    // type check. No buffer is accessed; the signed type is required for indices.
+    private static func int64(in dictionary: XPCDictionary, forKey key: String) -> Int64? {
+        guard let object = unsafe dictionary[key, as: XPC_TYPE_INT64] else {
+            return nil
+        }
+        return xpc_int64_get_value(object)
     }
 
     private static func uuid(

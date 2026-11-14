@@ -3,21 +3,46 @@ import Testing
 
 @Suite("Source URL syntax")
 struct TorrentSourceURLValidatorTests {
+    @Test("Numeric hosts use canonical dotted-quad spelling", arguments: [
+        "010.0.0.1", "0x41.1.1.1", "0X7f.1", "127.1", "1.2.3.004",
+    ])
+    func noncanonicalNumericHosts(host: String) {
+        #expect(!TorrentSourceURLValidator.isValid(
+            "http://\(host):80/announce", maximumBytes: 2_048, allowedSchemes: ["http"]
+        ))
+    }
+
+    @Test("Numeric-looking DNS labels remain valid when the host is not an IP alias")
+    func numericLookingDNSLabel() {
+        #expect(TorrentSourceURLValidator.isValid(
+            "https://0x41.tracker.example/announce",
+            maximumBytes: 2_048, allowedSchemes: ["https"]
+        ))
+    }
+
+    @Test("Source authorities reject userinfo", arguments: ["http", "https", "udp"])
+    func rejectsUserinfo(scheme: String) {
+        for authority in ["user:pass@tracker.example", "user@tracker.example", "@tracker.example"] {
+            #expect(!TorrentSourceURLValidator.isValid(
+                "\(scheme)://\(authority)/announce",
+                maximumBytes: 2_048, allowedSchemes: [scheme]
+            ))
+        }
+    }
+
     @Test("Source hostnames reject trailing dots without rejecting dots in paths", arguments: [
         "https", "http", "udp",
     ], ["tracker.example", "192.0.2.1"])
     func trailingDotHostnames(scheme: String, host: String) {
         for suffix in ["/announce.", ":443/announce?key=."] {
-            for userInfo in ["", "user:password@"] {
-                #expect(TorrentSourceURLValidator.isValid(
-                    "\(scheme)://\(userInfo)\(host)\(suffix)",
-                    maximumBytes: 2_048, allowedSchemes: [scheme]
-                ))
-                #expect(!TorrentSourceURLValidator.isValid(
-                    "\(scheme)://\(userInfo)\(host).\(suffix)",
-                    maximumBytes: 2_048, allowedSchemes: [scheme]
-                ))
-            }
+            #expect(TorrentSourceURLValidator.isValid(
+                "\(scheme)://\(host)\(suffix)",
+                maximumBytes: 2_048, allowedSchemes: [scheme]
+            ))
+            #expect(!TorrentSourceURLValidator.isValid(
+                "\(scheme)://\(host).\(suffix)",
+                maximumBytes: 2_048, allowedSchemes: [scheme]
+            ))
         }
     }
 

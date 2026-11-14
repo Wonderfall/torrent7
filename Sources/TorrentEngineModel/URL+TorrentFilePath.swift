@@ -7,7 +7,10 @@ package extension URL {
     /// supersedes did not. Paths crossing the engine boundary use the separator-free
     /// form as their stable identity, except that the filesystem root remains `/`.
     var torrentFilePath: String {
-        let decodedPath = path(percentEncoded: false)
+        // Standardization preserves encoded path separators and NULs as
+        // filename bytes. Decoding the original URL can turn a distinct file
+        // URL into a different filesystem path.
+        let decodedPath = standardizedFileURL.path(percentEncoded: false)
         guard let lastNonSeparator = decodedPath.lastIndex(where: { $0 != "/" }) else {
             return decodedPath.isEmpty ? "" : "/"
         }

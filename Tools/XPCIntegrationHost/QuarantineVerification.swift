@@ -57,7 +57,10 @@ enum QuarantineVerification {
         try session.activate()
         let request = QuarantineProbeRequest(
             endpoint: broker.endpoint, nonce: broker.sessionNonce,
-            claims: claims.map(\.manifest.claimID)
+            claims: claims.map(\.manifest.claimID),
+            paths: ["created.bin", "imported.bin"].map {
+                root.appending(path: $0).path(percentEncoded: false)
+            }
         )
         let reply = try await exchange(request, session: session)
         let observations: [QuarantineObservation]
@@ -75,9 +78,31 @@ enum QuarantineVerification {
             print("quarantine.\(name).read_errno=\(observation.readError)")
             print("quarantine.\(name).remove_errno=\(observation.removalError)")
             print("quarantine.\(name).overwrite_errno=\(observation.overwriteError)")
+            print("quarantine.\(name).path_open_errno=\(observation.pathOpenError)")
+            print("quarantine.\(name).descriptor_traversal_errno=\(observation.descriptorTraversalError)")
+            print("quarantine.\(name).link_errno=\(observation.linkError)")
+            print("quarantine.\(name).symlink_errno=\(observation.symlinkError)")
+            print("quarantine.\(name).rename_errno=\(observation.renameError)")
+            print("quarantine.\(name).unlink_errno=\(observation.unlinkError)")
+            print("quarantine.\(name).other_xattr_errno=\(observation.otherAttributeError)")
+            print("quarantine.\(name).flags_errno=\(observation.flagsError)")
             try require(try Data(contentsOf: url) == QuarantineProbe.payload, "Helper did not write \(name)")
             try require([EPERM, EACCES].contains(observation.removalError), "Helper removed quarantine: \(name)")
             try require([EPERM, EACCES].contains(observation.overwriteError), "Helper weakened quarantine: \(name)")
+            try require([EPERM, EACCES].contains(observation.pathOpenError), "Helper opened path directly: \(name)")
+            try require(observation.descriptorTraversalError == ENOTDIR, "Helper traversed a file descriptor: \(name)")
+            try require([EPERM, EACCES].contains(observation.linkError), "Helper linked payload: \(name)")
+            try require([EPERM, EACCES].contains(observation.symlinkError), "Helper created a link: \(name)")
+            try require([EPERM, EACCES].contains(observation.renameError), "Helper renamed payload: \(name)")
+            try require([EPERM, EACCES].contains(observation.unlinkError), "Helper unlinked payload: \(name)")
+            try require([EPERM, EACCES].contains(observation.otherAttributeError), "Helper changed another xattr: \(name)")
+            try require([EPERM, EACCES].contains(observation.flagsError), "Helper changed file flags: \(name)")
+            for suffix in ["probe-linked", "probe-symlink", "probe-renamed"] {
+                try require(!FileManager.default.fileExists(
+                    atPath: url.path(percentEncoded: false) + "." + suffix
+                ),
+                            "Helper created a sibling: \(name).\(suffix)")
+            }
             try require(afterProbe == initial[index], "Host observed changed quarantine: \(name)")
         }
         print("integration.quarantine=pass")

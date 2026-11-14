@@ -20,4 +20,12 @@ struct TorrentFilePathTests {
         )
         #expect(URL(filePath: "/", directoryHint: .isDirectory).torrentFilePath == "/")
     }
+
+    @Test("Escaped separators and NULs remain filename text")
+    func escapedPathComponents() throws {
+        let escapedSeparator = try #require(URL(string: "file:///tmp/a%2Fb.torrent"))
+        let escapedNull = try #require(URL(string: "file:///tmp/a%00b.torrent"))
+        #expect(escapedSeparator.torrentFilePath == "/tmp/a%2Fb.torrent")
+        #expect(escapedNull.torrentFilePath == "/tmp/a%00b.torrent")
+    }
 }

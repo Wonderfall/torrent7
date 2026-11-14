@@ -606,6 +606,9 @@ repairs or defaults a malformed policy.
 
 Resume state and removal tombstones remain in the helper's private container.
 The claim journal and security-scoped bookmarks remain in the GUI container.
+An unsupported claim-journal schema stops restoration and preserves the journal
+bytes for review; startup never replaces unknown older or newer records with an
+empty current-version journal.
 
 ## Network authority
 
@@ -809,7 +812,7 @@ The signed Enhanced Security integration gate verifies the real process
 lifecycle and authenticated broker handshake. Its separate
 [quarantine mode](EnhancedSecurityExtensionIntegration.md#payload-quarantine)
 verifies payload quarantine and rejects removal or flag clearing through real
-broker-returned writable descriptors. Broader adversarial Seatbelt coverage of
-descriptor-relative paths, links, rename, unlink, other xattrs, file flags, and
-raw-XPC attempts remains a release-validation gap, as does production
-identified-peer signing.
+broker-returned writable descriptors. It also checks direct pathname opens,
+links, rename, unlink, other xattrs, and file flags against the same fixtures.
+Raw-XPC attempts and production identified-peer signing remain release-validation
+gaps.

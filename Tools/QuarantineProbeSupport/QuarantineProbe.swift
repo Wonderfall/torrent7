@@ -8,11 +8,13 @@ package struct QuarantineProbeRequest: Codable, Sendable {
     package let endpoint: XPCEndpoint
     package let nonce: UUID
     package let claims: [UUID]
+    package let paths: [String]
 
-    package init(endpoint: XPCEndpoint, nonce: UUID, claims: [UUID]) {
+    package init(endpoint: XPCEndpoint, nonce: UUID, claims: [UUID], paths: [String]) {
         self.endpoint = endpoint
         self.nonce = nonce
         self.claims = claims
+        self.paths = paths
     }
 }
 
@@ -25,11 +27,32 @@ package struct QuarantineObservation: Codable, Sendable {
     package let readError: Int32
     package let removalError: Int32
     package let overwriteError: Int32
+    package let pathOpenError: Int32
+    package let descriptorTraversalError: Int32
+    package let linkError: Int32
+    package let symlinkError: Int32
+    package let renameError: Int32
+    package let unlinkError: Int32
+    package let otherAttributeError: Int32
+    package let flagsError: Int32
 
-    package init(readError: Int32, removalError: Int32, overwriteError: Int32) {
+    package init(
+        readError: Int32, removalError: Int32, overwriteError: Int32,
+        pathOpenError: Int32, descriptorTraversalError: Int32,
+        linkError: Int32, symlinkError: Int32, renameError: Int32, unlinkError: Int32,
+        otherAttributeError: Int32, flagsError: Int32
+    ) {
         self.readError = readError
         self.removalError = removalError
         self.overwriteError = overwriteError
+        self.pathOpenError = pathOpenError
+        self.descriptorTraversalError = descriptorTraversalError
+        self.linkError = linkError
+        self.symlinkError = symlinkError
+        self.renameError = renameError
+        self.unlinkError = unlinkError
+        self.otherAttributeError = otherAttributeError
+        self.flagsError = flagsError
     }
 }
 

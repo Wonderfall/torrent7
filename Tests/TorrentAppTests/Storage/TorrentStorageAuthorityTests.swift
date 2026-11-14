@@ -2274,9 +2274,9 @@ struct TorrentStorageAuthorityTests {
         }
     }
 
-    @Test("Obsolete development journals are reset without migration")
-    func obsoleteJournalIsReset() async throws {
-        try await withTemporaryDirectory { root in
+    @Test("Older journals are preserved for explicit recovery")
+    func obsoleteJournalIsPreserved() throws {
+        try withTemporaryDirectory { root in
             let state = root.appending(
                 path: "State",
                 directoryHint: .isDirectory
@@ -2292,20 +2292,16 @@ struct TorrentStorageAuthorityTests {
             )
             try obsolete.write(to: journalURL)
 
-            let journal = try TorrentStorageClaimJournal(directory: state)
-            #expect(await journal.allClaims().isEmpty)
-            #expect(await journal.unresolvedPreparations().isEmpty)
-            #expect(await journal.allPromotions().isEmpty)
-            #expect(try Data(contentsOf: journalURL) != obsolete)
-
-            let reloaded = try TorrentStorageClaimJournal(directory: state)
-            #expect(await reloaded.allClaims().isEmpty)
+            #expect(throws: TorrentStorageJournalError.unsupportedVersion(2)) {
+                _ = try TorrentStorageClaimJournal(directory: state)
+            }
+            #expect(try Data(contentsOf: journalURL) == obsolete)
         }
     }
 
-    @Test("Obsolete live authority is not carried into the current schema")
-    func obsoleteLiveJournalIsReset() async throws {
-        try await withTemporaryDirectory { root in
+    @Test("Older live claims and minimal records are never overwritten")
+    func obsoleteLiveJournalIsPreserved() throws {
+        try withTemporaryDirectory { root in
             let state = root.appending(
                 path: "State",
                 directoryHint: .isDirectory
@@ -2321,9 +2317,17 @@ struct TorrentStorageAuthorityTests {
             )
             try obsolete.write(to: journalURL)
 
-            let journal = try TorrentStorageClaimJournal(directory: state)
-            #expect(await journal.allClaims().isEmpty)
-            #expect(try Data(contentsOf: journalURL) != obsolete)
+            #expect(throws: TorrentStorageJournalError.unsupportedVersion(2)) {
+                _ = try TorrentStorageClaimJournal(directory: state)
+            }
+            #expect(try Data(contentsOf: journalURL) == obsolete)
+
+            let versionFour = Data(#"{"schemaVersion":4}"#.utf8)
+            try versionFour.write(to: journalURL)
+            #expect(throws: TorrentStorageJournalError.unsupportedVersion(4)) {
+                _ = try TorrentStorageClaimJournal(directory: state)
+            }
+            #expect(try Data(contentsOf: journalURL) == versionFour)
         }
     }
 

@@ -235,6 +235,22 @@ struct TorrentEngineIPCEnvelopeTests {
         }
     }
 
+    @Test("Broker endpoint requires a concrete XPC endpoint", arguments: [0, 1, 2])
+    func brokerEndpointRejectsOtherXPCObjects(kind: Int) throws {
+        var dictionary = try encodedRequest()
+        switch kind {
+        case 0: dictionary[TorrentEngineIPCField.brokerEndpoint] = "not an endpoint"
+        case 1: dictionary[TorrentEngineIPCField.brokerEndpoint] = Int64(7)
+        default:
+            dictionary[TorrentEngineIPCField.brokerEndpoint] = xpc_data_create(nil, 0)
+        }
+        expectIPCError(
+            .wrongFieldType(field: TorrentEngineIPCField.brokerEndpoint, expected: "endpoint")
+        ) {
+            try TorrentEngineIPCEnvelopeCodec.inspectRequest(dictionary)
+        }
+    }
+
     @Test("Protocol version and unknown operation values fail closed")
     func versionAndOperationAreExact() throws {
         var futureVersion = try encodedRequest()
@@ -306,13 +322,17 @@ struct TorrentEngineIPCEnvelopeTests {
         }
     }
 
-    @Test("Bounded UUID fields preserve lowercase input and optional epochs")
-    func boundedUUIDsPreserveAcceptedText() throws {
+    @Test("Envelope UUIDs require canonical uppercase text")
+    func envelopeUUIDsRequireCanonicalText() throws {
         let id = UUID()
         var dictionary = try encodedRequest()
         for field in [TorrentEngineIPCField.requestID, TorrentEngineIPCField.controllerID,
                       TorrentEngineIPCField.operationID, TorrentEngineIPCField.expectedEpoch] {
             dictionary[field] = id.uuidString.lowercased()
+            expectIPCError(.invalidUUID(field: field)) {
+                try TorrentEngineIPCEnvelopeCodec.inspectRequest(dictionary)
+            }
+            dictionary[field] = id.uuidString
         }
         let request = try TorrentEngineIPCEnvelopeCodec.decodeRequest(dictionary, maximumPayloadBytes: 64)
         #expect(request.header.requestID == id)

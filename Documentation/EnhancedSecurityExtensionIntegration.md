@@ -111,10 +111,10 @@ is the signed Enhanced Security process lifecycle, broker authentication,
 recovery path, and network observation. The practical and maximum modes add
 paged-dataset and transport measurements plus a genuine GUI-side Powerbox scope.
 These lifecycle and dataset modes do not request payload descriptors. The
-separate quarantine mode below exercises writable descriptors and quarantine
-xattrs. Broader adversarial coverage of descriptor-relative paths, links,
-rename, unlink, other xattrs, and file flags remains separate release-validation
-work, as does production identified-peer signing.
+separate quarantine mode below exercises writable descriptors, quarantine
+xattrs, other xattrs, file flags, and hostile pathname operations. Raw-XPC
+attempts and production identified-peer signing remain separate
+release-validation work.
 
 To run the same lifecycle with the fully instrumented ThreadSanitizer dependency
 profile:
@@ -153,7 +153,13 @@ to the helper. The helper writes known payload bytes, then attempts both
 `fremovexattr` and `fsetxattr` with cleared quarantine flags. Both attempts must
 fail with a permission error. The host reopens each file and verifies its payload
 and unchanged quarantine attribute. The log also records whether the helper can
-read the attribute; that read is not required to succeed.
+read the attribute; that read is not required to succeed. The host supplies the
+fixture paths to the probe as adversarial knowledge; the helper tries to open
+those paths, traverse from the file descriptor, and link, symlink, rename, and
+unlink the payload. The host requires the path operations to fail and checks
+that no sibling fixture appeared.
+Attempts to set another extended attribute and file flags must also fail with
+permission errors.
 
 CI runs this mode in release, ASan, and TSan profiles. It uses the same isolated
 identities, cleanup, and outer timeout as the lifecycle gate, plus a 15-second

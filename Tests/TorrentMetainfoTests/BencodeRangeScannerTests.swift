@@ -99,6 +99,20 @@ struct BencodeRangeScannerTests {
         }
     }
 
+    @Test("Empty terminal containers obey the exact nesting limit")
+    func emptyTerminalContainerDepth() throws {
+        let ten = Data((String(repeating: "l", count: 10)
+            + String(repeating: "e", count: 10)).utf8)
+        let eleven = Data((String(repeating: "l", count: 11)
+            + String(repeating: "e", count: 11)).utf8)
+        _ = try BencodeRangeDocument.scan(ten, limits: Self.limits(maximumNestingDepth: 10))
+        #expect(throws: BencodeScanError.nestingLimitExceeded) {
+            _ = try BencodeRangeDocument.scan(
+                eleven, limits: Self.limits(maximumNestingDepth: 10)
+            )
+        }
+    }
+
     @Test("Canonical encoding and independent work budgets fail closed", arguments: [
         ("d1:ai1e1:ai2ee", BencodeScanError.malformed),
         ("d1:bi1e1:ai2ee", BencodeScanError.malformed),

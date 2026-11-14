@@ -147,15 +147,25 @@ package enum TorrentEngineIPCEnvelopeCodec {
             in: dictionary,
             field: TorrentEngineIPCField.brokerEndpoint
         )
-        let brokerEndpoint = dictionary[
-            TorrentEngineIPCField.brokerEndpoint,
-            as: XPCEndpoint.self
-        ]
-        guard !endpointFieldIsPresent || brokerEndpoint != nil else {
-            throw TorrentEngineIPCError.wrongFieldType(
-                field: TorrentEngineIPCField.brokerEndpoint,
-                expected: "endpoint"
-            )
+        let brokerEndpoint: XPCEndpoint?
+        if endpointFieldIsPresent {
+            // SAFETY: The dictionary retains this borrowed XPC object for the
+            // synchronous type check. No pointer escapes or bytes are read;
+            // XPC's raw type subscript is required before overlay conversion.
+            guard unsafe dictionary[
+                TorrentEngineIPCField.brokerEndpoint, as: XPC_TYPE_ENDPOINT
+            ] != nil,
+                  let endpoint = dictionary[
+                    TorrentEngineIPCField.brokerEndpoint, as: XPCEndpoint.self
+                  ] else {
+                throw TorrentEngineIPCError.wrongFieldType(
+                    field: TorrentEngineIPCField.brokerEndpoint,
+                    expected: "endpoint"
+                )
+            }
+            brokerEndpoint = endpoint
+        } else {
+            brokerEndpoint = nil
         }
         try validateBrokerEndpoint(brokerEndpoint, for: header.operation)
         let totalByteCount = try requestTotalByteCount(
@@ -534,7 +544,7 @@ package enum TorrentEngineIPCEnvelopeCodec {
         guard value.utf8.count == 36,
               !value.contains("\0"),
               let uuid = UUID(uuidString: value),
-              uuid.uuidString == value.uppercased() else {
+              uuid.uuidString == value else {
             throw TorrentEngineIPCError.invalidUUID(field: field)
         }
         return uuid

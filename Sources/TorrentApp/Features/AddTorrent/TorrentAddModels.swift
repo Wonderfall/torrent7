@@ -139,7 +139,8 @@ nonisolated enum TorrentAddSourceParser {
             if offset.isMultiple(of: 16) {
                 try Task.checkCancellation()
             }
-            guard url.pathExtension
+            guard url.isFileURL,
+                  url.pathExtension
                 .caseInsensitiveCompare("torrent") == .orderedSame else {
                 continue
             }

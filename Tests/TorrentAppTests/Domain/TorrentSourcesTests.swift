@@ -67,6 +67,7 @@ struct TorrentSourcesTests {
         let urls = [
             URL(filePath: "/tmp/first.torrent"),
             URL(filePath: "/tmp/ignored.txt"),
+            try #require(URL(string: "torrent7:///tmp/forged.torrent")),
             URL(filePath: "/tmp/second.TORRENT")
         ]
 

@@ -47,6 +47,8 @@ for the protocol parsing that executes in C++ and its verification limits.
 - The shared tracker/web-seed URL validator rejects a terminal DNS root dot.
   Intake therefore uses the hostname spelling accepted by SNI and TLS identity
   validation; it does not accept a spelling that will fail only during TLS setup.
+- Source authorities reject userinfo and noncanonical numeric IPv4 spellings,
+  including leading-zero octets and hexadecimal aliases.
 - Bracketed IPv6 sources may have a dotted IPv4 tail only in the final 32 bits;
   `::` compression cannot follow that tail. Scoped IPv6 hosts remain supported.
 - Display names are never storage names. Tracker tiers and select-only hints are

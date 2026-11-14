@@ -5152,6 +5152,9 @@ final class TorrentStore {
     @concurrent
     private static func readTorrentFile(_ url: URL) async throws -> Data {
         try Task.checkCancellation()
+        guard url.isFileURL else {
+            throw TorrentStoreError.unreadableTorrentFile
+        }
         let didAccess = url.startAccessingSecurityScopedResource()
         defer {
             if didAccess {
@@ -5344,7 +5347,7 @@ final class TorrentStore {
     private nonisolated static func openTorrentFileDescriptor(_ url: URL) throws -> FileDescriptor {
         do {
             return try FileDescriptor.open(
-                FilePath(url.path(percentEncoded: false)),
+                FilePath(url.torrentFilePath),
                 .readOnly,
                 // A FIFO must reach descriptor validation without waiting for
                 // a writer. Nonblocking mode does not change regular-file I/O.
